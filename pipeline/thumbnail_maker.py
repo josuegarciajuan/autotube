@@ -71,6 +71,7 @@ class ThumbnailMaker:
         self.channel_name = getattr(config, "CANAL_DISPLAY_NAME", CANAL_DISPLAY_NAME)
         self.output_dir = Path(getattr(config, "THUMBNAILS_DIR", THUMBNAILS_DIR))
         self._channel_cfg = config
+        self._last_raw_base: Path | None = None  # raw Pollo image before F4 composition
 
         self.font = _find_font(self.font_size, bold=True)
         self.font_small = _find_font(int(self.font_size * 0.65), bold=True)
@@ -239,6 +240,9 @@ class ThumbnailMaker:
                 style=style,
                 slug=slug,
             )
+
+        # Store raw Pollo image BEFORE composition (for metadata phase recompose)
+        self._last_raw_base = base_image if not (base_image_path and Path(base_image_path).exists()) else None
 
         # ── F4: Composition ────────────────────────────────────
         logger.info("[Thumbnail v2] F4: Composing final thumbnail")
@@ -628,7 +632,7 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
 
     def _draw_4k_badge(self, draw: ImageDraw.ImageDraw) -> None:
         """Draw a small '4K' badge in the top-right corner."""
-        badge_w, badge_h = 64, 30
+        badge_w, badge_h = 128, 60
         padding = 15
         x = self.width - badge_w - padding
         y = padding
@@ -637,14 +641,14 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         bg_color = (10, 10, 10)
         draw.rounded_rectangle(
             [x, y, x + badge_w, y + badge_h],
-            radius=6,
+            radius=12,
             fill=bg_color,
             outline=(255, 215, 0),   # yellow border
-            width=2,
+            width=3,
         )
 
         # "4K" text
-        badge_font = _find_font(16, bold=True)
+        badge_font = _find_font(32, bold=True)
         text = "4K"
         bbox = draw.textbbox((0, 0), text, font=badge_font)
         tw = bbox[2] - bbox[0]

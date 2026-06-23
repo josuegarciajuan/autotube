@@ -35,8 +35,7 @@ STYLE_DEFAULTS: dict[str, dict] = {
             "dark atmospheric cinematography, desaturated color palette, "
             "deep crimson and black tones, institutional cold lighting, "
             "film grain texture, documentary photography style, "
-            "16:9 aspect ratio, high contrast, no text overlay, "
-            "no human faces or if present blurred obscured, no gore"
+            "16:9 aspect ratio, high contrast, no text overlay"
         ),
     },
     "vintage_archive": {
@@ -266,7 +265,7 @@ def build_pollo_prompt(image_concept: str, style_profile: dict) -> str:
     suffix = style_profile.get("pollo_prompt_suffix", "")
     negative = (
         "no text, no letters, no watermark, no overlay, no collage, "
-        "no cluttered composition, no human faces or blurred if present"
+        "no cluttered composition"
     )
     return (
         f"{image_concept}. Rule of thirds composition, single dominant focal point, "

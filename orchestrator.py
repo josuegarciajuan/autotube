@@ -482,7 +482,11 @@ class PipelineOrchestrator:
             return {
                 "video_path": str(video_path),
                 "thumbnail_path": str(thumbnail_path),
-                "thumbnail_base_path": str(thumbnail_path),  # for metadata phase to recompose text without regenerating
+                "thumbnail_base_path": str(
+                    # Use raw Pollo image (before text/gradient) so phase_metadata
+                    # recomposes from scratch instead of double-stacking effects.
+                    getattr(self.thumbnail_maker, '_last_raw_base', None) or str(thumbnail_path)
+                ),
                 "titulo": titulo_selected,
                 "video_id": video_id,
             }

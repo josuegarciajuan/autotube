@@ -30,7 +30,23 @@
 - [x] B4. DB: TEST_MODE=False en canales 1 y 3
 - [x] B5. Verificar sintaxis + prompt generado correctamente
 
-## Fase C: Pollo API oficial + thumbnails virales + badge 4K x2
+## Fase C: Pollo API oficial + thumbnails virales + badge 4K x2 ✅ COMPLETADA
+
+**Archivos modificados:**
+- `tools/pollo_image_worker.py` — copiado verbatim de lamami
+- `pipeline/ai_image_generator.py` — wrapper subprocess (invoca worker como publicista)
+- `pipeline/thumbnail_style_engine.py` — sin veto de caras
+- `pipeline/thumbnail_brainstorm.py` — prompts con cara de sorpresa
+- `pipeline/thumbnail_maker.py` — `_last_raw_base` + badge 128×60
+- `orchestrator.py` — `thumbnail_base_path` usa imagen cruda
+
+**Tareas:**
+- [x] C1. Copiar worker + reescribir ai_image_generator.py (subprocess wrapper)
+- [x] C2. Quitar veto de caras + brainstorm con rostro de sorpresa/shock
+- [x] C3. Guardar imagen Pollo cruda, fin doble-composición
+- [x] C4. Badge 4K a 128×60, fuente 32
+- [x] C5. Limpiar huérfano id=28
+- [x] C6. Generar miniatura para id=26 + verificar URL pública
 
 ## Fase D: Títulos virales
 

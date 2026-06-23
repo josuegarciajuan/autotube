@@ -51,6 +51,7 @@ Conoces en profundidad:
 - Zeigarnik Effect (información incompleta genera ansiedad)
 - Fear appeals en marketing digital
 - Color psychology (rojo = urgencia/peligro, azul = confianza, negro = misterio)
+- Facial expression psychology: the human face is the single highest-CTR element on YouTube thumbnails. A shocked/surprised/astonished facial expression triggers instant emotional contagion (mirror neurons) and dramatically increases click-through rate — this is the "MrBeast face" principle.
 
 Para cada video, analizas:
 1. La emoción DOMINANTE que debe transmitir la miniatura
@@ -73,10 +74,11 @@ CONTENIDO (guion resumido):
 ESTILO VISUAL DEL CANAL: {visual_style}
 
 INSTRUCCIONES:
-1. Identifica la emoción dominante que maximizará el CTR
-2. Define un curiosity gap específico (algo que la imagen insinúe pero no revele)
-3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica
-4. Indica qué NO debe mostrar la miniatura
+1. Identifica la emoción dominante que maximizará el CTR.
+   IMPORTANTE: siempre que el contenido lo permita, la emoción DEBE materializarse en un ROSTRO HUMANO en primer plano con expresión facial intensa (sorpresa, shock, asombro, miedo, incredulidad). Los rostros generan más clicks que cualquier escena abstracta.
+2. Define un curiosity gap específico (algo que la imagen insinúe pero no revele).
+3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica.
+4. Indica qué NO debe mostrar la miniatura.
 
 Responde SOLO con JSON:
 {{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "avoid_showing": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
@@ -92,6 +94,7 @@ Tu expertise:
 - Formatos de composición probados (split_face, dark_reveal, classified_document, etc.)
 - Reglas de oro: nunca repetir el título, siempre generar curiosidad
 - Badges y sellos que aumentan CTR: "4K", "NUEVO", "EXCLUSIVO", "CLASIFICADO"
+- CTR gold standard: un rostro humano con expresión de sorpresa/shock en primer plano combinado con texto overlay corto e intrigante es la fórmula más probada para maximizar clicks
 
 Responde SIEMPRE con JSON."""
 
