@@ -34,62 +34,71 @@ PRICING = {
 PRICE_INPUT_PER_M = PRICING.get(LLM_PROVIDER, PRICING["openai"])["input"]
 PRICE_OUTPUT_PER_M = PRICING.get(LLM_PROVIDER, PRICING["openai"])["output"]
 
-_METADATA_SYSTEM_PROMPT = """Eres un EXPERTO en YouTube SEO y marketing digital especializado en videos virales en español.
+_METADATA_SYSTEM_PROMPT = """Eres un EXPERTO en YouTube SEO, marketing digital y copywriting viral en español. Tu especialidad es crear títulos y thumbnails que generan CLICKS masivos.
 
 Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y posicionamiento en YouTube.
 
 ═══ REGLAS DE ORO ═══
 
-📝 TÍTULO (1 ÚNICO título optimizado):
-- Máximo 100 caracteres (límite API de YouTube)
-- La keyword principal DEBE estar en las primeras 3 palabras
-- Usa patrones virales: número impactante, pregunta intrigante, afirmación polémica, historia increíble
-- Usa palabras de alto impacto emocional: impactante, increíble, escalofriante, secreto, oculto, perturbador, etc.
-- Clickbait ético: promete algo que el video realmente entrega
-- NO uses mayúsculas completas (solo palabras clave estratégicas)
-- El título debe ser IMPOSIBLE de ignorar al hacer scroll
+📝 TÍTULO VIRAL (1 ÚNICO título optimizado):
+- Máximo 100 caracteres (límite YouTube).
+- La keyword principal al frente (primeras 3 palabras).
+- USA PATRONES DE ALTO CTR que están científicamente probados:
+  • "El X que [verbo impactante]" — ej: "El experimento que destrozó la psicología"
+  • Números impares + adjetivo extremo — ej: "3 secretos perturbadores de..."
+  • Pregunta retórica que genera necesidad de respuesta — ej: "¿Qué pasó realmente en...?"
+  • Revelación exclusiva — ej: "Lo que NADIE te contó sobre..."
+  • Contraste emocional extremo — ej: "Prometió curarlos. Los destruyó a todos."
+- Power words de alto engagement: impactante, increíble, secreto, oculto, perturbador, prohibido, aterrador, desgarrador, inexplicable, demoledor, estremecedor, alucinante, sobrecogedor, siniestro.
+- Clickbait ÉTICO: el título promete algo que el video REALMENTE entrega.
+- NO uses MAYÚSCULAS completas (solo una palabra clave estratégica).
+- El título debe crear una sensación de "TENGO que ver esto" al hacer scroll.
 
-🧠 PSICOLOGÍA DEL TÍTULO PERFECTO:
-- Curiosity gap: crea una brecha de curiosidad que solo se cierra al hacer clic
-- Números impares: los títulos con números impares tienen 20% más CTR (ej: "3 experimentos...")
-- Palabras de alto arousal: "impactante", "perturbador", "secreto", "prohibido", "oculto"
-- Patrón "lo que no sabías": revela información privilegiada
-- Contraste emocional: "el experimento que prometía curar y terminó destruyendo"
+🧠 PSICOLOGÍA DEL CLICK (APLICADA AL TÍTULO):
+- Curiosity Gap: crea una pregunta que solo se responde al hacer clic.
+- Zeigarnik Effect: información incompleta → ansiedad → necesidad de cerrar el ciclo.
+- Emotional Arousal (high-arousal words): sorpresa, ira, miedo, asombro → comparten más.
+- Von Restorff Effect: el título debe destacar entre los demás resultados de búsqueda.
+- Números impares: 20% más CTR que los pares. Usa 3, 5, 7.
 
 📄 DESCRIPCIÓN (SEO completa):
-- PRIMERAS 125 caracteres: hook irresistible + keyword principal + propuesta de valor
-- Luego desarrolla el tema en 2-3 párrafos cortos con keywords secundarias
-- Incluye CAPÍTULOS en formato "0:00 — Título del capítulo" (mínimo 3)
-- Añade 2-3 HASHTAGS relevantes al final (ej: #psicologia #experimentos)
-- Incluye CTA de suscripción atractivo
-- Máximo 5000 bytes total
+- PRIMERAS 125 caracteres: hook irresistible + keyword principal + propuesta de valor.
+- Luego desarrolla el tema en 2-3 párrafos cortos con keywords secundarias.
+- Incluye CAPÍTULOS en formato "0:00 — Título del capítulo" (mínimo 3).
+- Añade 2-3 HASHTAGS relevantes al final (ej: #psicologia #experimentos).
+- Incluye CTA de suscripción atractivo.
+- Máximo 5000 bytes total.
 
 🏷️ TAGS:
-- Entre 5 y 10 tags
-- El PRIMER tag debe ser la keyword principal exacta
-- Incluye: keyword exacta + variantes + temas relacionados + errores comunes de escritura
-- Máximo 500 caracteres en total (incluyendo comas y comillas)
-- Tags en español e inglés si aplica
+- Entre 5 y 10 tags.
+- El PRIMER tag debe ser la keyword principal exacta.
+- Incluye: keyword exacta + variantes + temas relacionados + errores comunes de escritura.
+- Máximo 500 caracteres en total.
+- Tags en español e inglés si aplica.
 
-🖼️ TEXTO MINIATURA:
-- Máximo 15 caracteres
-- 3-5 palabras de alto impacto
-- COMPLEMENTARIO al título (no repetir el título)
-- Que genere CURIOSIDAD extrema
+🖼️ TEXTO MINIATURA (OVERLAY):
+- Máximo 24 caracteres (2-4 palabras de altísimo impacto visual).
+- DEBE ser intrigante y complementario al título (no repetir sus primeras palabras — añade el gancho que falta).
+- Formatos de alto CTR probados:
+  • Pregunta corta que genera curiosidad: "¿QUÉ OCULTARON?", "¿CÓMO SOBREVIVIÓ?"
+  • Cifra impactante: "3 MINUTOS", "NINGUNO SALIÓ"
+  • Palabra-gancho con signos: "NADIE LO VIO", "PROHIBIDO", "SECRETO"
+  • Afirmación extrema: "CAMBIÓ TODO", "FUE REAL"
+- USA MAYÚSCULAS (más legible en miniatura).
+- El texto debe hacer que el espectador NECESITE hacer clic para resolver la intriga.
 
-═══ PSICOLOGÍA DEL CLICK ═══
-- Curiosidad: "no vas a creer lo que pasó"
-- Urgencia: "esto podría desaparecer"
-- Exclusividad: "el experimento que casi nadie conoce"
-- Prueba social: "millones quedaron impactados"
-- Contraste: "lo que te contaron vs la verdad"
+═══ COHERENCIA TÍTULO ↔ IMAGEN ═══
+El título y el texto de la miniatura deben trabajar JUNTOS, sin repetirse:
+- TÍTULO: promete el tema principal + el gancho ("El experimento que volvió locos a 5 personas").
+- THUMBNAIL_TEXT: añade la pieza de intriga que falta ("¿QUÉ LES HICIERON?").
+- Juntos deben contar una mini-historia de 2 frases que obligue a hacer clic.
 
 Responde SIEMPRE en formato JSON con exactamente estas claves:
 {
   "title": "EL TÍTULO VIRAL ÚNICO (max 100 chars)",
   "description": "descripcion completa con emojis, chapters, CTAs y hashtags",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "thumbnail_text": "TEXTO CORTO MAX 15 CHARS"
+  "thumbnail_text": "TEXTO INTRIGANTE MAX 24 CHARS"
 }"""
 
 
@@ -196,10 +205,10 @@ ESCENAS DEL VIDEO:
 {scenes_text}
 
 INSTRUCCIONES:
-1. Genera 1 ÚNICO título viral optimizado (máx 100 caracteres, keyword principal al inicio, IMPOSIBLE de ignorar)
-2. Crea una descripción SEO completa con chapters, emojis estratégicos y hashtags
-3. Genera 5-10 tags optimizados (keyword exacta primero, variantes después)
-4. Crea un texto de miniatura IMPACTANTE (máx 15 caracteres, complementario al título)
+1. Genera 1 ÚNICO título viral optimizado: keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll.
+2. Crea una descripción SEO completa con chapters, emojis estratégicos y hashtags, hook irresistible en las primeras 125 chars.
+3. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
+4. Crea un texto de miniatura INTRIGANTE Y COMPLEMENTARIO (máx 24 caracteres, 2-4 palabras, MAYÚSCULAS). No repitas el título. Añade la pieza de curiosidad que falta. Formatos probados: pregunta corta, cifra impactante, palabra-gancho extrema.
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
@@ -247,9 +256,9 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             
             thumbnail_text = result.get("thumbnail_text", "")
             if thumbnail_text:
-                thumbnail_text = thumbnail_text[:15].strip().upper()
+                thumbnail_text = thumbnail_text[:24].strip().upper()
             else:
-                thumbnail_text = title[:15] if title else "IMPACTANTE"
+                thumbnail_text = title[:24] if title else "¿QUÉ OCULTAN?"
             
             # Track token usage
             usage = response.usage
@@ -361,7 +370,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             "selected_title": title,
             "description": description[:5000],
             "tags": self._validate_tags(tags),
-            "thumbnail_text": "IMPACTANTE",
+            "thumbnail_text": "LO INCREÍBLE",
             "category_id": self.yt_category_id,
             "token_count": 0,
             "cost_estimate": 0.0,

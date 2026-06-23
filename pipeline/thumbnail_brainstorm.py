@@ -89,10 +89,12 @@ Has analizado miles de miniaturas virales y sabes exactamente qué combinación
 de imagen + texto maximiza el Click-Through Rate (CTR).
 
 Tu expertise:
-- Texto overlay: 2-4 palabras, UPPERCASE, alto contraste, bajo de la imagen
+- Texto overlay: 2-4 palabras de altísimo impacto, MAYÚSCULAS, alto contraste, bajo de la imagen
+- Formatos de texto probados: pregunta intrigante ("¿QUÉ OCULTARON?"), cifra impactante ("3 MINUTOS"), palabra-gancho ("NADIE LO VIO", "PROHIBIDO"), afirmación extrema ("CAMBIÓ TODO")
+- Hasta ~24 caracteres para frases-gancho potentes, siempre con máxima legibilidad en miniatura
 - Psicología del color en thumbnails
-- Formatos de composición probados (split_face, dark_reveal, classified_document, etc.)
-- Reglas de oro: nunca repetir el título, siempre generar curiosidad
+- Formatos de composición probados (split_face, dark_reveal, classified_document, shock_closeup)
+- Reglas de oro: nunca repetir el título, siempre generar curiosidad — el texto de imagen añade la pieza de intriga que el título no revela
 - Badges y sellos que aumentan CTR: "4K", "NUEVO", "EXCLUSIVO", "CLASIFICADO"
 - CTR gold standard: un rostro humano con expresión de sorpresa/shock en primer plano combinado con texto overlay corto e intrigante es la fórmula más probada para maximizar clicks
 
@@ -107,11 +109,11 @@ ESTILO VISUAL: {visual_style}
 PALETA DE COLORES: {color_palette}
 
 REQUISITOS:
-1. Crea 3 variantes de texto overlay (2-4 palabras cada una, max 15 caracteres)
+1. Crea 3 variantes de texto overlay (2-4 palabras cada una, hasta ~24 caracteres, MAYÚSCULAS). Formatos: pregunta intrigante, cifra impactante, palabra-gancho con signos. El texto debe hacer que el espectador NECESITE hacer clic.
 2. Elige la MEJOR (la que genere más curiosidad sin ser clickbait barato)
-3. Define la composición (dónde va el texto, dónde el foco visual)
-4. Sugiere qué layout usar: split_face, dark_reveal, classified_document, shock_closeup, incomplete_puzzle
-5. El texto NO debe repetir las primeras 3 palabras del título
+3. Define la composición (dónde va el texto, dónde el foco visual — el rostro de sorpresa debe ser el centro)
+4. Sugiere qué layout usar: shock_closeup, dark_reveal, split_face, incomplete_puzzle
+5. El texto NO debe repetir las primeras palabras del título — debe complementarlo, añadiendo la pieza de intriga que falta
 
 Responde SOLO con JSON:
 {{"text_variants": ["...", "...", "..."], "best_text": "...", "text_color_hex": "#...", "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""

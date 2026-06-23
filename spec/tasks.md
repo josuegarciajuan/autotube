@@ -48,7 +48,9 @@
 - [x] C5. Limpiar huérfano id=28
 - [x] C6. Generar miniatura para id=26 + verificar URL pública
 
-## Fase D: Títulos virales
+## Fase D: Títulos virales + texto de imagen viral ✅ COMPLETADA
+- **pipeline/metadata_generator.py**: prompts reescritos (curiosity gap, power words, coherencia), char cap 15→24
+- **pipeline/thumbnail_brainstorm.py**: marketing agent alineado (24 chars, formatos virales)
 
 ## Fase E: Progreso granular en el panel
 

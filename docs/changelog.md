@@ -20,3 +20,8 @@
 - **pipeline/thumbnail_maker.py**: `_last_raw_base` guarda la imagen Pollo cruda (antes de composición); badge `_draw_4k_badge` a 128×60, fuente 32.
 - **orchestrator.py**: `thumbnail_base_path` usa imagen cruda → fin de la doble-composición entre `phase_video` y `phase_metadata`.
 - **DB**: eliminado huérfano id=28; miniatura regenerada para video 26 (verificada: Pollo genera, QC 7.0/10, 141 KB).
+
+### Fase D — Títulos virales + texto de imagen más intrigante
+- **pipeline/metadata_generator.py**: prompt sistema reescrito con patrones de alto CTR probados (curiosity gap, emotional arousal, números impares, preguntas retóricas, power words). TEXTO MINIATURA ampliado con formatos de alto impacto (pregunta corta, cifra, palabra-gancho). Regla COHERENCIA TÍTULO↔IMAGEN (trabajan sin repetirse). Char cap de 15 → 24.
+- **pipeline/thumbnail_brainstorm.py**: agente marketing actualizado con reglas de texto overlay viral (~24 chars, formatos de intriga, complementariedad con el título).
+- **Regenerado**: metadatos + miniatura video 26 con texto viral (servible via API).
