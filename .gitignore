@@ -1,0 +1,40 @@
+# Secrets
+.env
+*.pickle
+tokens/*
+!tokens/.gitkeep
+
+# Output
+output/*
+!output/.gitkeep
+!output/audio/.gitkeep
+!output/images/.gitkeep
+!output/videos/.gitkeep
+!output/thumbnails/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+logs/*
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite

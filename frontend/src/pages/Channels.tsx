@@ -1,0 +1,201 @@
+import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { api, formatDate } from '../lib/api'
+import { Plus, Edit2, Trash2, Radio, Film, Calendar, Youtube, ExternalLink } from 'lucide-react'
+
+export default function Channels() {
+  const [channels, setChannels] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<any>(null)
+  const [form, setForm] = useState({ name: '', slug: '' })
+  const [error, setError] = useState('')
+
+  useEffect(() => { loadChannels() }, [])
+
+  async function loadChannels() {
+    setLoading(true)
+    try {
+      const data = await api.getChannels()
+      setChannels(data)
+    } catch (e) { console.error(e) }
+    setLoading(false)
+  }
+
+  function openNew() {
+    setEditing(null)
+    setForm({ name: '', slug: '' })
+    setError('')
+    setShowForm(true)
+  }
+
+  function openEdit(ch: any) {
+    setEditing(ch)
+    setForm({ name: ch.name, slug: ch.slug })
+    setError('')
+    setShowForm(true)
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    if (!form.name.trim() || !form.slug.trim()) {
+      setError('Nombre y slug son obligatorios')
+      return
+    }
+    try {
+      if (editing) {
+        await api.updateChannel(editing.id, form)
+      } else {
+        await api.createChannel(form)
+      }
+      setShowForm(false)
+      loadChannels()
+    } catch (e: any) {
+      setError(e.message || 'Error al guardar')
+    }
+  }
+
+  async function handleDelete(id: number) {
+    if (!confirm('¿Eliminar este canal y todos sus videos?')) return
+    try {
+      await api.deleteChannel(id)
+      loadChannels()
+    } catch (e: any) {
+      alert(e.message)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-2 border-neon-red border-t-transparent" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h2 className="font-display text-2xl font-bold text-white flex items-center gap-3">
+          <Radio size={24} className="text-neon-red" />
+          Canales
+        </h2>
+        <button
+          onClick={openNew}
+          className="flex items-center gap-2 px-4 py-2 bg-neon-red text-white rounded-lg hover:bg-neon-red/80 transition-all text-sm font-medium"
+        >
+          <Plus size={16} />
+          Nuevo Canal
+        </button>
+      </div>
+
+      {/* Form Modal */}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowForm(false)}>
+          <div className="glass rounded-xl p-6 w-full max-w-md space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <h3 className="font-display text-lg font-semibold text-white">
+              {editing ? 'Editar Canal' : 'Nuevo Canal'}
+            </h3>
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Nombre</label>
+                <input
+                  type="text"
+                  value={form.name}
+                  onChange={e => setForm({ ...form, name: e.target.value })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red transition-colors"
+                  placeholder="Canal de Misterio"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Slug (identificador)</label>
+                <input
+                  type="text"
+                  value={form.slug}
+                  onChange={e => setForm({ ...form, slug: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm font-mono focus:outline-none focus:border-neon-red transition-colors"
+                  placeholder="canal-misterio"
+                />
+              </div>
+              {error && <p className="text-sm text-red-400">{error}</p>}
+              <div className="flex gap-2 pt-2">
+                <button type="submit" className="flex-1 px-4 py-2 bg-neon-red text-white rounded-lg hover:bg-neon-red/80 text-sm font-medium">
+                  {editing ? 'Guardar' : 'Crear'}
+                </button>
+                <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 bg-dark-600 text-gray-300 rounded-lg hover:bg-dark-500 text-sm">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Channels Grid */}
+      {channels.length === 0 ? (
+        <div className="text-center py-16 glass rounded-xl">
+          <Radio size={48} className="mx-auto mb-4 opacity-20 text-gray-600" />
+          <p className="text-gray-500 mb-2">No hay canales creados</p>
+          <p className="text-sm text-gray-600 mb-4">Crea tu primer canal para empezar a generar videos</p>
+          <button onClick={openNew} className="px-4 py-2 bg-neon-red text-white rounded-lg hover:bg-neon-red/80 text-sm">
+            Crear Canal
+          </button>
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {channels.map((ch: any) => (
+            <div key={ch.id} className="glass rounded-xl p-5 neon-border hover:border-neon-red/60 transition-all duration-300 group">
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h3 className="font-display text-lg font-semibold text-white">{ch.name}</h3>
+                  <p className="text-xs text-gray-500 font-mono">{ch.slug}</p>
+                </div>
+                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button onClick={() => openEdit(ch)} className="p-1.5 rounded hover:bg-dark-600 text-gray-400 hover:text-white transition-colors">
+                    <Edit2 size={14} />
+                  </button>
+                  <button onClick={() => handleDelete(ch.id)} className="p-1.5 rounded hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 text-sm text-gray-400 mb-3">
+                <Film size={14} className="text-neon-red" />
+                <span>{ch.active ? 'Activo' : 'Inactivo'}</span>
+                <span>·</span>
+                <span>{formatDate(ch.created_at)}</span>
+              </div>
+              <Link
+                to={`/channels/${ch.id}`}
+                className="block w-full text-center px-4 py-2 bg-neon-red/10 border border-neon-red/30 text-neon-red rounded-lg hover:bg-neon-red/20 transition-all text-sm font-medium mb-2"
+              >
+                Gestionar Canal →
+              </Link>
+              <div className="grid grid-cols-2 gap-2">
+                <Link
+                  to="/scheduling"
+                  className="text-center px-3 py-1.5 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs font-medium hover:bg-neon-gold/20 transition-colors flex items-center justify-center gap-1"
+                >
+                  <Calendar size={12} /> Programar
+                </Link>
+                {ch.yt_channel_url ? (
+                  <a href={ch.yt_channel_url} target="_blank" rel="noopener noreferrer"
+                    className="text-center px-3 py-1.5 bg-red-600/10 border border-red-600/30 text-red-400 rounded-lg text-xs font-medium hover:bg-red-600/20 transition-colors flex items-center justify-center gap-1">
+                    <Youtube size={12} /> YT
+                  </a>
+                ) : (
+                  <span className="text-center px-3 py-1.5 text-gray-600 text-xs flex items-center justify-center gap-1 cursor-not-allowed">
+                    <Youtube size={12} /> —
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}

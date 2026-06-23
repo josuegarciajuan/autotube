@@ -1,0 +1,117 @@
+"""Autotube configuration loader.
+
+Loads settings from environment variables (.env file) and provides
+type-safe access to all configuration values.
+"""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+# ── Paths ──────────────────────────────────────────────────────
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(PROJECT_ROOT / "output")))
+AUDIO_DIR = OUTPUT_DIR / "audio"
+IMAGES_DIR = OUTPUT_DIR / "images"
+VIDEOS_DIR = OUTPUT_DIR / "videos"
+THUMBNAILS_DIR = OUTPUT_DIR / "thumbnails"
+ASSETS_DIR = PROJECT_ROOT / "assets"
+TOKENS_DIR = PROJECT_ROOT / "tokens"
+LOGS_DIR = PROJECT_ROOT / "logs"
+DATABASE_PATH = os.getenv("DATABASE_PATH", str(PROJECT_ROOT / "autotube.db"))
+
+# Ensure output dirs exist
+for d in [OUTPUT_DIR, AUDIO_DIR, IMAGES_DIR, VIDEOS_DIR, THUMBNAILS_DIR, TOKENS_DIR, LOGS_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+
+# ── API Keys ───────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+GOOGLE_CLIENT_SECRET_PATH = os.getenv(
+    "GOOGLE_CLIENT_SECRET_PATH",
+    str(PROJECT_ROOT / "config" / "client_secret.json"),
+)
+
+# ── Channels ───────────────────────────────────────────────────
+ACTIVE_CHANNELS = [
+    c.strip()
+    for c in os.getenv("ACTIVE_CHANNELS", "canal1,canal2").split(",")
+    if c.strip()
+]
+
+
+# ── Scheduling ─────────────────────────────────────────────────
+WEEK1_VIDEOS_PER_DAY = int(os.getenv("WEEK1_VIDEOS_PER_DAY", "1"))
+WEEK2_VIDEOS_PER_DAY = int(os.getenv("WEEK2_VIDEOS_PER_DAY", "2"))
+WEEK3_VIDEOS_PER_DAY = int(os.getenv("WEEK3_VIDEOS_PER_DAY", "3"))
+
+# Pipeline start date (ISO format: YYYY-MM-DD). Defaults to today.
+PIPELINE_START_DATE = os.getenv("PIPELINE_START_DATE", "")
+
+
+# ── LLM Provider (DeepSeek / OpenAI) ──────────────────────────
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+LLM_API_KEY = os.getenv("LLM_API_KEY", OPENAI_API_KEY)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+
+# ── OpenAI (legacy / fallback) ─────────────────────────────────
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.8"))
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+
+
+# ── Video ──────────────────────────────────────────────────────
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "24"))
+VIDEO_RESOLUTION = (1920, 1080)
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "6000k")
+VIDEO_CODEC = os.getenv("VIDEO_CODEC", "libx264")
+VIDEO_MIN_DURATION = int(os.getenv("VIDEO_MIN_DURATION", "480"))   # seconds (8 min)
+VIDEO_MAX_DURATION = int(os.getenv("VIDEO_MAX_DURATION", "840"))   # seconds (14 min)
+
+
+# ── Pollo AI (image generation for thumbnails) ─────────────────
+# Session cookie (tRPC web endpoint, bypasses Cloudflare via curl_cffi).
+# Override with POLLO_SESSION_COOKIE env var, otherwise reads from
+# /root/lamamionline-control/data/settings.json (shared with lamami).
+POLLO_SESSION_COOKIE = os.getenv("POLLO_SESSION_COOKIE", "")
+POLLO_IMAGE_MODEL = os.getenv("POLLO_IMAGE_MODEL", "pollo-image-v2")
+# Legacy x-api-key (kept for reference; the active integration uses cookie+tRPC).
+POLLO_AI_API_KEY = os.getenv("POLLO_AI_API_KEY", "")
+
+# ── Thumbnail Quality Control ──────────────────────────────────
+THUMBNAIL_QUALITY_THRESHOLD = int(os.getenv("THUMBNAIL_QUALITY_THRESHOLD", "7"))  # 0-10
+THUMBNAIL_MAX_QC_ATTEMPTS = int(os.getenv("THUMBNAIL_MAX_QC_ATTEMPTS", "3"))
+
+# ── Reddit API (OAuth — opcional, auto-activa la fuente primaria) ─
+# Registrar app en https://www.reddit.com/prefs/apps (tipo "script")
+# y copiar client_id y secret aquí para habilitar la fuente OAuth.
+# Sin credenciales, el scraper usa mirrors (PullPush → Arctic Shift).
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT = os.getenv(
+    "REDDIT_USER_AGENT",
+    "AutotubeContentBot/2.0 (by /u/yourusername)",
+)
+
+# ── Proxy (IP residencial para llamadas a YouTube) ─────────────
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+PROXY_TYPE = os.getenv("PROXY_TYPE", "socks5")  # socks5 | http
+PROXY_HOST = os.getenv("PROXY_HOST", "127.0.0.1")
+PROXY_PORT = int(os.getenv("PROXY_PORT", "1080"))
+PROXY_CHANNELS = [
+    c.strip()
+    for c in os.getenv("PROXY_CHANNELS", "").split(",")
+    if c.strip()
+]  # vacío = todos los canales usan proxy
+
+# ── Logging ────────────────────────────────────────────────────
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+LOG_FILE = LOGS_DIR / "autotube.log"

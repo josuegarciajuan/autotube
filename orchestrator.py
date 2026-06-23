@@ -1,0 +1,952 @@
+"""Pipeline orchestrator for Autotube.
+
+Coordinates the full content pipeline end-to-end:
+scrape → script generation → TTS → images → video editing → upload.
+
+Supports both single-run and scheduled (APScheduler) operation.
+"""
+
+import logging
+import time
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+from config.config_bridge import get_channel_config
+from config.settings import (
+    ACTIVE_CHANNELS,
+    WEEK1_VIDEOS_PER_DAY,
+    WEEK2_VIDEOS_PER_DAY,
+    WEEK3_VIDEOS_PER_DAY,
+    PIPELINE_START_DATE,
+    OUTPUT_DIR,
+    LOGS_DIR,
+    LOG_LEVEL,
+    LOG_FORMAT,
+)
+from database.db import Database, init_db
+
+logger = logging.getLogger(__name__)
+
+# Channel configurations — populated via config bridge
+CHANNEL_CONFIGS: dict[str, object] = {}
+
+
+class PipelineOrchestrator:
+    """Master orchestrator for the Autotube content pipeline."""
+
+    def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None):
+        self.canal = canal
+        self.db_video_id = db_video_id  # Si != None, modo API: update en vez de insert
+
+        # Load config via bridge (DB-aware) or fall back to Python module
+        if canal not in CHANNEL_CONFIGS:
+            try:
+                CHANNEL_CONFIGS[canal] = get_channel_config(canal)
+            except ImportError:
+                raise ValueError(f"Unknown channel: {canal}. No config module found.")
+        self.config = CHANNEL_CONFIGS[canal]
+
+        # Initialize database
+        self.db = Database(db_path)
+        init_db(db_path)
+
+        # Lazy-loaded components
+        self._scraper = None
+        self._script_gen = None
+        self._tts = None
+        self._media_fetcher = None
+        self._image_fetcher = None
+        self._image_processor = None
+        self._video_editor = None
+        self._thumbnail_maker = None
+        self._metadata_gen = None
+        self._uploader = None
+
+    @property
+    def scraper(self):
+        if self._scraper is None:
+            from scrapers.reddit import RedditScraper
+            from scrapers.wikipedia import WikipediaScraper
+            self._scraper = {
+                "reddit": RedditScraper(config=self.config),
+                "wikipedia": WikipediaScraper(config=self.config),
+            }
+        return self._scraper
+
+    @property
+    def script_gen(self):
+        if self._script_gen is None:
+            from pipeline.script_generator import ScriptGenerator
+            self._script_gen = ScriptGenerator(self.db, self.config)
+        return self._script_gen
+
+    @property
+    def tts(self):
+        if self._tts is None:
+            from pipeline.tts_engine import TTSEngine
+            tts_strategy = getattr(self.config, "TTS_STRATEGY", {})
+            voice_config = {
+                "voice": tts_strategy.get("voice_primary",
+                          getattr(self.config, "VOICE_ID", "es-ES-AlvaroNeural")),
+                "rate": tts_strategy.get("rate_base",
+                        getattr(self.config, "VOICE_RATE", "+5%")),
+                "pitch": tts_strategy.get("pitch_base",
+                         getattr(self.config, "VOICE_PITCH", "+0Hz")),
+                "volume": getattr(self.config, "VOICE_VOLUME", "+0%"),
+                "tts_strategy": tts_strategy,
+            }
+            self._tts = TTSEngine(voice_config)
+        return self._tts
+
+    @property
+    def media_fetcher(self):
+        if self._media_fetcher is None:
+            from pipeline.media_fetcher import MediaFetcher
+            self._media_fetcher = MediaFetcher(config=self.config)
+        return self._media_fetcher
+
+    @property
+    def image_fetcher(self):
+        """Legacy image fetcher — kept for backward compatibility."""
+        if self._image_fetcher is None:
+            from pipeline.image_fetcher import ImageFetcher
+            self._image_fetcher = ImageFetcher(config=self.config)
+        return self._image_fetcher
+
+    @property
+    def image_processor(self):
+        if self._image_processor is None:
+            from pipeline.image_processor import ImageProcessor
+            self._image_processor = ImageProcessor(self.config)
+        return self._image_processor
+
+    @property
+    def video_editor(self):
+        if self._video_editor is None:
+            from pipeline.video_editor import VideoEditor
+            self._video_editor = VideoEditor(self.config)
+        return self._video_editor
+
+    @property
+    def thumbnail_maker(self):
+        if self._thumbnail_maker is None:
+            from pipeline.thumbnail_maker import ThumbnailMaker
+            self._thumbnail_maker = ThumbnailMaker(self.config)
+        return self._thumbnail_maker
+
+    @property
+    def metadata_gen(self):
+        if self._metadata_gen is None:
+            from pipeline.metadata_generator import MetadataGenerator
+            self._metadata_gen = MetadataGenerator(self.config)
+        return self._metadata_gen
+
+    @property
+    def uploader(self):
+        if self._uploader is None:
+            from pipeline.youtube_uploader import YouTubeUploader
+            self._uploader = YouTubeUploader(
+                account_name=self.canal,
+                db=self.db,
+                channel_slug=self.canal,
+            )
+        return self._uploader
+
+    # ── Phase runners ──────────────────────────────────────────
+
+    def phase_scrape(self) -> int:
+        """Scrape new content from all sources. Returns items added."""
+        start = time.time()
+        added = 0
+
+        # Reddit scraping
+        for scraper_name, s in self.scraper.items():
+            try:
+                count = s.save_to_db(self.db)
+                added += count
+                logger.info(f"[{self.canal}] {scraper_name}: {count} items scraped")
+            except Exception as e:
+                logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
+                self.db.log_pipeline(self.canal, "scrape", "error", str(e))
+
+        duration_ms = int((time.time() - start) * 1000)
+        self.db.log_pipeline(self.canal, "scrape", "success",
+                             f"Added {added} items", duration_ms=duration_ms)
+        return added
+
+    def phase_generate_script(self) -> Optional[dict]:
+        """Generate ONE script from unused content. Returns script dict or None."""
+        start = time.time()
+
+        content_items = self.db.get_unused_content(canal=self.canal, limit=5)
+        if not content_items:
+            logger.warning(f"[{self.canal}] No unused content available for script generation")
+            self.db.log_pipeline(self.canal, "script", "skipped",
+                                 "No unused content")
+            return None
+
+        result = self.script_gen.generate(content_items[0])
+        duration_ms = int((time.time() - start) * 1000)
+
+        if result:
+            self.db.log_pipeline(self.canal, "script", "success",
+                                 f"Script {result.get('id')} generated",
+                                 content_id=result.get("id"),
+                                 duration_ms=duration_ms)
+        else:
+            self.db.log_pipeline(self.canal, "script", "error",
+                                 "Script generation failed",
+                                 duration_ms=duration_ms)
+        return result
+
+    def phase_tts(self, script: dict) -> Optional[dict]:
+        """Generate TTS audio for a script using segmented synthesis.
+
+        Each narrative block gets its own voice settings (rate/pitch)
+        based on block type (hook, desarrollo, climax, reflexion, cierre).
+        """
+        start = time.time()
+
+        try:
+            import json
+
+            # Get bloques from script JSON
+            bloques_raw = script.get("bloques") or script.get("bloques_json")
+            if isinstance(bloques_raw, str):
+                bloques = json.loads(bloques_raw)
+            else:
+                bloques = bloques_raw or []
+
+            if bloques:
+                # v2: segmented synthesis with per-block voice
+                logger.info("[%s] Using segmented TTS with %d blocks", self.canal, len(bloques))
+                audio_path, timestamps = self.tts.generate_segmented(bloques)
+            else:
+                # Legacy fallback: single-segment synthesis from guion text
+                logger.info("[%s] No bloques found — using legacy single-segment TTS", self.canal)
+                guion = script.get("guion", "")
+                audio_path, timestamps = self.tts.generate(guion)
+
+            result = {
+                "audio_path": audio_path,
+                "timestamps_path": str(Path(audio_path).with_suffix(".json")),
+                "timestamps": timestamps,
+            }
+
+            duration_ms = int((time.time() - start) * 1000)
+            self.db.log_pipeline(self.canal, "tts", "success",
+                                  f"Audio: {audio_path}",
+                                  content_id=script.get("id"),
+                                  duration_ms=duration_ms)
+            return result
+
+        except Exception as e:
+            logger.error(f"[{self.canal}] TTS failed: {e}")
+            self.db.log_pipeline(self.canal, "tts", "error", str(e))
+            return None
+
+    def phase_media(self, script: dict) -> Optional[list[dict]]:
+        """Fetch media (video/image) for each block using the hybrid fetcher.
+
+        One asset per block, with fallback chain: video → Unsplash → Pexels.
+        Images are post-processed (color grade, vignette, grain). Videos are used as-is.
+        """
+        start = time.time()
+
+        try:
+            import json
+
+            # Get bloques from script
+            bloques_raw = script.get("bloques") or script.get("bloques_json")
+            if isinstance(bloques_raw, str):
+                bloques = json.loads(bloques_raw)
+            else:
+                bloques = bloques_raw or []
+
+            if not bloques:
+                logger.warning("[%s] No bloques in script — falling back to legacy image fetcher", self.canal)
+                return self._phase_images_legacy(script)
+
+            logger.info("[%s] Fetching media for %d blocks", self.canal, len(bloques))
+
+            # Fetch one asset per block via the hybrid fetcher
+            media_assets = self.media_fetcher.fetch_for_script(bloques)
+
+            # Post-process images only (videos are used as-is)
+            for asset in media_assets:
+                if asset["type"] == "image" and asset["path"]:
+                    try:
+                        asset["path"] = self.image_processor.process(asset["path"])
+                    except Exception as exc:
+                        logger.warning("[%s] Image processing failed for %s: %s",
+                                       self.canal, asset["path"], exc)
+
+            # Count stats
+            n_video = sum(1 for a in media_assets if a["type"] == "video")
+            n_image = sum(1 for a in media_assets if a["type"] == "image")
+            n_placeholder = sum(1 for a in media_assets if a["type"] == "placeholder")
+
+            duration_ms = int((time.time() - start) * 1000)
+            self.db.log_pipeline(
+                self.canal, "media", "success",
+                f"Fetched {len(media_assets)} assets ({n_video} video, {n_image} image, {n_placeholder} placeholder)",
+                content_id=script.get("id"),
+                duration_ms=duration_ms,
+            )
+            return media_assets
+
+        except Exception as e:
+            logger.error(f"[{self.canal}] Media fetch failed: {e}")
+            self.db.log_pipeline(self.canal, "media", "error", str(e))
+            return None
+
+    def _phase_images_legacy(self, script: dict) -> Optional[list]:
+        """Legacy image fetching — kept for scripts without bloques field."""
+        return self.phase_images(script)
+
+    def phase_images(self, script: dict) -> Optional[list]:
+        """Legacy image fetching using old ImageFetcher (kept for backward compat)."""
+        start = time.time()
+
+        try:
+            import json
+            escenas_raw = script.get("escenas") or script.get("escenas_json")
+            if isinstance(escenas_raw, str):
+                escenas = json.loads(escenas_raw)
+            else:
+                escenas = escenas_raw or []
+
+            image_paths = self.image_fetcher.fetch_for_script(escenas)
+
+            # Process each image
+            processed = []
+            for scene_images in image_paths:
+                scene_processed = []
+                for img_path in scene_images:
+                    processed_path = self.image_processor.process(img_path)
+                    scene_processed.append(processed_path)
+                processed.append(scene_processed)
+
+            duration_ms = int((time.time() - start) * 1000)
+            total_imgs = sum(len(s) for s in processed)
+            self.db.log_pipeline(self.canal, "images", "success",
+                                  f"Fetched & processed {total_imgs} images (legacy)",
+                                  content_id=script.get("id"),
+                                  duration_ms=duration_ms)
+            return processed
+
+        except Exception as e:
+            logger.error(f"[{self.canal}] Image pipeline (legacy) failed: {e}")
+            self.db.log_pipeline(self.canal, "images", "error", str(e))
+            return None
+
+    def phase_video(self, script: dict, audio_data: dict,
+                     media_assets: list) -> Optional[dict]:
+        """Assemble the final video from blocks + media assets.
+
+        Uses v2 block-based API when bloques are available in the script,
+        falling back to legacy scene-based assembly.
+        """
+        start = time.time()
+
+        try:
+            import json
+
+            # Get bloques from script
+            bloques_raw = script.get("bloques") or script.get("bloques_json")
+            if isinstance(bloques_raw, str):
+                bloques = json.loads(bloques_raw)
+            else:
+                bloques = bloques_raw or []
+
+            # Select a title
+            titulo_raw = script.get("titulo_options", "[]")
+            if isinstance(titulo_raw, str):
+                titulo_options = json.loads(titulo_raw)
+            else:
+                titulo_options = titulo_raw or ["Historia Impactante"]
+            titulo_selected = titulo_options[0] if titulo_options else "Historia Impactante"
+
+            if bloques and media_assets:
+                # ── v2: block-based assembly ─────────────────
+                logger.info("[%s] Building video with v2 block API: %d blocks, %d assets",
+                            self.canal, len(bloques), len(media_assets))
+                video_path = self.video_editor.build_video(
+                    bloques=bloques,
+                    media_assets=media_assets,
+                    audio_path=audio_data["audio_path"],
+                    timestamps=audio_data["timestamps"],
+                )
+            else:
+                # ── Legacy fallback: scene-based assembly ────
+                logger.info("[%s] No bloques — using legacy scene-based video assembly", self.canal)
+                scenes = self.tts.parse_scenes(script.get("guion", ""))
+                if not scenes:
+                    logger.error(f"[{self.canal}] No scenes parsed from script")
+                    return None
+
+                if not isinstance(media_assets, list) or not media_assets:
+                    logger.error(f"[{self.canal}] No media assets for legacy assembly")
+                    return None
+
+                # Convert flat media_assets to per-scene format for legacy
+                # (approximate: one asset per scene)
+                legacy_image_paths = []
+                for asset in media_assets:
+                    if asset["type"] in ("image", "video") and asset["path"]:
+                        legacy_image_paths.append([asset["path"]])
+                    else:
+                        legacy_image_paths.append([])
+
+                video_path = self.video_editor.build_video(
+                    scenes=scenes,
+                    image_paths=legacy_image_paths,
+                    audio_path=audio_data["audio_path"],
+                    timestamps=audio_data["timestamps"],
+                )
+
+            # Generate thumbnail (non-fatal: video is still valid without it)
+            thumbnail_path = None
+            try:
+                # Collect scene images for thumbnail from media_assets (images only, not videos)
+                scene_images_for_thumb = []
+                if isinstance(media_assets, list):
+                    for asset in media_assets:
+                        if asset["type"] == "image" and asset["path"]:
+                            scene_images_for_thumb.append([asset["path"]])
+
+                keywords_raw = script.get("keywords_json") if isinstance(script.get("keywords_json"), str) else (script.get("keywords") or script.get("keywords_json", []))
+                if isinstance(keywords_raw, str):
+                    keywords = json.loads(keywords_raw)
+                else:
+                    keywords = keywords_raw or []
+
+                thumbnail_path = self.thumbnail_maker.make_viral_thumbnail(
+                    title=titulo_selected,
+                    overlay_text="",
+                    keywords=keywords,
+                    scene_images=scene_images_for_thumb or [],
+                    script_text=script.get("guion", "")[:1500],
+                    canal_slug=self.canal,
+                    channel_display_name=getattr(self.config, "CANAL_DISPLAY_NAME", ""),
+                    channel_description=getattr(self.config, "CHANNEL_ABOUT_SECTION", ""),
+                    channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
+                )
+            except Exception as thumb_exc:
+                logger.warning("[%s] Thumbnail generation failed (non-fatal): %s", self.canal, thumb_exc)
+                thumbnail_path = ""
+
+            duration_ms = int((time.time() - start) * 1000)
+            self.db.log_pipeline(self.canal, "video", "success",
+                                  f"Video: {video_path}",
+                                  content_id=script.get("id"),
+                                  duration_ms=duration_ms)
+
+            # ── Save video to database ──
+            channel_id = self._get_channel_id()
+            timestamps = audio_data.get("timestamps", [])
+            duracion_seg = int(timestamps[-1]["end_ms"] / 1000) if timestamps and "end_ms" in timestamps[-1] else (
+                int(timestamps[-1]["end"]) if timestamps else 0)
+
+            if self.db_video_id is not None:
+                # API mode: update the pre-created record (single-source-of-truth)
+                self.db.update_video(
+                    self.db_video_id,
+                    script_id=script.get("id"),
+                    video_path=str(video_path),
+                    thumbnail_path=str(thumbnail_path),
+                    audio_path=audio_data["audio_path"],
+                    titulo_final=titulo_selected,
+                    duracion_seg=duracion_seg,
+                    channel_id=channel_id,
+                )
+                video_id = self.db_video_id
+            else:
+                # CLI standalone mode: insert a new record
+                video_id = self.db.insert_video(
+                    script_id=script.get("id"),
+                    canal=self.canal,
+                    video_path=str(video_path),
+                    thumbnail_path=str(thumbnail_path),
+                    audio_path=audio_data["audio_path"],
+                    titulo_final=titulo_selected,
+                    duracion_seg=duracion_seg,
+                    channel_id=channel_id,
+                )
+
+            return {
+                "video_path": str(video_path),
+                "thumbnail_path": str(thumbnail_path),
+                "thumbnail_base_path": str(thumbnail_path),  # for metadata phase to recompose text without regenerating
+                "titulo": titulo_selected,
+                "video_id": video_id,
+            }
+
+        except Exception as e:
+            logger.error(f"[{self.canal}] Video assembly failed: {e}")
+            self.db.log_pipeline(self.canal, "video", "error", str(e))
+            return None
+
+    def _get_channel_id(self) -> int:
+        """Resolve the database channel_id from the canal slug.
+        
+        Returns the channels.id for self.canal, or None if not found.
+        """
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT id FROM channels WHERE slug = ?", (self.canal,)
+                ).fetchone()
+            return row["id"] if row else None
+        except Exception:
+            return None
+
+    def phase_metadata(self, script: dict, video_data: dict,
+                        source_content: dict = None) -> Optional[dict]:
+        """Generate SEO metadata via AI and regenerate thumbnail with overlay text.
+        
+        Args:
+            script: Script dict from phase_generate_script
+            video_data: Video data dict from phase_video (with video_path, thumbnail_path)
+            source_content: Optional raw_content dict for additional context
+            
+        Returns:
+            metadata dict: {titles, selected_title, description, tags, thumbnail_text, ...}
+            Also updates video_data['thumbnail_path'] in-place with the enhanced thumbnail.
+        """
+        start = time.time()
+        
+        try:
+            # 1. Generate AI-powered metadata
+            logger.info(f"[{self.canal}] Phase 5a: Generating SEO metadata via AI...")
+            metadata = self.metadata_gen.generate(script, source_content)
+            
+            if not metadata:
+                logger.warning(f"[{self.canal}] Metadata generation returned empty — using fallback")
+                metadata = self.metadata_gen._fallback_metadata(script)
+            
+            logger.info(
+                f"[{self.canal}] Metadata: title='{metadata['selected_title'][:60]}', "
+                f"{len(metadata['tags'])} tags, thumbnail_text='{metadata['thumbnail_text']}'"
+            )
+            
+            # 2. Regenerate thumbnail with viral composition + marketing overlay text
+            if metadata.get("thumbnail_text"):
+                logger.info(
+                    f"[{self.canal}] Phase 5b: Regenerating viral thumbnail with overlay text "
+                    f"'{metadata['thumbnail_text']}'"
+                )
+                try:
+                    import json as _json_meta
+                    keywords = []
+                    kw_raw = script.get("keywords") or script.get("keywords_json", "[]")
+                    if isinstance(kw_raw, str):
+                        try: keywords = _json_meta.loads(kw_raw)
+                        except: pass
+                    else:
+                        keywords = kw_raw or []
+                    
+                    # Reuse the base image from phase_video to avoid re-generating with Pollo AI
+                    base_img = video_data.get("thumbnail_base_path", "")
+                    
+                    new_thumb = self.thumbnail_maker.make_viral_thumbnail(
+                        title=metadata["selected_title"],
+                        overlay_text=metadata["thumbnail_text"],
+                        keywords=keywords,
+                        scene_images=None,
+                        script_text=script.get("guion", "")[:1500],
+                        canal_slug=self.canal,
+                        channel_display_name=getattr(self.config, "CANAL_DISPLAY_NAME", ""),
+                        channel_description=getattr(self.config, "CHANNEL_ABOUT_SECTION", ""),
+                        channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
+                        base_image_path=Path(base_img) if base_img else None,
+                        video_id=video_data.get("video_id", 0),
+                    )
+                    video_data["thumbnail_path"] = str(new_thumb)
+                    video_data["titulo"] = metadata["selected_title"]
+                    logger.info(f"[{self.canal}] Enhanced viral thumbnail: {new_thumb}")
+                except Exception as e:
+                    logger.warning(f"[{self.canal}] Thumbnail regeneration failed: {e} — keeping original")
+            
+            duration_ms = int((time.time() - start) * 1000)
+            self.db.log_pipeline(self.canal, "metadata", "success",
+                                 f"Titles: {len(metadata.get('titles',[]))}, Tags: {len(metadata.get('tags',[]))}",
+                                 content_id=script.get("id"),
+                                 duration_ms=duration_ms)
+
+            # ── Update video record in DB with SEO metadata ──
+            video_id = video_data.get("video_id")
+            if video_id:
+                try:
+                    import json as _json_upd
+                    self.db.update_video(
+                        video_id,
+                        titulo_final=metadata.get("selected_title", video_data.get("titulo", "")),
+                        description=metadata.get("description", ""),
+                        tags_json=_json_upd.dumps(metadata.get("tags", []), ensure_ascii=False),
+                        title_options=_json_upd.dumps(metadata.get("titles", []), ensure_ascii=False),
+                        thumbnail_path=video_data.get("thumbnail_path", ""),
+                        status="ready",
+                        progress=100,
+                    )
+                    logger.info(f"[{self.canal}] Video #{video_id} metadata saved to DB")
+                except Exception as e:
+                    logger.warning(f"[{self.canal}] Failed to update video #{video_id} metadata: {e}")
+
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"[{self.canal}] Metadata generation failed: {e}")
+            self.db.log_pipeline(self.canal, "metadata", "error", str(e))
+            
+            # Fallback: return basic metadata so pipeline can continue
+            return self.metadata_gen._fallback_metadata(script)
+
+    def phase_upload(self, script: dict, video_data: dict,
+                      metadata: dict = None) -> Optional[str]:
+        """Upload video to YouTube. Returns video_id or None.
+        
+        Args:
+            script: Script dict with content info
+            video_data: Video data dict with paths
+            metadata: Optional SEO metadata dict from phase_metadata().
+                      If provided, uses AI-optimized title/description/tags.
+                      If None, falls back to config templates (backward compat).
+        """
+        start = time.time()
+
+        try:
+            # Authenticate with YouTube
+            if not self.uploader.authenticate():
+                logger.error(f"[{self.canal}] YouTube authentication failed")
+                self.db.log_pipeline(self.canal, "upload", "error",
+                                      "Auth failed")
+                return None
+
+            # Determine title, description, tags — prefer AI metadata over templates
+            if metadata:
+                title = metadata.get("selected_title", video_data.get("titulo", "Video sin título"))
+                description = metadata.get("description", "")
+                tags = metadata.get("tags", [])
+                logger.info(f"[{self.canal}] Using AI-optimized metadata for upload: "
+                           f"title='{title[:60]}', {len(tags)} tags")
+            else:
+                # Fallback: build from config templates (original behavior)
+                import json as _json
+                title = video_data.get("titulo", "Video sin título")
+                
+                kw_raw = script.get("keywords") or script.get("keywords_json", "[]")
+                if isinstance(kw_raw, str):
+                    tags = _json.loads(kw_raw)
+                else:
+                    tags = kw_raw or []
+                
+                seo_desc = script.get("descripcion_seo", "")
+                chapters_raw = script.get("chapters", [])
+                if isinstance(chapters_raw, str):
+                    chapters_raw = _json.loads(chapters_raw)
+                
+                if chapters_raw:
+                    chapters_text = "\n".join(
+                        f"{ch.get('time', '0:00')} — {ch.get('title', '')}"
+                        for ch in chapters_raw
+                    )
+                else:
+                    chapters_text = "0:00 — Introducción\n0:45 — Desarrollo\n3:20 — Conclusión"
+                
+                description = self.config.DESCRIPTION_TEMPLATE.format(
+                    titulo=title,
+                    descripcion_seo=seo_desc,
+                    chapters=chapters_text,
+                )
+                logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
+
+            # Upload — API mode: suppress uploader's own _log_to_db (single video record)
+            if self.db_video_id is not None:
+                self._uploader.db = None
+
+            result = self.uploader.upload(
+                video_path=Path(video_data["video_path"]),
+                title=title,
+                description=description,
+                tags=tags,
+                thumbnail_path=Path(video_data["thumbnail_path"]),
+                category_id=metadata.get("category_id", self.config.YT_CATEGORY_ID) if metadata else self.config.YT_CATEGORY_ID,
+                privacy=self.config.YT_PRIVACY_STATUS,
+            )
+
+            video_id = result.get("video_id")
+            url = result.get("url", "")
+
+            if video_id:
+                channel_id = self._get_channel_id()
+                
+                import json as _json2
+                tags_json_str = _json2.dumps(tags, ensure_ascii=False) if tags else None
+                titles_json_str = None
+                if metadata and metadata.get("titles"):
+                    titles_json_str = _json2.dumps(metadata["titles"], ensure_ascii=False)
+                
+                if self.db_video_id is not None:
+                    # API mode: update the pre-created record (don't insert a new one)
+                    self.db.update_video(
+                        self.db_video_id,
+                        titulo_final=title,
+                        description=description,
+                        tags_json=tags_json_str,
+                        title_options=titles_json_str,
+                        privacy_status=self.config.YT_PRIVACY_STATUS,
+                        channel_id=channel_id,
+                    )
+                    # Note: mark_video_uploaded is called by the API layer (generation_service)
+                    # to ensure the tracked record gets yt_video_id/yt_url
+                else:
+                    # CLI standalone mode: insert + mark
+                    db_video_id = self.db.insert_video(
+                        script_id=script.get("id"),
+                        canal=self.canal,
+                        video_path=video_data["video_path"],
+                        thumbnail_path=video_data["thumbnail_path"],
+                        audio_path=video_data.get("audio_path", ""),
+                        titulo_final=title,
+                        privacy_status=self.config.YT_PRIVACY_STATUS,
+                        channel_id=channel_id,
+                        description=description,
+                        tags_json=tags_json_str,
+                        title_options=titles_json_str,
+                    )
+                    if db_video_id:
+                        self.db.mark_video_uploaded(db_video_id, video_id, url)
+
+            duration_ms = int((time.time() - start) * 1000)
+            self.db.log_pipeline(self.canal, "upload", "success",
+                                  f"YouTube ID: {video_id}",
+                                  content_id=script.get("id"),
+                                  duration_ms=duration_ms)
+            return video_id
+
+        except Exception as e:
+            logger.error(f"[{self.canal}] Upload failed: {e}")
+            self.db.log_pipeline(self.canal, "upload", "error", str(e))
+            return None
+
+    # ── Full pipeline ──────────────────────────────────────────
+
+    def run_full_pipeline(self, skip_upload: bool = False) -> bool:
+        """Execute the complete pipeline for one video. Returns True on success."""
+        logger.info(f"{'='*60}")
+        logger.info(f"[{self.canal}] STARTING FULL PIPELINE")
+        logger.info(f"{'='*60}")
+
+        # Phase 0: Scrape fresh content for this video
+        logger.info(f"[{self.canal}] Phase 0/6: Scraping fresh content...")
+        self.phase_scrape()
+
+        # Phase 1: Generate script from best scraped item
+        logger.info(f"[{self.canal}] Phase 1/6: Generating script...")
+        script = self.phase_generate_script()
+        if not script:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: No script generated from scraped content")
+            return False
+        logger.info(f"[{self.canal}] Script ready (ID: {script.get('id')})")
+
+        # Phase 2: TTS
+        logger.info(f"[{self.canal}] Phase 2/6: Generating TTS audio...")
+        audio_data = self.phase_tts(script)
+        if not audio_data:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: TTS failed")
+            return False
+        logger.info(f"[{self.canal}] TTS audio: {audio_data['audio_path']}")
+
+        # Phase 3: Media (video + image hybrid)
+        logger.info(f"[{self.canal}] Phase 3/6: Fetching media assets (video + image)...")
+        media_assets = self.phase_media(script)
+        if not media_assets:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: Media fetch failed")
+            return False
+        n_video = sum(1 for a in media_assets if a.get("type") == "video")
+        n_image = sum(1 for a in media_assets if a.get("type") == "image")
+        logger.info(f"[{self.canal}] Media ready ({len(media_assets)} assets: {n_video} video, {n_image} image)")
+
+        # Phase 4: Video assembly
+        logger.info(f"[{self.canal}] Phase 4/6: Assembling video...")
+        video_data = self.phase_video(script, audio_data, media_assets)
+        if not video_data:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: Video assembly failed")
+            return False
+        logger.info(f"[{self.canal}] Video: {video_data['video_path']}")
+
+        # Phase 5: SEO metadata + enhanced thumbnail
+        logger.info(f"[{self.canal}] Phase 5/6: Generating SEO metadata & optimized thumbnail...")
+        metadata = self.phase_metadata(script, video_data)
+        if metadata:
+            logger.info(
+                f"[{self.canal}] Metadata ready: '{metadata['selected_title'][:60]}' "
+                f"({len(metadata['titles'])} titles, {len(metadata['tags'])} tags)"
+            )
+
+        # Phase 6: Upload (optional)
+        if not skip_upload:
+            logger.info(f"[{self.canal}] Phase 6/6: Uploading to YouTube with optimized metadata...")
+            video_id = self.phase_upload(script, video_data, metadata)
+            if video_id:
+                logger.info(f"[{self.canal}] PIPELINE COMPLETE: https://youtube.com/watch?v={video_id}")
+            else:
+                logger.warning(f"[{self.canal}] Pipeline complete but upload failed — video saved locally")
+        else:
+            logger.info(f"[{self.canal}] Upload skipped (--skip-upload)")
+            # Save video record to DB so dashboard / web copy can find it
+            import json as _json3
+            
+            title = metadata["selected_title"] if metadata else video_data.get("titulo", "Sin título")
+            description = metadata.get("description", "") if metadata else ""
+            tags_json_str = _json3.dumps(metadata.get("tags", []), ensure_ascii=False) if metadata else None
+            titles_json_str = _json3.dumps(metadata.get("titles", []), ensure_ascii=False) if metadata else None
+            channel_id = self._get_channel_id()
+            
+            self.db.insert_video(
+                script_id=script.get("id"),
+                canal=self.canal,
+                video_path=video_data["video_path"],
+                thumbnail_path=video_data.get("thumbnail_path", ""),
+                audio_path=audio_data.get("audio_path", ""),
+                titulo_final=title,
+                privacy_status="unlisted",
+                channel_id=channel_id,
+                description=description,
+                tags_json=tags_json_str,
+                title_options=titles_json_str,
+            )
+            logger.info(f"[{self.canal}] PIPELINE COMPLETE: Video saved to {video_data['video_path']}")
+
+        # Mark script as used
+        self.db.mark_script_used(script.get("id"))
+
+        return True
+
+    # ── Scheduling ─────────────────────────────────────────────
+
+    def get_videos_per_day(self) -> int:
+        """Determine how many videos to produce today based on pipeline age."""
+        if PIPELINE_START_DATE:
+            start_date = datetime.fromisoformat(PIPELINE_START_DATE)
+        else:
+            # Assume started today
+            start_date = datetime.now(timezone.utc)
+
+        days_running = (datetime.now(timezone.utc) - start_date).days
+
+        if days_running < 7:
+            return WEEK1_VIDEOS_PER_DAY
+        elif days_running < 14:
+            return WEEK2_VIDEOS_PER_DAY
+        else:
+            return WEEK3_VIDEOS_PER_DAY
+
+    def scheduled_run(self):
+        """Entry point for APScheduler — run one video pipeline iteration."""
+        try:
+            count_today = self.db.get_videos_today(self.canal)
+            max_today = self.get_videos_per_day()
+
+            if count_today >= max_today:
+                logger.info(f"[{self.canal}] Daily quota reached ({count_today}/{max_today}). Skipping.")
+                return
+
+            self.run_full_pipeline(skip_upload=False)
+        except Exception as e:
+            logger.exception(f"[{self.canal}] Scheduled run crashed: {e}")
+            self.db.log_pipeline(self.canal, "orchestrator", "error", str(e))
+
+    def start_scheduler(self):
+        """Start APScheduler for continuous operation."""
+        videos_per_day = self.get_videos_per_day()
+
+        if videos_per_day <= 0:
+            logger.info(f"[{self.canal}] videos_per_day=0 — nothing scheduled")
+            return
+
+        # Space out videos evenly across the day
+        interval_hours = 24 / videos_per_day
+        interval_seconds = int(interval_hours * 3600)
+
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(
+            self.scheduled_run,
+            IntervalTrigger(seconds=interval_seconds),
+            id=f"{self.canal}_pipeline",
+            name=f"{self.canal} video pipeline",
+            replace_existing=True,
+        )
+
+        # Also schedule scraping every 6 hours
+        scheduler.add_job(
+            self.phase_scrape,
+            IntervalTrigger(hours=6),
+            id=f"{self.canal}_scrape",
+            name=f"{self.canal} scrape",
+            replace_existing=True,
+        )
+
+        scheduler.start()
+        logger.info(f"[{self.canal}] Scheduler started: {videos_per_day} video(s)/day "
+                     f"(every {interval_hours:.1f}h) + scrape every 6h")
+
+        return scheduler
+
+
+def setup_logging():
+    """Configure logging for the orchestrator."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+        format=LOG_FORMAT,
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOGS_DIR / "autotube.log", encoding="utf-8"),
+        ],
+    )
+    # Reduce noise from third-party libraries
+    for lib in ["urllib3", "googleapiclient", "google.auth", "apscheduler", "PIL"]:
+        logging.getLogger(lib).setLevel(logging.WARNING)
+
+
+def run_single(canal: str = "canal1", skip_upload: bool = False):
+    """Run a single pipeline execution for one channel."""
+    setup_logging()
+    orch = PipelineOrchestrator(canal=canal)
+    success = orch.run_full_pipeline(skip_upload=skip_upload)
+    return 0 if success else 1
+
+
+def run_scheduled(canal: str = "canal1"):
+    """Run the pipeline in scheduled mode (continuous)."""
+    setup_logging()
+    orch = PipelineOrchestrator(canal=canal)
+
+    logger.info(f"[{canal}] Starting scheduled mode. Press Ctrl+C to stop.")
+    logger.info(f"[{canal}] Videos per day: {orch.get_videos_per_day()}")
+    logger.info(f"[{canal}] Unused content: {orch.db.get_unused_count(canal)}")
+
+    scheduler = orch.start_scheduler()
+
+    try:
+        # Keep the main thread alive
+        import signal
+        stop_event = signal.Event()
+        signal.signal(signal.SIGINT, lambda s, f: stop_event.set())
+        signal.signal(signal.SIGTERM, lambda s, f: stop_event.set())
+        stop_event.wait()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        if scheduler:
+            scheduler.shutdown(wait=False)
+        logger.info("Scheduler stopped.")
+
+    return 0
