@@ -101,7 +101,7 @@ export default function GenerationProgressBar() {
             </div>
 
             {progress?.message && (
-              <p className="text-[11px] text-gray-500 mt-1 truncate">{progress.message}</p>
+              <p className="text-xs text-gray-300 mt-1.5 font-medium leading-relaxed">{progress.message}</p>
             )}
           </div>
         </div>

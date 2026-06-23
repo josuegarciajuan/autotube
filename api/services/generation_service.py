@@ -76,8 +76,18 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
         # Import orchestrator
         from orchestrator import PipelineOrchestrator
         
-        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)  # API mode: update pre-created record
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        
+        # Create thread-safe progress callback for granular panel feedback
+        def _progress_cb(percent: int, phase: str, message: str):
+            """Called from worker threads — safely dispatches to the async event loop."""
+            asyncio.run_coroutine_threadsafe(
+                _broadcast_progress(job_id, percent, phase, message, video_id=video_id),
+                loop,
+            )
+        
+        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id,
+                                     progress_callback=_progress_cb)
         
         # ── Phase 0: Scrape fresh content ────────────────────
         await _broadcast_progress(job_id, 5, "scrape", "Buscando nuevo contenido (Reddit + Wikipedia)...",

@@ -39,9 +39,11 @@ CHANNEL_CONFIGS: dict[str, object] = {}
 class PipelineOrchestrator:
     """Master orchestrator for the Autotube content pipeline."""
 
-    def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None):
+    def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None,
+                 progress_callback: Optional[callable] = None):
         self.canal = canal
         self.db_video_id = db_video_id  # Si != None, modo API: update en vez de insert
+        self._progress_cb = progress_callback  # (percent, phase, message) → None
 
         # Load config via bridge (DB-aware) or fall back to Python module
         if canal not in CHANNEL_CONFIGS:
@@ -157,16 +159,26 @@ class PipelineOrchestrator:
             )
         return self._uploader
 
+    def _emit_progress(self, percent: int, phase: str, message: str) -> None:
+        """Fire the progress callback (if set). No-op when running CLI standalone."""
+        if self._progress_cb:
+            try:
+                self._progress_cb(percent, phase, message)
+            except Exception:
+                pass  # never let progress emission crash the pipeline
+
     # ── Phase runners ──────────────────────────────────────────
 
     def phase_scrape(self) -> int:
         """Scrape new content from all sources. Returns items added."""
         start = time.time()
         added = 0
+        self._emit_progress(5, "scrape", "Buscando historias en Reddit y Wikipedia...")
 
         # Reddit scraping
         for scraper_name, s in self.scraper.items():
             try:
+                self._emit_progress(7, "scrape", f"Scraping {scraper_name}...")
                 count = s.save_to_db(self.db)
                 added += count
                 logger.info(f"[{self.canal}] {scraper_name}: {count} items scraped")
@@ -174,6 +186,7 @@ class PipelineOrchestrator:
                 logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
                 self.db.log_pipeline(self.canal, "scrape", "error", str(e))
 
+        self._emit_progress(10, "scrape", f"Contenido obtenido: {added} fuentes")
         duration_ms = int((time.time() - start) * 1000)
         self.db.log_pipeline(self.canal, "scrape", "success",
                              f"Added {added} items", duration_ms=duration_ms)
@@ -190,10 +203,13 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
+        self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_items[0])
         duration_ms = int((time.time() - start) * 1000)
 
         if result:
+            words = len(result.get("guion", "").split()) if result.get("guion") else 0
+            self._emit_progress(23, "script", f"Guion generado: {words} palabras, {result.get('id')}")
             self.db.log_pipeline(self.canal, "script", "success",
                                  f"Script {result.get('id')} generated",
                                  content_id=result.get("id"),
@@ -211,6 +227,7 @@ class PipelineOrchestrator:
         based on block type (hook, desarrollo, climax, reflexion, cierre).
         """
         start = time.time()
+        self._emit_progress(30, "tts", "Generando narracion con IA (TTS)...")
 
         try:
             import json
@@ -231,6 +248,9 @@ class PipelineOrchestrator:
                 logger.info("[%s] No bloques found — using legacy single-segment TTS", self.canal)
                 guion = script.get("guion", "")
                 audio_path, timestamps = self.tts.generate(guion)
+
+            audio_dur = int(timestamps[-1]["end_ms"]/1000) if timestamps and "end_ms" in timestamps[-1] else len(timestamps) if timestamps else 0
+            self._emit_progress(38, "tts", f"Audio generado: {audio_dur}s de narracion")
 
             result = {
                 "audio_path": audio_path,
@@ -257,6 +277,7 @@ class PipelineOrchestrator:
         Images are post-processed (color grade, vignette, grain). Videos are used as-is.
         """
         start = time.time()
+        self._emit_progress(42, "images", "Buscando imagenes y videos para el video...")
 
         try:
             import json
@@ -290,6 +311,7 @@ class PipelineOrchestrator:
             n_video = sum(1 for a in media_assets if a["type"] == "video")
             n_image = sum(1 for a in media_assets if a["type"] == "image")
             n_placeholder = sum(1 for a in media_assets if a["type"] == "placeholder")
+            self._emit_progress(53, "images", f"Imagenes listas: {n_video} videos + {n_image} imagenes")
 
             duration_ms = int((time.time() - start) * 1000)
             self.db.log_pipeline(
@@ -374,6 +396,7 @@ class PipelineOrchestrator:
 
             if bloques and media_assets:
                 # ── v2: block-based assembly ─────────────────
+                self._emit_progress(60, "video", f"Renderizando video con {len(bloques)} bloques (MoviePy)...")
                 logger.info("[%s] Building video with v2 block API: %d blocks, %d assets",
                             self.canal, len(bloques), len(media_assets))
                 video_path = self.video_editor.build_video(
@@ -413,6 +436,7 @@ class PipelineOrchestrator:
             # Generate thumbnail (non-fatal: video is still valid without it)
             thumbnail_path = None
             try:
+                self._emit_progress(65, "video", "Generando miniatura viral (Pollo AI)...")
                 # Collect scene images for thumbnail from media_assets (images only, not videos)
                 scene_images_for_thumb = []
                 if isinstance(media_assets, list):
@@ -524,7 +548,8 @@ class PipelineOrchestrator:
             Also updates video_data['thumbnail_path'] in-place with the enhanced thumbnail.
         """
         start = time.time()
-        
+        self._emit_progress(57, "video", "Ensamblando video...")
+
         try:
             # 1. Generate AI-powered metadata
             logger.info(f"[{self.canal}] Phase 5a: Generating SEO metadata via AI...")
@@ -623,9 +648,11 @@ class PipelineOrchestrator:
                       If None, falls back to config templates (backward compat).
         """
         start = time.time()
+        self._emit_progress(80, "upload", "Preparando subida a YouTube...")
 
         try:
             # Authenticate with YouTube
+            self._emit_progress(83, "upload", "Autenticando con YouTube...")
             if not self.uploader.authenticate():
                 logger.error(f"[{self.canal}] YouTube authentication failed")
                 self.db.log_pipeline(self.canal, "upload", "error",
@@ -674,6 +701,7 @@ class PipelineOrchestrator:
             if self.db_video_id is not None:
                 self._uploader.db = None
 
+            self._emit_progress(88, "upload", "Subiendo video a YouTube...")
             result = self.uploader.upload(
                 video_path=Path(video_data["video_path"]),
                 title=title,

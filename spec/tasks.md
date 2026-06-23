@@ -52,6 +52,9 @@
 - **pipeline/metadata_generator.py**: prompts reescritos (curiosity gap, power words, coherencia), char cap 15→24
 - **pipeline/thumbnail_brainstorm.py**: marketing agent alineado (24 chars, formatos virales)
 
-## Fase E: Progreso granular en el panel
+## Fase E: Progreso granular en el panel ✅ COMPLETADA
+- **orchestrator.py**: callback + sub-pasos en 7 fases
+- **generation_service.py**: wrapper thread-safe
+- **frontend**: `GenerationProgressBar` + `ChannelDetail` dinámicos
 
 ## Fase F: Borrar mp4 tras subida OK + embed YouTube en el panel

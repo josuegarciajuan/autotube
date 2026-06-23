@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api, formatDate, formatDuration, formatShortNumber, apiUrl } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
+import { useGenerationProgress } from '../hooks/useWebSocket'
 import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink } from 'lucide-react'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField } from '../types/channel'
 
@@ -34,7 +35,8 @@ export default function ChannelDetail() {
   const [showManualSetup, setShowManualSetup] = useState(false)
   const [syncResult, setSyncResult] = useState<any>(null)
 
-  const { setActiveJob } = useGeneration()
+  const { setActiveJob, activeJob } = useGeneration()
+  const { progress } = useGenerationProgress(activeJob?.jobId ?? null)
 
   useEffect(() => {
     async function load() {
@@ -367,9 +369,22 @@ export default function ChannelDetail() {
         {generating ? (
           <div className="flex items-center gap-3 p-4 bg-dark-700/50 rounded-lg">
             <Loader2 size={20} className="text-neon-gold animate-spin" />
-            <div>
-              <p className="text-sm font-medium text-white">Generando y subiendo video...</p>
-              <p className="text-xs text-gray-400">El pipeline completo (script → TTS → video → upload) está en marcha. El progreso se muestra en la barra inferior.</p>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-white">
+                {progress?.message || 'Generando y subiendo video...'}
+              </p>
+              <div className="flex items-center gap-2 mt-1">
+                <div className="flex-1 h-1.5 bg-dark-900 rounded-full overflow-hidden">
+                  <div className="h-full bg-gradient-to-r from-neon-red to-neon-gold rounded-full transition-all duration-500"
+                       style={{ width: `${progress?.progress || 0}%` }} />
+                </div>
+                <span className="text-xs text-neon-red font-mono tabular-nums">
+                  {progress?.progress || 0}%
+                </span>
+              </div>
+              {progress?.phase && (
+                <p className="text-xs text-neon-cyan mt-0.5">{progress.phase}</p>
+              )}
             </div>
           </div>
         ) : (
