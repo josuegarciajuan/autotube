@@ -102,6 +102,34 @@ Responde SIEMPRE en formato JSON con exactamente estas claves:
 }"""
 
 
+# ── Smart overlay-text truncation ──────────────────────────────
+
+def _smart_overlay_text(text: str, soft: int = 24, hard: int = 34) -> str:
+    """Truncate overlay text at word boundaries, never splitting a word.
+
+    - If the whole phrase fits within *hard* chars, return it as-is
+      (the thumbnail renderer wraps it across 2 lines anyway).
+    - Otherwise, drop trailing WHOLE words until the result fits
+      within *soft* chars.
+    - Never returns an empty string (falls back to original truncated
+      at *hard* as absolute last resort).
+    """
+    text = " ".join((text or "").split())  # normalize whitespace
+    if not text:
+        return text
+    if len(text) <= hard:
+        return text
+    # Drop trailing whole words to fit within soft limit
+    words = text.split()
+    out = ""
+    for w in words:
+        cand = (out + " " + w).strip()
+        if out and len(cand) > soft:
+            break
+        out = cand
+    return out or text[:hard]  # never empty; last-resort hard cut
+
+
 class MetadataGenerator:
     """Generate YouTube-optimized metadata (titles, description, tags, thumbnail text)
     using the same LLM provider as the script generator.
@@ -256,9 +284,9 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             
             thumbnail_text = result.get("thumbnail_text", "")
             if thumbnail_text:
-                thumbnail_text = thumbnail_text[:24].strip().upper()
+                thumbnail_text = _smart_overlay_text(thumbnail_text).upper()
             else:
-                thumbnail_text = title[:24] if title else "¿QUÉ OCULTAN?"
+                thumbnail_text = _smart_overlay_text(title).upper() if title else "¿QUÉ OCULTAN?"
             
             # Track token usage
             usage = response.usage
