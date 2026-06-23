@@ -73,7 +73,7 @@ CHANNEL_KEYWORDS = [
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
 
-TEST_MODE = True
+TEST_MODE = False
 
 TEST_SCRIPT_WORDS_MIN = 200
 TEST_SCRIPT_WORDS_MAX = 400
