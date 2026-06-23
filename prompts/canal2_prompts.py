@@ -177,12 +177,17 @@ def build_system_prompt(config=None) -> str:
             f"Sé conciso pero mantén la calidad narrativa.\n"
         )
     else:
-        words_min = getattr(cfg, "PROD_SCRIPT_WORDS_MIN", 2000)
-        words_max = getattr(cfg, "PROD_SCRIPT_WORDS_MAX", 3500)
-        blocks_min = getattr(cfg, "PROD_SCRIPT_BLOCKS_MIN", 10)
-        blocks_max = getattr(cfg, "PROD_SCRIPT_BLOCKS_MAX", 18)
-        duration_target = getattr(cfg, "PROD_VIDEO_DURATION_MIN", 8)
-        duration_max = getattr(cfg, "PROD_VIDEO_DURATION_MAX", 14)
+        # ── Production mode: derive from canonical channel config field ──
+        # VIDEO_OPTIMAL_DURATION_MINUTES is the single source of truth for video length.
+        # All other values (word count, blocks) are derived from it proportionally.
+        duration_target = getattr(cfg, "VIDEO_OPTIMAL_DURATION_MINUTES", 10)
+        # ~150 words per minute of narration, ±15% band
+        words_min = int(duration_target * 150 * 0.85)
+        words_max = int(duration_target * 150 * 1.15)
+        # ~1.5 to 2.1 blocks per minute (each 30-40 sec avg)
+        blocks_min = max(5, int(duration_target * 1.5))
+        blocks_max = max(8, int(duration_target * 2.1))
+        duration_max = int(duration_target * 1.4)  # upper bound for display range
         mode_banner = ""
 
     word_range_text = f"{words_min} y {words_max}"

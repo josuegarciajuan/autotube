@@ -17,7 +17,18 @@
 - [x] A7. Limpieza de registros duplicados existentes en canal 3
 - [x] A8. Reiniciar API y verificar
 
-## Fase B: Duración basada en VIDEO_OPTIMAL_DURATION_MINUTES
+## Fase B: Duración basada en VIDEO_OPTIMAL_DURATION_MINUTES ✅ COMPLETADA
+
+**Archivos modificados:**
+- `prompts/canal2_prompts.py` — rama producción deriva duración/palabras/bloques de `VIDEO_OPTIMAL_DURATION_MINUTES`
+- `prompts/canal1_prompts.py` — mismo cambio (paridad)
+
+**Tareas:**
+- [x] B1. Reemplazar hardcodeo `PROD_SCRIPT_WORDS_*`/`PROD_VIDEO_DURATION_*` por derivación desde `VIDEO_OPTIMAL_DURATION_MINUTES`
+- [x] B2. Mantener TEST_MODE como override para pruebas rápidas
+- [x] B3. Verificar palabras (~1275-1724 para 10 min), bloques (15-21), duración (10-14)
+- [x] B4. DB: TEST_MODE=False en canales 1 y 3
+- [x] B5. Verificar sintaxis + prompt generado correctamente
 
 ## Fase C: Pollo API oficial + thumbnails virales + badge 4K x2
 

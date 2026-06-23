@@ -19,6 +19,18 @@ POST /api/videos/generate {channel_id, action}
 
 **Modo CLI (sin cambios):** `PipelineOrchestrator(db_video_id=None)` → `insert_video` en cada fase (compatibilidad preservada).
 
-### DB: limpieza post-migración
+### Fase B: Derivación de duración desde config del canal
+
+**Campo canónico:** `VIDEO_OPTIMAL_DURATION_MINUTES` (int, minutos). Ambos canales = 10.
+
+**Algoritmo (rama producción, TEST_MODE=False):**
+- `duration_target = VIDEO_OPTIMAL_DURATION_MINUTES`
+- `words_min = duration_target × 150 × 0.85`
+- `words_max = duration_target × 150 × 1.15`
+- `blocks_min = max(5, duration_target × 1.5)`
+- `blocks_max = max(8, duration_target × 2.1)`
+- `duration_max = duration_target × 1.4`
+
+**TEST_MODE preservado** para pruebas rápidas (200-400 palabras, ~1 min).
 - Canal 3: registros huérfanos 27 y 29 eliminados; yt_video_id movido de 29 → 26.
 - Canal 3 queda con ids 15, 21, 26 (todos con yt_video_id y status='uploaded').
