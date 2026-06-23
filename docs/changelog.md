@@ -30,3 +30,8 @@
 - **orchestrator.py**: añadido `progress_callback` + `_emit_progress()`. Sub-pasos en scrape (fuentes), script (LLM, palabras), TTS (narración, segundos), imágenes, video (renderizado, miniatura Pollo), upload (auth, subida).
 - **api/services/generation_service.py**: callback thread-safe (`asyncio.run_coroutine_threadsafe`) para WebSocket desde hilos.
 - **frontend**: `GenerationProgressBar` mensaje más visible; `ChannelDetail` barra de progreso + fase + porcentaje en tiempo real.
+
+### Fase F — Borrar mp4 tras subida OK + embed YouTube en panel
+- **api/services/generation_service.py**: tras subida exitosa, borra el mp4 local y marca `video_path=""` en DB (ahorra espacio).
+- **api/main.py**: `/api/video-file/{id}` comprueba existencia real del archivo; si fue borrado y tiene `yt_video_id` → redirect HTTP 302 a YouTube.
+- **frontend/VideoEditor.tsx**: si `yt_video_id` existe → embed YouTube `<iframe>`; fallback `<video>` local; placeholder si ninguno.

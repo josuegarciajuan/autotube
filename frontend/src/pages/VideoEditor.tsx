@@ -301,9 +301,19 @@ export default function VideoEditor() {
         </div>
       )}
 
-      {/* Video Player */}
-      {video.video_path && (
-        <div className="glass rounded-xl overflow-hidden">
+      {/* Video Player — YouTube embed if uploaded, local file otherwise */}
+      <div className="glass rounded-xl overflow-hidden">
+        {video.yt_video_id ? (
+          <div className="aspect-video">
+            <iframe
+              src={`https://www.youtube.com/embed/${video.yt_video_id}`}
+              title="YouTube video player"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+              className="w-full h-full rounded-lg"
+            />
+          </div>
+        ) : video.video_path ? (
           <video
             src={apiUrl(`/video-file/${videoId}`)}
             controls
@@ -313,8 +323,12 @@ export default function VideoEditor() {
           >
             Tu navegador no soporta video HTML5.
           </video>
-        </div>
-      )}
+        ) : (
+          <div className="aspect-video flex items-center justify-center bg-dark-800">
+            <p className="text-gray-500 text-sm">Video no disponible localmente</p>
+          </div>
+        )}
+      </div>
 
       {/* Scenes Editor */}
       <div className="glass rounded-xl p-5">

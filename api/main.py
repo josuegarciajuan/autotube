@@ -15,7 +15,7 @@ import mimetypes
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 
 from api.deps import get_db
 from api.progress import get_progress_manager
@@ -325,15 +325,26 @@ async def serve_static(file_path: str):
 
 @app.get("/api/video-file/{video_id}")
 async def serve_video_file(video_id: int, request: Request):
-    """Stream a video file with range request support for seekable playback."""
+    """Stream a video file with range request support for seekable playback.
+    
+    If the local mp4 was deleted after upload (Fase F), redirect to YouTube.
+    """
     db = get_db()
     v = db.get_video(video_id)
-    if not v or not v.get("video_path"):
-        raise HTTPException(404, "Video file not found")
-
-    video_path = resolve_media_path(v["video_path"])
-    if video_path is None:
+    if not v:
+        raise HTTPException(404, "Video not found")
+    
+    stored_path = v.get("video_path", "")
+    video_path = resolve_media_path(stored_path) if stored_path else None
+    
+    # Local file was deleted after upload — redirect to YouTube
+    if video_path is None or not video_path.exists():
+        if v.get("yt_video_id"):
+            yt_url = v.get("yt_url") or f"https://youtube.com/watch?v={v['yt_video_id']}"
+            return RedirectResponse(url=yt_url, status_code=302)
         raise HTTPException(404, "Video file not found on disk")
+    
+    file_size = video_path.stat().st_size
 
     file_size = video_path.stat().st_size
     range_header = request.headers.get("range")

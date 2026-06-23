@@ -266,6 +266,16 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             yt_url = f"https://youtube.com/watch?v={video_yt_id}"
             db.mark_video_uploaded(video_id, video_yt_id, yt_url)
             
+            # Delete local mp4 to save server space (YouTube is the source)
+            video_path = video_data.get("video_path", "")
+            if video_path and Path(video_path).exists():
+                try:
+                    Path(video_path).unlink()
+                    logger.info(f"Deleted local mp4: {video_path}")
+                    db.update_video(video_id, video_path="")  # mark as deleted (NOT NULL constraint)
+                except Exception as e:
+                    logger.warning(f"Could not delete mp4 {video_path}: {e}")
+            
             await _broadcast_progress(job_id, 100, "upload", 
                                        f"Subido! youtube.com/watch?v={video_yt_id}",
                                        "completed", video_id)

@@ -57,4 +57,4 @@
 - **generation_service.py**: wrapper thread-safe
 - **frontend**: `GenerationProgressBar` + `ChannelDetail` dinámicos
 
-## Fase F: Borrar mp4 tras subida OK + embed YouTube en el panel
+## Fase F: Borrar mp4 tras subida OK + embed YouTube en el panel ✅ COMPLETADA
