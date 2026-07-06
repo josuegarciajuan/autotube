@@ -683,6 +683,11 @@ CTA_TEXT = (
     "Si estas historias de supervivencia te atrapan,\n"
     "¡dale like, suscribete y activa la campana!"
 )
+# ── Template voice-over texts (TTS with channel narrator voice) ──
+INTRO_VOICE_TEXT = "Bienvenidos a Expediciones sin retorno, donde no todos vuelven para contarlo."
+CTA_VOICE_TEXT = "Si has llegado hasta aquí, ya eres parte de la expedición. Suscríbete y no te quedes atrás."
+OUTRO_VOICE_TEXT = "Gracias por ver. Nos vemos en la próxima expedición."
+
 CANAL_INITIALS = "ESR"             # Expediciones Sin Retorno
 LOGO_SIZE = 180
 LOGO_PATH = ""

@@ -672,6 +672,11 @@ CTA_TEXT = (
     "Si te apasiona descubrir civilizaciones olvidadas,\n"
     "¡dale like, suscríbete y acompáñanos en la próxima expedición!"
 )
+# ── Template voice-over texts (TTS with channel narrator voice) ──
+INTRO_VOICE_TEXT = "Bienvenidos a Civilizaciones Olvidadas, la historia que el tiempo enterró."
+CTA_VOICE_TEXT = "Si esta historia despertó tu curiosidad, suscríbete y desentierra con nosotros el próximo secreto."
+OUTRO_VOICE_TEXT = "Gracias por vernos. Nos vemos en la próxima civilización."
+
 CANAL_INITIALS = "CO"             # Civilizaciones Olvidadas
 LOGO_SIZE = 140
 LOGO_PATH = ""

@@ -7,7 +7,11 @@ when AI image generation is unavailable.
 """
 
 import os
+import asyncio
+import hashlib
 import logging
+import tempfile
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -445,6 +449,21 @@ def _build_cta_icon(kind: str, size: int, palette: dict) -> np.ndarray:
     return np.array(img)
 
 
+def _mux_audio(video_path: Path, audio_path: Path, output_path: Path, duration: float) -> None:
+    """Mux audio track into video using ffmpeg. Trims audio to video duration."""
+    subprocess.run([
+        "ffmpeg", "-y", "-v", "error",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", str(duration),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-movflags", "+faststart",
+        str(output_path),
+    ], check=True, timeout=60)
+
+
 # ── TemplateGenerator ────────────────────────────────────────────
 
 class TemplateGenerator:
@@ -467,11 +486,12 @@ class TemplateGenerator:
     # ── Public API ──────────────────────────────────────────────
 
     def generate_intro(self) -> Optional[Path]:
-        """Generate intro template: channel logo + name with Ken Burns effect.
+        """Generate intro template: channel logo + name with Ken Burns effect + voice-over.
 
-        Duration: INTRO_DURATION_SEC from config (default 3s).
+        Duration: max(INTRO_DURATION_SEC from config, voice_duration + 0.5s).
+        Voice text from INTRO_VOICE_TEXT.
         """
-        duration = self._cfg("INTRO_DURATION_SEC", 3.0)
+        base_duration = self._cfg("INTRO_DURATION_SEC", 3.0)
         display_name = self._cfg("CANAL_DISPLAY_NAME", self.slug)
         subtitle = self._cfg("INTRO_SUBTITLE", "")
         color_pal = self._cfg("COLOR_PALETTE", {"accent": (200, 160, 40), "text": (230, 230, 230)})
@@ -479,6 +499,13 @@ class TemplateGenerator:
         logo_size = self._cfg("LOGO_SIZE", 140)
         font_size = self._cfg("INTRO_FONT_SIZE", 68)
         sub_font_size = self._cfg("INTRO_SUBTITLE_FONT_SIZE", 28)
+
+        # ── Voice synthesis ──
+        voice_text = self._cfg("INTRO_VOICE_TEXT", "")
+        voice_path = self._synthesize_voice(voice_text) if voice_text else None
+        voice_dur = self._get_voice_duration(voice_path) if voice_path else 0.0
+        # Duration = max(config base, voice + 0.5s pad)
+        duration = max(base_duration, voice_dur + 0.5) if voice_dur > 0 else base_duration
 
         output_path = self.output_dir / "intro.mp4"
         try:
@@ -557,18 +584,29 @@ class TemplateGenerator:
                 clips.append(sub)
 
             composite = CompositeVideoClip(clips, size=self.VIDEO_SIZE)
+
+            # Write video-only (no audio yet)
+            temp_video = self.output_dir / "intro_video.mp4"
             composite.write_videofile(
-                str(output_path),
+                str(temp_video),
                 fps=self.VIDEO_FPS,
                 codec="libx264",
                 bitrate="2000k",
                 preset="medium",
-                audio_codec="aac",
+                audio_codec="aac",  # silence placeholder
                 threads=os.cpu_count() or 4,
                 ffmpeg_params=["-movflags", "+faststart"],
             )
             composite.close()
-            logger.info("Intro template generated → %s", output_path)
+
+            # Mux voice-over if available
+            if voice_path and voice_path.exists():
+                _mux_audio(temp_video, voice_path, output_path, duration)
+                temp_video.unlink(missing_ok=True)
+            else:
+                temp_video.rename(output_path)
+
+            logger.info("Intro template generated → %s (%.1fs, voice=%s)", output_path, duration, "yes" if voice_path else "no")
             return output_path
 
         except Exception:
@@ -576,14 +614,15 @@ class TemplateGenerator:
             return None
 
     def generate_cta(self) -> Optional[Path]:
-        """Generate CTA template: like/subscribe/bell — clean branded minivideo.
+        """Generate CTA template: like/subscribe/bell — clean branded minivideo + voice-over.
 
-        Duration: min(OUTRO_DURATION_SEC / 2, 5.0) from config (default 2.5s).
+        Duration: max(min(OUTRO_DURATION_SEC/2, 5.0), voice_duration + 0.5s).
+        Voice text from CTA_VOICE_TEXT.
         Uses channel palette gradient background + vector PIL icons with
         labelled text – no AI images, no slug-in-prompt, no random backgrounds.
         """
         outro_total = self._cfg("OUTRO_DURATION_SEC", 5.0)
-        duration = min(outro_total / 2.0, 5.0)
+        base_duration = min(outro_total / 2.0, 5.0)
         cta_like = self._cfg("OUTRO_CTA_LIKE", "Like")
         cta_sub = self._cfg("OUTRO_CTA_SUBSCRIBE", "Suscríbete")
         cta_bell = self._cfg("OUTRO_CTA_BELL", "Activa la campana")
@@ -593,6 +632,13 @@ class TemplateGenerator:
              "primary": (160, 22, 22), "secondary": (12, 10, 10)},
         )
         font_size = self._cfg("OUTRO_FONT_SIZE", 46)
+
+        # ── Voice synthesis ──
+        voice_text = self._cfg("CTA_VOICE_TEXT", "")
+        voice_path = self._synthesize_voice(voice_text) if voice_text else None
+        voice_dur = self._get_voice_duration(voice_path) if voice_path else 0.0
+        # Duration = max(base, voice + 0.5s pad)
+        duration = max(base_duration, voice_dur + 0.5) if voice_dur > 0 else base_duration
 
         output_path = self.output_dir / "cta.mp4"
 
@@ -709,8 +755,11 @@ class TemplateGenerator:
                 clips.append(label_clip)
 
             composite = CompositeVideoClip(clips, size=self.VIDEO_SIZE)
+
+            # Write video-only (no audio yet)
+            temp_video = self.output_dir / "cta_video.mp4"
             composite.write_videofile(
-                str(output_path),
+                str(temp_video),
                 fps=self.VIDEO_FPS,
                 codec="libx264",
                 bitrate="2000k",
@@ -720,7 +769,15 @@ class TemplateGenerator:
                 ffmpeg_params=["-movflags", "+faststart"],
             )
             composite.close()
-            logger.info("CTA template generated → %s (%.1fs)", output_path, duration)
+
+            # Mux voice-over if available
+            if voice_path and voice_path.exists():
+                _mux_audio(temp_video, voice_path, output_path, duration)
+                temp_video.unlink(missing_ok=True)
+            else:
+                temp_video.rename(output_path)
+
+            logger.info("CTA template generated → %s (%.1fs, voice=%s)", output_path, duration, "yes" if voice_path else "no")
             return output_path
 
         except Exception:
@@ -728,12 +785,12 @@ class TemplateGenerator:
             return None
 
     def generate_outro(self) -> Optional[Path]:
-        """Generate outro template: final branding with channel name + CTA.
+        """Generate outro template: final branding with channel name + CTA + voice-over.
 
-        Duration: OUTRO_DURATION_SEC from config (default 5s for canal2/3, 6s for canal4).
+        Duration: max(OUTRO_DURATION_SEC from config, voice_duration + 0.5s).
+        Voice text from OUTRO_VOICE_TEXT.
         """
-        outro_total = self._cfg("OUTRO_DURATION_SEC", 6.0)
-        duration = outro_total
+        base_duration = self._cfg("OUTRO_DURATION_SEC", 6.0)
         display_name = self._cfg("CANAL_DISPLAY_NAME", self.slug)
         outro_tagline = self._cfg("CANAL_OUTRO_TAGLINE", "Suscríbete para más.")
         color_pal = self._cfg("COLOR_PALETTE", {"accent": (200, 160, 40), "text": (230, 230, 230)})
@@ -741,6 +798,13 @@ class TemplateGenerator:
         logo_size = self._cfg("LOGO_SIZE", 120)
         font_size = self._cfg("OUTRO_FONT_SIZE", 52)
         tagline_font_size = self._cfg("INTRO_SUBTITLE_FONT_SIZE", 28)
+
+        # ── Voice synthesis ──
+        voice_text = self._cfg("OUTRO_VOICE_TEXT", "")
+        voice_path = self._synthesize_voice(voice_text) if voice_text else None
+        voice_dur = self._get_voice_duration(voice_path) if voice_path else 0.0
+        # Duration = max(config base, voice + 0.5s pad)
+        duration = max(base_duration, voice_dur + 0.5) if voice_dur > 0 else base_duration
 
         output_path = self.output_dir / "outro.mp4"
 
@@ -810,8 +874,11 @@ class TemplateGenerator:
             clips.append(fade_overlay)
 
             composite = CompositeVideoClip(clips, size=self.VIDEO_SIZE)
+
+            # Write video-only (no audio yet)
+            temp_video = self.output_dir / "outro_video.mp4"
             composite.write_videofile(
-                str(output_path),
+                str(temp_video),
                 fps=self.VIDEO_FPS,
                 codec="libx264",
                 bitrate="2000k",
@@ -821,7 +888,15 @@ class TemplateGenerator:
                 ffmpeg_params=["-movflags", "+faststart"],
             )
             composite.close()
-            logger.info("Outro template generated → %s", output_path)
+
+            # Mux voice-over if available
+            if voice_path and voice_path.exists():
+                _mux_audio(temp_video, voice_path, output_path, duration)
+                temp_video.unlink(missing_ok=True)
+            else:
+                temp_video.rename(output_path)
+
+            logger.info("Outro template generated → %s (%.1fs, voice=%s)", output_path, duration, "yes" if voice_path else "no")
             return output_path
 
         except Exception:
@@ -835,6 +910,90 @@ class TemplateGenerator:
             "cta": self.generate_cta(),
             "outro": self.generate_outro(),
         }
+
+    # ── Voice / TTS helpers ─────────────────────────────────────
+
+    def _voice_config(self) -> dict:
+        """Extract voice (rate/pitch/voice-id) from channel config, matching orchestrator.py"""
+        cfg = self.config
+        if cfg is None:
+            return {"voice": "es-ES-AlvaroNeural", "rate": "+0%", "pitch": "+0Hz", "volume": "+0%"}
+        # Mirrors orchestrator.py line 102-112
+        tts_strategy = getattr(cfg, "TTS_STRATEGY", {}) if not isinstance(cfg, dict) else cfg.get("TTS_STRATEGY", {})
+        voice = tts_strategy.get("voice_primary",
+                                 getattr(cfg, "VOICE_ID", "es-ES-AlvaroNeural") if not isinstance(cfg, dict) else cfg.get("VOICE_ID", "es-ES-AlvaroNeural"))
+        rate = tts_strategy.get("rate_base",
+                                getattr(cfg, "VOICE_RATE", "+5%") if not isinstance(cfg, dict) else cfg.get("VOICE_RATE", "+5%"))
+        pitch = tts_strategy.get("pitch_base",
+                                 getattr(cfg, "VOICE_PITCH", "+0Hz") if not isinstance(cfg, dict) else cfg.get("VOICE_PITCH", "+0Hz"))
+        volume = getattr(cfg, "VOICE_VOLUME", "+0%") if not isinstance(cfg, dict) else cfg.get("VOICE_VOLUME", "+0%")
+        return {"voice": voice, "rate": rate, "pitch": pitch, "volume": volume}
+
+    def _synthesize_voice(self, text: str) -> Optional[Path]:
+        """Synthesize voice-over MP3 using edge-tts with the channel's narrator voice.
+
+        Caches results in output/voice_cache/<slug>_<sha256[0:12]>.mp3
+        Returns path to MP3 file, or None on failure.
+        """
+        text_key = text.strip()
+        if not text_key:
+            return None
+
+        # Cache path
+        txt_hash = hashlib.sha256(text_key.encode()).hexdigest()[:12]
+        cache_dir = Path("output/voice_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{self.slug}_{txt_hash}.mp3"
+
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            logger.debug("Voice cache hit: %s", cache_path)
+            return cache_path
+
+        voice_cfg = self._voice_config()
+        voice = voice_cfg["voice"]
+        rate = voice_cfg["rate"]
+        pitch = voice_cfg["pitch"]
+        volume = voice_cfg["volume"]
+
+        async def _run():
+            import edge_tts
+            communicate = edge_tts.Communicate(text_key, voice, rate=rate, pitch=pitch, volume=volume)
+            await communicate.save(str(cache_path))
+            return cache_path
+
+        try:
+            # Try asyncio.run (standard scripts / non-async context)
+            asyncio.run(_run())
+        except RuntimeError:
+            # Fallback: asyncio.run() fails when called from a running event loop (FastAPI).
+            # Run in a separate thread with its own fresh event loop.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _run())
+                future.result(timeout=30)
+        except Exception as exc:
+            logger.warning("Voice synthesis failed for '%s...': %s", text_key[:50], exc)
+            return None
+
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            logger.info("Voice synthesized: %s → %s (%.1f KB)",
+                         text_key[:50], cache_path, cache_path.stat().st_size / 1024)
+            return cache_path
+
+        return None
+
+    def _get_voice_duration(self, audio_path: Path) -> float:
+        """Get duration of audio file in seconds using ffprobe."""
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ], capture_output=True, text=True, timeout=10)
+            return float(result.stdout.strip())
+        except Exception:
+            return 0.0
 
     # ── Internal helpers ────────────────────────────────────────
 

@@ -646,6 +646,11 @@ CTA_TEXT = (
     "Si este contenido te ha hecho reflexionar,\n"
     "¡dale like, suscríbete y activa la campana!"
 )
+# ── Template voice-over texts (TTS with channel narrator voice) ──
+INTRO_VOICE_TEXT = "Bienvenidos a Sincronías, donde nada es casualidad."
+CTA_VOICE_TEXT = "Si sientes que esto no ha sido casualidad, suscríbete: la próxima señal podría cambiarlo todo."
+OUTRO_VOICE_TEXT = "Gracias por acompañarnos. Hasta la próxima sincronía."
+
 CANAL_INITIALS = "SX"             # Sincronías
 LOGO_SIZE = 140
 LOGO_PATH = ""

@@ -6,6 +6,8 @@ import random
 import logging
 import time
 import subprocess
+import asyncio
+import hashlib
 import threading
 from pathlib import Path
 from typing import Callable, Optional
@@ -491,14 +493,51 @@ class VideoEditor:
                                     cta_audio_path, exc, cta_dur)
                 cta_audio_clip = None
 
+        # ── Intro + Outro voice generation (TTS from config templates) ──
+        intro_voice_path: Optional[Path] = None
+        intro_voice_clip = None
+        intro_voice_dur: float = 0.0
+        intro_voice_text = self.canal.get("INTRO_VOICE_TEXT", "")
+        if intro_voice_text:
+            intro_voice_path = self._tts_template_voice(intro_voice_text)
+            if intro_voice_path:
+                intro_voice_dur = self._get_voice_duration(intro_voice_path)
+                try:
+                    intro_voice_clip = AudioFileClip(str(intro_voice_path))
+                except Exception as exc:
+                    self.logger.warning("Failed to load intro voice: %s", exc)
+
+        outro_voice_path: Optional[Path] = None
+        outro_voice_clip = None
+        outro_voice_dur: float = 0.0
+        outro_voice_text = self.canal.get("OUTRO_VOICE_TEXT", "")
+        if outro_voice_text:
+            outro_voice_path = self._tts_template_voice(outro_voice_text)
+            if outro_voice_path:
+                outro_voice_dur = self._get_voice_duration(outro_voice_path)
+                try:
+                    outro_voice_clip = AudioFileClip(str(outro_voice_path))
+                except Exception as exc:
+                    self.logger.warning("Failed to load outro voice: %s", exc)
+
+        self.logger.info("Template voices: intro=%s (%.1fs) outro=%s (%.1fs)",
+                         "yes" if intro_voice_clip else "no", intro_voice_dur,
+                         "yes" if outro_voice_clip else "no", outro_voice_dur)
+
         # ── CTA clip (between body and outro) ──────────────────
         self.logger.info("Step 4/6: Building CTA clip (%.1fs)…", cta_dur)
         cta_clip = self._build_cta(cta_dur, cta_audio_path)
 
         # ── Intro + Outro ──────────────────────────────────────
         self.logger.info("Step 5/6: Adding intro + outro…")
-        intro_dur = self.canal.get("INTRO_DURATION_SEC", self.INTRO_DURATION)
-        outro_dur = self.canal.get("OUTRO_DURATION_SEC", self.OUTRO_DURATION)
+        intro_dur = max(
+            self.canal.get("INTRO_DURATION_SEC", self.INTRO_DURATION),
+            intro_voice_dur + 0.5 if intro_voice_dur > 0 else 0,
+        )
+        outro_dur = max(
+            self.canal.get("OUTRO_DURATION_SEC", self.OUTRO_DURATION),
+            outro_voice_dur + 0.5 if outro_voice_dur > 0 else 0,
+        )
         intro = self._build_intro(intro_dur)
         outro = self._build_outro(outro_dur)
 
@@ -581,10 +620,20 @@ class VideoEditor:
 
         # ── Assemble final audio sequence ──────────────────────
         # v2 with transitions: body audio = narration segments + transition silences + optional music
-        # Sequence: intro_silence + BODY (narration + transitions) + CTA_audio + outro_silence
+        # Sequence: intro_voice + BODY (narration + transitions) + CTA_audio + outro_voice
+        # Each segment audio is padded to match its corresponding video segment duration.
         audio_parts: list[AudioClip] = []
-        # Intro silence (visual intro has no narration)
-        audio_parts.append(self._silent_audio(intro_dur))
+        # Intro voice padded to intro_dur
+        if intro_voice_clip is not None:
+            intro_pad = max(0.0, intro_dur - intro_voice_dur)
+            if intro_pad > 0.01:
+                audio_parts.append(concatenate_audioclips(
+                    [intro_voice_clip, self._silent_audio(intro_pad)]
+                ))
+            else:
+                audio_parts.append(intro_voice_clip)
+        else:
+            audio_parts.append(self._silent_audio(intro_dur))
 
         # ── Build body audio: narration segments with transition silences ──
         tts_audio = AudioFileClip(audio_path)
@@ -606,6 +655,17 @@ class VideoEditor:
                 if seg_dur > 0.01:
                     body_narr_parts.append(tts_audio.subclipped(pos, pos + seg_dur))
                     pos += seg_dur
+
+        # ── Append any remaining TTS audio not covered by block_ranges ──
+        leftover = tts_duration - pos
+        if leftover > 0.1:
+            self.logger.warning(
+                "TTS audio has %.1fs leftover not covered by block_ranges — appending to body narration",
+                leftover,
+            )
+            body_narr_parts.append(tts_audio.subclipped(pos, pos + leftover))
+            pos += leftover
+
         body_narration = concatenate_audioclips(body_narr_parts)
         body_dur = self._dur(body_narration)
 
@@ -620,6 +680,12 @@ class VideoEditor:
             )
             body_narration = concatenate_audioclips([body_narration, self._silent_audio(gap)])
             body_dur = self._dur(body_narration)
+        elif gap < -0.5:
+            self.logger.warning(
+                "Body narration (%.1fs) is LONGER than expected (%.1fs) by %.1fs. "
+                "Video body may be too short — last frames will freeze.",
+                body_dur, expected_body_dur, -gap,
+            )
 
         self.logger.info("Body audio: %.1fs (narration %.1fs + transitions %.1fs)",
                          body_dur, tts_duration, body_dur - tts_duration)
@@ -699,8 +765,17 @@ class VideoEditor:
             audio_parts.append(cta_audio_clip)
         else:
             audio_parts.append(self._silent_audio(cta_dur))
-        # Outro silence
-        audio_parts.append(self._silent_audio(outro_dur))
+        # Outro voice padded to outro_dur
+        if outro_voice_clip is not None:
+            outro_pad = max(0.0, outro_dur - outro_voice_dur)
+            if outro_pad > 0.01:
+                audio_parts.append(concatenate_audioclips(
+                    [outro_voice_clip, self._silent_audio(outro_pad)]
+                ))
+            else:
+                audio_parts.append(outro_voice_clip)
+        else:
+            audio_parts.append(self._silent_audio(outro_dur))
 
         final_audio = concatenate_audioclips(audio_parts)
 
@@ -756,46 +831,49 @@ class VideoEditor:
             if render_ok:
                 self.logger.info("✅ Video saved → %s (%.1f MB)",
                                  output_path, output_path.stat().st_size / 1024 / 1024)
-                # ── Audio post-process: attach clean narration+music via ffmpeg ──
+                # ── Audio post-process: use final_audio (full sequence with intro/body/CTA/outro) ──
                 _fix_path = output_path.with_suffix('.audio_fix.mp4')
-                intro_ms = int(intro_dur * 1000)
                 try:
                     import subprocess as _sp2
-                    if _music_temp_path and _music_temp_path.exists():
-                        # Mix narration (vol=1.0) + ambient music (vol=0.1)
-                        # EXACT match to original pre-segment code (no adelay — compensated by -shortest)
-                        _sp2.run([
-                            'ffmpeg', '-y', '-v', 'error',
-                            '-i', str(output_path),          # 0:v  — concat video
-                            '-i', audio_path,                 # 1:a  — clean narration
-                            '-i', str(_music_temp_path),      # 2:a  — ambient music
-                            '-filter_complex',
-                            '[1:a]volume=1.0[narr];[2:a]volume=0.1[music];[narr][music]amix=inputs=2:duration=first[aout]',
-                            '-c:v', 'copy', '-map', '0:v:0', '-map', '[aout]',
-                            '-shortest', '-movflags', '+faststart',
-                            str(_fix_path),
-                        ], check=True, timeout=180)
-                    else:
-                        # Narration only with adelay to sync with intro silence
-                        # EXACT match to original pre-segment code
-                        _sp2.run([
-                            'ffmpeg', '-y', '-v', 'error',
-                            '-i', str(output_path),
-                            '-i', audio_path,
-                            '-filter_complex',
-                            f'[1:a]adelay={intro_ms}:all=1[dnarr]',
-                            '-c:v', 'copy', '-map', '0:v:0', '-map', '[dnarr]',
-                            '-movflags', '+faststart',
-                            str(_fix_path),
-                        ], check=True, timeout=120)
+
+                    # Write final_audio to a temp AAC file for ffmpeg mux
+                    _final_audio_temp = output_path.with_suffix('.final_audio.aac')
+                    final_audio.write_audiofile(
+                        str(_final_audio_temp),
+                        codec='aac',
+                        bitrate='192k',
+                        fps=44100,
+                        logger=None,
+                    )
+
+                    # Mux concat video + final_audio
+                    _sp2.run([
+                        'ffmpeg', '-y', '-v', 'error',
+                        '-i', str(output_path),           # 0:v — concat video
+                        '-i', str(_final_audio_temp),      # 1:a — full audio sequence
+                        '-c:v', 'copy',
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-map', '0:v:0', '-map', '1:a:0',
+                        '-movflags', '+faststart',
+                        str(_fix_path),
+                    ], check=True, timeout=180)
+
+                    # Cleanup temp audio
+                    try:
+                        _final_audio_temp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
                     # Replace original with fixed version
                     output_path.unlink()
                     _fix_path.rename(output_path)
-                    self.logger.info("🔊 Audio post-processed: clean narration+mux from ffmpeg")
+                    self.logger.info("🔊 Audio post-processed: full sequence (intro+body+CTA+outro)")
                 except Exception as _audio_fix_e:
                     self.logger.warning("Audio post-process failed (%s) — keeping original", _audio_fix_e)
                     if _fix_path.exists():
                         _fix_path.unlink(missing_ok=True)
+                    if '_final_audio_temp' in dir() and _final_audio_temp.exists():
+                        _final_audio_temp.unlink(missing_ok=True)
             else:
                 self.logger.error("❌ Video file missing or empty: %s", output_path)
                 raise RuntimeError(f"Video rendering failed: no output file at {output_path}")
@@ -944,6 +1022,12 @@ class VideoEditor:
                 "asset_idx": i,
             })
             cumulative += dur
+
+        # Safety: extend last range to cover full audio in proportional fallback
+        if ranges and total_audio > 0:
+            ranges[-1]["end"] = max(ranges[-1]["end"], total_audio)
+            ranges[-1]["duration"] = ranges[-1]["end"] - ranges[-1]["start"]
+
         return self._enforce_scene_durations(ranges)
 
     # ── Scene duration enforcement ──────────────────────────────
@@ -1794,6 +1878,73 @@ class VideoEditor:
         else:
             frame_fn = lambda t: np.zeros((2,))
             return AudioClip(make_frame=frame_fn, duration=duration, fps=self.fps)
+
+    def _tts_template_voice(self, text: str) -> Optional[Path]:
+        """Synthesize a voice-over MP3 for a fixed template phrase using edge-tts.
+
+        Uses the channel's narrator voice (same voice/rate/pitch as TTSEngine).
+        Caches result in output/voice_cache/<slug>_<sha256[:12]>.mp3.
+        """
+        text_key = text.strip()
+        if not text_key:
+            return None
+
+        txt_hash = hashlib.sha256(text_key.encode()).hexdigest()[:12]
+        cache_dir = Path("output/voice_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        slug = self.canal.get("CHANNEL_SLUG", "unknown")
+        cache_path = cache_dir / f"{slug}_{txt_hash}.mp3"
+
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return cache_path
+
+        # Mirror the voice config extraction from orchestrator.py
+        tts_strategy = self.canal.get("TTS_STRATEGY", {})
+        voice = tts_strategy.get("voice_primary",
+                 self.canal.get("VOICE_ID", "es-ES-AlvaroNeural"))
+        rate = tts_strategy.get("rate_base",
+               self.canal.get("VOICE_RATE", "+5%"))
+        pitch = tts_strategy.get("pitch_base",
+                self.canal.get("VOICE_PITCH", "+0Hz"))
+        volume = self.canal.get("VOICE_VOLUME", "+0%")
+
+        async def _run():
+            import edge_tts
+            communicate = edge_tts.Communicate(text_key, voice, rate=rate, pitch=pitch, volume=volume)
+            await communicate.save(str(cache_path))
+            return cache_path
+
+        try:
+            asyncio.run(_run())
+        except RuntimeError:
+            # Fallback: run in a separate thread when called from an existing event loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _run())
+                future.result(timeout=30)
+        except Exception as exc:
+            self.logger.warning("Template voice synthesis failed for '%s...': %s",
+                                text_key[:50], exc)
+            return None
+
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            self.logger.info("Template voice generated: %s", cache_path)
+            return cache_path
+
+        return None
+
+    def _get_voice_duration(self, audio_path: Path) -> float:
+        """Get duration of an audio file in seconds using ffprobe."""
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ], capture_output=True, text=True, timeout=10)
+            return float(result.stdout.strip())
+        except Exception:
+            return 0.0
 
     # ── Subtitles ───────────────────────────────────────────────
 
