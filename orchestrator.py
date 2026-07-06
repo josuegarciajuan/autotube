@@ -1,15 +1,16 @@
 """Pipeline orchestrator for Autotube.
 
-Coordinates the full content pipeline end-to-end:
-scrape → script generation → TTS → images → video editing → upload.
-
-Supports both single-run and scheduled (APScheduler) operation.
+Coordinates the entire video generation pipeline:
+content scraping → script generation → TTS → media fetch → video assembly,
+thumbnail generation, metadata creation and YouTube upload.
 """
 
+import json
 import logging
-import time
+import random
 import sys
-from datetime import datetime, timedelta, timezone
+import time
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -98,19 +99,8 @@ class PipelineOrchestrator:
     @property
     def tts(self):
         if self._tts is None:
-            from pipeline.tts_engine import TTSEngine
-            tts_strategy = getattr(self.config, "TTS_STRATEGY", {})
-            voice_config = {
-                "voice": tts_strategy.get("voice_primary",
-                          getattr(self.config, "VOICE_ID", "es-ES-AlvaroNeural")),
-                "rate": tts_strategy.get("rate_base",
-                        getattr(self.config, "VOICE_RATE", "+5%")),
-                "pitch": tts_strategy.get("pitch_base",
-                         getattr(self.config, "VOICE_PITCH", "+0Hz")),
-                "volume": getattr(self.config, "VOICE_VOLUME", "+0%"),
-                "tts_strategy": tts_strategy,
-            }
-            self._tts = TTSEngine(voice_config)
+            from config.voice_resolver import build_tts_engine
+            self._tts = build_tts_engine(self.config)
         return self._tts
 
     @property
@@ -251,11 +241,13 @@ class PipelineOrchestrator:
                                  duration_ms=duration_ms)
         return result
 
-    def phase_tts(self, script: dict) -> Optional[dict]:
-        """Generate TTS audio for a script using segmented synthesis.
+    def phase_tts(self, script: dict, job_id: int = None) -> Optional[dict]:
+        """Generate TTS audio for a script using the channel's configured engine.
 
-        Each narrative block gets its own voice settings (rate/pitch)
+        Each narrative block gets its own voice settings (rate/pitch/block_speed)
         based on block type (hook, desarrollo, climax, reflexion, cierre).
+
+        Emits heartbeats during synthesis to prevent orphan detection timeout.
         """
         start = time.time()
         self._emit_progress(30, "tts", "Generando narracion con IA (TTS)...")
@@ -280,7 +272,37 @@ class PipelineOrchestrator:
 
                 # v2: segmented synthesis with per-block voice
                 logger.info("[%s] Using segmented TTS with %d blocks", self.canal, len(bloques))
+
+                # ── Heartbeat emitter (prevents orphan timeout during long synthesis) ──
+                _hb_stop = threading.Event()
+                _hb_thread = None
+                if job_id is not None:
+                    def _hb_loop_tts():
+                        while not _hb_stop.is_set():
+                            try:
+                                self.db.update_heartbeat(job_id)
+                            except Exception:
+                                pass
+                            _hb_stop.wait(30)
+                    _hb_thread = threading.Thread(target=_hb_loop_tts, daemon=True, name=f"tts-heartbeat-{job_id}")
+                    _hb_thread.start()
+                    logger.info("[%s] TTS heartbeat emitter started for job #%d (every 30s)", self.canal, job_id)
+
                 audio_path, timestamps = self.tts.generate_segmented(bloques)
+
+                # Stop heartbeat
+                if _hb_stop is not None:
+                    _hb_stop.set()
+                if _hb_thread is not None and _hb_thread.is_alive():
+                    _hb_thread.join(timeout=2)
+
+                # ── Release Kokoro pipeline memory after TTS ──
+                if hasattr(self.tts, 'unload'):
+                    try:
+                        self.tts.unload()
+                        logger.info("[%s] Kokoro pipeline unloaded after TTS", self.canal)
+                    except Exception as _ue:
+                        logger.debug("[%s] Kokoro unload: %s", self.canal, _ue)
             else:
                 # Legacy fallback: single-segment synthesis from guion text
                 logger.info("[%s] No bloques found — using legacy single-segment TTS", self.canal)
@@ -906,8 +928,11 @@ class PipelineOrchestrator:
 
     # ── Full pipeline ──────────────────────────────────────────
 
-    def run_full_pipeline(self, skip_upload: bool = False) -> bool:
-        """Execute the complete pipeline for one video. Returns True on success."""
+    def run_full_pipeline(self, skip_upload: bool = False, job_id: int = None) -> bool:
+        """Execute the complete pipeline for one video. Returns True on success.
+        
+        job_id: Optional generation_jobs.id for heartbeat emission during long phases.
+        """
         logger.info(f"{'='*60}")
         logger.info(f"[{self.canal}] STARTING FULL PIPELINE")
         logger.info(f"{'='*60}")
@@ -941,7 +966,7 @@ class PipelineOrchestrator:
 
         # Phase 2: TTS
         logger.info(f"[{self.canal}] Phase 2/6: Generating TTS audio...")
-        audio_data = self.phase_tts(script)
+        audio_data = self.phase_tts(script, job_id=job_id)
         if not audio_data:
             logger.error(f"[{self.canal}] PIPELINE ABORTED: TTS failed")
             return False
@@ -959,7 +984,7 @@ class PipelineOrchestrator:
 
         # Phase 4: Video assembly
         logger.info(f"[{self.canal}] Phase 4/6: Assembling video...")
-        video_data = self.phase_video(script, audio_data, media_assets)
+        video_data = self.phase_video(script, audio_data, media_assets, job_id=job_id)
         if not video_data:
             logger.error(f"[{self.canal}] PIPELINE ABORTED: Video assembly failed")
             return False

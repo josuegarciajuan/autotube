@@ -911,33 +911,49 @@ class TemplateGenerator:
             "outro": self.generate_outro(),
         }
 
-    # ── Voice / TTS helpers ─────────────────────────────────────
-
-    def _voice_config(self) -> dict:
-        """Extract voice (rate/pitch/voice-id) from channel config, matching orchestrator.py"""
-        cfg = self.config
-        if cfg is None:
-            return {"voice": "es-ES-AlvaroNeural", "rate": "+0%", "pitch": "+0Hz", "volume": "+0%"}
-        # Mirrors orchestrator.py line 102-112
-        tts_strategy = getattr(cfg, "TTS_STRATEGY", {}) if not isinstance(cfg, dict) else cfg.get("TTS_STRATEGY", {})
-        voice = tts_strategy.get("voice_primary",
-                                 getattr(cfg, "VOICE_ID", "es-ES-AlvaroNeural") if not isinstance(cfg, dict) else cfg.get("VOICE_ID", "es-ES-AlvaroNeural"))
-        rate = tts_strategy.get("rate_base",
-                                getattr(cfg, "VOICE_RATE", "+5%") if not isinstance(cfg, dict) else cfg.get("VOICE_RATE", "+5%"))
-        pitch = tts_strategy.get("pitch_base",
-                                 getattr(cfg, "VOICE_PITCH", "+0Hz") if not isinstance(cfg, dict) else cfg.get("VOICE_PITCH", "+0Hz"))
-        volume = getattr(cfg, "VOICE_VOLUME", "+0%") if not isinstance(cfg, dict) else cfg.get("VOICE_VOLUME", "+0%")
-        return {"voice": voice, "rate": rate, "pitch": pitch, "volume": volume}
+    # ── Voice / TTS helpers (delegates to voice_resolver) ─────
 
     def _synthesize_voice(self, text: str) -> Optional[Path]:
-        """Synthesize voice-over MP3 using edge-tts with the channel's narrator voice.
+        """Synthesize voice-over MP3 using the channel's configured TTS engine (edge or Kokoro).
 
-        Caches results in output/voice_cache/<slug>_<sha256[0:12]>.mp3
+        Caches results in output/voice_cache/{slug}_{engine}_{voice}_{hash}.mp3
         Returns path to MP3 file, or None on failure.
         """
         text_key = text.strip()
         if not text_key:
             return None
+
+        from config.voice_resolver import resolve_channel_voice, build_tts_engine
+
+        resolved = resolve_channel_voice(self.config)
+        engine_type = resolved["engine"]
+        voice_id = resolved["voice"]
+
+        # Cache path includes engine + voice to avoid collisions
+        txt_hash = hashlib.sha256(text_key.encode()).hexdigest()[:12]
+        cache_dir = Path("output/voice_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{self.slug}_{engine_type}_{voice_id}_{txt_hash}.mp3"
+
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            logger.debug("Voice cache hit: %s", cache_path)
+            return cache_path
+
+        try:
+            engine = build_tts_engine(self.config)
+            audio_path, _ = engine.generate(text_key)
+            # Move generated audio to cache
+            if audio_path and Path(audio_path).exists():
+                import shutil
+                shutil.move(str(audio_path), str(cache_path))
+                logger.info("Voice synthesized: %s → %s (%.1f KB, engine=%s, voice=%s)",
+                             text_key[:50], cache_path, cache_path.stat().st_size / 1024,
+                             engine_type, voice_id)
+                return cache_path
+        except Exception as exc:
+            logger.warning("Voice synthesis failed for '%s...': %s", text_key[:50], exc)
+
+        return None
 
         # Cache path
         txt_hash = hashlib.sha256(text_key.encode()).hexdigest()[:12]

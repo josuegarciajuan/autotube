@@ -16,6 +16,7 @@ import os
 import re
 import tempfile
 import time
+import concurrent.futures
 from pathlib import Path
 from typing import Optional
 
@@ -316,6 +317,20 @@ class KokoroTTSEngine:
         all_timestamps: list[dict] = []
         cumulative_offset_ms: float = 0.0
 
+        # ── Inner: run a single block in thread for timeout safety ──
+        def _run_block(clean_text, voice, speed):
+            """Run Kokoro synthesis for a single block."""
+            audio_chunks = []
+            for _gs, _ps, arr in self.pipeline(clean_text, voice=voice, speed=speed):
+                audio_chunks.append(arr if isinstance(arr, np.ndarray) else arr.numpy())
+            return audio_chunks
+
+        # ── Per-block timeout from env ────────────────────────
+        _BLOCK_TIMEOUT = int(os.environ.get("KOKORO_BLOCK_TIMEOUT", "600"))
+
+        # Pre-load pipeline (triggers lazy init on current thread)
+        _ = self.pipeline
+
         for i, bloque in enumerate(bloques):
             tipo = bloque.get("tipo", "desarrollo")
             texto = bloque.get("texto", "")
@@ -333,13 +348,15 @@ class KokoroTTSEngine:
                 i + 1, len(bloques), tipo, speed, len(clean)
             )
 
-            # Generate audio for this block
+            # Generate audio for this block (with timeout in separate thread)
             t0 = time.time()
             try:
-                generator = self.pipeline(clean, voice=self.kokoro_voice, speed=speed)
-                audio_chunks = []
-                for _gs, _ps, arr in generator:
-                    audio_chunks.append(arr if isinstance(arr, np.ndarray) else arr.numpy())
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
+                    _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
+                    audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                logger.error("Kokoro block %d timed out after %ds — skipping", i, _BLOCK_TIMEOUT)
+                continue
             except Exception as exc:
                 logger.error("Kokoro block %d failed: %s — skipping", i, exc)
                 continue

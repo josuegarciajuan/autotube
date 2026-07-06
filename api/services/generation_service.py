@@ -205,10 +205,11 @@ _PIPELINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 # Phase timeouts in seconds (generous ceilings with cooperative cancellation)
+_TTS_PHASE_TIMEOUT = int(os.environ.get("TTS_PHASE_TIMEOUT_SEC", "21600"))  # 6h default
 PHASE_TIMEOUTS = {
     "scrape":   None,   # no global limit — each scraper has its own 8s timeout
     "script":   3600,   # 60 min (sequential block generation with stop_event)
-    "tts":      7200,   # 2h (Kokoro on CPU for 12-min video)
+    "tts":      _TTS_PHASE_TIMEOUT,   # configurable, default 6h (Kokoro CPU)
     "media":    900,    # 15 min (multi-provider + Pollo AI)
     "video":    None,   # infinite (no ceiling for MoviePy rendering)
     "metadata": 300,    # 5 min (LLM)
@@ -809,8 +810,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                        video_id=video_id,
                                        detail="Procesando texto a voz (puede tardar varios minutos)")
             
-            ok, audio_data = await _run_in_executor(orch.phase_tts, script,
-                                                      timeout=PHASE_TIMEOUTS["tts"], phase="tts")
+            ok, audio_data = await _run_in_executor(orch.phase_tts, script, job_id,
+                                                       timeout=PHASE_TIMEOUTS["tts"], phase="tts")
             if not ok:
                 await _broadcast_progress(job_id, 30, "tts", f"Error TTS: {audio_data}",
                                            "failed", video_id)

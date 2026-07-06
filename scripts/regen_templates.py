@@ -16,17 +16,16 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s [template-regen] %
 logger = logging.getLogger("template-regen")
 
 CHANNELS = {
-    "canal2": {"slug": "canal2", "config_module": "config.canal2_config"},
-    "canal3": {"slug": "canal3", "config_module": "config.canal3_config"},
-    "canal4": {"slug": "canal4", "config_module": "config.canal4_config"},
+    "canal2": "canal2",
+    "canal3": "canal3",
+    "canal4": "canal4",
 }
 
 
-def regen_channel(slug: str, config_module: str) -> dict:
-    """Regenerate templates for a single channel. Returns dict of results."""
-    import importlib
-    mod = importlib.import_module(config_module)
-    config = mod  # Module itself acts as config object
+def regen_channel(slug: str) -> dict:
+    """Regenerate templates for a single channel using config bridge (honours panel voice)."""
+    from config.config_bridge import get_channel_config
+    config = get_channel_config(slug)
 
     from pipeline.template_generator import TemplateGenerator
     gen = TemplateGenerator(slug, channel_config=config)
@@ -41,22 +40,21 @@ def main():
     args = parser.parse_args()
 
     channels_to_run = (
-        {k: v for k, v in CHANNELS.items() if k == args.channel}
-        if args.channel
-        else CHANNELS
+        [args.channel] if args.channel
+        else list(CHANNELS)
     )
 
-    if not channels_to_run:
+    if args.channel and args.channel not in CHANNELS:
         logger.error("Unknown channel: %s. Available: %s", args.channel, list(CHANNELS))
         sys.exit(1)
 
     success = 0
     fail = 0
 
-    for slug, info in channels_to_run.items():
+    for slug in channels_to_run:
         logger.info("━━━ Regenerating templates for %s ━━━", slug)
         try:
-            results = regen_channel(info["slug"], info["config_module"])
+            results = regen_channel(slug)
             for seg_type, path in results.items():
                 if path and Path(path).exists():
                     size_kb = Path(path).stat().st_size / 1024

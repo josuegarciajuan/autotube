@@ -1880,56 +1880,42 @@ class VideoEditor:
             return AudioClip(make_frame=frame_fn, duration=duration, fps=self.fps)
 
     def _tts_template_voice(self, text: str) -> Optional[Path]:
-        """Synthesize a voice-over MP3 for a fixed template phrase using edge-tts.
+        """Synthesize a voice-over MP3 for a fixed template phrase.
 
-        Uses the channel's narrator voice (same voice/rate/pitch as TTSEngine).
-        Caches result in output/voice_cache/<slug>_<sha256[:12]>.mp3.
+        Uses the channel's configured TTS engine (edge-tts or Kokoro) via voice_resolver.
+        Caches result in output/voice_cache/{slug}_{engine}_{voice}_{hash}.mp3.
         """
         text_key = text.strip()
         if not text_key:
             return None
 
+        from config.voice_resolver import resolve_channel_voice, build_tts_engine
+
+        resolved = resolve_channel_voice(self.canal)
+        engine_type = resolved["engine"]
+        voice_id = resolved["voice"]
+
         txt_hash = hashlib.sha256(text_key.encode()).hexdigest()[:12]
         cache_dir = Path("output/voice_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
-        slug = self.canal.get("CHANNEL_SLUG", "unknown")
-        cache_path = cache_dir / f"{slug}_{txt_hash}.mp3"
+        slug = self.canal.get("CHANNEL_SLUG", self.canal.get("slug", "unknown"))
+        cache_path = cache_dir / f"{slug}_{engine_type}_{voice_id}_{txt_hash}.mp3"
 
         if cache_path.exists() and cache_path.stat().st_size > 0:
-            return cache_path
-
-        # Mirror the voice config extraction from orchestrator.py
-        tts_strategy = self.canal.get("TTS_STRATEGY", {})
-        voice = tts_strategy.get("voice_primary",
-                 self.canal.get("VOICE_ID", "es-ES-AlvaroNeural"))
-        rate = tts_strategy.get("rate_base",
-               self.canal.get("VOICE_RATE", "+5%"))
-        pitch = tts_strategy.get("pitch_base",
-                self.canal.get("VOICE_PITCH", "+0Hz"))
-        volume = self.canal.get("VOICE_VOLUME", "+0%")
-
-        async def _run():
-            import edge_tts
-            communicate = edge_tts.Communicate(text_key, voice, rate=rate, pitch=pitch, volume=volume)
-            await communicate.save(str(cache_path))
             return cache_path
 
         try:
-            asyncio.run(_run())
-        except RuntimeError:
-            # Fallback: run in a separate thread when called from an existing event loop
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, _run())
-                future.result(timeout=30)
+            engine = build_tts_engine(self.canal)
+            audio_path, _ = engine.generate(text_key)
+            if audio_path and Path(audio_path).exists():
+                import shutil
+                shutil.move(str(audio_path), str(cache_path))
+                self.logger.info("Template voice generated: %s (engine=%s, voice=%s)",
+                                 cache_path, engine_type, voice_id)
+                return cache_path
         except Exception as exc:
             self.logger.warning("Template voice synthesis failed for '%s...': %s",
                                 text_key[:50], exc)
-            return None
-
-        if cache_path.exists() and cache_path.stat().st_size > 0:
-            self.logger.info("Template voice generated: %s", cache_path)
-            return cache_path
 
         return None
 

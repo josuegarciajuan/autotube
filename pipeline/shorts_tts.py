@@ -289,11 +289,41 @@ def synthesize_shorts_blocks(
     output_srt_path   = Path(output_srt_path)
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Read voice from channel TTS config (same as long-form videos)
+    # ── Dispatch: Kokoro vs edge-tts based on channel config ──
+    from config.voice_resolver import resolve_channel_voice, build_tts_engine
+    resolved = resolve_channel_voice(ch_config)
+
+    if resolved["engine"] == "kokoro":
+        # Use Kokoro segmented synthesis (same API as body narration)
+        from pipeline.kokoro_tts import KokoroTTSEngine
+        engine = build_tts_engine(ch_config)
+        logger.info("🎙️ Kokoro Short TTS: %d blocks, voice=%s", len(bloques), resolved["voice"])
+        audio_path_str, all_timestamps = engine.generate_segmented(bloques, output_path=str(output_audio_path))
+        import shutil
+        shutil.move(audio_path_str, str(output_audio_path))
+        srt_content = _timestamps_to_srt(all_timestamps)
+        output_srt_path.write_text(srt_content, encoding="utf-8")
+        # Get duration from audio file
+        dur = len(AudioSegment.from_mp3(str(output_audio_path))) / 1000.0
+        total_words = len(all_timestamps)
+        if dur > max_duration_sec:
+            raise RuntimeError(
+                f"Short audio too long: {dur:.1f}s exceeds maximum {max_duration_sec}s."
+            )
+        logger.info("✅ Kokoro Short TTS done: %d words, %.1fs, %d blocks", total_words, dur, len(bloques))
+        return {
+            "audio_path": str(output_audio_path),
+            "srt_path": str(output_srt_path),
+            "duration_sec": dur,
+            "timestamps": all_timestamps,
+            "word_count": total_words,
+        }
+
+    # ── Edge-tts path (existing) ──────────────────────────────
+
+    # Use resolved voice (honours panel selection)
     if voice is None:
-        tts_strategy = getattr(ch_config, "TTS_STRATEGY", None) or {}
-        voice = tts_strategy.get("voice_primary",
-                getattr(ch_config, "VOICE_ID", "es-ES-AlvaroNeural"))
+        voice = resolved["voice"]
 
     # Filter out empty blocks
     valid = [b for b in bloques if b.get("texto", "").strip()]

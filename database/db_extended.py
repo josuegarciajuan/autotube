@@ -835,11 +835,14 @@ class ExtendedDatabase(Database):
     
     # ── Orphan Detection ─────────────────────────────────────
     
-    # Heartbeat-based orphan detection: a video-phase job is declared dead
+    # Heartbeat-based orphan detection: a non-video-phase job is declared dead
     # only if its last heartbeat was >N min ago (configurable via env).
-    # This prevents false positives during slow composited renders.
+    # Default 45 min — generous for Kokoro TTS on CPU.
     HEARTBEAT_ORPHAN_TIMEOUT_MINUTES = int(
         __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "15")
+    )
+    NONVIDEO_HEARTBEAT_ORPHAN_MIN = int(
+        __import__("os").getenv("NONVIDEO_HEARTBEAT_ORPHAN_MIN", "45")
     )
     
     # Legacy fallback: jobs without heartbeat support use started_at-based timeout
@@ -916,18 +919,18 @@ class ExtendedDatabase(Database):
                  WHERE j.status = 'running'
                    AND j.finished_at IS NULL
                    AND j.started_at IS NOT NULL
-                   AND j.phase != 'video'
-                   AND (
-                       -- Heartbeat mode: last heartbeat > 30 min ago → truly dead
-                       (j.last_heartbeat_at IS NOT NULL
-                        AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > 30)
-                       OR
-                       -- Legacy fallback: no heartbeat ever + started >480 min (8h) ago
-                       -- 480 min is generous enough for a long upload after a long render
-                       (j.last_heartbeat_at IS NULL
-                        AND (julianday('now') - julianday(j.started_at)) * 1440 > 480)
-                   )
-            """, ()).fetchall()
+                    AND j.phase != 'video'
+                    AND (
+                        -- Heartbeat mode: last heartbeat > N min ago → truly dead
+                        (j.last_heartbeat_at IS NOT NULL
+                         AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
+                        OR
+                        -- Legacy fallback: no heartbeat ever + started >480 min (8h) ago
+                        -- 480 min is generous enough for a long upload after a long render
+                        (j.last_heartbeat_at IS NULL
+                         AND (julianday('now') - julianday(j.started_at)) * 1440 > 480)
+                    )
+            """, (self.NONVIDEO_HEARTBEAT_ORPHAN_MIN,)).fetchall()
             
             # Combine video-phase and non-video orphans for processing
             all_orphan_jobs = list(orphan_video_jobs) + list(orphan_jobs)
