@@ -1,5 +1,6 @@
 """Video management router."""
 import json
+import logging
 import asyncio
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from api.deps import get_db
@@ -8,8 +9,9 @@ from api.schemas.models import (
     VideoGenerateRequest, VideoUpdate, VideoResponse,
     ScriptGenerateRequest, ScriptResponse, ContentResponse,
 )
-from api.services.generation_service import start_generation_job
+from api.services.generation_service import start_generation_job, _run_reassembly_job
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -21,6 +23,12 @@ def list_videos(channel_id: int = None, status: str = None, limit: int = 50, off
         for k in ("created_at", "uploaded_at"):
             if v.get(k):
                 v[k] = str(v[k])
+        # Deserialize timing_data from JSON string
+        if v.get("timing_data") and isinstance(v["timing_data"], str):
+            try:
+                v["timing_data"] = json.loads(v["timing_data"])
+            except (json.JSONDecodeError, TypeError):
+                v["timing_data"] = None
     return videos
 
 
@@ -33,6 +41,12 @@ def get_video(video_id: int):
     for k in ("created_at", "uploaded_at"):
         if v.get(k):
             v[k] = str(v[k])
+    # Deserialize timing_data from JSON string
+    if v.get("timing_data") and isinstance(v["timing_data"], str):
+        try:
+            v["timing_data"] = json.loads(v["timing_data"])
+        except (json.JSONDecodeError, TypeError):
+            v["timing_data"] = None
     # Get scenes
     v["scenes"] = db.get_scenes(video_id)
     for s in v["scenes"]:
@@ -65,8 +79,17 @@ def delete_video(video_id: int):
 
 @router.post("/generate")
 def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks):
-    """Start video generation (async background job)."""
+    """Start video generation (async background job).
+    
+    Rejected with 409 if another generation is already running.
+    """
     db = get_db()
+    
+    # Guard: only one generation at a time
+    active = db.get_active_job()
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
+    
     ch = db.get_channel(data.channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
@@ -90,15 +113,128 @@ def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks
         video_id=video_id,
         action=data.action,
         content_id=data.content_id,
+        test_mode=data.test_mode,
     )
     
     return {"job_id": job_id, "video_id": video_id, "message": "Generation started"}
+
+
+@router.post("/{video_id}/resume")
+def resume_video(video_id: int, background_tasks: BackgroundTasks):
+    """Resume video generation from the last completed phase.
+    
+    Loads checkpoint data from the DB and skips already-completed
+    phases. Useful when a generation job fails late in the pipeline
+    (e.g. video assembly) — no need to regenerate TTS or media.
+    
+    Rejected with 409 if another generation is already running.
+    """
+    db = get_db()
+    
+    # Guard: only one generation at a time
+    active = db.get_active_job()
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
+    
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    
+    channel_id = v.get("channel_id")
+    if not channel_id:
+        raise HTTPException(400, "Video has no channel_id")
+    
+    # Check if there's checkpoint data to resume from
+    checkpoint_raw = v.get("checkpoint_data", "{}")
+    try:
+        checkpoint = json.loads(checkpoint_raw) if isinstance(checkpoint_raw, str) else (checkpoint_raw or {})
+    except (json.JSONDecodeError, TypeError):
+        checkpoint = {}
+    
+    if not checkpoint:
+        raise HTTPException(400, "No checkpoint data — start a fresh generation instead")
+    
+    last_phase = v.get("progress_phase", "")
+    logger.info(f"Resuming video {video_id} from phase '{last_phase}' (checkpoint keys: {list(checkpoint.keys())})")
+    
+    # Reset status to generating
+    db.update_video(video_id, status="generating")
+    
+    job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+    
+    background_tasks.add_task(
+        start_generation_job,
+        job_id=job_id,
+        channel_id=channel_id,
+        video_id=video_id,
+        action="generate_and_upload",
+        resume=True,  # ← triggers checkpoint reload
+    )
+    
+    return {
+        "job_id": job_id,
+        "video_id": video_id,
+        "message": f"Resuming from phase '{last_phase}'",
+        "last_phase": last_phase,
+    }
+
+
+@router.post("/{video_id}/reassemble")
+def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
+    """Re-assemble a video from existing checkpoint data.
+
+    Skips scrape/script/tts/media — goes straight to ``VideoEditor.build_video()``
+    using the saved checkpoint. Useful when the original render crashed.
+    """
+    db = get_db()
+    
+    # Guard: only one generation at a time
+    active = db.get_active_job()
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
+    
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if v.get("status") not in ("error", "ready", "assembled", "reassembling"):
+        raise HTTPException(400, "Video must be in error/ready/assembled state")
+    
+    # Check we have checkpoint data
+    import json
+    cp = v.get("checkpoint_data", "{}")
+    try:
+        checkpoint = json.loads(cp) if isinstance(cp, str) else (cp or {})
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "Invalid checkpoint data")
+    
+    if not checkpoint.get("tts") or not checkpoint.get("media"):
+        raise HTTPException(400, "Checkpoint missing tts/media data — cannot reassemble")
+    
+    job_id = db.create_job(v["channel_id"] or 1, "reassemble", video_id)
+    
+    background_tasks.add_task(
+        _run_reassembly_job,
+        job_id=job_id,
+        video_id=video_id,
+    )
+    
+    return {
+        "job_id": job_id,
+        "video_id": video_id,
+        "message": "Reassembly started",
+    }
 
 
 @router.post("/{video_id}/upload")
 def upload_video(video_id: int, background_tasks: BackgroundTasks):
     """Upload (or re-upload) a video to YouTube."""
     db = get_db()
+    
+    # Guard: only one generation at a time
+    active = db.get_active_job()
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
+    
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
@@ -144,7 +280,7 @@ def generate_script(data: ScriptGenerateRequest, background_tasks: BackgroundTas
         raise HTTPException(404, "Channel not found")
     
     from pipeline.script_generator import ScriptGenerator
-    from config import canal1_config as cfg
+    from config import canal2_config as cfg
     
     # Use existing script generator
     content = db.get_script(data.content_id)  # reuse get_script to fetch content
@@ -235,7 +371,7 @@ def get_video_stats(data: dict):
     token_slug = None
     for token_file in sorted(TOKENS_DIR.glob("*.pickle")):
         slug = token_file.stem
-        if slug in ("canal1_state", "canal2_state"):
+        if slug in ("canal2_state",):
             continue
         token_slug = slug
         break
@@ -248,9 +384,11 @@ def get_video_stats(data: dict):
                 result[vid] = fetcher.get_video_stats(vid)
             return result
     
-    # Fallback: mock
+    # Fallback: mock (mark as synthetic so frontend can distinguish)
     for vid in video_ids:
-        result[vid] = _mock_youtube_stats(vid)
+        stats = _mock_youtube_stats(vid)
+        stats["is_mock"] = True
+        result[vid] = stats
     return result
 
 

@@ -1,6 +1,7 @@
 """Channel management router."""
 import json
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from api.deps import get_db
 from api.schemas.models import ChannelCreate, ChannelUpdate, ChannelResponse, ChannelConfigUpdate
 
@@ -39,6 +40,22 @@ def create_channel(data: ChannelCreate):
         ch["created_at"] = str(ch.get("created_at", ""))
         ch["updated_at"] = str(ch.get("updated_at", ""))
     return ch
+
+
+@router.get("/stats-summary")
+def get_all_channels_stats_summary():
+    """Devuelve el último snapshot de estadísticas de todos los canales desde la BD.
+    
+    Rápido, no requiere autenticación YouTube (usa los snapshots guardados cada 6h).
+    Incluye: total_views, subscribers, video_count, estimated_minutes_watched.
+    """
+    db = get_db()
+    stats = db.get_all_channels_latest_stats()
+    # Convert estimated_minutes_watched to hours for easy display
+    for s in stats:
+        emw = s.get("estimated_minutes_watched") or 0
+        s["estimated_hours_watched"] = round(emw / 60.0, 1) if emw else 0
+    return {"ok": True, "channels": stats}
 
 
 @router.get("/{channel_id}")
@@ -224,6 +241,11 @@ def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, of
         for k in ("created_at", "uploaded_at"):
             if v.get(k):
                 v[k] = str(v[k])
+        if v.get("timing_data") and isinstance(v["timing_data"], str):
+            try:
+                v["timing_data"] = json.loads(v["timing_data"])
+            except (json.JSONDecodeError, TypeError):
+                v["timing_data"] = None
     return videos
 
 
@@ -252,7 +274,7 @@ def list_channel_content(channel_id: int, limit: int = 50, unused_only: bool = T
 def sync_channel_config(channel_id: int):
     """Sync config_json from the Python config module to the DB.
 
-    Reads ``config/canal1_config.py`` (or equivalent) and writes its
+    Reads ``config/canal2_config.py`` (or equivalent) and writes its
     serialisable attributes into ``channels.config_json``.  The config
     bridge cache is invalidated so the next pipeline run picks up the
     latest values.
@@ -315,7 +337,10 @@ def get_manual_setup(channel_id: int):
 
 @router.get("/{channel_id}/youtube-stats")
 def get_channel_youtube_stats(channel_id: int):
-    """Obtiene estadísticas en tiempo real del canal desde YouTube."""
+    """Obtiene estadísticas en tiempo real del canal desde YouTube.
+
+    Incluye subscribers, total views, video count y estimated minutes watched.
+    """
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
@@ -328,4 +353,92 @@ def get_channel_youtube_stats(channel_id: int):
         return {"error": "No autenticado", "stats": {}}
 
     stats = fetcher.get_channel_stats()
+    # Also fetch channel analytics (watch time)
+    analytics = fetcher.get_channel_analytics()
+    if analytics:
+        stats.update(analytics)
+    # Convert minutes to hours for convenience
+    emw = stats.get("estimatedMinutesWatched")
+    if emw is not None and emw not in (0, "0"):
+        stats["estimatedHoursWatched"] = round(float(emw) / 60.0, 1)
+    else:
+        stats["estimatedHoursWatched"] = 0
+
     return {"ok": True, "stats": stats}
+
+
+@router.get("/{channel_id}/shorts-stats")
+def get_channel_shorts_stats(channel_id: int):
+    """Estadísticas agregadas de Shorts del canal (conteos + métricas YouTube)."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    stats = db.get_channel_shorts_stats(channel_id)
+    return {"ok": True, "shorts_stats": stats}
+
+
+@router.get("/{channel_id}/videos-aggregate-stats")
+def get_channel_videos_aggregate_stats(channel_id: int):
+    """Vistas/likes/comentarios agregados de vídeos largos del canal (desde BD)."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    stats = db.get_channel_videos_aggregate(channel_id)
+    return {"ok": True, "videos_stats": stats}
+
+
+# ── Channel Templates ──────────────────────────────────────────
+
+@router.post("/{channel_id}/templates/{segment_type}/generate")
+async def generate_template(channel_id: int, segment_type: str):
+    """Regenerate a template segment (intro/cta/outro) for a channel."""
+    if segment_type not in ("intro", "cta", "outro"):
+        raise HTTPException(status_code=400, detail="segment_type must be intro, cta, or outro")
+
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    from config.config_bridge import get_channel_config
+    from pipeline.template_generator import TemplateGenerator
+
+    config = get_channel_config(ch["slug"])
+    gen = TemplateGenerator(ch["slug"], config)
+
+    try:
+        if segment_type == "intro":
+            video_path = await run_in_threadpool(gen.generate_intro)
+        elif segment_type == "cta":
+            video_path = await run_in_threadpool(gen.generate_cta)
+        else:
+            video_path = await run_in_threadpool(gen.generate_outro)
+
+        if video_path:
+            db.upsert_channel_template(
+                channel_id, segment_type,
+                video_path=str(video_path),
+                config_json=json.dumps({"generated_by": "template_generator"})
+            )
+            return {"status": "ok", "segment_type": segment_type, "path": str(video_path)}
+        else:
+            raise HTTPException(status_code=500, detail="Template generation failed")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{channel_id}/templates")
+async def get_templates(channel_id: int):
+    """Get all templates status for a channel."""
+    db = get_db()
+    templates = db.get_channel_templates(channel_id)
+    # Ensure all 3 types are represented (with None for missing)
+    result = {"intro": None, "cta": None, "outro": None}
+    for t in templates:
+        result[t["segment_type"]] = {
+            "video_path": t["video_path"],
+            "generated_at": str(t["generated_at"]) if t.get("generated_at") else None,
+        }
+    return result

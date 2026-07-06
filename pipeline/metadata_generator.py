@@ -240,7 +240,7 @@ INSTRUCCIONES:
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=120.0, max_retries=2)
         
         try:
             response = client.chat.completions.create(

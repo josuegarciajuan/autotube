@@ -19,7 +19,9 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
     """Initialize the database with schema if not exists."""
     if db_path is None:
         db_path = str(DATABASE_PATH)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -39,15 +41,17 @@ class Database:
             init_db(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")  # Better concurrent read/write
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s wait on lock
         return conn
 
     # ── raw_content ────────────────────────────────────────────
 
     def insert_raw_content(self, source, url, title, text,
-                           subreddit=None, score=0, canal="canal1"):
+                           subreddit=None, score=0, canal="canal2"):
         """Insert scraped content. Returns row id. Skips duplicates by URL."""
         with self._connect() as conn:
             try:
@@ -62,13 +66,32 @@ class Database:
             except sqlite3.IntegrityError:
                 return None
 
-    def get_unused_content(self, canal="canal1", limit=10):
-        """Fetch unused scraped content, oldest first."""
+    def get_unused_content(self, canal="canal2", limit=10, strategy: str = "best_first"):
+        """Fetch unused scraped content.
+
+        Args:
+            canal: Channel slug.
+            limit: Max items to return.
+            strategy: Content ordering strategy:
+                - "best_first": Longest text + highest score first (default).
+                - "newest_first": Most recently scraped first.
+                - "oldest_first": Oldest first (legacy).
+                - "highest_score": Highest Reddit score first.
+        """
+        if strategy == "newest_first":
+            order_clause = "ORDER BY scraped_at DESC"
+        elif strategy == "oldest_first":
+            order_clause = "ORDER BY scraped_at ASC"
+        elif strategy == "highest_score":
+            order_clause = "ORDER BY score DESC, LENGTH(text) DESC"
+        else:  # best_first (default)
+            order_clause = "ORDER BY LENGTH(text) DESC, score DESC"
+
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT * FROM raw_content
-                   WHERE canal = ? AND used = 0
-                   ORDER BY scraped_at ASC LIMIT ?""",
+                f"""SELECT * FROM raw_content
+                    WHERE canal = ? AND used = 0
+                    {order_clause} LIMIT ?""",
                 (canal, limit),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -82,7 +105,7 @@ class Database:
             )
             conn.commit()
 
-    def get_unused_count(self, canal="canal1"):
+    def get_unused_count(self, canal="canal2"):
         """Return count of unused content items."""
         with self._connect() as conn:
             row = conn.execute(
@@ -118,7 +141,7 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
-    def get_unused_scripts(self, canal="canal1", limit=5):
+    def get_unused_scripts(self, canal="canal2", limit=5):
         """Fetch unused scripts sorted by creation time."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -152,7 +175,8 @@ class Database:
     def insert_video(self, script_id, canal, video_path, thumbnail_path=None,
                      audio_path=None, titulo_final=None, duracion_seg=None,
                      privacy_status="unlisted", channel_id=None,
-                     description=None, tags_json=None, title_options=None):
+                     description=None, tags_json=None, title_options=None,
+                     timing_data=None):
         """Insert a video record. Returns row id.
         
         Args:
@@ -180,6 +204,9 @@ class Database:
             if title_options is not None:
                 columns.append("title_options")
                 values.append(title_options)
+            if timing_data is not None:
+                columns.append("timing_data")
+                values.append(timing_data)
             
             placeholders = ", ".join(["?"] * len(values))
             cols_str = ", ".join(columns)
@@ -202,7 +229,7 @@ class Database:
             )
             conn.commit()
 
-    def get_unuploaded_videos(self, canal="canal1", limit=5):
+    def get_unuploaded_videos(self, canal="canal2", limit=5):
         """Fetch videos not yet uploaded to YouTube."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -213,7 +240,7 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_videos_today(self, canal="canal1"):
+    def get_videos_today(self, canal="canal2"):
         """Count videos uploaded today for a channel."""
         with self._connect() as conn:
             row = conn.execute(

@@ -36,6 +36,8 @@ SCOPES = [
 ]
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2  # seconds
+POST_UPLOAD_VERIFY_RETRIES = 3
+POST_UPLOAD_VERIFY_DELAY = 5  # seconds — YouTube processing may take a few secs
 
 
 class YouTubeUploader:
@@ -201,6 +203,7 @@ class YouTubeUploader:
         """Generate OAuth authorization URL (for web-based auth flow).
         
         Returns the URL the user must open, or None on failure.
+        Saves PKCE code_verifier to state file so complete_auth_with_code() can resume.
         """
         client_secret = self._client_secret_path
         if not client_secret.exists():
@@ -216,6 +219,16 @@ class YouTubeUploader:
             prompt="consent",
             include_granted_scopes="true",
         )
+
+        # Save PKCE state so complete_auth_with_code() can use the same code_verifier
+        import json as _json
+        state_path = TOKENS_DIR / f"{self.account_name}_state.json"
+        state_path.write_text(_json.dumps({
+            "client_secret_path": str(client_secret),
+            "scopes": SCOPES,
+            "code_verifier": getattr(flow, 'code_verifier', None),
+        }))
+
         return auth_url
 
     def complete_auth_with_code(self, code: str) -> bool:
@@ -231,13 +244,32 @@ class YouTubeUploader:
             logger.error("Google client secret not found")
             return False
 
+        # Restore PKCE code_verifier saved by get_auth_url()
+        import json as _json
+        state_path = TOKENS_DIR / f"{self.account_name}_state.json"
+        code_verifier = None
+        if state_path.exists():
+            try:
+                state_data = _json.loads(state_path.read_text())
+                code_verifier = state_data.get("code_verifier")
+            except Exception as exc:
+                logger.warning("Could not read state file: %s", exc)
+
         try:
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(client_secret), SCOPES
             )
+            flow.redirect_uri = "http://localhost"
+            if code_verifier:
+                flow.code_verifier = code_verifier
             flow.fetch_token(code=code)
             self._credentials = flow.credentials
             self._save_credentials()
+
+            # Clean up state file on success
+            if state_path.exists():
+                state_path.unlink()
+
             self._service = None
             logger.info("Web-based OAuth completed for %s", self.account_name)
             return True
@@ -300,6 +332,7 @@ class YouTubeUploader:
         category_id: str = "22",
         privacy: str = "unlisted",
         language: str = "es",
+        heartbeat_callback=None,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -307,6 +340,8 @@ class YouTubeUploader:
         - Sets snippet (title, desc, tags, category, language) + status (privacy)
         - Sets custom thumbnail via thumbnails().set()
         - Quota: 1600 upload + 50 thumbnail = 1650 units
+        - heartbeat_callback: optional callable invoked between upload chunks
+          to signal the orphan detector that the upload is still alive.
 
         Returns {video_id: str, url: str, warnings: list}
         """
@@ -359,11 +394,17 @@ class YouTubeUploader:
         )
 
         logger.info("Uploading: %s (privacy=%s)", title, privacy)
-        response = self._resumable_upload(request)
+        response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback)
+
+        # ── Validate YouTube response ─────────────────────────
+        self._validate_upload_response(response)
 
         video_id: str = response["id"]
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
         logger.info("Upload complete: %s", youtube_url)
+
+        # ── Post-upload verification: confirm video exists on YouTube ──
+        self._verify_upload_exists(service, video_id)
 
         # ── Build warnings for non-uploadable fields ─────────
         warnings = []
@@ -435,11 +476,157 @@ class YouTubeUploader:
             ).execute()
             logger.info("Thumbnail set for video %s", video_id)
         except HttpError as exc:
-            logger.error("Failed to set thumbnail: %s", exc)
+            logger.warning(
+                "Thumbnail upload skipped — account may need phone verification "
+                "at youtube.com/verify. Error: %s", exc
+            )
+
+    # ── Upload validation ───────────────────────────────────────
+
+    @staticmethod
+    def _validate_upload_response(response: dict) -> None:
+        """Validate the YouTube API upload response before declaring success.
+        
+        Checks:
+        - uploadStatus is 'uploaded' or 'processed'
+        - No rejectionReason present
+        - Video ID exists and is valid
+        
+        Raises RuntimeError with a clear message if validation fails.
+        """
+        status = response.get("status", {})
+        upload_status = status.get("uploadStatus", "")
+        rejection_reason = status.get("rejectionReason", "")
+        failure_reason = status.get("failureReason", "")
+        video_id = response.get("id", "")
+        
+        if not video_id:
+            raise RuntimeError("YouTube no devolvió un video ID. La subida falló silenciosamente.")
+        
+        if failure_reason:
+            raise RuntimeError(
+                f"YouTube rechazó el vídeo durante el procesamiento: {failure_reason}. "
+                f"Motivo: {failure_reason}"
+            )
+        
+        if rejection_reason:
+            raise RuntimeError(
+                f"YouTube rechazó el vídeo: {rejection_reason}. "
+                f"Revisa los lineamientos de contenido en youtube.com."
+            )
+        
+        if upload_status not in ("uploaded", "processed"):
+            raise RuntimeError(
+                f"Estado de subida inesperado: '{upload_status}'. "
+                f"El vídeo puede no estar disponible. Revisa YouTube Studio."
+            )
+    
+    def _verify_upload_exists(self, service: Any, video_id: str) -> None:
+        """Post-upload verification: confirm the video actually exists on YouTube.
+        
+        Retries up to POST_UPLOAD_VERIFY_RETRIES with delay because
+        YouTube may take a few seconds to process the video.
+        
+        Detects:
+        - 'Deleted video' (YouTube removed it silently)
+        - Video not found (API returns empty)
+        - Upload still processing (retries)
+        
+        Raises RuntimeError on permanent failures.
+        """
+        for attempt in range(1, POST_UPLOAD_VERIFY_RETRIES + 1):
+            try:
+                resp = service.videos().list(
+                    part="status,snippet", id=video_id
+                ).execute()
+                items = resp.get("items", [])
+                
+                if not items:
+                    if attempt < POST_UPLOAD_VERIFY_RETRIES:
+                        logger.info(
+                            "Post-upload verification attempt %d/%d: video not yet available, retrying...",
+                            attempt, POST_UPLOAD_VERIFY_RETRIES,
+                        )
+                        time.sleep(POST_UPLOAD_VERIFY_DELAY)
+                        continue
+                    raise RuntimeError(
+                        f"Fallo en verificación post-subida: el vídeo {video_id} no aparece en YouTube. "
+                        f"Posiblemente fue eliminado por los sistemas automatizados de YouTube."
+                    )
+                
+                item = items[0]
+                snippet = item.get("snippet", {})
+                status = item.get("status", {})
+                
+                title = snippet.get("title", "")
+                upload_status = status.get("uploadStatus", "")
+                rejection = status.get("rejectionReason", "")
+                
+                # Detect silently deleted videos
+                if title == "Deleted video" or (not title and not snippet.get("description")):
+                    raise RuntimeError(
+                        f"Vídeo subido pero ELIMINADO por YouTube: {video_id}. "
+                        f"YouTube lo marcó como 'Deleted video'. "
+                        f"Posibles causas: contenido generado por IA detectado, "
+                        f"política de contenido, o cuenta nueva con restricciones. "
+                        f"Revisa YouTube Studio para más detalles."
+                    )
+                
+                if rejection:
+                    raise RuntimeError(
+                        f"Vídeo rechazado por YouTube: {rejection}. "
+                        f"Revisa los lineamientos de contenido."
+                    )
+                
+                if upload_status == "processed":
+                    logger.info(
+                        "Post-upload verification OK: video %s (status=%s, title=%s)",
+                        video_id, upload_status, title[:60],
+                    )
+                    return
+                
+                if upload_status == "uploaded":
+                    logger.info(
+                        "Post-upload verification: video %s accepted, still processing.",
+                        video_id,
+                    )
+                    return
+                
+                if attempt < POST_UPLOAD_VERIFY_RETRIES:
+                    logger.info(
+                        "Post-upload verification attempt %d/%d: status=%s, retrying...",
+                        attempt, POST_UPLOAD_VERIFY_RETRIES, upload_status,
+                    )
+                    time.sleep(POST_UPLOAD_VERIFY_DELAY)
+                    continue
+                
+                logger.warning(
+                    "Post-upload verification: video %s has unexpected status '%s'. "
+                    "Proceeding but manual verification recommended.",
+                    video_id, upload_status,
+                )
+                return
+                
+            except HttpError as exc:
+                if attempt < POST_UPLOAD_VERIFY_RETRIES:
+                    logger.info(
+                        "Post-upload verification attempt %d/%d: HTTP %s, retrying...",
+                        attempt, POST_UPLOAD_VERIFY_RETRIES, exc.resp.status,
+                    )
+                    time.sleep(POST_UPLOAD_VERIFY_DELAY)
+                    continue
+                raise RuntimeError(
+                    f"Fallo en verificación post-subida: error HTTP {exc.resp.status}: {exc}"
+                ) from exc
+        
+        raise RuntimeError(
+            f"No se pudo verificar el vídeo {video_id} tras {POST_UPLOAD_VERIFY_RETRIES} intentos. "
+            f"Revisa YouTube Studio manualmente."
+        )
 
     # ── Helpers ─────────────────────────────────────────────────
 
-    def _resumable_upload(self, request: Any) -> dict:
+    def _resumable_upload(self, request: Any, heartbeat_callback=None) -> dict:
         response = None
         error_count = 0
         consecutive_errors = 0
@@ -453,10 +640,42 @@ class YouTubeUploader:
                 if response is not None:
                     return response
                 consecutive_errors = 0  # reset on successful chunk
+                # ── Heartbeat: signal orphan detector that upload is alive ──
+                if heartbeat_callback:
+                    try:
+                        heartbeat_callback()
+                    except Exception:
+                        pass
             except HttpError as exc:
                 consecutive_errors += 1
                 if exc.resp.status in (403, 401):
-                    logger.error("Auth/permission error: %s", exc)
+                    # Distinguish between auth issues and YouTube-specific errors
+                    error_content = b""
+                    try:
+                        error_content = exc.content if hasattr(exc, 'content') else b""
+                    except Exception:
+                        pass
+                    error_reason = ""
+                    try:
+                        import json as _json
+                        error_data = _json.loads(error_content) if error_content else {}
+                        error_reason = error_data.get("error", {}).get("errors", [{}])[0].get("reason", "")
+                    except Exception:
+                        pass
+                    if error_reason == "uploadLimitExceeded":
+                        raise RuntimeError(
+                            "YouTube rechazó el vídeo: la cuenta NO está verificada y el vídeo supera 15 minutos. "
+                            "Verifica la cuenta en youtube.com/verify."
+                        ) from exc
+                    if error_reason == "youtubeSignupRequired":
+                        raise RuntimeError(
+                            "La cuenta de YouTube requiere registro adicional (youtube.com/create_channel)."
+                        ) from exc
+                    if error_reason == "quotaExceeded":
+                        raise RuntimeError(
+                            "Cuota diaria de YouTube API agotada (10,000 unidades). Reintentar mañana."
+                        ) from exc
+                    logger.error("Auth/permission error (%s): %s", error_reason or "unknown", exc)
                     raise
                 if exc.resp.status in (500, 502, 503, 504):
                     if consecutive_errors >= MAX_RETRIES:
@@ -470,6 +689,30 @@ class YouTubeUploader:
                     )
                     time.sleep(delay)
                     continue
+                if exc.resp.status == 400:
+                    # Parse YouTube-specific error reason for bad requests
+                    error_content = b""
+                    try:
+                        error_content = exc.content if hasattr(exc, 'content') else b""
+                    except Exception:
+                        pass
+                    error_reason = ""
+                    try:
+                        import json as _json
+                        error_data = _json.loads(error_content) if error_content else {}
+                        error_reason = error_data.get("error", {}).get("errors", [{}])[0].get("reason", "")
+                    except Exception:
+                        pass
+                    if error_reason == "uploadLimitExceeded":
+                        raise RuntimeError(
+                            "YouTube rechazó el vídeo: supera el límite de duración permitido. "
+                            "Verifica la cuenta en youtube.com/verify para subir vídeos de más de 15 min."
+                        ) from exc
+                    if error_reason == "invalidTitle":
+                        raise RuntimeError(
+                            f"Título inválido: {exc}"
+                        ) from exc
+                    raise RuntimeError(f"YouTube rechazó la subida (400 {error_reason}): {exc}") from exc
                 raise
             except (OSError, ConnectionError) as exc:
                 consecutive_errors += 1
@@ -486,27 +729,12 @@ class YouTubeUploader:
 
         raise RuntimeError("Upload loop exited unexpectedly")
 
-    @staticmethod
-    def _format_description(titulo: str, descripcion: str = "") -> str:
+    def _format_description(self, titulo: str, descripcion: str = "") -> str:
         """Format description using channel's DESCRIPTION_TEMPLATE.
         
         Falls back to a simple template if config isn't loaded.
         """
-        # Try channel-specific template via the instance config
-        import inspect
-        frame = inspect.currentframe()
-        # Walk up to find the instance (caller's self)
-        instance = None
-        try:
-            caller_frame = frame.f_back if frame else None
-            if caller_frame:
-                instance = caller_frame.f_locals.get("self")
-        finally:
-            del frame
-
-        template = None
-        if instance and hasattr(instance, "_get_config_attr"):
-            template = instance._get_config_attr("DESCRIPTION_TEMPLATE")
+        template = self._get_config_attr("DESCRIPTION_TEMPLATE")
 
         if template:
             return template.format(titulo=titulo, descripcion=descripcion)

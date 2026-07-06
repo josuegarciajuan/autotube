@@ -70,11 +70,14 @@ class YouTubeStatsFetcher:
     def get_video_stats(self, yt_video_id: str) -> dict:
         """Get basic stats for a single video.
 
-        Returns {viewCount, likeCount, commentCount}
+        Returns {viewCount, likeCount, commentCount, ...}
+        Adds is_mock=True when stats are synthetic (not from YouTube API).
         """
         if not self._service:
             if not self.authenticate():
-                return self._mock_stats(yt_video_id)
+                result = self._mock_stats(yt_video_id)
+                result["is_mock"] = True
+                return result
 
         try:
             resp = (
@@ -84,7 +87,9 @@ class YouTubeStatsFetcher:
             )
             items = resp.get("items", [])
             if not items:
-                return self._mock_stats(yt_video_id)
+                result = self._mock_stats(yt_video_id)
+                result["is_mock"] = True
+                return result
 
             item = items[0]
             stats = item.get("statistics", {})
@@ -93,10 +98,13 @@ class YouTubeStatsFetcher:
                 "likeCount": stats.get("likeCount", "0"),
                 "commentCount": stats.get("commentCount", "0"),
                 "title": item.get("snippet", {}).get("title", ""),
+                "is_mock": False,
             }
         except HttpError as exc:
             logger.warning("Stats fetch failed for %s: %s", yt_video_id, exc)
-            return self._mock_stats(yt_video_id)
+            result = self._mock_stats(yt_video_id)
+            result["is_mock"] = True
+            return result
 
     def get_video_analytics(self, yt_video_id: str, days: int = 30) -> dict:
         """Get advanced analytics via YouTube Analytics API.
@@ -164,6 +172,42 @@ class YouTubeStatsFetcher:
             logger.error("Channel stats fetch failed: %s", exc)
             return {}
 
+    def get_channel_analytics(self, days: int = 30) -> dict:
+        """Get channel-level analytics via YouTube Analytics API.
+
+        Returns {estimatedMinutesWatched} for the channel (lifetime or
+        within the supplied window depending on the Analytics API).
+
+        Falls back to an empty dict if the Analytics API is unavailable.
+        """
+        if not self._analytics_service:
+            return {}
+
+        try:
+            resp = (
+                self._analytics_service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=f"{days}dAgo",
+                    endDate="today",
+                    metrics="estimatedMinutesWatched",
+                )
+                .execute()
+            )
+            rows = resp.get("rows", [])
+            if rows and rows[0]:
+                return {
+                    "estimatedMinutesWatched": str(rows[0][0]),
+                }
+        except HttpError as exc:
+            logger.warning(
+                "Channel analytics fetch failed for %s: %s", self.slug, exc
+            )
+        except Exception as exc:
+            logger.debug("Analytics API unavailable for channel %s: %s", self.slug, exc)
+
+        return {}
+
     # ── Batch collection ───────────────────────────────────────
 
     def collect_and_store(self, db) -> dict:
@@ -184,6 +228,10 @@ class YouTubeStatsFetcher:
         if channel:
             channel_stats = self.get_channel_stats()
             if channel_stats:
+                # Merge channel analytics (watch time) into stats dict
+                analytics = self.get_channel_analytics()
+                if analytics:
+                    channel_stats.update(analytics)
                 db.insert_channel_stats(channel["id"], channel_stats)
                 result["channel_updated"] = True
                 result["channel_stats"] = channel_stats
@@ -196,15 +244,39 @@ class YouTubeStatsFetcher:
                 continue
             try:
                 stats = self.get_video_stats(yt_id)
+                # Skip mock/synthetic stats — only store real YouTube API data
+                if stats.get("is_mock"):
+                    logger.debug("Skipping mock stats for video %s (%s)", v.get("id"), yt_id)
+                    continue
                 if "error" not in stats:
                     db.insert_video_stats(v["id"], yt_id, stats)
                     result["videos_updated"] += 1
             except Exception as exc:
                 logger.error("Failed to store stats for video %s: %s", v.get("id"), exc)
 
+        # Shorts stats
+        result["shorts_updated"] = 0
+        if channel:
+            shorts = db.get_shorts(channel_id=channel["id"], status="published")
+            for s in shorts:
+                yt_id = s.get("youtube_id")
+                if not yt_id:
+                    continue
+                try:
+                    stats = self.get_video_stats(yt_id)
+                    if stats.get("is_mock"):
+                        logger.debug("Skipping mock stats for short %s (%s)", s.get("id"), yt_id)
+                        continue
+                    if "error" not in stats:
+                        db.insert_short_stats(s["id"], yt_id, stats)
+                        result["shorts_updated"] += 1
+                except Exception as exc:
+                    logger.error("Failed to store stats for short %s: %s", s.get("id"), exc)
+
         logger.info(
-            "Stats collection: %s videos, channel=%s",
+            "Stats collection: %s videos, %s shorts, channel=%s",
             result["videos_updated"],
+            result["shorts_updated"],
             result["channel_updated"],
         )
         return result

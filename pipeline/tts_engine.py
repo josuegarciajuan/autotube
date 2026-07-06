@@ -9,6 +9,7 @@ v2: Segmented synthesis — each narrative block gets its own voice
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -28,6 +29,33 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2.0
+
+# ── Async timeout helper ──────────────────────────────────────
+_TTS_TIMEOUT_EXECUTOR = None  # lazy-init thread pool for TTS timeout
+
+
+def _run_async_with_timeout(coro, timeout: float = 120.0):
+    """Run an async coroutine with a timeout using a thread pool.
+    
+    Prevents the pipeline from hanging indefinitely if edge-tts
+    becomes unresponsive.
+    """
+    global _TTS_TIMEOUT_EXECUTOR
+    if _TTS_TIMEOUT_EXECUTOR is None:
+        _TTS_TIMEOUT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="tts-timeout"
+        )
+
+    def _runner():
+        return asyncio.run(coro)
+
+    future = _TTS_TIMEOUT_EXECUTOR.submit(_runner)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise TimeoutError(f"TTS operation timed out after {timeout}s")
+
 TICK_TO_MS = 10000  # 100-nanosecond ticks to milliseconds
 
 
@@ -181,10 +209,11 @@ class TTSEngine:
         os.makedirs(os.path.dirname(base_path) or ".", exist_ok=True)
 
         last_error = None
+        tts_timeout = int(os.environ.get("TTS_BLOCK_TIMEOUT", "120"))
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                audio_data, timestamps = asyncio.run(
-                    self._stream_sync(text)
+                audio_data, timestamps = _run_async_with_timeout(
+                    self._stream_sync(text), timeout=tts_timeout
                 )
                 if not audio_data:
                     raise edge_tts.exceptions.NoAudioReceived(
@@ -230,6 +259,7 @@ class TTSEngine:
         self,
         bloques: list[dict],
         output_path: Optional[str] = None,
+        progress_cb: Optional[callable] = None,
     ) -> tuple[str, list[dict]]:
         """Generate TTS audio segment-by-segment with per-block voice settings.
 
@@ -270,6 +300,9 @@ class TTSEngine:
         all_timestamps: list[dict] = []
         cumulative_offset_ms: float = 0.0
 
+        # Default TTS timeout per block (seconds)
+        tts_timeout = int(os.environ.get("TTS_BLOCK_TIMEOUT", "120"))
+
         for i, bloque in enumerate(bloques):
             tipo = bloque.get("tipo", "desarrollo")
             texto = bloque.get("texto", "")
@@ -286,17 +319,35 @@ class TTSEngine:
             if not clean_text:
                 continue
 
-            # Synthesize
+            # Synthesize with timeout to prevent indefinite hangs
             try:
-                audio_data, word_ts = asyncio.run(
-                    self._stream_sync(clean_text, rate=rate, pitch=pitch)
+                audio_data, word_ts = _run_async_with_timeout(
+                    self._stream_sync(clean_text, rate=rate, pitch=pitch),
+                    timeout=tts_timeout,
                 )
+            except TimeoutError:
+                logger.error("Block %d TTS timed out after %ds — retrying with defaults", i, tts_timeout)
+                try:
+                    audio_data, word_ts = _run_async_with_timeout(
+                        self._stream_sync(clean_text),
+                        timeout=tts_timeout,
+                    )
+                except TimeoutError:
+                    logger.error("Block %d retry also timed out — skipping", i)
+                    continue
+                except Exception as exc2:
+                    logger.error("Block %d retry also failed: %s — skipping", i, exc2)
+                    continue
             except Exception as exc:
                 logger.error("Block %d synthesis failed: %s — retrying with defaults", i, exc)
                 try:
-                    audio_data, word_ts = asyncio.run(
-                        self._stream_sync(clean_text)
+                    audio_data, word_ts = _run_async_with_timeout(
+                        self._stream_sync(clean_text),
+                        timeout=tts_timeout,
                     )
+                except TimeoutError:
+                    logger.error("Block %d retry timed out — skipping", i)
+                    continue
                 except Exception as exc2:
                     logger.error("Block %d retry also failed: %s — skipping", i, exc2)
                     continue
@@ -321,25 +372,33 @@ class TTSEngine:
             if word_ts:
                 cumulative_offset_ms = word_ts[-1]["end_ms"]
 
+            # Progress callback (if provided)
+            if progress_cb:
+                try:
+                    progress_cb(i + 1, len(bloques))
+                except Exception:
+                    pass  # never let progress crash the synthesis
+
         if not temp_files:
             raise RuntimeError("No blocks produced audio — cannot create narration")
 
         # ── Concatenate all temp MP3s with pydub ────────────
-        logger.info("Concatenating %d audio segments…", len(temp_files))
-        combined = AudioSegment.empty()
-        for tmp_path in temp_files:
-            seg = AudioSegment.from_mp3(tmp_path)
-            combined += seg
+        try:
+            logger.info("Concatenating %d audio segments…", len(temp_files))
+            combined = AudioSegment.empty()
+            for tmp_path in temp_files:
+                seg = AudioSegment.from_mp3(tmp_path)
+                combined += seg
 
-        combined.export(audio_path, format="mp3", bitrate="192k")
-        logger.info("Exported combined audio: %s (%.1fs)", audio_path, len(combined) / 1000.0)
-
-        # Clean up temp files
-        for tmp_path in temp_files:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            combined.export(audio_path, format="mp3", bitrate="192k")
+            logger.info("Exported combined audio: %s (%.1fs)", audio_path, len(combined) / 1000.0)
+        finally:
+            # Always clean up temp files, even if concatenation/export fails
+            for tmp_path in temp_files:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         # ── Save timestamps and SRT ─────────────────────────
         with open(json_path, "w", encoding="utf-8") as f:

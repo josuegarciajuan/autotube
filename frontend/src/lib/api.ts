@@ -28,12 +28,23 @@ export const api = {
   getChannelContent: (id: number, unusedOnly = true) => request<any[]>(`/channels/${id}/content?unused_only=${unusedOnly}`),
   getManualSetup: (id: number) => request<any>(`/channels/${id}/manual-setup`),
   getChannelYoutubeStats: (id: number) => request<any>(`/channels/${id}/youtube-stats`),
+  getChannelShortsStats: (id: number) => request<any>(`/channels/${id}/shorts-stats`),
+  getChannelVideosAggregate: (id: number) => request<any>(`/channels/${id}/videos-aggregate-stats`),
   generateChannelProfile: (id: number) => request<any>(`/channels/${id}/generate-profile`, { method: 'POST' }),
+  
+  // Templates
+  generateTemplate: (channelId: number, segmentType: string) =>
+    request<any>(`/channels/${channelId}/templates/${segmentType}/generate`, { method: 'POST' }),
+  getTemplates: (channelId: number) =>
+    request<any>(`/channels/${channelId}/templates`),
   
   // Auth
   startAuth: (channelId: number) => request<any>(`/channels/${channelId}/auth-start`, { method: 'POST' }),
   submitAuthCode: (channelId: number, code: string) => request<any>(`/channels/${channelId}/auth-code`, { method: 'POST', body: JSON.stringify({ code }) }),
   getAuthStatus: (channelId: number) => request<any>(`/channels/${channelId}/auth-status`),
+
+  // Voices
+  getVoices: () => request<any>('/voices'),
 
   // Videos
   getVideos: (channelId?: number, status?: string, limit = 50) => {
@@ -46,7 +57,7 @@ export const api = {
   getVideo: (id: number) => request<any>(`/videos/${id}`),
   updateVideo: (id: number, data: any) => request<any>(`/videos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteVideo: (id: number) => request<any>(`/videos/${id}`, { method: 'DELETE' }),
-  generateVideo: (data: { channel_id: number; action: string; content_id?: number }) =>
+  generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean }) =>
     request<any>('/videos/generate', { method: 'POST', body: JSON.stringify(data) }),
   uploadVideo: (id: number) => request<any>(`/videos/${id}/upload`, { method: 'POST' }),
   regenerateThumbnail: (id: number) => request<any>(`/videos/${id}/regenerate-thumbnail`, { method: 'POST' }),
@@ -71,7 +82,7 @@ export const api = {
   deleteContent: (id: number) => request<any>(`/content/${id}`, { method: 'DELETE' }),
   scheduleContent: (id: number, scheduledAt: string) => 
     request<any>(`/content/${id}/schedule`, { method: 'POST', body: JSON.stringify({ scheduled_at: scheduledAt }) }),
-  getScripts: (canal = 'canal1') => request<any[]>(`/content/scripts/list?canal=${canal}`),
+  getScripts: (canal = 'canal2') => request<any[]>(`/content/scripts/list?canal=${canal}`),
 
   // Jobs
   getJobs: (status?: string, channelId?: number, limit?: number) => {
@@ -86,6 +97,8 @@ export const api = {
 
   // Stats
   getStats: () => request<any>('/stats'),
+  getDashboard: () => request<any>('/dashboard'),
+  getAllChannelStats: () => request<any>('/channels/stats-summary'),
   getLogs: (channelId?: number) => request<any[]>(`/logs${channelId ? `?channel_id=${channelId}` : ''}`),
 
   // Marketing AI
@@ -109,6 +122,68 @@ export const api = {
   updateSchedule: (id: number, data: any) => request<any>(`/schedules/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSchedule: (id: number) => request<any>(`/schedules/${id}`, { method: 'DELETE' }),
   toggleSchedule: (id: number) => request<any>(`/schedules/${id}/toggle`, { method: 'PUT' }),
+
+  // Planning (dynamic scheduling v2)
+  getPlanningConfig: () => request<any[]>('/planning/config'),
+  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean }) =>
+    request<any>(`/planning/config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  getPlannedSlots: (date?: string, channelId?: number, status?: string) => {
+    const params = new URLSearchParams();
+    if (date) params.set('date', date);
+    if (channelId) params.set('channel_id', String(channelId));
+    if (status) params.set('status', status);
+    return request<any[]>(`/planning/slots?${params}`);
+  },
+  getTodaySlots: () => request<any>('/planning/slots/today'),
+  getWeekSlots: (channelId?: number) => {
+    const params = new URLSearchParams();
+    if (channelId) params.set('channel_id', String(channelId));
+    return request<any>(`/planning/slots/week?${params}`);
+  },
+  getPlanningTimeline: () => request<any>('/planning/timeline'),
+  getPlanningStats: () => request<any>('/planning/stats'),
+  forceReplan: (date?: string) => {
+    const params = date ? `?date=${date}` : '';
+    return request<any>(`/planning/replan${params}`, { method: 'POST' });
+  },
+  previewWeek: (overrides?: Record<string, any>) =>
+    request<any>('/planning/preview', {
+      method: 'POST',
+      body: JSON.stringify({ overrides: overrides || {} }),
+    }),
+
+  // Shorts Planning
+  getShortsPlanningConfig: () => request<any[]>('/planning/shorts-config'),
+  updateShortsPlanningConfig: (channelId: number, data: any) =>
+    request<any>(`/planning/shorts-config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  replanShorts: () => request<any>('/planning/shorts-replan', { method: 'POST' }),
+
+  // System
+  stabilizeSystem: () => request<any>('/system/stabilize', { method: 'POST' }),
+
+  // Monetization
+  getChannelMonetization: (channelId: number) =>
+    request<any>(`/channels/${channelId}/monetization`),
+  getMonetizationOverview: () =>
+    request<any>('/monetization/overview'),
+  updateChannelMonetization: (channelId: number, data: any) =>
+    request<any>(`/channels/${channelId}/monetization`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  // Milestones
+  getChannelMilestones: (channelId: number) =>
+    request<any>(`/channels/${channelId}/milestones`),
+  getMilestonesOverview: (limit = 8) =>
+    request<any>(`/milestones/overview?limit=${limit}`),
+
+  // Analytics
+  getChannelGrowth: (channelId: number, days = 30) =>
+    request<any>(`/channels/${channelId}/analytics/growth?days=${days}`),
+  getChannelContentRanking: (channelId: number, sort = 'views', limit = 20) =>
+    request<any>(`/channels/${channelId}/analytics/content?sort=${sort}&limit=${limit}`),
+  getVideoAnalytics: (videoId: number) =>
+    request<any>(`/videos/${videoId}/analytics`),
+  getChannelsComparison: () =>
+    request<any>('/analytics/comparison'),
 };
 
 /** Format seconds to mm:ss */
@@ -129,7 +204,15 @@ export function formatDate(dateStr: string | null): string {
 export function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return '-';
   const d = new Date(dateStr);
-  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/** Format milliseconds to human-readable minutes */
+export function formatTimingMs(ms: number | null | undefined): string {
+  if (!ms) return '';
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return '<1min';
+  return `${minutes}min`;
 }
 
 /** File size formatter */
@@ -159,6 +242,7 @@ export function statusBadge(status: string): string {
   const map: Record<string, string> = {
     draft: 'badge-draft',
     generating: 'badge-generating',
+    reassembling: 'badge-reassembling',
     ready: 'badge-ready',
     uploaded: 'badge-uploaded',
     error: 'badge-error',
@@ -171,6 +255,7 @@ export function statusLabel(status: string): string {
   const map: Record<string, string> = {
     draft: 'Borrador',
     generating: 'Generando',
+    reassembling: 'Re-ensamblando',
     ready: 'Listo',
     uploaded: 'Subido',
     error: 'Error',

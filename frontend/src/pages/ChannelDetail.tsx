@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { api, formatDate, formatDuration, formatShortNumber, apiUrl } from '../lib/api'
+import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatTimingMs, apiUrl } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3 } from 'lucide-react'
+import VideoTiming from '../components/VideoTiming'
+import VoiceSelector from '../components/VoiceSelector'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField } from '../types/channel'
 
 export default function ChannelDetail() {
@@ -15,9 +17,13 @@ export default function ChannelDetail() {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
-  const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '' })
+  const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '' })
   const [saving, setSaving] = useState(false)
   const [videoStats, setVideoStats] = useState<Record<string, any>>({})
+  const [shortStats, setShortStats] = useState<Record<string, any>>({})
+  const [channelYtStats, setChannelYtStats] = useState<any>(null)
+  const [channelShortsStats, setChannelShortsStats] = useState<any>(null)
+  const [channelVideosAggregate, setChannelVideosAggregate] = useState<any>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [editingConfig, setEditingConfig] = useState(false)
@@ -35,8 +41,41 @@ export default function ChannelDetail() {
   const [showManualSetup, setShowManualSetup] = useState(false)
   const [syncResult, setSyncResult] = useState<any>(null)
 
-  const { setActiveJob, activeJob } = useGeneration()
-  const { progress } = useGenerationProgress(activeJob?.jobId ?? null)
+  // Templates state
+  const [templates, setTemplates] = useState<Record<string, any> | null>(null)
+  const [regeneratingTemplate, setRegeneratingTemplate] = useState<string | null>(null)
+  const [templateResult, setTemplateResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null)
+  
+  // Short creation state (per video)
+  const [creatingShort, setCreatingShort] = useState<number | null>(null)
+  const [shortResult, setShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
+  
+  // Native short generation from Shorts tab
+  const [generatingNativeShort, setGeneratingNativeShort] = useState(false)
+  const [nativeShortResult, setNativeShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
+  
+  // Tab state for Videos/Shorts/Live/Growth
+  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth'>('videos')
+  const [shorts, setShorts] = useState<any[]>([])
+  const [loadingShorts, setLoadingShorts] = useState(false)
+
+  // Growth tab state
+  const [growthData, setGrowthData] = useState<any>(null)
+  const [monetizationData, setMonetizationData] = useState<any>(null)
+  const [milestonesData, setMilestonesData] = useState<any>(null)
+  const [contentRanking, setContentRanking] = useState<any[]>([])
+  const [growthDays, setGrowthDays] = useState(30)
+
+  const { addJob, removeJob, activeJobs, isChannelBusy } = useGeneration()
+  // Find active job for THIS channel (for inline progress display)
+  const channelActiveJob = activeJobs.find(j => j.channelId === channelId)
+  const { progress } = useGenerationProgress(channelActiveJob?.jobId ?? null)
+
+  // Block generation if ANY job is active for this channel
+  const busy = generating || isChannelBusy(channelId)
 
   useEffect(() => {
     async function load() {
@@ -47,17 +86,32 @@ export default function ChannelDetail() {
         ])
         setChannel(ch)
         setVideos(vids)
-        setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '' })
+        setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '', google_account: ch.google_account || '' })
       } catch (e) { console.error(e) }
       setLoading(false)
     }
     load()
   }, [channelId])
 
+  // Restore generating state from context on mount / when activeJobs change
+  useEffect(() => {
+    if (channelActiveJob && channelActiveJob.jobId) {
+      setGenerating(true)
+      pollForCompletion(channelActiveJob.jobId)
+    }
+  }, [channelActiveJob?.jobId, channelId])
+
   // Check auth status
   useEffect(() => {
     api.getAuthStatus(channelId).then(setAuthStatus).catch(() => {})
   }, [channelId])
+
+  // Fetch templates
+  useEffect(() => {
+    if (channel?.id) {
+      api.getTemplates(channel.id).then(setTemplates).catch(() => {})
+    }
+  }, [channel?.id])
 
   // Fetch YouTube stats for uploaded videos
   useEffect(() => {
@@ -65,6 +119,30 @@ export default function ChannelDetail() {
     if (ytIds.length === 0) return
     api.getVideoStats(ytIds).then(stats => setVideoStats(stats)).catch(() => {})
   }, [videos])
+
+  // Fetch channel-level YouTube stats (total views, watch hours)
+  useEffect(() => {
+    if (!channel?.id) return
+    api.getChannelYoutubeStats(channel.id).then(res => {
+      if (res?.ok && res.stats) setChannelYtStats(res.stats)
+    }).catch(() => {})
+  }, [channel?.id])
+
+  // Fetch channel shorts aggregate stats
+  useEffect(() => {
+    if (!channel?.id) return
+    api.getChannelShortsStats(channel.id).then(res => {
+      if (res?.ok && res.shorts_stats) setChannelShortsStats(res.shorts_stats)
+    }).catch(() => {})
+  }, [channel?.id])
+
+  // Fetch long-form videos aggregate stats (vistas/likes por vídeos largos)
+  useEffect(() => {
+    if (!channel?.id) return
+    api.getChannelVideosAggregate(channel.id).then(res => {
+      if (res?.ok && res.videos_stats) setChannelVideosAggregate(res.videos_stats)
+    }).catch(() => {})
+  }, [channel?.id])
 
   // Poll videos list when generating (since we use global progress bar now)
   useEffect(() => {
@@ -75,15 +153,62 @@ export default function ChannelDetail() {
     return () => clearInterval(interval)
   }, [generating, channelId])
 
+  // Load shorts when tab switches
+  useEffect(() => {
+    if (videoTab !== 'shorts' || !channelId) return
+    async function loadShorts() {
+      setLoadingShorts(true)
+      try {
+        const data = await fetch(`api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
+        setShorts(data)
+      } catch {}
+      setLoadingShorts(false)
+    }
+    loadShorts()
+  }, [videoTab, channelId])
+
+  // Load growth tab data when switched
+  useEffect(() => {
+    if (videoTab !== 'growth' || !channelId) return
+    async function loadGrowth() {
+      try {
+        const [growth, mon, milestones, content] = await Promise.all([
+          api.getChannelGrowth(channelId, growthDays),
+          api.getChannelMonetization(channelId),
+          api.getChannelMilestones(channelId),
+          api.getChannelContentRanking(channelId, 'views', 15),
+        ])
+        setGrowthData(growth)
+        setMonetizationData(mon)
+        setMilestonesData(milestones)
+        setContentRanking(content?.videos || [])
+      } catch (e) {
+        console.error('Error loading growth data:', e)
+      }
+    }
+    loadGrowth()
+  }, [videoTab, channelId, growthDays])
+  useEffect(() => {
+    const ytIds = shorts.filter((s: any) => s.youtube_id).map((s: any) => s.youtube_id)
+    if (ytIds.length === 0) return
+    api.getVideoStats(ytIds).then(stats => setShortStats(stats)).catch(() => {})
+  }, [shorts])
+
   async function handleGenerate() {
     setGenerating(true)
     try {
-      const result = await api.generateVideo({ channel_id: channelId, action: 'generate_and_upload' })
-      setActiveJob({
+      const isTestChannel = channel?.slug === 'test'
+      const result = await api.generateVideo({
+        channel_id: channelId,
+        action: isTestChannel ? 'generate_and_upload' : 'generate_and_upload',
+        test_mode: isTestChannel,
+      })
+      addJob({
         jobId: result.job_id,
         channelId,
         channelName: channel?.name || 'Canal',
         action: 'generate_and_upload',
+        videoId: result.video_id,
       })
       pollForCompletion(result.job_id)
     } catch (e: any) { alert('Error: ' + e.message); setGenerating(false) }
@@ -95,7 +220,7 @@ export default function ChannelDetail() {
         const job = await api.getJob(jobId)
         if (job.status === 'completed' || job.status === 'failed') {
           setGenerating(false)
-          setActiveJob(null)
+          removeJob(jobId)
           const vids = await api.getChannelVideos(channelId)
           setVideos(vids)
         } else {
@@ -108,8 +233,55 @@ export default function ChannelDetail() {
     setTimeout(check, 2000)
   }
 
+  async function handleCreateShort(videoId: number) {
+    setCreatingShort(videoId)
+    setShortResult(null)
+    const jobId = -(videoId * 1000 + Date.now() % 1000) // negative ID for shorts
+    addJob({ jobId, channelId, channelName: channel?.name || '', action: 'Creando Short', videoId })
+    try {
+      const res = await fetch(`api/shorts/extract-and-publish/${videoId}`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Error')
+      setShortResult({ ok: true, message: '¡Short publicado!', url: data.youtube_url })
+    } catch (e: any) {
+      setShortResult({ ok: false, message: e.message })
+    }
+    setCreatingShort(null)
+    removeJob(jobId)
+    setTimeout(() => setShortResult(null), 8000)
+  }
+
+  async function handleGenerateNativeShort() {
+    setGeneratingNativeShort(true)
+    setNativeShortResult(null)
+    const jobId = -(channelId * 20000 + Date.now() % 10000)
+    addJob({ jobId, channelId, channelName: channel?.name || '', action: 'Generando Short Nativo' })
+    try {
+      const res = await fetch(`api/shorts/generate-native/${channelId}`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Error')
+      setNativeShortResult({ ok: true, message: `¡Short publicado! "${data.title?.slice(0, 35)}..."`, url: data.youtube_url })
+      // Reload shorts
+      const sdata = await fetch(`api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
+      setShorts(sdata)
+    } catch (e: any) {
+      setNativeShortResult({ ok: false, message: e.message })
+    }
+    setGeneratingNativeShort(false)
+    removeJob(jobId)
+  }
+
   async function handleUpload(videoId: number) {
     try { await api.uploadVideo(videoId); alert('Subida iniciada'); const vids = await api.getChannelVideos(channelId); setVideos(vids) } catch (e: any) { alert('Error: ' + e.message) }
+  }
+
+  async function handleDelete(videoId: number) {
+    try {
+      await api.deleteVideo(videoId)
+      const vids = await api.getChannelVideos(channelId)
+      setVideos(vids)
+      setDeleteTarget(null)
+    } catch (e: any) { alert('Error: ' + e.message) }
   }
 
   async function handleSaveProfile() {
@@ -217,6 +389,9 @@ export default function ChannelDetail() {
         </select>
       )
     }
+    if (field.type === 'voice-select') {
+      return <VoiceSelector config={editConfig} onUpdateField={updateConfigField} />
+    }
     if (field.type === 'number') {
       return <input type="number" value={value || ''} onChange={e => updateConfigField(field.key, Number(e.target.value))}
         className="bg-dark-900 border border-surface-border text-white text-xs rounded px-1 py-0.5 w-full max-w-[100px]" />
@@ -239,8 +414,34 @@ export default function ChannelDetail() {
     setSyncing(false)
   }
 
+  async function handleRegenerateTemplate(segment: string) {
+    if (!channel?.id) return
+    setRegeneratingTemplate(segment)
+    try {
+      await api.generateTemplate(channel.id, segment)
+      const updated = await api.getTemplates(channel.id)
+      setTemplates(updated)
+      setTemplateResult({ ok: true, message: `El template "${segment}" se regeneró con éxito.` })
+    } catch (e: any) {
+      setTemplateResult({ ok: false, message: e.message || 'Error al generar el template' })
+    } finally {
+      setRegeneratingTemplate(null)
+    }
+  }
+
   function renderConfigValue(field: ConfigField, config: Record<string, any>): React.ReactNode {
     const value = config[field.key]
+    if (field.type === 'voice-select') {
+      const engine = config.TTS_ENGINE === 'kokoro' ? 'kokoro' : 'edgetts'
+      const voiceName = engine === 'kokoro'
+        ? (config.KOKORO_VOICE || 'em_santa')
+        : (config.VOICE_ID || 'es-MX-JorgeNeural')
+      return (
+        <span className="text-xs text-neon-cyan">
+          {voiceName} <span className="text-[10px] text-gray-500">({engine === 'kokoro' ? 'Kokoro' : 'Edge-TTS'})</span>
+        </span>
+      )
+    }
     if (value === undefined || value === null) return <span className="text-gray-600">—</span>
     if (field.type === 'boolean') return <span className={value ? 'text-green-400' : 'text-gray-500'}>{value ? '✅ Sí' : '❌ No'}</span>
     if (field.type === 'select' && field.options) {
@@ -279,7 +480,7 @@ export default function ChannelDetail() {
     <div className="max-w-6xl mx-auto animate-fade-in">
       {/* --- YouTube-style Banner --- */}
       <div className="relative">
-        <div className="w-full h-40 md:h-52 rounded-xl overflow-hidden bg-gradient-to-r from-dark-700 via-dark-600 to-neon-red/20">
+        <div className="w-full h-32 sm:h-40 md:h-52 rounded-xl overflow-hidden bg-gradient-to-r from-dark-700 via-dark-600 to-neon-red/20">
           {channel.banner_url ? (
             <img src={channel.banner_url} alt="Banner" className="w-full h-full object-cover" />
           ) : (
@@ -290,8 +491,8 @@ export default function ChannelDetail() {
         </div>
         
         {/* Avatar + Info */}
-        <div className="px-4 md:px-6 -mt-10 flex items-end gap-4 md:gap-5">
-          <div className="w-20 h-20 md:w-24 md:h-24 rounded-full border-4 border-dark-900 bg-dark-700 overflow-hidden shrink-0">
+        <div className="px-4 md:px-6 -mt-8 sm:-mt-10 flex flex-col sm:flex-row items-start sm:items-end gap-3 sm:gap-5">
+          <div className="w-16 h-16 sm:w-20 sm:h-20 md:w-24 md:h-24 rounded-full border-4 border-dark-900 bg-dark-700 overflow-hidden shrink-0">
             {channel.avatar_url ? (
               <img src={channel.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
             ) : (
@@ -301,116 +502,590 @@ export default function ChannelDetail() {
             )}
           </div>
           
-          <div className="flex-1 pb-1 min-w-0">
-            <h1 className="font-display text-xl md:text-2xl font-bold text-white truncate">{channel.name}</h1>
-            <div className="flex items-center gap-3 text-xs text-gray-400 mt-0.5 flex-wrap">
-              <span className="flex items-center gap-1"><Users size={12} />{uploadedCount} videos</span>
-              <span className="flex items-center gap-1"><Video size={12} />{videos.length} total</span>
+          <div className="flex-1 pb-1 min-w-0 w-full sm:w-auto">
+            <h1 className="font-display text-lg sm:text-xl md:text-2xl font-bold text-white truncate">{channel.name}</h1>
+            <div className="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-xs text-gray-400 mt-0.5 flex-wrap">
+              <span className="flex items-center gap-1"><Users size={11} />{uploadedCount} videos</span>
+              <span className="flex items-center gap-1"><Video size={11} />{videos.length} total</span>
               <span className="hidden sm:inline">·</span>
               <span className="hidden sm:inline">{channel.slug}</span>
             </div>
-            {channel.description && (
-              <p className="text-xs text-gray-400 mt-1.5 line-clamp-2">{channel.description}</p>
-            )}
-          </div>
+            {/* Channel YouTube Stats */}
+            {channelYtStats && (
+              <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-1 flex-wrap">
+                <span className="flex items-center gap-1 text-neon-cyan">
+                  <Eye size={11} />
+                  <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.viewCount || '0')}</span> vistas totales
+                </span>
+                <span className="flex items-center gap-1 text-neon-pink">
+                  <Users size={11} />
+                  <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.subscriberCount || '0')}</span> suscriptores
+                </span>
+                  {channelYtStats.estimatedHoursWatched > 0 && (
+                    <span className="flex items-center gap-1 text-neon-gold">
+                      <Clock size={11} />
+                      <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Shorts aggregate stats + total likes */}
+              {channelShortsStats && channelShortsStats.total > 0 && (
+                <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-0.5 flex-wrap">
+                  <span className="flex items-center gap-1 text-neon-purple">
+                    <Zap size={11} />
+                    <span className="font-mono tabular-nums">{channelShortsStats.published || 0}</span> shorts
+                  </span>
+                  {channelShortsStats.total_views > 0 && (
+                    <span className="flex items-center gap-1 text-neon-cyan">
+                      <Eye size={11} />
+                      <span className="font-mono tabular-nums">{formatShortNumber(channelShortsStats.total_views)}</span> vistas shorts
+                    </span>
+                  )}
+                  {channelShortsStats.total_likes > 0 && (
+                    <span className="flex items-center gap-1 text-neon-pink">
+                      <Heart size={11} />
+                      <span className="font-mono tabular-nums">{formatShortNumber(channelShortsStats.total_likes)}</span> likes shorts
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Long-form videos aggregate + combined total */}
+              {channelVideosAggregate && (channelVideosAggregate.video_count > 0 || channelVideosAggregate.total_views > 0) && (
+                <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-0.5 flex-wrap">
+                  <span className="flex items-center gap-1 text-neon-gold">
+                    <Video size={11} />
+                    <span className="font-mono tabular-nums">{channelVideosAggregate.video_count || 0}</span> vídeos largos
+                  </span>
+                  {channelVideosAggregate.total_views > 0 && (
+                    <span className="flex items-center gap-1 text-neon-cyan">
+                      <Eye size={11} />
+                      <span className="font-mono tabular-nums">{formatShortNumber(channelVideosAggregate.total_views)}</span> vistas vídeos
+                    </span>
+                  )}
+                  {channelVideosAggregate.total_likes > 0 && (
+                    <span className="flex items-center gap-1 text-neon-pink">
+                      <Heart size={11} />
+                      <span className="font-mono tabular-nums">{formatShortNumber(channelVideosAggregate.total_likes)}</span> likes vídeos
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Combined total: videos DB + shorts DB */}
+              {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
+                <div className="flex items-center gap-2 text-[11px] sm:text-xs mt-0.5 pt-0.5 border-t border-surface-border/40">
+                  <span className="flex items-center gap-1 text-neon-red font-semibold">
+                    <Eye size={12} />
+                    <span className="font-mono tabular-nums text-xs sm:text-sm">
+                      {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
+                    </span>
+                    vistas combinadas (vídeos + shorts)
+                  </span>
+                </div>
+              )}
+              {channel.description && (
+                <p className="text-xs text-gray-400 mt-1.5 line-clamp-2">{channel.description}</p>
+              )}
+            </div>
 
-          <div className="flex gap-2 pb-1 shrink-0">
+          <div className="flex gap-1.5 sm:gap-2 pb-1 shrink-0 mt-1 sm:mt-0 w-full sm:w-auto">
             {channel.yt_channel_url && (
               <a href={channel.yt_channel_url} target="_blank" rel="noopener noreferrer"
-                className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
+                className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-red-600 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
                 <Youtube size={14} /> YouTube
               </a>
             )}
             <button onClick={() => setEditingProfile(true)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-dark-700 border border-surface-border text-gray-300 rounded-full text-xs hover:bg-dark-600 transition-colors">
-              <Edit3 size={12} /> Editar perfil
+              className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-surface-border text-gray-300 rounded-full text-xs hover:bg-dark-600 transition-colors">
+              <Edit3 size={12} /> <span className="hidden sm:inline">Editar perfil</span><span className="sm:hidden">Editar</span>
             </button>
             <button onClick={() => setShowConfig(!showConfig)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-dark-700 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs hover:bg-dark-600 transition-colors">
-              <Settings size={12} /> {showConfig ? 'Ocultar' : 'Config'}
+              className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs hover:bg-dark-600 transition-colors">
+              <Settings size={12} /> <span className="hidden sm:inline">{showConfig ? 'Ocultar' : 'Config'}</span><Zap size={12} className="sm:hidden" />
             </button>
           </div>
         </div>
       </div>
 
       {/* --- Quick actions bar --- */}
-      <div className="flex items-center gap-2 mt-4 mb-6 flex-wrap">
+      <div className="flex items-center gap-1.5 sm:gap-2 mt-4 mb-6 flex-wrap">
         <Link to="/scheduling"
-          className="flex items-center gap-1.5 px-4 py-2 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-sm font-medium hover:bg-neon-gold/20 transition-colors">
+          className="flex items-center gap-1.5 px-3 py-2 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs sm:text-sm font-medium hover:bg-neon-gold/20 transition-colors">
           <Calendar size={14} /> Programar
         </Link>
         <button onClick={handleStartAuth} disabled={authLoading}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
             authStatus?.authenticated 
               ? 'bg-green-600/10 border border-green-600/30 text-green-400' 
               : 'bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan hover:bg-neon-cyan/20'
           }`}>
-          <Key size={14} /> {authStatus?.authenticated ? '✅ Conectado' : 'Conectar YouTube'}
+          <Key size={14} /> <span className="hidden sm:inline">{authStatus?.authenticated ? 'Conectado' : 'Conectar YouTube'}</span><span className="sm:hidden">{authStatus?.authenticated ? 'YT ✓' : 'Conectar'}</span>
         </button>
         <button onClick={handleSyncYouTube} disabled={syncing}
-          className="flex items-center gap-1.5 px-4 py-2 bg-red-600/10 border border-red-600/30 text-red-400 rounded-lg text-sm font-medium hover:bg-red-600/20 transition-colors">
-          <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> {syncing ? 'Syncing...' : 'Sync YouTube'}
+          className="flex items-center gap-1.5 px-3 py-2 bg-red-600/10 border border-red-600/30 text-red-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-red-600/20 transition-colors">
+          <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> <span className="hidden sm:inline">{syncing ? 'Syncing...' : 'Sync YouTube'}</span><span className="sm:hidden">Sync</span>
         </button>
         <button onClick={handleGetManualSetup}
-          className="flex items-center gap-1.5 px-4 py-2 bg-dark-600 border border-surface-border text-gray-400 rounded-lg text-sm font-medium hover:bg-dark-500 transition-colors">
-          <Clipboard size={14} /> Setup Manual
+          className="flex items-center gap-1.5 px-3 py-2 bg-dark-600 border border-surface-border text-gray-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-dark-500 transition-colors">
+          <Clipboard size={14} /> <span className="hidden sm:inline">Setup Manual</span><span className="sm:hidden">Setup</span>
         </button>
         <Link to="/channels"
-          className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-400 hover:text-white transition-colors">
-          <ArrowLeft size={14} /> Canales
+          className="flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm text-gray-400 hover:text-white transition-colors">
+          <ArrowLeft size={14} /> <span className="hidden sm:inline">Canales</span>
         </Link>
       </div>
 
       {/* --- Generation Panel --- */}
+      {videoTab !== 'live' && (
       <div className="glass rounded-xl p-5 space-y-4 mb-6">
         <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
-          <Wand2 size={20} className="text-neon-gold" /> Generar Video
+          <Wand2 size={20} className="text-neon-gold" /> {videoTab === 'shorts' ? 'Generar Short' : 'Generar Video'}
         </h3>
-        {generating ? (
+        {(videoTab === 'shorts' ? generatingNativeShort : busy) ? (
           <div className="flex items-center gap-3 p-4 bg-dark-700/50 rounded-lg">
             <Loader2 size={20} className="text-neon-gold animate-spin" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-white">
-                {progress?.message || 'Generando y subiendo video...'}
+                {videoTab === 'shorts'
+                  ? 'Generando y publicando Short...'
+                  : (progress?.message || 'Generando y subiendo video...')}
               </p>
-              <div className="flex items-center gap-2 mt-1">
-                <div className="flex-1 h-1.5 bg-dark-900 rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-neon-red to-neon-gold rounded-full transition-all duration-500"
-                       style={{ width: `${progress?.progress || 0}%` }} />
-                </div>
-                <span className="text-xs text-neon-red font-mono tabular-nums">
-                  {progress?.progress || 0}%
-                </span>
-              </div>
-              {progress?.phase && (
-                <p className="text-xs text-neon-cyan mt-0.5">{progress.phase}</p>
+              {videoTab !== 'shorts' && (
+                <>
+                  <div className="flex items-center gap-2 mt-1">
+                    <div className="flex-1 h-1.5 bg-dark-900 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-neon-red to-neon-gold rounded-full transition-all duration-500"
+                           style={{ width: `${progress?.progress || 0}%` }} />
+                    </div>
+                    <span className="text-xs text-neon-red font-mono tabular-nums">
+                      {progress?.progress || 0}%
+                    </span>
+                  </div>
+                  {progress?.phase && (
+                    <p className="text-xs text-neon-cyan mt-0.5 capitalize">{progress.phase}</p>
+                  )}
+                  {progress?.detail && (
+                    <p className="text-xs text-slate-400 mt-0.5">{progress.detail}</p>
+                  )}
+                  {progress?.current !== undefined && progress?.total !== undefined && (
+                    <p className="text-xs text-slate-500">
+                      {progress.current}/{progress.total}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>
         ) : (
-          <button onClick={handleGenerate} disabled={generating}
+          <button
+            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : handleGenerate}
+            disabled={videoTab === 'shorts' ? generatingNativeShort : busy}
             className="w-full py-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-display font-semibold text-lg hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3">
-            <Wand2 size={22} /> {generating ? 'Iniciando...' : 'Generar Video'}
+            <Wand2 size={22} /> {videoTab === 'shorts' ? 'Generar Short' : channel?.slug === 'test' ? 'Generar video de pruebas' : 'Generar Video'}
           </button>
         )}
-        <p className="text-xs text-gray-500 text-center">Genera y sube automáticamente a YouTube. Recibirás una notificación al terminar.</p>
+        <p className="text-xs text-gray-500 text-center">
+          {videoTab === 'shorts'
+            ? 'Genera un Short nativo con IA y lo publica automáticamente en YouTube.'
+            : 'Genera y sube automáticamente a YouTube. Recibirás una notificación al terminar.'}
+        </p>
+        {videoTab === 'shorts' && nativeShortResult && (
+          <div className={`p-3 rounded-lg text-sm flex items-center gap-2 ${
+            nativeShortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
+          }`}>
+            <span>{nativeShortResult.ok ? '✅' : '❌'}</span>
+            <span>{nativeShortResult.message}</span>
+            {nativeShortResult.url && (
+              <a href={nativeShortResult.url} target="_blank" rel="noopener noreferrer"
+                 className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
+            )}
+          </div>
+        )}
+      </div>
+      )}
+
+      {/* --- Templates Panel --- */}
+      <div className="glass rounded-xl p-5 space-y-4 mb-6">
+        <h3 className="text-lg font-semibold">🎬 Templates del Canal</h3>
+        <p className="text-sm text-slate-400">Genera los mini-videos de intro, CTA y outro para tus videos.</p>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+          {['intro', 'cta', 'outro'].map(segment => {
+            const data = templates?.[segment];
+            return (
+              <div key={segment} className="bg-white/5 rounded-lg p-3 text-center space-y-2 flex flex-col">
+                <div className="text-sm font-medium capitalize">{segment}</div>
+                {data ? (
+                  <>
+                    <video
+                      controls
+                      muted
+                      preload="metadata"
+                      poster=""
+                      className="w-full rounded-md aspect-video bg-black object-cover"
+                      src={apiUrl(`/channels/${channel.id}/templates/${segment}/file?v=${data.generated_at || '0'}`)}
+                    />
+                    <div className="text-xs text-green-400">✅ Generado</div>
+                    {data.generated_at && (
+                      <div className="text-[10px] text-gray-500">
+                        {new Date(data.generated_at).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="flex-1 flex items-center justify-center">
+                    <div className="text-xs text-yellow-400">⚠️ No generado</div>
+                  </div>
+                )}
+                <button
+                  onClick={() => handleRegenerateTemplate(segment)}
+                  disabled={regeneratingTemplate === segment}
+                  className="w-full px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 rounded-lg transition disabled:opacity-50 mt-auto"
+                >
+                  {regeneratingTemplate === segment ? 'Generando...' : 'Regenerar'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* --- Video Grid --- */}
       <section>
         <div className="flex items-center gap-2 mb-4">
-          <button className="px-4 py-1.5 bg-dark-700 text-white rounded-lg text-sm font-medium">Videos</button>
-          <button className="px-4 py-1.5 text-gray-500 text-sm hover:text-white">Shorts</button>
-          <button className="px-4 py-1.5 text-gray-500 text-sm hover:text-white">En directo</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'videos' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('videos')}
+          >Videos</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'shorts' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('shorts')}
+          >Shorts</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'live' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('live')}
+          >En directo</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'growth' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('growth')}
+          ><TrendingUp size={14} className="inline mr-1" />Crecimiento</button>
         </div>
-        {videos.length === 0 ? (
+        {videoTab === 'growth' ? (
+          <div className="space-y-4">
+            {/* YPP Progress Card */}
+            {monetizationData && (
+              <div className="glass p-4 rounded-xl border border-neon-gold/10">
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp size={18} className="text-neon-gold" />
+                  <h3 className="text-sm font-semibold text-gray-300">Progreso YPP</h3>
+                  {monetizationData.ypp_progress?.ypp_eligible && (
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-green-600/20 text-green-400">¡Elegible!</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-gray-400">Suscriptores</span>
+                      <span className="text-xs font-mono tabular-nums text-gray-300">
+                        {formatShortNumber(monetizationData.subscribers || 0)} / 1,000
+                      </span>
+                    </div>
+                    <div className="h-2.5 bg-dark-600 rounded-full mb-1">
+                      <div className="h-full bg-gradient-to-r from-neon-cyan to-neon-gold rounded-full transition-all"
+                        style={{ width: `${monetizationData.ypp_progress?.subs_pct || 0}%` }} />
+                    </div>
+                    <span className="text-[10px] text-gray-500">{monetizationData.ypp_progress?.subs_pct || 0}% completado</span>
+                    {monetizationData.ypp_progress?.estimated_days_to_1k_subs != null && monetizationData.ypp_progress?.estimated_days_to_1k_subs > 0 && (
+                      <span className="text-[10px] text-gray-500 ml-2">~{monetizationData.ypp_progress.estimated_days_to_1k_subs} días</span>
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-gray-400">Horas de visualización</span>
+                      <span className="text-xs font-mono tabular-nums text-gray-300">
+                        {formatShortNumber(monetizationData.watch_hours || 0)} / 4,000
+                      </span>
+                    </div>
+                    <div className="h-2.5 bg-dark-600 rounded-full mb-1">
+                      <div className="h-full bg-gradient-to-r from-green-500 to-neon-gold rounded-full transition-all"
+                        style={{ width: `${monetizationData.ypp_progress?.hours_pct || 0}%` }} />
+                    </div>
+                    <span className="text-[10px] text-gray-500">{monetizationData.ypp_progress?.hours_pct || 0}% completado</span>
+                    {monetizationData.ypp_progress?.estimated_days_to_4k_hours != null && monetizationData.ypp_progress?.estimated_days_to_4k_hours > 0 && (
+                      <span className="text-[10px] text-gray-500 ml-2">~{monetizationData.ypp_progress.estimated_days_to_4k_hours} días</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Revenue Panel */}
+            {monetizationData && (
+              <div className="glass p-4 rounded-xl border border-green-500/10">
+                <div className="flex items-center gap-2 mb-3">
+                  <DollarSign size={18} className="text-green-400" />
+                  <h3 className="text-sm font-semibold text-gray-300">Revenue Estimado</h3>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                  <div className="bg-dark-800/50 rounded-lg p-3 text-center">
+                    <p className="text-[10px] text-gray-500 mb-0.5">CPM</p>
+                    <p className="text-sm font-mono font-semibold text-green-400">
+                      ${monetizationData.cpm_min || '?'}–${monetizationData.cpm_max || '?'}
+                    </p>
+                  </div>
+                  <div className="bg-dark-800/50 rounded-lg p-3 text-center">
+                    <p className="text-[10px] text-gray-500 mb-0.5">Total est.</p>
+                    <p className="text-sm font-mono font-semibold text-green-400">
+                      ${monetizationData.revenue_total_min?.toFixed(0) || '0'}–${monetizationData.revenue_total_max?.toFixed(0) || '0'}
+                    </p>
+                  </div>
+                  <div className="bg-dark-800/50 rounded-lg p-3 text-center">
+                    <p className="text-[10px] text-gray-500 mb-0.5">Vertical</p>
+                    <p className="text-xs text-gray-300">{monetizationData.monetization_vertical || '—'}</p>
+                  </div>
+                  <div className="bg-dark-800/50 rounded-lg p-3 text-center">
+                    <p className="text-[10px] text-gray-500 mb-0.5">Status</p>
+                    <p className="text-xs font-medium text-neon-gold">{monetizationData.ypp_status || 'No monetizado'}</p>
+                  </div>
+                </div>
+                {monetizationData.top_revenue_videos?.length > 0 && (
+                  <div>
+                    <p className="text-xs text-gray-500 mb-2">Top videos por revenue:</p>
+                    <div className="space-y-1">
+                      {monetizationData.top_revenue_videos.map((v: any, i: number) => (
+                        <div key={i} className="flex items-center justify-between text-xs bg-dark-800/30 rounded px-2 py-1">
+                          <span className="text-gray-300 truncate max-w-[60%]">{v.title}</span>
+                          <span className="font-mono tabular-nums text-green-400">${v.revenue_min?.toFixed(2)}–${v.revenue_max?.toFixed(2)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Growth Chart (simple bars) */}
+            {growthData?.data && growthData.data.length > 0 && (
+              <div className="glass p-4 rounded-xl">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <BarChart3 size={18} className="text-neon-cyan" />
+                    <h3 className="text-sm font-semibold text-gray-300">Crecimiento</h3>
+                  </div>
+                  <div className="flex gap-1">
+                    {[30, 60, 90].map(d => (
+                      <button key={d}
+                        onClick={() => setGrowthDays(d)}
+                        className={`px-2 py-0.5 text-[10px] rounded ${growthDays === d ? 'bg-neon-red/10 text-neon-red' : 'text-gray-500 hover:text-gray-300'}`}
+                      >{d}d</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="h-32 flex items-end gap-0.5">
+                  {growthData.data.map((point: any, i: number) => {
+                    const maxSubs = Math.max(...growthData.data.map((p: any) => p.subscribers || 0), 1)
+                    const height = ((point.subscribers || 0) / maxSubs) * 100
+                    return (
+                      <div key={i} className="flex-1 flex flex-col items-center justify-end group relative" style={{ height: '100%' }}>
+                        <div className="w-full bg-neon-cyan/40 hover:bg-neon-cyan/70 rounded-t transition-colors"
+                          style={{ height: `${Math.max(1, height)}%` }}
+                          title={`${point.date_key}: ${formatShortNumber(point.subscribers || 0)} subs`}
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center justify-between mt-2 text-[10px] text-gray-500">
+                  {growthData.data.length > 0 && (
+                    <>
+                      <span>{growthData.data[0]?.date_key}</span>
+                      <span className="font-mono tabular-nums text-neon-cyan">{formatShortNumber(growthData.data[growthData.data.length-1]?.subscribers || 0)} subs</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Content Ranking */}
+            {contentRanking.length > 0 && (
+              <div className="glass p-4 rounded-xl">
+                <div className="flex items-center gap-2 mb-3">
+                  <Eye size={18} className="text-neon-red" />
+                  <h3 className="text-sm font-semibold text-gray-300">Ranking de Contenido</h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-white/5">
+                        <th className="text-left py-2 font-medium">Video</th>
+                        <th className="text-right py-2 font-medium">Vistas</th>
+                        <th className="text-right py-2 font-medium">Likes</th>
+                        <th className="text-right py-2 font-medium hidden sm:table-cell">Revenue est.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {contentRanking.slice(0, 10).map((v: any, i: number) => (
+                        <tr key={i} className="border-b border-white/5 hover:bg-dark-800/30">
+                          <td className="py-2 pr-4">
+                            <span className="text-gray-300 line-clamp-1">{v.title}</span>
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-neon-cyan">{formatShortNumber(v.views)}</td>
+                          <td className="py-2 text-right font-mono tabular-nums text-neon-gold">{formatShortNumber(v.likes)}</td>
+                          <td className="py-2 text-right font-mono tabular-nums text-green-400 hidden sm:table-cell">
+                            ${v.revenue_min?.toFixed(2)}–${v.revenue_max?.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Milestones */}
+            {milestonesData?.milestones && milestonesData.milestones.length > 0 && (
+              <div className="glass p-4 rounded-xl border border-neon-gold/10">
+                <div className="flex items-center gap-2 mb-3">
+                  <Award size={18} className="text-neon-gold" />
+                  <h3 className="text-sm font-semibold text-gray-300">Hitos</h3>
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                  {milestonesData.milestones.map((m: any, i: number) => {
+                    const isAchieved = m.status === 'achieved'
+                    return (
+                      <div key={i} className={`flex items-center justify-between text-xs py-2 px-2 rounded ${isAchieved ? 'bg-green-600/5' : 'bg-dark-800/30'}`}>
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${isAchieved ? 'bg-green-400' : 'bg-gray-600'}`} />
+                          <span className={isAchieved ? 'text-green-400 font-medium' : 'text-gray-400'}>{m.label}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="w-16 h-1.5 bg-dark-600 rounded-full hidden sm:block">
+                            <div className="h-full bg-neon-gold rounded-full" style={{ width: `${m.percentage || 0}%` }} />
+                          </div>
+                          <span className={`font-mono tabular-nums w-12 text-right ${isAchieved ? 'text-green-400' : 'text-gray-500'}`}>
+                            {isAchieved ? '✅' : `${Math.round(m.percentage || 0)}%`}
+                          </span>
+                          {!isAchieved && m.predicted_days != null && m.predicted_days > 0 && (
+                            <span className="text-[10px] text-gray-600 hidden sm:inline">~{m.predicted_days}d</span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : videoTab === 'shorts' ? (
+          <div>
+          {nativeShortResult && (
+            <div className={`mb-3 p-3 rounded-lg text-sm flex items-center gap-2 ${
+              nativeShortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
+            }`}>
+              <span>{nativeShortResult.ok ? '✅' : '❌'}</span>
+              <span>{nativeShortResult.message}</span>
+              {nativeShortResult.url && (
+                <a href={nativeShortResult.url} target="_blank" rel="noopener noreferrer"
+                   className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
+              )}
+            </div>
+          )}
+          {loadingShorts ? (
+            <div className="text-center py-16">
+              <RefreshCw size={24} className="animate-spin mx-auto text-gray-500" />
+            </div>
+          ) : shorts.length === 0 ? (
+            <div className="text-center py-16 glass rounded-xl">
+              <Video size={48} className="mx-auto mb-4 opacity-20 text-gray-600" />
+              <p className="text-gray-500">No hay Shorts en este canal</p>
+              <p className="text-xs text-gray-600 mt-1 mb-4">
+                Los Shorts se extraen automáticamente de videos largos o se generan como nativos
+              </p>
+              <button
+                onClick={handleGenerateNativeShort}
+                disabled={generatingNativeShort}
+                className="px-4 py-2 bg-neon-red/10 text-neon-red border border-neon-red/20 rounded-lg text-sm font-medium hover:bg-neon-red/20 disabled:opacity-50 transition-colors flex items-center gap-2 mx-auto"
+              >
+                {generatingNativeShort ? (
+                  <><RefreshCw size={14} className="animate-spin" /> Generando...</>
+                ) : (
+                  <><Plus size={14} /> Generar Short Nativo</>
+                )}
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+              {shorts.map((s: any) => (
+                <div key={s.id} className="glass rounded-lg overflow-hidden group">
+                    <div className="relative aspect-[9/16] bg-dark-800 flex items-center justify-center rounded-lg overflow-hidden">
+                      {s.youtube_id ? (
+                        <iframe
+                          src={`https://www.youtube.com/embed/${s.youtube_id}`}
+                          title="YouTube Shorts player"
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                          allowFullScreen
+                          className="w-full h-full"
+                        />
+                      ) : s.file_path ? (
+                        <video src={apiUrl(`/static/${s.file_path}?v=${s.id}`)} className="w-full h-full object-cover" preload="metadata" controls />
+                      ) : (
+                        <Video size={24} className="text-gray-600" />
+                      )}
+                    <span className={`absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                      s.status === 'published' ? 'bg-green-600/90 text-white' :
+                      s.status === 'ready' ? 'bg-blue-600/90 text-white' :
+                      s.status === 'failed' ? 'bg-red-600/90 text-white' :
+                      'bg-gray-600/90 text-white'
+                    }`}>
+                      {s.status === 'published' ? 'Publicado' : s.status === 'ready' ? 'Listo' : s.status === 'failed' ? 'Error' : 'Pendiente'}
+                    </span>
+                  </div>
+                  <div className="p-2">
+                    <p className="text-xs text-gray-300 truncate">{s.hook_title || s.title || 'Short'}</p>
+                    {s.duration && (
+                      <p className="text-[10px] text-gray-500 mt-0.5">{formatDuration(s.duration)}</p>
+                    )}
+                    <p className="text-[10px] text-gray-600 mt-0.5">{formatDateTime(s.created_at)}</p>
+                    {s.scheduled_date && (
+                      <p className="text-[10px] text-gray-500 mt-0.5">{formatDate(s.scheduled_date)}</p>
+                    )}
+                    {s.youtube_id && shortStats[s.youtube_id] && (
+                      <div className="flex items-center gap-2 mt-0.5 text-[10px] text-gray-500">
+                        <span>{formatShortNumber(shortStats[s.youtube_id].viewCount || '0')} vistas</span>
+                        <span>·</span>
+                        <span>{formatShortNumber(shortStats[s.youtube_id].likeCount || '0')} likes</span>
+                      </div>
+                    )}
+                    {s.youtube_url && (
+                      <a href={s.youtube_url} target="_blank" rel="noopener noreferrer"
+                         className="text-[10px] text-neon-red hover:underline mt-0.5 block">
+                        Ver en YouTube &rarr;
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          </div>
+        ) : (
+          <div>
+          {videos.length === 0 ? (
           <div className="text-center py-16 glass rounded-xl">
             <Video size={48} className="mx-auto mb-4 opacity-20 text-gray-600" />
             <p className="text-gray-500">No hay videos en este canal</p>
             <p className="text-xs text-gray-600 mt-1">Genera tu primer video usando el panel de arriba</p>
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
             {videos.map((v: any) => (
               <Link key={v.id} to={`/videos/${v.id}/edit`} className="group">
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
@@ -420,8 +1095,8 @@ export default function ChannelDetail() {
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-dark-700 to-dark-900"><Video size={28} className="text-gray-700" /></div>
                   )}
                   {v.duracion_seg && <span className="absolute bottom-1.5 right-1.5 bg-black/85 text-white text-[11px] px-1.5 py-0.5 rounded font-mono">{formatDuration(v.duracion_seg)}</span>}
-                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${v.status === 'uploaded' ? 'bg-green-600/90 text-white' : v.status === 'ready' ? 'bg-neon-cyan/90 text-dark-900' : v.status === 'generating' ? 'bg-blue-600/90 text-white' : v.status === 'error' ? 'bg-red-600/90 text-white' : 'bg-gray-700/90 text-gray-300'}`}>
-                    {v.status === 'uploaded' ? 'Subido' : v.status === 'ready' ? 'Listo' : v.status === 'generating' ? 'Generando' : v.status || 'Borrador'}
+                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${v.status === 'uploaded' ? 'bg-green-600/90 text-white' : v.status === 'ready' ? 'bg-neon-cyan/90 text-dark-900' : v.status === 'generating' ? 'bg-blue-600/90 text-white' : v.status === 'error' ? 'bg-red-600/90 text-white' : v.status === 'failed' ? 'bg-red-600/90 text-white' : 'bg-gray-700/90 text-gray-300'}`}>
+                    {v.status === 'uploaded' ? 'Subido' : v.status === 'ready' ? 'Listo' : v.status === 'generating' ? 'Generando' : v.status === 'error' ? 'Error' : v.status === 'failed' ? 'Error' : v.status || 'Borrador'}
                   </span>
                   <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
                     <div className="w-12 h-12 rounded-full bg-neon-red/90 flex items-center justify-center shadow-lg"><Play size={20} className="text-white ml-0.5" /></div>
@@ -431,32 +1106,56 @@ export default function ChannelDetail() {
                   <p className="text-sm font-medium text-white leading-tight line-clamp-2 group-hover:text-neon-red transition-colors">{v.titulo_final || 'Video sin título'}</p>
                   <p className="text-xs text-gray-500 mt-1">{channel.name}</p>
                   <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-600">
-                    <span>{formatDate(v.created_at)}</span>
+                    <span>{formatDateTime(v.uploaded_at || v.created_at)}{v.timing_data?.total_duration_ms ? ` — ${formatTimingMs(v.timing_data.total_duration_ms)}` : ''}</span>
                     {v.yt_url && <><span>·</span><a href={v.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-red hover:underline flex items-center gap-0.5" onClick={e => e.stopPropagation()}><Youtube size={10} /> YT</a></>}
+                    {v.script_id && (
+                      creatingShort === v.id ? (
+                        <><span>·</span><span className="flex items-center gap-1 text-purple-400"><RefreshCw size={10} className="animate-spin" /></span></>
+                      ) : (
+                        <><span>·</span><button onClick={e => { e.preventDefault(); e.stopPropagation(); handleCreateShort(v.id) }} className="text-purple-400 hover:text-purple-300 flex items-center gap-0.5" title="Crear Short de este video">🎬</button></>
+                      )
+                    )}
                   </div>
-                  {/* YouTube Stats */}
-                  {v.yt_video_id && videoStats[v.yt_video_id] && (
+                  {v.yt_video_id && videoStats[v.yt_video_id] && !videoStats[v.yt_video_id].is_mock && (
                     <div className="flex items-center gap-2 mt-0.5 text-[11px] text-gray-500">
                       <span>{formatShortNumber(videoStats[v.yt_video_id].viewCount || '0')} vistas</span>
                       <span>·</span>
                       <span>{formatShortNumber(videoStats[v.yt_video_id].likeCount || '0')} likes</span>
                     </div>
                   )}
+                  <VideoTiming timing={v.timing_data} />
                   <div className="flex gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {v.status === 'ready' && !v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-red bg-neon-red/10 px-2 py-0.5 rounded hover:bg-neon-red/20">Subir a YT</button>}
                     {v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-gold bg-neon-gold/10 px-2 py-0.5 rounded hover:bg-neon-gold/20">Resubir</button>}
+                    {(v.status === 'error' || v.status === 'failed') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
                   </div>
                 </div>
               </Link>
             ))}
           </div>
         )}
+          </div>
+        )}
       </section>
+
+      {/* Short result notification */}
+      {shortResult && (
+        <div className={`mt-4 p-3 rounded-lg text-sm flex items-center gap-2 ${
+          shortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
+        }`}>
+          <span>{shortResult.ok ? '✅' : '❌'}</span>
+          <span>{shortResult.message}</span>
+          {shortResult.url && (
+            <a href={shortResult.url} target="_blank" rel="noopener noreferrer" 
+               className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
+          )}
+        </div>
+      )}
 
       {/* --- Edit Profile Modal --- */}
       {editingProfile && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setEditingProfile(false)}>
-          <div className="glass rounded-xl p-6 w-full max-w-lg space-y-4 animate-slide-up max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-lg mx-4 sm:mx-0 space-y-4 animate-slide-up max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2"><Edit3 size={18} className="text-neon-red" /> Editar Perfil del Canal</h3>
             <div className="space-y-3">
               <div><label className="block text-xs text-gray-400 mb-1">Nombre del canal</label>
@@ -474,6 +1173,9 @@ export default function ChannelDetail() {
               <div><label className="block text-xs text-gray-400 mb-1">URL del Canal de YouTube</label>
                 <input type="text" value={profileForm.yt_channel_url || ''} onChange={e => setProfileForm({ ...profileForm, yt_channel_url: e.target.value })}
                   className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red" /></div>
+              <div><label className="block text-xs text-gray-400 mb-1">Cuenta de Google</label>
+                <input type="text" value={profileForm.google_account || ''} onChange={e => setProfileForm({ ...profileForm, google_account: e.target.value })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red" placeholder="email@gmail.com" /></div>
               <div className="flex gap-2 pt-2">
                 <button onClick={handleSaveProfile} disabled={saving}
                   className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 bg-neon-red text-white rounded-lg font-bold text-sm hover:bg-neon-red/80 disabled:opacity-50">
@@ -521,7 +1223,7 @@ export default function ChannelDetail() {
             </div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {CONFIG_SECTIONS.map((section: ConfigSection) => (
               <div key={section.key} className="bg-dark-700/50 rounded-lg p-3 border border-surface-border">
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{section.label}</h4>
@@ -555,7 +1257,7 @@ export default function ChannelDetail() {
       {/* --- Auth Modal --- */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowAuthModal(false)}>
-          <div className="glass rounded-xl p-6 w-full max-w-lg space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-lg mx-4 sm:mx-0 space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
             <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2"><Key size={18} className="text-neon-cyan" /> Conectar YouTube</h3>
             <p className="text-sm text-gray-400">
               1. Abre esta URL en tu navegador:<br/>
@@ -586,7 +1288,7 @@ export default function ChannelDetail() {
       {/* --- Manual Setup Modal --- */}
       {showManualSetup && manualSetup && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowManualSetup(false)}>
-          <div className="glass rounded-xl p-6 w-full max-w-lg space-y-4 animate-slide-up max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-lg mx-4 sm:mx-0 space-y-4 animate-slide-up max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2"><Clipboard size={18} className="text-neon-gold" /> Configuración Manual</h3>
             <p className="text-xs text-gray-500">Estos campos NO se pueden subir por API. Debes configurarlos en YouTube Studio.</p>
             
@@ -639,6 +1341,49 @@ export default function ChannelDetail() {
             )}
 
             <button onClick={() => setShowManualSetup(false)} className="w-full py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500">Cerrar</button>
+          </div>
+        </div>
+      )}
+
+      {/* --- Template Result Modal --- */}
+      {templateResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTemplateResult(null)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-sm mx-4 sm:mx-0 space-y-4 animate-slide-up text-center" onClick={e => e.stopPropagation()}>
+            <div className={`text-4xl ${templateResult.ok ? 'text-green-400' : 'text-red-400'}`}>
+              {templateResult.ok ? '✅' : '❌'}
+            </div>
+            <p className="text-sm text-gray-300 leading-relaxed">{templateResult.message}</p>
+            <button
+              onClick={() => setTemplateResult(null)}
+              className="w-full py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500 transition"
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* --- Delete Confirm Modal --- */}
+      {deleteTarget !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDeleteTarget(null)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-sm mx-4 sm:mx-0 space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2 text-red-400">
+              <Trash2 size={20} />
+              <h3 className="font-display text-lg font-semibold text-white">Eliminar video</h3>
+            </div>
+            <p className="text-sm text-gray-400">
+              ¿Seguro que quieres eliminar este video? Esta acción no se puede deshacer.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setDeleteTarget(null)}
+                className="px-4 py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500 transition">
+                Cancelar
+              </button>
+              <button onClick={() => handleDelete(deleteTarget!)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-500 transition flex items-center gap-1.5">
+                <Trash2 size={14} /> Eliminar
+              </button>
+            </div>
           </div>
         </div>
       )}

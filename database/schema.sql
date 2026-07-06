@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS raw_content (
     score       INTEGER DEFAULT 0,          -- upvotes / relevance
     scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     used        BOOLEAN DEFAULT 0,          -- already processed?
-    canal       TEXT DEFAULT 'canal1'
+    canal       TEXT DEFAULT 'canal2'
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_unused ON raw_content(canal, used, scraped_at);

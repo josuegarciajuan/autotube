@@ -19,8 +19,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Red
 
 from api.deps import get_db
 from api.progress import get_progress_manager
-from api.routers import channels, videos, scenes, jobs, schedules, ws as ws_router
-from api.routers import auth
+from api.routers import channels, videos, scenes, jobs, schedules, sources, voices, dashboard, system, ws as ws_router
+from api.routers import auth, planning, shorts
+from api.routers import monetization, milestones, analytics
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH
@@ -30,6 +31,20 @@ from config.settings import TOKENS_DIR, DATABASE_PATH
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── File-based logging (adds FileHandler to root logger) ──
+    LOG_DIR = Path(__file__).parent.parent / "logs"
+    LOG_DIR.mkdir(exist_ok=True)
+    root_logger = logging.getLogger()
+    if not any(isinstance(h, logging.FileHandler) and 
+               str(LOG_DIR / "api.log") in getattr(h, 'baseFilename', '')
+               for h in root_logger.handlers):
+        fh = logging.FileHandler(LOG_DIR / "api.log")
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        root_logger.addHandler(fh)
+        logging.getLogger("autotube").info("File logging enabled → logs/api.log")
+    
     # Startup
     init_db()
     migrate_v2()
@@ -40,12 +55,46 @@ async def lifespan(app: FastAPI):
         synced = sync_all_configs_to_db()
         logger = logging.getLogger("autotube.startup")
         logger.info("Config sync: %d channel(s) synced → %s", len(synced), synced)
+        # Validate visual configs (catches out-of-range values from DB or config files)
+        try:
+            from config.config_validator import validate_all_channels
+            val_warnings = validate_all_channels()
+            if val_warnings:
+                logger.warning("Config validation: %d warning(s):", len(val_warnings))
+                for w in val_warnings:
+                    logger.warning("  %s", w)
+            else:
+                logger.info("Config validation: all channels within safe ranges")
+        except Exception as val_exc:
+            logger.warning("Config validation skipped: %s", val_exc)
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
+    
+    # Auto-recover failed/interrupted videos from previous run
+    # DISABLED: interferes with new generation jobs and causes ffmpeg
+    # BrokenPipeError due to concurrent renders. Recovery will be
+    # re-enabled after fixing serialization of ffmpeg access.
+    try:
+        from api.services.generation_service import auto_recover_on_startup
+        # await auto_recover_on_startup()
+        logging.getLogger("autotube.startup").info("Auto-recovery skipped (disabled pending fix)")
+    except Exception as exc:
+        logging.getLogger("autotube.startup").warning(
+            "Auto-recovery skipped: %s", exc
+        )
     
     # Launch schedule checker in background
     import asyncio
     schedule_task = asyncio.create_task(_schedule_checker_loop())
+    
+    # Ensure today has planned slots
+    try:
+        from api.services.planning_service import ensure_today_planned, ensure_shorts_planned
+        ensure_today_planned()
+        ensure_shorts_planned()
+        logging.getLogger("autotube.startup").info("Planning: today's slots ensured (videos + shorts)")
+    except Exception as exc:
+        logging.getLogger("autotube.startup").warning("Planning init skipped: %s", exc)
     
     yield
     
@@ -57,8 +106,69 @@ async def lifespan(app: FastAPI):
         pass
 
 
+# ── Orphan detection config ─────────────────────────────────
+ORPHAN_TIMEOUT_MINUTES = 60  # Jobs older than this without progress are declared orphaned
+
+
+async def _queue_consumer():
+    """Process queued generation jobs sequentially, one at a time.
+    
+    Only dispatches when:
+    - No job is currently running
+    - Enough RAM is available (4 GB minimum)
+    
+    Jobs bypassing the queue (manual dashboard generation) are started
+    directly via the API endpoint and skip this consumer.
+    """
+    import logging
+    logger = logging.getLogger("autotube.queue")
+    
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        
+        # Guard: don't dispatch if a job is already running
+        jobs = db.get_active_jobs()
+        running = [j for j in jobs if j["status"] == "running"]
+        if running:
+            return
+        
+        # Find next queued job
+        next_job = db.get_next_queued_job()
+        if not next_job:
+            return
+        
+        # RAM gate: need at least 4 GB free
+        try:
+            from pipeline.ram_governor import is_ram_ok_for_dispatch
+            if not is_ram_ok_for_dispatch():
+                logger.info(
+                    "Queue consumer: insufficient RAM — skipping dispatch for job #%d",
+                    next_job["id"],
+                )
+                return
+        except ImportError:
+            pass  # ram_governor not available — proceed
+        
+        logger.info(
+            "Queue consumer: dispatching job #%d (channel_id=%d, action=%s)",
+            next_job["id"], next_job["channel_id"], next_job.get("action", "?"),
+        )
+        
+        from api.services.generation_service import start_generation_job
+        asyncio.create_task(start_generation_job(
+            job_id=next_job["id"],
+            channel_id=next_job["channel_id"],
+            video_id=next_job["video_id"],
+            action=next_job.get("action", "generate_and_upload"),
+        ))
+        
+    except Exception as e:
+        logger.error("Queue consumer error: %s", e)
+
+
 async def _schedule_checker_loop():
-    """Background loop that checks content_schedules and collects YouTube stats."""
+    """Background loop that checks schedules, planned slots, orphans, and collects YouTube stats."""
     import asyncio, logging, time
     logger = logging.getLogger("autotube.scheduler")
     
@@ -68,6 +178,10 @@ async def _schedule_checker_loop():
         try:
             await asyncio.sleep(300)  # Check every 5 minutes
             await _process_due_schedules()
+            await _process_planned_slots()
+            await _queue_consumer()          # Process queued generation jobs sequentially
+            await _detect_and_clean_orphans()
+            await _process_shorts_schedule()
             
             # Collect YouTube stats every 6 hours
             now = time.time()
@@ -82,6 +196,22 @@ async def _schedule_checker_loop():
             await asyncio.sleep(60)
 
 
+async def _process_planned_slots():
+    """Process due planned_slots using the dynamic planning engine."""
+    import logging
+    logger = logging.getLogger("autotube.planner")
+    try:
+        from api.services.planning_service import process_planned_slots as dispatch
+        result = dispatch()
+        if result:
+            logger.info(
+                "Planning dispatched: slot=%d job=%d video=%d channel=%s",
+                result["slot_id"], result["job_id"], result["video_id"], result["channel_slug"],
+            )
+    except Exception as e:
+        logger.error("Planning dispatch error: %s", e)
+
+
 async def _process_due_schedules():
     """Find and execute due schedules."""
     import sqlite3, logging
@@ -89,8 +219,17 @@ async def _process_due_schedules():
     from config.settings import DATABASE_PATH
     logger = logging.getLogger("autotube.scheduler")
     
-    conn = sqlite3.connect(str(DATABASE_PATH))
+    # Guard: don't dispatch if another generation is already running
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    active = db.get_active_job()
+    if active:
+        logger.debug("Due schedules skipped: active job #%d running", active["id"])
+        return
+    
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = conn.execute(
@@ -116,7 +255,7 @@ async def _process_due_schedules():
             
             # Create a video record
             cursor = conn.execute(
-                "INSERT INTO videos (canal, channel_id, video_path, status, progress) VALUES (?, ?, '', 'generating', 0)",
+                "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
                 (s["channel_slug"], s["channel_id"]),
             )
             conn.commit()
@@ -127,10 +266,17 @@ async def _process_due_schedules():
             
             # Update schedule: calculate next run
             if s["schedule_type"] == "recurring":
-                next_run = f"datetime('now', '+{s['interval_h']} hours')"
+                # Sanitize interval_h (must be a positive integer) to prevent SQL injection
+                try:
+                    interval_h = int(s["interval_h"])
+                    if interval_h <= 0:
+                        interval_h = 1
+                except (ValueError, TypeError):
+                    interval_h = 1
                 conn.execute(
-                    "UPDATE content_schedules SET last_run_at = ?, next_run_at = {}, video_id = ? WHERE id = ?".format(next_run),
-                    (now, video_id, s["id"]),
+                    "UPDATE content_schedules SET last_run_at = ?, "
+                    "next_run_at = datetime('now', '+' || ? || ' hours'), video_id = ? WHERE id = ?",
+                    (now, str(interval_h), video_id, s["id"]),
                 )
             else:
                 # One-time: deactivate after run
@@ -163,6 +309,50 @@ async def _process_due_schedules():
     conn.close()
 
 
+async def _detect_and_clean_orphans():
+    """Detect orphaned generation jobs/videos and mark them as failed.
+    
+    Runs every 5 minutes as part of the schedule checker loop.
+    Declares a job/video orphaned if stuck for > ORPHAN_TIMEOUT_MINUTES (60 min).
+    
+    Offloaded to thread pool to avoid blocking the async event loop.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.orphans")
+    
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _detect_and_clean_orphans_sync)
+    except Exception as exc:
+        logger.error("Orphan detection failed: %s", exc)
+
+
+def _detect_and_clean_orphans_sync():
+    """Synchronous orphan detection logic (runs in thread pool)."""
+    import logging
+    logger = logging.getLogger("autotube.orphans")
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        result = db.cleanup_orphaned_jobs(timeout_minutes=ORPHAN_TIMEOUT_MINUTES)
+        
+        if result["jobs_failed"] == 0 and result["videos_reset"] == 0:
+            logger.debug("Orphan check: all clear")
+    except Exception as exc:
+        logger.error("Orphan detection failed: %s", exc)
+
+
+async def _process_shorts_schedule():
+    """Process daily shorts schedule using the planning service."""
+    import logging
+    logger = logging.getLogger("autotube.shorts_scheduler")
+    try:
+        from api.services.planning_service import process_shorts_slots
+        process_shorts_slots()
+    except Exception as e:
+        logger.error("Shorts schedule error: %s", e)
+
+
 async def _collect_youtube_stats():
     """Collect YouTube stats for all active channels with valid tokens."""
     import logging
@@ -171,6 +361,7 @@ async def _collect_youtube_stats():
     try:
         from database.db_extended import ExtendedDatabase
         from pipeline.youtube_stats import YouTubeStatsFetcher
+        from pipeline.monetization import calc_video_revenue, calc_channel_revenue_total
         
         db = ExtendedDatabase()
         channels = db.get_channels(active_only=True)
@@ -190,6 +381,65 @@ async def _collect_youtube_stats():
                     result.get("videos_updated", 0),
                     result.get("channel_updated", False),
                 )
+                
+                # Calculate and store estimated revenue for this channel
+                if ch.get("cpm_min") and ch.get("cpm_max"):
+                    cpm_min = ch["cpm_min"]
+                    cpm_max = ch["cpm_max"]
+                    
+                    # Per-video revenue
+                    videos = db.get_videos(channel_id=ch["id"], limit=200)
+                    for v in videos:
+                        if v.get("yt_video_id"):
+                            latest_stats = db.get_video_stats_history(v["id"], days=7)
+                            if latest_stats:
+                                views = latest_stats[-1].get("views", 0) or 0
+                                rev_min, rev_max = calc_video_revenue(views, cpm_min, cpm_max)
+                                # Update the latest stats entry with revenue
+                                import sqlite3
+                                with db._connect() as conn:
+                                    conn.execute(
+                                        """UPDATE video_stats_history
+                                           SET estimated_revenue_min = ?, estimated_revenue_max = ?
+                                           WHERE id = ?""",
+                                        (rev_min, rev_max, latest_stats[-1]["id"]),
+                                    )
+                                    conn.commit()
+                    
+                    # Channel-level revenue snapshot
+                    revenue = calc_channel_revenue_total(db, ch["id"])
+                    import sqlite3
+                    with db._connect() as conn:
+                        conn.execute(
+                            """UPDATE channel_stats_history
+                               SET estimated_revenue_min = ?, estimated_revenue_max = ?
+                               WHERE id = (
+                                   SELECT MAX(id) FROM channel_stats_history WHERE channel_id = ?
+                               )""",
+                            (round(revenue.get("total_min", 0), 2),
+                             round(revenue.get("total_max", 0), 2),
+                             ch["id"]),
+                        )
+                        conn.commit()
+                    logger.info(
+                        "Revenue calculated for %s: $%.2f — $%.2f",
+                        slug,
+                        revenue.get("total_min", 0),
+                        revenue.get("total_max", 0),
+                    )
+                
+                # Check for newly achieved milestones
+                try:
+                    from pipeline.milestones import check_and_record_milestones
+                    new_milestones = check_and_record_milestones(db, ch["id"])
+                    if new_milestones > 0:
+                        logger.info(
+                            "Milestones: %d new achieved for %s",
+                            new_milestones, slug,
+                        )
+                except Exception as me:
+                    logger.warning("Milestone check failed for %s: %s", slug, me)
+                    
             except Exception as exc:
                 logger.error("Stats collection failed for %s: %s", slug, exc)
     except Exception as exc:
@@ -222,6 +472,15 @@ app.include_router(videos.router, prefix="/api/videos", tags=["Videos"])
 app.include_router(scenes.router, prefix="/api/scenes", tags=["Scenes"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(schedules.router, prefix="/api/schedules", tags=["Schedules"])
+app.include_router(planning.router, prefix="/api/planning", tags=["Planning"])
+app.include_router(sources.router, prefix="/api/sources", tags=["Sources"])
+app.include_router(voices.router, prefix="/api", tags=["Voices"])
+app.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
+app.include_router(system.router, prefix="/api", tags=["System"])
+app.include_router(shorts.router, tags=["Shorts"])
+app.include_router(monetization.router, prefix="/api", tags=["Monetization"])
+app.include_router(milestones.router, prefix="/api", tags=["Milestones"])
+app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")
@@ -395,6 +654,56 @@ async def serve_thumbnail(video_id: int):
         raise HTTPException(404, "Thumbnail file not found on disk")
 
     return FileResponse(thumb_path, media_type="image/jpeg", headers=NO_CACHE_MEDIA)
+
+
+@app.get("/api/channels/{channel_id}/templates/{segment_type}/file")
+async def serve_template_file(channel_id: int, segment_type: str, request: Request):
+    """Stream a channel template mini-video (intro/cta/outro) with range support."""
+    if segment_type not in ("intro", "cta", "outro"):
+        raise HTTPException(400, "segment_type must be intro, cta, or outro")
+
+    db = get_db()
+    tpl = db.get_channel_template(channel_id, segment_type)
+    if not tpl or not tpl.get("video_path"):
+        raise HTTPException(404, "Template not found")
+
+    video_path = resolve_media_path(tpl["video_path"])
+    if video_path is None or not video_path.exists():
+        raise HTTPException(404, "Template file not found on disk")
+
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        start_str, end_str = range_header.replace("bytes=", "").split("-")
+        start = int(start_str)
+        end = int(end_str) if end_str else file_size - 1
+        chunk_size = end - start + 1
+
+        async def ranged_stream():
+            with open(video_path, "rb") as f:
+                f.seek(start)
+                bytes_sent = 0
+                while bytes_sent < chunk_size:
+                    buf = f.read(min(65536, chunk_size - bytes_sent))
+                    if not buf:
+                        break
+                    bytes_sent += len(buf)
+                    yield buf
+
+        return StreamingResponse(
+            ranged_stream(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+                **NO_CACHE_MEDIA,
+            },
+        )
+
+    return FileResponse(video_path, media_type="video/mp4", headers=NO_CACHE_MEDIA)
 
 
 # ── Static files (React SPA) ─────────────────────────────────

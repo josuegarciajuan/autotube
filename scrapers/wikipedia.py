@@ -7,11 +7,11 @@ import urllib.parse
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from config.canal1_config import (
+from config.canal2_config import (
     CANAL_NAME as _DEFAULT_CANAL,
     WIKIPEDIA_CATEGORIES as _DEFAULT_CATEGORIES,
 )
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, register_scraper
 
 if TYPE_CHECKING:
     from database.db import Database
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@register_scraper("wikipedia")
 class WikipediaScraper(BaseScraper):
     """Scrapes Wikipedia articles via the public REST and Action APIs.
 

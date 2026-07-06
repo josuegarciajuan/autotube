@@ -19,7 +19,9 @@ from config.settings import (
     REDDIT_CLIENT_SECRET,
     REDDIT_USER_AGENT,
 )
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, register_scraper
+from scrapers.base import (PermanentBlock, AuthenticationError,
+                            RateLimitError, APIUnavailable, ContentNotFound)
 
 if TYPE_CHECKING:
     from database.db import Database
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@register_scraper("reddit")
 class RedditScraper(BaseScraper):
     """Scrapes Reddit posts via a priority-ordered chain of sources."""
 
@@ -43,6 +46,13 @@ class RedditScraper(BaseScraper):
     # Official OAuth endpoint
     OAUTH_BASE: str = "https://oauth.reddit.com"
     OAUTH_TOKEN_URL: str = "https://www.reddit.com/api/v1/access_token"
+
+    # ── Global block detection ──────────────────────────────────
+    # When Reddit detects datacenter IPs, ALL subreddits return 403.
+    # Once we see a definitive 403 response, skip remaining subreddits
+    # to avoid wasting time (17+ subreddits × 4 sources × 3 retries).
+    _reddit_blocked: bool = False
+    _blocked_at_source: str = ""
 
     def __init__(
         self,
@@ -67,7 +77,7 @@ class RedditScraper(BaseScraper):
 
         # ── Subreddits, sort, time, limit ──────────────────────
         # Priority: constructor params > config object > module-level defaults
-        from config.canal1_config import (
+        from config.canal2_config import (
             CANAL_NAME as _DEFAULT_CANAL,
             REDDIT_SUBREDDITS as _DEFAULT_SUBS,
             REDDIT_SORT as _DEFAULT_SORT,
@@ -115,6 +125,14 @@ class RedditScraper(BaseScraper):
         # Build source chain (ordered by priority)
         self._sources: list[tuple[str, Callable[[str], list[dict]]]] = self._build_source_chain()
 
+        # Fail-fast: track consecutive subreddits with zero posts
+        # to detect global IP block early (3 consecutive = blocked).
+        self._empty_subreddits: int = 0
+
+        # PullPush-specific circuit breaker: skip after 3 consecutive failures
+        self._pullpush_failures: int = 0
+        self._pullpush_degraded: bool = False
+
     # ── Source chain ─────────────────────────────────────────────
 
     def _build_source_chain(self) -> list[tuple[str, Callable[[str], list[dict]]]]:
@@ -141,6 +159,16 @@ class RedditScraper(BaseScraper):
         seen_urls: set[str] = set()
 
         for subreddit in self.subreddits:
+            # ── Fail-fast: Reddit is blocking this IP ──────────
+            if self._reddit_blocked:
+                self.logger.warning(
+                    "Skipping remaining %d subreddits — Reddit is blocking this IP "
+                    "(detected via %s)",
+                    len(self.subreddits) - self.subreddits.index(subreddit),
+                    self._blocked_at_source,
+                )
+                break
+
             self.logger.info("Scraping r/%s (%s/%s, limit=%d)",
                              subreddit, self.sort, self.time_filter, self.limit)
 
@@ -199,12 +227,28 @@ class RedditScraper(BaseScraper):
                 if posts:
                     self.logger.info("r/%s: %d posts from '%s'",
                                      subreddit, len(posts), source_name)
+                    self._empty_subreddits = 0  # reset fail counter on success
+                    self._reddit_blocked = False
                     return posts
             except Exception as exc:
                 self.logger.warning("r/%s: source '%s' failed: %s",
                                     subreddit, source_name, exc)
 
         self.logger.warning("r/%s: ALL sources exhausted (0 posts)", subreddit)
+        self._empty_subreddits += 1
+
+        # After 3 consecutive empty subreddits, assume global IP block
+        if self._empty_subreddits >= 3 and not self._reddit_blocked:
+            self._reddit_blocked = True
+            self._blocked_at_source = (
+                f"3 consecutive subreddits returned 0 posts across all sources "
+                f"(last: r/{subreddit})"
+            )
+            self.logger.warning(
+                "🔒 Reddit global block detected — %s. Skipping remaining subreddits.",
+                self._blocked_at_source,
+            )
+
         return []
 
     # ── Source: Official Reddit OAuth API ────────────────────────
@@ -273,7 +317,11 @@ class RedditScraper(BaseScraper):
 
         API: https://api.pullpush.io/reddit/search/submission/
         Returns: {"data": [{post fields ...}], "metadata": {...}}
+        Includes circuit breaker: after 3 consecutive failures, skips PullPush.
         """
+        if self._pullpush_degraded:
+            return []
+
         params = (
             f"?subreddit={subreddit}"
             f"&sort=desc&sort_type=score"
@@ -281,9 +329,33 @@ class RedditScraper(BaseScraper):
             f"&over_18=false"
         )
         url = f"{self.PULLPUSH_URL}{params}"
-        data = self._request(url)
-        if data is None or not isinstance(data, dict):
+        try:
+            data = self._request(url)
+        except (PermanentBlock, AuthenticationError):
+            self._pullpush_degraded = True
+            self.logger.warning("PullPush permanently blocked — degraded immediately")
             return []
+        except (RateLimitError, APIUnavailable):
+            self._pullpush_failures += 1
+            if self._pullpush_failures >= 3:
+                self._pullpush_degraded = True
+                self.logger.warning(
+                    "🔒 PullPush degraded after %d consecutive failures — skipping for remaining subreddits",
+                    self._pullpush_failures,
+                )
+            return []
+        if data is None or not isinstance(data, dict):
+            self._pullpush_failures += 1
+            if self._pullpush_failures >= 3:
+                self._pullpush_degraded = True
+                self.logger.warning(
+                    "🔒 PullPush degraded after %d consecutive failures — skipping for remaining subreddits",
+                    self._pullpush_failures,
+                )
+            return []
+
+        self._pullpush_failures = 0  # reset on success
+        self._pullpush_degraded = False
 
         posts = data.get("data", [])
         if not isinstance(posts, list):

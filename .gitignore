@@ -11,6 +11,7 @@ output/*
 !output/images/.gitkeep
 !output/videos/.gitkeep
 !output/thumbnails/.gitkeep
+!output/templates/.gitkeep
 
 # Python
 __pycache__/

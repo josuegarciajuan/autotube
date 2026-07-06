@@ -9,8 +9,9 @@ from types import SimpleNamespace
 
 import requests
 
-from config import canal1_config as _default_cfg
+from config import canal2_config as _default_cfg
 from config import settings
+from pipeline.rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -166,16 +167,23 @@ class UnsplashProvider(ImageProvider):
             raise ValueError("Unsplash access key is required")
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Client-ID {access_key}"
+        self._rate_limiter = TokenBucketRateLimiter.get("unsplash")
         logger.info("UnsplashProvider initialized")
 
-    def search(self, query: str, n: int = 1, style_modifiers: str = "") -> list[dict]:
+    def search(self, query: str, n: int = 1, style_modifiers: str = "", orientation: str = "landscape") -> list[dict]:
         if n < 1:
+            return []
+
+        # Non-blocking: if rate limit is exhausted, return empty so
+        # the caller can immediately fall through to Pexels instead of
+        # sleeping for minutes and blocking the entire pipeline.
+        if not self._rate_limiter.try_acquire():
             return []
 
         params: dict = {
             "query": query,
             "per_page": min(n, 30),
-            "orientation": "landscape",
+            "orientation": orientation,
         }
 
         try:
@@ -229,16 +237,21 @@ class PexelsProvider(ImageProvider):
             raise ValueError("Pexels API key is required")
         self._session = requests.Session()
         self._session.headers["Authorization"] = api_key
+        self._rate_limiter = TokenBucketRateLimiter.get("pexels")
         logger.info("PexelsProvider initialized")
 
-    def search(self, query: str, n: int = 1, style_modifiers: str = "") -> list[dict]:
+    def search(self, query: str, n: int = 1, style_modifiers: str = "", orientation: str = "landscape") -> list[dict]:
         if n < 1:
+            return []
+
+        # Non-blocking: skip to fallback if exhausted
+        if not self._rate_limiter.try_acquire():
             return []
 
         params: dict = {
             "query": query,
             "per_page": min(n, 80),
-            "orientation": "landscape",
+            "orientation": orientation,
         }
 
         try:

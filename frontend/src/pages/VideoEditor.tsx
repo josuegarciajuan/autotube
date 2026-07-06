@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { api, formatDuration, formatDate, statusBadge, statusLabel, truncate, mediaUrl, apiUrl } from '../lib/api'
+import { api, formatDuration, formatDate, formatDateTime, formatTimingMs, statusBadge, statusLabel, truncate, mediaUrl, apiUrl } from '../lib/api'
 import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2 } from 'lucide-react'
 
 export default function VideoEditor() {
@@ -144,48 +144,48 @@ export default function VideoEditor() {
   return (
     <div className="max-w-7xl mx-auto space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <Link to={`/channels/${video.channel_id}`} className="text-sm text-gray-500 hover:text-white flex items-center gap-1 mb-1">
+          <Link to={`/channels/${video.channel_id}`} className="text-xs sm:text-sm text-gray-500 hover:text-white flex items-center gap-1 mb-1">
             <ArrowLeft size={14} /> Volver al canal
           </Link>
-          <h2 className="font-display text-xl font-bold text-white flex items-center gap-2">
-            <Edit3 size={20} className="text-neon-red" />
+          <h2 className="font-display text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+            <Edit3 size={18} className="text-neon-red" />
             {video.titulo_final || 'Video sin título'}
           </h2>
           <div className="flex items-center gap-2 mt-1">
             <span className={`badge ${statusBadge(video.status || 'draft')}`}>{statusLabel(video.status || 'draft')}</span>
             {video.duracion_seg && <span className="text-xs text-gray-500">{formatDuration(video.duracion_seg)}</span>}
-            <span className="text-xs text-gray-500">{formatDate(video.created_at)}</span>
+            <span className="text-xs text-gray-500">{formatDateTime(video.uploaded_at || video.created_at)}{video.timing_data?.total_duration_ms ? ` — ${formatTimingMs(video.timing_data.total_duration_ms)}` : ''}</span>
           </div>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-1.5 sm:gap-2">
           <button
             onClick={() => setShowMetadataEditor(!showMetadataEditor)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-sm text-gray-300 hover:bg-dark-600 transition-colors"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-xs sm:text-sm text-gray-300 hover:bg-dark-600 transition-colors"
           >
             <Save size={14} />
-            Metadata
+            <span className="hidden sm:inline">Metadata</span>
           </button>
           <button
             onClick={handleGenerateMarketing}
             disabled={loadingMarketing}
-            className="flex items-center gap-1.5 px-3 py-2 bg-neon-gold/10 border border-neon-gold/30 rounded-lg text-sm text-neon-gold hover:bg-neon-gold/20 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-2 bg-neon-gold/10 border border-neon-gold/30 rounded-lg text-xs sm:text-sm text-neon-gold hover:bg-neon-gold/20 transition-colors disabled:opacity-50"
           >
             <Wand2 size={14} />
-            {loadingMarketing ? 'Generando...' : 'Marketing IA'}
+            <span className="hidden sm:inline">{loadingMarketing ? 'Generando...' : 'Marketing IA'}</span>
           </button>
           <button
             onClick={handleRegenerateThumbnail}
-            className="flex items-center gap-1.5 px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-sm text-gray-300 hover:bg-dark-600 transition-colors"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-xs sm:text-sm text-gray-300 hover:bg-dark-600 transition-colors"
           >
             <Image size={14} />
-            Miniatura
+            <span className="hidden sm:inline">Miniatura</span>
           </button>
           <button
             onClick={handleUpload}
-            className="flex items-center gap-1.5 px-4 py-2 bg-neon-red text-white rounded-lg text-sm font-medium hover:bg-neon-red/80 transition-colors"
+            className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-neon-red text-white rounded-lg text-xs sm:text-sm font-medium hover:bg-neon-red/80 transition-colors"
           >
             <Upload size={14} />
             {video.yt_video_id ? 'Resubir' : 'Subir a YT'}

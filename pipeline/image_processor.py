@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 
-from config import canal1_config as cfg
+from config import canal2_config as cfg
 from config import settings
 
 logger = logging.getLogger(__name__)

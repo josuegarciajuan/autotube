@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
-from config.canal1_config import (
+from config.canal2_config import (
     CANAL_DISPLAY_NAME,
     COLOR_PALETTE,
     THUMBNAIL_BORDER_WIDTH,
@@ -29,28 +29,63 @@ from config.settings import THUMBNAILS_DIR
 logger = logging.getLogger(__name__)
 
 
-def _find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Find an available TrueType font, falling back to default."""
-    candidates = [
+# ── Font registry ──────────────────────────────────────────────
+# Maps short font-family names to a priority-ordered list of
+# absolute TTF paths.  The first file found on disk wins.
+_FONT_REGISTRY: dict[str, list[str]] = {
+    "DejaVuSans-Bold": [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-Regular.ttf",
-    ]
-    kwargs = {}
+    ],
+    "DejaVuSerif-Bold": [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    ],
+    "LiberationSerif-Bold": [
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ],
+}
+
+# Default sans-serif candidates (used when font_name is not in registry)
+_FONT_FALLBACK_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-Regular.ttf",
+]
+
+
+def _find_font(size: int, bold: bool = False,
+               font_name: str | None = None) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Find an available TrueType font, falling back to default.
+
+    Args:
+        size: Font size in points.
+        bold: When True AND font_name is None, prefer a Bold weight.
+        font_name: Optional registry key (e.g. ``\"DejaVuSerif-Bold\"``).
+            If the key exists in ``_FONT_REGISTRY`` those exact paths
+            are tried first.  Otherwise the standard sans-serif
+            candidates are used.
+    """
+    # ── 1. Try named registry entry ─────────────────────────────
+    if font_name and font_name in _FONT_REGISTRY:
+        for path in _FONT_REGISTRY[font_name]:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size)
+        logger.warning("Registered font %r not found on disk; falling back.", font_name)
+
+    # ── 2. Standard sans-serif fallback ─────────────────────────
+    candidates = list(_FONT_FALLBACK_CANDIDATES)
     if not bold and "Bold" in candidates[0]:
-        for p in candidates:
-            if "Bold" not in p:
-                kwargs["candidates"] = candidates[1:]  # will still try bold first as fallback
-                break
+        # Push the first (bold) candidate to the end so regular is tried first
+        candidates = candidates[1:] + [candidates[0]]
 
     for path in candidates:
         if Path(path).exists():
             return ImageFont.truetype(path, size)
+
     logger.warning("No TrueType font found; using default bitmap font.")
     return ImageFont.load_default()
 
@@ -60,9 +95,9 @@ class ThumbnailMaker:
 
     def __init__(self, config=None):
         if config is None:
-            from config import canal1_config
+            from config import canal2_config
 
-            config = canal1_config
+            config = canal2_config
         self.width = getattr(config, "THUMBNAIL_WIDTH", THUMBNAIL_WIDTH)
         self.height = getattr(config, "THUMBNAIL_HEIGHT", THUMBNAIL_HEIGHT)
         self.font_size = getattr(config, "THUMBNAIL_FONT_SIZE", THUMBNAIL_FONT_SIZE)
@@ -73,8 +108,26 @@ class ThumbnailMaker:
         self._channel_cfg = config
         self._last_raw_base: Path | None = None  # raw Pollo image before F4 composition
 
-        self.font = _find_font(self.font_size, bold=True)
-        self.font_small = _find_font(int(self.font_size * 0.65), bold=True)
+        # ── Per-channel thumbnail customisation (v2.1) ──────────
+        self.font_family = getattr(config, "THUMBNAIL_FONT_FAMILY", "DejaVuSans-Bold")
+        self.border_color = self._parse_color(
+            getattr(config, "THUMBNAIL_BORDER_COLOR", "#CC0000")
+        )
+        self.show_4k_badge = getattr(config, "THUMBNAIL_SHOW_4K_BADGE", True)
+        self.text_stroke_width = getattr(config, "THUMBNAIL_TEXT_STROKE_WIDTH", 0)
+        self.text_stroke_color = self._parse_color(
+            getattr(config, "THUMBNAIL_TEXT_STROKE_COLOR", "#000000")
+        )
+
+        # ── Rescue-themed overlays (distress signal style) ────────
+        self.rescue_mayday = getattr(config, "THUMBNAIL_RESCUE_MAYDAY", False)
+        self.rescue_coordinates = getattr(config, "THUMBNAIL_RESCUE_COORDINATES", False)
+        self.rescue_sin_senal = getattr(config, "THUMBNAIL_RESCUE_SIN_SENAL", False)
+
+        self.font = _find_font(self.font_size, bold=True,
+                               font_name=self.font_family)
+        self.font_small = _find_font(int(self.font_size * 0.65), bold=True,
+                                     font_name=self.font_family)
 
     def make(
         self, image_path: Path, title: str, channel_name: str | None = None,
@@ -190,7 +243,7 @@ class ThumbnailMaker:
             keywords: SEO keywords for context.
             scene_images: Unused in v2 (Pollo AI generates fresh images).
             script_text: First ~1500 chars of script for context.
-            canal_slug: Channel slug for cache key (e.g. "canal1").
+            canal_slug: Channel slug for cache key (e.g. "canal2").
             channel_display_name: Display name for style engine.
             channel_description: About section for style engine.
             channel_theme: Theme summary for style engine.
@@ -203,7 +256,7 @@ class ThumbnailMaker:
         Returns:
             Path to the generated thumbnail JPEG.
         """
-        slug = canal_slug or "canal1"
+        slug = canal_slug or "canal2"
 
         # ── F1: Style Engine (cached per channel) ──────────────
         logger.info("[Thumbnail v2] F1: Loading channel style for %s", slug)
@@ -337,7 +390,7 @@ class ThumbnailMaker:
         from pipeline.thumbnail_style_engine import build_pollo_prompt
         from pipeline.ai_image_generator import AIImageGenerator
 
-        threshold = THUMBNAIL_QUALITY_THRESHOLD
+        threshold = max(8, THUMBNAIL_QUALITY_THRESHOLD)  # Minimum 8/10
         max_attempts = THUMBNAIL_MAX_QC_ATTEMPTS
 
         prompt = build_pollo_prompt(brief.image_concept, style)
@@ -349,10 +402,10 @@ class ThumbnailMaker:
                 attempt, max_attempts, prompt[:80],
             )
 
-            # Generate 2 variant images
+            # Generate 2 variant images (saves Pollo credits — 2×2=4 max)
             prompts = [
                 prompt,
-                prompt + " alternative composition, different angle",
+                prompt + " alternative composition, different angle and lighting",
             ]
             paths = ai_gen.generate_batch(
                 prompts=prompts,
@@ -389,7 +442,14 @@ class ThumbnailMaker:
                 logger.warning(
                     "QC score %.1f < threshold %d — refining prompt", score, threshold,
                 )
-                prompt = self._refine_prompt(prompt, feedback)
+                if attempt > 1:
+                    # Significantly change the prompt for retry
+                    prompt = self._refine_prompt(
+                        prompt,
+                        feedback + " completely different composition, opposite angle, radically different lighting setup"
+                    )
+                else:
+                    prompt = self._refine_prompt(prompt, feedback)
 
             except Exception as exc:
                 logger.warning("QC vision review failed: %s — using first image", exc)
@@ -411,7 +471,7 @@ class ThumbnailMaker:
         from openai import OpenAI
         from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
 
         # Read images as base64
         import base64
@@ -481,7 +541,7 @@ class ThumbnailMaker:
         from openai import OpenAI
         from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
 
         refine_prompt = f"""Refina este prompt de generación de imagen para mejorar la calidad.
 
@@ -520,6 +580,16 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
 
     # ── F4: Final Composition ─────────────────────────────────
 
+    @staticmethod
+    def _parse_color(value) -> tuple[int, int, int]:
+        """Accept hex string '#RRGGBB' or a 3-tuple of ints."""
+        if isinstance(value, tuple) and len(value) == 3:
+            return value
+        hex_str = str(value).lstrip("#")
+        if len(hex_str) == 3:
+            hex_str = "".join(c * 2 for c in hex_str)
+        return tuple(int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+
     def _compose_final(
         self,
         base_image: Path,
@@ -544,17 +614,23 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         img = Image.open(base_image).convert("RGB")
         img = self._resize_center_crop(img)
 
-        # Color grading per style
+        # Color grading per style (boosted 1.5x for viral impact)
         effects = style.get("effects", {})
-        contrast_boost = float(effects.get("contrast_boost", 1.3))
-        saturation = float(effects.get("saturation", 0.85))
+        contrast_boost = float(effects.get("contrast_boost", 1.3)) * 1.5
+        saturation = float(effects.get("saturation", 0.85)) * 1.5
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(contrast_boost)
         enhancer = ImageEnhance.Color(img)
         img = enhancer.enhance(saturation)
 
+        # Apply sharpening filter to the focal area
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(2.0)
+
+
         # ── Focus vignette (radial darkening → draws eye to centre) ──
-        img = self._apply_focus_vignette(img)
+        # More subtle vignette to keep image bright
+        img = self._apply_focus_vignette(img, strength=0.6)  # reduced from 1.0
 
         # Dark gradient overlay (bottom 50%)
         overlay = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
@@ -583,7 +659,8 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
 
         viral_font_size = int(self.font_size * 1.3)
-        viral_font = _find_font(viral_font_size, bold=True)
+        viral_font = _find_font(viral_font_size, bold=True,
+                                font_name=self.font_family)
 
         if text_for_visual:
             lines = self._wrap_text_viral(
@@ -593,18 +670,20 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
             )
             self._draw_viral_text_with_palette(
                 draw, lines, viral_font, text_color, shadow_color,
+                stroke_width=self.text_stroke_width,
+                stroke_color=self.text_stroke_color,
             )
 
-        # ── 4K Badge ─────────────────────────────────────────
-        self._draw_4k_badge(draw)
+        # ── 4K Badge (per-channel configurable) ────────────────
+        if self.show_4k_badge:
+            self._draw_4k_badge(draw)
 
-        # ── Red brand border (fixed, all channels) ─────────────
-        border_w = max(5, self.border_width + 1)
-        red_border = (204, 0, 0)  # #CC0000 — brand red, high contrast
+        # ── Border (per-channel configurable color) ─────────────
+        border_w = max(6, self.border_width + 2)  # thicker for viral impact
         for i in range(border_w):
             draw.rectangle(
                 [i, i, self.width - 1 - i, self.height - 1 - i],
-                outline=red_border,
+                outline=self.border_color,
             )
 
         # ── Classified stamp (if style matches) ──────────────
@@ -615,6 +694,14 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
                 "text_primary": text_color,
                 "text_shadow": shadow_color,
             })
+
+        # ── Rescue-themed overlays (distress signal) ────────────
+        if self.rescue_mayday:
+            self._draw_mayday_banner(draw)
+        if self.rescue_sin_senal:
+            self._draw_sin_senal_stamp(draw)
+        if self.rescue_coordinates:
+            self._draw_coordinates_overlay(draw)
 
         # ── Save ─────────────────────────────────────────────
         if video_id and canal_slug:
@@ -659,11 +746,14 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
 
     # ── Focus vignette (radial darkening → eye drawn to centre) ──
 
-    def _apply_focus_vignette(self, img: Image.Image) -> Image.Image:
+    def _apply_focus_vignette(self, img: Image.Image, strength: float = 1.0) -> Image.Image:
         """Apply a soft radial vignette that darkens edges, brightening the centre.
 
         Creates a circular gradient mask: centre is transparent, corners are dark.
         This naturally guides the viewer's eye to the focal point.
+
+        Args:
+            strength: Multiplier for vignette intensity (1.0 = normal, 0.5 = half).
         """
         w, h = self.width, self.height
         cx, cy = w / 2, h / 2
@@ -673,7 +763,7 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         yv, xv = np.ogrid[:h, :w]
         dist = np.sqrt((xv - cx) ** 2 + (yv - cy) ** 2) / max_r
         # Soft curve: start darkening at ~40 % radius, fully dark at edges
-        alpha = np.clip((dist - 0.35) / 0.65, 0, 1) * 140
+        alpha = np.clip((dist - 0.35) / 0.65, 0, 1) * 140 * strength
         alpha = alpha.astype(np.uint8)
 
         vignette_overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -692,8 +782,15 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         font: ImageFont.FreeTypeFont,
         text_color: tuple[int, int, int],
         shadow_color: tuple[int, int, int],
+        stroke_width: int = 0,
+        stroke_color: tuple[int, int, int] = (0, 0, 0),
     ) -> None:
-        """Draw text with aggressive shadow for maximum contrast."""
+        """Draw text with aggressive shadow for maximum contrast.
+
+        When *stroke_width* > 0 a coloured outline is drawn around
+        each glyph BEFORE the fill, so the text stays readable on
+        bright backgrounds without relying solely on drop-shadows.
+        """
         line_height = int(font.size * 1.3)
         total_height = line_height * len(lines)
         start_y = int(self.height * 0.62) + (
@@ -717,10 +814,18 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
                 (x - 1, y + 1),
                 (x + 1, y - 1),
             ]:
-                draw.text((sx, sy), line, font=font, fill=shadow_color)
+                draw.text((sx, sy), line, font=font, fill=shadow_color,
+                          stroke_width=0)
 
-            # Main text
-            draw.text((x, y), line, font=font, fill=text_color)
+            # Optional outline (stroke) - rendered before fill for clean edge
+            if stroke_width > 0:
+                draw.text((x, y), line, font=font,
+                          fill=text_color,
+                          stroke_width=stroke_width,
+                          stroke_fill=stroke_color)
+            else:
+                # Main text (no stroke)
+                draw.text((x, y), line, font=font, fill=text_color)
 
     # ── Helpers ──────────────────────────────────────────────
 
@@ -810,6 +915,125 @@ Responde SOLO con el prompt refinado, sin comillas ni JSON."""
         draw.rectangle([x - 8, y - 4, x + tw + 8, y + bbox[3] - bbox[1] + 6],
                         fill=(*accent, 180), outline=accent)
         draw.text((x, y), stamp_text, font=small_font, fill=(255, 255, 255))
+
+    # ── Rescue-themed overlays (distress signal style) ───────────
+
+    def _draw_mayday_banner(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw emergency MAYDAY hazard banner across the top of the thumbnail.
+
+        A black strip with alternating orange diagonal hazard stripes and
+        a bold white '⚠ MAYDAY' centred label, mimicking emergency rescue tape.
+        """
+        banner_h = 45
+        rescue_orange = (255, 92, 0)
+        black = (13, 13, 13)
+
+        # ── Black background strip ──────────────────────────────
+        draw.rectangle([0, 0, self.width, banner_h], fill=black)
+
+        # ── Diagonal hazard stripes ─────────────────────────────
+        stripe_spacing = 22
+        stripe_width = 8
+        for start_x in range(-banner_h, self.width + banner_h, stripe_spacing):
+            # Each stripe is a parallelogram (slanted rectangle)
+            draw.polygon([
+                (start_x, 0),
+                (start_x + stripe_width, 0),
+                (start_x + banner_h + stripe_width, banner_h),
+                (start_x + banner_h, banner_h),
+            ], fill=rescue_orange)
+
+        # ── MAYDAY text centred on top of stripes ──────────────
+        banner_font = _find_font(26, bold=True)
+        label = "⚠  MAYDAY"
+        bbox = draw.textbbox((0, 0), label, font=banner_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = (self.width - tw) // 2
+        ty = (banner_h - th) // 2 - 1
+
+        # Black outline behind text for readability over stripes
+        for ox, oy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            draw.text((tx + ox, ty + oy), label, font=banner_font, fill=black)
+        draw.text((tx, ty), label, font=banner_font, fill=(255, 255, 255))
+
+    def _draw_coordinates_overlay(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw fake GPS coordinates in bottom-left corner.
+
+        Mimics an expedition log / distress beacon transmission.
+        Coordinates are randomly chosen from a pool of real expedition
+        locations to maintain authenticity.
+        """
+        import random as _random
+
+        coords_pool = [
+            "LAT: 64°08'N  ·  LONG: 21°56'W  ·  SIN CONTACTO",       # Iceland / Franklin area
+            "LAT: 78°13'N  ·  LONG: 15°38'E  ·  ÚLTIMA POSICIÓN",    # Svalbard
+            "LAT: 27°59'S  ·  LONG: 86°56'E  ·  SEÑAL PERDIDA",       # Everest region
+            "LAT: 41°44'N  ·  LONG: 49°57'W  ·  SIN RESPUESTA",       # Titanic area
+            "LAT: 68°50'S  ·  LONG: 90°35'W  ·  EXPEDICIÓN PERDIDA",   # Antarctic
+        ]
+        coord_text = _random.choice(coords_pool)
+
+        # Use monospace font for authentic GPS/radio look
+        mono_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+        if Path(mono_path).exists():
+            mono_font = ImageFont.truetype(mono_path, 14)
+        else:
+            mono_font = _find_font(14, bold=False)
+        padding = 12
+        y = self.height - 32
+
+        # Semi-transparent dark background pill behind text
+        bbox = draw.textbbox((0, 0), coord_text, font=mono_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        draw.rounded_rectangle(
+            [padding - 6, y - 4, padding + tw + 12 + 8, y + th + 4],
+            radius=6,
+            fill=(6, 12, 24),  # deep navy
+            outline=(255, 92, 0),
+            width=1,
+        )
+        # Orange accent dot before text
+        draw.ellipse(
+            [padding + 2, y + th // 2 - 3, padding + 8, y + th // 2 + 3],
+            fill=(255, 92, 0),
+        )
+        draw.text((padding + 14, y), coord_text, font=mono_font,
+                  fill=(235, 240, 245))
+
+    def _draw_sin_senal_stamp(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw a 'SIN SEÑAL' red stamp in the top-right corner.
+
+        Positioned below the 4K badge (if present) or at default top-right offset.
+        Uses a bold red pill with orange border for a 'stamped on' look.
+        """
+        # Position: below 4K badge if present, else default top-right
+        badge_offset = 80 if self.show_4k_badge else 0
+        stamp_x = self.width - 145
+        stamp_y = 15 + badge_offset
+        stamp_w = 130
+        stamp_h = 36
+
+        # Red pill background
+        draw.rounded_rectangle(
+            [stamp_x, stamp_y, stamp_x + stamp_w, stamp_y + stamp_h],
+            radius=8,
+            fill=(180, 35, 35),          # rescue red
+            outline=(255, 92, 0),         # orange border
+            width=2,
+        )
+
+        # "SIN SEÑAL" text centred
+        stamp_font = _find_font(17, bold=True)
+        label = "SIN SEÑAL"
+        bbox = draw.textbbox((0, 0), label, font=stamp_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = stamp_x + (stamp_w - tw) // 2
+        ty = stamp_y + (stamp_h - th) // 2 - 1
+        draw.text((tx, ty), label, font=stamp_font, fill=(255, 255, 255))
 
     # ── helpers ──────────────────────────────────────────────────
 

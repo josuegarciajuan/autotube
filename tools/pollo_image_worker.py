@@ -41,6 +41,23 @@ POLL_INTERVAL = 4
 SUCCESS_GRACE_SECONDS = 36
 UNKNOWN_FAILURE_GRACE_POLLS = 6  # tolerancia a flapping de Pollo.ai: 6 polls × 4s = 24s de gracia antes de rendirse
 MAX_PROMPT_CHARS = 2000
+
+# Fingerprints TLS para burlar Cloudflare — se prueban en cascada hasta que uno funcione.
+IMPERSONATION_TARGETS = [
+    "chrome146",
+    "chrome145",
+    "chrome142",
+    "chrome136",
+    "chrome133a",
+    "chrome131",
+    "chrome124",
+    "chrome120",
+    "chrome110",
+    "firefox147",
+    "firefox144",
+    "safari184",
+    "safari180",
+]
 COMMON_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -90,9 +107,9 @@ def extract_cookie_value(cookie_str):
     return cookie_str
 
 
-def make_client(cookie_value):
+def make_client(cookie_value, impersonate="chrome146"):
     if HTTP_BACKEND == "curl-cffi":
-        session = cffi_requests.Session(impersonate="chrome110")
+        session = cffi_requests.Session(impersonate=impersonate)
         session.headers.update(COMMON_HEADERS)
         session.cookies.set(
             "__Secure-next-auth.session-token",
@@ -575,19 +592,49 @@ def cmd_generate(args):
 
         model_key = args.model if args.model in MODEL_CONFIG else "flux-dev"
         model_cfg = MODEL_CONFIG[model_key]
-        client = make_client(cookie_value)
         num_outputs = max(1, int(args.num_outputs or 1))
         result["requested_num_outputs"] = num_outputs
 
-        gen_id = create_generation(
-            client,
-            args.prompt,
-            model_cfg,
-            args.aspect_ratio or model_cfg["aspectRatio"],
-            num_outputs,
-        )
+        # ── Cascada de fingerprints TLS ─────────────────────
+        last_error = ""
+        working_fingerprint = None
+        gen_id = None
+        poll_result = None
+        client = None
+        for fp in IMPERSONATION_TARGETS:
+            try:
+                client = make_client(cookie_value, impersonate=fp)
+                gen_id = create_generation(
+                    client,
+                    args.prompt,
+                    model_cfg,
+                    args.aspect_ratio or model_cfg["aspectRatio"],
+                    num_outputs,
+                )
+                # Poll también puede fallar con 403 si Cloudflare rota midway
+                poll_result = poll_generation(client, gen_id,
+                                              int(args.timeout or 300),
+                                              expected_outputs=num_outputs)
+                working_fingerprint = fp
+                print("CLOUDFLARE_BYPASS: fingerprint=%s OK" % fp, file=sys.stderr)
+                break
+            except RuntimeError as exc:
+                err = str(exc)
+                if "403" in err or "Cloudflare" in err.lower() or "denegado" in err.lower():
+                    print("CLOUDFLARE_BYPASS: fingerprint=%s FAILED (403) — probando siguiente..." % fp, file=sys.stderr)
+                    last_error = err
+                    continue
+                raise  # otro error (401 cookie, timeout, etc.) — no reintentar
+
+        if not working_fingerprint:
+            attempted = ", ".join(IMPERSONATION_TARGETS[:6]) + "..."
+            raise RuntimeError(
+                "Cloudflare no pudo ser burlado con ningun fingerprint TLS. "
+                "Intentados: %s. Ultimo error: %s" % (attempted, last_error)
+            )
+
+        result["cloudflare_fingerprint"] = working_fingerprint
         result["generation_id"] = str(gen_id)
-        poll_result = poll_generation(client, gen_id, int(args.timeout or 300), expected_outputs=num_outputs)
 
         if num_outputs <= 1:
             url = get_nowatermark_url(client, poll_result, generation_id=gen_id)

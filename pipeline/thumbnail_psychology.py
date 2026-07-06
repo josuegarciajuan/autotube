@@ -203,6 +203,13 @@ STYLE_PSYCHOLOGY_RULES = {
         "text_strategy": "máximo 3 palabras, fuente sans-serif limpia: DESCUBRE, DATOS, CIENCIA",
         "avoid": "decoración excesiva, texturas rugosas, caos visual, vintage",
     },
+    "distress_signal": {
+        "color_triggers": "naranja neón + azul ártico = emergencia, rescate, peligro, supervivencia",
+        "composition_rule": "MAYDAY banner superior + coordenadas GPS inferiores + sello SIN SEÑAL — estética de transmisión de socorro",
+        "emotional_hooks": ["urgency", "fear_of_death", "survival_instinct", "curiosity_gap", "loss_of_control"],
+        "text_strategy": "PALABRAS DE EMERGENCIA: PERDIDO, SIN SEÑAL, ÚLTIMA TRANSMISIÓN, MAYDAY, RESCATE",
+        "avoid": "rostros sonrientes, colores cálidos y acogedores, fondos claros o pastel, composiciones relajadas, naturaleza pacífica",
+    },
 }
 
 # ── Thumbnail Concept Builder (LLM Prompt Fragment) ────────────

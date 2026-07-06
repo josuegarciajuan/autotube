@@ -28,7 +28,8 @@ from config.settings import (
     LOG_LEVEL,
     LOG_FORMAT,
 )
-from database.db import Database, init_db
+from database.db import init_db
+from database.db_extended import ExtendedDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,10 @@ class PipelineOrchestrator:
         self.db_video_id = db_video_id  # Si != None, modo API: update en vez de insert
         self._progress_cb = progress_callback  # (percent, phase, message) → None
 
+        # Phase timing tracking
+        self._timing: dict = {"phases": {}}
+        self._pipeline_start: float = time.time()
+
         # Load config via bridge (DB-aware) or fall back to Python module
         if canal not in CHANNEL_CONFIGS:
             try:
@@ -54,7 +59,7 @@ class PipelineOrchestrator:
         self.config = CHANNEL_CONFIGS[canal]
 
         # Initialize database
-        self.db = Database(db_path)
+        self.db = ExtendedDatabase(db_path)
         init_db(db_path)
 
         # Lazy-loaded components
@@ -68,6 +73,9 @@ class PipelineOrchestrator:
         self._thumbnail_maker = None
         self._metadata_gen = None
         self._uploader = None
+
+        # Inter-phase state (computed once, used in subsequent phases)
+        self._last_scene_ranges: list[dict] | None = None
 
     @property
     def scraper(self):
@@ -167,6 +175,27 @@ class PipelineOrchestrator:
             except Exception:
                 pass  # never let progress emission crash the pipeline
 
+    def collect_timing(self) -> dict:
+        """Return accumulated phase timings + wall-clock duration.
+
+        Returns:
+            dict with keys ``phases`` (phase_name → duration_ms) and
+            ``total_duration_ms`` (wall-clock since orchestrator was created).
+        """
+        if self._pipeline_start is not None:
+            total = int((time.time() - self._pipeline_start) * 1000)
+        else:
+            total = sum(self._timing.get("phases", {}).values())
+        return {
+            "phases": dict(self._timing.get("phases", {})),
+            "total_duration_ms": total,
+        }
+
+    def collect_timing_json(self) -> str:
+        """collect_timing() as a JSON string — for DB persistence."""
+        import json
+        return json.dumps(self.collect_timing())
+
     # ── Phase runners ──────────────────────────────────────────
 
     def phase_scrape(self) -> int:
@@ -188,6 +217,7 @@ class PipelineOrchestrator:
 
         self._emit_progress(10, "scrape", f"Contenido obtenido: {added} fuentes")
         duration_ms = int((time.time() - start) * 1000)
+        self._timing["phases"]["scrape"] = duration_ms
         self.db.log_pipeline(self.canal, "scrape", "success",
                              f"Added {added} items", duration_ms=duration_ms)
         return added
@@ -207,6 +237,7 @@ class PipelineOrchestrator:
         result = self.script_gen.generate(content_items[0])
         duration_ms = int((time.time() - start) * 1000)
 
+        self._timing["phases"]["script"] = duration_ms
         if result:
             words = len(result.get("guion", "").split()) if result.get("guion") else 0
             self._emit_progress(23, "script", f"Guion generado: {words} palabras, {result.get('id')}")
@@ -240,6 +271,13 @@ class PipelineOrchestrator:
                 bloques = bloques_raw or []
 
             if bloques:
+                # Test mode: limit number of blocks for faster iteration
+                max_blocks = getattr(self.config, "MAX_SCRIPT_BLOCKS", 0)
+                if max_blocks > 0 and len(bloques) > max_blocks:
+                    logger.info("[%s] Test mode: truncating %d blocks → %d (MAX_SCRIPT_BLOCKS=%d)",
+                                self.canal, len(bloques), max_blocks, max_blocks)
+                    bloques = bloques[:max_blocks]
+
                 # v2: segmented synthesis with per-block voice
                 logger.info("[%s] Using segmented TTS with %d blocks", self.canal, len(bloques))
                 audio_path, timestamps = self.tts.generate_segmented(bloques)
@@ -252,13 +290,43 @@ class PipelineOrchestrator:
             audio_dur = int(timestamps[-1]["end_ms"]/1000) if timestamps and "end_ms" in timestamps[-1] else len(timestamps) if timestamps else 0
             self._emit_progress(38, "tts", f"Audio generado: {audio_dur}s de narracion")
 
+            # ── Generate CTA audio (separate from body narration) ──
+            cta_audio_path = None
+            try:
+                # Priority 1: LLM-generated cta field from script metadata
+                cta_obj = script.get("cta", {})
+                if isinstance(cta_obj, dict) and cta_obj.get("texto", "").strip():
+                    cta_text = cta_obj["texto"].strip()
+                else:
+                    cta_text = None
+
+                # Priority 2: Channel config SCRIPT_END_HOOK (channel-specific teaser)
+                if not cta_text:
+                    cta_text = getattr(self.config, "SCRIPT_END_HOOK", None)
+                    # Clean up any remaining placeholders like {next_story}
+                    if cta_text:
+                        import re as _re
+                        cta_text = _re.sub(r'\{[^}]+\}', 'la proxima historia', cta_text)
+
+                if cta_text:
+                    self._emit_progress(39, "tts", "Generando audio de cierre (CTA)...")
+                    cta_path, _ = self.tts.generate(cta_text)
+                    cta_audio_path = cta_path
+                    logger.info("[%s] CTA audio generated: %s", self.canal, cta_path)
+                else:
+                    logger.info("[%s] No CTA text found — CTA segment will be silent", self.canal)
+            except Exception as exc:
+                logger.warning("[%s] CTA audio generation failed (non-fatal): %s", self.canal, exc)
+
             result = {
                 "audio_path": audio_path,
                 "timestamps_path": str(Path(audio_path).with_suffix(".json")),
                 "timestamps": timestamps,
+                "cta_audio_path": cta_audio_path,
             }
 
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["tts"] = duration_ms
             self.db.log_pipeline(self.canal, "tts", "success",
                                   f"Audio: {audio_path}",
                                   content_id=script.get("id"),
@@ -270,11 +338,12 @@ class PipelineOrchestrator:
             self.db.log_pipeline(self.canal, "tts", "error", str(e))
             return None
 
-    def phase_media(self, script: dict) -> Optional[list[dict]]:
-        """Fetch media (video/image) for each block using the hybrid fetcher.
+    def phase_media(self, script: dict, audio_data: Optional[dict] = None) -> Optional[list[dict]]:
+        """Fetch media (video/image) for each enforceable scene range.
 
-        One asset per block, with fallback chain: video → Unsplash → Pexels.
-        Images are post-processed (color grade, vignette, grain). Videos are used as-is.
+        When ``audio_data`` is provided (with TTS timestamps), scene ranges are
+        computed BEFORE fetching so each sub-scene gets its own distinct asset.
+        Without audio_data, falls back to per-block fetch.
         """
         start = time.time()
         self._emit_progress(42, "images", "Buscando imagenes y videos para el video...")
@@ -293,14 +362,36 @@ class PipelineOrchestrator:
                 logger.warning("[%s] No bloques in script — falling back to legacy image fetcher", self.canal)
                 return self._phase_images_legacy(script)
 
-            logger.info("[%s] Fetching media for %d blocks", self.canal, len(bloques))
+            # Compute scene_ranges from TTS timestamps if available (so subscenes
+            # each get their own media instead of sharing the parent block's image)
+            scene_ranges = None
+            timestamps = audio_data.get("timestamps") if audio_data else None
+            if timestamps and bloques:
+                try:
+                    scene_ranges = self.video_editor._compute_block_ranges(bloques, timestamps)
+                    logger.info("[%s] Computed %d scene ranges from TTS timestamps "
+                                "(each subscene gets its own media)", self.canal, len(scene_ranges))
+                except Exception as e:
+                    logger.warning("[%s] Could not compute scene ranges: %s", self.canal, e)
 
-            # Fetch one asset per block via the hybrid fetcher
-            media_assets = self.media_fetcher.fetch_for_script(bloques)
+            # ── Save scene_ranges for phase_video (ensures 1:1 alignment) ──
+            self._last_scene_ranges = scene_ranges
+
+            logger.info("[%s] Fetching media for %d scenes", self.canal,
+                        len(scene_ranges) if scene_ranges else len(bloques))
+
+            # Fetch one asset per scene (scene_ranges or bloques as fallback)
+            media_assets = self.media_fetcher.fetch_for_script(
+                bloques=bloques,
+                scene_ranges=scene_ranges,
+            )
 
             # Post-process images only (videos are used as-is)
+            skip_processing = getattr(self.config, "IMAGE_PROCESSING_DISABLED", False)
+            if skip_processing:
+                logger.info("[%s] Image processing disabled (test mode) — using raw images", self.canal)
             for asset in media_assets:
-                if asset["type"] == "image" and asset["path"]:
+                if asset["type"] == "image" and asset["path"] and not skip_processing:
                     try:
                         asset["path"] = self.image_processor.process(asset["path"])
                     except Exception as exc:
@@ -314,6 +405,7 @@ class PipelineOrchestrator:
             self._emit_progress(53, "images", f"Imagenes listas: {n_video} videos + {n_image} imagenes")
 
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["media"] = duration_ms
             self.db.log_pipeline(
                 self.canal, "media", "success",
                 f"Fetched {len(media_assets)} assets ({n_video} video, {n_image} image, {n_placeholder} placeholder)",
@@ -355,6 +447,7 @@ class PipelineOrchestrator:
                 processed.append(scene_processed)
 
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["images"] = duration_ms
             total_imgs = sum(len(s) for s in processed)
             self.db.log_pipeline(self.canal, "images", "success",
                                   f"Fetched & processed {total_imgs} images (legacy)",
@@ -368,7 +461,7 @@ class PipelineOrchestrator:
             return None
 
     def phase_video(self, script: dict, audio_data: dict,
-                     media_assets: list) -> Optional[dict]:
+                     media_assets: list, job_id: int = None) -> Optional[dict]:
         """Assemble the final video from blocks + media assets.
 
         Uses v2 block-based API when bloques are available in the script,
@@ -378,6 +471,19 @@ class PipelineOrchestrator:
 
         try:
             import json
+            import shutil
+
+            try:
+                _disk = shutil.disk_usage(Path("output"))
+                _free_gb = _disk.free / (1024**3)
+                logger.info("[%s] Disk free before render: %.1f GB", self.canal, _free_gb)
+                if _free_gb < 1.0:
+                    logger.warning(
+                        "[%s] ⚠️  Only %.1f GB free — render may fail due to disk space!",
+                        self.canal, _free_gb,
+                    )
+            except Exception:
+                pass
 
             # Get bloques from script
             bloques_raw = script.get("bloques") or script.get("bloques_json")
@@ -404,6 +510,9 @@ class PipelineOrchestrator:
                     media_assets=media_assets,
                     audio_path=audio_data["audio_path"],
                     timestamps=audio_data["timestamps"],
+                    scene_ranges=getattr(self, "_last_scene_ranges", None),
+                    job_id=job_id,
+                    cta_audio_path=audio_data.get("cta_audio_path"),
                 )
             else:
                 # ── Legacy fallback: scene-based assembly ────
@@ -431,6 +540,7 @@ class PipelineOrchestrator:
                     image_paths=legacy_image_paths,
                     audio_path=audio_data["audio_path"],
                     timestamps=audio_data["timestamps"],
+                    job_id=job_id,
                 )
 
             # Generate thumbnail (non-fatal: video is still valid without it)
@@ -466,6 +576,7 @@ class PipelineOrchestrator:
                 thumbnail_path = ""
 
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["video_assembly"] = duration_ms
             self.db.log_pipeline(self.canal, "video", "success",
                                   f"Video: {video_path}",
                                   content_id=script.get("id"),
@@ -603,6 +714,7 @@ class PipelineOrchestrator:
                     logger.warning(f"[{self.canal}] Thumbnail regeneration failed: {e} — keeping original")
             
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["metadata"] = duration_ms
             self.db.log_pipeline(self.canal, "metadata", "success",
                                  f"Titles: {len(metadata.get('titles',[]))}, Tags: {len(metadata.get('tags',[]))}",
                                  content_id=script.get("id"),
@@ -637,7 +749,7 @@ class PipelineOrchestrator:
             return self.metadata_gen._fallback_metadata(script)
 
     def phase_upload(self, script: dict, video_data: dict,
-                      metadata: dict = None) -> Optional[str]:
+                      metadata: dict = None, job_id: int = None) -> Optional[str]:
         """Upload video to YouTube. Returns video_id or None.
         
         Args:
@@ -646,9 +758,13 @@ class PipelineOrchestrator:
             metadata: Optional SEO metadata dict from phase_metadata().
                       If provided, uses AI-optimized title/description/tags.
                       If None, falls back to config templates (backward compat).
+            job_id: Optional generation_jobs.id. If provided, heartbeats are
+                    emitted during upload to prevent false orphan detection.
         """
         start = time.time()
         self._emit_progress(80, "upload", "Preparando subida a YouTube...")
+
+        _saved_uploader_db = None  # for finally restore
 
         try:
             # Authenticate with YouTube
@@ -698,10 +814,25 @@ class PipelineOrchestrator:
                 logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
 
             # Upload — API mode: suppress uploader's own _log_to_db (single video record)
+            _saved_uploader_db = self._uploader.db
+
             if self.db_video_id is not None:
                 self._uploader.db = None
 
             self._emit_progress(88, "upload", "Subiendo video a YouTube...")
+            
+            # ── Heartbeat callback for upload phase ──────────────
+            # Prevents false orphan detection during slow uploads by
+            # pulsing the job's last_heartbeat_at between chunks.
+            upload_heartbeat = None
+            if job_id is not None:
+                def _pulse():
+                    try:
+                        self.db.update_heartbeat(job_id)
+                    except Exception:
+                        pass
+                upload_heartbeat = _pulse
+            
             result = self.uploader.upload(
                 video_path=Path(video_data["video_path"]),
                 title=title,
@@ -710,6 +841,7 @@ class PipelineOrchestrator:
                 thumbnail_path=Path(video_data["thumbnail_path"]),
                 category_id=metadata.get("category_id", self.config.YT_CATEGORY_ID) if metadata else self.config.YT_CATEGORY_ID,
                 privacy=self.config.YT_PRIVACY_STATUS,
+                heartbeat_callback=upload_heartbeat,
             )
 
             video_id = result.get("video_id")
@@ -756,6 +888,7 @@ class PipelineOrchestrator:
                         self.db.mark_video_uploaded(db_video_id, video_id, url)
 
             duration_ms = int((time.time() - start) * 1000)
+            self._timing["phases"]["upload"] = duration_ms
             self.db.log_pipeline(self.canal, "upload", "success",
                                   f"YouTube ID: {video_id}",
                                   content_id=script.get("id"),
@@ -766,6 +899,10 @@ class PipelineOrchestrator:
             logger.error(f"[{self.canal}] Upload failed: {e}")
             self.db.log_pipeline(self.canal, "upload", "error", str(e))
             return None
+        finally:
+            # Restore uploader.db (was set to None in API mode to suppress duplicate DB records)
+            if hasattr(self, '_uploader') and self._uploader is not None:
+                self._uploader.db = _saved_uploader_db
 
     # ── Full pipeline ──────────────────────────────────────────
 
@@ -774,6 +911,21 @@ class PipelineOrchestrator:
         logger.info(f"{'='*60}")
         logger.info(f"[{self.canal}] STARTING FULL PIPELINE")
         logger.info(f"{'='*60}")
+
+        # ── Disk cleanup before pipeline (moved from phase_media) ──
+        import shutil
+        _cleanup_dirs = [
+            Path("output/video_clips"),
+            Path("output/temp"),
+        ]
+        for _d in _cleanup_dirs:
+            if _d.exists():
+                try:
+                    shutil.rmtree(_d)
+                    _d.mkdir(parents=True, exist_ok=True)
+                    logger.info("[%s] Cleaned up %s before pipeline", self.canal, _d)
+                except Exception as _exc:
+                    logger.warning("[%s] Could not clean %s: %s", self.canal, _d, _exc)
 
         # Phase 0: Scrape fresh content for this video
         logger.info(f"[{self.canal}] Phase 0/6: Scraping fresh content...")
@@ -797,7 +949,7 @@ class PipelineOrchestrator:
 
         # Phase 3: Media (video + image hybrid)
         logger.info(f"[{self.canal}] Phase 3/6: Fetching media assets (video + image)...")
-        media_assets = self.phase_media(script)
+        media_assets = self.phase_media(script, audio_data)
         if not media_assets:
             logger.error(f"[{self.canal}] PIPELINE ABORTED: Media fetch failed")
             return False
@@ -840,20 +992,33 @@ class PipelineOrchestrator:
             tags_json_str = _json3.dumps(metadata.get("tags", []), ensure_ascii=False) if metadata else None
             titles_json_str = _json3.dumps(metadata.get("titles", []), ensure_ascii=False) if metadata else None
             channel_id = self._get_channel_id()
-            
-            self.db.insert_video(
-                script_id=script.get("id"),
-                canal=self.canal,
-                video_path=video_data["video_path"],
-                thumbnail_path=video_data.get("thumbnail_path", ""),
-                audio_path=audio_data.get("audio_path", ""),
-                titulo_final=title,
-                privacy_status="unlisted",
-                channel_id=channel_id,
-                description=description,
-                tags_json=tags_json_str,
-                title_options=titles_json_str,
-            )
+
+            # Reuse the video record created by phase_video (avoid duplicate insert)
+            db_vid = video_data.get("video_id")
+            if db_vid is not None:
+                self.db.update_video(
+                    db_vid,
+                    titulo_final=title,
+                    description=description,
+                    tags_json=tags_json_str,
+                    title_options=titles_json_str,
+                    privacy_status="unlisted",
+                    channel_id=channel_id,
+                )
+            else:
+                self.db.insert_video(
+                    script_id=script.get("id"),
+                    canal=self.canal,
+                    video_path=video_data["video_path"],
+                    thumbnail_path=video_data.get("thumbnail_path", ""),
+                    audio_path=audio_data.get("audio_path", ""),
+                    titulo_final=title,
+                    privacy_status="unlisted",
+                    channel_id=channel_id,
+                    description=description,
+                    tags_json=tags_json_str,
+                    title_options=titles_json_str,
+                )
             logger.info(f"[{self.canal}] PIPELINE COMPLETE: Video saved to {video_data['video_path']}")
 
         # Mark script as used

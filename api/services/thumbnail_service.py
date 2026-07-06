@@ -25,7 +25,7 @@ async def regenerate_thumbnail_for_video(video_id: int):
         from config.config_bridge import get_channel_config
 
         # Get channel config for style info
-        canal = v.get("canal", "canal1")
+        canal = v.get("canal", "canal2")
         cfg = get_channel_config(canal)
         maker = ThumbnailMaker(cfg)
         titulo = v.get("titulo_final", "Historia Impactante")

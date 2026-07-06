@@ -23,6 +23,10 @@ CANAL_OUTRO_TAGLINE = (
     "La realidad siempre supera la ficción. Y esto que acabas de ver es real."
 )
 
+# ── YouTube Handle ───────────────────────────────────────────
+YOUTUBE_HANDLE = "@cleanthelistemaillistclean7103"
+YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@cleanthelistemaillistclean7103"
+
 # ── Narrative Style ─────────────────────────────────────────────
 CANAL_NARRATIVE_STYLE = "documental de asombro"
 CANAL_STYLE_DESCRIPTION = (
@@ -77,13 +81,13 @@ CHANNEL_KEYWORDS = [
 
 TEST_MODE = False
 
-TEST_SCRIPT_WORDS_MIN = 200
-TEST_SCRIPT_WORDS_MAX = 400
+TEST_SCRIPT_WORDS_MIN = 450
+TEST_SCRIPT_WORDS_MAX = 700
 TEST_SCRIPT_SCENES_MIN = 10
 TEST_SCRIPT_SCENES_MAX = 12
 TEST_SCRIPT_BLOCKS_MIN = 3
 TEST_SCRIPT_BLOCKS_MAX = 5
-TEST_VIDEO_DURATION_TARGET = 1
+TEST_VIDEO_DURATION_TARGET = 3.5
 
 QUICK_TEST_SCRIPT_WORDS_MIN = 80
 QUICK_TEST_SCRIPT_WORDS_MAX = 120
@@ -103,10 +107,29 @@ PROD_SCRIPT_BLOCKS_MAX = 18
 PROD_VIDEO_DURATION_MIN = 8
 PROD_VIDEO_DURATION_MAX = 14
 
+# ── Scene duration enforcement (overrides video_editor defaults) ──
+# Scenes shorter than MIN are merged with neighbors.
+# Scenes longer than MAX are split into sub-scenes (each with its own media asset).
+SCENE_DURATION_MIN = 4.0   # default 6.0 — shorter scenes force more visual changes
+
+# ── Hard cap: maximum accumulated duration for any composited clip ──
+# When a clip has been extended (via scene merges) beyond this limit,
+# the next scene with no media forces a NEW clip from the fallback pool
+# instead of further extending the same image. Prevents "same image for 200s".
+MAX_CLIP_EXTEND_SEC = 25.0
+
+# ── Image reuse gap (video_editor LRU dedup) ──
+# Minimum number of different clips that must appear before the same image
+# can be reused in another scene. Prevents back-to-back repetition while
+# allowing limited reuse for variety.
+IMAGE_REUSE_MIN_GAP = 2   # was 3 — allow faster reuse with shorter scenes (global SCENE_MAX=15)
+
 # ── Average video duration target (approx, in minutes) ──
-# Used as reference; actual videos will vary roughly ±30% around this target.
-# Example: 15 → videos typically range 11–19 minutes.
+# The pipeline picks a random duration between (mean - discrepancy) and (mean + discrepancy)
+# for each video generation, avoiding uniform durations.
+# Example: mean=15, discrepancy=3 → videos range 12–18 minutes.
 VIDEO_AVERAGE_DURATION_MIN = 15
+VIDEO_DURATION_DISCREPANCY_MIN = 3
 
 # ═══════════════════════════════════════════════════════════════════
 # NARRATIVE TONE
@@ -284,7 +307,7 @@ SCRIPT_STRUCTURE = [
 SCRIPT_END_HOOK = (
     "Y si crees que esta historia es increíble, espera a ver {next_story}. "
     "Porque lo que le ocurrió a {next_protagonist} es todavía más "
-    "inexplicable. Ese es el próximo video. Suscríbete y activa la campana."
+    "inexplicable. Ese es el próximo video. Dale like, suscríbete y activa la campana."
 )
 
 SCRIPT_EMOTIONAL_ARC = {
@@ -383,27 +406,27 @@ TTS_STRATEGY = {
     "voice_secondary": "es-MX-DaliaNeural",
 
     # ── Base (default) ───────────────────────────────────
-    "rate_base": "+3%",          # slightly slower for wonder effect
+    "rate_base": "-10%",         # slower, ~150 WPM documentary pace
     "pitch_base": "+2Hz",        # slightly warmer
 
     # ── Hook (opening impact) ────────────────────────────
-    "rate_hook": "+8%",          # energetic, urgent
+    "rate_hook": "-5%",          # slightly faster than base for hook energy
     "pitch_hook": "+0Hz",
 
     # ── Desarrollo (body — neutral storytelling) ────────
-    "rate_desarrollo": "+3%",
+    "rate_desarrollo": "-8%",
     "pitch_desarrollo": "+2Hz",
 
     # ── Climax (emotional peak of wonder) ───────────────
-    "rate_climax": "-2%",        # slightly slower for awe
+    "rate_climax": "-15%",       # slowest — awe and impact
     "pitch_climax": "-4Hz",      # slight gravity for importance
 
     # ── Reflexion (contemplative) ───────────────────────
-    "rate_reflexion": "+2%",
+    "rate_reflexion": "-10%",
     "pitch_reflexion": "+2Hz",
 
     # ── Cierre (closing call-to-action) ──────────────────
-    "rate_cierre": "+6%",
+    "rate_cierre": "-5%",
     "pitch_cierre": "+4Hz",      # warmth for CTA
 }
 
@@ -421,6 +444,32 @@ VOICE_SSML = {
     "prosody_rate_slow": '<prosody rate="slow" pitch="-2st">',
     "prosody_end": '</prosody>',
 }
+
+# ═══════════════════════════════════════════════════════════════════
+# TTS ENGINE SELECTION
+# ═══════════════════════════════════════════════════════════════════
+# Supported engines: "edgetts" (Microsoft Edge TTS, free, cloud)
+#                     "kokoro"  (Kokoro-82M, local, Apache 2.0)
+
+TTS_ENGINE = "kokoro"
+
+# ── Kokoro configuration ─────────────────────────────────────
+# Voice: ef_dora (female), em_alex (male), em_santa (male)
+KOKORO_VOICE = "em_santa"
+
+# Block speed multipliers (1.0 = normal). Each block type gets
+# a different speed to create emotional dynamics. Lower = slower,
+# more dramatic. Higher = faster, more energetic.
+KOKORO_BLOCK_SPEEDS = {
+    "hook": 0.85,        # antes 1.06 — más lento para que el hook impacte sin atropellar
+    "desarrollo": 0.80,  # antes 0.94 — -20% más lento, narración pausada y clara
+    "climax": 0.75,      # antes 0.87 — máxima tensión, muy lento y dramático
+    "reflexion": 0.78,   # antes 0.92 — contemplativo, ritmo relajado
+    "cierre": 0.85,      # antes 0.98 — conclusión pausada y cálida
+}
+
+# Silence inserted between narrative blocks (seconds)
+KOKORO_PAUSE_BETWEEN_BLOCKS = 0.9  # antes 0.7 — pausas más largas entre bloques
 
 # ═══════════════════════════════════════════════════════════════════
 # CONTENT SOURCES
@@ -481,6 +530,33 @@ WIKIPEDIA_CATEGORIES = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════
+# SCRAPE SOURCES (multi-source plugin system)
+# ═══════════════════════════════════════════════════════════════════
+SCRAPE_SOURCES = [
+    {"plugin": "reddit", "priority": 1},
+    {"plugin": "wikipedia", "priority": 2},
+    {"plugin": "atlas_obscura", "priority": 3},
+    {"plugin": "rss", "priority": 4},
+    {"plugin": "google_news", "priority": 5},
+]
+
+# Atlas Obscura categories for Sincronías
+ATLAS_OBSCURA_CATEGORIES = ["wonders", "history", "unique"]
+
+# RSS feeds for Sincronías
+RSS_FEEDS = []
+
+# Google News queries for Sincronías
+GOOGLE_NEWS_QUERIES = [
+    "sincronicidades historias reales",
+    "milagros inexplicables",
+    "casualidades increíbles",
+    "coincidencias misteriosas",
+]
+GOOGLE_NEWS_LANGUAGE = "es"
+GOOGLE_NEWS_COUNTRY = "ES"
+
+# ═══════════════════════════════════════════════════════════════════
 # VISUAL STYLE
 # ═══════════════════════════════════════════════════════════════════
 
@@ -502,8 +578,8 @@ COLOR_PALETTE = {
 
 FILM_GRAIN_OPACITY = 5              # lighter grain for luminous feel
 FILM_GRAIN_FRAMES = 8
-KEN_BURNS_ZOOM_MIN = 3
-KEN_BURNS_ZOOM_MAX = 8
+KEN_BURNS_ZOOM_MIN = 4
+KEN_BURNS_ZOOM_MAX = 12    # antes 8 — zoom más pronunciado para efecto cinematico visible
 
 # ── Subtitle style ─────────────────────────────────────────────
 SUBTITLE_FONT_SIZE = 52
@@ -523,28 +599,36 @@ MEDIA_STRATEGY = {
     "media_per_block": 1,
     "prefer_video": True,
     "max_video_blocks_pct": 50,
+    "target_video_pct": 60,            # governor target: ~60% video scenes (antes 50)
+    "max_placeholder_pct": 0,          # governor: 0% placeholder scenes tolerated
     "video_fallback_to_image": True,
     "video_min_duration": 4,
     "video_max_duration": 20,
     "video_sources": ["pexels"],
+    "video_providers": [
+        {"name": "pexels", "api_key_env": "PEXELS_API_KEY"},
+        {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
+        {"name": "mixkit"},
+    ],
     "fallback_query": "warm golden hour cinematic atmosphere light rays 16:9",
     "fallback_query_simple": "warm atmospheric hopeful cinematic",
-    "ken_burns_zoom_min": 3,
-    "ken_burns_zoom_max": 8,
+    "ken_burns_zoom_min": 4,
+    "ken_burns_zoom_max": 12,
     "crossfade_min": 0.3,
     "crossfade_max": 0.7,
 }
 
 SUBTITLES_ENABLED = False
 
-SCENE_DURATION_MIN = 5.0
-SCENE_DURATION_MAX = 8.0
-CROSSFADE_MIN = MEDIA_STRATEGY["crossfade_min"]
-CROSSFADE_MAX = MEDIA_STRATEGY["crossfade_max"]
+# ── Inter-paragraph transitions ──────────────────────────────────
+TRANSITION_ENABLED = True
+TRANSITION_DURATION_MIN = 1.0   # seconds for cambio_tematico=1
+TRANSITION_DURATION_MAX = 5.0   # seconds for cambio_tematico=10
 
-PHRASES_PER_IMAGE = 2
-IMAGES_PER_SCENE = 5
-NO_REPEAT_IMAGES = True
+# ── Background music ────────────────────────────────────────────
+BACKGROUND_MUSIC_ENABLED = True
+BACKGROUND_MUSIC_VOLUME = -18.0       # dB during transitions/silence
+BACKGROUND_MUSIC_DUCK_VOLUME = -28.0  # dB during narration
 
 # ── Intro / Outro ──────────────────────────────────────────────
 INTRO_DURATION_SEC = 3.0
@@ -554,13 +638,20 @@ OUTRO_DURATION_SEC = 5.0
 OUTRO_FONT_SIZE = 60
 OUTRO_BG_COLOR = (15, 32, 62)
 OUTRO_TEXT = "Suscríbete"
+OUTRO_CTA_LIKE = "👍 Like"
+OUTRO_CTA_SUBSCRIBE = "🔔 Suscríbete"
+OUTRO_CTA_BELL = "📢 Comparte"
+# ── CTA visual text (shown on screen during the CTA segment) ──
+CTA_TEXT = (
+    "Si este contenido te ha hecho reflexionar,\n"
+    "¡dale like, suscríbete y activa la campana!"
+)
 CANAL_INITIALS = "SX"             # Sincronías
 LOGO_SIZE = 140
 LOGO_PATH = ""
 
-# ── Vignette overlay ───────────────────────────────────────────
-VIGNETTE_RADIUS_FACTOR = 0.70   # softer vignette for luminous style
-VIGNETTE_INTENSITY = 20         # lighter vignette
+# ── Vignette ──────────────────────────────────────────────────
+# Now hardcoded in video_editor._create_vignette_clip() for uniform subtle effect across all channels
 
 # ═══════════════════════════════════════════════════════════════════
 # YOUTUBE METADATA
@@ -650,6 +741,15 @@ SEO_HASHTAGS = [
     "#HistoriasQueInspiran",
 ]
 
+SHORTS_ENABLED = True
+SHORTS_PER_DAY = 3
+SHORTS_MAX_CLIPS_PER_VIDEO = 5
+SHORTS_CLIP_SCHEDULE = [
+    {"offset_days": 1, "count": 1},
+    {"offset_days": 3, "count": 1},
+    {"offset_days": 5, "count": 1},
+]
+
 SHORTS_HASHTAGS = [
     "#Sincronías",
     "#MilagrosReales",
@@ -703,6 +803,13 @@ THUMBNAIL_WIDTH = 1280
 THUMBNAIL_HEIGHT = 720
 THUMBNAIL_FONT_SIZE = 56
 THUMBNAIL_BORDER_WIDTH = 5
+
+# ── Per-channel thumbnail customisation (v2.1) ────────────────
+THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"       # sans-serif bold (Sincronías style)
+THUMBNAIL_BORDER_COLOR = "#CC0000"              # brand red (classic)
+THUMBNAIL_SHOW_4K_BADGE = True                  # keep 4K badge
+THUMBNAIL_TEXT_STROKE_WIDTH = 0                 # no outline
+THUMBNAIL_TEXT_STROKE_COLOR = "#000000"         # unused (stroke=0)
 
 # ── Per-channel visual style (coherent across all videos) ───────
 THUMBNAIL_VISUAL_STYLE = "moody_atmospheric"

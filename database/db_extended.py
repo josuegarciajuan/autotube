@@ -83,8 +83,10 @@ def migrate_v2(db_path: str = None):
     if db_path is None:
         db_path = str(DATABASE_PATH)
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     
     # Run new schema
     if SCHEMA_V2_PATH.exists():
@@ -100,6 +102,8 @@ def migrate_v2(db_path: str = None):
         ("tags_json", "TEXT"),
         ("title_options", "TEXT"),
         ("channel_id", "INTEGER REFERENCES channels(id)"),
+        ("checkpoint_data", "TEXT DEFAULT '{}'"),
+        ("timing_data", "TEXT DEFAULT '{}'"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -135,19 +139,111 @@ def migrate_v2(db_path: str = None):
             except sqlite3.OperationalError:
                 pass
 
-    # Run v3 schema (stats history tables)
+    # Run v3 schema (stats history tables + channel_templates)
     schema_v3 = Path(__file__).parent / "schema_v3.sql"
     if schema_v3.exists():
         with open(schema_v3) as f:
             conn.executescript(f.read())
         logger.info("Migration: v3 schema applied")
+
+    # Run v4 schema (shorts tables)
+    schema_v4 = Path(__file__).parent / "schema_v4.sql"
+    if schema_v4.exists():
+        with open(schema_v4) as f:
+            conn.executescript(f.read())
+        logger.info("Migration: v4 schema applied")
+
+    # Add target_time column to shorts_schedule (idempotent)
+    existing_ss = {row[1] for row in conn.execute("PRAGMA table_info(shorts_schedule)").fetchall()}
+    if "target_time" not in existing_ss:
+        try:
+            conn.execute("ALTER TABLE shorts_schedule ADD COLUMN target_time TEXT")
+            logger.info("Migration: added target_time column to shorts_schedule")
+        except sqlite3.OperationalError:
+            pass
+
+    # Add heartbeat + retry columns to generation_jobs (idempotent)
+    existing_gj = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
+    gj_columns = [
+        ("last_heartbeat_at", "TIMESTAMP"),
+        ("retry_count", "INTEGER DEFAULT 0"),
+    ]
+    for col_name, col_def in gj_columns:
+        if col_name not in existing_gj:
+            try:
+                conn.execute(f"ALTER TABLE generation_jobs ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration: added %s column to generation_jobs", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    # Seed shorts_planning_config for existing channels
+    channels = conn.execute("SELECT id, slug FROM channels WHERE active = 1").fetchall()
+    for ch in channels:
+        exists = conn.execute(
+            "SELECT COUNT(*) as c FROM shorts_planning_config WHERE channel_id = ?",
+            (ch["id"],),
+        ).fetchone()
+        if exists["c"] == 0:
+            # Load defaults from channel config
+            default_per_day = 3
+            if ch["slug"] == "canal4":
+                default_per_day = 2
+            conn.execute(
+                """INSERT INTO shorts_planning_config
+                   (channel_id, shorts_per_day, shorts_enabled, shorts_clip_enabled)
+                   VALUES (?, ?, 1, 1)""",
+                (ch["id"], default_per_day),
+            )
+    conn.commit()
     
-    # Seed canal1 if channels table is empty
+    # Add estimated_minutes_watched to channel_stats_history (idempotent)
+    existing_csh = {row[1] for row in conn.execute("PRAGMA table_info(channel_stats_history)").fetchall()}
+    if "estimated_minutes_watched" not in existing_csh:
+        try:
+            conn.execute("ALTER TABLE channel_stats_history ADD COLUMN estimated_minutes_watched REAL DEFAULT 0")
+            logger.info("Migration: added estimated_minutes_watched column to channel_stats_history")
+        except sqlite3.OperationalError:
+            pass
+
+    # Create short_stats table for tracking shorts YouTube metrics (v5 migration)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS short_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
+            yt_video_id TEXT NOT NULL,
+            views INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            estimated_minutes_watched REAL DEFAULT 0,
+            average_view_duration REAL DEFAULT 0,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_short ON short_stats(short_id, fetched_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_ytid ON short_stats(yt_video_id, fetched_at)")
+    logger.info("Migration: short_stats table ensured")
+
+    # Ensure channel_templates table exists (idempotent — may also be in schema_v3.sql)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            segment_type TEXT NOT NULL CHECK(segment_type IN ('intro', 'cta', 'outro')),
+            video_path TEXT,
+            image_path TEXT,
+            config_json TEXT,
+            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+            UNIQUE(channel_id, segment_type)
+        )
+    """)
+    
+    # Seed canal2 if channels table is empty
     row = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()
     if row["cnt"] == 0:
         conn.execute(
             "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
-            ("Psicología Oculta", "canal1", "{}", 1),
+            ("Sincronías", "canal2", "{}", 1),
         )
         # Link existing videos to channel 1
         conn.execute("UPDATE videos SET channel_id = 1 WHERE channel_id IS NULL")
@@ -163,6 +259,28 @@ def migrate_v2(db_path: str = None):
             ("Sincronías", "canal2", "{}", 1),
         )
 
+    # Seed canal3 if it doesn't exist yet
+    row3 = conn.execute(
+        "SELECT COUNT(*) as cnt FROM channels WHERE slug = 'canal3'"
+    ).fetchone()
+    canal3_is_new = row3["cnt"] == 0
+    if canal3_is_new:
+        conn.execute(
+            "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
+            ("Civilizaciones Olvidadas", "canal3", "{}", 1),
+        )
+
+    # Seed canal4 if it doesn't exist yet
+    row4 = conn.execute(
+        "SELECT COUNT(*) as cnt FROM channels WHERE slug = 'canal4'"
+    ).fetchone()
+    canal4_is_new = row4["cnt"] == 0
+    if canal4_is_new:
+        conn.execute(
+            "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
+            ("Expediciones sin retorno", "canal4", "{}", 1),
+        )
+
     # Check if canal2 needs profile seeding (new OR missing description)
     canal2_needs_profile = canal2_is_new
     if not canal2_is_new:
@@ -171,6 +289,99 @@ def migrate_v2(db_path: str = None):
         ).fetchone()
         if prof and not any([prof["description"], prof["banner_url"], prof["avatar_url"]]):
             canal2_needs_profile = True
+
+    # ── v6: Monetization + Milestones + Analytics columns & tables ──
+    # Add monetization columns to channels (idempotent)
+    ch_mon_columns = [
+        ("cpm_min", "REAL"),
+        ("cpm_max", "REAL"),
+        ("monetization_vertical", "TEXT"),
+        ("ypp_status", "TEXT DEFAULT 'not_eligible'"),
+    ]
+    for col_name, col_def in ch_mon_columns:
+        if col_name not in existing_ch:
+            try:
+                conn.execute(f"ALTER TABLE channels ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration: added %s column to channels", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    # Add revenue columns to channel_stats_history (idempotent)
+    csh_rev_columns = [
+        ("estimated_revenue_min", "REAL DEFAULT 0"),
+        ("estimated_revenue_max", "REAL DEFAULT 0"),
+    ]
+    for col_name, col_def in csh_rev_columns:
+        if col_name not in existing_csh:
+            try:
+                conn.execute(f"ALTER TABLE channel_stats_history ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration: added %s column to channel_stats_history", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    # Add revenue columns to video_stats_history (idempotent)
+    existing_vsh = {row[1] for row in conn.execute("PRAGMA table_info(video_stats_history)").fetchall()}
+    vsh_rev_columns = [
+        ("estimated_revenue_min", "REAL DEFAULT 0"),
+        ("estimated_revenue_max", "REAL DEFAULT 0"),
+    ]
+    for col_name, col_def in vsh_rev_columns:
+        if col_name not in existing_vsh:
+            try:
+                conn.execute(f"ALTER TABLE video_stats_history ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration: added %s column to video_stats_history", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    # Create channel_milestones table (idempotent)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_milestones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            metric_type TEXT NOT NULL,
+            target_value REAL NOT NULL,
+            label TEXT NOT NULL,
+            tier TEXT DEFAULT 'standard',
+            sort_order INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'in_progress',
+            achieved_at TEXT,
+            UNIQUE(channel_id, metric_type, target_value)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cm_channel ON channel_milestones(channel_id, status)")
+
+    # Create video_analytics_detailed table (idempotent)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_analytics_detailed (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            yt_video_id TEXT NOT NULL,
+            report_type TEXT NOT NULL,
+            dimension TEXT,
+            metric_value REAL NOT NULL,
+            fetched_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_vad_video ON video_analytics_detailed(video_id, report_type)")
+    logger.info("Migration: v6 tables ensured (channel_milestones, video_analytics_detailed)")
+
+    # Seed CPM values from channel configs if channels already exist
+    cpm_seeds = {
+        "canal2": (5.0, 12.0, "Bienestar, Libros, Viajes, Tecnologia, Salud"),
+        "canal3": (8.0, 18.0, "Educacion, Viajes, Libros, Tecnologia, Inversion"),
+        "canal4": (5.0, 12.0, "Aventura, Viajes, Libros, Educacion, Documentales"),
+    }
+    for slug, (cpm_min, cpm_max, vertical) in cpm_seeds.items():
+        ch = conn.execute(
+            "SELECT id, cpm_min, cpm_max FROM channels WHERE slug = ?", (slug,)
+        ).fetchone()
+        if ch and (ch["cpm_min"] is None or ch["cpm_max"] is None):
+            conn.execute(
+                "UPDATE channels SET cpm_min=?, cpm_max=?, monetization_vertical=? WHERE slug=?",
+                (cpm_min, cpm_max, vertical, slug),
+            )
+            logger.info("Migration: seeded CPM for %s (%.0f-%.0f USD)", slug, cpm_min, cpm_max)
+    conn.commit()
 
     # ── v4: Normalize media paths to project-root-relative form ──
     normalize_media_paths(conn, logger)
@@ -199,7 +410,8 @@ def _seed_canal2_profile():
         _log.info("Generating channel profile for canal2...")
         profile = generate_channel_profile("canal2")
 
-        conn = sqlite3.connect(str(DATABASE_PATH))
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute(
             """UPDATE channels
                SET description = ?,
@@ -232,7 +444,8 @@ def _migrate_content_schedules(db_path: str = None):
         from config.settings import DATABASE_PATH
         db_path = str(DATABASE_PATH)
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     
     # Create table if it doesn't exist
     conn.execute("""
@@ -342,6 +555,7 @@ class ExtendedDatabase(Database):
     
     def delete_channel(self, channel_id: int) -> bool:
         with self._connect() as conn:
+            conn.execute("DELETE FROM planned_slots WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM video_scenes WHERE video_id IN (SELECT id FROM videos WHERE channel_id = ?)", (channel_id,))
             conn.execute("DELETE FROM videos WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM generation_jobs WHERE channel_id = ?", (channel_id,))
@@ -399,7 +613,7 @@ class ExtendedDatabase(Database):
         allowed = ["titulo_final", "description", "tags_json", "title_options",
                     "privacy_status", "status", "progress", "progress_phase",
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
-                    "script_id", "channel_id"]
+                    "script_id", "channel_id", "checkpoint_data", "timing_data"]
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
@@ -488,10 +702,18 @@ class ExtendedDatabase(Database):
             if k in allowed and v is not None:
                 fields.append(f"{k} = ?")
                 values.append(v)
-        if kwargs.get("status") == "running" and "started_at" not in kwargs:
-            fields.append("started_at = COALESCE(started_at, CURRENT_TIMESTAMP)")
+        if kwargs.get("status") == "running":
+            if "started_at" not in kwargs:
+                fields.append("started_at = COALESCE(started_at, CURRENT_TIMESTAMP)")
+            # Reset finished_at when job is (re)started — prevents inconsistent
+            # state where finished_at is set but status is still 'running'
+            fields.append("finished_at = NULL")
         if kwargs.get("status") in ("completed", "failed"):
             fields.append("finished_at = CURRENT_TIMESTAMP")
+        # Clear stale error_msg when job succeeds (fixes ghost orphan errors)
+        if kwargs.get("status") == "completed":
+            if "error_msg" not in kwargs:
+                fields.append("error_msg = NULL")
         values.append(job_id)
         with self._connect() as conn:
             conn.execute(f"UPDATE generation_jobs SET {', '.join(fields)} WHERE id = ?", values)
@@ -509,6 +731,50 @@ class ExtendedDatabase(Database):
                 "SELECT * FROM generation_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+    
+    def update_heartbeat(self, job_id: int) -> None:
+        """Update the last_heartbeat_at timestamp for a running job.
+        
+        Called every ~30s by the video render thread to signal the
+        orphan detector that the render is still alive.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE generation_jobs SET last_heartbeat_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (job_id,),
+            )
+            conn.commit()
+    
+    def get_next_queued_job(self) -> Optional[dict]:
+        """Return the oldest queued job (FIFO), or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    
+    def increment_retry(self, job_id: int) -> int:
+        """Increment retry_count and return the new value."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE generation_jobs SET retry_count = retry_count + 1 WHERE id = ?",
+                (job_id,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT retry_count FROM generation_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return row["retry_count"] if row else 0
+    
+    def update_job_requeue(self, job_id: int, error_msg: str = None) -> None:
+        """Reset a failed job to 'queued' for retry, preserving the error message."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE generation_jobs SET status='queued', finished_at=NULL, "
+                "started_at=NULL, error_msg=? WHERE id=?",
+                (error_msg, job_id),
+            )
+            conn.commit()
     
     def get_channel_jobs(self, channel_id: int, limit: int = 20) -> list[dict]:
         with self._connect() as conn:
@@ -544,7 +810,7 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             if channel_id:
                 canal = self.get_channel(channel_id)
-                canal_name = canal["slug"] if canal else "canal1"
+                canal_name = canal["slug"] if canal else "canal2"
                 rows = conn.execute(
                     "SELECT * FROM pipeline_log WHERE canal = ? ORDER BY created_at DESC LIMIT ?",
                     (canal_name, limit),
@@ -555,6 +821,312 @@ class ExtendedDatabase(Database):
                     (limit,),
                 ).fetchall()
         return [dict(r) for r in rows]
+    
+    def log_pipeline_event(self, canal: str, phase: str, status: str, message: str = None, 
+                           content_id: int = None, duration_ms: int = None):
+        """Insert a row into pipeline_log (used by orphan detector and other utilities)."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO pipeline_log (canal, phase, status, message, content_id, duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (canal, phase, status, message, content_id, duration_ms),
+            )
+            conn.commit()
+    
+    # ── Orphan Detection ─────────────────────────────────────
+    
+    # Heartbeat-based orphan detection: a video-phase job is declared dead
+    # only if its last heartbeat was >N min ago (configurable via env).
+    # This prevents false positives during slow composited renders.
+    HEARTBEAT_ORPHAN_TIMEOUT_MINUTES = int(
+        __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "15")
+    )
+    
+    # Legacy fallback: jobs without heartbeat support use started_at-based timeout
+    VIDEO_PHASE_TIMEOUT_MINUTES = 480  # 8h — generous ceiling for long renders
+    DEFAULT_ORPHAN_TIMEOUT_MINUTES = 60
+
+    def cleanup_orphaned_jobs(self, timeout_minutes: int = None) -> dict:
+        """Detect and clean up orphaned generation jobs and videos.
+        
+        Three types of orphans:
+        1. Jobs stuck in 'running' with no finished_at for > timeout_minutes
+           (video phase: 20 min; all others: 60 min).
+        2. Videos stuck in 'generating' with no active job for > timeout_minutes
+        3. Videos in 'error' with job still 'running' (zombie-thread race)
+        
+        Returns a dict with counts of cleaned items.
+        """
+        import logging
+        logger = logging.getLogger("autotube.orphans")
+        
+        if timeout_minutes is None:
+            default_timeout = self.DEFAULT_ORPHAN_TIMEOUT_MINUTES
+        else:
+            default_timeout = timeout_minutes
+        
+        result = {"jobs_failed": 0, "videos_reset": 0, "details": []}
+        
+        with self._connect() as conn:
+            # ── Type 1: Jobs stuck in 'running' beyond timeout ──
+            # Separate queries for video phase vs other phases.
+            # Video phase uses heartbeat when available (>20 min w/o heartbeat = dead).
+            # Fallback to started_at for jobs that never emitted a heartbeat.
+            
+            # Type 1a: Video-phase jobs — heartbeat-aware orphan detection
+            # A video job is orphaned if:
+            #   (a) It has heartbeats but the last one was >20 min ago, OR
+            #   (b) It has NEVER emitted a heartbeat AND started >480 min ago (legacy fallback)
+            orphan_video_jobs = conn.execute("""
+                SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at,
+                       j.last_heartbeat_at,
+                       cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
+                       c.slug as channel_slug, v.status as video_status
+                 FROM generation_jobs j
+                 JOIN channels c ON j.channel_id = c.id
+                 LEFT JOIN videos v ON j.video_id = v.id
+                 WHERE j.status = 'running'
+                   AND j.finished_at IS NULL
+                   AND j.started_at IS NOT NULL
+                   AND j.phase = 'video'
+                   AND (
+                       -- Heartbeat mode: last heartbeat > 20 min ago → truly dead
+                       (j.last_heartbeat_at IS NOT NULL
+                        AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
+                       OR
+                       -- Legacy fallback: no heartbeat ever + started >480 min ago
+                       (j.last_heartbeat_at IS NULL
+                        AND (julianday('now') - julianday(j.started_at)) * 1440 > ?)
+                   )
+            """, (20, self.VIDEO_PHASE_TIMEOUT_MINUTES,)).fetchall()
+            
+            # Type 1b: Non-video-phase jobs — heartbeat-aware when available,
+            # fallback to generous started_at timeout when no heartbeats exist.
+            # Upload phase can emit heartbeats via the resumable upload callback;
+            # other phases (metadata, thumbnail) are short-lived and use the
+            # job-level started_at timeout.
+            orphan_jobs = conn.execute("""
+                SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at,
+                       j.last_heartbeat_at,
+                       cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
+                       c.slug as channel_slug, v.status as video_status
+                 FROM generation_jobs j
+                 JOIN channels c ON j.channel_id = c.id
+                 LEFT JOIN videos v ON j.video_id = v.id
+                 WHERE j.status = 'running'
+                   AND j.finished_at IS NULL
+                   AND j.started_at IS NOT NULL
+                   AND j.phase != 'video'
+                   AND (
+                       -- Heartbeat mode: last heartbeat > 30 min ago → truly dead
+                       (j.last_heartbeat_at IS NOT NULL
+                        AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > 30)
+                       OR
+                       -- Legacy fallback: no heartbeat ever + started >480 min (8h) ago
+                       -- 480 min is generous enough for a long upload after a long render
+                       (j.last_heartbeat_at IS NULL
+                        AND (julianday('now') - julianday(j.started_at)) * 1440 > 480)
+                   )
+            """, ()).fetchall()
+            
+            # Combine video-phase and non-video orphans for processing
+            all_orphan_jobs = list(orphan_video_jobs) + list(orphan_jobs)
+            
+            for row in all_orphan_jobs:
+                r = dict(row)
+                logger.warning(
+                    "Orphan job #%d (channel=%s, video=%s, phase=%s, elapsed=%ds): marking as failed",
+                    r["job_id"], r["channel_slug"], r["video_id"], r["phase"], r["elapsed_sec"]
+                )
+                
+                # Mark job as failed
+                conn.execute(
+                    "UPDATE generation_jobs SET status='failed', error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (f"Orphaned: process lost after {r['elapsed_sec']}s", r["job_id"]),
+                )
+                
+                # Mark associated video as error if it's still 'generating'
+                if r["video_id"] and r["video_status"] == "generating":
+                    conn.execute(
+                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                        (r["video_id"],),
+                    )
+                    result["videos_reset"] += 1
+                
+                # Log to pipeline_log
+                conn.execute(
+                    """INSERT INTO pipeline_log (canal, phase, status, message)
+                       VALUES (?, 'orphan_detector', 'error', ?)""",
+                    (r["channel_slug"], f"Job #{r['job_id']} orphaned after {r['elapsed_sec']}s (phase={r['phase']})"),
+                )
+                
+                result["jobs_failed"] += 1
+                result["details"].append({
+                    "type": "orphan_job",
+                    "job_id": r["job_id"],
+                    "video_id": r["video_id"],
+                    "channel": r["channel_slug"],
+                    "elapsed_sec": r["elapsed_sec"],
+                    "phase": r["phase"],
+                })
+            
+            # ── Type 1b: Jobs with inconsistent state (running + finished_at set) ──
+            # These happen when update_job() set finished_at on a 'failed' transition
+            # but status was later reverted to 'running' without clearing finished_at.
+            inconsistent_jobs = conn.execute("""
+                SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at, j.finished_at,
+                       j.error_msg,
+                       cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
+                       c.slug as channel_slug, v.status as video_status
+                FROM generation_jobs j
+                JOIN channels c ON j.channel_id = c.id
+                LEFT JOIN videos v ON j.video_id = v.id
+                WHERE j.status = 'running'
+                  AND j.finished_at IS NOT NULL
+                   AND (julianday('now') - julianday(j.finished_at)) * 1440 > ?
+            """, (default_timeout,)).fetchall()
+            
+            for row in inconsistent_jobs:
+                r = dict(row)
+                logger.warning(
+                    "Inconsistent job #%d (channel=%s, video=%s, phase=%s, elapsed_since_finish=%ds): "
+                    "status=running but finished_at is set — marking as failed",
+                    r["job_id"], r["channel_slug"], r["video_id"], r["phase"], r["elapsed_sec"]
+                )
+                
+                # Mark job as failed (status was wrong)
+                conn.execute(
+                    "UPDATE generation_jobs SET status='failed', error_msg=COALESCE(error_msg, 'Inconsistent state: running with finished_at') WHERE id=?",
+                    (r["job_id"],),
+                )
+                
+                # Mark associated video as error if it's still 'generating'
+                if r["video_id"] and r["video_status"] == "generating":
+                    conn.execute(
+                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                        (r["video_id"],),
+                    )
+                    result["videos_reset"] += 1
+                
+                # Log to pipeline_log
+                conn.execute(
+                    """INSERT INTO pipeline_log (canal, phase, status, message)
+                       VALUES (?, 'orphan_detector', 'error', ?)""",
+                    (r["channel_slug"],
+                     f"Inconsistent job #{r['job_id']}: running with finished_at set ({r['elapsed_sec']}s since finish, error={r['error_msg'][:80] if r['error_msg'] else 'unknown'})"),
+                )
+                
+                result["jobs_failed"] += 1
+                result["details"].append({
+                    "type": "inconsistent_job",
+                    "job_id": r["job_id"],
+                    "video_id": r["video_id"],
+                    "channel": r["channel_slug"],
+                    "elapsed_sec": r["elapsed_sec"],
+                    "phase": r["phase"],
+                    "error_msg": r["error_msg"][:200] if r["error_msg"] else None,
+                })
+            
+            # ── Type 2: Videos in 'generating' with no active job ──
+            orphan_videos = conn.execute("""
+                SELECT v.id as video_id, v.channel_id, v.created_at,
+                       cast((julianday('now') - julianday(v.created_at)) * 86400 as integer) as elapsed_sec,
+                       c.slug as channel_slug
+                FROM videos v
+                JOIN channels c ON v.channel_id = c.id
+                WHERE v.status = 'generating'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM generation_jobs j
+                    WHERE j.video_id = v.id AND j.status IN ('queued', 'running')
+                  )
+                   AND (julianday('now') - julianday(v.created_at)) * 1440 > ?
+            """, (default_timeout,)).fetchall()
+            
+            for row in orphan_videos:
+                r = dict(row)
+                logger.warning(
+                    "Orphan video #%d (channel=%s, elapsed=%ds): no active job — marking as error",
+                    r["video_id"], r["channel_slug"], r["elapsed_sec"]
+                )
+                
+                conn.execute(
+                    "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                    (r["video_id"],),
+                )
+                
+                conn.execute(
+                    """INSERT INTO pipeline_log (canal, phase, status, message)
+                       VALUES (?, 'orphan_detector', 'error', ?)""",
+                    (r["channel_slug"], f"Video #{r['video_id']} orphaned after {r['elapsed_sec']}s (no active job)"),
+                )
+                
+                result["videos_reset"] += 1
+                result["details"].append({
+                    "type": "orphan_video",
+                    "video_id": r["video_id"],
+                    "channel": r["channel_slug"],
+                    "elapsed_sec": r["elapsed_sec"],
+                })
+            
+            # ── Type 3: Videos in 'error' with job still 'running' ──
+            # This catches the race condition where a zombie pipeline thread
+            # overwrites the job's "failed" status back to "running" after the
+            # error handler already marked the video as "error".
+            zombie_led_jobs = conn.execute("""
+                SELECT j.id as job_id, j.video_id, j.channel_id, j.phase,
+                       j.started_at, j.progress,
+                       cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
+                       c.slug as channel_slug, v.status as video_status,
+                       v.progress_phase as video_progress_phase
+                FROM generation_jobs j
+                JOIN channels c ON j.channel_id = c.id
+                JOIN videos v ON j.video_id = v.id
+                WHERE j.status = 'running'
+                  AND v.status = 'error'
+            """).fetchall()
+            
+            for row in zombie_led_jobs:
+                r = dict(row)
+                logger.warning(
+                    "Zombie-thread job #%d (channel=%s, video=#%d, phase=%s, "
+                    "elapsed=%ds): video is 'error' but job is still 'running' — marking job as failed",
+                    r["job_id"], r["channel_slug"], r["video_id"],
+                    r["phase"], r["elapsed_sec"]
+                )
+                
+                conn.execute(
+                    "UPDATE generation_jobs SET status='failed', error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (f"Video failed: associated video #{r['video_id']} is in 'error' state "
+                     f"(phase={r['video_progress_phase']}, elapsed={r['elapsed_sec']}s)", r["job_id"]),
+                )
+                
+                conn.execute(
+                    """INSERT INTO pipeline_log (canal, phase, status, message)
+                       VALUES (?, 'orphan_detector', 'error', ?)""",
+                    (r["channel_slug"],
+                     f"Zombie-thread job #{r['job_id']} resolved: video #{r['video_id']} "
+                     f"was already 'error' ({r['video_progress_phase']}) after {r['elapsed_sec']}s"),
+                )
+                
+                result["jobs_failed"] += 1
+                result["details"].append({
+                    "type": "zombie_thread_job",
+                    "job_id": r["job_id"],
+                    "video_id": r["video_id"],
+                    "channel": r["channel_slug"],
+                    "elapsed_sec": r["elapsed_sec"],
+                    "video_progress_phase": r["video_progress_phase"],
+                })
+            
+            conn.commit()
+        
+        if result["jobs_failed"] > 0 or result["videos_reset"] > 0:
+            logger.info(
+                "Orphan cleanup complete: %d jobs failed, %d videos reset",
+                result["jobs_failed"], result["videos_reset"]
+            )
+        
+        return result
 
     # ── Video Stats History ────────────────────────────────────
 
@@ -565,8 +1137,8 @@ class ExtendedDatabase(Database):
                 """INSERT INTO video_stats_history
                    (video_id, yt_video_id, views, likes, comments,
                     estimated_minutes_watched, average_view_duration,
-                    subscribers_gained)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subscribers_gained, estimated_revenue_min, estimated_revenue_max)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     yt_video_id,
@@ -576,6 +1148,29 @@ class ExtendedDatabase(Database):
                     float(stats.get("estimatedMinutesWatched", 0)),
                     float(stats.get("averageViewDuration", 0)),
                     int(stats.get("subscribersGained", 0)),
+                    float(stats.get("estimated_revenue_min", 0)),
+                    float(stats.get("estimated_revenue_max", 0)),
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def insert_short_stats(self, short_id: int, yt_video_id: str, stats: dict) -> int | None:
+        """Insert a snapshot of YouTube statistics for a short."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO short_stats
+                   (short_id, yt_video_id, views, likes, comments,
+                    estimated_minutes_watched, average_view_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    short_id,
+                    yt_video_id,
+                    int(stats.get("viewCount", 0)),
+                    int(stats.get("likeCount", 0)),
+                    int(stats.get("commentCount", 0)),
+                    float(stats.get("estimatedMinutesWatched", 0)),
+                    float(stats.get("averageViewDuration", 0)),
                 ),
             )
             conn.commit()
@@ -597,16 +1192,22 @@ class ExtendedDatabase(Database):
 
     def insert_channel_stats(self, channel_id: int, stats: dict) -> int | None:
         """Insert a snapshot of YouTube channel statistics."""
+        emw = stats.get("estimatedMinutesWatched")
+        emw_val = float(emw) if emw is not None and emw not in (0, "0") else 0.0
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO channel_stats_history
-                   (channel_id, subscribers, total_views, video_count)
-                   VALUES (?, ?, ?, ?)""",
+                   (channel_id, subscribers, total_views, video_count, estimated_minutes_watched,
+                    estimated_revenue_min, estimated_revenue_max)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     channel_id,
                     int(stats.get("subscriberCount", 0)),
                     int(stats.get("viewCount", 0)),
                     int(stats.get("videoCount", 0)),
+                    emw_val,
+                    float(stats.get("estimated_revenue_min", 0)),
+                    float(stats.get("estimated_revenue_max", 0)),
                 ),
             )
             conn.commit()
@@ -623,3 +1224,858 @@ class ExtendedDatabase(Database):
                 (channel_id, f"-{days} days"),
             ).fetchall()
         return [dict(r) for r in rows]
+    
+    def get_all_channels_latest_stats(self) -> list[dict]:
+        """Get the most recent stats snapshot for every channel (one row per channel)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT csh.*, ch.name as channel_name, ch.slug as channel_slug,
+                          (SELECT COUNT(*) FROM shorts s WHERE s.channel_id = ch.id AND s.status = 'published') as shorts_published,
+                          (SELECT COUNT(*) FROM shorts s WHERE s.channel_id = ch.id) as shorts_total,
+                          (SELECT COALESCE(SUM(vsh.likes), 0) FROM videos v
+                             JOIN video_stats_history vsh ON vsh.id = (
+                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                               WHERE vsh2.video_id = v.id AND vsh2.likes > 0
+                             )
+                             WHERE v.channel_id = ch.id) as total_likes,
+                          (SELECT COALESCE(SUM(vsh.views), 0) FROM videos v
+                             JOIN video_stats_history vsh ON vsh.id = (
+                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                               WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                             )
+                              WHERE v.channel_id = ch.id AND v.yt_video_id IS NOT NULL) as longform_views,
+                           (SELECT COALESCE(SUM(ss.views), 0) FROM shorts s
+                              JOIN short_stats ss ON ss.id = (
+                                SELECT MAX(ss2.id) FROM short_stats ss2
+                                WHERE ss2.short_id = s.id AND ss2.views > 0
+                              )
+                              WHERE s.channel_id = ch.id AND s.status = 'published' AND s.youtube_id IS NOT NULL) as shorts_views,
+                           (SELECT COALESCE(SUM(ss.likes), 0) FROM shorts s
+                              JOIN short_stats ss ON ss.id = (
+                                SELECT MAX(ss2.id) FROM short_stats ss2
+                                WHERE ss2.short_id = s.id AND ss2.likes > 0
+                              )
+                              WHERE s.channel_id = ch.id AND s.status = 'published' AND s.youtube_id IS NOT NULL) as shorts_likes
+                    FROM channel_stats_history csh
+                    JOIN channels ch ON ch.id = csh.channel_id
+                    WHERE csh.id IN (
+                       SELECT MAX(csh2.id) FROM channel_stats_history csh2
+                       GROUP BY csh2.channel_id
+                   )
+                   ORDER BY ch.name"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Monetization ──────────────────────────────────────────
+
+    def get_channel_monetization(self, channel_id: int) -> dict | None:
+        """Get monetization config (cpm_min, cpm_max, vertical) for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, name, slug, cpm_min, cpm_max, monetization_vertical, ypp_status FROM channels WHERE id = ?",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_channel_monetization(self, channel_id: int, cpm_min: float = None,
+                                     cpm_max: float = None, vertical: str = None) -> bool:
+        """Update CPM config for a channel."""
+        fields, values = [], []
+        if cpm_min is not None:
+            fields.append("cpm_min = ?"); values.append(cpm_min)
+        if cpm_max is not None:
+            fields.append("cpm_max = ?"); values.append(cpm_max)
+        if vertical is not None:
+            fields.append("monetization_vertical = ?"); values.append(vertical)
+        if not fields:
+            return False
+        values.append(channel_id)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE channels SET {', '.join(fields)} WHERE id = ?", values)
+            conn.commit()
+        return True
+
+    def get_channel_revenue_total(self, channel_id: int) -> dict:
+        """Sum estimated revenue from latest video stats for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(vsh.estimated_revenue_min), 0) as total_min,
+                          COALESCE(SUM(vsh.estimated_revenue_max), 0) as total_max,
+                          COALESCE(SUM(vsh.views), 0) as total_longform_views
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                   )
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else {"total_min": 0, "total_max": 0, "total_longform_views": 0}
+
+    # ── Milestones ───────────────────────────────────────────
+
+    def upsert_channel_milestone(self, channel_id: int, metric_type: str,
+                                  target_value: float, label: str, tier: str = "standard",
+                                  sort_order: int = 0, status: str = "in_progress",
+                                  achieved_at: str = None) -> int:
+        """Insert or update a channel milestone row."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO channel_milestones
+                   (channel_id, metric_type, target_value, label, tier, sort_order, status, achieved_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(channel_id, metric_type, target_value) DO UPDATE SET
+                       status = excluded.status,
+                       achieved_at = COALESCE(excluded.achieved_at, channel_milestones.achieved_at)""",
+                (channel_id, metric_type, target_value, label, tier, sort_order, status, achieved_at),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_channel_milestones(self, channel_id: int) -> list[dict]:
+        """Get all milestones for a channel, ordered by sort_order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM channel_milestones
+                   WHERE channel_id = ? ORDER BY sort_order""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_upcoming_milestones(self, limit: int = 8) -> list[dict]:
+        """Get milestones not yet achieved across all active channels."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT cm.*, ch.name as channel_name, ch.slug as channel_slug
+                   FROM channel_milestones cm
+                   JOIN channels ch ON cm.channel_id = ch.id
+                   WHERE cm.status = 'in_progress' AND ch.active = 1
+                   ORDER BY cm.sort_order LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Video Analytics Detailed ─────────────────────────────
+
+    def insert_video_analytics_batch(self, video_id: int, yt_video_id: str,
+                                      report_type: str, rows_data: list[dict]) -> int:
+        """Insert analytics rows (traffic sources, demographics, etc.) for a video."""
+        count = 0
+        with self._connect() as conn:
+            # Remove old data for this video+report_type before inserting fresh
+            conn.execute(
+                "DELETE FROM video_analytics_detailed WHERE video_id = ? AND report_type = ?",
+                (video_id, report_type),
+            )
+            for item in rows_data:
+                conn.execute(
+                    """INSERT INTO video_analytics_detailed
+                       (video_id, yt_video_id, report_type, dimension, metric_value)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (video_id, yt_video_id, report_type,
+                     item.get("dimension"), item.get("metric_value", 0)),
+                )
+                count += 1
+            conn.commit()
+        return count
+
+    def get_video_analytics(self, video_id: int) -> list[dict]:
+        """Get all analytics data for a video."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM video_analytics_detailed
+                   WHERE video_id = ? ORDER BY report_type, metric_value DESC""",
+                (video_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Growth Data for Charts ───────────────────────────────
+
+    def get_channel_growth_data(self, channel_id: int, days: int = 30) -> list[dict]:
+        """Get daily stats snapshots for a channel's growth chart."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT DATE(fetched_at) as date_key,
+                          MAX(subscribers) as subscribers,
+                          MAX(total_views) as total_views,
+                          MAX(estimated_minutes_watched) as watch_minutes,
+                          MAX(estimated_revenue_min) as revenue_min,
+                          MAX(estimated_revenue_max) as revenue_max
+                   FROM channel_stats_history
+                   WHERE channel_id = ?
+                     AND fetched_at >= datetime('now', ?)
+                   GROUP BY DATE(fetched_at)
+                   ORDER BY date_key ASC""",
+                (channel_id, f"-{days} days"),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_channel_content_ranking(self, channel_id: int, limit: int = 20) -> list[dict]:
+        """Rank videos by views with revenue and retention data."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
+                          v.created_at,
+                          vsh.views, vsh.likes, vsh.comments,
+                          vsh.estimated_minutes_watched, vsh.average_view_duration,
+                          vsh.subscribers_gained, vsh.estimated_revenue_min,
+                          vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                   )
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL
+                   ORDER BY vsh.views DESC LIMIT ?""",
+                (channel_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_dashboard_data(self) -> dict:
+        """Unified dashboard data: KPIs, channels, pipeline, upcoming, top videos."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+
+            # ── Engagement per channel (likes + comments from latest video stats, real Data API v3 data) ──
+            engagement_by_channel = conn.execute(
+                """SELECT v.channel_id,
+                          COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND (vsh2.likes > 0 OR vsh2.comments > 0)
+                   )
+                   WHERE v.yt_video_id IS NOT NULL
+                   GROUP BY v.channel_id"""
+            ).fetchall()
+            engagement_map = {r["channel_id"]: r["engagement"] for r in engagement_by_channel}
+
+            # ── Channel comparison with latest stats ──
+            channels = conn.execute(
+                """SELECT ch.id, ch.name, ch.slug, ch.active,
+                          ch.cpm_min, ch.cpm_max, ch.monetization_vertical, ch.ypp_status,
+                          csh.subscribers, csh.total_views, csh.video_count,
+                          csh.estimated_minutes_watched, csh.fetched_at as stats_updated,
+                          csh.estimated_revenue_min, csh.estimated_revenue_max,
+                          (SELECT COUNT(*) FROM videos v WHERE v.channel_id = ch.id AND v.yt_video_id IS NOT NULL) as uploaded_videos,
+                          (SELECT COUNT(*) FROM shorts s WHERE s.channel_id = ch.id AND s.status = 'published') as shorts_published,
+                          (SELECT COUNT(*) FROM shorts s WHERE s.channel_id = ch.id) as shorts_total,
+                          (SELECT COALESCE(SUM(vsh.likes), 0) FROM videos v
+                             JOIN video_stats_history vsh ON vsh.id = (
+                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                               WHERE vsh2.video_id = v.id AND vsh2.likes > 0
+                             )
+                             WHERE v.channel_id = ch.id AND v.yt_video_id IS NOT NULL) as total_likes,
+                          (SELECT COALESCE(SUM(vsh.views), 0) FROM videos v
+                             JOIN video_stats_history vsh ON vsh.id = (
+                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                               WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                             )
+                              WHERE v.channel_id = ch.id AND v.yt_video_id IS NOT NULL) as longform_views,
+                           (SELECT COALESCE(SUM(ss.views), 0) FROM shorts s
+                              JOIN short_stats ss ON ss.id = (
+                                SELECT MAX(ss2.id) FROM short_stats ss2
+                                WHERE ss2.short_id = s.id AND ss2.views > 0
+                              )
+                              WHERE s.channel_id = ch.id AND s.status = 'published' AND s.youtube_id IS NOT NULL) as shorts_views,
+                           (SELECT COALESCE(SUM(ss.likes), 0) FROM shorts s
+                              JOIN short_stats ss ON ss.id = (
+                                SELECT MAX(ss2.id) FROM short_stats ss2
+                                WHERE ss2.short_id = s.id AND ss2.likes > 0
+                              )
+                              WHERE s.channel_id = ch.id AND s.status = 'published' AND s.youtube_id IS NOT NULL) as shorts_likes
+                    FROM channels ch
+                   LEFT JOIN channel_stats_history csh ON csh.id = (
+                       SELECT MAX(csh2.id) FROM channel_stats_history csh2 WHERE csh2.channel_id = ch.id
+                   )
+                   WHERE ch.active = 1
+                   ORDER BY ch.name"""
+            ).fetchall()
+
+            channels_data = []
+            total_subscribers = 0
+            total_views = 0
+            total_engagement = 0
+            total_shorts_published = 0
+            total_likes = 0
+            total_longform_views = 0
+            total_shorts_views = 0
+            total_revenue_min = 0
+            total_revenue_max = 0
+            subscribers_prev = 0
+            views_prev = 0
+            engagement_prev = 0
+
+            for ch in channels:
+                ch_dict = dict(ch)
+                ch_dict["engagement"] = engagement_map.get(ch_dict["id"], 0)
+                channels_data.append(ch_dict)
+                total_subscribers += (ch_dict["subscribers"] or 0)
+                total_views += (ch_dict["total_views"] or 0)
+                total_engagement += ch_dict["engagement"]
+                total_shorts_published += (ch_dict["shorts_published"] or 0)
+                total_likes += (ch_dict["total_likes"] or 0)
+                total_longform_views += (ch_dict["longform_views"] or 0)
+                total_shorts_views += (ch_dict["shorts_views"] or 0)
+                total_revenue_min += (ch_dict.get("estimated_revenue_min") or 0)
+                total_revenue_max += (ch_dict.get("estimated_revenue_max") or 0)
+
+                # Compute YPP progress per channel
+                subs = ch_dict.get("subscribers") or 0
+                watch_hours = round((ch_dict.get("estimated_minutes_watched") or 0) / 60.0, 1)
+                ch_dict["ypp_subs_pct"] = min(100, round(subs / 10, 1))  # target 1000
+                ch_dict["ypp_hours_pct"] = min(100, round(watch_hours / 40, 1))  # target 4000
+                ch_dict["watch_hours"] = watch_hours
+
+                # Get previous snapshot (~7 days ago) for delta
+                prev = conn.execute(
+                    """SELECT subscribers, total_views
+                       FROM channel_stats_history
+                       WHERE channel_id = ? AND fetched_at <= datetime('now', '-7 days')
+                       ORDER BY fetched_at DESC LIMIT 1""",
+                    (ch_dict["id"],),
+                ).fetchone()
+                if prev:
+                    subscribers_prev += (prev["subscribers"] or 0)
+                    views_prev += (prev["total_views"] or 0)
+
+                # Engagement at ~7 days ago
+                eng_prev = conn.execute(
+                    """SELECT COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
+                       FROM videos v
+                       JOIN video_stats_history vsh ON vsh.id = (
+                           SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                           WHERE vsh2.video_id = v.id
+                             AND (vsh2.likes > 0 OR vsh2.comments > 0)
+                             AND vsh2.fetched_at <= datetime('now', '-7 days')
+                       )
+                       WHERE v.yt_video_id IS NOT NULL AND v.channel_id = ?""",
+                    (ch_dict["id"],),
+                ).fetchone()
+                if eng_prev:
+                    engagement_prev += (eng_prev["engagement"] or 0)
+
+            def _delta_pct(current, previous):
+                if previous and previous > 0 and current is not None and current > 0:
+                    return round((current - previous) / previous * 100, 1)
+                return None
+
+            # ── Pipeline: videos generating or ready ──
+            pipeline = conn.execute(
+                """SELECT v.id, v.titulo_final, v.status, v.progress, v.progress_phase,
+                          v.created_at, c.name as channel_name, c.slug as channel_slug
+                   FROM videos v
+                   JOIN channels c ON v.channel_id = c.id
+                   WHERE v.status IN ('generating', 'ready')
+                   ORDER BY v.created_at DESC LIMIT 10"""
+            ).fetchall()
+
+            in_production = conn.execute(
+                "SELECT COUNT(*) as c FROM videos WHERE status = 'generating'"
+            ).fetchone()["c"]
+            ready_count = conn.execute(
+                "SELECT COUNT(*) as c FROM videos WHERE status = 'ready'"
+            ).fetchone()["c"]
+
+            # ── Upcoming schedules ──
+            upcoming = conn.execute(
+                """SELECT cs.*, c.name as channel_name, c.slug as channel_slug,
+                          v.titulo_final as video_title
+                   FROM content_schedules cs
+                   JOIN channels c ON cs.channel_id = c.id
+                   LEFT JOIN videos v ON cs.video_id = v.id
+                   WHERE cs.active = 1 AND cs.next_run_at > datetime('now')
+                   ORDER BY cs.next_run_at ASC LIMIT 8"""
+            ).fetchall()
+
+            # ── Top 5 videos by views ──
+            top_videos = conn.execute(
+                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
+                          v.video_path, v.created_at, c.name as channel_name, c.slug as channel_slug,
+                          vsh.views, vsh.likes, vsh.comments, vsh.estimated_minutes_watched,
+                          vsh.average_view_duration, vsh.estimated_revenue_min,
+                          vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
+                   FROM videos v
+                   JOIN channels c ON v.channel_id = c.id
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                   )
+                   ORDER BY vsh.views DESC LIMIT 5"""
+            ).fetchall()
+
+            # ── Sparkline data for KPI cards (last 7 days) ──
+            sparkline_subscribers = []
+            sparkline_views = []
+            sparkline_engagement = []
+            for days_ago in range(7, -1, -1):
+                date_point = f"datetime('now', '-{days_ago} days')"
+                aggr = conn.execute(
+                    f"""SELECT SUM(csh.subscribers) as subs, SUM(csh.total_views) as views
+                        FROM channel_stats_history csh
+                        INNER JOIN (
+                            SELECT channel_id, MAX(id) as max_id
+                            FROM channel_stats_history
+                            WHERE fetched_at <= {date_point}
+                            GROUP BY channel_id
+                        ) latest ON csh.id = latest.max_id"""
+                ).fetchone()
+                # Real engagement from Data API v3 (likes + comments)
+                eng_aggr = conn.execute(
+                    f"""SELECT COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
+                        FROM videos v
+                        JOIN video_stats_history vsh ON vsh.id = (
+                            SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                            WHERE vsh2.video_id = v.id
+                              AND (vsh2.likes > 0 OR vsh2.comments > 0)
+                              AND vsh2.fetched_at <= {date_point}
+                        )
+                        WHERE v.yt_video_id IS NOT NULL"""
+                ).fetchone()
+                if aggr:
+                    sparkline_subscribers.append(aggr["subs"] or 0)
+                    sparkline_views.append(aggr["views"] or 0)
+                    sparkline_engagement.append(eng_aggr["engagement"] or 0)
+
+        return {
+            "global_kpis": {
+                "subscribers": {
+                    "value": total_subscribers,
+                    "delta": _delta_pct(total_subscribers, subscribers_prev),
+                },
+                "total_views": {
+                    "value": total_views,
+                    "delta": _delta_pct(total_views, views_prev),
+                    "breakdown": {
+                        "longform": total_longform_views,
+                        "shorts": total_shorts_views,
+                    },
+                },
+                "engagement": {
+                    "value": total_engagement,
+                    "delta": _delta_pct(total_engagement, engagement_prev),
+                },
+                "total_likes": {
+                    "value": total_likes,
+                    "delta": None,
+                },
+                "shorts": {
+                    "value": total_shorts_published,
+                    "delta": None,
+                },
+                "in_production": {
+                    "value": in_production + ready_count,
+                    "generating": in_production,
+                    "ready": ready_count,
+                },
+                "sparkline_subscribers": sparkline_subscribers,
+                "sparkline_views": sparkline_views,
+                "sparkline_engagement": sparkline_engagement,
+            },
+            "channels": channels_data,
+            "pipeline": [dict(r) for r in pipeline],
+            "upcoming": [dict(r) for r in upcoming],
+            "top_videos": [dict(r) for r in top_videos],
+            "ypp_progress": channels_data,
+            "revenue_overview": {
+                "total_min": round(total_revenue_min, 2),
+                "total_max": round(total_revenue_max, 2),
+                "avg_cpm_min": round(total_revenue_min / max(total_longform_views, 1) * 1000, 2),
+                "avg_cpm_max": round(total_revenue_max / max(total_longform_views, 1) * 1000, 2),
+            },
+        }
+
+    # ── Channel Templates ─────────────────────────────────────
+
+    def get_channel_templates(self, channel_id: int) -> list[dict]:
+        """Get all templates for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM channel_templates WHERE channel_id = ?", (channel_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_channel_template(self, channel_id: int, segment_type: str) -> Optional[dict]:
+        """Get a specific template for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM channel_templates WHERE channel_id = ? AND segment_type = ?",
+                (channel_id, segment_type)
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ── Planning Slots ──────────────────────────────────────────
+    
+    def create_planned_slot(self, channel_id: int, date_key: str, scheduled_at: str,
+                            target_upload_at: str = None, slot_position: int = 0) -> int:
+        """Create a planned slot. Returns slot id."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
+                   target_upload_at, slot_position)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (channel_id, date_key, scheduled_at, target_upload_at, slot_position),
+            )
+            conn.commit()
+            return cursor.lastrowid
+    
+    def create_planned_slots_batch(self, slots: list[dict]) -> int:
+        """Insert multiple slots atomically. Returns count inserted."""
+        count = 0
+        with self._connect() as conn:
+            for s in slots:
+                conn.execute(
+                    """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
+                       target_upload_at, slot_position)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (s["channel_id"], s["date_key"], s["scheduled_at"],
+                     s.get("target_upload_at"), s.get("slot_position", 0)),
+                )
+                count += 1
+            conn.commit()
+        return count
+    
+    def get_planned_slots(self, date_key: str = None, channel_id: int = None,
+                          status: str = None) -> list[dict]:
+        """Get planned slots with optional filters."""
+        q = """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
+               FROM planned_slots ps
+               JOIN channels c ON ps.channel_id = c.id
+               WHERE 1=1"""
+        params = []
+        if date_key:
+            q += " AND ps.date_key = ?"; params.append(date_key)
+        if channel_id:
+            q += " AND ps.channel_id = ?"; params.append(channel_id)
+        if status:
+            q += " AND ps.status = ?"; params.append(status)
+        q += " ORDER BY ps.scheduled_at ASC"
+        with self._connect() as conn:
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+    
+    def get_planned_slots_week(self, start_date: str, end_date: str,
+                                channel_id: int = None) -> list[dict]:
+        """Get planned slots for a date range."""
+        q = """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
+               FROM planned_slots ps
+               JOIN channels c ON ps.channel_id = c.id
+               WHERE ps.date_key >= ? AND ps.date_key <= ?"""
+        params = [start_date, end_date]
+        if channel_id:
+            q += " AND ps.channel_id = ?"; params.append(channel_id)
+        q += " ORDER BY ps.date_key, ps.scheduled_at ASC"
+        with self._connect() as conn:
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+    
+    def get_next_pending_slot(self) -> dict | None:
+        """Get the next pending slot that is due (scheduled_at <= now), 
+        ordered by scheduled_at. Returns None if none."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
+                   FROM planned_slots ps
+                   JOIN channels c ON ps.channel_id = c.id
+                   WHERE ps.status = 'pending'
+                      AND ps.scheduled_at <= datetime('now', 'localtime')
+                   ORDER BY ps.scheduled_at ASC LIMIT 1"""
+            ).fetchone()
+        return dict(row) if row else None
+    
+    def count_slots_by_status(self, date_key: str, status: str) -> int:
+        """Count slots by status for a specific date."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE date_key = ? AND status = ?",
+                (date_key, status),
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def get_channel_slots_today(self, channel_id: int, date_key: str) -> list[dict]:
+        """Get all slots (any status) for a channel on a specific date."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM planned_slots
+                   WHERE channel_id = ? AND date_key = ?
+                   ORDER BY scheduled_at ASC""",
+                (channel_id, date_key),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    
+    def update_slot_status(self, slot_id: int, status: str,
+                           job_id: int = None, video_id: int = None) -> bool:
+        """Update a planned slot's status and optionally link job/video."""
+        fields = ["status = ?"]
+        values = [status]
+        if job_id is not None:
+            fields.append("job_id = ?"); values.append(job_id)
+        if video_id is not None:
+            fields.append("video_id = ?"); values.append(video_id)
+        values.append(slot_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE planned_slots SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+            conn.commit()
+        return True
+    
+    def cancel_slots(self, slot_ids: list[int]) -> int:
+        """Cancel multiple planned slots. Returns count."""
+        if not slot_ids:
+            return 0
+        placeholders = ",".join(["?" for _ in slot_ids])
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE planned_slots SET status = 'cancelled' WHERE id IN ({placeholders})",
+                slot_ids,
+            )
+            conn.commit()
+            return cursor.rowcount
+    
+    def get_channel_planning_config(self, channel_id: int) -> dict:
+        """Extract planning-related fields from channel config_json."""
+        ch = self.get_channel(channel_id)
+        if not ch:
+            return {}
+        try:
+            config = json.loads(ch.get("config_json", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+        return {
+            "channel_id": channel_id,
+            "name": ch.get("name", ""),
+            "slug": ch.get("slug", ""),
+            "videos_per_day": config.get("videos_per_day", 1),
+            "planning_enabled": config.get("planning_enabled", True),
+        }
+    
+    def update_channel_planning_config(self, channel_id: int,
+                                        videos_per_day: int = None,
+                                        planning_enabled: bool = None) -> bool:
+        """Update planning fields in channel config_json."""
+        ch = self.get_channel(channel_id)
+        if not ch:
+            return False
+        try:
+            config = json.loads(ch.get("config_json", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+        if videos_per_day is not None:
+            config["videos_per_day"] = max(0, min(10, videos_per_day))
+        if planning_enabled is not None:
+            config["planning_enabled"] = planning_enabled
+        return self.update_channel(channel_id, config=config)
+    
+    def get_active_job(self) -> dict | None:
+        """Check if any generation job is currently running or queued. Returns it or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE status IN ('running','queued') LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    
+    def upsert_channel_template(self, channel_id: int, segment_type: str,
+                                 video_path: str, image_path: str = None,
+                                 config_json: str = None) -> int:
+        """Insert or update a channel template. Returns template id."""
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM channel_templates WHERE channel_id = ? AND segment_type = ?",
+                (channel_id, segment_type)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE channel_templates SET video_path=?, image_path=?, config_json=?, generated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (video_path, image_path, config_json, existing["id"])
+                )
+                return existing["id"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO channel_templates (channel_id, segment_type, video_path, image_path, config_json) VALUES (?,?,?,?,?)",
+                    (channel_id, segment_type, video_path, image_path, config_json)
+                )
+                return cursor.lastrowid
+    
+    # ── Shorts ────────────────────────────────────────────────
+
+    def get_shorts(
+        self, channel_id: int = None, status: str = None,
+        type_filter: str = None, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """List shorts with optional filters."""
+        with self._connect() as conn:
+            q = """SELECT s.*, c.slug as channel_slug, c.name as channel_name,
+                   v.titulo_final as source_title
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   LEFT JOIN videos v ON s.source_video_id = v.id
+                   WHERE 1=1"""
+            params = []
+            if channel_id is not None:
+                q += " AND s.channel_id = ?"; params.append(channel_id)
+            if status:
+                q += " AND s.status = ?"; params.append(status)
+            if type_filter:
+                q += " AND s.type = ?"; params.append(type_filter)
+            q += " ORDER BY s.created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_short(self, short_id: int) -> Optional[dict]:
+        """Get a single short by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT s.*, c.slug as channel_slug, c.name as channel_name,
+                   v.titulo_final as source_title
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   LEFT JOIN videos v ON s.source_video_id = v.id
+                   WHERE s.id = ?""",
+                (short_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_clips_for_video(self, video_id: int) -> list[dict]:
+        """Get all clip shorts for a source video."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM shorts WHERE source_video_id = ? AND type = 'clip' ORDER BY ranking",
+                (video_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_today_pending_shorts(self, channel_id: int = None) -> list[dict]:
+        """Get all shorts scheduled for publication today."""
+        from datetime import date
+        today = date.today().isoformat()
+        with self._connect() as conn:
+            q = """SELECT s.*, c.slug as channel_slug, c.name as channel_name
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   WHERE s.scheduled_date = ? AND s.status = 'pending'"""
+            params = [today]
+            if channel_id is not None:
+                q += " AND s.channel_id = ?"; params.append(channel_id)
+            q += " ORDER BY s.ranking ASC"
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_shorts_stats(self) -> dict:
+        """Get aggregate shorts statistics including YouTube metrics."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) as c FROM shorts").fetchone()["c"]
+            published = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE status = 'published'"
+            ).fetchone()["c"]
+            pending = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE status = 'pending'"
+            ).fetchone()["c"]
+            ready = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE status = 'ready'"
+            ).fetchone()["c"]
+            by_type = {}
+            for row in conn.execute(
+                "SELECT type, COUNT(*) as cnt FROM shorts GROUP BY type"
+            ).fetchall():
+                by_type[row["type"]] = row["cnt"]
+
+            # YouTube metrics for published shorts
+            yt_stats = conn.execute(
+                """SELECT COALESCE(SUM(ss.views), 0) as total_views,
+                          COALESCE(SUM(ss.likes), 0) as total_likes,
+                          COALESCE(SUM(ss.comments), 0) as total_comments
+                   FROM shorts s
+                   JOIN short_stats ss ON ss.id = (SELECT MAX(ss2.id) FROM short_stats ss2
+                                                    WHERE ss2.short_id = s.id)
+                   WHERE s.status = 'published' AND s.youtube_id IS NOT NULL"""
+            ).fetchone()
+
+            # Per-channel shorts stats with YouTube metrics
+            per_channel = []
+            for row in conn.execute(
+                """SELECT s.channel_id, c.name as channel_name, c.slug as channel_slug,
+                          COUNT(*) as total, SUM(CASE WHEN s.status = 'published' THEN 1 ELSE 0 END) as published,
+                          COALESCE(SUM(yt.views), 0) as total_views,
+                          COALESCE(SUM(yt.likes), 0) as total_likes
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   LEFT JOIN (
+                     SELECT s2.id, ss.views, ss.likes
+                     FROM shorts s2
+                     JOIN short_stats ss ON ss.id = (SELECT MAX(ss2.id) FROM short_stats ss2
+                                                      WHERE ss2.short_id = s2.id)
+                     WHERE s2.status = 'published' AND s2.youtube_id IS NOT NULL
+                   ) yt ON yt.id = s.id
+                   GROUP BY s.channel_id
+                   ORDER BY c.name"""
+            ).fetchall():
+                per_channel.append(dict(row))
+        return {
+            "total": total,
+            "published": published,
+            "pending": pending,
+            "ready": ready,
+            "by_type": by_type,
+            "total_views": yt_stats["total_views"] if yt_stats else 0,
+            "total_likes": yt_stats["total_likes"] if yt_stats else 0,
+            "total_comments": yt_stats["total_comments"] if yt_stats else 0,
+            "per_channel": per_channel,
+        }
+
+    def get_channel_shorts_stats(self, channel_id: int) -> dict:
+        """Get shorts aggregate stats for a specific channel including YouTube metrics."""
+        with self._connect() as conn:
+            counts = {}
+            for row in conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM shorts WHERE channel_id = ? GROUP BY status",
+                (channel_id,)
+            ).fetchall():
+                counts[row["status"]] = row["cnt"]
+
+            yt_stats = conn.execute(
+                """SELECT COALESCE(SUM(ss.views), 0) as total_views,
+                          COALESCE(SUM(ss.likes), 0) as total_likes,
+                          COALESCE(SUM(ss.comments), 0) as total_comments
+                   FROM shorts s
+                   JOIN short_stats ss ON ss.id = (SELECT MAX(ss2.id) FROM short_stats ss2
+                                                    WHERE ss2.short_id = s.id)
+                   WHERE s.channel_id = ? AND s.status = 'published' AND s.youtube_id IS NOT NULL""",
+                (channel_id,)
+            ).fetchone()
+
+        return {
+            "total": sum(counts.values()),
+            "published": counts.get("published", 0),
+            "pending": counts.get("pending", 0),
+            "ready": counts.get("ready", 0),
+            "rendering": counts.get("rendering", 0),
+            "failed": counts.get("failed", 0),
+            "total_views": yt_stats["total_views"] if yt_stats else 0,
+            "total_likes": yt_stats["total_likes"] if yt_stats else 0,
+            "total_comments": yt_stats["total_comments"] if yt_stats else 0,
+        }
+    
+    def get_channel_videos_aggregate(self, channel_id: int) -> dict:
+        """Aggregate stats from long-form videos for a specific channel.
+
+        Returns sum of views/likes/comments from latest video_stats_history
+        snapshot for each uploaded video, plus video count.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(vsh.views), 0) as total_views,
+                          COALESCE(SUM(vsh.likes), 0) as total_likes,
+                          COALESCE(SUM(vsh.comments), 0) as total_comments,
+                          COUNT(DISTINCT v.id) as video_count
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                   )
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else {"total_views": 0, "total_likes": 0, "total_comments": 0, "video_count": 0}

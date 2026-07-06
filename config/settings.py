@@ -33,6 +33,7 @@ for d in [OUTPUT_DIR, AUDIO_DIR, IMAGES_DIR, VIDEOS_DIR, THUMBNAILS_DIR, TOKENS_
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
 GOOGLE_CLIENT_SECRET_PATH = os.getenv(
     "GOOGLE_CLIENT_SECRET_PATH",
     str(PROJECT_ROOT / "config" / "client_secret.json"),
@@ -41,7 +42,7 @@ GOOGLE_CLIENT_SECRET_PATH = os.getenv(
 # ── Channels ───────────────────────────────────────────────────
 ACTIVE_CHANNELS = [
     c.strip()
-    for c in os.getenv("ACTIVE_CHANNELS", "canal1,canal2").split(",")
+    for c in os.getenv("ACTIVE_CHANNELS", "canal2,canal3,canal4").split(",")
     if c.strip()
 ]
 
@@ -75,6 +76,43 @@ VIDEO_CODEC = os.getenv("VIDEO_CODEC", "libx264")
 VIDEO_MIN_DURATION = int(os.getenv("VIDEO_MIN_DURATION", "480"))   # seconds (8 min)
 VIDEO_MAX_DURATION = int(os.getenv("VIDEO_MAX_DURATION", "840"))   # seconds (14 min)
 
+# ffmpeg encoding preset: ultrafast > veryfast > faster > fast > medium (default) > slow > slower > veryslow
+# "fast" gives ~2x speed over "medium" with negligible quality loss
+FFMPEG_PRESET_DEFAULT = os.getenv("FFMPEG_PRESET_DEFAULT", "fast")
+
+# ── Memory guard thresholds (MB) ───────────────────────────────
+VIDEO_MEMORY_GUARD_MB = int(os.getenv("VIDEO_MEMORY_GUARD_MB", "2000"))
+LOW_MEMORY_WARN_MB = int(os.getenv("LOW_MEMORY_WARN_MB", "1500"))
+MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "3000"))
+MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "4000"))
+
+# ── Render timeout ─────────────────────────────────────────────
+# Timeout = min(max(video_duration * RENDER_TIMEOUT_MULTIPLIER, RENDER_TIMEOUT_MIN_SEC), RENDER_TIMEOUT_MAX_SEC)
+RENDER_TIMEOUT_MULTIPLIER = float(os.getenv("RENDER_TIMEOUT_MULTIPLIER", "5.0"))
+RENDER_TIMEOUT_MIN_SEC = int(os.getenv("RENDER_TIMEOUT_MIN_SEC", "3600"))  # 60 min floor (CPU renders with effects take 30-50 min)
+RENDER_TIMEOUT_MAX_SEC = int(os.getenv("RENDER_TIMEOUT_MAX_SEC", "7200"))  # 2 hour ceiling
+
+# ── Orphan detection ───────────────────────────────────────────
+HEARTBEAT_ORPHAN_TIMEOUT_MIN = int(os.getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "15"))
+MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
+
+# ── Shorts ─────────────────────────────────────────────────────
+SHORTS_RESOLUTION = (1080, 1920)
+SHORTS_FPS = 30
+SHORTS_BITRATE = "6000k"
+SHORTS_MAX_CLIPS_PER_VIDEO = 5
+SHORTS_CLIP_SCHEDULE = [
+    {"offset_days": 1, "count": 1},
+    {"offset_days": 2, "count": 1},
+    {"offset_days": 3, "count": 1},
+]
+SHORTS_NATIVE_SCHEDULE = [
+    {"week": 1, "per_day": 1},
+    {"week": 2, "per_day": 2},
+    {"week": 3, "per_day": 3},
+]
+SHORTS_NATIVE_MAX_DAILY = 4
+
 
 # ── Pollo AI (image generation for thumbnails) ─────────────────
 # Session cookie (tRPC web endpoint, bypasses Cloudflare via curl_cffi).
@@ -87,7 +125,7 @@ POLLO_AI_API_KEY = os.getenv("POLLO_AI_API_KEY", "")
 
 # ── Thumbnail Quality Control ──────────────────────────────────
 THUMBNAIL_QUALITY_THRESHOLD = int(os.getenv("THUMBNAIL_QUALITY_THRESHOLD", "7"))  # 0-10
-THUMBNAIL_MAX_QC_ATTEMPTS = int(os.getenv("THUMBNAIL_MAX_QC_ATTEMPTS", "3"))
+THUMBNAIL_MAX_QC_ATTEMPTS = int(os.getenv("THUMBNAIL_MAX_QC_ATTEMPTS", "2"))
 
 # ── Reddit API (OAuth — opcional, auto-activa la fuente primaria) ─
 # Registrar app en https://www.reddit.com/prefs/apps (tipo "script")

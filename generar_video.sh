@@ -9,7 +9,7 @@ cd /root/autotube
 
 echo "=============================================="
 echo "  AUTOTUBE — Generación de Video"
-echo "  Canal 1: Historias Impactantes Reales"
+echo "  Sincronías"
 echo "  $(date)"
 echo "=============================================="
 
@@ -19,7 +19,7 @@ echo ""
 echo "[1/2] Pipeline completo (scrape + guion + voz + imágenes + montaje)..."
 echo "       Esto tarda ~5-10 min en el montaje de video. Paciencia."
 echo ""
-python3 main.py run --canal canal1 --skip-upload
+python3 main.py run --canal canal2 --skip-upload
 
 # ── Paso 2: Copiar a web ───────────────────────────────────────
 echo ""
@@ -36,7 +36,7 @@ row = conn.execute(
        FROM videos
        WHERE canal = ? AND yt_video_id IS NULL
        ORDER BY created_at DESC LIMIT 1''',
-    ('canal1',)
+    ('canal2',)
 ).fetchone()
 conn.close()
 

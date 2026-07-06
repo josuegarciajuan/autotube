@@ -8,9 +8,9 @@
 ## Canales (v1 multi-channel)
 | ID | Slug | Nombre | YouTube | Token |
 |----|------|--------|---------|-------|
-| 1 | canal1 | Psicología Oculta | @historiasimpactantes | tokens/canal1.pickle |
-| 2 | pruebas | Pruebas | @pruebas | — |
-| 3 | canal2 | Sincronías | @cleanthelistemaillistclean7103 | tokens/canal2.pickle |
+| 1 | canal2 | Sincronías | @cleanthelistemaillistclean7103 | tokens/canal2.pickle |
+| 2 | canal3 | Civilizaciones Olvidadas | — | tokens/canal3.pickle |
+| 3 | canal4 | Expediciones sin retorno | — | — |
 
 ## OAuth por canal
 - Cada canal usa su propio `client_secret` (priority: `config/client_secret_{slug}.json` → `config/client_secret.json`)
@@ -29,7 +29,9 @@ cd frontend && npm run build
 
 ### API — reinicio tras cambios en Python
 ```bash
-pkill -f "uvicorn api.main" && sleep 1 && cd /root/autotube && nohup python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > logs/api.log 2>&1 &
+# Kill ONLY the uvicorn process, not other Python processes (renders, watchers, ffmpeg).
+# kill by PID is safe; pkill -f "uvicorn" can match unrelated processes.
+PID=$(pgrep -f "uvicorn api.main:app") && kill $PID 2>/dev/null; sleep 1 && cd /root/autotube && nohup python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > logs/api.log 2>&1 &
 ```
 
 ### Base de datos — schema y migraciones
@@ -105,5 +107,5 @@ python3 main.py upload --canal canal2
 python3 main.py stats --canal canal2
 
 # Stats YouTube reales via API
-curl localhost:8000/api/channels/3/youtube-stats
+curl localhost:8000/api/channels/1/youtube-stats
 ```

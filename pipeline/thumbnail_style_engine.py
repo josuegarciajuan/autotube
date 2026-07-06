@@ -21,6 +21,9 @@ STYLE_CATEGORIES = [
     "dramatic_contrast",       # true crime, drama, impacto
     "moody_atmospheric",       # filosófico, reflexivo, arte
     "minimalist_clean",        # tecnología, ciencia, datos
+    "vibrant_educational",     # educativo vibrante, Kurzgesagt-style
+    "shock_documentary",       # documental de impacto, National Geographic-style
+    "distress_signal",         # emergencia, rescate, expediciones perdidas
 ]
 
 # ── Per-style defaults (fallback when LLM is unavailable) ───────
@@ -104,6 +107,69 @@ STYLE_DEFAULTS: dict[str, dict] = {
             "sleek design aesthetic, high quality"
         ),
     },
+    "vibrant_educational": {
+        "visual_style": "vibrant_educational",
+        "color_palette": {
+            "primary": "#1a1a2e",
+            "secondary": "#16213e",
+            "accent": "#e94560",
+            "text": "#FFFFFF",
+            "background": "#0f3460",
+        },
+        "base_composition": "shock_closeup",
+        "effects": {"contrast_boost": 1.35, "saturation": 1.15, "vignette": 0.25},
+        "text_style": {"uppercase": True, "max_words": 4},
+        "pollo_prompt_suffix": (
+            "highly vibrant colors, educational documentary style, clean composition, "
+            "bold graphics aesthetic, Kurzgesagt-inspired visual style, "
+            "16:9 aspect ratio, dramatic lighting"
+        ),
+        "negative": "dull, muted, grayscale, boring, corporate",
+    },
+    "shock_documentary": {
+        "visual_style": "shock_documentary",
+        "color_palette": {
+            "primary": "#0a0a0a",
+            "secondary": "#1a0a0a",
+            "accent": "#ff3333",
+            "text": "#FFFFFF",
+            "background": "#000000",
+        },
+        "base_composition": "shock_closeup",
+        "effects": {"contrast_boost": 1.5, "saturation": 1.05, "vignette": 0.3},
+        "text_style": {"uppercase": True, "max_words": 3},
+        "pollo_prompt_suffix": (
+            "extreme contrast, documentary photojournalism style, gritty texture, "
+            "intense realism, dramatic shadows, National Geographic documentary aesthetic, "
+            "16:9 aspect ratio"
+        ),
+        "negative": "soft, gentle, peaceful, calm, pastel, corporate",
+    },
+    "distress_signal": {
+        "visual_style": "distress_signal",
+        "color_palette": {
+            "primary": "#0F2841",
+            "secondary": "#060C18",
+            "accent": "#FF5C00",
+            "text": "#EBF0F5",
+            "background": "#060C18",
+        },
+        "base_composition": "dark_reveal",
+        "effects": {"contrast_boost": 1.25, "saturation": 0.70, "vignette": 0.40},
+        "text_style": {"uppercase": True, "max_words": 4},
+        "pollo_prompt_suffix": (
+            "cold desaturated cinematography, arctic survival atmosphere, "
+            "distress signal aesthetic, emergency orange accents, deep blue and snow white tones, "
+            "dramatic documentary lighting, frozen wilderness landscape, 16:9 aspect ratio, "
+            "high contrast, rescue beacon mood, no text overlay"
+        ),
+        "negative": "warm, cozy, tropical, sunny, cheerful, pastel, corporate, peaceful",
+        "rescue_elements": {
+            "mayday_banner": True,
+            "coordinates": True,
+            "sin_senal_stamp": True,
+        },
+    },
 }
 
 # ── LLM prompt for style decision ────────────────────────────────
@@ -159,7 +225,7 @@ def get_channel_style(
         description: Channel about section or description text.
         theme: One-line theme summary.
         keywords: List of SEO keywords.
-        channel_slug: Unique slug for cache key (e.g. "canal1").
+        channel_slug: Unique slug for cache key (e.g. "canal2").
         force_reload: Bypass cache and re-run LLM analysis.
 
     Returns:
@@ -204,7 +270,7 @@ def _decide_style_via_llm(
     from openai import OpenAI
     from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
 
     prompt = STYLE_DECISION_PROMPT.format(
         channel_name=channel_name[:100],
@@ -252,7 +318,7 @@ def build_pollo_prompt(image_concept: str, style_profile: dict) -> str:
     """Combine an image concept with the channel style profile into a Pollo AI prompt.
 
     Structure: [focal subject] + [composition (rule of thirds, lower-third empty)]
-    + [lighting/lens] + [mood/atmosphere] + [style suffix] + [negative prompt].
+    + [lighting/lens] + [mood/atmosphere] + [style suffix] + [quality booster] + [negative prompt].
 
     Args:
         image_concept: Description of what the thumbnail should show
@@ -263,14 +329,24 @@ def build_pollo_prompt(image_concept: str, style_profile: dict) -> str:
         A complete prompt string ready for Pollo AI.
     """
     suffix = style_profile.get("pollo_prompt_suffix", "")
-    negative = (
-        "no text, no letters, no watermark, no overlay, no collage, "
-        "no cluttered composition"
+
+    quality_suffix = (
+        "high contrast, cinematic lighting, dramatic shadows, ultra-detailed, "
+        "photorealistic, vivid colors, eye-catching YouTube thumbnail composition, "
+        "viral YouTube aesthetic, 8K resolution, shallow depth of field, "
+        "professional studio lighting, award-winning composition"
     )
+
+    negative_prompt = (
+        "flat lighting, dull colors, boring, generic, low contrast, washed out, "
+        "mundane, ordinary, amateur, blurry, pixelated, overexposed, underexposed, "
+        "text, watermark, logo, signature"
+    )
+
     return (
         f"{image_concept}. Rule of thirds composition, single dominant focal point, "
         f"negative space in lower third reserved for text, cinematic depth of field. "
-        f"{suffix}. --no {negative}"
+        f"{suffix}. {quality_suffix}. --no {negative_prompt}"
     )
 
 

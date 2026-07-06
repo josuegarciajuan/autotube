@@ -97,14 +97,21 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
         if key.isupper() and key.lower() not in merged:
             merged[key.lower()] = merged[key]
 
-    # JSON round-trip turns tuples into lists.  Fix COLOR_PALETTE and
-    # similar colour-value dicts so PIL / MoviePy receive real tuples.
-    for dict_key in ("COLOR_PALETTE",):
-        palette = merged.get(dict_key)
-        if isinstance(palette, dict):
-            for sub_key, sub_val in palette.items():
-                if isinstance(sub_val, list):
-                    palette[sub_key] = tuple(sub_val)
+    # JSON round-trip turns tuples into lists. Restore all tuple-valued
+    # config entries using the Python module as the authoritative reference.
+    for key in list(merged.keys()):
+        py_val = vars(py_mod).get(key)
+        if py_val is None:
+            continue
+        # Top-level tuples (e.g. VIDEO_RESOLUTION, INTRO_BG_COLOR)
+        if isinstance(py_val, tuple) and isinstance(merged.get(key), list):
+            merged[key] = tuple(merged[key])
+        # Nested tuples inside dicts (e.g. COLOR_PALETTE values)
+        elif isinstance(py_val, dict) and isinstance(merged.get(key), dict):
+            for sub_key, sub_val in py_val.items():
+                merged_sub = merged[key].get(sub_key)
+                if isinstance(sub_val, tuple) and isinstance(merged_sub, list):
+                    merged[key][sub_key] = tuple(merged_sub)
 
     return SimpleNamespace(**merged)
 
@@ -120,7 +127,7 @@ def get_channel_config(slug: str, force_reload: bool = False) -> SimpleNamespace
     the cache (used after a config sync).
 
     Args:
-        slug: Channel slug (e.g. ``"canal1"``).
+        slug: Channel slug (e.g. ``"canal2"``).
         force_reload: If True, reload from sources even if cached.
 
     Returns:
@@ -173,6 +180,15 @@ def sync_config_to_db(slug: str) -> dict | None:
             logger.warning("sync_config_to_db: channel slug=%s not in DB", slug)
             return None
 
+        # Preserve DB-only planning keys that don't exist in Python configs
+        try:
+            existing_db = json.loads(ch.get("config_json", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            existing_db = {}
+        for key in ("videos_per_day", "planning_enabled"):
+            if key in existing_db and key not in safe:
+                safe[key] = existing_db[key]
+
         # Update name from display name
         display_name = safe.get("CANAL_DISPLAY_NAME") or safe.get("canal_display_name")
         if display_name:
@@ -204,3 +220,19 @@ def sync_all_configs_to_db() -> list[str]:
     except Exception as exc:
         logger.error("sync_all_configs_to_db failed: %s", exc)
     return synced
+
+
+def get_all_channel_configs() -> dict[str, object]:
+    """Return dict slug → SimpleNamespace for all configured channels."""
+    from database.db_extended import ExtendedDatabase
+    result: dict[str, object] = {}
+    try:
+        db = ExtendedDatabase()
+        for ch in db.get_channels():
+            slug = ch["slug"]
+            config = get_channel_config(slug)
+            if config is not None:
+                result[slug] = config
+    except Exception as exc:
+        logger.error("get_all_channel_configs failed: %s", exc)
+    return result

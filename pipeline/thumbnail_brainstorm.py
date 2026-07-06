@@ -52,6 +52,9 @@ Conoces en profundidad:
 - Fear appeals en marketing digital
 - Color psychology (rojo = urgencia/peligro, azul = confianza, negro = misterio)
 - Facial expression psychology: the human face is the single highest-CTR element on YouTube thumbnails. A shocked/surprised/astonished facial expression triggers instant emotional contagion (mirror neurons) and dramatically increases click-through rate — this is the "MrBeast face" principle.
+- Visual impact analysis: a thumbnail MUST be visually striking to stop the scroll. High contrast, vibrant focal point, dramatic composition. Flat, dull, or monotonous images are FAILURES.
+- Pattern interrupt techniques: unexpected colors, unusual angles, surreal elements that break the visual pattern of the YouTube feed.
+- The golden rule of thumbnail design: the image should make someone who has NO IDEA what the video is about NEED to click.
 
 Para cada video, analizas:
 1. La emoción DOMINANTE que debe transmitir la miniatura
@@ -79,6 +82,7 @@ INSTRUCCIONES:
 2. Define un curiosity gap específico (algo que la imagen insinúe pero no revele).
 3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica.
 4. Indica qué NO debe mostrar la miniatura.
+5. IMPORTANTE: Evalúa el NIVEL DE IMPACTO VISUAL necesario (1-10). Para contenido de psicología/documental oscuro, el impacto debe ser 8+. Sugiere TÉCNICAS ESPECÍFICAS: iluminación dramática, primer plano extremo, contraste máximo, colores vibrantes contra fondos oscuros, composición asimétrica.
 
 Responde SOLO con JSON:
 {{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "avoid_showing": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
@@ -97,6 +101,8 @@ Tu expertise:
 - Reglas de oro: nunca repetir el título, siempre generar curiosidad — el texto de imagen añade la pieza de intriga que el título no revela
 - Badges y sellos que aumentan CTR: "4K", "NUEVO", "EXCLUSIVO", "CLASIFICADO"
 - CTR gold standard: un rostro humano con expresión de sorpresa/shock en primer plano combinado con texto overlay corto e intrigante es la fórmula más probada para maximizar clicks
+- Pattern interrupt: the thumbnail must VISUALLY INTERRUPT the viewer's scanning pattern. Use unexpected element placement, color contrast, or surreal juxtaposition.
+- Text readability: text must be readable at 100px wide on mobile. Use thick outlines (3-4px minimum), high contrast, and blocky fonts.
 
 Responde SIEMPRE con JSON."""
 
@@ -111,7 +117,7 @@ PALETA DE COLORES: {color_palette}
 REQUISITOS:
 1. Crea 3 variantes de texto overlay (2-4 palabras cada una, hasta ~24 caracteres, MAYÚSCULAS). Formatos: pregunta intrigante, cifra impactante, palabra-gancho con signos. El texto debe hacer que el espectador NECESITE hacer clic.
 2. Elige la MEJOR (la que genere más curiosidad sin ser clickbait barato)
-3. Define la composición (dónde va el texto, dónde el foco visual — el rostro de sorpresa debe ser el centro)
+3. Define la composición (dónde va el texto, dónde el foco visual — el rostro de sorpresa debe ser el centro ocupando al menos 40% de la imagen). El texto debe ser GRANDE y con OUTLINE GRUESO para legibilidad en móvil.
 4. Sugiere qué layout usar: shock_closeup, dark_reveal, split_face, incomplete_puzzle
 5. El texto NO debe repetir las primeras palabras del título — debe complementarlo, añadiendo la pieza de intriga que falta
 
@@ -192,7 +198,7 @@ class ThumbnailBrainstorm:
         from openai import OpenAI
         from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
 
         user_prompt = PSYCHOLOGY_AGENT_PROMPT.format(
             channel_name=channel_name[:80],
@@ -227,7 +233,7 @@ class ThumbnailBrainstorm:
         from openai import OpenAI
         from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
 
         user_prompt = MARKETING_AGENT_PROMPT.format(
             title=title[:120],
@@ -271,22 +277,18 @@ class ThumbnailBrainstorm:
 
     def _fallback_brief(self, title: str, style: dict) -> ThumbnailBrief:
         """Return a minimal brief when the LLM agents are unavailable."""
-        visual_style = style.get("visual_style", "dark_cinematic")
-        color_palette = style.get("color_palette", {})
-        text_color = color_palette.get("text", "#F5F0E8")
-
         return ThumbnailBrief(
-            image_concept="dark atmospheric mystery scene with dramatic lighting",
-            visual_focus="central dramatic element",
-            emotion_target="curiosidad",
+            image_concept="dramatic atmospheric scene with intense lighting, high contrast, photorealistic, 8K",
+            visual_focus="central dramatic element with strong contrast",
+            emotion_target="shock",
             curiosity_gap="¿Qué secreto se oculta?",
             text_overlay="IMPACTANTE",
-            text_color_hex=text_color,
-            composition_notes="texto grande abajo, imagen oscura arriba",
-            layout=style.get("base_composition", "dark_reveal"),
-            psych_hooks=["curiosity_gap", "emotional_arousal"],
-            psych_score=0.5,
-            marketing_ctr_estimate="medium",
+            text_color_hex="#FFFFFF",
+            composition_notes="texto GRANDE abajo con outline grueso, imagen dramática arriba ocupando 70%",
+            layout=style.get("base_composition", "shock_closeup"),
+            psych_hooks=["curiosity_gap", "emotional_arousal", "pattern_interrupt"],
+            psych_score=0.7,
+            marketing_ctr_estimate="high",
             marketing_text_variants=["IMPACTANTE", "INCREÍBLE", "SECRETO"],
         )
 

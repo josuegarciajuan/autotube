@@ -1,4 +1,4 @@
-/** Channel configuration — mirrors config/canal1_config.py fields. */
+/** Channel configuration — mirrors config/canal2_config.py fields. */
 export interface ChannelConfig {
   canal_display_name: string
   canal_tagline: string
@@ -45,6 +45,7 @@ export interface ChannelConfig {
 
   // Duration / Generation
   video_average_duration_min: number
+  video_duration_discrepancy_min: number
   test_mode: boolean
   test_script_words_min: number
   test_script_words_max: number
@@ -83,8 +84,22 @@ export interface Channel {
   avatar_url: string | null
   yt_channel_id: string | null
   yt_channel_url: string | null
+  google_account: string | null
   created_at: string
   updated_at: string
+}
+
+/** Aggregate shorts statistics for a channel. */
+export interface ShortsStats {
+  total: number
+  published: number
+  pending: number
+  ready: number
+  rendering: number
+  failed: number
+  total_views: number
+  total_likes: number
+  total_comments: number
 }
 
 /** Sections for the config viewer UI */
@@ -98,11 +113,11 @@ export interface ConfigField {
   key: string
   label: string
   affectsVideo: boolean   // ⚡ badge
-  type: 'text' | 'list' | 'dict' | 'number' | 'boolean' | 'select'
+  type: 'text' | 'list' | 'dict' | 'number' | 'boolean' | 'select' | 'voice-select'
   options?: { value: string; label: string }[]  // for 'select' type
 }
 
-/** Pre-defined sections matching canal1_config.py structure */
+/** Pre-defined sections matching canal2_config.py structure */
 export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'identity',
@@ -118,7 +133,7 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     key: 'voice',
     label: '🎙️ Voz (TTS)',
     fields: [
-      { key: 'VOICE_ID', label: 'Voz Principal', affectsVideo: true, type: 'text' },
+      { key: 'VOICE_SELECT', label: 'Voz Narradora', affectsVideo: true, type: 'voice-select' },
       { key: 'VOICE_RATE', label: 'Velocidad', affectsVideo: true, type: 'text' },
       { key: 'VOICE_PITCH', label: 'Tono', affectsVideo: true, type: 'text' },
       { key: 'VOICE_VOLUME', label: 'Volumen', affectsVideo: true, type: 'text' },
@@ -202,6 +217,7 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     label: '⏱️ Duración — Objetivo',
     fields: [
       { key: 'VIDEO_AVERAGE_DURATION_MIN', label: 'Duración media (min)', affectsVideo: true, type: 'number' },
+      { key: 'VIDEO_DURATION_DISCREPANCY_MIN', label: 'Discrepancia de la media (min)', affectsVideo: true, type: 'number' },
     ],
   },
   {

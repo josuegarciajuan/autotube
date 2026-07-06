@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { api, formatDate } from '../lib/api'
-import { Plus, Edit2, Trash2, Radio, Film, Calendar, Youtube, ExternalLink } from 'lucide-react'
+import { api, formatDate, formatShortNumber } from '../lib/api'
+import { Plus, Edit2, Trash2, Radio, Film, Calendar, Youtube, ExternalLink, Eye, Users, Zap, Video } from 'lucide-react'
 
 export default function Channels() {
   const [channels, setChannels] = useState<any[]>([])
+  const [channelStats, setChannelStats] = useState<Record<number, any>>({})
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<any>(null)
@@ -18,6 +19,15 @@ export default function Channels() {
     try {
       const data = await api.getChannels()
       setChannels(data)
+      // Load stats for all channels (snapshot from DB)
+      try {
+        const statsRes = await api.getAllChannelStats()
+        if (statsRes?.ok && statsRes.channels) {
+          const map: Record<number, any> = {}
+          statsRes.channels.forEach((s: any) => { map[s.channel_id] = s })
+          setChannelStats(map)
+        }
+      } catch { /* stats are optional, not critical */ }
     } catch (e) { console.error(e) }
     setLoading(false)
   }
@@ -77,24 +87,70 @@ export default function Channels() {
   return (
     <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-2xl font-bold text-white flex items-center gap-3">
-          <Radio size={24} className="text-neon-red" />
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <h2 className="font-display text-xl sm:text-2xl font-bold text-white flex items-center gap-3">
+          <Radio size={22} className="text-neon-red" />
           Canales
         </h2>
         <button
           onClick={openNew}
-          className="flex items-center gap-2 px-4 py-2 bg-neon-red text-white rounded-lg hover:bg-neon-red/80 transition-all text-sm font-medium"
+          className="flex items-center gap-2 px-3 py-2 bg-neon-red text-white rounded-lg hover:bg-neon-red/80 transition-all text-sm font-medium w-full sm:w-auto justify-center"
         >
           <Plus size={16} />
           Nuevo Canal
         </button>
       </div>
 
+      {/* Stats summary row */}
+      {Object.keys(channelStats).length > 0 && (
+        <div className="glass rounded-xl p-4 flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <Eye size={18} className="text-neon-red" />
+            <span className="text-sm text-gray-300">Totales de todos los canales</span>
+          </div>
+          <div className="flex items-center gap-3 text-xs sm:text-sm flex-wrap">
+            <span className="font-display text-lg text-neon-gold font-bold tabular-nums">
+              {formatShortNumber(
+                Object.values(channelStats).reduce((sum: number, s: any) => sum + (s.total_views || 0), 0)
+              )}
+            </span>
+            <span className="text-gray-500">vistas YT</span>
+            <span className="text-gray-600 hidden sm:inline">|</span>
+            <span className="font-display text-sm text-neon-cyan font-bold tabular-nums">
+              {formatShortNumber(
+                Object.values(channelStats).reduce((sum: number, s: any) => sum + (s.longform_views || 0), 0)
+              )}
+            </span>
+            <span className="text-gray-500 text-[10px]">vídeos</span>
+            <span className="text-gray-600 hidden sm:inline">|</span>
+            <span className="font-display text-sm text-neon-purple font-bold tabular-nums">
+              {formatShortNumber(
+                Object.values(channelStats).reduce((sum: number, s: any) => sum + (s.shorts_views || 0), 0)
+              )}
+            </span>
+            <span className="text-gray-500 text-[10px]">shorts</span>
+            <span className="text-gray-600 hidden sm:inline">|</span>
+            <span className="font-display text-lg text-neon-pink font-bold tabular-nums">
+              {formatShortNumber(
+                Object.values(channelStats).reduce((sum: number, s: any) => sum + (s.subscribers || 0), 0)
+              )}
+            </span>
+            <span className="text-gray-500 hidden sm:inline">subs</span>
+            <span className="text-gray-600 hidden sm:inline">|</span>
+            <span className="font-display text-lg text-neon-cyan font-bold tabular-nums">
+              {formatShortNumber(
+                Object.values(channelStats).reduce((sum: number, s: any) => sum + (s.shorts_published || 0), 0)
+              )}
+            </span>
+            <span className="text-gray-500 hidden sm:inline">shorts</span>
+          </div>
+        </div>
+      )}
+
       {/* Form Modal */}
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowForm(false)}>
-          <div className="glass rounded-xl p-6 w-full max-w-md space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-md mx-4 sm:mx-0 space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
             <h3 className="font-display text-lg font-semibold text-white">
               {editing ? 'Editar Canal' : 'Nuevo Canal'}
             </h3>
@@ -145,7 +201,7 @@ export default function Channels() {
           </button>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {channels.map((ch: any) => (
             <div key={ch.id} className="glass rounded-xl p-5 neon-border hover:border-neon-red/60 transition-all duration-300 group">
               <div className="flex items-start justify-between mb-3">
@@ -167,6 +223,51 @@ export default function Channels() {
                 <span>{ch.active ? 'Activo' : 'Inactivo'}</span>
                 <span>·</span>
                 <span>{formatDate(ch.created_at)}</span>
+              </div>
+              {/* Channel stats grid */}
+              <div className="grid grid-cols-3 gap-x-2 gap-y-1.5 mb-3">
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Eye size={11} className="text-neon-cyan shrink-0" />
+                  <span className="font-mono text-neon-cyan tabular-nums">
+                    {channelStats[ch.id] ? formatShortNumber(channelStats[ch.id].longform_views || 0) : '—'}
+                  </span>
+                  <span className="hidden sm:inline">v. vídeos</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Zap size={11} className="text-neon-purple shrink-0" />
+                  <span className="font-mono text-neon-purple tabular-nums">
+                    {channelStats[ch.id] ? formatShortNumber(channelStats[ch.id].shorts_views || 0) : '—'}
+                  </span>
+                  <span className="hidden sm:inline">v. shorts</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Eye size={11} className="text-neon-gold shrink-0" />
+                  <span className="font-mono text-neon-gold tabular-nums">
+                    {channelStats[ch.id] ? formatShortNumber(channelStats[ch.id].total_views || 0) : '—'}
+                  </span>
+                  <span className="hidden sm:inline">v. YT</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Users size={11} className="text-neon-pink shrink-0" />
+                  <span className="font-mono text-neon-pink tabular-nums">
+                    {channelStats[ch.id] ? formatShortNumber(channelStats[ch.id].subscribers || 0) : '—'}
+                  </span>
+                  <span className="hidden sm:inline">subs</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Film size={11} className="text-neon-cyan shrink-0" />
+                  <span className="font-mono tabular-nums">
+                    {channelStats[ch.id] ? (channelStats[ch.id].video_count ?? '—') : '—'}
+                  </span>
+                  <span className="hidden sm:inline">vídeos</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Zap size={11} className="text-neon-purple shrink-0" />
+                  <span className="font-mono tabular-nums">
+                    {channelStats[ch.id] ? (channelStats[ch.id].shorts_published ?? '—') : '—'}
+                  </span>
+                  <span className="hidden sm:inline">shorts</span>
+                </div>
               </div>
               <Link
                 to={`/channels/${ch.id}`}

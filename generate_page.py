@@ -24,12 +24,12 @@ bg_status = bg_log.read_text()[-500:] if bg_log.exists() else "Waiting..."
 conn = sqlite3.connect(str(DATABASE_PATH))
 conn.row_factory = sqlite3.Row
 
-total_content = conn.execute("SELECT COUNT(*) as c FROM raw_content WHERE canal='canal1'").fetchone()['c']
-total_scripts = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal1'").fetchone()['c']
-total_used = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal1' AND used=1").fetchone()['c']
+total_content = conn.execute("SELECT COUNT(*) as c FROM raw_content WHERE canal='canal2'").fetchone()['c']
+total_scripts = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal2'").fetchone()['c']
+total_used = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal2' AND used=1").fetchone()['c']
 
 # Latest script
-latest = conn.execute("SELECT * FROM scripts WHERE canal='canal1' ORDER BY created_at DESC LIMIT 1").fetchone()
+latest = conn.execute("SELECT * FROM scripts WHERE canal='canal2' ORDER BY created_at DESC LIMIT 1").fetchone()
 latest_dict = dict(latest) if latest else None
 if latest_dict:
     titles = json.loads(latest_dict['titulo_options'])
@@ -38,12 +38,12 @@ if latest_dict:
 
 # Pipeline log
 logs = conn.execute(
-    "SELECT * FROM pipeline_log WHERE canal='canal1' ORDER BY created_at DESC LIMIT 20"
+    "SELECT * FROM pipeline_log WHERE canal='canal2' ORDER BY created_at DESC LIMIT 20"
 ).fetchall()
 
 # Source content
 sources = conn.execute(
-    "SELECT * FROM raw_content WHERE canal='canal1' ORDER BY scraped_at DESC LIMIT 5"
+    "SELECT * FROM raw_content WHERE canal='canal2' ORDER BY scraped_at DESC LIMIT 5"
 ).fetchall()
 
 conn.close()
@@ -60,7 +60,7 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Autotube — Canal 1: Historias Impactantes Reales</title>
+<title>Autotube — Sincronías</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d0d0d;color:#e0e0e0;line-height:1.6}}

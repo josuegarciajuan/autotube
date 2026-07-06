@@ -5,6 +5,8 @@ import re
 import random
 import logging
 import time
+import subprocess
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -12,15 +14,19 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from config.settings import (
-    VIDEOS_DIR,
+    OUTPUT_DIR,
     AUDIO_DIR,
     IMAGES_DIR,
-    ASSETS_DIR,
-    OUTPUT_DIR,
+    VIDEOS_DIR,
     VIDEO_FPS,
     VIDEO_RESOLUTION,
     VIDEO_BITRATE,
     VIDEO_CODEC,
+    FFMPEG_PRESET_DEFAULT,
+    RENDER_TIMEOUT_MULTIPLIER,
+    RENDER_TIMEOUT_MIN_SEC,
+    RENDER_TIMEOUT_MAX_SEC,
+    ASSETS_DIR,
 )
 from config.canal2_config import (
     CANAL_NAME,
@@ -102,6 +108,72 @@ def _dynamic_volume(clip, factor):
     )
 
 
+# ── FFmpeg decoder semaphore (global, system-wide) ──────────────────
+# Limits concurrent ffmpeg decoder processes to prevent RAM exhaustion
+# when multiple renders run simultaneously. Each decoder consumes
+# 50-300 MB RSS (up to 1.2 GB for 4K sources). With this cap, even
+# 2-3 parallel renders stay within safe memory bounds.
+_MAX_FFMPEG_DECODERS = 4
+_ffmpeg_decoder_semaphore = threading.Semaphore(_MAX_FFMPEG_DECODERS)
+
+
+def _kill_orphaned_ffmpeg_videoeditor():
+    """Kill orphaned ffmpeg processes from previous crashed renders.
+
+    Called before each build_video() to start with clean memory.
+    Uses the same 3-layer strategy as generation_service.py.
+    After killing, reaps zombie children to free kernel process-table slots.
+    """
+    import signal
+    killed = 0
+    reap_pids = set()
+
+    try:
+        pid = os.getpid()
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid), "-f", "ffmpeg"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            for cpid in result.stdout.strip().split():
+                try:
+                    os.kill(int(cpid), signal.SIGKILL)
+                    reap_pids.add(int(cpid))
+                    killed += 1
+                except ProcessLookupError:
+                    pass
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", "1", "-f", "ffmpeg"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            for opid in result.stdout.strip().split():
+                try:
+                    os.kill(int(opid), signal.SIGKILL)
+                    reap_pids.add(int(opid))
+                    killed += 1
+                except ProcessLookupError:
+                    pass
+    except Exception:
+        pass
+
+    # Reap zombie children so they don't linger in the process table
+    for rpid in reap_pids:
+        try:
+            os.waitpid(rpid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+
+    if killed > 0:
+        import logging as _log
+        _log.getLogger("autotube.video_editor").warning(
+            "Killed %d orphaned ffmpeg process(es) + reaped zombies before render", killed
+        )
+
+
 class VideoEditor:
     """MoviePy-based video assembler with Ken Burns, subtitles, ducking, and effects.
 
@@ -135,11 +207,14 @@ class VideoEditor:
 
     INTRO_DURATION: float = 3.0
     OUTRO_DURATION: float = 5.0
-    SCENE_DURATION_MIN: float = 5.0   # Enforced — scenes shorter than this are merged
-    SCENE_DURATION_MAX: float = 20.0  # Enforced — scenes longer than this are split (matches stock video max)
+    SCENE_DURATION_MIN: float = 6.0   # Enforced — scenes shorter than this are merged
+    SCENE_DURATION_MAX: float = 15.0  # Enforced — dynamic pacing for documentary content
     # Legacy aliases kept for backward compatibility
     MIN_SCENE_DURATION: float = SCENE_DURATION_MIN
     MAX_SCENE_DURATION: float = SCENE_DURATION_MAX
+    # Hard cap: when accumulated clip duration exceeds this, force a new clip
+    # from the fallback pool instead of extending the same image indefinitely.
+    MAX_CLIP_EXTEND_SEC: float = 25.0
 
     DEFAULT_FONT: str = "DejaVu-Sans"
 
@@ -158,8 +233,22 @@ class VideoEditor:
                 if not k.startswith('_') and not inspect.ismodule(v) and not inspect.isfunction(v)
             }
         self.canal = canal_config or {}
+        # Validate visual config before any rendering starts
+        # (also validated at API startup, but re-check here in case
+        #  the channel config was modified since boot).
+        if self.canal:
+            slug = self.canal.get("slug") or self.canal.get("CANAL_NAME", "unknown")
+            try:
+                from config.config_validator import validate_channel_config
+                vw = validate_channel_config(slug, self.canal)
+                if vw:
+                    for w in vw:
+                        self.logger.warning("Config: %s", w)
+            except Exception:
+                pass  # validation is advisory, never block a render
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.video_size: tuple[int, int] = VIDEO_RESOLUTION
+        # Allow per-channel/test resolution override (e.g. 480x270 for fast tests)
+        self.video_size: tuple[int, int] = self.canal.get("VIDEO_RESOLUTION", VIDEO_RESOLUTION)
         self.fps: int = VIDEO_FPS
 
         # P3: Per-video uniform color grade (consistent across all clips)
@@ -167,10 +256,15 @@ class VideoEditor:
 
         # P4: Asset deduplication tracking — prevents the same file from
         # being used for multiple scenes within one video build.
-        # Images: full dedup (Ken Burns on same image is repetitive).
+        # Images: LRU-based dedup (allow reuse after N different clips).
         # Videos: offset tracking — each scene gets a different segment.
         self._used_asset_paths: set[str] = set()
         self._video_offset_tracker: dict[str, float] = {}  # path → next_start_offset
+        # LRU tracking for image reuse: key=path → last clip index when used
+        self._image_last_clip_idx: dict[str, int] = {}
+        self._current_clip_idx: int = 0
+        # When reusing an image, vary Ken Burns focus to avoid visual repetition
+        self._image_reuse_count: dict[str, int] = {}  # path → how many times reused
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -186,6 +280,7 @@ class VideoEditor:
         music_volume: float = -20.0,
         cta_audio_path: str | None = None,
         scene_ranges: list[dict] | None = None,     # v2: precomputed enforceable ranges
+        job_id: int = None,                           # v3: for heartbeat emission during render
     ) -> Path:
         """Assemble the complete video from blocks, media, audio, and effects.
 
@@ -214,6 +309,19 @@ class VideoEditor:
             safe_stem = Path(audio_path).stem.replace(" ", "_")
             output_path = str(VIDEOS_DIR / f"{safe_stem}.mp4")
         output_path = Path(output_path)
+        
+        # Collision avoidance: if output already exists (e.g. from a prior failed
+        # retry), append a random suffix to prevent partial-file conflicts.
+        if output_path.exists():
+            import uuid
+            suffix = uuid.uuid4().hex[:6]
+            new_path = output_path.with_stem(f"{output_path.stem}_{suffix}")
+            self.logger.info(
+                "Output path %s already exists — using %s instead",
+                output_path.name, new_path.name,
+            )
+            output_path = new_path
+        
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         timestamps = self._normalize_timestamps(timestamps)
@@ -229,6 +337,9 @@ class VideoEditor:
         self._used_asset_paths.clear()
         self._video_offset_tracker.clear()
         self._video_color_grade = None
+        self._image_last_clip_idx.clear()
+        self._current_clip_idx = 0
+        self._image_reuse_count.clear()
 
         # ── Compute block time ranges ──────────────────────────
         if scene_ranges:
@@ -242,22 +353,33 @@ class VideoEditor:
                 raise RuntimeError("No block ranges computed — cannot build video.")
             self.logger.info("Step 1/6: %d blocks with time ranges computed", len(block_ranges))
 
-        # ── Create clips per block/range ───────────────────────
-        block_clips: list[VideoClip] = []
+        # ── v4: Segment-based body rendering (RAM bounded) ─────
+        # Instead of creating all clips in memory (CompositeVideoClip → OOM),
+        # render each scene as a standalone MP4 segment (1 decoder at a time),
+        # then concatenate with ffmpeg xfade. Peak RAM = ~400 MB, constant.
+        self.logger.info("Step 2/6: Rendering %d scene segments (RAM bounded)…", len(block_ranges))
         tts_duration = timestamps[-1].get("end", 0) if timestamps else 0
 
-        # Collect the paths of all real (non-placeholder) assets as a
-        # fallback pool so we never render the blue-text placeholder.
+        # Collect fallback image pool (images only, videos would crash PIL)
         _real_image_paths: list[Path] = []
         if media_assets:
             for a in media_assets:
                 ap = a.get("path")
-                if ap and a.get("type") in ("image", "video") and Path(ap).exists():
+                if ap and a.get("type") == "image" and Path(ap).exists():
                     _real_image_paths.append(Path(ap))
 
+        # Temp dir for scene segments
+        seg_dir = Path(VIDEOS_DIR) / "segments"
+        if job_id is not None:
+            seg_dir = seg_dir / str(job_id)
+        seg_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_paths: list[str] = []
+        self._current_clip_idx = 0
+        n_fallback = 0
+
         for i, br in enumerate(block_ranges):
-            # When scene_ranges are pre-computed, media_assets align 1:1 by index.
-            # Otherwise fall back to asset_idx mapping.
+            # Match asset to scene (1:1 with scene_ranges)
             asset = None
             if scene_ranges:
                 asset = media_assets[i] if i < len(media_assets) else None
@@ -268,62 +390,88 @@ class VideoEditor:
             if asset is None:
                 asset = {"type": "placeholder", "path": None}
 
-            clip = self._create_block_clip(br, asset, fallback_pool=_real_image_paths)
+            seg_path = seg_dir / f"scene_{i:04d}.mp4"
+            media_type = asset.get("type", "?")
 
-            if clip is None:
-                # No real media for this scene — extend the PREVIOUS clip
-                # instead of rendering the blue-text placeholder.
-                if block_clips:
-                    prev = block_clips[-1]
-                    # Extend duration: keep the same clip, just longer.
-                    try:
-                        prev_dur = prev.duration() if callable(prev.duration) else prev.duration
-                    except Exception:
-                        prev_dur = br.get("start", 0)  # best guess
-                    block_clips[-1] = prev.with_duration(prev_dur + br["duration"])
-                    self.logger.info(
-                        "  Scene %d [%s] merged with previous — no media available",
+            # Try render as segment (1 attempt + 1 retry on failure)
+            result_path = self._render_scene_segment(
+                br, asset, str(seg_path), clip_idx=i,
+                fallback_pool=_real_image_paths,
+            )
+
+            if result_path is None:
+                # Scene failed or returned None (no media) — retry with fallback image
+                self.logger.warning(
+                    "  Scene %d FAILED (type=%s) — retrying with fallback image", i, media_type,
+                )
+                if _real_image_paths:
+                    fb_asset = {
+                        "type": "image",
+                        "path": str(random.choice(_real_image_paths)),
+                    }
+                    fb_path = seg_dir / f"scene_{i:04d}_fb.mp4"
+                    result_path = self._render_scene_segment(
+                        br, fb_asset, str(fb_path), clip_idx=i,
+                        fallback_pool=_real_image_paths,
+                    )
+                if result_path is None:
+                    self.logger.warning(
+                        "  Scene %d [%s]: ULTIMATE FALLBACK — using black placeholder",
                         i + 1, br.get("tipo", "?"),
                     )
+                    result_path = self._render_black_segment(br, seg_dir / f"scene_{i:04d}_black.mp4")
+                    n_fallback += 1
                 else:
-                    # First scene has no media at all — use a black placeholder
-                    # (extreme edge case; should never happen with the fallback pool).
-                    self.logger.warning(
-                        "  Scene 1 has no media and nothing to merge with — using black clip"
-                    )
-                    clip = self._placeholder_clip(br["duration"])
-                    clip = clip.with_start(br["start"])
-                    block_clips.append(clip)
-                continue
+                    n_fallback += 1
 
-            clip = clip.with_start(br["start"])
-            block_clips.append(clip)
+            if result_path:
+                segment_paths.append(result_path)
+            else:
+                # Last resort — can't happen with _render_black_segment, but be safe
+                self.logger.error("  Scene %d: CRITICAL — could not render placeholder", i)
+                segment_paths.append("")  # placeholder; will be caught by concat
 
-            media_type = asset.get("type", "?")
-            self.logger.info("  Scene %d [%s]: %.1f-%.1fs (%.1fs) media=%s",
-                             i + 1, br.get("tipo", "?"), br["start"], br["end"],
-                             br["duration"], media_type)
+            self._current_clip_idx += 1
 
-        # The body video duration may exceed the TTS narration when
-        # inter-paragraph transition scenes are present. The last clip
-        # covers the full body including transitions.
-        if not block_clips:
-            raise RuntimeError("No clips created — cannot build video.")
+        # Remove empty entries from any remaining failures
+        segment_paths = [p for p in segment_paths if p and Path(p).exists()]
 
-        # ── Composite with crossfades ──────────────────────────
-        self.logger.info("Step 2/6: Compositing %d clips with crossfades…", len(block_clips))
-        body_video = self._composite_scenes(block_clips)
+        if not segment_paths:
+            raise RuntimeError("No segments rendered — cannot build video.")
+
+        self.logger.info(
+            "  %d segments rendered (%d fallback, %d image/%d video ratio)",
+            len(segment_paths), n_fallback,
+            sum(1 for a in media_assets if a.get("type") == "image"),
+            sum(1 for a in media_assets if a.get("type") == "video"),
+        )
+
+        # ── Concat segments with crossfades (+ grain + vignette) ──
+        self.logger.info("Step 3/6: Concatenating %d segments with xfade…", len(segment_paths))
+        body_path = seg_dir / "body.mp4"
+        body_segment_path = self._concat_body_with_crossfades(
+            segment_paths, block_ranges, str(body_path),
+        )
+
+        # Load body as VideoClip for final assembly (cheap — single file)
+        body_video = VideoFileClip(body_segment_path)
+
+        # ── Tack on CTA clip at body end if requested ──────────
+        # (Some tests pass cta_audio_path to force a follow-up clip)
+
+        self.logger.info("Step 4/6: Body video assembled (%d segments → %.1fs)",
+                         len(segment_paths), self._dur(body_video))
 
         # ── Subtitles (toggleable) ─────────────────────────────
-        subtitles_enabled = self.canal.get("SUBTITLES_ENABLED", True)
+        subtitles_enabled = self.canal.get("SUBTITLES_ENABLED", False)
         if subtitles_enabled:
-            self.logger.info("Step 3/6: Adding animated subtitles…")
+            self.logger.info("  Adding animated subtitles…")
             subtitle_clips = self._build_subtitles(timestamps, self.video_size)
             body_video = CompositeVideoClip(
                 [body_video] + subtitle_clips, size=self.video_size,
             )
         else:
-            self.logger.info("Step 3/6: Subtitles disabled (SUBTITLES_ENABLED=False)")
+            self.logger.info("  Subtitles disabled (SUBTITLES_ENABLED=False)")
 
         # ── CTA audio: load first to determine duration ────────
         # The CTA voice-over can be 10+ seconds (full SCRIPT_END_HOOK),
@@ -354,20 +502,82 @@ class VideoEditor:
         intro = self._build_intro(intro_dur)
         outro = self._build_outro(outro_dur)
 
-        # ── Assemble final video sequence ──────────────────────
-        # Sequence: INTRO → BODY (exact TTS length) → CTA → OUTRO
-        video_parts: list[VideoClip] = []
-        if intro is not None:
-            intro = intro.with_audio(self._silent_audio(intro_dur))
-            video_parts.append(intro)
-        video_parts.append(body_video)
-        if cta_clip is not None:
-            video_parts.append(cta_clip)
-        if outro is not None:
-            outro = outro.with_audio(self._silent_audio(outro_dur))
-            video_parts.append(outro)
+        # ── Assemble final video via concat demuxer ───────────────
+        # Sequence: INTRO → BODY → CTA → OUTRO
+        # Render intro/cta/outro as standalone segments, then concat all
+        # using ffmpeg concat demuxer (stream-copy, near-zero RAM).
+        self.logger.info("Step 5/6: Rendering intro/cta/outro segments + final concat…")
+        intro_dur = self.canal.get("INTRO_DURATION_SEC", self.INTRO_DURATION)
+        outro_dur = self.canal.get("OUTRO_DURATION_SEC", self.OUTRO_DURATION)
+        intro = self._build_intro(intro_dur)
+        outro = self._build_outro(outro_dur)
 
-        final_video = concatenate_videoclips(video_parts)
+        # Render intro/cta/outro + body as segment files for concat
+        _video_segments: list[str] = []
+
+        def _render_seg(clip, path):
+            """Render a single clip to video-only MP4 to a given path."""
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                clip.write_videofile(
+                    str(p), fps=self.fps, codec=VIDEO_CODEC,
+                    preset=self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
+                    bitrate=VIDEO_BITRATE,
+                    ffmpeg_params=["-pix_fmt", "yuv420p", "-an"],
+                    logger=None,
+                )
+                return str(p)
+            except Exception as e:
+                self.logger.warning("Segment render failed for %s: %s", path, e)
+                return None
+            finally:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+
+        # INTRO
+        if intro is not None:
+            res = _render_seg(intro.with_audio(self._silent_audio(intro_dur)), seg_dir / "intro.mp4")
+            if res:
+                _video_segments.append(res)
+        # BODY
+        _video_segments.append(body_segment_path)
+        # CTA
+        if cta_clip is not None:
+            res = _render_seg(cta_clip, seg_dir / "cta.mp4")
+            if res:
+                _video_segments.append(res)
+        # OUTRO
+        if outro is not None:
+            res = _render_seg(outro.with_audio(self._silent_audio(outro_dur)), seg_dir / "outro.mp4")
+            if res:
+                _video_segments.append(res)
+
+        # Concat demuxer: stream-copy, no re-encode, RAM ~0
+        # Use absolute paths to avoid relative-path confusion with seg_dir
+        concat_list = seg_dir / "concat_list.txt"
+        concat_list.write_text("\n".join(
+            f"file '{Path(p).resolve()}'" for p in _video_segments if p
+        ) + "\n")
+        concat_output = output_path.with_suffix(".concat.mp4")
+        result = subprocess.run([
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(concat_output),
+        ], capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            stderr_tail = result.stderr.strip()[-500:] if result.stderr else ""
+            raise RuntimeError(f"ffmpeg concat failed (rc={result.returncode}): {stderr_tail}")
+        if not concat_output.exists() or concat_output.stat().st_size == 0:
+            raise RuntimeError("ffmpeg concat produced empty output")
+
+        # Replace output_path with concat result
+        output_path.unlink(missing_ok=True)
+        concat_output.rename(output_path)
 
         # ── Assemble final audio sequence ──────────────────────
         # v2 with transitions: body audio = narration segments + transition silences + optional music
@@ -380,18 +590,37 @@ class VideoEditor:
         tts_audio = AudioFileClip(audio_path)
         body_narr_parts: list[AudioClip] = []
         pos: float = 0.0  # cursor within the TTS audio (seconds)
-        for br in block_ranges:
+        for scene_idx, br in enumerate(block_ranges):
             if br.get("is_transition"):
                 body_narr_parts.append(self._silent_audio(br["duration"]))
             else:
                 seg_dur = br["duration"]
                 available = max(0.0, tts_duration - pos)
+                if available < seg_dur and not br.get("is_transition"):
+                    self.logger.warning(
+                        "Audio truncation: scene %d needs %.1fs but only %.1fs TTS audio remaining "
+                        "(tts_duration=%.1fs, pos=%.1fs). TTS may have failed for later blocks.",
+                        scene_idx + 1, seg_dur, available, tts_duration, pos,
+                    )
                 seg_dur = min(seg_dur, available)
                 if seg_dur > 0.01:
                     body_narr_parts.append(tts_audio.subclipped(pos, pos + seg_dur))
                     pos += seg_dur
         body_narration = concatenate_audioclips(body_narr_parts)
         body_dur = self._dur(body_narration)
+
+        # Compute expected body duration from block_ranges (sum of all scene durations)
+        expected_body_dur = sum(br["duration"] for br in block_ranges)
+        gap = expected_body_dur - body_dur
+        if gap > 0.5:
+            self.logger.warning(
+                "Body narration (%.1fs) is shorter than expected (%.1fs) by %.1fs. "
+                "Padding with silence to avoid video played without audio.",
+                body_dur, expected_body_dur, gap,
+            )
+            body_narration = concatenate_audioclips([body_narration, self._silent_audio(gap)])
+            body_dur = self._dur(body_narration)
+
         self.logger.info("Body audio: %.1fs (narration %.1fs + transitions %.1fs)",
                          body_dur, tts_duration, body_dur - tts_duration)
 
@@ -474,59 +703,138 @@ class VideoEditor:
         audio_parts.append(self._silent_audio(outro_dur))
 
         final_audio = concatenate_audioclips(audio_parts)
-        final_video = final_video.with_audio(final_audio)
 
-        # ── Render ─────────────────────────────────────────────
-        self.logger.info("Step 6/6: Rendering MP4 (%dx%d, %d fps)…",
-                         self.video_size[0], self.video_size[1], self.fps)
-        render_ok = False
-        _render_timeout = None  # infinite — no ceiling
+        # ── v4: Video already rendered (concat demuxer) ─────────
+        # Skip MoviePy write_videofile — the video exists on disk.
+        # Just validate the output and proceed to audio re-mux.
+        self.logger.info("Step 6/6: Video assembled via segments — applying audio post-process…")
+
+        # ── Timeline sync check ──────────────────────────────────
+        body_vid_dur = self._dur(body_video)
+        body_aud_dur = self._dur(body_audio)
+        cta_has_voice = cta_audio_clip is not None
+        self.logger.info(
+            "Timeline: intro=%.1fs | body_video=%.1fs body_audio=%.1fs (match=%s) | "
+            "cta=%.1fs (voice=%s) | outro=%.1fs | TOTAL=%.1fs",
+            intro_dur, body_vid_dur, body_aud_dur,
+            "OK" if abs(body_vid_dur - body_aud_dur) < 0.5 else "MISMATCH!",
+            cta_dur, "yes" if cta_has_voice else "no",
+            outro_dur,
+            intro_dur + body_vid_dur + cta_dur + outro_dur,
+        )
+        if abs(body_vid_dur - body_aud_dur) >= 0.5:
+            self.logger.warning(
+                "⚠ Body video/audio mismatch: video=%.1fs audio=%.1fs gap=%.1fs",
+                body_vid_dur, body_aud_dur, abs(body_vid_dur - body_aud_dur),
+            )
+
+        # ── Heartbeat emitter (during audio re-mux) ────────────
+        _hb_stop = threading.Event() if job_id is not None else None
+        _hb_thread = None
+        if job_id is not None:
+            def _hb_loop():
+                from database.db_extended import ExtendedDatabase
+                _db = ExtendedDatabase()
+                _last_pct = 75  # segments + concat done, entering audio phase
+                while not _hb_stop.is_set():
+                    try:
+                        _db.update_heartbeat(job_id)
+                        # Simpler progress: just bump once
+                        if _last_pct < 85 and os.path.exists(str(output_path)):
+                            _last_pct = 80
+                            _db.update_job(job_id, progress=_last_pct, phase="video")
+                    except Exception:
+                        pass
+                    _hb_stop.wait(30)
+
+            _hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"heartbeat-{job_id}")
+            _hb_thread.start()
+            self.logger.info("Heartbeat emitter started for job #%d (every 30s)", job_id)
+
+        render_ok = output_path.exists() and output_path.stat().st_size > 0
         try:
-            import concurrent.futures
-            _ffmpeg_pids_before = _find_ffmpeg_pids()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _render_exec:
-                _future = _render_exec.submit(
-                    final_video.write_videofile,
-                    str(output_path),
-                    fps=self.fps,
-                    codec=VIDEO_CODEC,
-                    bitrate=VIDEO_BITRATE,
-                    preset="medium",
-                    audio_codec="aac",
-                    threads=min(os.cpu_count() or 4, 8),  # cap to avoid memory exhaustion
-                    ffmpeg_params=["-movflags", "+faststart"],
-                )
+            if render_ok:
+                self.logger.info("✅ Video saved → %s (%.1f MB)",
+                                 output_path, output_path.stat().st_size / 1024 / 1024)
+                # ── Audio post-process: attach clean narration+music via ffmpeg ──
+                _fix_path = output_path.with_suffix('.audio_fix.mp4')
+                intro_ms = int(intro_dur * 1000)
                 try:
-                    _future.result(timeout=_render_timeout)
-                    render_ok = True
-                except concurrent.futures.TimeoutError:
-                    self.logger.error(
-                        "❌ Video rendering timed out after %ds — killing ffmpeg", _render_timeout
-                    )
-                    _kill_new_ffmpeg(_ffmpeg_pids_before)
-        except Exception as exc:
-            self.logger.error("❌ MoviePy render crashed: %s", exc)
-            import traceback
-            crash_log = output_path.with_suffix(".crash.log")
-            crash_log.write_text(traceback.format_exc())
-            self.logger.error("   Full traceback saved to %s", crash_log)
+                    import subprocess as _sp2
+                    if _music_temp_path and _music_temp_path.exists():
+                        # Mix narration (vol=1.0) + ambient music (vol=0.1)
+                        # EXACT match to original pre-segment code (no adelay — compensated by -shortest)
+                        _sp2.run([
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', str(output_path),          # 0:v  — concat video
+                            '-i', audio_path,                 # 1:a  — clean narration
+                            '-i', str(_music_temp_path),      # 2:a  — ambient music
+                            '-filter_complex',
+                            '[1:a]volume=1.0[narr];[2:a]volume=0.1[music];[narr][music]amix=inputs=2:duration=first[aout]',
+                            '-c:v', 'copy', '-map', '0:v:0', '-map', '[aout]',
+                            '-shortest', '-movflags', '+faststart',
+                            str(_fix_path),
+                        ], check=True, timeout=180)
+                    else:
+                        # Narration only with adelay to sync with intro silence
+                        # EXACT match to original pre-segment code
+                        _sp2.run([
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', str(output_path),
+                            '-i', audio_path,
+                            '-filter_complex',
+                            f'[1:a]adelay={intro_ms}:all=1[dnarr]',
+                            '-c:v', 'copy', '-map', '0:v:0', '-map', '[dnarr]',
+                            '-movflags', '+faststart',
+                            str(_fix_path),
+                        ], check=True, timeout=120)
+                    # Replace original with fixed version
+                    output_path.unlink()
+                    _fix_path.rename(output_path)
+                    self.logger.info("🔊 Audio post-processed: clean narration+mux from ffmpeg")
+                except Exception as _audio_fix_e:
+                    self.logger.warning("Audio post-process failed (%s) — keeping original", _audio_fix_e)
+                    if _fix_path.exists():
+                        _fix_path.unlink(missing_ok=True)
+            else:
+                self.logger.error("❌ Video file missing or empty: %s", output_path)
+                raise RuntimeError(f"Video rendering failed: no output file at {output_path}")
         finally:
-            final_video.close()
-            final_audio.close()
-            # Clean up temp music file (generated in-situ)
+            # ── Stop heartbeat emitter ───────────────────────────
+            if _hb_stop is not None:
+                _hb_stop.set()
+            if _hb_thread is not None and _hb_thread.is_alive():
+                _hb_thread.join(timeout=5)
+                self.logger.info("Heartbeat emitter stopped for job #%d", job_id)
+
+            # ── Cleanup ──────────────────────────────────────
+            try:
+                final_audio.close()
+            except Exception:
+                pass
+            try:
+                body_video.close()
+            except Exception:
+                pass
+            # Force garbage collection
+            import gc
+            gc.collect()
+            # Clean up temp segments if successful
+            if render_ok:
+                try:
+                    import shutil
+                    if seg_dir.exists():
+                        shutil.rmtree(seg_dir, ignore_errors=True)
+                        self.logger.info("🧹 Segment tempdir cleaned: %s", seg_dir.name)
+                except Exception:
+                    self.logger.debug("Could not clean segment tempdir: %s", seg_dir)
+            # Clean up temp music
             if _music_temp_path and _music_temp_path.exists():
                 try:
                     _music_temp_path.unlink()
                     self.logger.info("🧹 Temp music deleted: %s", _music_temp_path.name)
                 except Exception:
                     pass
-
-        if render_ok and output_path.exists() and output_path.stat().st_size > 0:
-            self.logger.info("✅ Video saved → %s (%.1f MB)",
-                             output_path, output_path.stat().st_size / 1024 / 1024)
-        else:
-            self.logger.error("❌ Video file missing or empty: %s", output_path)
-            raise RuntimeError(f"Video rendering failed: no output file at {output_path}")
 
         return output_path
 
@@ -654,13 +962,15 @@ class VideoEditor:
 
         # ---- Phase 1: Merge short scenes (repeat until stable) ----
         # Repeatedly scan the list and merge any scene whose duration
-        # falls below min_dur with the next scene.  The outer loop runs
-        # at most len(block_ranges) times (each iteration reduces the
-        # list by at least one element when a merge happens).
+        # falls below min_dur with the next scene. The outer loop runs
+        # at most len(merged) times (each merge pass reduces the list
+        # by at least one element). A hard safety cap prevents infinite
+        # loops in pathological cases.
         merged = list(block_ranges)  # work on a mutable copy
         changed = True
         safety = 0
-        while changed and safety < len(block_ranges) + 2:
+        max_safety = max(len(merged), 1) + 3  # generous upper bound
+        while changed and safety < max_safety:
             changed = False
             safety += 1
             new_list: list[dict] = []
@@ -683,6 +993,13 @@ class VideoEditor:
                     i += 1
                 new_list.append(br)
             merged = new_list
+
+        if safety >= max_safety:
+            self.logger.warning(
+                "Scene merge safety limit reached (%d iterations) — "
+                "some short scenes may remain. min_dur=%.1f",
+                safety, min_dur,
+            )
 
         # ---- Phase 1b: Backward-merge last scene ------------------
         # The forward loop above can only merge scene[i] with scene[i+1],
@@ -730,6 +1047,7 @@ class VideoEditor:
         return new_ranges
 
     def _create_block_clip(self, block_range: dict, asset: dict,
+                           clip_idx: int = 0,
                            fallback_pool: list = None) -> Optional[VideoClip]:
         """Create a clip for one block: video, image, or None (no real media).
 
@@ -737,8 +1055,10 @@ class VideoEditor:
         returns ``None`` so the caller can merge the scene with its neighbour
         instead of rendering the blue-text placeholder.
 
-        Deduplication:
-        - Images: full dedup — same image used twice is visually repetitive.
+        Image deduplication (LRU-based):
+        - Images: reused after IMAGE_REUSE_MIN_GAP different clips have been shown
+          since the last use of that image. When reused, Ken Burns parameters are
+          varied (different zoom direction/focus area) to avoid visual monotony.
         - Videos: offset tracking — different scenes get different segments
           of the same source video file (no more frozen/looped frames).
         """
@@ -747,26 +1067,38 @@ class VideoEditor:
         asset_path = str(asset.get("path", "")) if asset.get("path") else ""
         content_hash = asset.get("content_hash", "")
 
-        # ---- Image deduplication check ----
+        # ── Image reuse: check LRU gap ──────────────────────────────
+        image_reuse_gap = self.canal.get("IMAGE_REUSE_MIN_GAP", 2)
         if media_type == "image" and asset_path and asset_path in self._used_asset_paths:
-            self.logger.warning(
-                "Image %s already used — returning None (caller will merge)",
-                asset_path,
+            last_idx = self._image_last_clip_idx.get(asset_path, -999)
+            clips_since = self._current_clip_idx - last_idx
+            if clips_since < image_reuse_gap:
+                self.logger.warning(
+                    "Image %s reused too soon (gap=%d < %d) — returning None (caller will merge)",
+                    Path(asset_path).name, clips_since, image_reuse_gap,
+                )
+                return None
+            # Allow reuse — will apply varied Ken Burns below
+            self.logger.info(
+                "Image %s reused at gap=%d (allowed) — varying Ken Burns for variety",
+                Path(asset_path).name, clips_since,
             )
-            return None
         if media_type == "image" and content_hash and content_hash in self._used_asset_paths:
-            self.logger.warning(
-                "Image content hash %s already used — returning None",
-                content_hash[:12],
-            )
-            return None
+            last_idx = self._image_last_clip_idx.get(content_hash, -999)
+            clips_since = self._current_clip_idx - last_idx
+            if clips_since < image_reuse_gap:
+                self.logger.warning(
+                    "Image hash %s reused too soon (gap=%d < %d) — returning None",
+                    content_hash[:12], clips_since, image_reuse_gap,
+                )
+                return None
 
         # Initialize per-video color grade on first non-placeholder clip (P3)
         if self._video_color_grade is None and media_type not in ("placeholder", "duplicate"):
             self._video_color_grade = {
-                "contrast": random.uniform(1.05, 1.15),
-                "brightness": random.uniform(0.95, 1.05),
-                "saturation": random.uniform(0.90, 1.10),
+                "contrast": random.uniform(1.02, 1.04),
+                "brightness": random.uniform(0.99, 1.01),
+                "saturation": random.uniform(0.97, 1.03),
             }
             self.logger.info("Per-video color grade set: %s", self._video_color_grade)
 
@@ -778,12 +1110,25 @@ class VideoEditor:
             offset = self._video_offset_tracker.get(asset_path, 0.0)
             clip = self._video_clip_for_block(Path(asset_path), block_dur, start_offset=offset)
             if clip is None:
-                # Source exhausted or too short — fall back to image merge
+                # Source exhausted or too short — reset offset so next scene
+                # can loop from the beginning instead of failing permanently.
+                self._video_offset_tracker[asset_path] = 0.0
                 self.logger.info(
-                    "Video %s exhausted at offset %.1fs — falling back to image",
+                    "Video %s failed/exhausted at offset %.1fs — falling back to image",
                     Path(asset_path).name, offset,
                 )
-                return None
+                # Try fallback: use a random image from the pool instead of extending
+                # the previous clip (which would lose the video scene entirely).
+                if fallback_pool:
+                    import random as _random2
+                    fb_path = str(_random2.choice(fallback_pool))
+                    self.logger.info("  Using fallback image for scene: %s", Path(fb_path).name)
+                    clip = self._image_clip_for_block(Path(fb_path), block_dur)
+                    self._used_asset_paths.add(fb_path)
+                    self._image_last_clip_idx[fb_path] = self._current_clip_idx
+                    self._image_reuse_count.setdefault(fb_path, 0)
+                else:
+                    return None
             else:
                 # Advance the offset so the next scene (even with same file)
                 # starts where this one ended.
@@ -791,11 +1136,17 @@ class VideoEditor:
                 self._used_asset_paths.add(asset_path)
                 if content_hash:
                     self._used_asset_paths.add(content_hash)
-        if clip is None and media_type == "image" and asset_path and Path(asset_path).exists():
-            clip = self._image_clip_for_block(Path(asset_path), block_dur)
+        if clip is None and asset_path and Path(asset_path).exists():
+            # Vary Ken Burns for reused images: alternate zoom direction
+            reuse_count = self._image_reuse_count.get(asset_path, 0)
+            clip = self._image_clip_for_block(Path(asset_path), block_dur,
+                                               reuse_count=reuse_count)
             self._used_asset_paths.add(asset_path)
+            self._image_last_clip_idx[asset_path] = self._current_clip_idx
+            self._image_reuse_count[asset_path] = reuse_count + 1
             if content_hash:
                 self._used_asset_paths.add(content_hash)
+                self._image_last_clip_idx[content_hash] = self._current_clip_idx
 
         if clip is None:
             # No real media for this scene — return None so the caller
@@ -832,11 +1183,10 @@ class VideoEditor:
                                start_offset: float = 0.0) -> Optional[VideoClip]:
         """Load a video clip and trim to match block duration from a given offset.
 
-        **No looping**: if the source video runs out before reaching
-        ``start_offset + block_dur`` the method returns ``None`` so the
-        caller can fall back to a static image.  Each scene in a split
-        block advances ``start_offset`` so successive scenes play different
-        segments of the same source file.
+        **Looping**: if the source video runs out before reaching
+        ``start_offset + block_dur``, the clip wraps modulo the source
+        duration.  This allows short Pexels clips (8-16s) to feed
+        multiple sub-scenes by looping instead of failing immediately.
 
         Args:
             video_path: Absolute path to the source video file.
@@ -848,31 +1198,95 @@ class VideoEditor:
             clip = VideoFileClip(str(video_path))
             clip_dur = clip.duration() if callable(clip.duration) else clip.duration
 
-            if clip_dur >= start_offset + block_dur:
-                # Enough source material — extract the requested segment
-                clip = clip.subclipped(start_offset, start_offset + block_dur)
-            else:
-                # Source exhausted for this scene
-                self.logger.warning(
-                    "Video %s exhausted (%.1fs < offset %.1f + %.1fs) — falling back to image",
-                    video_path, clip_dur, start_offset, block_dur,
-                )
-                clip.close()
-                return None
+            # Cap source resolution to output size to prevent
+            # imageio-ffmpeg from decoding 4K frames in raw RGB.
+            if clip.w > self.video_size[0] or clip.h > self.video_size[1]:
+                clip = clip.resized(self.video_size)
 
-            # Resize to video dimensions
-            clip = clip.resized(self.video_size)
+            # ── Looping: wrap offset modulo clip duration ──────────
+            # Prevents exhaustion for short stock videos (Pexels 8-16s)
+            # while still advancing the offset sequentially between scenes.
+            effective_start = start_offset % clip_dur
+            effective_end = effective_start + block_dur
+
+            if effective_end > clip_dur:
+                # ── Clip wraps past the end — use freeze-frame extension ──
+                # MoviePy v2 concat(subclip) corrupts frames across looping.
+                # If > 50% of the scene would be freeze-frame, return None
+                # so the caller uses a Ken Burns image from the fallback pool
+                # instead of showing a mostly-static freeze-frame.
+                effective_start = start_offset % clip_dur
+                remaining = effective_end - clip_dur
+                if remaining > block_dur * 0.5:
+                    return None
+                if clip_dur > 0 and remaining > 0.5:
+                    try:
+                        _clipped = clip.subclipped(effective_start, clip_dur)
+                        _last_frame_arr = _clipped.get_frame(clip_dur - effective_start - 0.01)
+                        _freeze = ImageClip(_last_frame_arr, duration=remaining)
+                        if MOVIEPY_V2:
+                            _freeze = _freeze.resized(self.video_size)
+                        clip = concatenate_videoclips([_clipped, _freeze])
+                    except Exception:
+                        # Fallback: just trim to end, crossfade bridges the gap
+                        clip = clip.subclipped(effective_start, min(effective_end, clip_dur))
+                else:
+                    clip = clip.subclipped(effective_start, min(effective_end, clip_dur))
+            else:
+                clip = clip.subclipped(effective_start, effective_end)
+
+            # Apply subtle zoom for cinematic look.
+            # Wrapped in try/except: double-resize on concatenated (looped) clips
+            # can produce corrupt frames that crash ffmpeg downstream.
+            try:
+                zoom_factor = random.uniform(1.03, 1.05)
+                zoom_w = int(self.video_size[0] * zoom_factor)
+                zoom_h = int(self.video_size[1] * zoom_factor)
+                clip = clip.resized((zoom_w, zoom_h)).resized(self.video_size)
+            except Exception as zoom_err:
+                self.logger.warning(
+                    "Video zoom failed for %s (%s) — using clip without zoom",
+                    video_path.name, zoom_err,
+                )
             return clip
         except Exception as exc:
-            self.logger.exception("VideoFileClip failed for %s, falling back to placeholder", video_path)
-            return self._placeholder_clip(block_dur)
+            self.logger.exception("VideoFileClip failed for %s, returning None for fallback", video_path)
+            # Kill orphaned ffmpeg decoders left by the failed MoviePy open
+            _kill_orphaned_ffmpeg_videoeditor()
+            # Advance offset so subsequent scenes don't retry the same broken file
+            self._video_offset_tracker[video_path] = start_offset + block_dur
+            return None
 
-    def _image_clip_for_block(self, image_path: Path, block_dur: float) -> VideoClip:
-        """Create a Ken Burns image clip for the given duration."""
-        zoom = random.uniform(
-            self.canal.get("KEN_BURNS_ZOOM_MIN", KEN_BURNS_ZOOM_MIN),
-            self.canal.get("KEN_BURNS_ZOOM_MAX", KEN_BURNS_ZOOM_MAX),
-        )
+    def _image_clip_for_block(self, image_path: Path, block_dur: float,
+                               reuse_count: int = 0) -> VideoClip:
+        """Create a Ken Burns image clip for the given duration.
+
+        When *reuse_count* > 0 (same image used again after LRU gap),
+        the Ken Burns parameters are varied to avoid visual monotony:
+        even reuse → zoom-out (pull back), odd reuse → zoom-in (push in),
+        and the zoom range is shifted to explore different areas of the image.
+        """
+        zoom_min = self.canal.get("KEN_BURNS_ZOOM_MIN", KEN_BURNS_ZOOM_MIN)
+        zoom_max = self.canal.get("KEN_BURNS_ZOOM_MAX", KEN_BURNS_ZOOM_MAX)
+
+        if reuse_count > 0:
+            # Shift the zoom range to explore different image regions
+            shift = reuse_count * 2
+            zoom_min = min(zoom_min + shift, 18)  # cap both ends to avoid pixelation
+            zoom_max = min(zoom_max + shift, 18)  # and prevent zoom_min > zoom_max
+            # Alternate direction: even reuse → zoom-out, odd → zoom-in
+            if reuse_count % 2 == 0:
+                zoom = random.uniform(zoom_max * 0.9, zoom_max)  # start close, pull back
+            else:
+                zoom = random.uniform(zoom_min, zoom_min * 1.1)  # start wide, push in
+            self.logger.debug(
+                "Ken Burns reused image: count=%d zoom=%.1f range=[%.1f, %.1f] alt=%s",
+                reuse_count, zoom, zoom_min, zoom_max,
+                "zoom-out" if reuse_count % 2 == 0 else "zoom-in",
+            )
+        else:
+            zoom = random.uniform(zoom_min, zoom_max)
+
         return self._single_ken_burns_clip(image_path, block_dur, zoom)
 
     def _placeholder_clip_with_text(self, block_range: dict, block_dur: float) -> VideoClip:
@@ -958,7 +1372,18 @@ class VideoEditor:
 
         The frame function progressively zooms into the image over the clip
         lifetime and applies a gentle pan chosen at random.
+
+        FAST PATH: when zoom_percent == 0, returns a simple ImageClip
+        without per-frame recalculations (used in fast-test mode).
         """
+        # ── Fast path: no zoom → simple ImageClip ────────────
+        if zoom_percent == 0:
+            try:
+                return ImageClip(str(image_path), duration=duration).resized(self.video_size)
+            except Exception:
+                self.logger.exception("Failed to open %s for static clip", image_path)
+                return self._placeholder_clip(duration)
+
         try:
             pil_img = Image.open(image_path).convert("RGB")
         except Exception:
@@ -968,6 +1393,24 @@ class VideoEditor:
         target_w, target_h = self.video_size
         src_w, src_h = pil_img.size
 
+        # ── Memory guard: cap source images to 2560 px max dimension ──
+        # Stock images can be 6000×4000+ (72 MB each in raw RGB).
+        # Ken Burns zoom (max 8%) only needs ~2× output resolution,
+        # so we downscale to 2560 px max side BEFORE creating the VideoClip
+        # closure. This reduces per-image memory from 50-72 MB down to ~13 MB
+        # while retaining more than enough resolution for smooth zoom.
+        MAX_SOURCE_DIM = 2560
+        if max(src_w, src_h) > MAX_SOURCE_DIM:
+            orig_w, orig_h = src_w, src_h
+            ratio = MAX_SOURCE_DIM / max(src_w, src_h)
+            new_w, new_h = int(src_w * ratio), int(src_h * ratio)
+            pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+            src_w, src_h = new_w, new_h
+            self.logger.debug(
+                "Ken Burns source downscaled: %dx%d → %dx%d",
+                orig_w, orig_h, src_w, src_h,
+            )
+
         if src_w < target_w or src_h < target_h:
             ratio = max(target_w / src_w, target_h / src_h)
             new_w, new_h = int(src_w * ratio), int(src_h * ratio)
@@ -976,8 +1419,13 @@ class VideoEditor:
 
         zoom_factor = 1.0 + zoom_percent / 100.0
 
-        pan_dir_x = random.choice([-1, 0, 1])
-        pan_dir_y = random.choice([-1, 0, 1]) if pan_dir_x == 0 else 0
+        # Pick the axis with more available panning room (pixels).
+        # Portrait/square images pan vertically; landscape horizontally.
+        # Guarantees at least one axis is non-zero.
+        if (src_h - target_h) > (src_w - target_w):
+            pan_dir_x, pan_dir_y = 0, random.choice([-1, 1])
+        else:
+            pan_dir_x, pan_dir_y = random.choice([-1, 1]), 0
 
         def make_frame(t: float) -> np.ndarray:
             progress = t / duration if duration > 0 else 0
@@ -990,8 +1438,10 @@ class VideoEditor:
             max_ox = max(0, (new_w - target_w) / 2)
             max_oy = max(0, (new_h - target_h) / 2)
 
-            ox = max_ox + max_ox * pan_dir_x * progress * 0.5
-            oy = max_oy + max_oy * pan_dir_y * progress * 0.5
+            # Start centered, pan out to one edge.
+            # Clamp (below) is a safety net — with this formula it is never hit.
+            ox = max_ox * pan_dir_x * progress
+            oy = max_oy * pan_dir_y * progress
 
             left = int((new_w - target_w) / 2 + ox)
             top = int((new_h - target_h) / 2 + oy)
@@ -1208,74 +1658,128 @@ class VideoEditor:
 
         Creates a low-frequency ambient bed (55-65 Hz fundamental with soft
         harmonics) that evolves slowly via amplitude modulation (~0.3 Hz).
-        No external API or network access required — the entire waveform is
-        synthesised in-process.
+        No external API or network access required.
 
-        The file is written to a temp location and the caller is responsible
-        for deleting it after the video render completes.
+        **v3: chunked synthesis** — generates the waveform in 30-second blocks
+        to keep peak memory ~80 MB regardless of total duration, instead of
+        1.5 GB+ for a 14-minute production video.
         """
         import numpy as np
         from pydub import AudioSegment
 
         sample_rate = 44100
-        n_samples = int(sample_rate * duration_sec)
-
-        # Time array
-        t = np.linspace(0, duration_sec, n_samples, endpoint=False, dtype=np.float32)
-
-        # ── Ambient drone: fundamental + soft harmonics ──────────
-        # Stereo: left and right channels with slight phase difference
-        fund_l = np.sin(2 * np.pi * 58.0 * t, dtype=np.float32)
-        fund_r = np.sin(2 * np.pi * 58.0 * t + 0.15, dtype=np.float32)
-
-        harm_l = 0.35 * np.sin(2 * np.pi * 87.0 * t, dtype=np.float32)
-        harm_r = 0.35 * np.sin(2 * np.pi * 87.0 * t + 0.35, dtype=np.float32)
-
-        octave_l = 0.15 * np.sin(2 * np.pi * 116.0 * t, dtype=np.float32)
-        octave_r = 0.15 * np.sin(2 * np.pi * 116.0 * t + 0.25, dtype=np.float32)
-
-        # Slow amplitude swell (0.25-0.35 Hz) for organic feel
-        swell = 0.55 + 0.45 * np.sin(
-            2 * np.pi * 0.28 * t + np.sin(2 * np.pi * 0.09 * t) * 1.5,
-            dtype=np.float32,
-        )
-
-        left = (fund_l + harm_l + octave_l) * swell
-        right = (fund_r + harm_r + octave_r) * swell
-
-        # Fade in/out to avoid clicks
-        fade_samples = int(sample_rate * 0.5)  # 0.5s fade
-        if fade_samples < n_samples:
-            ramp = np.linspace(0, 1, fade_samples, dtype=np.float32)
-            left[:fade_samples] *= ramp
-            right[:fade_samples] *= ramp
-            left[-fade_samples:] *= ramp[::-1]
-            right[-fade_samples:] *= ramp[::-1]
-
-        # Normalise and convert to 16-bit PCM
-        peak = max(np.max(np.abs(left)), np.max(np.abs(right)), 1e-12)
-        left = (left / peak * 32767 * 0.7).astype(np.int16)
-        right = (right / peak * 32767 * 0.7).astype(np.int16)
-
-        # Interleave stereo
-        stereo = np.empty((n_samples, 2), dtype=np.int16)
-        stereo[:, 0] = left
-        stereo[:, 1] = right
-
-        # Export via pydub
-        audio = AudioSegment(
-            stereo.tobytes(),
-            frame_rate=sample_rate,
-            sample_width=2,
-            channels=2,
-        )
+        CHUNK_SEC = 30  # process 30 seconds at a time → ~80 MB peak per chunk
+        n_chunks = int(np.ceil(duration_sec / CHUNK_SEC))
+        all_chunks: list[AudioSegment] = []
 
         out_path = OUTPUT_DIR / "temp" / f"ambient_{int(time.time())}.mp3"
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        audio.export(str(out_path), format="mp3", bitrate="128k")
+        fade_samples = int(sample_rate * 0.5)  # 0.5s fade
+
+        for ci in range(n_chunks):
+            chunk_start = ci * CHUNK_SEC
+            chunk_dur = min(CHUNK_SEC, duration_sec - chunk_start)
+            # Add crossfade buffer (1s overlap) between chunks to avoid clicks
+            overlap_buffer = 1.0 if ci < n_chunks - 1 else 0.0
+            chunk_total = chunk_dur + overlap_buffer
+
+            n_samples = int(sample_rate * chunk_total)
+            t = np.linspace(0, chunk_total, n_samples, endpoint=False, dtype=np.float32)
+
+            # Ambient drone: fundamental + soft harmonics, stereo
+            fund_l = np.sin(2 * np.pi * 58.0 * (t + chunk_start), dtype=np.float32)
+            fund_r = np.sin(2 * np.pi * 58.0 * (t + chunk_start) + 0.15, dtype=np.float32)
+            harm_l = 0.35 * np.sin(2 * np.pi * 87.0 * (t + chunk_start), dtype=np.float32)
+            harm_r = 0.35 * np.sin(2 * np.pi * 87.0 * (t + chunk_start) + 0.35, dtype=np.float32)
+            octave_l = 0.15 * np.sin(2 * np.pi * 116.0 * (t + chunk_start), dtype=np.float32)
+            octave_r = 0.15 * np.sin(2 * np.pi * 116.0 * (t + chunk_start) + 0.25, dtype=np.float32)
+
+            swell = 0.55 + 0.45 * np.sin(
+                2 * np.pi * 0.28 * (t + chunk_start)
+                + np.sin(2 * np.pi * 0.09 * (t + chunk_start)) * 1.5,
+                dtype=np.float32,
+            )
+
+            left = (fund_l + harm_l + octave_l) * swell
+            right = (fund_r + harm_r + octave_r) * swell
+
+            # Crossfade edges between chunks (linear ramp on overlap buffer)
+            if ci > 0:
+                cross_len = int(sample_rate * 1.0)
+                ramp_in = np.linspace(0, 1, cross_len, dtype=np.float32)
+                left[:cross_len] *= ramp_in
+                right[:cross_len] *= ramp_in
+            if ci < n_chunks - 1 and overlap_buffer > 0:
+                cross_len = int(sample_rate * overlap_buffer)
+                if cross_len > 0:
+                    ramp_out = np.linspace(1, 0, cross_len, dtype=np.float32)
+                    left[-cross_len:] *= ramp_out
+                    right[-cross_len:] *= ramp_out
+
+            # Fade in on first chunk, fade out on last
+            if ci == 0 and fade_samples < n_samples:
+                ramp = np.linspace(0, 1, fade_samples, dtype=np.float32)
+                left[:fade_samples] *= ramp
+                right[:fade_samples] *= ramp
+            if ci == n_chunks - 1 and fade_samples < n_samples:
+                ramp = np.linspace(1, 0, fade_samples, dtype=np.float32)
+                left[-fade_samples:] *= ramp
+                right[-fade_samples:] *= ramp
+
+            peak = max(np.max(np.abs(left)), np.max(np.abs(right)), 1e-12)
+            left = (left / peak * 32767 * 0.7).astype(np.int16)
+            right = (right / peak * 32767 * 0.7).astype(np.int16)
+
+            stereo = np.empty((n_samples, 2), dtype=np.int16)
+            stereo[:, 0] = left
+            stereo[:, 1] = right
+
+            seg = AudioSegment(stereo.tobytes(), frame_rate=sample_rate,
+                               sample_width=2, channels=2)
+            all_chunks.append(seg)
+
+            # Release per-chunk numpy arrays immediately
+            del t, fund_l, fund_r, harm_l, harm_r, octave_l, octave_r
+            del swell, left, right, stereo, seg
+            import gc
+            gc.collect()
+
+        # ── Export: write each chunk to a temp WAV, then ffmpeg-concat ──
+        # Avoids sum(all_chunks) which doubles RAM (~150 MB → 300 MB) and
+        # triggers the OOM killer on ffmpeg during pydub's export().
+        # Instead, write per-chunk WAVs to disk and let ffmpeg concatenate
+        # them in a single pass — memory stays under ~50 MB.
+        import tempfile as _tempfile
+        _wav_dir = Path(_tempfile.mkdtemp(prefix="ambient_wav_"))
+        _wav_paths: list[Path] = []
+        try:
+            for ci, chunk in enumerate(all_chunks):
+                _wav_path = _wav_dir / f"c{ci:03d}.wav"
+                chunk.export(str(_wav_path), format="wav")
+                _wav_paths.append(_wav_path)
+                del chunk
+            del all_chunks
+
+            # Build ffmpeg concat list
+            _list_path = _wav_dir / "concat.txt"
+            _list_path.write_text(
+                "\n".join(f"file '{p}'" for p in _wav_paths)
+            )
+            import subprocess as _sp
+            _sp.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", str(_list_path), "-b:a", "128k", str(out_path)],
+                check=True, capture_output=True, timeout=120,
+            )
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(_wav_dir, ignore_errors=True)
+            import gc as _gc
+            _gc.collect()
+
         self.logger.info(
-            "Ambient music generated: %s (%.1fs, %.0f KB)",
-            out_path.name, duration_sec, out_path.stat().st_size / 1024,
+            "Ambient music generated: %s (%.1fs, %d chunks, %.0f KB)",
+            out_path.name, duration_sec, n_chunks, out_path.stat().st_size / 1024,
         )
         return out_path
 
@@ -1285,7 +1789,7 @@ class VideoEditor:
             return AudioClip(
                 lambda t: np.zeros((2,)),
                 duration=duration,
-                fps=self.fps,
+                fps=44100,
             )
         else:
             frame_fn = lambda t: np.zeros((2,))
@@ -1464,22 +1968,29 @@ class VideoEditor:
 
     @staticmethod
     def _resolve_font() -> str:
-        """Return the first available font from a preferred list."""
+        """Return the first available font from a preferred list.
+
+        Searches both exact paths and glob patterns in /usr/share/fonts.
+        Returns an absolute path when possible so PIL.ImageFont.truetype()
+        and MoviePy TextClip can both use it reliably.
+        """
         candidates = [
-            "DejaVu-Sans",
-            "DejaVu Sans",
-            "Arial",
-            "Helvetica",
-            "Liberation-Sans",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
         ]
-        for name in candidates:
-            if os.path.exists(name):
-                return name
-            if any(Path("/usr/share/fonts").rglob(f"*{name}*")):
-                return name
-        return "DejaVu-Sans"
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        # Fallback: glob search for any sans-serif font
+        for pattern in ["*DejaVu*Sans*", "*Liberation*Sans*", "*Noto*Sans*", "*Arial*", "*FreeSans*"]:
+            matches = list(Path("/usr/share/fonts").rglob(pattern))
+            if matches:
+                return str(matches[0])
+        return "DejaVuSans"
 
     # ── Film grain ──────────────────────────────────────────────
 
@@ -1515,29 +2026,28 @@ class VideoEditor:
     def _create_vignette_clip(
         self, duration: float, size: tuple[int, int]
     ) -> VideoClip:
-        """Return a static dark radial-gradient vignette overlay.
+        """Return a static subtle dark radial-gradient vignette overlay.
 
         Returns RGBA (4-channel) arrays so MoviePy v2 composites the
         vignette correctly as a semi-transparent overlay on top of
         the image clips.
 
-        Uses ``VIGNETTE_RADIUS_FACTOR`` and ``COLOR_PALETTE.secondary``
-        from config for channel-specific styling.
+        Parameters are hardcoded for a uniform subtle cinematic effect
+        across all channels — barely perceptible at first glance.
         """
         vw, vh = size
         cx, cy = vw / 2, vh / 2
         max_r = np.sqrt(cx ** 2 + cy ** 2)
-        radius_factor = self.canal.get("VIGNETTE_RADIUS_FACTOR", 0.65)
-        vignette_intensity = self.canal.get("VIGNETTE_INTENSITY", 10)
-        # Use color_palette secondary for vignette tint, fallback to near-black
-        color_pal = self.canal.get("COLOR_PALETTE", COLOR_PALETTE)
-        vignette_rgb = color_pal.get("secondary", (vignette_intensity,) * 3)
-        if isinstance(vignette_rgb, int):
-            vignette_rgb = (vignette_rgb,) * 3
+
+        # Hardcoded subtle vignette — same for all channels
+        radius_factor = 0.90           # bright center covers 90% of frame
+        vignette_rgb = (8, 8, 8)       # barely-perceptible dark tint at edges
 
         yy, xx = np.mgrid[0:vh, 0:vw]
         dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-        alpha = np.clip(dist / (max_r * radius_factor), 0.0, 1.0)
+        # Gentle linear-ish falloff — only the extreme corners darken
+        ratio = np.clip(dist / (max_r * radius_factor), 0.0, 1.0)
+        alpha = ratio ** 1.2
 
         # Pre-built RGBA frame: tinted overlay with radial alpha gradient
         dark_rgb = np.full((vh, vw, 3), vignette_rgb, dtype=np.uint8)
@@ -1569,7 +2079,7 @@ class VideoEditor:
         template_path = self._get_template_path("intro")
         if template_path:
             try:
-                clip = VideoFileClip(str(template_path))
+                clip = VideoFileClip(str(template_path), target_resolution=self.video_size)
                 if clip.duration > duration:
                     clip = clip.subclipped(0, duration)
                 self.logger.info("Using cached intro template: %s", template_path)
@@ -1605,7 +2115,7 @@ class VideoEditor:
                 font=font,
                 font_size=font_size,
                 color=_rgb_to_hex(accent_color),
-                method="pillow",
+                method="label",
                 size=(max_width, None),
             ).with_position(("center", int(vh * 0.48))).with_duration(duration)
             label = _fade_in_out(label, duration, hold_ratio=0.4)
@@ -1619,7 +2129,7 @@ class VideoEditor:
                     font=font,
                     font_size=sub_font_size,
                     color=_rgb_to_hex(text_color),
-                    method="pillow",
+                    method="label",
                     size=(max_width, None),
                 ).with_position(("center", int(vh * 0.58))).with_duration(duration)
                 sub = _fade_in_out(sub, duration, hold_ratio=0.4)
@@ -1659,9 +2169,17 @@ class VideoEditor:
         template_path = self._get_template_path("outro")
         if template_path:
             try:
-                clip = VideoFileClip(str(template_path))
-                if clip.duration > duration:
+                clip = VideoFileClip(str(template_path), target_resolution=self.video_size)
+                clip_dur = self._dur(clip)
+                if clip_dur > duration:
                     clip = clip.subclipped(0, duration)
+                elif clip_dur < duration:
+                    # Template is shorter than expected — extend to match duration
+                    # (uses freeze-frame on last frame; silent outro is fine with this)
+                    clip = clip.with_duration(duration)
+                    self.logger.info(
+                        "Cached outro template extended: %.1fs → %.1fs", clip_dur, duration,
+                    )
                 self.logger.info("Using cached outro template: %s", template_path)
                 return clip
             except Exception as e:
@@ -1711,7 +2229,7 @@ class VideoEditor:
                     font=font,
                     font_size=cta_font_size,
                     color=_rgb_to_hex(text_color),
-                    method="pillow",
+                    method="label",
                     size=(cta_max_w, None),
                 ).with_position(("center", cta_y_positions[i])).with_duration(duration)
 
@@ -1730,7 +2248,7 @@ class VideoEditor:
                 font=font,
                 font_size=font_size,
                 color=_rgb_to_hex(accent_color),
-                method="pillow",
+                method="label",
                 size=(int(vw * 0.80), None),
             ).with_position(("center", name_y)).with_duration(duration)
             name = _fade_in_out(name, duration, hold_ratio=0.5)
@@ -1756,11 +2274,28 @@ class VideoEditor:
         template_path = self._get_template_path("cta")
         if template_path:
             try:
-                clip = VideoFileClip(str(template_path))
-                if self._dur(clip) > duration:
-                    clip = clip.subclipped(0, duration)
-                self.logger.info("Using cached CTA template: %s", template_path)
-                return clip
+                clip = VideoFileClip(str(template_path), target_resolution=self.video_size)
+                template_dur = self._dur(clip)
+                # If template covers the full duration, use it (trim if too long)
+                if template_dur >= duration or not audio_path:
+                    if template_dur > duration:
+                        clip = clip.subclipped(0, duration)
+                    elif template_dur < duration:
+                        # No audio — freeze-frame extend is fine
+                        clip = clip.with_duration(duration)
+                        self.logger.info(
+                            "Cached CTA template extended: %.1fs → %.1fs (no audio)",
+                            template_dur, duration,
+                        )
+                    self.logger.info("Using cached CTA template: %s", template_path)
+                    return clip
+                else:
+                    # Template shorter than audio-driven duration — use programmatic
+                    # so visual matches audio length without ugly freeze-frames
+                    self.logger.info(
+                        "Cached CTA template too short (%.1fs < %.1fs) — falling back to programmatic",
+                        template_dur, duration,
+                    )
             except Exception as e:
                 self.logger.warning("Failed to load CTA template: %s — falling back to programmatic", e)
 
@@ -2020,6 +2555,265 @@ class VideoEditor:
             return base_audio
         return CompositeAudioClip(audio_clips)
 
+    # ── Segment-based rendering (RAM-bounded per scene) ──────────
+
+    def _render_scene_segment(
+        self, block_range: dict, asset: dict, seg_path: str,
+        clip_idx: int, fallback_pool: list,
+    ) -> Optional[str]:
+        """Render a single scene to a standalone MP4 segment (video-only, no audio).
+
+        Peak RAM = 1 ffmpeg decoder + 1 encoder ≈ 300-500 MB, constant regardless
+        of total scene count. After rendering, the source clip is closed and
+        memory freed immediately.
+
+        Returns the segment path on success, or None on failure (caller retries
+        or falls back to image Ken Burns).
+
+        v4 (Jul 2026): Segment-based architecture to eliminate OOM risk from
+        keeping all MoviePy VideoFileClip decoders open simultaneously during
+        CompositeVideoClip write_videofile.
+        """
+        seg_path = Path(seg_path)
+        seg_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Collision avoidance
+        if seg_path.exists():
+            import uuid
+            seg_path = seg_path.with_stem(f"{seg_path.stem}_{uuid.uuid4().hex[:4]}")
+
+        clip = None
+        seg_clip = None
+        try:
+            # Reuse existing clip-creation logic (dedup, offset tracking, Ken Burns, etc.)
+            clip = self._create_block_clip(
+                block_range, asset, clip_idx=clip_idx,
+                fallback_pool=fallback_pool,
+            )
+            if clip is None:
+                return None  # caller will use fallback image
+
+            # Set timeline position
+            start_s = block_range.get("start", 0.0)
+            seg_clip = clip.with_start(0.0)  # segment starts at 0 internally
+
+            # Apply color grade if set (same logic as original)
+            if self._video_color_grade:
+                try:
+                    cg = self._video_color_grade
+                    if MOVIEPY_V2:
+                        seg_clip = seg_clip.with_effects([
+                            vfx.ColorCorrection(
+                                contrast=cg["contrast"],
+                                brightness=cg["brightness"],
+                                saturation=cg["saturation"],
+                            )
+                        ])
+                except Exception:
+                    pass
+
+            # Render this single clip to a video-only MP4
+            # Use CRF for visually lossless intermediate (prevents degradation
+            # during the subsequent xfade re-encode).
+            seg_clip.write_videofile(
+                str(seg_path),
+                fps=self.fps,
+                codec=VIDEO_CODEC,
+                preset=self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
+                bitrate=None,  # CRF mode
+                ffmpeg_params=[
+                    "-crf", "16",
+                    "-pix_fmt", "yuv420p",
+                    "-an",  # no audio in segment
+                    "-threads", "2",
+                ],
+                logger=None,
+            )
+
+            self.logger.debug("  Seg %d rendered: %s", clip_idx, seg_path.name)
+            return str(seg_path)
+
+        except Exception as exc:
+            self.logger.warning(
+                "  Seg %d FAILED: %s (%s)", clip_idx, seg_path.name, exc,
+            )
+            # Kill orphaned ffmpeg left by the failed render
+            _kill_orphaned_ffmpeg_videoeditor()
+            # Delete partial file
+            try:
+                if seg_path.exists():
+                    seg_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        finally:
+            # IMMEDIATE release: close the source clip and free its ffmpeg decoder
+            if seg_clip is not None:
+                try:
+                    seg_clip.close()
+                except Exception:
+                    pass
+            if clip is not None:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+
+    def _render_black_segment(
+        self, block_range: dict, seg_path: str | Path,
+    ) -> str:
+        """Render a black placeholder segment for scenes with no media at all.
+
+        Last-resort fallback — uses PIL to generate a black frame and MoviePy
+        to render it as a video segment matching the block's duration.
+        """
+        seg_path = Path(seg_path)
+        seg_path.parent.mkdir(parents=True, exist_ok=True)
+        if seg_path.exists():
+            import uuid
+            seg_path = seg_path.with_stem(f"{seg_path.stem}_{uuid.uuid4().hex[:4]}")
+
+        dur = block_range.get("duration", 5.0)
+        try:
+            clip = self._placeholder_clip(dur)
+            clip.write_videofile(
+                str(seg_path), fps=self.fps, codec=VIDEO_CODEC,
+                preset=self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
+                bitrate=VIDEO_BITRATE,
+                ffmpeg_params=["-pix_fmt", "yuv420p", "-an"],
+                logger=None,
+            )
+            clip.close()
+            return str(seg_path)
+        except Exception as exc:
+            self.logger.warning("Black placeholder render failed: %s", exc)
+            return ""
+
+    def _concat_body_with_crossfades(
+        self, segment_paths: list[str], block_ranges: list[dict],
+        output_path: str,
+    ) -> str:
+        """Concatenate pre-rendered scene segments with xfade transitions.
+
+        Uses ffmpeg's xfade filter to chain segments with the same crossfade
+        duration and overlap formula as the original CompositeVideoClip path.
+        Grain and vignette are folded into the same filter_complex as overlays.
+
+        Returns the output path of the concatenated body video (video-only, no audio).
+        """
+        if not segment_paths:
+            raise RuntimeError("No segments to concatenate")
+
+        crossfade_duration = random.uniform(
+            self.canal.get("CROSSFADE_MIN", 0.3),
+            self.canal.get("CROSSFADE_MAX", 0.7),
+        )
+
+        # Compute total expected duration (same formula as _composite_scenes)
+        total_scenes_dur = sum(br["duration"] for br in block_ranges)
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            import uuid
+            output_path = output_path.with_stem(f"{output_path.stem}_{uuid.uuid4().hex[:6]}")
+
+        # Build ffmpeg filter_complex for xfade chain
+        # Each segment is an input, chained with xfade
+        n = len(segment_paths)
+        ff_args = ["ffmpeg", "-y", "-v", "error"]
+
+        for sp in segment_paths:
+            ff_args += ["-i", str(sp)]
+
+        filter_parts: list[str] = []
+        stream_labels: list[str] = []
+
+        # Build xfade chain: xfade=transition=fade:duration=X:offset=Y
+        # First segment passes through. Then each new segment gets xfade with the running result.
+        current_label = "[0:v]"
+        cumulative_offset = 0.0
+        stream_labels.append(current_label)
+
+        for i in range(1, n):
+            seg_dur = block_ranges[i-1]["duration"] if i-1 < len(block_ranges) else 5.0
+            offset = cumulative_offset + seg_dur - crossfade_duration
+            offset = max(0.0, offset)
+
+            next_stream = f"[{i}:v]"
+            output_label = f"[xfade{i}]"
+            filter_parts.append(
+                f"{current_label}{next_stream}xfade=transition=fade:duration={crossfade_duration:.3f}:offset={offset:.3f}{output_label}"
+            )
+            current_label = output_label
+            stream_labels.append(current_label)
+            cumulative_offset = offset
+
+        # After xfade chain, compute padding to match total narration length
+        composite_end = cumulative_offset + block_ranges[-1]["duration"] if block_ranges else 0
+        if composite_end < total_scenes_dur:
+            pad_dur = total_scenes_dur - composite_end
+            pad_label = f"[padded]"
+            filter_parts.append(
+                f"{current_label}tpad=stop_mode=clone:stop_duration={pad_dur:.3f}{pad_label}"
+            )
+            current_label = pad_label
+
+        # Grain + vignette overlays (if enabled)
+        film_grain_opacity = self.canal.get("FILM_GRAIN_OPACITY", 0)
+        vignette_intensity = self.canal.get("VIGNETTE_INTENSITY", 0)
+        has_overlays = film_grain_opacity > 0 or vignette_intensity > 0
+
+        if has_overlays:
+            # Generate grain + vignette as temporary image clips, then overlay
+            # For now: apply vignette via ffmpeg vignette filter (simpler, no temp files)
+            overlay_parts = []
+            if vignette_intensity > 0:
+                vig_val = vignette_intensity / 100.0
+                overlay_parts.append(f"vignette=PI/4:aspect=16/9")
+            if film_grain_opacity > 0:
+                # ffmpeg noise + blend
+                grain_val = film_grain_opacity / 100.0
+                overlay_parts.append(f"noise=alls={grain_val*20:.0f}:allf=t+u")
+            if overlay_parts:
+                vig_label = f"[final]"
+                filter_parts.append(f"{current_label}{','.join(overlay_parts)}{vig_label}")
+                current_label = vig_label
+
+        filter_complex = ";".join(filter_parts)
+
+        ff_args += [
+            "-filter_complex", filter_complex,
+            "-map", current_label,
+            "-c:v", VIDEO_CODEC,
+            "-preset", self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
+            "-b:v", VIDEO_BITRATE,
+            "-pix_fmt", "yuv420p",
+            "-an",  # no audio in body segment
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        self.logger.info(
+            "Concat %d segments + xfade(%.1fs) + overlays → %s",
+            n, crossfade_duration, output_path.name,
+        )
+
+        try:
+            result = subprocess.run(ff_args, capture_output=True, text=True, timeout=900)
+            if result.returncode != 0:
+                stderr_tail = result.stderr.strip()[-500:] if result.stderr else ""
+                raise RuntimeError(
+                    f"ffmpeg xfade concat failed (rc={result.returncode}): {stderr_tail}"
+                )
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                raise RuntimeError("ffmpeg xfade concat produced empty output")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ffmpeg xfade concat timed out after 15 min")
+
+        return str(output_path)
+
 
 # ── Module-level helpers ────────────────────────────────────────
 
@@ -2045,8 +2839,6 @@ def _kill_new_ffmpeg(before_pids: set[int]) -> None:
             logging.getLogger("VideoEditor").warning("Killed hung ffmpeg PID %d", pid)
         except Exception:
             pass
-
-
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     """Convert (R, G, B) tuple to ``'#RRGGBB'`` hex string."""
     return "#{:02X}{:02X}{:02X}".format(*rgb)

@@ -7,12 +7,14 @@ from pathlib import Path
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
 
 from database.db import Database
-from config import canal1_config as cfg
+from database.db_extended import migrate_v2
+from config import canal2_config as cfg
 from pipeline.tts_engine import TTSEngine
 from pipeline.video_editor import VideoEditor
 from pipeline.thumbnail_maker import ThumbnailMaker
 
 db = Database()
+migrate_v2()
 script = db.get_script(8)
 
 # Parse scenes

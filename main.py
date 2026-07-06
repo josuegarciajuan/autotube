@@ -3,25 +3,25 @@
 
 Usage:
     # Full pipeline (scrape → script → TTS → images → video → upload)
-    python main.py run --canal canal1
+    python main.py run --canal canal2
 
     # Full pipeline without YouTube upload (save video locally)
-    python main.py run --canal canal1 --skip-upload
+    python main.py run --canal canal2 --skip-upload
 
     # Scheduled mode (continuous operation)
-    python main.py serve --canal canal1
+    python main.py serve --canal canal2
 
     # Scrape only (populate database with fresh content)
-    python main.py scrape --canal canal1
+    python main.py scrape --canal canal2
 
     # Generate scripts only (from existing scraped content)
-    python main.py generate --canal canal1
+    python main.py generate --canal canal2
 
     # Upload a specific video file
-    python main.py upload --canal canal1 --video /path/to/video.mp4 --title "My Title"
+    python main.py upload --canal canal2 --video /path/to/video.mp4 --title "My Title"
 
     # Database stats
-    python main.py stats --canal canal1
+    python main.py stats --canal canal2
 """
 
 import argparse
@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.settings import ACTIVE_CHANNELS, LOG_LEVEL, LOGS_DIR, LOG_FORMAT
 from database.db import Database, init_db
+from database.db_extended import migrate_v2
 
 logger = logging.getLogger("autotube")
 
@@ -55,8 +56,27 @@ def setup_logging():
 def cmd_run(args):
     """Run the full pipeline once."""
     from orchestrator import PipelineOrchestrator
+    from database.db_extended import ExtendedDatabase
 
     canal = args.canal or ACTIVE_CHANNELS[0]
+    
+    # ── Guard: don't run if API has an active generation ──
+    db = ExtendedDatabase()
+    active = db.get_active_job()
+    if active:
+        logger.error("❌ Active job #%d is running in the API — aborting CLI run to avoid conflict", active["id"])
+        return 1
+    
+    # ── Memory check ──
+    import os
+    try:
+        avail_bytes = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        avail_gb = avail_bytes / (1024 ** 3)
+        if avail_gb < 4.0:
+            logger.warning("⚠️  Only %.1f GB free — rendering may fail with OOM", avail_gb)
+    except Exception:
+        pass
+    
     orch = PipelineOrchestrator(canal=canal)
 
     # Quick content check before starting
@@ -155,6 +175,7 @@ def cmd_stats(args):
     canal = args.canal or ACTIVE_CHANNELS[0]
     db = Database()
     init_db()
+    migrate_v2()
 
     logger.info(f"=== Autotube Stats for {canal} ===")
     logger.info(f"  Unused content:   {db.get_unused_count(canal)}")
@@ -197,10 +218,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py run --canal canal1
-  python main.py serve --canal canal1
-  python main.py scrape --canal canal1
-  python main.py generate --canal canal1 --count 3
+  python main.py run --canal canal2
+  python main.py serve --canal canal2
+  python main.py scrape --canal canal2
+  python main.py generate --canal canal2 --count 3
   python main.py upload --video output/videos/video.mp4 --title "My Title"
   python main.py stats
         """,

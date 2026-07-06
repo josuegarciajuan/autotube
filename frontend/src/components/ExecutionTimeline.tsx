@@ -182,7 +182,7 @@ export default function ExecutionTimeline() {
 
       {/* Filter bar */}
       {showFilters && (
-        <div className="flex flex-wrap items-center gap-2 mb-4 p-3 bg-dark-700/50 rounded-lg">
+        <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center gap-2 mb-4 p-3 bg-dark-700/50 rounded-lg">
           <div className="flex gap-1">
             {([
               ['all', `Todas (${executions.length})`],
@@ -242,11 +242,11 @@ function ExecutionRow({ execution: e }: { execution: Execution }) {
   const isFuture = e.type === 'future'
 
   return (
-    <div className={`flex items-center gap-3 px-3 py-2 text-xs border-b border-surface-border/30 last:border-0 hover:bg-dark-700/30 transition-colors rounded ${
+    <div className={`flex items-center gap-2 sm:gap-3 px-3 py-2 text-xs border-b border-surface-border/30 last:border-0 hover:bg-dark-700/30 transition-colors rounded flex-wrap ${
       isRunning ? 'bg-neon-gold/5' : isPast && e.status === 'failed' ? 'bg-red-900/10' : ''
     }`}>
       {/* Date/Time */}
-      <span className={`font-mono w-28 shrink-0 ${
+      <span className={`font-mono shrink-0 ${
         isFuture ? 'text-gray-500' : isRunning ? 'text-neon-gold' : 'text-gray-400'
       }`}>
         {formatDateTime(e.date)}
@@ -261,7 +261,7 @@ function ExecutionRow({ execution: e }: { execution: Execution }) {
       </div>
 
       {/* Channel */}
-      <span className="font-medium text-gray-300 w-32 truncate shrink-0">{e.channel_name}</span>
+      <span className="font-medium text-gray-300 truncate shrink-0 max-w-[100px] sm:max-w-[150px]">{e.channel_name}</span>
 
       {/* Action */}
       <span className="text-gray-600 shrink-0">

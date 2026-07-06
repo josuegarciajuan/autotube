@@ -7,7 +7,7 @@ from datetime import datetime
 # ── Channel ──────────────────────────────────────────────────
 
 class ChannelConfig(BaseModel):
-    """Full channel configuration — synced with config/canal1_config.py."""
+    """Full channel configuration — synced with config/canal2_config.py."""
     # Identity
     canal_display_name: str = ""
     canal_tagline: str = ""
@@ -61,7 +61,8 @@ class ChannelConfig(BaseModel):
     content_pillars: list[dict] = Field(default_factory=list)
 
     # ── Video Duration / Generation ─────────────────────────
-    video_average_duration_min: int = 15  # target average duration (minutes, ±30%)
+    video_average_duration_min: int = 15  # target average duration (minutes)
+    video_duration_discrepancy_min: float = 3  # ±discrepancy around mean (minutes)
 
     test_mode: bool = False
     test_script_words_min: int = 200
@@ -110,6 +111,7 @@ class ChannelUpdate(BaseModel):
     description: Optional[str] = None
     yt_channel_id: Optional[str] = None
     yt_channel_url: Optional[str] = None
+    google_account: Optional[str] = None
 
 
 class ChannelResponse(BaseModel):
@@ -123,6 +125,7 @@ class ChannelResponse(BaseModel):
     description: Optional[str] = None
     yt_channel_id: Optional[str] = None
     yt_channel_url: Optional[str] = None
+    google_account: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -134,14 +137,16 @@ class ChannelConfigUpdate(BaseModel):
     banner_url: Optional[str] = None
     avatar_url: Optional[str] = None
     yt_channel_url: Optional[str] = None
+    google_account: Optional[str] = None
 
 
 # ── Video ────────────────────────────────────────────────────
 
 class VideoGenerateRequest(BaseModel):
     channel_id: int
-    action: str = "generate_and_upload"  # always generate+upload; legacy field kept for compatibility
-    content_id: Optional[int] = None  # specific content to use (unused — pipeline scrapes fresh)
+    action: str = "generate_and_upload"
+    content_id: Optional[int] = None
+    test_mode: bool = False  # fast-test: low res, no upload, no effects
 
 
 class VideoUpdate(BaseModel):
@@ -172,6 +177,7 @@ class VideoResponse(BaseModel):
     status: str = "draft"
     progress: int = 0
     progress_phase: Optional[str] = None
+    timing_data: Optional[str] = None
     uploaded_at: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -238,7 +244,7 @@ class ContentCreate(BaseModel):
     title: str = Field(..., min_length=1)
     text: str = Field(..., min_length=10)
     source: str = "manual"
-    canal: str = "canal1"
+    canal: str = "canal2"
     subreddit: Optional[str] = None
     url: Optional[str] = None
     score: int = 0
