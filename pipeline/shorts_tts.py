@@ -54,7 +54,7 @@ def _run_async_in_thread(coro):
 
 TICK_TO_MS = 10000                # 100-nanosecond ticks → milliseconds
 SHORTS_MAX_DURATION_SEC = 55.0    # YouTube Shorts max = 60 s; leave 5 s buffer
-MIN_WORD_COUNT = 50               # minimum words for a coherent Short
+MIN_WORD_COUNT = 35               # minimum words for a coherent Short (50→35: LLM struggles with 5-block format)
 MAX_WORD_COUNT = 110              # hard cap to prevent over-long audio (≈55 s @ -10% rate)
 BLOCK_PAUSE_MS = 350              # silence between narrative blocks (human rhythm)
 

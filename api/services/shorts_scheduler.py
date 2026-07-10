@@ -48,58 +48,58 @@ SLOT_TYPES = ["native", "native", "clip", "native", "clip"]
 # Which long slot position each clip depends on (1-based)
 CLIP_LONG_SLOT = {2: 1, 4: 2}  # slot_idx -> long_slot_position
 
-# ── Rotation: 6-day cycle for 3 channels × 5 slots ──
+# ── Rotation: 6-day cycle for 4 channels × 5 slots ──
 # Each entry is an order of channel slugs per slot window.
-# 5 windows × 3 channels = 15 positions per day.
+# 5 windows × 4 channels = 20 positions per day.
 # The rotation cycles channel ordering independently per window.
 ROTATION = [
     # Day 0
     [
-        ["canal4", "canal2", "canal3"],  # slot 0 (10:00 native)
-        ["canal3", "canal4", "canal2"],  # slot 1 (13:30 native)
-        ["canal2", "canal3", "canal4"],  # slot 2 (18:00 clip)
-        ["canal4", "canal2", "canal3"],  # slot 3 (20:30 native)
-        ["canal3", "canal4", "canal2"],  # slot 4 (23:30 clip)
+        ["canal4", "canal2", "canal3", "canal5"],  # slot 0 (10:00 native)
+        ["canal3", "canal4", "canal2", "canal5"],  # slot 1 (13:30 native)
+        ["canal2", "canal3", "canal4", "canal5"],  # slot 2 (18:00 clip)
+        ["canal4", "canal2", "canal3", "canal5"],  # slot 3 (20:30 native)
+        ["canal3", "canal4", "canal2", "canal5"],  # slot 4 (23:30 clip)
     ],
     # Day 1
     [
-        ["canal3", "canal2", "canal4"],
-        ["canal2", "canal3", "canal4"],
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
-        ["canal2", "canal3", "canal4"],
+        ["canal3", "canal2", "canal4", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
     ],
     # Day 2
     [
-        ["canal2", "canal4", "canal3"],
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
-        ["canal2", "canal3", "canal4"],
-        ["canal4", "canal2", "canal3"],
+        ["canal2", "canal4", "canal3", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
     ],
     # Day 3
     [
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
-        ["canal2", "canal3", "canal4"],
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
     ],
     # Day 4
     [
-        ["canal3", "canal2", "canal4"],
-        ["canal2", "canal3", "canal4"],
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
-        ["canal2", "canal3", "canal4"],
+        ["canal3", "canal2", "canal4", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
     ],
     # Day 5
     [
-        ["canal2", "canal4", "canal3"],
-        ["canal4", "canal2", "canal3"],
-        ["canal3", "canal4", "canal2"],
-        ["canal2", "canal3", "canal4"],
-        ["canal4", "canal2", "canal3"],
+        ["canal2", "canal4", "canal3", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
+        ["canal3", "canal4", "canal2", "canal5"],
+        ["canal2", "canal3", "canal4", "canal5"],
+        ["canal4", "canal2", "canal3", "canal5"],
     ],
 ]
 
@@ -510,18 +510,20 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": (
-            f"Genera un Short viral en español de ~40-45 segundos (~70-90 palabras). "
+            f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). "
             f"Canal: {display_name} — {niche}. Tagline: {tagline}. "
-            f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre), "
-            f"cada uno con 1-2 frases concisas. "
+            f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). "
+            f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
+            f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
+            f"El total debe superar 50 palabras. "
             f"Devuelve SOLO JSON: "
             f'{{"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
             f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases"}}, '
-            f'{{"tipo": "desarrollo1", "texto": "1-2 frases contexto"}}, '
-            f'{{"tipo": "desarrollo2", "texto": "1-2 frases dato impactante"}}, '
-            f'{{"tipo": "climax", "texto": "1-2 frases consecuencia"}}, '
-            f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscríbete"}}]}}. '
-            f"NADA MÁS."
+            f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle"}}, '
+            f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico"}}, '
+            f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion"}}, '
+            f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete"}}]}}. '
+            f"NADA MAS fuera del JSON."
         )}],
         temperature=0.9, max_tokens=1200,
     )
