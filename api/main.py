@@ -94,22 +94,26 @@ async def lifespan(app: FastAPI):
             "Worker reconnection skipped: %s", exc
         )
     
-    # ── Adaptive per-channel schedule generation ────────────────
-    # Generates 2 publish slots/day/channel with fair rotation,
-    # per-channel avg creation times, jitter, and buffer.
+    # ── Dynamic daily schedule generation (planning_service) ──
+    # Generates slots per day based on per-channel config (videos_per_day).
+    # Only creates slots for days that don't have any yet.
     try:
-        from api.services.schedule_engine import generate_upcoming
-        result = generate_upcoming(days=7)
+        from datetime import date as _dt_su, timedelta as _td_su
+        from api.services.planning_service import compute_and_store_slots, ensure_today_planned
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        ensure_today_planned(db=_db)
         logger = logging.getLogger("autotube.startup")
-        logger.info("Schedule engine: 7-day plan generated (%d days)", len(result))
-        # Print today's schedule for visibility
-        from api.services.schedule_engine import get_day_schedule_summary
-        summary = get_day_schedule_summary()
-        for line in summary.split("\n"):
-            logger.info("  %s", line)
+        # Ensure next 6 days also have slots (only if they don't exist)
+        for offset in range(1, 7):
+            day_str = (_dt_su.today() + _td_su(days=offset)).isoformat()
+            existing = _db.get_planned_slots(date_key=day_str)
+            if not existing:
+                compute_and_store_slots(day_str, db=_db)
+        logger.info("Planning engine: 7-day slots ensured")
     except Exception as exc:
         logging.getLogger("autotube.startup").warning(
-            "Schedule engine init skipped: %s", exc
+            "Planning engine init skipped: %s", exc
         )
 
     # ── Shorts scheduler: 5 shorts/day/channel (3 native + 2 clip) ──
@@ -227,8 +231,8 @@ async def _schedule_checker_loop():
                 await asyncio.sleep(300)  # Check every 5 minutes after first run
 
             await _process_due_schedules()
-            await _process_smart_slots()      # Adaptive per-channel schedule dispatch
-            await _process_shorts_slots()     # Shorts scheduled dispatch (5/day/channel)
+            await _process_planned_slots()    # Dynamic planning engine (primary dispatcher)
+            await _process_shorts_slots()     # Shorts scheduled dispatch
             await _queue_consumer()           # Process queued generation jobs sequentially
             await _detect_and_clean_orphans()
             
@@ -246,31 +250,33 @@ async def _schedule_checker_loop():
             # Regenerate the schedule forecast at midnight (daily)
             if now - last_midnight_check > 3600:  # Check once per hour
                 from datetime import date as _date
+                import logging as _logging
+                _logger = _logging.getLogger("autotube.midnight")
                 today = _date.today().isoformat()
                 try:
-                    from api.services.schedule_engine import ensure_today_scheduled, generate_upcoming
-                    # Ensure today has slots (won't touch completed/running ones)
-                    ensure_today_scheduled()
+                    from database.db_extended import ExtendedDatabase
+                    _mid_db = ExtendedDatabase()
+                    from api.services.planning_service import ensure_today_planned, compute_and_store_slots
+                    # Ensure today has slots (only creates if none exist; won't touch completed/running)
+                    ensure_today_planned(db=_mid_db)
                     # Also ensure today has shorts slots
                     from api.services.shorts_scheduler import ensure_today_shorts_scheduled
                     ensure_today_shorts_scheduled()
                     # Pre-generate the +7th day to keep the 7-day forecast window
                     from datetime import date as _dt, timedelta as _td
                     future_day = (_dt.today() + _td(days=7)).isoformat()
-                    from api.services.schedule_engine import compute_daily_schedule, persist_daily_schedule
-                    # Only generate if it doesn't already exist
-                    existing = db.get_planned_slots(date_key=future_day)
+                    # Only generate if the day has ZERO slots of any kind (avoid duplication)
+                    existing = _mid_db.get_planned_slots(date_key=future_day)
                     if not existing:
-                        slots = compute_daily_schedule(future_day, db)
-                        persist_daily_schedule(future_day, slots, db)
-                        logger.info("Schedule extended to %s (%d slots)", future_day, len(slots))
+                        compute_and_store_slots(future_day, db=_mid_db)
+                        _logger.info("Schedule extended to %s", future_day)
                     # Extend shorts forecast too
-                    existing_shorts = db.get_shorts_planned_slots(date_key=future_day)
+                    existing_shorts = _mid_db.get_shorts_planned_slots(date_key=future_day)
                     if not existing_shorts:
                         from api.services.shorts_scheduler import compute_daily_shorts_slots, persist_daily_shorts_slots
-                        shorts_slots = compute_daily_shorts_slots(future_day, db)
-                        persist_daily_shorts_slots(future_day, shorts_slots, db)
-                        logger.info("Shorts schedule extended to %s (%d slots)", future_day, len(shorts_slots))
+                        shorts_slots = compute_daily_shorts_slots(future_day, db=_mid_db)
+                        persist_daily_shorts_slots(future_day, shorts_slots, db=_mid_db)
+                        _logger.info("Shorts schedule extended to %s (%d slots)", future_day, len(shorts_slots))
                     last_midnight_check = now
                 except Exception as exc:
                     logger.debug("Midnight schedule refresh: %s", exc)

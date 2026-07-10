@@ -1,32 +1,24 @@
-/** Unified execution timeline — past, in-progress, and future pipeline executions.
-
-Shows:
-- Past: completed/failed jobs
-- In progress: running jobs with % progress bar
-- Future: scheduled upcoming runs (next 7 days)
-
-Supports filtering by status and channel.
-*/
+/** ExecutionTimeline — Shows past and running generation jobs.
+ *  Pure history view: completed, failed, cancelled, running.
+ *  Future slots are shown in UpcomingExecutions instead.
+ */
 
 import { useState, useEffect, useCallback } from 'react'
 import { api, formatDateTime } from '../lib/api'
-import { Clock, CheckCircle, AlertCircle, Loader2, Calendar, Filter, RefreshCw, Play, Youtube, X, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Clock, CheckCircle, AlertCircle, Loader2, Filter, RefreshCw, Play, Youtube, X, XCircle } from 'lucide-react'
 
-type FilterStatus = 'all' | 'past' | 'running' | 'future'
+type FilterStatus = 'all' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 interface Execution {
-  id: string            // unique key: "job_123" or "sched_456_run_2024-01-01"
-  type: 'past' | 'running' | 'future'
-  date: string          // ISO datetime
+  id: string
+  date: string
   channel_name: string
   action: string
-  status: string         // completed / failed / running / scheduled
-  progress?: number      // 0-100 for running
-  phase?: string         // current phase for running
+  status: string
+  progress?: number
+  phase?: string
   video_id?: number
-  video_title?: string
   error_msg?: string
-  schedule_id?: number
 }
 
 export default function ExecutionTimeline() {
@@ -39,133 +31,72 @@ export default function ExecutionTimeline() {
 
   const loadData = useCallback(async () => {
     try {
-      const [jobs, schedules, chs] = await Promise.all([
+      const [jobs, chs] = await Promise.all([
         api.getJobs(undefined, filterChannel || undefined, 50),
-        api.getSchedules(filterChannel || undefined, false),
         api.getChannels(true),
       ])
       setChannels(chs)
 
       const execs: Execution[] = []
 
-      // ── Past + Running Jobs ──────────────────────────────
       for (const j of jobs) {
-        const isRunning = j.status === 'running'
-        const isCompleted = j.status === 'completed'
-        const isFailed = j.status === 'failed'
+        const chName = j.channel_name || chs.find((c: any) => c.id === j.channel_id)?.name || `Canal #${j.channel_id}`
 
-        if (isRunning) {
-          execs.push({
-            id: `job_${j.id}`,
-            type: 'running',
-            date: j.started_at || j.created_at,
-            channel_name: j.channel_name || chs.find((c: any) => c.id === j.channel_id)?.name || `Canal #${j.channel_id}`,
-            action: j.action || 'generate_and_upload',
-            status: 'running',
-            progress: j.progress || 0,
-            phase: j.phase || 'iniciando',
-            video_id: j.video_id,
-          })
-        } else if (isCompleted || isFailed) {
-          execs.push({
-            id: `job_${j.id}`,
-            type: 'past',
-            date: j.finished_at || j.started_at || j.created_at,
-            channel_name: j.channel_name || chs.find((c: any) => c.id === j.channel_id)?.name || `Canal #${j.channel_id}`,
-            action: j.action || 'generate_and_upload',
-            status: isCompleted ? 'completed' : 'failed',
-            video_id: j.video_id,
-            error_msg: j.error_msg,
-          })
-        }
+        execs.push({
+          id: `job_${j.id}`,
+          date: j.finished_at || j.started_at || j.created_at,
+          channel_name: chName,
+          action: j.action || 'generate_and_upload',
+          status: j.status,
+          progress: j.progress || 0,
+          phase: j.phase || '',
+          video_id: j.video_id,
+          error_msg: j.error_msg,
+        })
       }
 
-      // ── Future Scheduled Runs ────────────────────────────
-      const now = new Date()
-      const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-
-      for (const s of schedules) {
-        if (!s.active || !s.next_run_at) continue
-        
-        const nextRun = new Date(s.next_run_at)
-        if (nextRun > sevenDaysFromNow) {
-          // Only show 1 upcoming run beyond 7 days
-          execs.push({
-            id: `sched_${s.id}_run_0`,
-            type: 'future',
-            date: s.next_run_at,
-            channel_name: s.channel_name || chs.find((c: any) => c.id === s.channel_id)?.name || '',
-            action: s.action,
-            status: 'scheduled',
-            schedule_id: s.id,
-          })
-          continue
-        }
-
-        // For recurring schedules, generate next 7 days of runs
-        if (s.schedule_type === 'recurring') {
-          let runTime = nextRun
-          let idx = 0
-          while (runTime <= sevenDaysFromNow && idx < 50) {
-            execs.push({
-              id: `sched_${s.id}_run_${idx}`,
-              type: 'future',
-              date: runTime.toISOString(),
-              channel_name: s.channel_name || chs.find((c: any) => c.id === s.channel_id)?.name || '',
-              action: s.action,
-              status: 'scheduled',
-              schedule_id: s.id,
-            })
-            runTime = new Date(runTime.getTime() + (s.interval_h || 24) * 60 * 60 * 1000)
-            idx++
-          }
-        } else {
-          execs.push({
-            id: `sched_${s.id}_run_0`,
-            type: 'future',
-            date: s.next_run_at,
-            channel_name: s.channel_name || chs.find((c: any) => c.id === s.channel_id)?.name || '',
-            action: s.action,
-            status: 'scheduled',
-            schedule_id: s.id,
-          })
-        }
-      }
-
-      // Sort by date (descending for past, ascending for future)
-      const past = execs.filter(e => e.type === 'past').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-      const running = execs.filter(e => e.type === 'running').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-      const future = execs.filter(e => e.type === 'future').sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-
-      setExecutions([...running, ...past, ...future])
+      // Sort by date descending (newest first)
+      execs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      setExecutions(execs)
     } catch (e) { console.error(e) }
     setLoading(false)
   }, [filterChannel])
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 15000) // Refresh every 15s
+    const interval = setInterval(loadData, 15000)
     return () => clearInterval(interval)
   }, [loadData])
 
-  // ── Filtering ────────────────────────────────────────────
   const filtered = executions.filter(e => {
-    if (filterStatus === 'past' && e.type !== 'past') return false
-    if (filterStatus === 'running' && e.type !== 'running') return false
-    if (filterStatus === 'future' && e.type !== 'future') return false
+    if (filterStatus === 'running') return e.status === 'running'
+    if (filterStatus === 'completed') return e.status === 'completed'
+    if (filterStatus === 'failed') return e.status === 'failed'
+    if (filterStatus === 'cancelled') return e.status === 'cancelled'
     return true
   })
 
-  const pastCount = executions.filter(e => e.type === 'past').length
-  const runningCount = executions.filter(e => e.type === 'running').length
-  const futureCount = executions.filter(e => e.type === 'future').length
+  const counts = {
+    running: executions.filter(e => e.status === 'running').length,
+    completed: executions.filter(e => e.status === 'completed').length,
+    failed: executions.filter(e => e.status === 'failed').length,
+    cancelled: executions.filter(e => e.status === 'cancelled').length,
+  }
+
+  const filterOptions: [FilterStatus, string, number][] = [
+    ['all', `Todas (${executions.length})`, executions.length],
+    ['running', `Ejecutando (${counts.running})`, counts.running],
+    ['completed', `Completadas (${counts.completed})`, counts.completed],
+    ['failed', `Fallidas (${counts.failed})`, counts.failed],
+    ['cancelled', `Canceladas (${counts.cancelled})`, counts.cancelled],
+  ]
 
   return (
     <section className="glass rounded-xl p-5">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-display text-base font-semibold text-white flex items-center gap-2">
-          <Clock size={16} className="text-neon-cyan" /> Ejecuciones (próx. 7 días)
+          <Clock size={16} className="text-neon-cyan" /> Historial de Ejecuciones
         </h3>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowFilters(!showFilters)}
@@ -183,13 +114,8 @@ export default function ExecutionTimeline() {
       {/* Filter bar */}
       {showFilters && (
         <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center gap-2 mb-4 p-3 bg-dark-700/50 rounded-lg">
-          <div className="flex gap-1">
-            {([
-              ['all', `Todas (${executions.length})`],
-              ['running', `En curso (${runningCount})`],
-              ['past', `Pasadas (${pastCount})`],
-              ['future', `Futuras (${futureCount})`],
-            ] as [FilterStatus, string][]).map(([val, label]) => (
+          <div className="flex flex-wrap gap-1">
+            {filterOptions.map(([val, label, count]) => (
               <button key={val}
                 onClick={() => setFilterStatus(val)}
                 className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
@@ -199,11 +125,11 @@ export default function ExecutionTimeline() {
               </button>
             ))}
           </div>
-          <span className="text-gray-700">|</span>
+          <span className="text-gray-700 hidden sm:inline">|</span>
           <select value={filterChannel} onChange={e => { setFilterChannel(Number(e.target.value)); setLoading(true) }}
             className="px-2 py-1 bg-dark-600 border border-surface-border rounded text-xs text-gray-300 focus:outline-none focus:border-neon-cyan">
             <option value={0}>Todos los canales</option>
-            {channels.map((ch: any) => (
+            {channels.filter((c: any) => c.slug !== 'test').map((ch: any) => (
               <option key={ch.id} value={ch.id}>{ch.name}</option>
             ))}
           </select>
@@ -237,44 +163,67 @@ export default function ExecutionTimeline() {
 }
 
 function ExecutionRow({ execution: e }: { execution: Execution }) {
-  const isRunning = e.type === 'running'
-  const isPast = e.type === 'past'
-  const isFuture = e.type === 'future'
+  const isRunning = e.status === 'running'
+
+  function statusIcon() {
+    switch (e.status) {
+      case 'running': return <Loader2 size={14} className="text-neon-gold animate-spin" />
+      case 'completed': return <CheckCircle size={14} className="text-green-400" />
+      case 'failed': return <AlertCircle size={14} className="text-red-400" />
+      case 'cancelled': return <XCircle size={14} className="text-gray-500" />
+      default: return <Clock size={14} className="text-gray-500" />
+    }
+  }
+
+  function statusText() {
+    switch (e.status) {
+      case 'running': return 'Ejecutando'
+      case 'completed': return 'Completado'
+      case 'failed': return `Fallido${e.error_msg ? ': ' + e.error_msg.slice(0, 80) : ''}`
+      case 'cancelled': return 'Cancelado'
+      default: return e.status
+    }
+  }
+
+  function statusColor() {
+    switch (e.status) {
+      case 'running': return 'text-neon-gold'
+      case 'completed': return 'text-green-400/80'
+      case 'failed': return 'text-red-400/80'
+      case 'cancelled': return 'text-gray-500'
+      default: return 'text-gray-400'
+    }
+  }
 
   return (
     <div className={`flex items-center gap-2 sm:gap-3 px-3 py-2 text-xs border-b border-surface-border/30 last:border-0 hover:bg-dark-700/30 transition-colors rounded flex-wrap ${
-      isRunning ? 'bg-neon-gold/5' : isPast && e.status === 'failed' ? 'bg-red-900/10' : ''
+      isRunning ? 'bg-neon-gold/5' : e.status === 'failed' ? 'bg-red-900/10' : ''
     }`}>
       {/* Date/Time */}
-      <span className={`font-mono shrink-0 ${
-        isFuture ? 'text-gray-500' : isRunning ? 'text-neon-gold' : 'text-gray-400'
-      }`}>
+      <span className={`font-mono shrink-0 ${isRunning ? 'text-neon-gold' : 'text-gray-400'}`}>
         {formatDateTime(e.date)}
       </span>
 
       {/* Status indicator */}
-      <div className="shrink-0">
-        {isRunning && <Loader2 size={14} className="text-neon-gold animate-spin" />}
-        {isPast && e.status === 'completed' && <CheckCircle size={14} className="text-green-400" />}
-        {isPast && e.status === 'failed' && <AlertCircle size={14} className="text-red-400" />}
-        {isFuture && <Calendar size={14} className="text-gray-600" />}
-      </div>
+      <div className="shrink-0">{statusIcon()}</div>
 
       {/* Channel */}
-      <span className="font-medium text-gray-300 truncate shrink-0 max-w-[100px] sm:max-w-[150px]">{e.channel_name}</span>
+      <span className="font-medium text-gray-300 truncate shrink-0 max-w-[100px] sm:max-w-[150px]">
+        {e.channel_name}
+      </span>
 
       {/* Action */}
       <span className="text-gray-600 shrink-0">
-        {e.action === 'generate_and_upload' ? (
+        {e.action === 'generate_and_upload' || e.action === 'generate_clip_short' || e.action === 'generate_native_short' ? (
           <span className="flex items-center gap-1"><Youtube size={10} /> Subir</span>
         ) : (
-          <span className="flex items-center gap-1"><Play size={10} /> Generar</span>
+          <span className="flex items-center gap-1"><Play size={10} /> {e.action}</span>
         )}
       </span>
 
       {/* Status text + progress */}
-      <span className="flex-1 min-w-0">
-        {isRunning && (
+      <span className={`flex-1 min-w-0 ${statusColor()}`}>
+        {isRunning ? (
           <div className="flex items-center gap-2">
             <div className="flex-1 h-1.5 bg-dark-700 rounded-full overflow-hidden max-w-[100px]">
               <div className="h-full bg-neon-gold rounded-full transition-all duration-500" style={{ width: `${e.progress || 0}%` }} />
@@ -282,17 +231,8 @@ function ExecutionRow({ execution: e }: { execution: Execution }) {
             <span className="text-neon-gold font-mono tabular-nums">{e.progress || 0}%</span>
             {e.phase && <span className="text-gray-500">{e.phase}</span>}
           </div>
-        )}
-        {isPast && e.status === 'completed' && (
-          <span className="text-green-400/80">Completado</span>
-        )}
-        {isPast && e.status === 'failed' && (
-          <span className="text-red-400/80 truncate" title={e.error_msg}>
-            Fallido{e.error_msg ? `: ${e.error_msg.slice(0, 60)}` : ''}
-          </span>
-        )}
-        {isFuture && (
-          <span className="text-gray-600">Programado</span>
+        ) : (
+          <span className="truncate" title={e.error_msg}>{statusText()}</span>
         )}
       </span>
 
