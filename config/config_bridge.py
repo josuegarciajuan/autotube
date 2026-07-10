@@ -205,15 +205,18 @@ def sync_config_to_db(slug: str) -> dict | None:
 
 
 def sync_all_configs_to_db() -> list[str]:
-    """Sync all existing DB channels from their Python config modules.
+    """Sync all *active* DB channels from their Python config modules.
 
-    Called on API startup.  Returns the list of synced slugs.
+    Only channels with active=1 are synced to prevent test/disabled channels
+    from polluting the planning engine. Called on API startup.
+
+    Returns the list of synced slugs.
     """
     synced: list[str] = []
     try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
-        for ch in db.get_channels():
+        for ch in db.get_channels(active_only=True):
             slug = ch["slug"]
             if sync_config_to_db(slug) is not None:
                 synced.append(slug)
@@ -223,12 +226,12 @@ def sync_all_configs_to_db() -> list[str]:
 
 
 def get_all_channel_configs() -> dict[str, object]:
-    """Return dict slug → SimpleNamespace for all configured channels."""
+    """Return dict slug → SimpleNamespace for all *active* channels."""
     from database.db_extended import ExtendedDatabase
     result: dict[str, object] = {}
     try:
         db = ExtendedDatabase()
-        for ch in db.get_channels():
+        for ch in db.get_channels(active_only=True):
             slug = ch["slug"]
             config = get_channel_config(slug)
             if config is not None:
