@@ -9,7 +9,8 @@ from api.schemas.models import (
     VideoGenerateRequest, VideoUpdate, VideoResponse,
     ScriptGenerateRequest, ScriptResponse, ContentResponse,
 )
-from api.services.generation_service import start_generation_job, _run_reassembly_job
+from api.services.generation_service import start_generation_job, _run_reassembly_job, start_upload_job
+from api.services.generation_service import start_generation_job_subprocess, USE_SUBPROCESS_WORKER
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,6 +54,9 @@ def get_video(video_id: int):
         for k in ("created_at", "updated_at"):
             if s.get(k):
                 s[k] = str(s[k])
+    # Include embeddable status from latest YouTube stats
+    latest_stats = db.get_video_latest_stats(video_id)
+    v["embeddable"] = bool(latest_stats.get("embeddable", 1)) if latest_stats else True
     return v
 
 
@@ -106,15 +110,30 @@ def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks
     
     job_id = db.create_job(data.channel_id, data.action, video_id)
     
-    background_tasks.add_task(
-        start_generation_job,
-        job_id=job_id,
-        channel_id=data.channel_id,
-        video_id=video_id,
-        action=data.action,
-        content_id=data.content_id,
-        test_mode=data.test_mode,
-    )
+    if USE_SUBPROCESS_WORKER:
+        # Spawn independent worker subprocess (survives API restarts)
+        asyncio.create_task(
+            start_generation_job_subprocess(
+                job_id=job_id,
+                channel_id=data.channel_id,
+                video_id=video_id,
+                action=data.action,
+                test_mode=data.test_mode,
+                upload=data.upload,
+            )
+        )
+    else:
+        # Legacy in-process generation
+        background_tasks.add_task(
+            start_generation_job,
+            job_id=job_id,
+            channel_id=data.channel_id,
+            video_id=video_id,
+            action=data.action,
+            content_id=data.content_id,
+            test_mode=data.test_mode,
+            upload=data.upload,
+        )
     
     return {"job_id": job_id, "video_id": video_id, "message": "Generation started"}
 
@@ -140,6 +159,16 @@ def resume_video(video_id: int, background_tasks: BackgroundTasks):
     if not v:
         raise HTTPException(404, "Video not found")
     
+    # Guard: reject resume if video was already uploaded to YouTube.
+    # A new generation would overwrite the existing upload status via the
+    # orphan-detector / zombie-thread race condition.
+    if v.get("yt_video_id"):
+        raise HTTPException(
+            409,
+            f"Este video ya fue subido a YouTube (ID: {v['yt_video_id']}). "
+            "Usa el boton Resubir si necesitas reemplazarlo."
+        )
+    
     channel_id = v.get("channel_id")
     if not channel_id:
         raise HTTPException(400, "Video has no channel_id")
@@ -162,14 +191,27 @@ def resume_video(video_id: int, background_tasks: BackgroundTasks):
     
     job_id = db.create_job(channel_id, "generate_and_upload", video_id)
     
-    background_tasks.add_task(
-        start_generation_job,
-        job_id=job_id,
-        channel_id=channel_id,
-        video_id=video_id,
-        action="generate_and_upload",
-        resume=True,  # ← triggers checkpoint reload
-    )
+    if USE_SUBPROCESS_WORKER:
+        # Note: resume in subprocess mode = full regeneration
+        # The worker runs run_full_pipeline which doesn't support partial resume.
+        # This is acceptable because the subprocess worker is more robust.
+        asyncio.create_task(
+            start_generation_job_subprocess(
+                job_id=job_id,
+                channel_id=channel_id,
+                video_id=video_id,
+                action="generate_and_upload",
+            )
+        )
+    else:
+        background_tasks.add_task(
+            start_generation_job,
+            job_id=job_id,
+            channel_id=channel_id,
+            video_id=video_id,
+            action="generate_and_upload",
+            resume=True,  # ← triggers checkpoint reload
+        )
     
     return {
         "job_id": job_id,
@@ -253,6 +295,49 @@ def upload_video(video_id: int, background_tasks: BackgroundTasks):
     return {"job_id": job_id, "message": "Upload started"}
 
 
+@router.put("/{video_id}/privacy")
+def set_video_privacy(video_id: int, data: dict):
+    """Update the privacy status of an already uploaded YouTube video.
+    
+    Body: {"privacy_status": "public"|"unlisted"|"private"}
+    """
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if not v.get("yt_video_id"):
+        raise HTTPException(400, "Video has no YouTube ID — upload it first")
+    
+    privacy_new = data.get("privacy_status", "")
+    if privacy_new not in ("public", "unlisted", "private"):
+        raise HTTPException(400, "privacy_status must be 'public', 'unlisted', or 'private'")
+    
+    channel_id = v.get("channel_id") or 1
+    ch = db.get_channel(channel_id)
+    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    
+    from orchestrator import PipelineOrchestrator
+    orch = PipelineOrchestrator(canal=canal)
+    
+    if not orch.uploader.authenticate():
+        raise HTTPException(500, "Failed to authenticate with YouTube")
+    
+    try:
+        result = orch.uploader.set_privacy(v["yt_video_id"], privacy_new)
+    except Exception as e:
+        raise HTTPException(500, f"YouTube API error: {e}")
+    
+    # Update the privacy_status in our database too
+    db.update_video(video_id, privacy_status=privacy_new)
+    
+    return {
+        "updated": True,
+        "yt_video_id": v["yt_video_id"],
+        "privacy": privacy_new,
+        "yt_url": v.get("yt_url", f"https://youtube.com/watch?v={v['yt_video_id']}"),
+    }
+
+
 @router.post("/{video_id}/regenerate-thumbnail")
 def regenerate_thumbnail(video_id: int, background_tasks: BackgroundTasks):
     """Regenerate video thumbnail."""
@@ -260,9 +345,6 @@ def regenerate_thumbnail(video_id: int, background_tasks: BackgroundTasks):
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
-    if not v.get("video_path"):
-        raise HTTPException(400, "No video file to extract thumbnail from")
-    
     from api.services.thumbnail_service import regenerate_thumbnail_for_video
     background_tasks.add_task(regenerate_thumbnail_for_video, video_id)
     
@@ -355,40 +437,56 @@ async def generate_marketing_metadata(video_id: int):
 
 @router.post("/stats")
 def get_video_stats(data: dict):
-    """Get YouTube stats for a list of video IDs.
+    """Get video stats for a list of YouTube video IDs from DB cache.
 
-    Tries real YouTube API first, falls back to mock data.
+    Ya no consume YouTube API quota — siempre lee de video_stats_history.
+    Para refrescar los datos, usar el botón 'Recolectar stats' del dashboard.
     """
     video_ids = data.get("video_ids", [])
     if not video_ids:
         return {}
-    
-    # Try to find a valid token from any channel
-    from config.settings import TOKENS_DIR
-    from pipeline.youtube_stats import YouTubeStatsFetcher
-    import pickle
-    
-    token_slug = None
-    for token_file in sorted(TOKENS_DIR.glob("*.pickle")):
-        slug = token_file.stem
-        if slug in ("canal2_state",):
-            continue
-        token_slug = slug
-        break
-    
+
+    db = get_db()
     result = {}
-    if token_slug:
-        fetcher = YouTubeStatsFetcher(token_slug)
-        if fetcher.authenticate():
-            for vid in video_ids:
-                result[vid] = fetcher.get_video_stats(vid)
-            return result
-    
-    # Fallback: mock (mark as synthetic so frontend can distinguish)
     for vid in video_ids:
-        stats = _mock_youtube_stats(vid)
-        stats["is_mock"] = True
-        result[vid] = stats
+        # 1) Long-form videos table
+        with db._connect() as conn:
+            vrow = conn.execute(
+                "SELECT id FROM videos WHERE yt_video_id = ? LIMIT 1",
+                (vid,),
+            ).fetchone()
+        if vrow:
+            db_stats = db.get_video_latest_stats(vrow["id"])
+            if db_stats:
+                result[vid] = {
+                    "viewCount": str(db_stats.get("views", 0)),
+                    "likeCount": str(db_stats.get("likes", 0)),
+                    "commentCount": str(db_stats.get("comments", 0)),
+                    "embeddable": bool(db_stats.get("embeddable", 1)),
+                    "_from_db": True,
+                }
+                continue
+
+        # 2) Fallback: shorts table (YouTube ID stored in shorts.youtube_id)
+        with db._connect() as conn:
+            srow = conn.execute(
+                "SELECT id FROM shorts WHERE youtube_id = ? LIMIT 1",
+                (vid,),
+            ).fetchone()
+            if srow:
+                sstats = conn.execute(
+                    "SELECT views, likes, comments, embeddable FROM short_stats "
+                    "WHERE short_id = ? ORDER BY fetched_at DESC LIMIT 1",
+                    (srow["id"],),
+                ).fetchone()
+                if sstats:
+                    result[vid] = {
+                        "viewCount": str(sstats["views"]),
+                        "likeCount": str(sstats["likes"]),
+                        "commentCount": str(sstats["comments"]),
+                        "embeddable": bool(sstats["embeddable"]),
+                        "_from_db": True,
+                    }
     return result
 
 

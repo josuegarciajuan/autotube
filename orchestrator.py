@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -157,6 +158,30 @@ class PipelineOrchestrator:
             )
         return self._uploader
 
+    def cleanup(self):
+        """Release heavy resources (Kokoro pipeline) to free RAM between phases.
+
+        Called by generation_service after the video subprocess is spawned
+        and at job completion.  Releasing the TTS engine (~500 MB PyTorch model)
+        prevents uvicorn from accumulating RAM during the hour-long render.
+        """
+        import gc
+        if self._tts is not None:
+            if hasattr(self._tts, 'unload'):
+                try:
+                    self._tts.unload()
+                    logger.info("[%s] Kokoro pipeline unloaded via cleanup()", self.canal)
+                except Exception as _exc:
+                    logger.debug("[%s] Kokoro unload in cleanup: %s", self.canal, _exc)
+            self._tts = None
+        gc.collect()
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        logger.info("[%s] Orchestrator cleanup complete", self.canal)
+
     def _emit_progress(self, percent: int, phase: str, message: str) -> None:
         """Fire the progress callback (if set). No-op when running CLI standalone."""
         if self._progress_cb:
@@ -190,17 +215,23 @@ class PipelineOrchestrator:
 
     def phase_scrape(self) -> int:
         """Scrape new content from all sources. Returns items added."""
+        import concurrent.futures
         start = time.time()
         added = 0
         self._emit_progress(5, "scrape", "Buscando historias en Reddit y Wikipedia...")
 
-        # Reddit scraping
+        # Reddit scraping with per-source timeout (5 min per scraper)
         for scraper_name, s in self.scraper.items():
             try:
                 self._emit_progress(7, "scrape", f"Scraping {scraper_name}...")
-                count = s.save_to_db(self.db)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(s.save_to_db, self.db)
+                    count = future.result(timeout=300)  # 5 min hard timeout per scraper
                 added += count
                 logger.info(f"[{self.canal}] {scraper_name}: {count} items scraped")
+            except concurrent.futures.TimeoutError:
+                logger.error(f"[{self.canal}] {scraper_name} scrape timed out after 5min")
+                self.db.log_pipeline(self.canal, "scrape", "error", "timeout after 5min")
             except Exception as e:
                 logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
                 self.db.log_pipeline(self.canal, "scrape", "error", str(e))
@@ -340,9 +371,21 @@ class PipelineOrchestrator:
             except Exception as exc:
                 logger.warning("[%s] CTA audio generation failed (non-fatal): %s", self.canal, exc)
 
+            # ── Release Kokoro pipeline after CTA ──────────────
+            # The TTS engine stays loaded after CTA generation but is no longer
+            # needed during the render (video subprocess).  Release it now to
+            # prevent PyTorch model (~500 MB) from consuming RAM for the entire
+            # render duration (1h+).
+            if hasattr(self.tts, 'unload'):
+                try:
+                    self.tts.unload()
+                    logger.info("[%s] Kokoro pipeline unloaded after CTA", self.canal)
+                except Exception as _ue:
+                    logger.debug("[%s] Kokoro unload after CTA: %s", self.canal, _ue)
+
             result = {
                 "audio_path": audio_path,
-                "timestamps_path": str(Path(audio_path).with_suffix(".json")),
+                "timestamps_path": str(Path(audio_path).with_name(f"{Path(audio_path).stem}_timestamps.json")),
                 "timestamps": timestamps,
                 "cta_audio_path": cta_audio_path,
             }
@@ -878,6 +921,7 @@ class PipelineOrchestrator:
                 if metadata and metadata.get("titles"):
                     titles_json_str = _json2.dumps(metadata["titles"], ensure_ascii=False)
                 
+                db_video_id = None  # always defined, used below for stats + lifecycle
                 if self.db_video_id is not None:
                     # API mode: update the pre-created record (don't insert a new one)
                     self.db.update_video(
@@ -891,6 +935,7 @@ class PipelineOrchestrator:
                     )
                     # Note: mark_video_uploaded is called by the API layer (generation_service)
                     # to ensure the tracked record gets yt_video_id/yt_url
+                    db_video_id = self.db_video_id  # for stats + lifecycle below
                 else:
                     # CLI standalone mode: insert + mark
                     db_video_id = self.db.insert_video(
@@ -915,6 +960,35 @@ class PipelineOrchestrator:
                                   f"YouTube ID: {video_id}",
                                   content_id=script.get("id"),
                                   duration_ms=duration_ms)
+
+            # ── Post-upload: baseline stats snapshot (0 views/likes, para DB cache) ──
+            try:
+                self.db.insert_video_stats(
+                    video_id=db_video_id or self.db_video_id,
+                    yt_video_id=video_id,
+                    stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
+                )
+                logger.debug(f"[{self.canal}] Baseline stats saved for video {video_id}")
+            except Exception as stats_exc:
+                logger.warning(f"[{self.canal}] Failed to save baseline stats: {stats_exc}")
+
+            # ── Post-upload: schedule lifecycle promotion actions ──
+            try:
+                from pipeline.video_lifecycle import VideoLifecycleManager
+                lifecycle = VideoLifecycleManager(self.canal)
+                script_text = script.get("script_text") or script.get("texto_completo", "")
+                db_vid_for_lifecycle = db_video_id or self.db_video_id
+                channel_id_for_lifecycle = self._get_channel_id()
+                lifecycle.on_video_published(
+                    db_video_id=db_vid_for_lifecycle,
+                    yt_video_id=video_id,
+                    channel_id=channel_id_for_lifecycle,
+                    script_text=script_text,
+                )
+                logger.info(f"[{self.canal}] Lifecycle actions scheduled for video {video_id}")
+            except Exception as lifecycle_exc:
+                logger.warning(f"[{self.canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
+
             return video_id
 
         except Exception as e:
@@ -1027,7 +1101,7 @@ class PipelineOrchestrator:
                     description=description,
                     tags_json=tags_json_str,
                     title_options=titles_json_str,
-                    privacy_status="unlisted",
+                    privacy_status="public",
                     channel_id=channel_id,
                 )
             else:
@@ -1038,7 +1112,7 @@ class PipelineOrchestrator:
                     thumbnail_path=video_data.get("thumbnail_path", ""),
                     audio_path=audio_data.get("audio_path", ""),
                     titulo_final=title,
-                    privacy_status="unlisted",
+                    privacy_status="public",
                     channel_id=channel_id,
                     description=description,
                     tags_json=tags_json_str,
@@ -1056,7 +1130,7 @@ class PipelineOrchestrator:
     def get_videos_per_day(self) -> int:
         """Determine how many videos to produce today based on pipeline age."""
         if PIPELINE_START_DATE:
-            start_date = datetime.fromisoformat(PIPELINE_START_DATE)
+            start_date = datetime.fromisoformat(PIPELINE_START_DATE).replace(tzinfo=timezone.utc)
         else:
             # Assume started today
             start_date = datetime.now(timezone.utc)

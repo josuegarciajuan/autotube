@@ -5,6 +5,7 @@ on top of the existing Database class.
 """
 
 import json
+import logging
 import sqlite3
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Optional
 
 from config.settings import DATABASE_PATH
 from database.db import Database, init_db as _init_db
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_V2_PATH = Path(__file__).parent / "schema_v2.sql"
@@ -153,6 +156,16 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v4 schema applied")
 
+    # Run v5 schema (promotion/lifecycle tables)
+    schema_v5 = Path(__file__).parent / "schema_v5.sql"
+    if schema_v5.exists():
+        with open(schema_v5) as f:
+            conn.executescript(f.read())
+        logger.info("Migration: v5 schema applied")
+
+    # ── v4.1: Migrate shorts_planning_config to new column schema ──
+    _migrate_shorts_planning_config(conn, logger)
+    
     # Add target_time column to shorts_schedule (idempotent)
     existing_ss = {row[1] for row in conn.execute("PRAGMA table_info(shorts_schedule)").fetchall()}
     if "target_time" not in existing_ss:
@@ -185,14 +198,16 @@ def migrate_v2(db_path: str = None):
         ).fetchone()
         if exists["c"] == 0:
             # Load defaults from channel config
-            default_per_day = 3
+            default_native = 3
+            default_clip = 2
             if ch["slug"] == "canal4":
-                default_per_day = 2
+                default_native = 2
+                default_clip = 1
             conn.execute(
                 """INSERT INTO shorts_planning_config
-                   (channel_id, shorts_per_day, shorts_enabled, shorts_clip_enabled)
-                   VALUES (?, ?, 1, 1)""",
-                (ch["id"], default_per_day),
+                   (channel_id, shorts_native_per_day, shorts_clip_per_day, shorts_enabled)
+                   VALUES (?, ?, ?, 1)""",
+                (ch["id"], default_native, default_clip),
             )
     conn.commit()
     
@@ -216,12 +231,31 @@ def migrate_v2(db_path: str = None):
             comments INTEGER DEFAULT 0,
             estimated_minutes_watched REAL DEFAULT 0,
             average_view_duration REAL DEFAULT 0,
+            embeddable INTEGER DEFAULT 1,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_short ON short_stats(short_id, fetched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_ytid ON short_stats(yt_video_id, fetched_at)")
     logger.info("Migration: short_stats table ensured")
+
+    # Add embeddable column to video_stats_history (idempotent)
+    existing_vsh = {row[1] for row in conn.execute("PRAGMA table_info(video_stats_history)").fetchall()}
+    if "embeddable" not in existing_vsh:
+        try:
+            conn.execute("ALTER TABLE video_stats_history ADD COLUMN embeddable INTEGER DEFAULT 1")
+            logger.info("Migration: added embeddable column to video_stats_history")
+        except sqlite3.OperationalError:
+            pass
+
+    # Add embeddable column to short_stats (idempotent)
+    existing_ss_cols = {row[1] for row in conn.execute("PRAGMA table_info(short_stats)").fetchall()}
+    if "embeddable" not in existing_ss_cols:
+        try:
+            conn.execute("ALTER TABLE short_stats ADD COLUMN embeddable INTEGER DEFAULT 1")
+            logger.info("Migration: added embeddable column to short_stats")
+        except sqlite3.OperationalError:
+            pass
 
     # Ensure channel_templates table exists (idempotent — may also be in schema_v3.sql)
     conn.execute("""
@@ -238,6 +272,28 @@ def migrate_v2(db_path: str = None):
         )
     """)
     
+    # ── v6: shorts_planned_slots table for per-slot shorts scheduling ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shorts_planned_slots (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            date_key            TEXT NOT NULL,
+            scheduled_at        TIMESTAMP NOT NULL,
+            target_upload_at    TIMESTAMP,
+            status              TEXT NOT NULL DEFAULT 'pending',
+            short_type          TEXT NOT NULL DEFAULT 'native',
+            slot_position       INTEGER DEFAULT 0,
+            long_slot_position  INTEGER,
+            source_video_id     INTEGER REFERENCES videos(id) ON DELETE SET NULL,
+            short_id            INTEGER REFERENCES shorts(id) ON DELETE SET NULL,
+            job_id              INTEGER REFERENCES generation_jobs(id) ON DELETE SET NULL,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sps_date ON shorts_planned_slots(date_key, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sps_channel ON shorts_planned_slots(channel_id, date_key)")
+    logger.info("Migration: shorts_planned_slots table ensured")
+
     # Seed canal2 if channels table is empty
     row = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()
     if row["cnt"] == 0:
@@ -395,6 +451,67 @@ def migrate_v2(db_path: str = None):
 
     # Ensure content_schedules table exists (idempotent — adds video_id column if missing)
     _migrate_content_schedules(db_path)
+
+
+def _migrate_shorts_planning_config(conn, logger):
+    """Migrate shorts_planning_config to v4.1 column schema (idempotent).
+    
+    Adds shorts_native_per_day and shorts_clip_per_day columns,
+    migrates data from old shorts_per_day column, and keeps old columns
+    (SQLite does not support DROP COLUMN easily).
+    """
+    # Check if the table exists
+    table_exists = conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='shorts_planning_config'"
+    ).fetchone()[0]
+    if not table_exists:
+        return
+    
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(shorts_planning_config)").fetchall()}
+    
+    # Add new columns if missing
+    new_columns = [
+        ("shorts_native_per_day", "INTEGER DEFAULT 3"),
+        ("shorts_clip_per_day", "INTEGER DEFAULT 2"),
+    ]
+    had_old_column = "shorts_per_day" in existing
+    columns_added = False
+    
+    for col_name, col_def in new_columns:
+        if col_name not in existing:
+            try:
+                conn.execute(f"ALTER TABLE shorts_planning_config ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration: added %s column to shorts_planning_config", col_name)
+                columns_added = True
+            except sqlite3.OperationalError:
+                pass
+    
+    # Migrate data from old shorts_per_day if it exists and new columns were just created
+    if had_old_column and columns_added:
+        # Rough migration: clips = min(old_value, 2), native = max(1, old_value - 2)
+        updated = conn.execute("""
+            UPDATE shorts_planning_config
+            SET shorts_clip_per_day = MIN(shorts_per_day, 2),
+                shorts_native_per_day = MAX(1, shorts_per_day - 2)
+        """).rowcount
+        if updated:
+            logger.info(
+                "Migration: migrated %d shorts_planning_config rows "
+                "(shorts_per_day → native/clip split)", updated
+            )
+    elif had_old_column:
+        # New columns already existed — just migrate data if nulls remain
+        updated = conn.execute("""
+            UPDATE shorts_planning_config
+            SET shorts_clip_per_day = COALESCE(shorts_clip_per_day, MIN(shorts_per_day, 2)),
+                shorts_native_per_day = COALESCE(shorts_native_per_day, MAX(1, shorts_per_day - 2))
+            WHERE shorts_clip_per_day IS NULL OR shorts_native_per_day IS NULL
+        """).rowcount
+        if updated:
+            logger.info(
+                "Migration: backfilled %d shorts_planning_config rows with null new columns",
+                updated
+            )
 
 
 def _seed_canal2_profile():
@@ -595,6 +712,9 @@ class ExtendedDatabase(Database):
             if status:
                 q += " AND v.status = ?"
                 params.append(status)
+            else:
+                # Exclude videos deleted from YouTube (soft-delete) by default
+                q += " AND v.status != 'deleted_on_yt'"
             q += " ORDER BY v.created_at DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             rows = conn.execute(q, params).fetchall()
@@ -614,6 +734,19 @@ class ExtendedDatabase(Database):
                     "privacy_status", "status", "progress", "progress_phase",
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
                     "script_id", "channel_id", "checkpoint_data", "timing_data"]
+        
+        # ── Guard: never overwrite status to 'error' if video was already uploaded ──
+        # A video with a YouTube ID was successfully published. Pipeline failures
+        # (zombie threads, orphan detector races) must not overwrite that fact.
+        if kwargs.get("status") == "error":
+            existing = self.get_video(video_id)
+            if existing and existing.get("yt_video_id"):
+                logger.warning(
+                    "Rejecting status='error' for video #%d: "
+                    "already uploaded to YouTube (yt_video_id=%s)",
+                    video_id, existing["yt_video_id"])
+                kwargs = {k: v for k, v in kwargs.items() if k != "status"}
+        
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
@@ -835,19 +968,20 @@ class ExtendedDatabase(Database):
     
     # ── Orphan Detection ─────────────────────────────────────
     
-    # Heartbeat-based orphan detection: a non-video-phase job is declared dead
-    # only if its last heartbeat was >N min ago (configurable via env).
-    # Default 45 min — generous for Kokoro TTS on CPU.
+    # Heartbeat-based orphan detection: a job is declared dead only if its last
+    # heartbeat was >N min ago (configurable via env).  Defaults have been raised
+    # to 120 min (2h) for all phases to prevent false-positive orphan detection
+    # during long renders (50+ scene segments can take 40-90 min with MoviePy).
     HEARTBEAT_ORPHAN_TIMEOUT_MINUTES = int(
-        __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "15")
+        __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "120")
     )
     NONVIDEO_HEARTBEAT_ORPHAN_MIN = int(
-        __import__("os").getenv("NONVIDEO_HEARTBEAT_ORPHAN_MIN", "45")
+        __import__("os").getenv("NONVIDEO_HEARTBEAT_ORPHAN_MIN", "120")
     )
     
     # Legacy fallback: jobs without heartbeat support use started_at-based timeout
-    VIDEO_PHASE_TIMEOUT_MINUTES = 480  # 8h — generous ceiling for long renders
-    DEFAULT_ORPHAN_TIMEOUT_MINUTES = 60
+    VIDEO_PHASE_TIMEOUT_MINUTES = 1440  # 24h — max ceiling for long renders
+    DEFAULT_ORPHAN_TIMEOUT_MINUTES = 180  # 3h — videos with no active job
 
     def cleanup_orphaned_jobs(self, timeout_minutes: int = None) -> dict:
         """Detect and clean up orphaned generation jobs and videos.
@@ -892,16 +1026,16 @@ class ExtendedDatabase(Database):
                    AND j.finished_at IS NULL
                    AND j.started_at IS NOT NULL
                    AND j.phase = 'video'
-                   AND (
-                       -- Heartbeat mode: last heartbeat > 20 min ago → truly dead
-                       (j.last_heartbeat_at IS NOT NULL
-                        AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
-                       OR
-                       -- Legacy fallback: no heartbeat ever + started >480 min ago
-                       (j.last_heartbeat_at IS NULL
-                        AND (julianday('now') - julianday(j.started_at)) * 1440 > ?)
-                   )
-            """, (20, self.VIDEO_PHASE_TIMEOUT_MINUTES,)).fetchall()
+                    AND (
+                        -- Heartbeat mode: last heartbeat > configured timeout → truly dead
+                        (j.last_heartbeat_at IS NOT NULL
+                         AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
+                        OR
+                        -- Legacy fallback: no heartbeat ever + started >VIDEO_PHASE_TIMEOUT min ago
+                        (j.last_heartbeat_at IS NULL
+                         AND (julianday('now') - julianday(j.started_at)) * 1440 > ?)
+                    )
+            """, (self.HEARTBEAT_ORPHAN_TIMEOUT_MINUTES, self.VIDEO_PHASE_TIMEOUT_MINUTES,)).fetchall()
             
             # Type 1b: Non-video-phase jobs — heartbeat-aware when available,
             # fallback to generous started_at timeout when no heartbeats exist.
@@ -950,11 +1084,20 @@ class ExtendedDatabase(Database):
                 
                 # Mark associated video as error if it's still 'generating'
                 if r["video_id"] and r["video_status"] == "generating":
-                    conn.execute(
-                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                        (r["video_id"],),
-                    )
-                    result["videos_reset"] += 1
+                    # Guard: never overwrite status if video was already uploaded (zombie-thread race)
+                    yt_check = conn.execute(
+                        "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
+                    ).fetchone()
+                    if yt_check and yt_check[0]:
+                        logger.warning(
+                            "Skipping orphan error for video #%d: already uploaded (yt=%s)",
+                            r["video_id"], yt_check[0])
+                    else:
+                        conn.execute(
+                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                            (r["video_id"],),
+                        )
+                        result["videos_reset"] += 1
                 
                 # Log to pipeline_log
                 conn.execute(
@@ -1005,11 +1148,20 @@ class ExtendedDatabase(Database):
                 
                 # Mark associated video as error if it's still 'generating'
                 if r["video_id"] and r["video_status"] == "generating":
-                    conn.execute(
-                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                        (r["video_id"],),
-                    )
-                    result["videos_reset"] += 1
+                    # Guard: never overwrite status if video was already uploaded
+                    yt_check = conn.execute(
+                        "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
+                    ).fetchone()
+                    if yt_check and yt_check[0]:
+                        logger.warning(
+                            "Skipping inconsistent error for video #%d: already uploaded (yt=%s)",
+                            r["video_id"], yt_check[0])
+                    else:
+                        conn.execute(
+                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                            (r["video_id"],),
+                        )
+                        result["videos_reset"] += 1
                 
                 # Log to pipeline_log
                 conn.execute(
@@ -1052,10 +1204,20 @@ class ExtendedDatabase(Database):
                     r["video_id"], r["channel_slug"], r["elapsed_sec"]
                 )
                 
-                conn.execute(
-                    "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                    (r["video_id"],),
-                )
+                # Guard: never overwrite status if video was already uploaded
+                yt_check = conn.execute(
+                    "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
+                ).fetchone()
+                if yt_check and yt_check[0]:
+                    logger.warning(
+                        "Skipping orphan error for video #%d: already uploaded (yt=%s)",
+                        r["video_id"], yt_check[0])
+                else:
+                    conn.execute(
+                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                        (r["video_id"],),
+                    )
+                    result["videos_reset"] += 1
                 
                 conn.execute(
                     """INSERT INTO pipeline_log (canal, phase, status, message)
@@ -1140,8 +1302,9 @@ class ExtendedDatabase(Database):
                 """INSERT INTO video_stats_history
                    (video_id, yt_video_id, views, likes, comments,
                     estimated_minutes_watched, average_view_duration,
-                    subscribers_gained, estimated_revenue_min, estimated_revenue_max)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subscribers_gained, estimated_revenue_min, estimated_revenue_max,
+                    embeddable)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     yt_video_id,
@@ -1153,6 +1316,7 @@ class ExtendedDatabase(Database):
                     int(stats.get("subscribersGained", 0)),
                     float(stats.get("estimated_revenue_min", 0)),
                     float(stats.get("estimated_revenue_max", 0)),
+                    1 if stats.get("embeddable", True) else 0,
                 ),
             )
             conn.commit()
@@ -1164,8 +1328,9 @@ class ExtendedDatabase(Database):
             cursor = conn.execute(
                 """INSERT INTO short_stats
                    (short_id, yt_video_id, views, likes, comments,
-                    estimated_minutes_watched, average_view_duration)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    estimated_minutes_watched, average_view_duration,
+                    embeddable)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     short_id,
                     yt_video_id,
@@ -1174,6 +1339,7 @@ class ExtendedDatabase(Database):
                     int(stats.get("commentCount", 0)),
                     float(stats.get("estimatedMinutesWatched", 0)),
                     float(stats.get("averageViewDuration", 0)),
+                    1 if stats.get("embeddable", True) else 0,
                 ),
             )
             conn.commit()
@@ -1227,6 +1393,28 @@ class ExtendedDatabase(Database):
                 (channel_id, f"-{days} days"),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_channel_latest_stats(self, channel_id: int) -> dict | None:
+        """Get the most recent stats snapshot for a single channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM channel_stats_history
+                   WHERE channel_id = ?
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_video_latest_stats(self, video_id: int) -> dict | None:
+        """Get the most recent stats snapshot for a single video."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM video_stats_history
+                   WHERE video_id = ?
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (video_id,),
+            ).fetchone()
+        return dict(row) if row else None
     
     def get_all_channels_latest_stats(self) -> list[dict]:
         """Get the most recent stats snapshot for every channel (one row per channel)."""
@@ -1453,6 +1641,20 @@ class ExtendedDatabase(Database):
             ).fetchall()
             engagement_map = {r["channel_id"]: r["engagement"] for r in engagement_by_channel}
 
+            # ── Engagement from shorts (likes + comments from latest short_stats) ──
+            shorts_engagement_by_channel = conn.execute(
+                """SELECT s.channel_id,
+                          COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
+                   FROM shorts s
+                   JOIN short_stats ss ON ss.id = (
+                       SELECT MAX(ss2.id) FROM short_stats ss2
+                       WHERE ss2.short_id = s.id AND (ss2.likes > 0 OR ss2.comments > 0)
+                   )
+                   WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
+                   GROUP BY s.channel_id"""
+            ).fetchall()
+            shorts_engagement_map = {r["channel_id"]: r["engagement"] for r in shorts_engagement_by_channel}
+
             # ── Channel comparison with latest stats ──
             channels = conn.execute(
                 """SELECT ch.id, ch.name, ch.slug, ch.active,
@@ -1498,7 +1700,8 @@ class ExtendedDatabase(Database):
             channels_data = []
             total_subscribers = 0
             total_views = 0
-            total_engagement = 0
+            total_engagement_longform = 0
+            total_engagement_shorts = 0
             total_shorts_published = 0
             total_likes = 0
             total_longform_views = 0
@@ -1512,10 +1715,12 @@ class ExtendedDatabase(Database):
             for ch in channels:
                 ch_dict = dict(ch)
                 ch_dict["engagement"] = engagement_map.get(ch_dict["id"], 0)
+                ch_dict["shorts_engagement"] = shorts_engagement_map.get(ch_dict["id"], 0)
                 channels_data.append(ch_dict)
                 total_subscribers += (ch_dict["subscribers"] or 0)
                 total_views += (ch_dict["total_views"] or 0)
-                total_engagement += ch_dict["engagement"]
+                total_engagement_longform += ch_dict["engagement"]
+                total_engagement_shorts += ch_dict["shorts_engagement"]
                 total_shorts_published += (ch_dict["shorts_published"] or 0)
                 total_likes += (ch_dict["total_likes"] or 0)
                 total_longform_views += (ch_dict["longform_views"] or 0)
@@ -1557,6 +1762,23 @@ class ExtendedDatabase(Database):
                 ).fetchone()
                 if eng_prev:
                     engagement_prev += (eng_prev["engagement"] or 0)
+
+                # Shorts engagement at ~7 days ago
+                shorts_eng_prev = conn.execute(
+                    """SELECT COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
+                       FROM shorts s
+                       JOIN short_stats ss ON ss.id = (
+                           SELECT MAX(ss2.id) FROM short_stats ss2
+                           WHERE ss2.short_id = s.id
+                             AND (ss2.likes > 0 OR ss2.comments > 0)
+                             AND ss2.fetched_at <= datetime('now', '-7 days')
+                       )
+                       WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
+                         AND s.channel_id = ?""",
+                    (ch_dict["id"],),
+                ).fetchone()
+                if shorts_eng_prev:
+                    engagement_prev += (shorts_eng_prev["engagement"] or 0)
 
             def _delta_pct(current, previous):
                 if previous and previous > 0 and current is not None and current > 0:
@@ -1635,10 +1857,24 @@ class ExtendedDatabase(Database):
                         )
                         WHERE v.yt_video_id IS NOT NULL"""
                 ).fetchone()
+                # Include shorts engagement in sparkline
+                shorts_eng_aggr = conn.execute(
+                    f"""SELECT COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
+                        FROM shorts s
+                        JOIN short_stats ss ON ss.id = (
+                            SELECT MAX(ss2.id) FROM short_stats ss2
+                            WHERE ss2.short_id = s.id
+                              AND (ss2.likes > 0 OR ss2.comments > 0)
+                              AND ss2.fetched_at <= {date_point}
+                        )
+                        WHERE s.status = 'published' AND s.youtube_id IS NOT NULL"""
+                ).fetchone()
                 if aggr:
                     sparkline_subscribers.append(aggr["subs"] or 0)
                     sparkline_views.append(aggr["views"] or 0)
-                    sparkline_engagement.append(eng_aggr["engagement"] or 0)
+                    sparkline_engagement.append(
+                        (eng_aggr["engagement"] or 0) + (shorts_eng_aggr["engagement"] or 0)
+                    )
 
         return {
             "global_kpis": {
@@ -1655,8 +1891,12 @@ class ExtendedDatabase(Database):
                     },
                 },
                 "engagement": {
-                    "value": total_engagement,
-                    "delta": _delta_pct(total_engagement, engagement_prev),
+                    "value": total_engagement_longform + total_engagement_shorts,
+                    "delta": _delta_pct(total_engagement_longform + total_engagement_shorts, engagement_prev),
+                    "breakdown": {
+                        "longform": total_engagement_longform,
+                        "shorts": total_engagement_shorts,
+                    },
                 },
                 "total_likes": {
                     "value": total_likes,
@@ -1836,6 +2076,96 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
             return cursor.rowcount
+    
+    def prune_old_slots(self, before_date: str = None) -> dict:
+        """Delete cancelled/skipped slots from before the given date (default: yesterday).
+        
+        Also prunes today's cancelled/skipped slots if the count exceeds the noise
+        threshold (>50), which indicates replan churn rather than genuine cancellations.
+        
+        Returns a dict with counts of deleted rows from each table.
+        Only prunes slots with status cancelled or skipped — never touches
+        pending, running, or completed slots.
+        """
+        import logging
+        from datetime import date as _dt, timedelta as _td
+        logger = logging.getLogger("autotube.prune")
+        
+        if before_date is None:
+            before_date = (_dt.today() - _td(days=1)).isoformat()
+        
+        result = {"planned_slots_deleted": 0, "shorts_planned_slots_deleted": 0,
+                   "today_noise_cleared": 0, "today_shorts_noise_cleared": 0}
+        
+        MAX_TODAY_CANCELLED = 50  # Above this threshold, today's cancelled are replan noise
+        
+        with self._connect() as conn:
+            # ── Prune planned_slots from old dates ──
+            cursor = conn.execute(
+                """DELETE FROM planned_slots
+                    WHERE status IN ('cancelled', 'skipped')
+                      AND date_key < ?""",
+                (before_date,),
+            )
+            result["planned_slots_deleted"] = cursor.rowcount
+            
+            # ── Safety valve: prune today's excessive cancelled planned_slots ──
+            today = _dt.today().isoformat()
+            today_count = conn.execute(
+                "SELECT COUNT(*) FROM planned_slots WHERE status IN ('cancelled','skipped') AND date_key = ?",
+                (today,),
+            ).fetchone()[0]
+            
+            if today_count > MAX_TODAY_CANCELLED:
+                cursor_today = conn.execute(
+                    """DELETE FROM planned_slots
+                        WHERE status IN ('cancelled', 'skipped')
+                          AND date_key = ?""",
+                    (today,),
+                )
+                result["today_noise_cleared"] = cursor_today.rowcount
+                logger.warning(
+                    "Cleared %d excessive cancelled slots from today (threshold: %d)",
+                    cursor_today.rowcount, MAX_TODAY_CANCELLED,
+                )
+            
+            # ── Prune shorts_planned_slots ──
+            try:
+                cursor2 = conn.execute(
+                    """DELETE FROM shorts_planned_slots
+                        WHERE status IN ('cancelled', 'skipped', 'failed')
+                          AND date_key < ?""",
+                    (before_date,),
+                )
+                result["shorts_planned_slots_deleted"] = cursor2.rowcount
+                
+                # Safety valve for shorts too
+                today_shorts = conn.execute(
+                    "SELECT COUNT(*) FROM shorts_planned_slots WHERE status IN ('cancelled','skipped','failed') AND date_key = ?",
+                    (today,),
+                ).fetchone()[0]
+                if today_shorts > MAX_TODAY_CANCELLED:
+                    cursor_st = conn.execute(
+                        """DELETE FROM shorts_planned_slots
+                            WHERE status IN ('cancelled', 'skipped', 'failed')
+                              AND date_key = ?""",
+                        (today,),
+                    )
+                    result["today_shorts_noise_cleared"] = cursor_st.rowcount
+            except Exception:
+                pass  # Table may not exist
+            
+            conn.commit()
+        
+        total_deleted = result["planned_slots_deleted"] + result["today_noise_cleared"] + result["shorts_planned_slots_deleted"] + result["today_shorts_noise_cleared"]
+        if total_deleted:
+            logger.info(
+                "Slot prune: %d planned-old + %d planned-today + %d shorts-old + %d shorts-today deleted",
+                result["planned_slots_deleted"], result["today_noise_cleared"],
+                result["shorts_planned_slots_deleted"], result["today_shorts_noise_cleared"],
+            )
+        
+        return result
     
     def get_channel_planning_config(self, channel_id: int) -> dict:
         """Extract planning-related fields from channel config_json."""
@@ -2082,3 +2412,471 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchone()
         return dict(row) if row else {"total_views": 0, "total_likes": 0, "total_comments": 0, "video_count": 0}
+
+    # ═══════════════════════════════════════════════════════════════
+    # v5 — Promotion / Lifecycle
+    # ═══════════════════════════════════════════════════════════════
+
+    # ── YouTube Playlists ──────────────────────────────────────────
+
+    def upsert_youtube_playlist(self, channel_id: int, slug: str,
+                                 yt_playlist_id: str, name: str = None,
+                                 playlist_type: str = 'thematic') -> int:
+        """Insert or update a cached YouTube playlist ID. Returns row id."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO youtube_playlists (channel_id, slug, yt_playlist_id, name, playlist_type)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(channel_id, slug) DO UPDATE SET
+                     yt_playlist_id = excluded.yt_playlist_id,
+                     name = excluded.name,
+                     playlist_type = excluded.playlist_type""",
+                (channel_id, slug, yt_playlist_id, name, playlist_type),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT id FROM youtube_playlists WHERE channel_id = ? AND slug = ?",
+                (channel_id, slug),
+            ).fetchone()
+            return row["id"] if row else 0
+
+    def get_channel_youtube_playlists(self, channel_id: int) -> list[dict]:
+        """Get all cached playlists for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM youtube_playlists WHERE channel_id = ? ORDER BY playlist_type, name",
+                (channel_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_playlist_by_slug(self, channel_id: int, slug: str) -> Optional[dict]:
+        """Get a cached playlist by channel + slug."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM youtube_playlists WHERE channel_id = ? AND slug = ?",
+                (channel_id, slug),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def add_video_to_playlist_db(self, video_id: int, playlist_db_id: int,
+                                  yt_playlist_item_id: str = None) -> int:
+        """Record that a video was added to a playlist. Idempotent."""
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, yt_playlist_item_id)
+                       VALUES (?, ?, ?)""",
+                    (video_id, playlist_db_id, yt_playlist_item_id),
+                )
+                conn.commit()
+            except Exception:
+                pass
+            row = conn.execute(
+                "SELECT id FROM video_playlists WHERE video_id = ? AND playlist_id = ?",
+                (video_id, playlist_db_id),
+            ).fetchone()
+            return row["id"] if row else 0
+
+    def get_video_playlists_db(self, video_id: int) -> list[dict]:
+        """Get all playlist assignments for a video (with playlist details)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT vp.*, yp.slug as playlist_slug, yp.name as playlist_name,
+                          yp.playlist_type, yp.yt_playlist_id
+                   FROM video_playlists vp
+                   JOIN youtube_playlists yp ON vp.playlist_id = yp.id
+                   WHERE vp.video_id = ?
+                   ORDER BY vp.added_at""",
+                (video_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_video_playlists(self, video_id: int) -> int:
+        """Remove all playlist assignments for a video. Returns deleted count."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM video_playlists WHERE video_id = ?", (video_id,)
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    # ── Lifecycle Actions ──────────────────────────────────────────
+
+    def create_lifecycle_action(self, video_id: int, action_type: str,
+                                 channel_id: int, yt_video_id: str = None,
+                                 scheduled_for: str = None,
+                                 config_json: str = None) -> int:
+        """Create a pending lifecycle action. Returns the new row id."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO video_lifecycle_actions
+                   (video_id, action_type, channel_id, yt_video_id, scheduled_for, config_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (video_id, action_type, channel_id, yt_video_id, scheduled_for, config_json),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_due_lifecycle_actions(self) -> list[dict]:
+        """Get all pending lifecycle actions whose scheduled_for has passed."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT vla.*, c.slug as channel_slug
+                   FROM video_lifecycle_actions vla
+                   JOIN channels c ON vla.channel_id = c.id
+                   WHERE vla.status = 'pending'
+                     AND datetime(vla.scheduled_for) <= datetime('now')
+                   ORDER BY vla.scheduled_for ASC
+                   LIMIT 50""",
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_video_lifecycle_actions(self, video_id: int,
+                                     status: str = None) -> list[dict]:
+        """Get all lifecycle actions for a video, optionally filtered by status."""
+        with self._connect() as conn:
+            if status:
+                rows = conn.execute(
+                    """SELECT * FROM video_lifecycle_actions
+                       WHERE video_id = ? AND status = ?
+                       ORDER BY scheduled_for ASC""",
+                    (video_id, status),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM video_lifecycle_actions
+                       WHERE video_id = ?
+                       ORDER BY scheduled_for ASC""",
+                    (video_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_lifecycle_action_status(self, action_id: int, status: str,
+                                        executed_at: str = None,
+                                        result_json: str = None,
+                                        error_message: str = None,
+                                        retry_count: int = None) -> bool:
+        """Update a lifecycle action's status and results."""
+        with self._connect() as conn:
+            parts = ["status = ?"]
+            params: list = [status]
+
+            if executed_at is not None:
+                parts.append("executed_at = ?")
+                params.append(executed_at)
+            if result_json is not None:
+                parts.append("result_json = ?")
+                params.append(result_json)
+            if error_message is not None:
+                parts.append("error_message = ?")
+                params.append(error_message)
+            if retry_count is not None:
+                parts.append("retry_count = ?")
+                params.append(retry_count)
+
+            params.append(action_id)
+            conn.execute(
+                f"UPDATE video_lifecycle_actions SET {', '.join(parts)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+            return True
+
+    def cancel_pending_lifecycle_actions(self, video_id: int) -> int:
+        """Cancel all pending actions for a video. Returns cancelled count."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE video_lifecycle_actions SET status = 'cancelled'
+                   WHERE video_id = ? AND status = 'pending'""",
+                (video_id,),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def get_channel_latest_lifecycle(self, channel_id: int,
+                                      limit: int = 30) -> list[dict]:
+        """Get recent lifecycle actions for a channel's videos."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT vla.*, v.titulo_final as video_title
+                   FROM video_lifecycle_actions vla
+                   LEFT JOIN videos v ON vla.video_id = v.id
+                   WHERE vla.channel_id = ?
+                   ORDER BY vla.created_at DESC
+                   LIMIT ?""",
+                (channel_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ── Comment Log ────────────────────────────────────────────────
+
+    def log_comment(self, video_id: int, yt_video_id: str,
+                     yt_comment_id: str, comment_type: str = 'first',
+                     parent_comment_id: str = None,
+                     comment_text: str = None) -> int:
+        """Record a posted comment. Returns new row id."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO comment_log (video_id, yt_video_id, yt_comment_id,
+                   parent_comment_id, comment_type, comment_text)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (video_id, yt_video_id, yt_comment_id,
+                 parent_comment_id, comment_type, comment_text),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_video_comments_log(self, video_id: int) -> list[dict]:
+        """Get all comments posted for a video via the promotion system."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM comment_log
+                   WHERE video_id = ?
+                   ORDER BY posted_at DESC""",
+                (video_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def has_first_comment(self, video_id: int) -> bool:
+        """Check if a first comment has already been posted for this video."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM comment_log WHERE video_id = ? AND comment_type = 'first'",
+                (video_id,),
+            ).fetchone()
+            return row["cnt"] > 0 if row else False
+
+    # ── Shorts Planning Config ────────────────────────────────────
+
+    def get_shorts_planning_config(self, channel_id: int = None) -> list[dict]:
+        """Get shorts planning config for active channels, optionally filtered."""
+        with self._connect() as conn:
+            if channel_id:
+                rows = conn.execute(
+                    """SELECT spc.*, c.slug, c.name
+                       FROM shorts_planning_config spc
+                       JOIN channels c ON spc.channel_id = c.id
+                       WHERE spc.channel_id = ?""",
+                    (channel_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT spc.*, c.slug, c.name
+                       FROM shorts_planning_config spc
+                       JOIN channels c ON spc.channel_id = c.id
+                       WHERE c.active = 1
+                       ORDER BY c.name"""
+                ).fetchall()
+        configs = []
+        for row in rows:
+            r = dict(row)
+            configs.append({
+                "channel_id": r["channel_id"],
+                "name": r["name"],
+                "slug": r["slug"],
+                "shorts_enabled": bool(r.get("shorts_enabled", 1)),
+                "shorts_native_per_day": r.get("shorts_native_per_day", 3),
+                "shorts_clip_per_day": r.get("shorts_clip_per_day", 2),
+            })
+        return configs
+
+    def update_shorts_planning_config(self, channel_id: int, data: dict) -> bool:
+        """Update shorts planning config for one channel.
+        
+        Accepted keys: shorts_enabled, shorts_native_per_day, shorts_clip_per_day.
+        """
+        with self._connect() as conn:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(shorts_planning_config)").fetchall()}
+            fields = []
+            values = []
+
+            for k, v in data.items():
+                col = None
+                if k == "shorts_enabled":
+                    col = "shorts_enabled"
+                    v = 1 if v else 0
+                elif k == "shorts_native_per_day":
+                    col = "shorts_native_per_day"
+                elif k == "shorts_clip_per_day":
+                    col = "shorts_clip_per_day"
+                if col and col in columns:
+                    fields.append(f"{col} = ?")
+                    values.append(v)
+
+            if not fields:
+                return False
+
+            fields.append("updated_at = datetime('now')")
+            values.append(channel_id)
+            conn.execute(
+                f"UPDATE shorts_planning_config SET {', '.join(fields)} WHERE channel_id = ?",
+                values,
+            )
+            conn.commit()
+            return True
+
+    # ── Shorts Planned Slots ───────────────────────────────────────
+
+    def create_shorts_slot(self, channel_id: int, date_key: str, scheduled_at: str,
+                           target_upload_at: str = None, short_type: str = 'native',
+                           long_slot_position: int = None, source_video_id: int = None,
+                           slot_position: int = 0) -> int:
+        """Create a single shorts planned slot. Returns slot id."""
+        with self._connect() as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            cursor = conn.execute(
+                """INSERT INTO shorts_planned_slots
+                   (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                    long_slot_position, source_video_id, slot_position)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                 long_slot_position, source_video_id, slot_position),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def create_shorts_planned_slots_batch(self, slots: list[dict]) -> int:
+        """Insert multiple shorts slots atomically. Returns count inserted."""
+        count = 0
+        with self._connect() as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            for s in slots:
+                conn.execute(
+                    """INSERT INTO shorts_planned_slots
+                       (channel_id, date_key, scheduled_at, target_upload_at,
+                        short_type, slot_position, long_slot_position, source_video_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (s["channel_id"], s["date_key"], s["scheduled_at"],
+                     s.get("target_upload_at"), s["short_type"],
+                     s.get("slot_position", 0), s.get("long_slot_position"),
+                     s.get("source_video_id")),
+                )
+                count += 1
+            conn.commit()
+        return count
+
+    def get_shorts_planned_slots(self, date_key: str = None, channel_id: int = None,
+                                  status: str = None) -> list[dict]:
+        """Get shorts planned slots with optional filters."""
+        q = """SELECT sps.*, c.name as channel_name, c.slug as channel_slug
+               FROM shorts_planned_slots sps
+               JOIN channels c ON sps.channel_id = c.id
+               WHERE 1=1"""
+        params = []
+        if date_key:
+            q += " AND sps.date_key = ?"; params.append(date_key)
+        if channel_id:
+            q += " AND sps.channel_id = ?"; params.append(channel_id)
+        if status:
+            q += " AND sps.status = ?"; params.append(status)
+        q += " ORDER BY sps.scheduled_at ASC"
+        with self._connect() as conn:
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_shorts_planned_slots_week(self, start_date: str, end_date: str,
+                                       channel_id: int = None) -> list[dict]:
+        """Get shorts planned slots for a date range."""
+        q = """SELECT sps.*, c.name as channel_name, c.slug as channel_slug
+               FROM shorts_planned_slots sps
+               JOIN channels c ON sps.channel_id = c.id
+               WHERE sps.date_key >= ? AND sps.date_key <= ?"""
+        params = [start_date, end_date]
+        if channel_id:
+            q += " AND sps.channel_id = ?"; params.append(channel_id)
+        q += " ORDER BY sps.date_key, sps.scheduled_at ASC"
+        with self._connect() as conn:
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_next_pending_shorts_slot(self) -> dict | None:
+        """Get the next pending short slot that is due (scheduled_at <= now),
+        ordered by scheduled_at. Returns None if none."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT sps.*, c.name as channel_name, c.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels c ON sps.channel_id = c.id
+                   WHERE sps.status = 'pending'
+                      AND sps.scheduled_at <= datetime('now', 'localtime')
+                   ORDER BY sps.scheduled_at ASC LIMIT 1"""
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_shorts_slots_by_status(self, date_key: str, status: str) -> int:
+        """Count shorts slots by status for a specific date."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM shorts_planned_slots
+                   WHERE date_key = ? AND status = ?""",
+                (date_key, status),
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+    def get_channel_shorts_slots_today(self, channel_id: int, date_key: str) -> list[dict]:
+        """Get all shorts slots for a channel on a specific date."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM shorts_planned_slots
+                   WHERE channel_id = ? AND date_key = ?
+                   ORDER BY scheduled_at ASC""",
+                (channel_id, date_key),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_shorts_slot_status(self, slot_id: int, status: str,
+                                   source_video_id: int = None,
+                                   short_id: int = None,
+                                   job_id: int = None,
+                                   error_message: str = None) -> bool:
+        """Update a shorts planned slot's status and optionally link references."""
+        fields = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        values = [status]
+        if source_video_id is not None:
+            fields.append("source_video_id = ?"); values.append(source_video_id)
+        if short_id is not None:
+            fields.append("short_id = ?"); values.append(short_id)
+        if job_id is not None:
+            fields.append("job_id = ?"); values.append(job_id)
+        if error_message is not None:
+            fields.append("error_message = ?"); values.append(error_message)
+        values.append(slot_id)
+        with self._connect() as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(
+                f"UPDATE shorts_planned_slots SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+            conn.commit()
+        return True
+
+    def cancel_shorts_slots(self, slot_ids: list[int]) -> int:
+        """Cancel multiple shorts slots. Returns count."""
+        if not slot_ids:
+            return 0
+        placeholders = ",".join(["?" for _ in slot_ids])
+        with self._connect() as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            cursor = conn.execute(
+                f"""UPDATE shorts_planned_slots
+                   SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                   WHERE id IN ({placeholders})""",
+                slot_ids,
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def get_completed_videos_today(self, channel_id: int) -> list[dict]:
+        """Get today's completed videos for a channel, ordered by created_at.
+        Used by clip shorts dispatch to find source long videos."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, titulo_final, yt_video_id, created_at
+                   FROM videos
+                   WHERE channel_id = ?
+                     AND date(created_at) = date('now', 'localtime')
+                     AND status IN ('uploaded', 'public')
+                   ORDER BY created_at ASC""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]

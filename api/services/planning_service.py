@@ -584,16 +584,30 @@ def process_planned_slots(db=None) -> dict | None:
     
     # 8. Fire and forget the generation
     import asyncio
-    from api.services.generation_service import start_generation_job
-    
-    asyncio.create_task(
-        start_generation_job(
-            job_id=job_id,
-            channel_id=channel_id,
-            video_id=video_id,
-            action="generate_and_upload",
-        )
+    from api.services.generation_service import (
+        start_generation_job,
+        start_generation_job_subprocess,
+        USE_SUBPROCESS_WORKER,
     )
+    
+    if USE_SUBPROCESS_WORKER:
+        asyncio.create_task(
+            start_generation_job_subprocess(
+                job_id=job_id,
+                channel_id=channel_id,
+                video_id=video_id,
+                action="generate_and_upload",
+            )
+        )
+    else:
+        asyncio.create_task(
+            start_generation_job(
+                job_id=job_id,
+                channel_id=channel_id,
+                video_id=video_id,
+                action="generate_and_upload",
+            )
+        )
     
     return {
         "slot_id": slot_id,
@@ -616,17 +630,26 @@ def _sync_running_slots(db):
     for s in running_slots:
         job_id = s.get("job_id")
         if not job_id:
+            # No job linked at all → stale, mark completed (slot was consumed)
+            db.update_slot_status(s["id"], "completed")
+            logger.info("Slot #%d marked completed (no job linked — stale)", s["id"])
+            any_completed = True
             continue
         job = db.get_job(job_id)
         if not job:
+            # Job row missing → stale, mark completed (slot was consumed)
+            db.update_slot_status(s["id"], "completed")
+            logger.info("Slot #%d marked completed (job #%d not found)", s["id"], job_id)
+            any_completed = True
             continue
-        if job["status"] == "completed":
+        if job["status"] in ("completed", "success"):
             db.update_slot_status(s["id"], "completed")
             logger.info("Slot #%d marked completed (job #%d done)", s["id"], job_id)
             any_completed = True
-        elif job["status"] == "failed":
-            db.update_slot_status(s["id"], "completed")  # Still mark as "done" — slot was consumed
-            logger.info("Slot #%d marked completed (job #%d failed)", s["id"], job_id)
+        elif job["status"] in ("failed", "cancelled"):
+            # failed or cancelled = slot was consumed / is dead
+            db.update_slot_status(s["id"], "completed")
+            logger.info("Slot #%d marked completed (job #%d %s)", s["id"], job_id, job["status"])
             any_completed = True
     
     if any_completed:
@@ -781,188 +804,97 @@ def _memory_ok(min_free_gb: float = 4.0) -> bool:
     Returns False if available memory is below the threshold, to prevent
     OOM killer from taking down the process.
     
+    Uses /proc/meminfo::MemAvailable (container-aware) instead of
+    os.sysconf() which reports host memory in containerized environments.
+    
     Threshold raised to 4.0 GB (from 2.0) to account for MoviePy rendering
     peaks that can exhaust ~25 MB/frame in raw RGB during write_videofile.
     """
-    import os
     try:
-        # SC_AVPHYS_PAGES × SC_PAGE_SIZE = available physical memory in bytes
-        avail_bytes = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
-        avail_gb = avail_bytes / (1024 ** 3)
-        if avail_gb < min_free_gb:
-            logger.warning(
-                "Memory guard: only %.1f GB free (need %.1f GB) — skipping dispatch",
-                avail_gb, min_free_gb,
-            )
-            return False
+        # MemAvailable is container-aware (cgroup limits) on Linux 3.14+
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    avail_kb = int(line.split()[1])
+                    avail_gb = avail_kb / (1024 * 1024)
+                    if avail_gb < min_free_gb:
+                        logger.warning(
+                            "Memory guard: only %.1f GB free (need %.1f GB) — skipping dispatch",
+                            avail_gb, min_free_gb,
+                        )
+                        return False
+                    return True
+        # Fallback: no MemAvailable field (old kernel) — let it proceed
+        logger.warning("Memory guard: /proc/meminfo has no MemAvailable — skipping guard")
         return True
     except Exception:
         return True  # can't determine — let it proceed
 
 
-# ── Shorts Planning ─────────────────────────────────────────────
+# ── Shorts Planning (DEPRECATED — use api.services.shorts_scheduler instead) ──
+# These functions have been moved to:
+#   - api/services/shorts_scheduler.py (compute, persist, dispatch)
+#   - database/db_extended.py (get_shorts_planning_config, update_shorts_planning_config)
+#
+# Kept for backward compatibility during transition. Will be removed in v3.
 
 def get_shorts_planning_config(db=None) -> list[dict]:
-    """Get shorts planning config for all active channels."""
-    import sqlite3
-    from config.settings import DATABASE_PATH
-
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
+    """[DEPRECATED] Get shorts planning config for all active channels.
     
-    rows = conn.execute(
-        """SELECT spc.*, c.slug, c.name
-           FROM shorts_planning_config spc
-           JOIN channels c ON spc.channel_id = c.id
-           WHERE c.active = 1
-           ORDER BY c.name"""
-    ).fetchall()
-
-    configs = []
-    for row in rows:
-        r = dict(row)
-        configs.append({
-            "channel_id": r["channel_id"],
-            "name": r["name"],
-            "slug": r["slug"],
-            "shorts_per_day": r.get("shorts_per_day", 3),
-            "shorts_enabled": bool(r.get("shorts_enabled", 1)),
-            "shorts_clip_enabled": bool(r.get("shorts_clip_enabled", 1)),
-            "shorts_max_clips": r.get("shorts_max_clips", 5),
-            "shorts_clip_schedule": r.get("shorts_clip_schedule_json", "[]"),
-        })
-    conn.close()
-    return configs
+    Use db.get_shorts_planning_config() instead.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    return db.get_shorts_planning_config()
 
 
 def update_shorts_planning_config(channel_id: int, data: dict, db=None) -> dict:
-    """Update shorts planning config for one channel. Triggers replan if needed."""
-    import sqlite3
-    from config.settings import DATABASE_PATH
-
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(shorts_planning_config)").fetchall()}
-    fields, values = [], []
-
-    for k, v in data.items():
-        col = None
-        if k == "shorts_per_day": col = "shorts_per_day"
-        elif k == "shorts_enabled": col = "shorts_enabled"
-        elif k == "shorts_clip_enabled": col = "shorts_clip_enabled"
-        elif k == "shorts_max_clips": col = "shorts_max_clips"
-        elif k == "shorts_clip_schedule":
-            col = "shorts_clip_schedule_json"
-            import json
-            v = json.dumps(v, ensure_ascii=False)
-        if col and col in columns:
-            fields.append(f"{col} = ?")
-            values.append(v)
-
-    if not fields:
-        conn.close()
-        return {"ok": False, "message": "No valid fields"}
-
-    fields.append("updated_at = datetime('now')")
-    values.append(channel_id)
-    conn.execute(f"UPDATE shorts_planning_config SET {', '.join(fields)} WHERE channel_id = ?", values)
-    conn.commit()
-    conn.close()
-
-    # Replan for the current week
-    ensure_shorts_planned(db)
-    return {"ok": True, "message": "Shorts planning config updated"}
+    """[DEPRECATED] Update shorts planning config for one channel.
+    
+    Use db.update_shorts_planning_config(channel_id, data) instead.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    ok = db.update_shorts_planning_config(channel_id, data)
+    return {"ok": ok, "message": "Shorts planning config updated" if ok else "No valid fields"}
 
 
 def ensure_shorts_planned(db=None):
-    """Ensure today has shorts_schedule entries. Called on API startup."""
-    import sqlite3, random
-    from config.settings import DATABASE_PATH
-    from datetime import date, datetime
-
-    today = date.today()
-    for offset in range(7):
-        d = today + __import__('datetime').timedelta(days=offset)
-        date_key = d.isoformat()
-
-        configs = get_shorts_planning_config()
-        for cfg in configs:
-            if not cfg["shorts_enabled"]:
-                continue
-
-            conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-            existing = conn.execute(
-                "SELECT id FROM shorts_schedule WHERE channel_id = ? AND schedule_date = ?",
-                (cfg["channel_id"], date_key),
-            ).fetchone()
-            if existing:
-                conn.close()
-                continue
-
-            target = min(cfg["shorts_per_day"], max(1, offset + 1))
-            windows = [(12, 14), (17, 21)]
-            hour = random.randint(18, 20)
-            if offset > 0:
-                win = random.choice(windows)
-                hour = random.randint(win[0], win[1])
-            target_time = f"{hour:02d}:{random.randint(0, 59):02d}"
-
-            conn.execute(
-                """INSERT INTO shorts_schedule
-                   (channel_id, schedule_date, target_count, target_time, status)
-                   VALUES (?, ?, ?, ?, 'pending')""",
-                (cfg["channel_id"], date_key, target, target_time),
-            )
-            conn.commit()
-            conn.close()
+    """[DEPRECATED] Ensure today has shorts_schedule entries.
+    
+    Use shorts_scheduler.generate_upcoming_shorts() instead.
+    """
+    from api.services.shorts_scheduler import generate_upcoming_shorts
+    generate_upcoming_shorts(days=7, db=db)
 
 
 def process_shorts_slots(db=None):
-    """Process due shorts_schedule slots. Called by background scheduler."""
-    import sqlite3, random
-    from config.settings import DATABASE_PATH
-    from datetime import date, datetime
-
-    today = date.today().isoformat()
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    rows = conn.execute(
-        """SELECT ss.*, c.slug
-           FROM shorts_schedule ss
-           JOIN channels c ON ss.channel_id = c.id
-           WHERE ss.schedule_date = ? AND ss.status = 'pending'
-             AND ss.produced_count < ss.target_count""",
-        (today,),
-    ).fetchall()
-    conn.close()
-
-    if not rows:
-        return
-
-    for row in rows:
-        d = dict(row)
-        try:
-            short_type = random.choice(["native"] * 8 + ["clip"] * 2)
-            if short_type == "native":
-                _generate_and_publish_native_short(d["channel_id"], d["slug"])
-
-            conn2 = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-            conn2.execute(
-                "UPDATE shorts_schedule SET produced_count = produced_count + 1 WHERE id = ?",
-                (d["id"],),
-            )
-            if d["produced_count"] + 1 >= d["target_count"]:
-                conn2.execute("UPDATE shorts_schedule SET status = 'completed' WHERE id = ?", (d["id"],))
-            conn2.commit()
-            conn2.close()
-        except Exception as e:
-            logger.error("Shorts slot #%d failed: %s", d["id"], e)
+    """[DEPRECATED] Process due shorts_schedule slots.
+    
+    Use shorts_scheduler.dispatch_next_due_shorts_slot() instead.
+    Called by the background checker loop in api/main.py.
+    """
+    from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
+    dispatch_next_due_shorts_slot(db=db)
 
 
-def _generate_and_publish_native_short(channel_id: int, channel_slug: str):
-    """Generate and publish one native Short for a channel (internal, used by scheduler)."""
+def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=None):
+    """Generate and publish one native Short for a channel (internal, used by scheduler).
+
+    This function is kept as the canonical native short generator and is imported
+    by shorts_scheduler._dispatch_native_short. The shorts_scheduler has its own
+    copy for independence, but external callers can use this too.
+
+    Args:
+        channel_id: Channel ID in the database.
+        channel_slug: Channel slug (e.g. 'canal2').
+        db: Optional ExtendedDatabase instance.
+
+    Returns:
+        short_id if successful, None on failure.
+    """
     import json, re, subprocess, time, sqlite3
     from pathlib import Path
     from config.settings import DATABASE_PATH, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OUTPUT_DIR
@@ -1071,17 +1003,42 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str):
     if not uploader.authenticate():
         return
 
-    # Build channel subscription link
-    channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
-    sub_link = f"\n\n📺 Suscríbete: {channel_url}?sub_confirmation=1" if channel_url else ""
+    # ── Cross-promotion: link to long-form video ──────────
+    from pipeline.shorts_cross_promote import (
+        get_best_longform_link, build_short_description, run_post_publish_promotion,
+        should_cross_promote,
+    )
+    longform_url = None
+    if should_cross_promote(ch_config):
+        longform_url = get_best_longform_link(channel_id)
 
-    description = f"{hook_text}\n\n{' '.join(f'#{t}' for t in hashtags[:10])}{sub_link}\n\n🔔 Suscríbete para más contenido."
+    channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
+    description = build_short_description(
+        hook_text=hook_text,
+        hashtags=hashtags,
+        longform_url=longform_url,
+        channel_url=channel_url,
+    )
     result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), privacy="public")
 
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now'))", (channel_id, title, title[:60], hook_text, str(video_path), yt_id, result.get("url", "")))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now'))", (channel_id, title, title[:60], hook_text, str(video_path), yt_id, result.get("url", "")))
+        short_id = cursor.lastrowid
         conn.commit()
         conn.close()
+
+        # ── Post-publish cross-promotion ──────────────
+        run_post_publish_promotion(
+            channel_slug=channel_slug,
+            short_yt_id=yt_id,
+            channel_id=channel_id,
+            source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+            channel_config=ch_config,
+        )
+
         logger.info("Scheduled native Short published: %s → %s", title[:40], result.get("url", ""))
+        return short_id
+
+    return None

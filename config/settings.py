@@ -55,6 +55,11 @@ WEEK3_VIDEOS_PER_DAY = int(os.getenv("WEEK3_VIDEOS_PER_DAY", "3"))
 # Pipeline start date (ISO format: YYYY-MM-DD). Defaults to today.
 PIPELINE_START_DATE = os.getenv("PIPELINE_START_DATE", "")
 
+# ── Generation worker mode ─────────────────────────────────────
+# True  = generation runs in independent subprocess (survives API restarts)
+# False = generation runs in-process (legacy behavior, dies with API)
+USE_SUBPROCESS_WORKER = os.getenv("USE_SUBPROCESS_WORKER", "true").lower() in ("1", "true", "yes")
+
 
 # ── LLM Provider (DeepSeek / OpenAI) ──────────────────────────
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
@@ -89,11 +94,11 @@ MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "4000"))
 # ── Render timeout ─────────────────────────────────────────────
 # Timeout = min(max(video_duration * RENDER_TIMEOUT_MULTIPLIER, RENDER_TIMEOUT_MIN_SEC), RENDER_TIMEOUT_MAX_SEC)
 RENDER_TIMEOUT_MULTIPLIER = float(os.getenv("RENDER_TIMEOUT_MULTIPLIER", "5.0"))
-RENDER_TIMEOUT_MIN_SEC = int(os.getenv("RENDER_TIMEOUT_MIN_SEC", "3600"))  # 60 min floor (CPU renders with effects take 30-50 min)
-RENDER_TIMEOUT_MAX_SEC = int(os.getenv("RENDER_TIMEOUT_MAX_SEC", "7200"))  # 2 hour ceiling
+RENDER_TIMEOUT_MIN_SEC = int(os.getenv("RENDER_TIMEOUT_MIN_SEC", "7200"))  # 2h floor — long renders (50+ scenes + effects)
+RENDER_TIMEOUT_MAX_SEC = int(os.getenv("RENDER_TIMEOUT_MAX_SEC", "14400"))  # 4h ceiling — generous for complex videos
 
 # ── Orphan detection ───────────────────────────────────────────
-HEARTBEAT_ORPHAN_TIMEOUT_MIN = int(os.getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "15"))
+HEARTBEAT_ORPHAN_TIMEOUT_MIN = int(os.getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "120"))  # 2h — raised from 15
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 # ── Shorts ─────────────────────────────────────────────────────
@@ -148,6 +153,32 @@ PROXY_CHANNELS = [
     for c in os.getenv("PROXY_CHANNELS", "").split(",")
     if c.strip()
 ]  # vacío = todos los canales usan proxy
+
+# ── YouTube Stats collection ───────────────────────────────────
+STATS_ENABLED = os.getenv("STATS_ENABLED", "true").lower() == "true"
+
+# ── Video Lifecycle (post-upload promotion) ────────────────────
+LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "true").lower() == "true"
+LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15"))
+
+# Timeline por defecto — delays relativos al momento de publicación
+# Cada canal puede sobrescribir via LIFECYCLE_TIMELINE en su config
+LIFECYCLE_DEFAULT_TIMELINE = [
+    {"action": "playlist_add",       "offset_minutes": 1},
+    {"action": "first_comment",      "offset_minutes": 5},
+    {"action": "comment_reply_1",    "offset_hours": 12},
+    {"action": "comment_reply_2",    "offset_hours": 24},
+    {"action": "ctr_check",          "offset_hours": 48},
+    {"action": "metadata_reoptimize", "offset_hours": 72},
+]
+
+# ── Comment reply ──────────────────────────────────────────────
+COMMENT_REPLY_MAX_PER_VIDEO = int(os.getenv("COMMENT_REPLY_MAX_PER_VIDEO", "5"))
+COMMENT_REPLY_ENABLED = os.getenv("COMMENT_REPLY_ENABLED", "true").lower() == "true"
+
+# ── Metadata reoptimization ────────────────────────────────────
+METADATA_OPTIMIZE_ENABLED = os.getenv("METADATA_OPTIMIZE_ENABLED", "true").lower() == "true"
+METADATA_OPTIMIZE_CTR_THRESHOLD = float(os.getenv("METADATA_OPTIMIZE_CTR_THRESHOLD", "3.0"))
 
 # ── Logging ────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

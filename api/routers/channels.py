@@ -337,26 +337,46 @@ def get_manual_setup(channel_id: int):
 
 @router.get("/{channel_id}/youtube-stats")
 def get_channel_youtube_stats(channel_id: int):
-    """Obtiene estadísticas en tiempo real del canal desde YouTube.
+    """Estadísticas del canal desde la base de datos (snapshot más reciente).
 
-    Incluye subscribers, total views, video count y estimated minutes watched.
+    Ya no consume YouTube API quota — usa los datos cacheados por
+    'Recolectar stats' o post-upload. Incluye descripción del canal.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
 
-    from pipeline.youtube_stats import YouTubeStatsFetcher
+    db_stats = db.get_channel_latest_stats(channel_id)
+    if db_stats:
+        stats = {
+            "subscriberCount": str(db_stats.get("subscribers", 0)),
+            "viewCount": str(db_stats.get("total_views", 0)),
+            "videoCount": str(db_stats.get("video_count", 0)),
+        }
+        emw = db_stats.get("estimated_minutes_watched")
+        if emw is not None and emw not in (0, 0.0, "0"):
+            stats["estimatedMinutesWatched"] = str(emw)
+        # Revenue estimates
+        rev_min = db_stats.get("estimated_revenue_min")
+        rev_max = db_stats.get("estimated_revenue_max")
+        if rev_min is not None and rev_min != 0:
+            stats["estimatedRevenueMin"] = round(float(rev_min), 2)
+        if rev_max is not None and rev_max != 0:
+            stats["estimatedRevenueMax"] = round(float(rev_max), 2)
+        stats["_from_db"] = True
+    else:
+        stats = {
+            "subscriberCount": "0",
+            "viewCount": "0",
+            "videoCount": "0",
+            "_from_db": True,
+            "_empty": True,
+        }
 
-    fetcher = YouTubeStatsFetcher(ch["slug"])
-    if not fetcher.authenticate():
-        return {"error": "No autenticado", "stats": {}}
+    # Channel description from DB
+    stats["channelDescription"] = ch.get("description", "") or ""
 
-    stats = fetcher.get_channel_stats()
-    # Also fetch channel analytics (watch time)
-    analytics = fetcher.get_channel_analytics()
-    if analytics:
-        stats.update(analytics)
     # Convert minutes to hours for convenience
     emw = stats.get("estimatedMinutesWatched")
     if emw is not None and emw not in (0, "0"):

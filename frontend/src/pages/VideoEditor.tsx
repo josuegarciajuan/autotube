@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api, formatDuration, formatDate, formatDateTime, formatTimingMs, statusBadge, statusLabel, truncate, mediaUrl, apiUrl } from '../lib/api'
-import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2 } from 'lucide-react'
+import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2, CheckCircle, XCircle, Loader2, ExternalLink } from 'lucide-react'
+import { useGenerationProgress } from '../hooks/useWebSocket'
 
 export default function VideoEditor() {
   const { id } = useParams<{ id: string }>()
@@ -23,6 +24,10 @@ export default function VideoEditor() {
   const [marketing, setMarketing] = useState<any>(null)
   const [loadingMarketing, setLoadingMarketing] = useState(false)
   const [showMarketing, setShowMarketing] = useState(false)
+
+  const [uploadJobId, setUploadJobId] = useState<number | null>(null)
+  const [uploadToast, setUploadToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const { progress } = useGenerationProgress(uploadJobId)
 
   useEffect(() => {
     loadVideo()
@@ -111,13 +116,27 @@ export default function VideoEditor() {
 
   async function handleUpload() {
     try {
-      await api.uploadVideo(videoId)
-      alert('Subida iniciada')
-      loadVideo()
+      const res = await api.uploadVideo(videoId)
+      setUploadJobId(res.job_id)
+      setUploadToast(null) // clear any previous toast
     } catch (e: any) {
-      alert('Error: ' + e.message)
+      setUploadToast({ type: 'error', message: 'Error al iniciar subida: ' + e.message })
     }
   }
+
+  // React to upload progress changes
+  useEffect(() => {
+    if (!progress) return
+    if (progress.status === 'completed') {
+      setUploadToast({ type: 'success', message: progress.message || 'Subido con exito' })
+      setUploadJobId(null)
+      loadVideo()
+    } else if (progress.status === 'failed') {
+      setUploadToast({ type: 'error', message: progress.message || 'Error en la subida' })
+      setUploadJobId(null)
+      loadVideo()
+    }
+  }, [progress?.status])
 
   function openSceneEditor(scene: any) {
     setEditingScene(scene.id)
@@ -185,13 +204,69 @@ export default function VideoEditor() {
           </button>
           <button
             onClick={handleUpload}
-            className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-neon-red text-white rounded-lg text-xs sm:text-sm font-medium hover:bg-neon-red/80 transition-colors"
+            disabled={uploadJobId !== null}
+            className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-neon-red text-white rounded-lg text-xs sm:text-sm font-medium hover:bg-neon-red/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Upload size={14} />
-            {video.yt_video_id ? 'Resubir' : 'Subir a YT'}
+            {uploadJobId !== null ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Upload size={14} />
+            )}
+            {uploadJobId !== null ? 'Subiendo...' : video.yt_video_id ? 'Resubir' : 'Subir a YT'}
           </button>
         </div>
       </div>
+
+      {/* Upload progress bar */}
+      {uploadJobId !== null && progress && (
+        <div className="glass rounded-xl p-4 space-y-2 animate-slide-up border border-neon-red/30">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-white font-medium flex items-center gap-2">
+              <Loader2 size={14} className="animate-spin text-neon-red" />
+              {progress.message || 'Subiendo video a YouTube...'}
+            </span>
+            <span className="text-gray-400">{progress.progress}%</span>
+          </div>
+          <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-neon-red rounded-full transition-all duration-500"
+              style={{ width: `${progress.progress || 0}%` }}
+            />
+          </div>
+          {progress.detail && (
+            <p className="text-xs text-gray-500">{progress.detail}</p>
+          )}
+        </div>
+      )}
+
+      {/* Upload toast — success or error */}
+      {uploadToast && (
+        <div
+          className={`glass rounded-xl p-4 flex items-center gap-3 animate-slide-up border ${
+            uploadToast.type === 'success'
+              ? 'border-green-500/40 bg-green-500/5'
+              : 'border-red-500/40 bg-red-500/5'
+          }`}
+        >
+          {uploadToast.type === 'success' ? (
+            <CheckCircle size={20} className="text-green-400 shrink-0" />
+          ) : (
+            <XCircle size={20} className="text-red-400 shrink-0" />
+          )}
+          <div className="flex-1 min-w-0">
+            <p className={`text-sm font-medium ${uploadToast.type === 'success' ? 'text-green-300' : 'text-red-300'}`}>
+              {uploadToast.type === 'success' ? 'Subida completada' : 'Error en la subida'}
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">{uploadToast.message}</p>
+          </div>
+          <button
+            onClick={() => setUploadToast(null)}
+            className="text-gray-500 hover:text-white transition-colors shrink-0"
+          >
+            x
+          </button>
+        </div>
+      )}
 
       {/* Metadata Editor */}
       {showMetadataEditor && (
@@ -304,15 +379,37 @@ export default function VideoEditor() {
       {/* Video Player — YouTube embed if uploaded, local file otherwise */}
       <div className="glass rounded-xl overflow-hidden">
         {video.yt_video_id ? (
-          <div className="aspect-video">
-            <iframe
-              src={`https://www.youtube.com/embed/${video.yt_video_id}`}
-              title="YouTube video player"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowFullScreen
-              className="w-full h-full rounded-lg"
-            />
-          </div>
+          video.embeddable !== false ? (
+            <div className="aspect-video">
+              <iframe
+                src={`https://www.youtube.com/embed/${video.yt_video_id}`}
+                title="YouTube video player"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                className="w-full h-full rounded-lg"
+              />
+            </div>
+          ) : (
+            <div className="aspect-video relative bg-dark-800 flex items-center justify-center group cursor-pointer"
+                 onClick={() => window.open(video.yt_url || `https://www.youtube.com/watch?v=${video.yt_video_id}`, '_blank', 'noopener')}>
+              {video.thumbnail_path ? (
+                <img src={apiUrl(`/thumbnail/${videoId}?v=${video.updated_at || videoId}`)}
+                     alt={video.titulo_final} className="w-full h-full object-cover opacity-60" />
+              ) : null}
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-dark-900/70">
+                <div className="w-14 h-14 rounded-full bg-neon-red flex items-center justify-center shadow-lg">
+                  <ExternalLink size={24} className="text-white" />
+                </div>
+                <p className="text-white text-sm font-medium text-center px-4 leading-relaxed">
+                  YouTube bloqueó el embed de este video<br />
+                  <span className="text-gray-400 text-xs">(Copyright, Content ID o políticas de YouTube)</span>
+                </p>
+                <span className="text-neon-red text-xs font-bold flex items-center gap-1 hover:underline bg-neon-red/10 px-3 py-1.5 rounded-full">
+                  <ExternalLink size={12} /> Ver en YouTube
+                </span>
+              </div>
+            </div>
+          )
         ) : video.video_path ? (
           <video
             src={apiUrl(`/video-file/${videoId}`)}

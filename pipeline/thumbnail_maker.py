@@ -381,195 +381,32 @@ class ThumbnailMaker:
         style: dict,
         slug: str,
     ) -> Path:
-        """Generate thumbnail image via Pollo AI with LLM quality review.
+        """Generate a single thumbnail image via Pollo AI.
 
-        Generates 2 images, has the vision LLM score them. If score < threshold,
-        refines the prompt and retries (max THUMBNAIL_MAX_QC_ATTEMPTS times).
+        Generates exactly 1 image per call — no variants, no QC loop,
+        no vision LLM review. Saves Pollo credits.
         """
-        from config.settings import THUMBNAIL_QUALITY_THRESHOLD, THUMBNAIL_MAX_QC_ATTEMPTS
         from pipeline.thumbnail_style_engine import build_pollo_prompt
-        from pipeline.ai_image_generator import AIImageGenerator
-
-        threshold = max(8, THUMBNAIL_QUALITY_THRESHOLD)  # Minimum 8/10
-        max_attempts = THUMBNAIL_MAX_QC_ATTEMPTS
+        from pipeline.ai_image_generator import AIImageGenerator, PolloAIError
 
         prompt = build_pollo_prompt(brief.image_concept, style)
+        logger.info("Pollo AI prompt: %r...", prompt[:80])
+
         ai_gen = AIImageGenerator()
+        out_path = self.output_dir / f"qc_{slug}_a1_01.jpg"
 
-        for attempt in range(1, max_attempts + 1):
-            logger.info(
-                "QC attempt %d/%d (prompt=%r...)",
-                attempt, max_attempts, prompt[:80],
-            )
+        try:
+            path = ai_gen.generate(prompt, out_path)
+            if path and Path(path).exists():
+                logger.info("Pollo image generated: %s", path)
+                return Path(path)
+        except PolloAIError as exc:
+            logger.error("Pollo AI generation failed: %s", exc)
+        except Exception as exc:
+            logger.error("Unexpected error generating thumbnail: %s", exc)
 
-            # Generate 2 variant images (saves Pollo credits — 2×2=4 max)
-            prompts = [
-                prompt,
-                prompt + " alternative composition, different angle and lighting",
-            ]
-            paths = ai_gen.generate_batch(
-                prompts=prompts,
-                output_dir=self.output_dir,
-                prefix=f"qc_{slug}_a{attempt}_",
-            )
-
-            if len(paths) < 1:
-                logger.error("QC attempt %d: no images generated", attempt)
-                if attempt < max_attempts:
-                    prompt = self._refine_prompt(prompt, "no images generated — try simpler composition")
-                    time.sleep(5)
-                    continue
-                # Last attempt failed — use black fallback
-                return self._black_fallback()
-
-            if len(paths) == 1:
-                # Only got 1 image — use it directly (skip QC review)
-                logger.info("QC: only 1 image generated — using directly")
-                return paths[0]
-
-            # Review both images with vision LLM
-            try:
-                best_idx, score, feedback = self._review_with_vision_llm(
-                    image_paths=paths,
-                    expected_content=brief.image_concept,
-                )
-                logger.info("QC review: best=%d score=%.1f/10", best_idx + 1, score)
-
-                if score >= threshold:
-                    logger.info("✅ QC passed (%.1f ≥ %d)", score, threshold)
-                    return paths[best_idx]
-
-                logger.warning(
-                    "QC score %.1f < threshold %d — refining prompt", score, threshold,
-                )
-                if attempt > 1:
-                    # Significantly change the prompt for retry
-                    prompt = self._refine_prompt(
-                        prompt,
-                        feedback + " completely different composition, opposite angle, radically different lighting setup"
-                    )
-                else:
-                    prompt = self._refine_prompt(prompt, feedback)
-
-            except Exception as exc:
-                logger.warning("QC vision review failed: %s — using first image", exc)
-                return paths[0]
-
-        # All attempts exhausted — return best available
-        logger.warning("All QC attempts exhausted — returning first image")
-        return paths[0] if paths else self._black_fallback()
-
-    def _review_with_vision_llm(
-        self,
-        image_paths: list[Path],
-        expected_content: str,
-    ) -> tuple[int, float, str]:
-        """Use vision-capable LLM to review and score generated images.
-
-        Returns (best_index, score 0-10, feedback_string).
-        """
-        from openai import OpenAI
-        from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
-
-        # Read images as base64
-        import base64
-
-        image_contents = []
-        for i, p in enumerate(image_paths):
-            b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
-            image_contents.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
-            })
-
-        # Build message with images
-        user_content = [
-            {
-                "type": "text",
-                "text": (
-                    "Evalúa estas 2 imágenes generadas para una miniatura de YouTube.\n\n"
-                    f"CONTENIDO ESPERADO: {expected_content}\n\n"
-                    "Evalúa cada imagen del 0 al 10 en estos criterios:\n"
-                    "1. Relevancia al contenido esperado\n"
-                    "2. Calidad estética y composición\n"
-                    "3. Impacto visual (¿haría click una persona?)\n"
-                    "4. Iluminación y atmósfera\n"
-                    "5. Adecuación para miniatura de YouTube (1280x720)\n\n"
-                    "Responde SOLO con JSON:\n"
-                    '{"best_index": 0, "scores": [8.5, 6.0], '
-                    '"feedback": "breve explicación de por qué la mejor es mejor '
-                    'y qué mejorar en la peor"}'
-                ),
-            },
-            *image_contents,
-        ]
-
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Eres un crítico de diseño visual especializado en miniaturas "
-                        "de YouTube. Evalúas imágenes objetivamente y respondes JSON."
-                    ),
-                },
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.3,
-            max_tokens=300,
-        )
-
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1])
-            content = content.replace("```json", "").replace("```", "").strip()
-
-        result = json.loads(content)
-        best_idx = int(result.get("best_index", 0))
-        scores = result.get("scores", [5.0, 5.0])
-        avg_score = float(scores[best_idx]) if best_idx < len(scores) else 5.0
-        feedback = str(result.get("feedback", ""))
-
-        return best_idx, avg_score, feedback
-
-    def _refine_prompt(self, original_prompt: str, feedback: str) -> str:
-        """Use LLM to refine the image prompt based on QC feedback."""
-        from openai import OpenAI
-        from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
-
-        refine_prompt = f"""Refina este prompt de generación de imagen para mejorar la calidad.
-
-PROMPT ORIGINAL: {original_prompt}
-
-FEEDBACK DE CALIDAD: {feedback}
-
-INSTRUCCIONES:
-- Corrige los problemas mencionados en el feedback
-- Mantén el estilo cinematográfico oscuro
-- Asegura que la imagen funcione como miniatura de YouTube (1280x720)
-- El resultado debe ser un prompt de 1-3 frases en inglés
-
-Responde SOLO con el prompt refinado, sin comillas ni JSON."""
-
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "Eres un experto en prompts para generación de imágenes con IA."},
-                {"role": "user", "content": refine_prompt},
-            ],
-            temperature=0.7,
-            max_tokens=200,
-        )
-
-        refined = response.choices[0].message.content.strip()
-        logger.info("Refined prompt: %r...", refined[:80])
-        return refined
+        logger.warning("No image generated — using black fallback")
+        return self._black_fallback()
 
     def _black_fallback(self) -> Path:
         """Create a plain black fallback image."""

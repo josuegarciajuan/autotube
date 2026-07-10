@@ -30,10 +30,12 @@ Para cada momento, devuelve:
 - ranking: 1-5 donde 1 = el más impactante/viralizable
 
 REGLAS:
-- Los clips deben durar entre 30 y 90 segundos
+- Los clips deben durar entre 8 y 90 segundos (obligatorio, respétalo estrictamente)
 - Prioriza momentos que funcionan sin contexto previo (autocontenidos)
 - El hook_title debe generar curiosidad ("¿Sabías que...", "El misterio de...", "Nadie te contó que...")
-- El hook_text debe ser la frase más potente del clip
+- El hook_text debe ser la frase más potente del clip (30-60 palabras)
+- Basa los timecodes en los timestamps proporcionados, no los inventes
+- Escoge segmentos de al menos 8 segundos y máximo 90 segundos
 - Devuelve EXACTAMENTE el siguiente JSON y nada más:
 
 ```json
@@ -149,7 +151,8 @@ class ShortsExtractor:
                     continue
                 # Ensure reasonable duration
                 duration = clip["end_time"] - clip["start_time"]
-                if duration < 15 or duration > 120:
+                if duration < 8 or duration > 180:
+                    logger.debug("Clip rejected: duration %.1fs outside 8-180 range", duration)
                     continue
                 clip["ranking"] = clip.get("ranking", 5)
                 valid_clips.append(clip)

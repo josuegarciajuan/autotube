@@ -283,6 +283,7 @@ class VideoEditor:
         cta_audio_path: str | None = None,
         scene_ranges: list[dict] | None = None,     # v2: precomputed enforceable ranges
         job_id: int = None,                           # v3: for heartbeat emission during render
+        video_id: int = None,                         # v4: for subprocess progress writes to DB
     ) -> Path:
         """Assemble the complete video from blocks, media, audio, and effects.
 
@@ -292,6 +293,8 @@ class VideoEditor:
             audio_path: Path to TTS voice-over MP3
             timestamps: Word-level timestamps
             cta_audio_path: Optional voice-over for the CTA segment
+            job_id: Optional job id for heartbeat emission during render.
+            video_id: Optional video DB id for subprocess progress writes.
 
         v1 API (legacy fallback):
             scenes: List of scene dicts from parse_scenes()
@@ -355,6 +358,38 @@ class VideoEditor:
                 raise RuntimeError("No block ranges computed — cannot build video.")
             self.logger.info("Step 1/6: %d blocks with time ranges computed", len(block_ranges))
 
+        # ── Heartbeat emitter (covers Steps 2-6: segment rendering through final mux) ──
+        # Starts BEFORE the heavy segment rendering to prevent orphan detection
+        # from killing the job during long renders (50+ scenes can take 40-90 min).
+        _hb_stop = threading.Event() if job_id is not None else None
+        _hb_thread = None
+        if job_id is not None:
+            _total_scenes = len(block_ranges)
+
+            def _hb_loop():
+                try:
+                    from database.db_extended import ExtendedDatabase
+                    _db = ExtendedDatabase()
+                except Exception as _hb_init_exc:
+                    self.logger.error("Heartbeat DB init failed: %s", _hb_init_exc)
+                    return
+                while not _hb_stop.is_set():
+                    try:
+                        _db.update_heartbeat(job_id)
+                    except Exception:
+                        pass
+                    _hb_stop.wait(30)
+
+            _hb_thread = threading.Thread(
+                target=_hb_loop, daemon=True,
+                name=f"heartbeat-render-{job_id}",
+            )
+            _hb_thread.start()
+            self.logger.info(
+                "Heartbeat emitter started for job #%d (every 30s, covers Steps 2-6 / %d scenes)",
+                job_id, _total_scenes,
+            )
+
         # ── v4: Segment-based body rendering (RAM bounded) ─────
         # Instead of creating all clips in memory (CompositeVideoClip → OOM),
         # render each scene as a standalone MP4 segment (1 decoder at a time),
@@ -370,8 +405,8 @@ class VideoEditor:
                 if ap and a.get("type") == "image" and Path(ap).exists():
                     _real_image_paths.append(Path(ap))
 
-        # Temp dir for scene segments
-        seg_dir = Path(VIDEOS_DIR) / "segments"
+        # Temp dir for scene segments (resolved absolute to prevent ffmpeg concat path doubling)
+        seg_dir = Path(VIDEOS_DIR).resolve() / "segments"
         if job_id is not None:
             seg_dir = seg_dir / str(job_id)
         seg_dir.mkdir(parents=True, exist_ok=True)
@@ -435,8 +470,35 @@ class VideoEditor:
 
             self._current_clip_idx += 1
 
-        # Remove empty entries from any remaining failures
-        segment_paths = [p for p in segment_paths if p and Path(p).exists()]
+            # ── v4: subprocess progress via DB ─────────────────
+            # Only active when called from the pipeline worker
+            # (video_id is set).  Writes ~10 progress updates
+            # across the segment loop so the frontend sees real
+            # progress instead of being stuck at 60 %.
+            if video_id is not None and video_id > 0:
+                _total = len(block_ranges)
+                _update_interval = max(1, _total // 10)
+                if (i == 0 or i == _total - 1
+                        or (i + 1) % _update_interval == 0):
+                    _pct = 60 + int((i + 1) / _total * 15)
+                    try:
+                        from database.db_extended import ExtendedDatabase
+                        ExtendedDatabase().update_video(
+                            video_id,
+                            progress=_pct,
+                            progress_phase="video",
+                        )
+                    except Exception:
+                        pass  # never let a DB write crash the render
+
+        # Remove empty entries AND corresponding block_ranges to keep 1:1 alignment
+        _valid = []
+        _valid_ranges = []
+        for _j, (_sp, _br) in enumerate(zip(segment_paths, block_ranges)):
+            if _sp and Path(_sp).exists():
+                _valid.append(_sp)
+                _valid_ranges.append(_br)
+        segment_paths, block_ranges = _valid, _valid_ranges
 
         if not segment_paths:
             raise RuntimeError("No segments rendered — cannot build video.")
@@ -546,10 +608,6 @@ class VideoEditor:
         # Render intro/cta/outro as standalone segments, then concat all
         # using ffmpeg concat demuxer (stream-copy, near-zero RAM).
         self.logger.info("Step 5/6: Rendering intro/cta/outro segments + final concat…")
-        intro_dur = self.canal.get("INTRO_DURATION_SEC", self.INTRO_DURATION)
-        outro_dur = self.canal.get("OUTRO_DURATION_SEC", self.OUTRO_DURATION)
-        intro = self._build_intro(intro_dur)
-        outro = self._build_outro(outro_dur)
 
         # Render intro/cta/outro + body as segment files for concat
         _video_segments: list[str] = []
@@ -558,6 +616,10 @@ class VideoEditor:
             """Render a single clip to video-only MP4 to a given path."""
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
+            # Collision avoidance (same pattern as _render_scene_segment)
+            if p.exists():
+                import uuid
+                p = p.with_stem(f"{p.stem}_{uuid.uuid4().hex[:4]}")
             try:
                 clip.write_videofile(
                     str(p), fps=self.fps, codec=VIDEO_CODEC,
@@ -566,7 +628,7 @@ class VideoEditor:
                     ffmpeg_params=["-pix_fmt", "yuv420p", "-an"],
                     logger=None,
                 )
-                return str(p)
+                return str(p.resolve())
             except Exception as e:
                 self.logger.warning("Segment render failed for %s: %s", path, e)
                 return None
@@ -803,29 +865,6 @@ class VideoEditor:
                 body_vid_dur, body_aud_dur, abs(body_vid_dur - body_aud_dur),
             )
 
-        # ── Heartbeat emitter (during audio re-mux) ────────────
-        _hb_stop = threading.Event() if job_id is not None else None
-        _hb_thread = None
-        if job_id is not None:
-            def _hb_loop():
-                from database.db_extended import ExtendedDatabase
-                _db = ExtendedDatabase()
-                _last_pct = 75  # segments + concat done, entering audio phase
-                while not _hb_stop.is_set():
-                    try:
-                        _db.update_heartbeat(job_id)
-                        # Simpler progress: just bump once
-                        if _last_pct < 85 and os.path.exists(str(output_path)):
-                            _last_pct = 80
-                            _db.update_job(job_id, progress=_last_pct, phase="video")
-                    except Exception:
-                        pass
-                    _hb_stop.wait(30)
-
-            _hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"heartbeat-{job_id}")
-            _hb_thread.start()
-            self.logger.info("Heartbeat emitter started for job #%d (every 30s)", job_id)
-
         render_ok = output_path.exists() and output_path.stat().st_size > 0
         try:
             if render_ok:
@@ -883,7 +922,10 @@ class VideoEditor:
                 _hb_stop.set()
             if _hb_thread is not None and _hb_thread.is_alive():
                 _hb_thread.join(timeout=5)
-                self.logger.info("Heartbeat emitter stopped for job #%d", job_id)
+                if _hb_thread.is_alive():
+                    self.logger.warning("Heartbeat thread did not stop within 5s for job #%d", job_id)
+                else:
+                    self.logger.info("Heartbeat emitter stopped for job #%d", job_id)
 
             # ── Cleanup ──────────────────────────────────────
             try:
@@ -897,15 +939,15 @@ class VideoEditor:
             # Force garbage collection
             import gc
             gc.collect()
-            # Clean up temp segments if successful
-            if render_ok:
-                try:
-                    import shutil
-                    if seg_dir.exists():
-                        shutil.rmtree(seg_dir, ignore_errors=True)
-                        self.logger.info("🧹 Segment tempdir cleaned: %s", seg_dir.name)
-                except Exception:
-                    self.logger.debug("Could not clean segment tempdir: %s", seg_dir)
+            # Clean up temp segments (always, to prevent stale files on next render)
+            try:
+                import shutil
+                if seg_dir.exists():
+                    shutil.rmtree(seg_dir, ignore_errors=True)
+                    status = "after success" if render_ok else "after failure"
+                    self.logger.info("🧹 Segment tempdir cleaned (%s): %s", status, seg_dir.name)
+            except Exception:
+                self.logger.debug("Could not clean segment tempdir: %s", seg_dir)
             # Clean up temp music
             if _music_temp_path and _music_temp_path.exists():
                 try:
@@ -2311,14 +2353,24 @@ class VideoEditor:
                 if clip_dur > duration:
                     clip = clip.subclipped(0, duration)
                 elif clip_dur < duration:
-                    # Template is shorter than expected — extend to match duration
-                    # (uses freeze-frame on last frame; silent outro is fine with this)
-                    clip = clip.with_duration(duration)
-                    self.logger.info(
-                        "Cached outro template extended: %.1fs → %.1fs", clip_dur, duration,
-                    )
-                self.logger.info("Using cached outro template: %s", template_path)
-                return clip
+                    if duration - clip_dur <= 1.0:
+                        # Small gap: freeze-frame extension is acceptable
+                        clip = clip.with_duration(duration)
+                        self.logger.info(
+                            "Cached outro template extended: %.1fs → %.1fs", clip_dur, duration,
+                        )
+                    else:
+                        # Large gap: fall back to programmatic to avoid black screen
+                        # from the template's crossfade-to-black overlay on the last frame
+                        self.logger.info(
+                            "Cached outro template too short (%.1fs < %.1fs) — falling back to programmatic",
+                            clip_dur, duration,
+                        )
+                        clip.close()
+                        clip = None  # signal fallback to programmatic branch
+                if clip is not None:
+                    self.logger.info("Using cached outro template: %s", template_path)
+                    return clip
             except Exception as e:
                 self.logger.warning("Failed to load outro template: %s — falling back to programmatic", e)
 

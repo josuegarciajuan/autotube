@@ -20,25 +20,85 @@
 
 ## Reglas obligatorias
 
-### Frontend — recompilación tras cambios
-**Cada vez que se modifique cualquier archivo en `frontend/src/`**, se debe recompilar el frontend:
+### 📝 Git — cada cambio se commitea
+- **Cada cambio en el código debe registrarse en git** con un commit atómico y descriptivo.
+- Formato recomendado: `tipo: descripción breve` (ej. `feat: añadir soporte para thumbnails Pollo AI`, `fix: corregir cálculo de duración de voz`)
+- Tipos: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`, `style`
+- **Nunca** commitear secretos: `.env`, `client_secret_*.json`, `*.pickle`
+
+### 🚀 Modo desarrollo (hot-reload) — RECOMENDADO para trabajar con cambios
+El sistema ahora soporta **hot-reload completo**: cambios en Python y frontend se reflejan
+instantáneamente **sin matar la generación de video en curso**.
 
 ```bash
-cd frontend && npm run build
+# Arrancar servidores de desarrollo (API con reload + Vite HMR)
+bash scripts/start_dev.sh
+
+# Parar servidores
+bash scripts/stop_dev.sh
 ```
 
-### API — reinicio tras cambios en Python
+**Cómo funciona:**
+- La **API** corre con `uvicorn --reload` — se reinicia sola al detectar cambios en `.py`
+- El **frontend** corre con Vite dev server en `:5173` — HMR (Hot Module Replacement) en vivo
+- La **generación de video** se lanza como **proceso independiente** (subprocess con `start_new_session`) — **NO muere cuando la API se reinicia**
+- Modo subprocess activado por defecto: `USE_SUBPROCESS_WORKER = True` en `api/services/generation_service.py`
+
+**URLs en desarrollo:**
+- Frontend (HMR): `http://localhost:5173`
+- API (Swagger): `http://localhost:8000/api/docs`
+- Logs: `tail -f logs/api_dev.log` | `tail -f logs/vite_dev.log`
+
+### 📦 Modo producción — aplicar cambios sin downtime
+Cuando necesites aplicar cambios en producción sin interrumpir generaciones activas:
+
 ```bash
-# Kill ONLY the uvicorn process, not other Python processes (renders, watchers, ffmpeg).
-# kill by PID is safe; pkill -f "uvicorn" can match unrelated processes.
+# Rebuild frontend + restart API (workers sobreviven)
+bash scripts/apply_changes.sh
+```
+
+Este script:
+1. Recompila el frontend (`npm run build`)
+2. Reinicia la API (graceful kill + restart)
+3. **NO mata workers de generación activos**
+
+### 🛠️ Restart manual tradicional (solo si no hay generación activa)
+
+```bash
+# Frontend — recompilación
+cd frontend && npm run build
+
+# API — reinicio
 PID=$(pgrep -f "uvicorn api.main:app") && kill $PID 2>/dev/null; sleep 1 && cd /root/autotube && nohup python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > logs/api.log 2>&1 &
 ```
+
+### ⚙️ Arquitectura del worker independiente
+
+El worker de generación (`api/services/full_pipeline_worker.py`) es un script standalone que:
+- Se ejecuta como proceso independiente (`subprocess.Popen` con `start_new_session=True`)
+- Escribe progreso en la tabla `videos` (columna `progress` + `progress_phase`)
+- La API monitorea el progreso desde la DB y lo transmite por WebSocket
+- Si la API se reinicia, el worker sigue corriendo — al volver, la API reanuda el monitoreo
+
+**No mezclar modos:** Si `USE_SUBPROCESS_WORKER=True`, todas las generaciones nuevas
+usan el worker independiente. Si `False`, usan el modo legacy (in-process, mueren con la API).
+
+**⚠️ Si hay una generación corriendo en modo legacy (in-process), NO reiniciar la API
+porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto y advierte.
 
 ### Base de datos — schema y migraciones
 - Schema base: `database/schema.sql`
 - Schema v2 (panel): `database/schema_v2.sql`  
 - Schema v3 (stats): `database/schema_v3.sql`
 - Migraciones automáticas en `database/db_extended.py::migrate_v2()` (idempotentes, incluye v3)
+
+### ⚠️ Preservación de imágenes — NO borrar en limpiezas
+**El directorio `output/thumbnails/` contiene thumbnails, banners y avatares recuperados de YouTube.**
+- `output/thumbnails/{slug}/banner.jpg` — banner del canal (descargado de YouTube API)
+- `output/thumbnails/{slug}/avatar.jpg` — foto de perfil del canal (descargado de YouTube API)
+- `output/thumbnails/{slug}/thumb_{video_id}.jpg` — thumbnail original de cada video (descargado de YouTube CDN)
+- **NUNCA borrar `output/thumbnails/` ni sus subdirectorios en limpiezas del sistema.**
+- Si se borran accidentalmente, recuperar con: `python3 scripts/recover_thumbnails.py`
 
 ### Config Bridge
 - `config/config_bridge.py` → `get_channel_config(slug)` — fuente única de configuración

@@ -355,13 +355,24 @@ Devuelve SOLO JSON:
             return None
 
         title = script.get("titulo", "Short sin título")[:100]
+
+        # ── Cross-promotion: link to long-form video ──────────
+        from pipeline.shorts_cross_promote import (
+            get_best_longform_link, build_short_description, run_post_publish_promotion,
+            should_cross_promote,
+        )
+        longform_url = None
+        channel_id = self.db.get_channel_by_slug(self.channel_slug).get("id") if self.db else None
+        if should_cross_promote(self.config) and channel_id is not None:
+            longform_url = get_best_longform_link(channel_id)
+
         channel_url = getattr(self.config, "YOUTUBE_CHANNEL_URL", "")
-        sub_link = f"\n\n📺 Suscríbete: {channel_url}?sub_confirmation=1" if channel_url else ""
-        description = f"""{script.get('hook_text', '')}
-
-{' '.join(f'#{t}' for t in script.get('hashtags', ['Shorts']))}{sub_link}
-
-🔔 Suscríbete para más contenido como este."""
+        description = build_short_description(
+            hook_text=script.get("hook_text", ""),
+            hashtags=script.get("hashtags", ["Shorts"]),
+            longform_url=longform_url,
+            channel_url=channel_url,
+        )
 
         result = uploader.upload(
             video_path=video_path,
@@ -374,6 +385,14 @@ Devuelve SOLO JSON:
 
         video_id = result.get("video_id")
         if video_id:
+            # ── Post-publish cross-promotion ──────────────
+            run_post_publish_promotion(
+                channel_slug=self.channel_slug,
+                short_yt_id=video_id,
+                channel_id=channel_id,
+                source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+                channel_config=self.config,
+            )
             return {
                 "youtube_id": video_id,
                 "youtube_url": result.get("url", ""),

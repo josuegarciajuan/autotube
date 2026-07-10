@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
-import { Users, Eye, Heart, Video, Wrench, Loader2 } from 'lucide-react'
+import { Users, Eye, Heart, Video, Wrench, Loader2, RefreshCw, X } from 'lucide-react'
 import KpiCard from '../components/KpiCard'
 import ChannelTable from '../components/ChannelTable'
 import PipelineSection from '../components/PipelineSection'
@@ -18,6 +18,72 @@ export default function Dashboard() {
   const [stabilizing, setStabilizing] = useState(false)
   const [stabilizeResult, setStabilizeResult] = useState<StabilizeResult | null>(null)
   const [stabilizeError, setStabilizeError] = useState<string | null>(null)
+
+  // Stats collection state
+  const [collectingStats, setCollectingStats] = useState(false)
+  const [collectStatsMsg, setCollectStatsMsg] = useState<string | null>(null)
+  const [collectStatsError, setCollectStatsError] = useState(false)
+
+  // Load last/current stats-collection state on mount (survives reloads)
+  useEffect(() => {
+    let cancelled = false
+    async function loadStatus() {
+      try {
+        const s = await api.getStatsCollectStatus()
+        if (cancelled) return
+        applyStatsStatus(s)
+        if (s.status === 'running') {
+          setCollectingStats(true)
+          pollStatsStatus()
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    loadStatus()
+    return () => { cancelled = true }
+  }, [])
+
+  function summarize(s: any): string {
+    const chans = s.channels || []
+    const ok = chans.filter((c: any) => c.ok)
+    const failed = chans.filter((c: any) => !c.ok && !c.skipped)
+    const totalVideos = ok.reduce((n: number, c: any) => n + (c.videos_updated || 0), 0)
+    const totalShorts = ok.reduce((n: number, c: any) => n + (c.shorts_updated || 0), 0)
+    let msg = `${ok.length} canal(es) OK · ${totalVideos} videos · ${totalShorts} shorts`
+    if (failed.length) msg += ` · ${failed.length} con error`
+    return msg
+  }
+
+  function applyStatsStatus(s: any) {
+    if (s.status === 'success') {
+      setCollectStatsError(false)
+      setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
+    } else if (s.status === 'error') {
+      setCollectStatsError(true)
+      setCollectStatsMsg(`Error: ${s.error || 'fallo en la recoleccion'}`)
+    } else if (s.status === 'running') {
+      setCollectStatsError(false)
+      setCollectStatsMsg('Recolectando stats de YouTube...')
+    }
+  }
+
+  async function pollStatsStatus() {
+    const poll = async () => {
+      try {
+        const s = await api.getStatsCollectStatus()
+        applyStatsStatus(s)
+        if (s.status === 'running') {
+          setTimeout(poll, 2000)
+        } else {
+          setCollectingStats(false)
+        }
+      } catch {
+        setCollectingStats(false)
+      }
+    }
+    setTimeout(poll, 2000)
+  }
 
   useEffect(() => {
     async function load() {
@@ -50,6 +116,21 @@ export default function Dashboard() {
     }
   }
 
+  async function handleCollectStats() {
+    if (collectingStats) return
+    setCollectingStats(true)
+    setCollectStatsError(false)
+    setCollectStatsMsg('Recolectando stats de YouTube...')
+    try {
+      await api.collectStats()
+      pollStatsStatus()
+    } catch (e: any) {
+      setCollectStatsError(true)
+      setCollectStatsMsg(`Error: ${e.message || 'desconocido'}`)
+      setCollectingStats(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -65,8 +146,21 @@ export default function Dashboard() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 animate-fade-in">
-      {/* Toolbar: Stabilize button + KPIs */}
-      <div className="flex items-center justify-end">
+      {/* Toolbar: Refresh Stats + Stabilize */}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          onClick={handleCollectStats}
+          disabled={collectingStats}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Recolectar estadisticas de YouTube bajo demanda"
+        >
+          {collectingStats ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <RefreshCw size={13} />
+          )}
+          <span>{collectingStats ? 'Recolectando...' : 'Recolectar stats'}</span>
+        </button>
         <button
           onClick={handleStabilize}
           disabled={stabilizing}
@@ -81,6 +175,31 @@ export default function Dashboard() {
           <span>{stabilizing ? 'Estabilizando...' : 'Estabilizar Herramienta'}</span>
         </button>
       </div>
+
+      {/* Stats collection feedback */}
+      {collectStatsMsg && (
+        <div className={`flex items-center justify-between gap-2 text-xs py-1.5 px-3 rounded-md animate-fade-in ${
+          collectStatsError
+            ? 'text-red-400 bg-red-500/10 border border-red-500/20'
+            : collectingStats
+            ? 'text-cyan-400 bg-cyan-500/10 border border-cyan-500/20'
+            : 'text-green-400 bg-green-500/10 border border-green-500/20'
+        }`}>
+          <span className="flex items-center gap-1.5">
+            {collectingStats && <Loader2 size={12} className="animate-spin" />}
+            {collectStatsMsg}
+          </span>
+          {!collectingStats && (
+            <button
+              onClick={() => setCollectStatsMsg(null)}
+              className="opacity-60 hover:opacity-100 transition-opacity"
+              title="Cerrar"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* KPIs Globales */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
@@ -108,6 +227,7 @@ export default function Dashboard() {
           icon={Heart}
           color="text-neon-gold"
           sparkline={kpis?.sparkline_engagement}
+          breakdown={kpis?.engagement?.breakdown}
         />
         <KpiCard
           label="En producción"

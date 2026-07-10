@@ -263,3 +263,66 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     ],
   },
 ]
+
+// ── Promotion / Lifecycle ────────────────────────────────────
+
+export type LifecycleActionType =
+  | 'playlist_add'
+  | 'first_comment'
+  | 'comment_reply_1'
+  | 'comment_reply_2'
+  | 'ctr_check'
+  | 'metadata_reoptimize'
+
+export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
+  playlist_add: 'Añadir a playlists',
+  first_comment: 'Primer comentario',
+  comment_reply_1: 'Responder comentarios (12h)',
+  comment_reply_2: 'Responder comentarios (24h)',
+  ctr_check: 'Análisis de CTR',
+  metadata_reoptimize: 'Reoptimizar metadata',
+}
+
+export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
+  pending: '⏳ Pendiente',
+  executed: '✅ Ejecutado',
+  failed: '❌ Fallido',
+  skipped: '⏭️ Omitido',
+  cancelled: '🚫 Cancelado',
+}
+
+export interface YouTubePlaylist {
+  id: number
+  channel_id: number
+  slug: string
+  yt_playlist_id: string
+  name: string | null
+  playlist_type: 'main' | 'onboarding' | 'thematic'
+  created_at: string
+}
+
+export interface VideoPlaylist {
+  id: number
+  video_id: number
+  playlist_id: number
+  yt_playlist_item_id: string | null
+  playlist_slug: string
+  playlist_name: string | null
+  playlist_type: string
+  yt_playlist_id: string
+  added_at: string
+}
+
+export interface LifecycleActionItem {
+  id: number
+  video_id: number
+  action_type: LifecycleActionType
+  scheduled_for: string | null
+  executed_at: string | null
+  status: 'pending' | 'executed' | 'failed' | 'skipped' | 'cancelled'
+  result_json: string | null
+  error_message: string | null
+  retry_count: number
+  config_json: string | null
+  video_title?: string
+}

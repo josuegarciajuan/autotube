@@ -700,7 +700,7 @@ LOGO_PATH = ""
 # ═══════════════════════════════════════════════════════════════════
 
 YT_CATEGORY_ID = "27"              # Education
-YT_PRIVACY_STATUS = "unlisted"     # Unlisted — review before publishing
+YT_PRIVACY_STATUS = "public"     # Public — upload directly visible
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
@@ -800,6 +800,13 @@ SHORTS_HASHTAGS = [
     "#Documental",
     "#Aventura",
 ]
+
+# ── Cross-promotion ──────────────────────────────────────────
+SHORTS_LONGFORM_LINK_ENABLED = True
+SHORTS_PLAYLIST_AUTO = True
+SHORTS_FIRST_COMMENT_LINK = True
+SHORTS_PER_VIDEO_PLAYLIST = True
+SHORTS_PLAYLIST_NAME = "Shorts"
 
 # ═══════════════════════════════════════════════════════════════════
 # DESCRIPTION TEMPLATE

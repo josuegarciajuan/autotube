@@ -9,15 +9,19 @@ v2.3: Added memory guard watcher for video phase to prevent OOM crashes.
 
 import json
 import logging
+import multiprocessing
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import asyncio
 import concurrent.futures
 import glob as _glob
 import importlib
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 import config.settings as settings
 from database.db_extended import ExtendedDatabase
@@ -25,6 +29,12 @@ from database.db_extended import ExtendedDatabase
 logger = logging.getLogger("autotube.generation")
 
 # ── Ffmpeg orphan killer ──────────────────────────────────────
+# Protects ffmpeg processes belonging to an active render from being
+# killed by a concurrent job's pre-phase cleanup.  See _run_in_executor.
+
+_RENDER_ACTIVE: bool = False  # set True during video phase, False otherwise
+_TTS_ACTIVE: bool = False     # set True during TTS phase, False otherwise (Bug B fix)
+
 
 def _kill_orphaned_ffmpeg():
     """Kill any ffmpeg child processes to prevent RAM leaks after job failure.
@@ -34,24 +44,28 @@ def _kill_orphaned_ffmpeg():
     videos in raw RGB. Uses a 2-layer cleanup targeting only orphans.
     
     1. Kill children of current PID (immediate children of the API process).
+       SKIPPED when a render is active to avoid killing legitimate ffmpeg workers.
     2. Kill ffmpeg processes whose PPID is 1 (true init orphans).
+       Always runs — these are truly orphaned regardless of render state.
     """
     killed = 0
     try:
-        pid = os.getpid()
-        # Layer 1: immediate children of this process
-        result = subprocess.run(
-            ["pgrep", "-P", str(pid), "-f", "ffmpeg"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.stdout.strip():
-            child_pids = result.stdout.strip().split()
-            for cpid in child_pids:
-                try:
-                    os.kill(int(cpid), 9)
-                    killed += 1
-                except ProcessLookupError:
-                    pass
+        # Layer 1: immediate children of this process.
+        # Skip when a render or TTS is active — its ffmpeg workers are legitimate.
+        if not _RENDER_ACTIVE and not _TTS_ACTIVE:
+            pid = os.getpid()
+            result = subprocess.run(
+                ["pgrep", "-P", str(pid), "-f", "ffmpeg"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip():
+                child_pids = result.stdout.strip().split()
+                for cpid in child_pids:
+                    try:
+                        os.kill(int(cpid), 9)
+                        killed += 1
+                    except ProcessLookupError:
+                        pass
     except Exception:
         pass
 
@@ -210,10 +224,10 @@ PHASE_TIMEOUTS = {
     "scrape":   None,   # no global limit — each scraper has its own 8s timeout
     "script":   3600,   # 60 min (sequential block generation with stop_event)
     "tts":      _TTS_PHASE_TIMEOUT,   # configurable, default 6h (Kokoro CPU)
-    "media":    900,    # 15 min (multi-provider + Pollo AI)
+    "media":    1800,   # 30 min (multi-provider + Pollo AI) — raised from 900
     "video":    None,   # infinite (no ceiling for MoviePy rendering)
     "metadata": 300,    # 5 min (LLM)
-    "upload":   1800,   # 30 min (YouTube resumable upload)
+    "upload":   3600,   # 60 min (YouTube resumable upload) — raised from 1800
 }
 
 # ── Global render lock (defense in depth) ────────────────────
@@ -322,6 +336,7 @@ async def _run_in_executor(fn, *args, timeout: int = None, phase: str = None,
     a safety net, not a render-killer.
     """
     loop = asyncio.get_running_loop()
+    global _RENDER_ACTIVE
     future = None
     stop_monitor = asyncio.Event()
     monitor_task = None
@@ -333,7 +348,15 @@ async def _run_in_executor(fn, *args, timeout: int = None, phase: str = None,
         logger.info("Phase '%s' starting: %d MB free RAM", phase_label, start_mem_mb)
     
     # Pre-phase orphan cleanup: kill any leftover ffmpeg processes from prior phases
-    _kill_orphaned_ffmpeg()    
+    _kill_orphaned_ffmpeg()
+    
+    # ── Protect active render ffmpeg workers from concurrent job cleanup ──
+    # When a video-phase render is in progress, _kill_orphaned_ffmpeg() skips
+    # Layer 1 (children of this PID) to avoid killing legitimate ffmpeg workers
+    # that belong to the render (which runs in the same process via thread pool).
+    if phase == "video":
+        _RENDER_ACTIVE = True
+
     async def _memory_monitor():
         """Background task: monitor available RAM and warn if critically low.
         
@@ -438,6 +461,10 @@ async def _run_in_executor(fn, *args, timeout: int = None, phase: str = None,
         return False, str(e)[:300]
         
     finally:
+        # ── Unprotect ffmpeg workers when render phase ends ──
+        if phase == "video":
+            _RENDER_ACTIVE = False
+        
         stop_monitor.set()
         if monitor_task is not None:
             monitor_task.cancel()
@@ -445,6 +472,253 @@ async def _run_in_executor(fn, *args, timeout: int = None, phase: str = None,
                 await monitor_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+async def _run_video_in_subprocess(
+    canal: str,
+    video_id: int,
+    job_id: int,
+    script: dict,
+    audio_data: dict,
+    media_assets: dict,
+    test_mode: bool,
+    orch = None,
+) -> tuple[bool, dict | str]:
+    """Run the video render phase in an isolated subprocess.
+
+    The subprocess runs ``pipeline_worker.run_video_render()`` which
+    executes MoviePy/FFmpeg rendering in its own address space.  When the
+    subprocess dies the OS reclaims **all** memory — no Python heap
+    fragmentation accumulates in the long-lived uvicorn server.
+
+    The parent polls the DB for progress updates written by the worker
+    and broadcasts them via WebSocket.  After the render completes, the
+    parent generates the thumbnail (Pollo AI HTTP call — low memory).
+
+    Returns ``(True, video_data_dict)`` on success or
+    ``(False, error_message)`` on failure — compatible with the existing
+    ``_run_in_executor`` return convention.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    # ── 1. Serialize data for the subprocess ───────────────────
+    # Extract bloques from script (handles both raw JSON string
+    # and already-parsed list).
+    _bloques_raw = script.get("bloques") or script.get("bloques_json", "[]")
+    if isinstance(_bloques_raw, str):
+        bloques_json = _bloques_raw
+    else:
+        bloques_json = _json.dumps(_bloques_raw, ensure_ascii=False)
+
+    # Media assets (always a dict with 'assets' key from checkpoint)
+    _assets_list = media_assets.get("assets", []) if isinstance(media_assets, dict) else (media_assets or [])
+    media_assets_json = _json.dumps(_assets_list, ensure_ascii=False, default=str)
+
+    # Scene ranges (may be None / present in media checkpoint)
+    _ranges = media_assets.get("scene_ranges") if isinstance(media_assets, dict) else None
+    scene_ranges_json = _json.dumps(_ranges, ensure_ascii=False) if _ranges else ""
+
+    # Audio + timestamps (use timestamps_path from checkpoint, fall back to file next to audio)
+    audio_path = str(audio_data.get("audio_path", ""))
+    ts_path = audio_data.get("timestamps_path", "")
+    # Invalidate stored path if file doesn't exist (triggers auto-fallback below).
+    # Fixes B5/B6: orchestrator stores {stem}.json but TTS writes {stem}_timestamps.json.
+    if ts_path and not _Path(ts_path).exists():
+        ts_path = ""
+    if not ts_path and audio_path:
+        _base = _Path(audio_path)
+        for _c in (
+            _base.with_name(f"{_base.stem}_timestamps.json"),
+            _base.with_suffix(".json"),
+        ):
+            if _c.exists():
+                ts_path = str(_c)
+                break
+
+    cta_audio = str(audio_data.get("cta_audio_path", "") or "")
+
+    # ── 2. Spawn subprocess ────────────────────────────────────
+    _bloque_count = 0
+    if bloques_json:
+        try:
+            _bloque_count = len(_json.loads(bloques_json))
+        except Exception:
+            pass
+    logger.info(
+        "Spawning render subprocess: canal=%s video=%d job=%d "
+        "bloques=%d assets=%d test_mode=%s",
+        canal, video_id, job_id, _bloque_count, len(_assets_list), test_mode,
+    )
+
+    ctx = multiprocessing.get_context("spawn")
+    # Use a multiprocessing.Queue so the child can send the result back.
+    result_queue: multiprocessing.Queue = ctx.Queue(maxsize=1)
+
+    from api.services.pipeline_worker import run_video_render
+
+    p = ctx.Process(
+        target=run_video_render,
+        args=(
+            canal, video_id, job_id,
+            bloques_json, media_assets_json,
+            audio_path, ts_path,
+            scene_ranges_json, cta_audio,
+            test_mode, result_queue,
+        ),
+        daemon=False,  # we join() explicitly
+        name=f"autotube-render-{job_id}",
+    )
+    p.start()
+    logger.info("Render subprocess started: PID=%d", p.pid)
+
+    # ── 2b. Release serialized data from parent RAM ────────────
+    # After the subprocess starts, the JSON strings and asset list are
+    # no longer needed in the parent.  Free them immediately so uvicorn
+    # doesn't hold 100+ KB of duplicated data during the render wait.
+    try:
+        del bloques_json, media_assets_json, scene_ranges_json
+        # ⚠️ Keep _assets_list — needed later for thumbnail & scene_images (line ~704)
+        try:
+            del _bloque_count
+        except Exception:
+            pass
+        import gc
+        gc.collect()
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+    except Exception as _cleanup_exc:
+        logger.debug("Post-spawn cleanup: %s", _cleanup_exc)
+
+    # ── 3. Poll DB for progress while the subprocess runs ──────
+    last_pct = 60
+    last_phase = "video"
+    db = _get_db()
+    stop_poll = asyncio.Event()
+
+    async def _poll_loop():
+        nonlocal last_pct, last_phase
+        while not stop_poll.is_set():
+            try:
+                v = db.get_video(video_id)
+                if v:
+                    pct = v.get("progress", 0) or 60
+                    ph = v.get("progress_phase", "") or "video"
+                    if pct != last_pct or ph != last_phase:
+                        await _broadcast_progress(
+                            job_id, pct, ph,
+                            f"Renderizando... {pct}%",
+                            video_id=video_id,
+                        )
+                        last_pct, last_phase = pct, ph
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+    poll_task = asyncio.ensure_future(_poll_loop())
+
+    # ── 4. Wait for subprocess (non-blocking poll) ─────────────
+    _MAX_RENDER_SEC = 28800  # 8h ceiling for very long renders
+    _deadline = time.time() + _MAX_RENDER_SEC
+
+    try:
+        while p.is_alive():
+            if time.time() > _deadline:
+                logger.error("Render subprocess timed out after %ds — killing PID %d",
+                             _MAX_RENDER_SEC, p.pid)
+                p.terminate()
+                await asyncio.sleep(5)
+                if p.is_alive():
+                    p.kill()
+                break
+            await asyncio.sleep(2)
+        p.join(timeout=10)
+    except asyncio.CancelledError:
+        logger.warning("Job cancelled — terminating render subprocess PID %d", p.pid)
+        p.terminate()
+        await asyncio.sleep(3)
+        if p.is_alive():
+            p.kill()
+        p.join(timeout=5)
+        raise  # re-raise so the caller's async with releases the semaphore
+    except Exception:
+        pass
+    finally:
+        stop_poll.set()
+        if not poll_task.done():
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
+
+    # ── 4b. Read Queue result (IPC, more reliable) ──────────────
+    _queue_result = None
+    try:
+        _queue_result = result_queue.get_nowait()
+    except Exception:
+        pass
+    if _queue_result:
+        try:
+            _qr = _json.loads(_queue_result)
+            if _qr.get("success") and _qr.get("video_path"):
+                logger.info("Got video_path from Queue: %s", _qr["video_path"])
+        except Exception:
+            pass
+
+    # ── 5. Collect result ──────────────────────────────────────
+    exit_code = p.exitcode if p.exitcode is not None else -1
+
+    if exit_code == 0:
+        # Read result from DB as primary source (survives parent restart).
+        try:
+            v = db.get_video(video_id)
+            ck_raw = v.get("checkpoint_data", "{}") if v else "{}"
+            ck = _json.loads(ck_raw) if isinstance(ck_raw, str) else (ck_raw or {})
+            video_ck = ck.get("video", {})
+            video_path = video_ck.get("video_path", "")
+            if video_path and _Path(video_path).exists():
+                logger.info("Render subprocess completed: %s", video_path)
+
+                # ── Extract title from script (needed for both paths) ──
+                _titulo_raw = script.get("titulo_options", "[]")
+                if isinstance(_titulo_raw, str):
+                    _titles = _json.loads(_titulo_raw)
+                else:
+                    _titles = _titulo_raw or []
+                _titulo = _titles[0] if _titles else "Sin titulo"
+
+                # ── Return render result (thumbnail generated outside semaphore) ──
+                return True, {
+                    "video_path": video_path,
+                    "thumbnail_path": "",  # thumbnail generated later in start_generation_job
+                    "titulo": _titulo,
+                }
+            else:
+                logger.error("Subprocess exited 0 but no video_path in DB")
+                return False, "Subprocess exited OK but no output file found"
+        except Exception as db_exc:
+            logger.exception("Failed to read subprocess result from DB: %s", db_exc)
+            return False, f"Render subprocess exited OK but DB read failed: {db_exc}"
+    else:
+        # Subprocess failed — try to get error from Queue or DB
+        error_msg = f"Render subprocess exited with code {exit_code}"
+        try:
+            v = db.get_video(video_id)
+            if v and v.get("progress_phase") == "video_failed":
+                error_msg = f"Render subprocess failed (exit={exit_code})"
+        except Exception:
+            pass
+
+        logger.error("Render subprocess failed: exit_code=%d", exit_code)
+
+        # Kill any orphaned ffmpegs left by the dead subprocess
+        _kill_orphaned_ffmpeg()
+
+        return False, error_msg
 
 
 def _phase_index(phase_name: str) -> int:
@@ -537,11 +811,15 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
 
 async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                  action: str, content_id: int = None,
-                                 resume: bool = False, test_mode: bool = False):
+                                 resume: bool = False, test_mode: bool = False,
+                                 upload: bool = True):
     """Run the full pipeline as an async background job.
 
     When test_mode=True: low resolution (480x270), no upload, no effects,
     ultrafast preset — for rapid algorithm validation.
+
+    When upload=False: full quality generation but skip YouTube upload.
+    Video stays in 'ready' status for manual upload later.
     """
     # ── Test-mode guard: reject tests if a production render is active ──
     if test_mode:
@@ -785,7 +1063,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                 timing_data=orch.collect_timing_json())
                 return
             
-            db.update_video(video_id, progress=25, progress_phase="script")
+            db.update_video(video_id, progress=25, progress_phase="script",
+                            script_id=script.get("id"))
             titulo = script.get('titulo_selected', 'Sin titulo')[:60]
             n_escenas = len(script.get("escenas", [])) if isinstance(script.get("escenas"), list) else 0
             await _broadcast_progress(job_id, 25, "script",
@@ -807,11 +1086,15 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                        video_id=video_id)
         else:
             await _broadcast_progress(job_id, 30, "tts", "Generando voz con IA (TTS)...",
-                                       video_id=video_id,
-                                       detail="Procesando texto a voz (puede tardar varios minutos)")
+                                        video_id=video_id,
+                                        detail="Procesando texto a voz (puede tardar varios minutos)")
             
-            ok, audio_data = await _run_in_executor(orch.phase_tts, script, job_id,
-                                                       timeout=PHASE_TIMEOUTS["tts"], phase="tts")
+            _TTS_ACTIVE = True  # Bug B: protect TTS ffmpeg from orphan killer
+            try:
+                ok, audio_data = await _run_in_executor(orch.phase_tts, script, job_id,
+                                                            timeout=PHASE_TIMEOUTS["tts"], phase="tts")
+            finally:
+                _TTS_ACTIVE = False
             if not ok:
                 await _broadcast_progress(job_id, 30, "tts", f"Error TTS: {audio_data}",
                                            "failed", video_id)
@@ -891,9 +1174,9 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                        video_id=video_id,
                                        detail="Combinando audio, imagenes y efectos con MoviePy")
             
-            # Pre-render memory estimation based on audio duration
-            _est_base_gb = 3.0  # base overhead for compositing + ffmpeg
-            _est_rate_gb_per_sec = 8.0 / (1024)  # ~8 MB/sec incremental cost
+            # Pre-render memory gate — check total system RAM before spawning subprocess.
+            _est_base_gb = 3.0
+            _est_rate_gb_per_sec = 8.0 / 1024
             if audio_data and isinstance(audio_data, dict) and audio_data.get("duration"):
                 _est_dur_sec = audio_data["duration"]
                 _est_ram_gb = _est_base_gb + _est_dur_sec * _est_rate_gb_per_sec
@@ -906,27 +1189,57 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 )
                 if _avail_gb and _est_ram_gb > _avail_gb * 0.75:
                     logger.warning(
-                        "⛔ Pre-render memory gate: estimated %.1f GB needed but only %.1f GB available — "
+                        "Pre-render memory gate: estimated %.1f GB needed but only %.1f GB available — "
                         "aborting video phase to prevent OOM",
                         _est_ram_gb, _avail_gb,
                     )
                     await _broadcast_progress(job_id, 60, "video",
-                        f"Abortado: memoria insuficiente (est. {_est_ram_gb:.1f} GB, disp. {_avail_gb:.1f} GB)",
-                        "failed", video_id)
+                        f"Abortado: memoria insuficiente", "failed", video_id)
                     db.update_video(video_id, status="error", progress_phase="video",
                                     timing_data=orch.collect_timing_json())
                     _kill_orphaned_ffmpeg()
                     return
             
-            # v4: Acquire global render lock — only one render at a time
-            # per-scene segment rendering caps RAM per render, but concurrent
-            # renders could still exceed total system memory.
-            async with _RENDER_SEMAPHORE:
-                logger.info("Render lock ACQUIRED for job %d (channel %d)", job_id, channel_id)
-                ok, video_data = await _run_in_executor(orch.phase_video, script, audio_data, media_assets, job_id,
-                                                            timeout=PHASE_TIMEOUTS["video"], phase="video",
-                                                            memory_guard=not test_mode)
-                logger.info("Render lock RELEASED for job %d", job_id)
+            # v4: Acquire global render lock — only one render subprocess at a time.
+            # Per-scene segment rendering caps RAM per render at ~400 MB, but two
+            # concurrent renders could still exceed total system memory.
+            #
+            # ── Pre-lock heartbeat emitter ──────────────────────────
+            # The semaphore may be held by another job's render/thumbnail.
+            # Pulse heartbeats while waiting so the orphan detector (15 min
+            # timeout) doesn't kill this job during lock contention.
+            _hb_lock_stop = threading.Event()
+            _hb_lock_thread = None
+            if job_id is not None:
+                def _hb_lock_loop():
+                    _db = ExtendedDatabase()
+                    while not _hb_lock_stop.is_set():
+                        try:
+                            _db.update_heartbeat(job_id)
+                        except Exception:
+                            pass
+                        _hb_lock_stop.wait(30)
+                _hb_lock_thread = threading.Thread(
+                    target=_hb_lock_loop, daemon=True,
+                    name=f"hb-lock-wait-{job_id}",
+                )
+                _hb_lock_thread.start()
+            try:
+                async with _RENDER_SEMAPHORE:
+                    # Stop lock-wait heartbeat — render subprocess has its own
+                    _hb_lock_stop.set()
+                    logger.info("Render lock ACQUIRED for job %d (channel %d)", job_id, channel_id)
+                    ok, video_data = await _run_video_in_subprocess(
+                        canal=canal, video_id=video_id, job_id=job_id,
+                        script=script, audio_data=audio_data,
+                        media_assets=media_assets, test_mode=test_mode,
+                        orch=orch,
+                    )
+                    logger.info("Render lock RELEASED for job %d", job_id)
+            finally:
+                _hb_lock_stop.set()
+                if _hb_lock_thread is not None and _hb_lock_thread.is_alive():
+                    _hb_lock_thread.join(timeout=2)
             if not ok:
                 await _broadcast_progress(job_id, 60, "video",
                     f"Error en ensamblaje: {video_data}", "failed", video_id)
@@ -940,13 +1253,54 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                 timing_data=orch.collect_timing_json())
                 return
             
+            # ── Post-render thumbnail generation (outside semaphore) ──
+            # Moved here from _run_video_in_subprocess so the render lock is
+            # released before the (potentially slow) Pollo AI HTTP call.
+            # This prevents one channel's thumbnail from blocking another
+            # channel's render.
+            _titulo = video_data.get("titulo", "Sin titulo")
+            try:
+                _keywords_raw = script.get("keywords_json") or script.get("keywords", "[]")
+                if isinstance(_keywords_raw, str):
+                    _keywords = json.loads(_keywords_raw)
+                else:
+                    _keywords = _keywords_raw or []
+
+                _scene_images = []
+                _assets_list = media_assets.get("assets", []) if isinstance(media_assets, dict) else []
+                for a in _assets_list:
+                    if a.get("type") == "image" and a.get("path"):
+                        _scene_images.append([a["path"]])
+
+                thumbnail_path = orch.thumbnail_maker.make_viral_thumbnail(
+                    title=_titulo,
+                    overlay_text="",
+                    keywords=_keywords,
+                    scene_images=_scene_images or [],
+                    script_text=script.get("guion", "")[:1500],
+                    canal_slug=canal,
+                    channel_display_name=getattr(orch.config, "CANAL_DISPLAY_NAME", ""),
+                    channel_description=getattr(orch.config, "CHANNEL_ABOUT_SECTION", ""),
+                    channel_theme=getattr(orch.config, "CANAL_TAGLINE", ""),
+                ) or ""
+                if thumbnail_path:
+                    video_data["thumbnail_path"] = thumbnail_path
+                    logger.info("Thumbnail generated (post-render): %s", thumbnail_path)
+            except Exception as thumb_exc:
+                logger.warning("Thumbnail generation failed (non-fatal): %s", thumb_exc)
+
             db.update_video(video_id, progress=75, progress_phase="video",
                             status="ready")  # video done — panel can display it
-            _save_checkpoint(video_id, "video", {
-                "video_path": video_data.get("video_path", ""),
-                "thumbnail_path": video_data.get("thumbnail_path", ""),
-                "titulo": video_data.get("titulo", ""),
-            })
+            try:
+                _save_checkpoint(video_id, "video", {
+                    "video_path": str(video_data.get("video_path", "")),
+                    "thumbnail_path": str(video_data.get("thumbnail_path", "")),
+                    "titulo": str(video_data.get("titulo", "")),
+                })
+            except Exception as _ck_exc:
+                logger.error("Checkpoint save failed after successful render: %s", _ck_exc)
+                # Don't let checkpoint failure undo a successful render
+                pass
             db.update_video(video_id, timing_data=orch.collect_timing_json())
         
         # Extract duration (always ensure int to avoid format errors downstream)
@@ -1077,12 +1431,15 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                    video_id=video_id,
                                    detail="Thumbnail lista para YouTube")
         
-        # ── Phase 6: Upload (skip in test mode) ──────────────
-        if test_mode:
+        # ── Phase 6: Upload (skip in test mode or when upload=False) ──
+        if test_mode or not upload:
+            skip_reason = "Modo pruebas: " if test_mode else ""
             await _broadcast_progress(job_id, 95, "upload",
-                "Modo pruebas: upload omitido. Video listo localmente.",
+                f"{skip_reason}Upload omitido. Video listo localmente.",
                 "completed", video_id,
-                detail="Video generado en modo pruebas (sin subir a YouTube)")
+                detail=("Video generado en modo pruebas (sin subir a YouTube)"
+                        if test_mode else
+                        "Video generado exitosamente. Listo para subir manualmente."))
             db.update_video(video_id, status="ready", progress=100)
         else:
             await _broadcast_progress(job_id, 90, "upload", "Preparando subida a YouTube...",
@@ -1103,6 +1460,32 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             if video_yt_id:
                 yt_url = f"https://youtube.com/watch?v={video_yt_id}"
                 db.mark_video_uploaded(video_id, video_yt_id, yt_url)
+
+                # ── Post-upload: baseline stats snapshot (0 views/likes, para DB cache) ──
+                try:
+                    db.insert_video_stats(
+                        video_id=video_id,
+                        yt_video_id=video_yt_id,
+                        stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
+                    )
+                    logger.debug(f"[{canal}] Baseline stats saved for video {video_yt_id}")
+                except Exception as stats_exc:
+                    logger.warning(f"[{canal}] Failed to save baseline stats: {stats_exc}")
+
+                # ── Post-upload: schedule lifecycle promotion actions ──
+                try:
+                    from pipeline.video_lifecycle import VideoLifecycleManager
+                    lifecycle = VideoLifecycleManager(canal)
+                    script_text_for_lifecycle = script.get("script_text") or script.get("texto_completo", "")
+                    lifecycle.on_video_published(
+                        db_video_id=video_id,
+                        yt_video_id=video_yt_id,
+                        channel_id=channel_id,
+                        script_text=script_text_for_lifecycle,
+                    )
+                    logger.info(f"[{canal}] Lifecycle actions scheduled for video {video_yt_id}")
+                except Exception as lifecycle_exc:
+                    logger.warning(f"[{canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
             
                 video_path = video_data.get("video_path", "")
                 if video_path and Path(video_path).exists():
@@ -1179,7 +1562,14 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
         except Exception:
             pass
         gc.collect()
-        logger.info("Job %d cleanup complete: orchestrator released + gc.collect()", job_id)
+        # Force glibc to return freed pages to the OS (Python never does).
+        # Without this the RSS of the uvicorn process only grows over time.
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        logger.info("Job %d cleanup complete: orchestrator released + gc.collect() + malloc_trim", job_id)
 
 
 async def start_upload_job(job_id: int, video_id: int):
@@ -1232,7 +1622,7 @@ async def start_upload_job(job_id: int, video_id: int):
                 description=v.get("description", ""),
                 tags=tags,
                 thumbnail_path=Path(v["thumbnail_path"]) if v.get("thumbnail_path") else None,
-                privacy=v.get("privacy_status", "unlisted"),
+                privacy=v.get("privacy_status", "public"),
             )
         
         ok, result = await _run_in_executor(_do_upload, timeout=PHASE_TIMEOUTS["upload"])
@@ -1327,7 +1717,6 @@ async def _run_reassembly_job(job_id: int, video_id: int):
 async def _do_reassembly(job_id: int, video_id: int):
     import json, time
     from pathlib import Path
-    from pipeline.video_editor import VideoEditor
     from config.config_bridge import get_channel_config
 
     db = _get_db()
@@ -1378,9 +1767,14 @@ async def _do_reassembly(job_id: int, video_id: int):
                                        f"Audio no encontrado: {audio_path}", "failed")
             return
 
-        # Timestamps
+        # Timestamps (used for detail message and audio duration estimate)
         ts_path = Path(str(audio_path).replace(".mp3", "_timestamps.json"))
-        timestamps = json.loads(ts_path.read_text()) if ts_path.exists() else []
+        timestamps = []
+        try:
+            if ts_path.exists():
+                timestamps = json.loads(ts_path.read_text())
+        except Exception as _ts_exc:
+            logger.warning("Failed to load timestamps from %s: %s", ts_path, _ts_exc)
 
         # Media
         media_cp = cp.get("media", {})
@@ -1391,9 +1785,8 @@ async def _do_reassembly(job_id: int, video_id: int):
                                        "No hay assets en el checkpoint", "failed")
             return
 
-        # Channel config
+        # Channel config / slug
         canal = video.get("canal", "canal2")
-        config = get_channel_config(canal)
     except Exception as e:
         logger.exception("Reassembly data load failed")
         await _broadcast_progress(job_id, 0, "error", f"Error cargando datos: {e}", "failed")
@@ -1404,59 +1797,54 @@ async def _do_reassembly(job_id: int, video_id: int):
                                video_id=video_id,
                                detail=f'Audio: {len(timestamps)} timestamps, {Path(audio_path).stat().st_size / 1e6:.1f} MB')
 
-    # ── Phase 2: Build video ──────────────────────────────────
+    # ── Phase 2: Build video (subprocess, not thread) ─────────
     await _broadcast_progress(job_id, 20, "video", "Construyendo escenas...",
-                               video_id=video_id,
-                               detail=f"Procesando {len(scene_ranges) if scene_ranges else len(bloques)} escenas")
+                                video_id=video_id,
+                                detail=f"Procesando {len(scene_ranges) if scene_ranges else len(bloques)} escenas")
 
     try:
-        def _build_video():
-            ve = VideoEditor(config)
-            return ve.build_video(
-                bloques=bloques,
-                media_assets=assets,
-                audio_path=audio_path,
-                timestamps=timestamps,
-                scene_ranges=scene_ranges,
-                cta_audio_path=tts_cp.get("cta_audio_path"),
+        # Build structures compatible with _run_video_in_subprocess
+        _script = {
+            "bloques": bloques,  # already-parsed list
+            "guion": script.get("guion", ""),
+            "titulo_options": json.dumps(titulo_options, ensure_ascii=False),
+            "keywords_json": script.get("keywords_json", json.dumps([])),
+        }
+        _audio = {
+            "audio_path": audio_path,
+            "timestamps_path": "",  # worker auto-detects from audio_path
+            "cta_audio_path": tts_cp.get("cta_audio_path", ""),
+            "duration": int(timestamps[-1].get("end", 0)) if timestamps else 0,
+        }
+        _media = {
+            "assets": assets,
+            "scene_ranges": scene_ranges,
+        }
+
+        async with _RENDER_SEMAPHORE:
+            ok, video_data = await _run_video_in_subprocess(
+                canal=canal, video_id=video_id, job_id=job_id,
+                script=_script, audio_data=_audio,
+                media_assets=_media, test_mode=False,
+                orch=None,  # reassembly — no thumbnail
             )
+        if not ok or not video_data or not isinstance(video_data, dict):
+            raise RuntimeError(video_data if isinstance(video_data, str) else "Render subprocess failed")
 
-        # Run in a thread — build_video() is blocking
-        import concurrent.futures
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, _build_video)
+        output_path = video_data.get("video_path", "")
+        if not output_path or not Path(output_path).exists():
+            raise RuntimeError(f"No output file produced: {output_path}")
 
-        # Poll progress every 10s while rendering
-        start = time.time()
-        last_pct = 20
-        while not future.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(future), timeout=10)
-            except asyncio.TimeoutError:
-                elapsed = time.time() - start
-                # Estimate: assume ~3 fps for a 24fps video = ~2h for 24k frames
-                # Show elapsed time as fallback detail
-                await _broadcast_progress(
-                    job_id, last_pct, "video",
-                    "Renderizando video (MoviePy)...",
-                    video_id=video_id,
-                    detail=f"Render en progreso ({elapsed:.0f}s transcurridos)"
-                )
-                last_pct = min(last_pct + 5, 90)
-
-        output_path = future.result()
-
-        elapsed = time.time() - start
         await _broadcast_progress(job_id, 95, "video",
-                                   f"Video renderizado en {elapsed:.0f}s",
-                                   video_id=video_id,
-                                   detail=f"Archivo: {Path(output_path).name}")
+                                    "Video renderizado correctamente",
+                                    video_id=video_id,
+                                    detail=f"Archivo: {Path(output_path).name}")
 
     except Exception as e:
         logger.exception("Video build failed")
         await _broadcast_progress(job_id, 0, "error",
-                                   f"Error ensamblando video: {e}", "failed",
-                                   video_id=video_id)
+                                    f"Error ensamblando video: {e}", "failed",
+                                    video_id=video_id)
         db.update_video(video_id, status="error", progress_phase="video")
         return
 
@@ -1645,7 +2033,7 @@ async def auto_recover_on_startup():
             cp = {}
 
         # Must have tts + media to reassemble
-        if not cp.get("tts") or not cp.get("media"):
+        if not cp.get("tts") or not isinstance(cp.get("tts"), dict) or not cp.get("media"):
             log.info("Video %d: no tts/media in checkpoint — not recoverable", video_id)
             unrecoverable += 1
             continue
@@ -1707,3 +2095,365 @@ async def auto_recover_on_startup():
 
     log.info("Startup recovery complete: %d bug(s) skipped, %d recovered, %d unrecoverable",
              bugs_skipped, recovered, unrecoverable)
+
+
+# ── Subprocess-based generation (survives API restarts) ──────────
+
+# Tracks running worker subprocesses: {job_id: subprocess.Popen}
+_active_workers: dict[int, subprocess.Popen] = {}
+
+
+def _get_worker_script() -> Path:
+    """Return the absolute path to the full pipeline worker script."""
+    return Path(__file__).parent / "full_pipeline_worker.py"
+
+
+async def start_generation_job_subprocess(
+    job_id: int, channel_id: int, video_id: int,
+    action: str, test_mode: bool = False, upload: bool = True,
+) -> subprocess.Popen:
+    """Spawn the pipeline as an independent subprocess that survives API restarts.
+
+    Unlike ``start_generation_job`` which runs the pipeline inside the
+    uvicorn process, this spawns ``full_pipeline_worker.py`` as a
+    completely independent OS process with ``start_new_session=True``.
+
+    The worker writes progress to the database.  A background monitor task
+    polls the DB and broadcasts progress via WebSocket.
+
+    Returns the ``subprocess.Popen`` object for lifecycle tracking.
+    """
+    db = _get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        await _broadcast_progress(job_id, 0, "error", "Canal no encontrado", "failed")
+        raise ValueError(f"Channel {channel_id} not found")
+
+    canal = ch["slug"]
+    channel_name = ch.get("name", canal)
+
+    # ── Guard: don't spawn if a job is already running for this channel ──
+    active = db.get_active_job()
+    if active and active["id"] != job_id:
+        logger.warning(
+            "Subprocess spawn blocked: active job #%d is running for channel %d",
+            active["id"], channel_id,
+        )
+        await _broadcast_progress(
+            job_id, 0, "blocked",
+            f"Ya hay un job activo (#{active['id']}). Espera a que termine.",
+            "failed", video_id,
+            detail="No se puede iniciar otro job mientras hay uno en curso",
+        )
+        db.update_job(job_id, status="failed",
+                      error_msg="Active job already running")
+        return None
+
+    # ── Build command ─────────────────────────────────────────
+    worker_script = _get_worker_script()
+    cmd = [
+        sys.executable, str(worker_script),
+        "--job-id", str(job_id),
+        "--channel-id", str(channel_id),
+        "--video-id", str(video_id),
+        "--action", action,
+    ]
+    if test_mode:
+        cmd.append("--test-mode")
+    if not upload:
+        cmd.append("--no-upload")
+
+    # ── Spawn worker ──────────────────────────────────────────
+    log_path = settings.LOGS_DIR / f"worker_{job_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            start_new_session=True,     # Survive parent (API) death
+            stdout=open(log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as exc:
+        logger.error("Failed to spawn worker subprocess: %s", exc)
+        await _broadcast_progress(
+            job_id, 0, "error",
+            f"Error al iniciar worker: {exc}", "failed", video_id,
+        )
+        db.update_job(job_id, status="failed",
+                      error_msg=f"Subprocess spawn failed: {exc}")
+        return None
+
+    # Track the worker
+    _active_workers[job_id] = proc
+    logger.info(
+        "Worker spawned: job=%d pid=%d channel=%s session=new",
+        job_id, proc.pid, canal,
+    )
+
+    # ── Update job status ─────────────────────────────────────
+    db.update_job(job_id, status="running",
+                  started_at=datetime.now(timezone.utc).isoformat())
+
+    await _broadcast_progress(
+        job_id, 1, "inicio",
+        f"Iniciando generacion para {channel_name} (worker pid={proc.pid})...",
+        video_id=video_id,
+        detail="Worker independiente iniciado — los cambios en la API no afectaran la generacion",
+    )
+
+    # ── Launch progress monitor ───────────────────────────────
+    asyncio.create_task(_monitor_worker_progress(
+        job_id=job_id, video_id=video_id, proc=proc,
+        channel_name=channel_name,
+    ))
+
+    return proc
+
+
+async def _monitor_worker_progress(
+    job_id: int, video_id: int, proc: subprocess.Popen,
+    channel_name: str = "",
+):
+    """Poll the database for worker progress and broadcast via WebSocket.
+
+    Runs as a background asyncio task. When the worker completes (process exits
+    or job status changes), sends the final status via WebSocket and cleans up.
+    """
+    db = _get_db()
+
+    last_progress = -1
+    last_phase = ""
+    poll_interval = 2.0  # seconds — fast enough for responsive UI
+
+    logger.info("Progress monitor started for job #%d (worker pid=%d)", job_id, proc.pid)
+
+    try:
+        while True:
+            await asyncio.sleep(poll_interval)
+
+            # Check if the worker process is still alive
+            poll_result = proc.poll()
+            process_alive = poll_result is None
+
+            # Read job status from DB
+            try:
+                job = db.get_job(job_id)
+            except Exception:
+                job = None
+
+            # Read video progress from DB
+            try:
+                video = db.get_video(video_id)
+            except Exception:
+                video = None
+
+            current_progress = video.get("progress", 0) if video else 0
+            current_phase = video.get("progress_phase", "") if video else ""
+            current_status = video.get("status", "") if video else ""
+
+            # Detect progress changes and broadcast
+            if (current_progress != last_progress or current_phase != last_phase):
+                last_progress = current_progress
+                last_phase = current_phase
+
+                # Build a human-readable message
+                phase_messages = {
+                    "scrape": "Buscando nuevo contenido...",
+                    "script": "Generando guion con IA...",
+                    "tts": "Generando voz con IA (TTS)...",
+                    "media": "Buscando imagenes y videos...",
+                    "video": "Ensamblando video (MoviePy)...",
+                    "metadata": "Generando metadatos SEO...",
+                    "upload": "Subiendo a YouTube...",
+                    "inicio": "Iniciando pipeline...",
+                    "error": "Error en la generacion",
+                }
+                message = phase_messages.get(
+                    current_phase,
+                    f"Procesando: {current_phase}" if current_phase else "Procesando...",
+                )
+
+                status = None
+                if current_status == "error":
+                    status = "failed"
+                    message = f"Error: {message}"
+                elif current_status == "ready" and current_progress >= 100:
+                    status = "completed"
+                    message = "Video generado exitosamente (local)"
+                elif current_status == "uploaded":
+                    status = "completed"
+                    message = "Video subido a YouTube exitosamente"
+
+                await _broadcast_progress(
+                    job_id, current_progress, current_phase,
+                    message, status, video_id,
+                    detail=f"Worker pid={proc.pid} | {current_phase}",
+                )
+
+            # Check if job is done (terminal status in DB)
+            job_status = job.get("status", "") if job else ""
+            is_terminal = job_status in ("completed", "failed", "cancelled")
+
+            # If process died but DB doesn't know yet, mark as failed
+            if not process_alive and not is_terminal:
+                exit_code = proc.returncode
+                logger.warning(
+                    "Worker pid=%d exited with code %d before DB update — marking as failed",
+                    proc.pid, exit_code,
+                )
+                db.update_job(job_id, status="failed",
+                              error_msg=f"Worker exited with code {exit_code}")
+                db.update_video(video_id, status="error", progress_phase="worker_died")
+                await _broadcast_progress(
+                    job_id, last_progress, "error",
+                    f"Worker termino inesperadamente (exit code={exit_code})",
+                    "failed", video_id,
+                    detail="El proceso de generacion termino de forma inesperada",
+                )
+                break
+
+            if is_terminal:
+                logger.info(
+                    "Worker job #%d reached terminal status: %s (exit_code=%s)",
+                    job_id, job_status,
+                    proc.returncode if not process_alive else "still running",
+                )
+                break
+
+    except asyncio.CancelledError:
+        logger.info("Progress monitor cancelled for job #%d", job_id)
+    except Exception as exc:
+        logger.error("Progress monitor for job #%d crashed: %s", job_id, exc)
+    finally:
+        # Cleanup: remove from tracking
+        _active_workers.pop(job_id, None)
+
+        # If worker is still running after terminal DB status, log but DON'T kill it.
+        # The worker might have updated the DB before the API detected the terminal status,
+        # or the DB status might be stale. Let the worker finish on its own.
+        if proc.poll() is None:
+            logger.info(
+                "Worker pid=%d still alive after job #%d monitor exit — letting it finish naturally",
+                proc.pid, job_id,
+            )
+
+        logger.info("Progress monitor stopped for job #%d", job_id)
+
+
+def get_active_workers() -> dict:
+    """Return snapshot of currently running worker subprocesses.
+
+    Returns dict: ``{job_id: {"pid": int, "alive": bool}}``
+    """
+    return {
+        jid: {
+            "pid": proc.pid,
+            "alive": proc.poll() is None if proc else False,
+        }
+        for jid, proc in _active_workers.items()
+    }
+
+
+# ── Config for switching between in-process vs subprocess modes ──
+# Set to True to use the independent subprocess worker (survives API restarts).
+# Set to False to use the original in-process generation (legacy behavior).
+# Default: True (subprocess mode) — safe for development with hot-reload.
+
+USE_SUBPROCESS_WORKER: bool = getattr(
+    settings, "USE_SUBPROCESS_WORKER", True
+)
+
+
+# ── Worker reconnection on API restart ────────────────────────────
+
+async def reconnect_active_workers():
+    """Re-spawn progress monitors for workers that survived an API restart.
+
+    Called from api/main.py lifespan on startup. Finds jobs with status
+    "running" that have an active worker subprocess, and creates a new
+    progress monitor for each. This ensures the WebSocket gets progress
+    updates even after the API was restarted mid-generation.
+    """
+    if not USE_SUBPROCESS_WORKER:
+        return
+
+    try:
+        db = _get_db()
+        running_jobs = db.get_active_jobs()
+        running_jobs = [j for j in running_jobs if j["status"] == "running"]
+
+        if not running_jobs:
+            return
+
+        # Check if there's an actual worker process for each running job
+        for job in running_jobs:
+            job_id = job["id"]
+            video_id = job.get("video_id") or 0
+
+            # Look for a running worker process associated with this job
+            worker_found = False
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.stdout.strip():
+                    worker_pid = int(result.stdout.strip().split()[0])
+                    worker_found = True
+                    logger.info(
+                        "Reconnecting to worker: job=%d pid=%d (survived API restart)",
+                        job_id, worker_pid,
+                    )
+
+                    # Create a Popen object for the existing process
+                    # We can't create a real Popen for an existing process,
+                    # but we can track it with a simple wrapper
+                    class _ExistingProcess:
+                        def __init__(self, pid):
+                            self.pid = pid
+                        def poll(self):
+                            try:
+                                os.kill(self.pid, 0)
+                                return None  # Still alive
+                            except (ProcessLookupError, PermissionError):
+                                return -1  # Dead
+                        def wait(self, timeout=None):
+                            import time as _t
+                            for _ in range(int(timeout or 10)):
+                                if self.poll() is not None:
+                                    return
+                                _t.sleep(1)
+
+                    proc = _ExistingProcess(worker_pid)
+                    _active_workers[job_id] = proc
+
+                    # Get channel name
+                    ch = db.get_channel(job.get("channel_id") or 1)
+                    channel_name = ch.get("name", "?") if ch else "?"
+
+                    # Re-spawn the progress monitor
+                    asyncio.create_task(_monitor_worker_progress(
+                        job_id=job_id, video_id=video_id, proc=proc,
+                        channel_name=channel_name,
+                    ))
+
+            except Exception as exc:
+                logger.debug("Worker reconnection check for job %d: %s", job_id, exc)
+
+            if not worker_found:
+                # Job says "running" but no worker process exists
+                # Worker might have crashed — mark as failed
+                logger.warning(
+                    "Job #%d marked as running but no worker process found — marking failed",
+                    job_id,
+                )
+                db.update_job(job_id, status="failed",
+                              error_msg="Worker process not found after API restart")
+                db.update_video(video_id, status="error", progress_phase="orphaned")
+
+        if _active_workers:
+            logger.info("Reconnected to %d active worker(s) after API restart", len(_active_workers))
+
+    except Exception as exc:
+        logger.warning("Worker reconnection failed: %s", exc)

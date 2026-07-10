@@ -57,7 +57,7 @@ export const api = {
   getVideo: (id: number) => request<any>(`/videos/${id}`),
   updateVideo: (id: number, data: any) => request<any>(`/videos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteVideo: (id: number) => request<any>(`/videos/${id}`, { method: 'DELETE' }),
-  generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean }) =>
+  generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean; upload?: boolean }) =>
     request<any>('/videos/generate', { method: 'POST', body: JSON.stringify(data) }),
   uploadVideo: (id: number) => request<any>(`/videos/${id}/upload`, { method: 'POST' }),
   regenerateThumbnail: (id: number) => request<any>(`/videos/${id}/regenerate-thumbnail`, { method: 'POST' }),
@@ -99,6 +99,8 @@ export const api = {
   getStats: () => request<any>('/stats'),
   getDashboard: () => request<any>('/dashboard'),
   getAllChannelStats: () => request<any>('/channels/stats-summary'),
+  collectStats: () => request<any>('/stats/collect', { method: 'POST' }),
+  getStatsCollectStatus: () => request<any>('/stats/collect/status'),
   getLogs: (channelId?: number) => request<any[]>(`/logs${channelId ? `?channel_id=${channelId}` : ''}`),
 
   // Marketing AI
@@ -154,9 +156,16 @@ export const api = {
 
   // Shorts Planning
   getShortsPlanningConfig: () => request<any[]>('/planning/shorts-config'),
-  updateShortsPlanningConfig: (channelId: number, data: any) =>
+  updateShortsPlanningConfig: (channelId: number, data: { shorts_enabled?: boolean; shorts_native_per_day?: number; shorts_clip_per_day?: number }) =>
     request<any>(`/planning/shorts-config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   replanShorts: () => request<any>('/planning/shorts-replan', { method: 'POST' }),
+
+  // Shorts slots
+  getShortsSlotsToday: () => request<any>('/planning/shorts-slots/today'),
+  getShortsSlotsWeek: (channelId?: number) => {
+    const params = channelId ? `?channel_id=${channelId}` : ''
+    return request<any>(`/planning/shorts-slots/week${params}`)
+  },
 
   // System
   stabilizeSystem: () => request<any>('/system/stabilize', { method: 'POST' }),
@@ -184,6 +193,38 @@ export const api = {
     request<any>(`/videos/${videoId}/analytics`),
   getChannelsComparison: () =>
     request<any>('/analytics/comparison'),
+
+  // ── Promotion / Lifecycle ──
+  // Playlists
+  getChannelPlaylists: (channelId: number) =>
+    request<any[]>(`/channels/${channelId}/playlists`),
+  syncChannelPlaylists: (channelId: number) =>
+    request<any>(`/channels/${channelId}/playlists/sync`, { method: 'POST' }),
+  getVideoPlaylists: (videoId: number) =>
+    request<any[]>(`/videos/${videoId}/playlists`),
+  addVideoToPlaylists: (videoId: number) =>
+    request<any>(`/videos/${videoId}/add-to-playlists`, { method: 'POST' }),
+
+  // Lifecycle
+  getVideoLifecycle: (videoId: number) =>
+    request<any[]>(`/videos/${videoId}/lifecycle`),
+  getChannelLifecycleRecent: (channelId: number, limit = 30) =>
+    request<any[]>(`/channels/${channelId}/lifecycle/recent?limit=${limit}`),
+  triggerLifecycleAction: (videoId: number, actionType: string) =>
+    request<any>(`/videos/${videoId}/lifecycle/trigger`, {
+      method: 'POST',
+      body: JSON.stringify({ action_type: actionType }),
+    }),
+
+  // Comments
+  postFirstComment: (videoId: number) =>
+    request<any>(`/videos/${videoId}/post-first-comment`, { method: 'POST' }),
+  replyToComments: (videoId: number) =>
+    request<any>(`/videos/${videoId}/reply-comments`, { method: 'POST' }),
+
+  // Metadata
+  reoptimizeMetadata: (videoId: number) =>
+    request<any>(`/videos/${videoId}/reoptimize-metadata`, { method: 'POST' }),
 };
 
 /** Format seconds to mm:ss */
@@ -193,17 +234,17 @@ export function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-/** Format date string */
+/** Format date string — DB stores server local time (Europe/Madrid) */
 export function formatDate(dateStr: string | null): string {
   if (!dateStr) return '-';
-  const d = new Date(dateStr);
+  const d = new Date(dateStr.replace(' ', 'T'));
   return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
-/** Format date + time */
+/** Format date + time — DB stores server local time (Europe/Madrid) */
 export function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return '-';
-  const d = new Date(dateStr);
+  const d = new Date(dateStr.replace(' ', 'T'));
   return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 

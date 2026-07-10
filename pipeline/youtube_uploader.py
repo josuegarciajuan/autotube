@@ -330,7 +330,7 @@ class YouTubeUploader:
         tags: list[str] | None = None,
         thumbnail_path: Path | None = None,
         category_id: str = "22",
-        privacy: str = "unlisted",
+        privacy: str = "public",
         language: str = "es",
         heartbeat_callback=None,
     ) -> dict:
@@ -437,7 +437,7 @@ class YouTubeUploader:
         video_path: Path,
         script: dict,
         thumbnail_path: Path | None = None,
-        privacy: str = "unlisted",
+        privacy: str = "public",
     ) -> dict:
         """Convenience: upload with metadata from script JSON.
 
@@ -460,6 +460,58 @@ class YouTubeUploader:
             category_id=category,
             privacy=privacy,
         )
+
+    def update_description(self, video_id: str, description: str) -> dict:
+        """Update the description of an existing YouTube video.
+
+        Uses videos().update() — quota cost: 50 units.
+
+        Returns {updated: True, yt_video_id: str} or raises HttpError.
+        """
+        service = self._get_service()
+
+        body = {
+            "id": video_id,
+            "snippet": {
+                "description": description[:5000],
+            },
+        }
+
+        service.videos().update(
+            part="snippet",
+            body=body,
+        ).execute()
+
+        logger.info("[%s] Description updated for video %s", self.channel_slug, video_id)
+        return {"updated": True, "yt_video_id": video_id}
+
+    def set_privacy(self, video_id: str, privacy: str) -> dict:
+        """Update the privacy status of an existing YouTube video.
+
+        Valid privacy values: 'public', 'unlisted', 'private'.
+        Uses videos().update() — quota cost: 50 units.
+
+        Returns {updated: True, yt_video_id: str, privacy: str} or raises HttpError.
+        """
+        if privacy not in ("public", "unlisted", "private"):
+            raise ValueError(f"Invalid privacy status: {privacy}. Must be 'public', 'unlisted', or 'private'.")
+
+        service = self._get_service()
+
+        body = {
+            "id": video_id,
+            "status": {
+                "privacyStatus": privacy,
+            },
+        }
+
+        service.videos().update(
+            part="status",
+            body=body,
+        ).execute()
+
+        logger.info("[%s] Privacy set to %s for video %s", self.channel_slug, privacy, video_id)
+        return {"updated": True, "yt_video_id": video_id, "privacy": privacy}
 
     # ── Thumbnail ───────────────────────────────────────────────
 
@@ -608,6 +660,13 @@ class YouTubeUploader:
                 return
                 
             except HttpError as exc:
+                # Quota exceeded / access errors: log warning and skip verification
+                if exc.resp.status in (403, 429):
+                    logger.warning(
+                        "Post-upload verification skipped (HTTP %s, likely quota): %s",
+                        exc.resp.status, str(exc)[:200],
+                    )
+                    return  # Upload succeeded, verification unavailable — proceed
                 if attempt < POST_UPLOAD_VERIFY_RETRIES:
                     logger.info(
                         "Post-upload verification attempt %d/%d: HTTP %s, retrying...",
@@ -753,7 +812,7 @@ class YouTubeUploader:
             return
         try:
             canal_name = self._get_config_attr("CANAL_NAME", self.channel_slug or "unknown")
-            privacy_status = self._get_config_attr("YT_PRIVACY_STATUS", "unlisted")
+            privacy_status = self._get_config_attr("YT_PRIVACY_STATUS", "public")
             video_db_id = self.db.insert_video(
                 script_id=None,
                 canal=canal_name,

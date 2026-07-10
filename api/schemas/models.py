@@ -38,7 +38,7 @@ class ChannelConfig(BaseModel):
 
     # YouTube Metadata
     yt_category_id: str = "27"
-    yt_privacy_status: str = "unlisted"
+    yt_privacy_status: str = "public"
     yt_default_tags: list[str] = Field(default_factory=list)
     description_template: str = ""
 
@@ -147,6 +147,7 @@ class VideoGenerateRequest(BaseModel):
     action: str = "generate_and_upload"
     content_id: Optional[int] = None
     test_mode: bool = False  # fast-test: low res, no upload, no effects
+    upload: bool = True  # si False, genera el video sin subir a YouTube
 
 
 class VideoUpdate(BaseModel):
@@ -173,7 +174,7 @@ class VideoResponse(BaseModel):
     tags_json: Optional[str] = None
     title_options: Optional[str] = None
     duracion_seg: Optional[int] = None
-    privacy_status: str = "unlisted"
+    privacy_status: str = "public"
     status: str = "draft"
     progress: int = 0
     progress_phase: Optional[str] = None

@@ -3,7 +3,7 @@
 Tests cover:
 - ShortsScheduler: CRUD, scheduling logic, stats
 - ShortsExtractor: LLM response parsing, timestamp formatting, JSON extraction
-- ShortsRenderer: FFmpeg command building, text filter generation
+- ShortsRenderer: SRT subtitle generation, resolution constants, FFmpeg escaping
 """
 
 import json
@@ -16,7 +16,12 @@ import pytest
 
 from pipeline.shorts_scheduler import ShortsScheduler, DEFAULT_CLIP_SCHEDULE
 from pipeline.shorts_extractor import ShortsExtractor
-from pipeline.shorts_renderer import ShortsRenderer
+from pipeline.shorts_renderer import (
+    ShortsRenderer,
+    _ms_to_srt_time,
+    _timestamps_to_srt,
+    _esc_ffmpeg,
+)
 
 
 # ── Fixtures ────────────────────────────────────────────────────
@@ -372,40 +377,126 @@ class TestShortsExtractor:
 # ── ShortsRenderer ────────────────────────────────────────────────
 
 class TestShortsRenderer:
-    """Tests for ShortsRenderer: FFmpeg filter construction, text building."""
+    """Tests for ShortsRenderer: SRT generation, escaping, constants."""
 
-    def test_build_text_filter_single_line(self):
-        """Single line text filter is well-formed drawtext."""
-        renderer = ShortsRenderer()
-        lines = ["Este es un hook de prueba"]
-        result = renderer._build_text_filter(lines, 1)
+    # ── _ms_to_srt_time ────────────────────────────────────────
 
-        assert "drawtext=" in result
-        assert "fontsize=68" in result
-        assert "fontcolor=white" in result
-        assert "box=1" in result
+    def test_ms_to_srt_time_zero(self):
+        """0ms → 00:00:00,000."""
+        assert _ms_to_srt_time(0) == "00:00:00,000"
 
-    def test_build_text_filter_multi_line(self):
-        """Multi-line text includes all lines."""
-        renderer = ShortsRenderer()
-        lines = ["Primera linea de texto", "Segunda linea aqui", "Tercera linea"]
-        result = renderer._build_text_filter(lines, 3)
+    def test_ms_to_srt_time_one_second(self):
+        """1000ms → 00:00:01,000."""
+        assert _ms_to_srt_time(1000) == "00:00:01,000"
 
-        assert "Primera linea" in result
-        assert "Segunda linea" in result
-        assert "Tercera linea" in result
+    def test_ms_to_srt_time_one_minute(self):
+        """60000ms → 00:01:00,000."""
+        assert _ms_to_srt_time(60_000) == "00:01:00,000"
 
-    def test_build_text_filter_empty(self):
-        """Empty lines return null filter."""
-        renderer = ShortsRenderer()
-        result = renderer._build_text_filter([], 0)
-        assert result == "null"
+    def test_ms_to_srt_time_one_hour(self):
+        """3600000ms → 01:00:00,000."""
+        assert _ms_to_srt_time(3_600_000) == "01:00:00,000"
+
+    def test_ms_to_srt_time_with_millis(self):
+        """61234ms → 00:01:01,234."""
+        assert _ms_to_srt_time(61234) == "00:01:01,234"
+
+    # ── _timestamps_to_srt ─────────────────────────────────────
+
+    def test_timestamps_to_srt_empty(self):
+        """Empty timestamps list returns empty string."""
+        assert _timestamps_to_srt([]) == ""
+
+    def test_timestamps_to_srt_single_word(self):
+        """Single word produces one SRT block."""
+        ts = [{"word": "Hola", "start_ms": 100, "end_ms": 500}]
+        srt = _timestamps_to_srt(ts)
+        assert "1\n" in srt
+        assert "00:00:00,100 --> 00:00:00,500" in srt
+        assert "Hola" in srt
+
+    def test_timestamps_to_srt_groups_words(self):
+        """Words within 200ms gap are grouped into the same block."""
+        ts = [
+            {"word": "El", "start_ms": 0, "end_ms": 150},
+            {"word": "misterio", "start_ms": 200, "end_ms": 500},  # gap=50ms (<200)
+            {"word": "continúa", "start_ms": 2000, "end_ms": 2500},  # gap=1500ms (>200)
+        ]
+        srt = _timestamps_to_srt(ts)
+        # First block: "El misterio"
+        assert "El misterio" in srt
+        # Second block: "continúa"
+        assert "continúa" in srt
+        # Should have exactly 2 subtitle blocks (N blocks → N-1 \n\n separators)
+        assert srt.count("\n\n") == 1
+        assert "1\n" in srt and "2\n" in srt  # both indices present
+
+    def test_timestamps_to_srt_respects_max_chars(self):
+        """Group stops when accumulated text exceeds 42 chars."""
+        words = [{"word": f"palabra{i}", "start_ms": i * 100, "end_ms": i * 100 + 90} for i in range(20)]
+        srt = _timestamps_to_srt(words)
+        # Each "palabra0 palabra1..." is 10+1=11 chars → max 3-4 words per block
+        # With 20 words we expect multiple blocks (>1)
+        assert srt.count("\n\n") > 1
+
+    def test_timestamps_to_srt_respects_gap_threshold(self):
+        """200ms gap threshold triggers a new subtitle block."""
+        ts = [
+            {"word": "Uno", "start_ms": 0, "end_ms": 100},
+            {"word": "Dos", "start_ms": 500, "end_ms": 600},  # gap=400ms > 200
+        ]
+        srt = _timestamps_to_srt(ts)
+        # 2 blocks → 1 separator
+        assert srt.count("\n\n") == 1
+        assert "Uno" in srt
+        assert "Dos" in srt
+        assert "1\n" in srt and "2\n" in srt
+
+    # ── _esc_ffmpeg ────────────────────────────────────────────
+
+    def test_esc_ffmpeg_single_quote(self):
+        """Single quotes are escaped for FFmpeg filter values."""
+        result = _esc_ffmpeg("texto con 'comilla' adentro")
+        assert "\\\\\\'" in result  # escaped single quote
+
+    def test_esc_ffmpeg_colon(self):
+        """Colons are escaped."""
+        result = _esc_ffmpeg("C:\\path")
+        assert "\\\\:" in result
+
+    def test_esc_ffmpeg_plain_text(self):
+        """Plain text without special chars is unchanged."""
+        result = _esc_ffmpeg("hello_world.mp4")
+        assert "'" not in result
+        assert ":" not in result
+
+    # ── Constants ──────────────────────────────────────────────
 
     def test_renderer_resolution_constants(self):
         """Shorts resolution constants are correct 9:16."""
         from pipeline.shorts_renderer import SHORTS_RESOLUTION, SHORTS_FPS
         assert SHORTS_RESOLUTION == (1080, 1920)
         assert SHORTS_FPS == 30
+
+    def test_subtitle_style_no_background_box(self):
+        """Subtitles should have BorderStyle=1 (outline only, no box)."""
+        from pipeline.shorts_renderer import SUBTITLE_FORCE_STYLE
+        assert "BorderStyle=1" in SUBTITLE_FORCE_STYLE
+        assert "OutlineColour=&H00000000" in SUBTITLE_FORCE_STYLE
+        assert "PrimaryColour=&H00FFFFFF" in SUBTITLE_FORCE_STYLE
+
+    # ── Backward compat: render() without timestamps ───────────
+
+    def test_render_without_timestamps_does_not_crash(self, tmp_path):
+        """Calling render without word_timestamps is backward-compatible."""
+        renderer = ShortsRenderer()
+        # Should return None because source file doesn't exist
+        result = renderer.render(
+            tmp_path / "nonexistent.mp4",
+            {"start_time": 0, "end_time": 30},
+            word_timestamps=None,
+        )
+        assert result is None  # Source not found → None
 
 
 # ── Integration tests ────────────────────────────────────────────

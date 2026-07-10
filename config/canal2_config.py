@@ -768,6 +768,13 @@ SHORTS_HASHTAGS = [
     "#HistoriasReales",
 ]
 
+# ── Cross-promotion ──────────────────────────────────────────
+SHORTS_LONGFORM_LINK_ENABLED = True
+SHORTS_PLAYLIST_AUTO = True
+SHORTS_FIRST_COMMENT_LINK = True
+SHORTS_PER_VIDEO_PLAYLIST = True
+SHORTS_PLAYLIST_NAME = "Shorts"
+
 # ═══════════════════════════════════════════════════════════════════
 # DESCRIPTION TEMPLATE
 # ═══════════════════════════════════════════════════════════════════

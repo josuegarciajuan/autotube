@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS video_stats_history (
     estimated_minutes_watched  REAL DEFAULT 0,
     average_view_duration      REAL DEFAULT 0,
     subscribers_gained         INTEGER DEFAULT 0,
+    embeddable                 INTEGER DEFAULT 1,
     fetched_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

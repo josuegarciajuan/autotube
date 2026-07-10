@@ -174,7 +174,7 @@ class Database:
 
     def insert_video(self, script_id, canal, video_path, thumbnail_path=None,
                      audio_path=None, titulo_final=None, duracion_seg=None,
-                     privacy_status="unlisted", channel_id=None,
+                     privacy_status="public", channel_id=None,
                      description=None, tags_json=None, title_options=None,
                      timing_data=None):
         """Insert a video record. Returns row id.

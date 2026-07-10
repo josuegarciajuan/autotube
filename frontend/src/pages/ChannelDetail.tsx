@@ -1,12 +1,195 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatTimingMs, apiUrl } from '../lib/api'
+import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, apiUrl } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3 } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
-import { CONFIG_SECTIONS, type ConfigSection, type ConfigField } from '../types/channel'
+import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
+
+// ── PromotionTab (inline component) ─────────────────────────
+
+function PromotionTab({ channelId, videos, playlists, setPlaylists, loadingPlaylists,
+  setLoadingPlaylists, syncingPlaylists, setSyncingPlaylists, lifecycleActions,
+  setLifecycleActions, loadingLifecycle, setLoadingLifecycle, selectedVideoId,
+  setSelectedVideoId, promoActionResult, setPromoActionResult }: any) {
+
+  const loadPlaylists = async () => {
+    setLoadingPlaylists(true)
+    try {
+      const data = await api.getChannelPlaylists(channelId)
+      setPlaylists(data)
+    } catch (e) { console.error('Failed to load playlists', e) }
+    setLoadingPlaylists(false)
+  }
+
+  const loadLifecycle = async () => {
+    setLoadingLifecycle(true)
+    try {
+      const data = await api.getChannelLifecycleRecent(channelId, 30)
+      setLifecycleActions(data)
+    } catch (e) { console.error('Failed to load lifecycle', e) }
+    setLoadingLifecycle(false)
+  }
+
+  useEffect(() => { loadPlaylists(); loadLifecycle() }, [channelId])
+
+  const handleSyncPlaylists = async () => {
+    setSyncingPlaylists(true)
+    try {
+      const result = await api.syncChannelPlaylists(channelId)
+      setPromoActionResult(`✅ Playlists: ${result.created?.length || 0} creadas, ${result.existing?.length || 0} existentes`)
+      loadPlaylists()
+    } catch (e: any) { setPromoActionResult(`❌ Error: ${e.message}`) }
+    setSyncingPlaylists(false)
+  }
+
+  const handlePromoAction = async (actionType: string, videoId?: number) => {
+    const vid = videoId || selectedVideoId
+    if (!vid) { setPromoActionResult('❌ Selecciona un video primero'); return }
+    setPromoActionResult(null)
+    try {
+      let result: any
+      switch (actionType) {
+        case 'playlist_add': result = await api.addVideoToPlaylists(vid); break
+        case 'first_comment': result = await api.postFirstComment(vid); break
+        case 'comment_reply_1':
+        case 'comment_reply_2': result = await api.replyToComments(vid); break
+        case 'metadata_reoptimize': result = await api.reoptimizeMetadata(vid); break
+        default: result = await api.triggerLifecycleAction(vid, actionType)
+      }
+      const msg = result.success ? '✅ Ejecutado correctamente' :
+        result.skipped ? `⏭️ ${result.reason || 'Omitido'}` :
+        result.replied_to !== undefined ? `💬 Respondido: ${result.replied_to}, omitidos: ${result.skipped}` :
+        result.added_to ? `📋 Añadido a: ${result.added_to.join(', ')}` :
+        result.error ? `❌ ${result.error}` : '✅ Completado'
+      setPromoActionResult(msg)
+      loadLifecycle()
+      if (actionType === 'playlist_add') loadPlaylists()
+    } catch (e: any) { setPromoActionResult(`❌ Error: ${e.message}`) }
+  }
+
+  const uploadedVideos = videos.filter((v: any) => v.yt_video_id)
+
+  return (
+    <div className="space-y-4">
+      {/* Playlists */}
+      <div className="glass rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+            <ListPlus size={16} /> Playlists del Canal
+          </h3>
+          <button onClick={handleSyncPlaylists} disabled={syncingPlaylists}
+            className="px-3 py-1.5 bg-neon-red/10 border border-neon-red/30 text-neon-red rounded-lg text-xs hover:bg-neon-red/20 disabled:opacity-50 flex items-center gap-1">
+            <RefreshCw size={12} className={syncingPlaylists ? 'animate-spin' : ''} />
+            {syncingPlaylists ? 'Sincronizando...' : 'Sincronizar'}
+          </button>
+        </div>
+        {loadingPlaylists ? <RefreshCw size={20} className="animate-spin mx-auto text-gray-500 my-4" /> :
+        playlists.length === 0 ? <p className="text-gray-500 text-xs">Sin playlists. Haz clic en Sincronizar.</p> :
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead><tr className="text-gray-500 border-b border-dark-600">
+              <th className="text-left py-2">Nombre</th><th className="text-left py-2">Tipo</th><th className="text-left py-2">YouTube ID</th>
+            </tr></thead>
+            <tbody>{playlists.map((pl: any) => (
+              <tr key={pl.id} className="border-b border-dark-600/50">
+                <td className="py-2 text-white">{pl.name || pl.slug}</td>
+                <td className="py-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                    pl.playlist_type === 'main' ? 'bg-blue-600/20 text-blue-400' :
+                    pl.playlist_type === 'onboarding' ? 'bg-green-600/20 text-green-400' : 'bg-dark-600 text-gray-400'
+                  }`}>{pl.playlist_type}</span>
+                </td>
+                <td className="py-2 text-gray-500 font-mono text-[10px]">{pl.yt_playlist_id?.slice(0, 20)}...</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>}
+      </div>
+
+      {/* Lifecycle Timeline */}
+      <div className="glass rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+            <Clock size={16} /> Timeline de Promoción
+          </h3>
+          <button onClick={loadLifecycle} className="text-gray-400 hover:text-white">
+            <RefreshCw size={14} className={loadingLifecycle ? 'animate-spin' : ''} />
+          </button>
+        </div>
+        {loadingLifecycle ? <RefreshCw size={20} className="animate-spin mx-auto text-gray-500 my-4" /> :
+        lifecycleActions.length === 0 ? <p className="text-gray-500 text-xs">No hay acciones registradas aún.</p> :
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead><tr className="text-gray-500 border-b border-dark-600">
+              <th className="text-left py-2">Video</th><th className="text-left py-2">Acción</th>
+              <th className="text-left py-2 hidden sm:table-cell">Programado</th><th className="text-left py-2">Estado</th>
+              <th className="text-left py-2">Acción</th>
+            </tr></thead>
+            <tbody>{lifecycleActions.slice(0, 20).map((a: any) => (
+              <tr key={a.id} className="border-b border-dark-600/50">
+                <td className="py-2 text-white max-w-[120px] truncate">{a.video_title || `#${a.video_id}`}</td>
+                <td className="py-2 text-gray-300">{LIFECYCLE_ACTION_LABELS[a.action_type as LifecycleActionType] || a.action_type}</td>
+                <td className="py-2 text-gray-500 hidden sm:table-cell">{a.scheduled_for ? formatDateTime(a.scheduled_for) : '-'}</td>
+                <td className="py-2">{LIFECYCLE_STATUS_LABELS[a.status] || a.status}</td>
+                <td className="py-2">
+                  {a.status === 'pending' && (
+                    <button onClick={() => handlePromoAction(a.action_type, a.video_id)}
+                      className="text-neon-red hover:underline text-[10px]">Ejecutar</button>
+                  )}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>}
+      </div>
+
+      {/* Manual Actions */}
+      <div className="glass rounded-xl p-4">
+        <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-3">
+          <Sparkles size={16} /> Acciones Manuales
+        </h3>
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <span className="text-xs text-gray-400">Video:</span>
+          <select value={selectedVideoId || ''} onChange={(e) => setSelectedVideoId(e.target.value ? Number(e.target.value) : null)}
+            className="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-white">
+            <option value="">Seleccionar video...</option>
+            {uploadedVideos.map((v: any) => (
+              <option key={v.id} value={v.id}>{v.titulo_final || `Video #${v.id}`}</option>
+            ))}
+          </select>
+        </div>
+        {promoActionResult && (
+          <div className={`mb-3 p-2 rounded-lg text-xs ${
+            promoActionResult.startsWith('✅') ? 'bg-green-600/10 border border-green-600/30 text-green-400' :
+            promoActionResult.startsWith('❌') ? 'bg-red-600/10 border border-red-600/30 text-red-400' :
+            'bg-blue-600/10 border border-blue-600/30 text-blue-400'
+          }`}>{promoActionResult}</div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => handlePromoAction('playlist_add')}
+            className="px-3 py-2 bg-dark-700 border border-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-600 flex items-center gap-1">
+            <ListPlus size={12} /> Añadir a playlists
+          </button>
+          <button onClick={() => handlePromoAction('first_comment')}
+            className="px-3 py-2 bg-dark-700 border border-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-600 flex items-center gap-1">
+            <MessageCircle size={12} /> Postear primer comentario
+          </button>
+          <button onClick={() => handlePromoAction('comment_reply_1')}
+            className="px-3 py-2 bg-dark-700 border border-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-600 flex items-center gap-1">
+            <MessageCircle size={12} /> Responder comentarios
+          </button>
+          <button onClick={() => handlePromoAction('metadata_reoptimize')}
+            className="px-3 py-2 bg-dark-700 border border-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-600 flex items-center gap-1">
+            <Sparkles size={12} /> Reoptimizar metadata
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function ChannelDetail() {
   const { id } = useParams<{ id: string }>()
@@ -48,6 +231,9 @@ export default function ChannelDetail() {
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null)
+
+  // Upload confirmation modal (before generation)
+  const [showUploadConfirm, setShowUploadConfirm] = useState(false)
   
   // Short creation state (per video)
   const [creatingShort, setCreatingShort] = useState<number | null>(null)
@@ -57,8 +243,8 @@ export default function ChannelDetail() {
   const [generatingNativeShort, setGeneratingNativeShort] = useState(false)
   const [nativeShortResult, setNativeShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
   
-  // Tab state for Videos/Shorts/Live/Growth
-  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth'>('videos')
+  // Tab state for Videos/Shorts/Live/Growth/Promotion
+  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion'>('videos')
   const [shorts, setShorts] = useState<any[]>([])
   const [loadingShorts, setLoadingShorts] = useState(false)
 
@@ -68,6 +254,15 @@ export default function ChannelDetail() {
   const [milestonesData, setMilestonesData] = useState<any>(null)
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [growthDays, setGrowthDays] = useState(30)
+
+  // Promotion tab state
+  const [playlists, setPlaylists] = useState<any[]>([])
+  const [loadingPlaylists, setLoadingPlaylists] = useState(false)
+  const [syncingPlaylists, setSyncingPlaylists] = useState(false)
+  const [lifecycleActions, setLifecycleActions] = useState<any[]>([])
+  const [loadingLifecycle, setLoadingLifecycle] = useState(false)
+  const [selectedVideoId, setSelectedVideoId] = useState<number | null>(null)
+  const [promoActionResult, setPromoActionResult] = useState<string | null>(null)
 
   const { addJob, removeJob, activeJobs, isChannelBusy } = useGeneration()
   // Find active job for THIS channel (for inline progress display)
@@ -159,7 +354,7 @@ export default function ChannelDetail() {
     async function loadShorts() {
       setLoadingShorts(true)
       try {
-        const data = await fetch(`api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
+        const data = await fetch(`/api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
         setShorts(data)
       } catch {}
       setLoadingShorts(false)
@@ -194,14 +389,16 @@ export default function ChannelDetail() {
     api.getVideoStats(ytIds).then(stats => setShortStats(stats)).catch(() => {})
   }, [shorts])
 
-  async function handleGenerate() {
+  async function handleGenerate(upload: boolean = true) {
     setGenerating(true)
+    setShowUploadConfirm(false)
     try {
       const isTestChannel = channel?.slug === 'test'
       const result = await api.generateVideo({
         channel_id: channelId,
         action: isTestChannel ? 'generate_and_upload' : 'generate_and_upload',
         test_mode: isTestChannel,
+        upload,
       })
       addJob({
         jobId: result.job_id,
@@ -239,16 +436,16 @@ export default function ChannelDetail() {
     const jobId = -(videoId * 1000 + Date.now() % 1000) // negative ID for shorts
     addJob({ jobId, channelId, channelName: channel?.name || '', action: 'Creando Short', videoId })
     try {
-      const res = await fetch(`api/shorts/extract-and-publish/${videoId}`, { method: 'POST' })
+      const res = await fetch(`/api/shorts/extract-and-publish/${videoId}`, { method: 'POST' })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Error')
-      setShortResult({ ok: true, message: '¡Short publicado!', url: data.youtube_url })
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`)
+      setShortResult({ ok: true, message: `¡Short publicado! "${data.title || 'Sin título'}"`, url: data.youtube_url })
     } catch (e: any) {
-      setShortResult({ ok: false, message: e.message })
+      setShortResult({ ok: false, message: `Error: ${e.message}` })
     }
     setCreatingShort(null)
     removeJob(jobId)
-    setTimeout(() => setShortResult(null), 8000)
+    // Toast stays until dismissed manually (no auto-hide)
   }
 
   async function handleGenerateNativeShort() {
@@ -257,12 +454,12 @@ export default function ChannelDetail() {
     const jobId = -(channelId * 20000 + Date.now() % 10000)
     addJob({ jobId, channelId, channelName: channel?.name || '', action: 'Generando Short Nativo' })
     try {
-      const res = await fetch(`api/shorts/generate-native/${channelId}`, { method: 'POST' })
+      const res = await fetch(`/api/shorts/generate-native/${channelId}`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Error')
       setNativeShortResult({ ok: true, message: `¡Short publicado! "${data.title?.slice(0, 35)}..."`, url: data.youtube_url })
       // Reload shorts
-      const sdata = await fetch(`api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
+      const sdata = await fetch(`/api/shorts?channel_id=${channelId}&limit=50`).then(r => r.json())
       setShorts(sdata)
     } catch (e: any) {
       setNativeShortResult({ ok: false, message: e.message })
@@ -678,7 +875,7 @@ export default function ChannelDetail() {
           </div>
         ) : (
           <button
-            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : handleGenerate}
+            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : () => setShowUploadConfirm(true)}
             disabled={videoTab === 'shorts' ? generatingNativeShort : busy}
             className="w-full py-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-display font-semibold text-lg hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3">
             <Wand2 size={22} /> {videoTab === 'shorts' ? 'Generar Short' : channel?.slug === 'test' ? 'Generar video de pruebas' : 'Generar Video'}
@@ -777,6 +974,12 @@ export default function ChannelDetail() {
             }`}
             onClick={() => setVideoTab('growth')}
           ><TrendingUp size={14} className="inline mr-1" />Crecimiento</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'promotion' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('promotion')}
+          ><Megaphone size={14} className="inline mr-1" />Promoción</button>
         </div>
         {videoTab === 'growth' ? (
           <div className="space-y-4">
@@ -984,6 +1187,25 @@ export default function ChannelDetail() {
               </div>
             )}
           </div>
+        ) : videoTab === 'promotion' ? (
+          <PromotionTab
+            channelId={channelId}
+            videos={videos}
+            playlists={playlists}
+            setPlaylists={setPlaylists}
+            loadingPlaylists={loadingPlaylists}
+            setLoadingPlaylists={setLoadingPlaylists}
+            syncingPlaylists={syncingPlaylists}
+            setSyncingPlaylists={setSyncingPlaylists}
+            lifecycleActions={lifecycleActions}
+            setLifecycleActions={setLifecycleActions}
+            loadingLifecycle={loadingLifecycle}
+            setLoadingLifecycle={setLoadingLifecycle}
+            selectedVideoId={selectedVideoId}
+            setSelectedVideoId={setSelectedVideoId}
+            promoActionResult={promoActionResult}
+            setPromoActionResult={setPromoActionResult}
+          />
         ) : videoTab === 'shorts' ? (
           <div>
           {nativeShortResult && (
@@ -1027,13 +1249,25 @@ export default function ChannelDetail() {
                 <div key={s.id} className="glass rounded-lg overflow-hidden group">
                     <div className="relative aspect-[9/16] bg-dark-800 flex items-center justify-center rounded-lg overflow-hidden">
                       {s.youtube_id ? (
-                        <iframe
-                          src={`https://www.youtube.com/embed/${s.youtube_id}`}
-                          title="YouTube Shorts player"
-                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                          allowFullScreen
-                          className="w-full h-full"
-                        />
+                        (shortStats[s.youtube_id]?.embeddable === false) ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center bg-dark-800 cursor-pointer p-2"
+                               onClick={() => window.open(s.youtube_url || `https://www.youtube.com/shorts/${s.youtube_id}`, '_blank', 'noopener')}>
+                            <div className="w-8 h-8 rounded-full bg-neon-red/80 flex items-center justify-center mb-1">
+                              <ExternalLink size={14} className="text-white" />
+                            </div>
+                            <p className="text-[9px] text-gray-400 text-center leading-tight">
+                              Embed bloqueado<br />Ver en YouTube
+                            </p>
+                          </div>
+                        ) : (
+                          <iframe
+                            src={`https://www.youtube.com/embed/${s.youtube_id}`}
+                            title="YouTube Shorts player"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowFullScreen
+                            className="w-full h-full"
+                          />
+                        )
                       ) : s.file_path ? (
                         <video src={apiUrl(`/static/${s.file_path}?v=${s.id}`)} className="w-full h-full object-cover" preload="metadata" controls />
                       ) : (
@@ -1053,7 +1287,7 @@ export default function ChannelDetail() {
                     {s.duration && (
                       <p className="text-[10px] text-gray-500 mt-0.5">{formatDuration(s.duration)}</p>
                     )}
-                    <p className="text-[10px] text-gray-600 mt-0.5">{formatDateTime(s.created_at)}</p>
+                    <p className="text-[10px] text-gray-600 mt-0.5">{formatDateTime(s.published_at || s.created_at)}</p>
                     {s.scheduled_date && (
                       <p className="text-[10px] text-gray-500 mt-0.5">{formatDate(s.scheduled_date)}</p>
                     )}
@@ -1086,7 +1320,12 @@ export default function ChannelDetail() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
-            {videos.map((v: any) => (
+            {videos.map((v: any) => {
+              // If YouTube ID exists, the video was successfully uploaded regardless
+              // of what status says (orphan-detector / zombie-thread races can
+              // overwrite it to 'error').
+              const displayStatus = v.yt_video_id ? 'uploaded' : (v.status || 'draft');
+              return (
               <Link key={v.id} to={`/videos/${v.id}/edit`} className="group">
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
                   {v.thumbnail_path ? (
@@ -1095,8 +1334,8 @@ export default function ChannelDetail() {
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-dark-700 to-dark-900"><Video size={28} className="text-gray-700" /></div>
                   )}
                   {v.duracion_seg && <span className="absolute bottom-1.5 right-1.5 bg-black/85 text-white text-[11px] px-1.5 py-0.5 rounded font-mono">{formatDuration(v.duracion_seg)}</span>}
-                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${v.status === 'uploaded' ? 'bg-green-600/90 text-white' : v.status === 'ready' ? 'bg-neon-cyan/90 text-dark-900' : v.status === 'generating' ? 'bg-blue-600/90 text-white' : v.status === 'error' ? 'bg-red-600/90 text-white' : v.status === 'failed' ? 'bg-red-600/90 text-white' : 'bg-gray-700/90 text-gray-300'}`}>
-                    {v.status === 'uploaded' ? 'Subido' : v.status === 'ready' ? 'Listo' : v.status === 'generating' ? 'Generando' : v.status === 'error' ? 'Error' : v.status === 'failed' ? 'Error' : v.status || 'Borrador'}
+                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${displayStatus === 'uploaded' ? 'bg-green-600/90 text-white' : displayStatus === 'ready' ? 'bg-neon-cyan/90 text-dark-900' : displayStatus === 'generating' ? 'bg-blue-600/90 text-white' : displayStatus === 'error' ? 'bg-red-600/90 text-white' : displayStatus === 'failed' ? 'bg-red-600/90 text-white' : 'bg-gray-700/90 text-gray-300'}`}>
+                    {displayStatus === 'uploaded' ? 'Subido' : displayStatus === 'ready' ? 'Listo' : displayStatus === 'generating' ? 'Generando' : displayStatus === 'error' ? 'Error' : displayStatus === 'failed' ? 'Error' : displayStatus || 'Borrador'}
                   </span>
                   <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
                     <div className="w-12 h-12 rounded-full bg-neon-red/90 flex items-center justify-center shadow-lg"><Play size={20} className="text-white ml-0.5" /></div>
@@ -1104,51 +1343,62 @@ export default function ChannelDetail() {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-white leading-tight line-clamp-2 group-hover:text-neon-red transition-colors">{v.titulo_final || 'Video sin título'}</p>
-                  <p className="text-xs text-gray-500 mt-1">{channel.name}</p>
                   <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-600">
-                    <span>{formatDateTime(v.uploaded_at || v.created_at)}{v.timing_data?.total_duration_ms ? ` — ${formatTimingMs(v.timing_data.total_duration_ms)}` : ''}</span>
+                    <span>{formatDateTime(v.uploaded_at || v.created_at)}</span>
                     {v.yt_url && <><span>·</span><a href={v.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-red hover:underline flex items-center gap-0.5" onClick={e => e.stopPropagation()}><Youtube size={10} /> YT</a></>}
                     {v.script_id && (
                       creatingShort === v.id ? (
-                        <><span>·</span><span className="flex items-center gap-1 text-purple-400"><RefreshCw size={10} className="animate-spin" /></span></>
+                        <button disabled className="text-purple-400 text-xs flex items-center gap-1 px-2 py-0.5 rounded bg-purple-400/10 cursor-wait">
+                          <Loader2 size={12} className="animate-spin" /> Extrayendo clip...
+                        </button>
                       ) : (
-                        <><span>·</span><button onClick={e => { e.preventDefault(); e.stopPropagation(); handleCreateShort(v.id) }} className="text-purple-400 hover:text-purple-300 flex items-center gap-0.5" title="Crear Short de este video">🎬</button></>
+                        <button onClick={e => { e.preventDefault(); e.stopPropagation(); handleCreateShort(v.id) }} 
+                          className="text-purple-400 hover:text-purple-300 text-xs flex items-center gap-1 px-2 py-0.5 rounded hover:bg-purple-400/10 transition-colors"
+                          title="Crear Short de este video">
+                          <Scissors size={12} /> Short
+                        </button>
                       )
                     )}
                   </div>
-                  {v.yt_video_id && videoStats[v.yt_video_id] && !videoStats[v.yt_video_id].is_mock && (
+                  {v.yt_video_id && videoStats[v.yt_video_id] && videoStats[v.yt_video_id].viewCount ? (
                     <div className="flex items-center gap-2 mt-0.5 text-[11px] text-gray-500">
                       <span>{formatShortNumber(videoStats[v.yt_video_id].viewCount || '0')} vistas</span>
                       <span>·</span>
                       <span>{formatShortNumber(videoStats[v.yt_video_id].likeCount || '0')} likes</span>
+                      <VideoTiming timing={v.timing_data} className="!mt-0" />
                     </div>
+                  ) : (
+                    <VideoTiming timing={v.timing_data} />
                   )}
-                  <VideoTiming timing={v.timing_data} />
                   <div className="flex gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {v.status === 'ready' && !v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-red bg-neon-red/10 px-2 py-0.5 rounded hover:bg-neon-red/20">Subir a YT</button>}
                     {v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-gold bg-neon-gold/10 px-2 py-0.5 rounded hover:bg-neon-gold/20">Resubir</button>}
-                    {(v.status === 'error' || v.status === 'failed') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
+                    {(displayStatus === 'error' || displayStatus === 'failed') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
                   </div>
                 </div>
               </Link>
-            ))}
+              );
+            })}
           </div>
         )}
           </div>
         )}
       </section>
 
-      {/* Short result notification */}
+      {/* Short result notification — stays until dismissed */}
       {shortResult && (
-        <div className={`mt-4 p-3 rounded-lg text-sm flex items-center gap-2 ${
+        <div className={`mt-4 p-3 rounded-lg text-sm flex items-center gap-2 animate-slide-up ${
           shortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
         }`}>
           <span>{shortResult.ok ? '✅' : '❌'}</span>
-          <span>{shortResult.message}</span>
+          <span className="flex-1">{shortResult.message}</span>
           {shortResult.url && (
             <a href={shortResult.url} target="_blank" rel="noopener noreferrer" 
-               className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
+               className="text-neon-red underline text-xs whitespace-nowrap">Ver en YouTube →</a>
           )}
+          <button onClick={() => setShortResult(null)} className="ml-1 p-1 rounded hover:bg-white/10 transition-colors" title="Cerrar">
+            <X size={14} />
+          </button>
         </div>
       )}
 
@@ -1187,6 +1437,40 @@ export default function ChannelDetail() {
                 <button onClick={() => setEditingProfile(false)} className="px-4 py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500">Cancelar</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Upload Confirmation Modal --- */}
+      {showUploadConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowUploadConfirm(false)}>
+          <div className="glass rounded-xl p-6 w-full max-w-md mx-4 animate-slide-up space-y-5" onClick={e => e.stopPropagation()}>
+            <div className="text-center">
+              <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-neon-red/10 flex items-center justify-center">
+                <Upload size={28} className="text-neon-red" />
+              </div>
+              <h3 className="font-display text-xl font-semibold text-white">¿Subir directamente a YouTube?</h3>
+              <p className="text-sm text-gray-400 mt-2">
+                El video se generará con calidad completa. Puedes subirlo ahora o dejarlo en estado "Listo" y subirlo más tarde manualmente.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleGenerate(false)}
+                className="flex-1 py-3 px-4 bg-dark-700 border border-surface-border text-gray-300 rounded-xl font-medium text-sm hover:bg-dark-600 hover:border-gray-600 transition-all flex items-center justify-center gap-2">
+                <Eye size={16} />
+                No, solo generar
+              </button>
+              <button
+                onClick={() => handleGenerate(true)}
+                className="flex-1 py-3 px-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-bold text-sm hover:shadow-lg hover:shadow-neon-red/20 transition-all flex items-center justify-center gap-2">
+                <Upload size={16} />
+                Sí, subir
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-600 text-center">
+              "Sí, subir" — genera y publica automáticamente. "No, solo generar" — el video quedará en "Listo" con botón para subir después.
+            </p>
           </div>
         </div>
       )}

@@ -50,15 +50,44 @@ CREATE INDEX IF NOT EXISTS idx_ss_date ON shorts_schedule(schedule_date, status)
 CREATE INDEX IF NOT EXISTS idx_ss_channel ON shorts_schedule(channel_id, schedule_date);
 
 -- ── shorts_planning_config ──────────────────────────────────
+-- v4.1: cleaner fields — shorts_native_per_day + shorts_clip_per_day
+-- Old columns (shorts_per_day, shorts_clip_enabled, shorts_max_clips,
+-- shorts_clip_schedule_json) are deprecated and migrated away in db_extended.py.
 CREATE TABLE IF NOT EXISTS shorts_planning_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id INTEGER NOT NULL UNIQUE,
-    shorts_per_day INTEGER DEFAULT 3,
+    shorts_native_per_day INTEGER DEFAULT 3,
+    shorts_clip_per_day INTEGER DEFAULT 2,
     shorts_enabled BOOLEAN DEFAULT 1,
-    shorts_clip_enabled BOOLEAN DEFAULT 1,
-    shorts_max_clips INTEGER DEFAULT 5,
-    shorts_clip_schedule_json TEXT DEFAULT '[{"offset_days": 1, "count": 1}, {"offset_days": 3, "count": 1}, {"offset_days": 5, "count": 1}]',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
+
+-- ── shorts_planned_slots ─────────────────────────────────────
+-- Individual slot scheduling for shorts. Replaces the legacy
+-- shorts_schedule table (which is kept but no longer used).
+CREATE TABLE IF NOT EXISTS shorts_planned_slots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL,
+    date_key TEXT NOT NULL,                  -- YYYY-MM-DD
+    scheduled_at TIMESTAMP NOT NULL,         -- when to start generation
+    target_upload_at TIMESTAMP,              -- target YouTube publish time
+    short_type TEXT NOT NULL DEFAULT 'native', -- 'native' | 'clip'
+    long_slot_position INTEGER,              -- for clips: which long-form slot this pairs with
+    source_video_id INTEGER,                 -- for clips: source long-form video
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending|running|completed|failed|cancelled|skipped
+    job_id INTEGER,                          -- FK → generation_jobs
+    short_id INTEGER,                        -- FK → shorts
+    slot_position INTEGER DEFAULT 0,         -- order within the day
+    error_message TEXT,                      -- error details if failed
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_video_id) REFERENCES videos(id),
+    FOREIGN KEY (short_id) REFERENCES shorts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sps_date ON shorts_planned_slots(date_key, status);
+CREATE INDEX IF NOT EXISTS idx_sps_channel ON shorts_planned_slots(channel_id, date_key);
+CREATE INDEX IF NOT EXISTS idx_sps_status ON shorts_planned_slots(status, scheduled_at);

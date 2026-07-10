@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS videos (
     yt_url          TEXT,                   -- full YouTube URL
     titulo_final    TEXT,                   -- final published title
     duracion_seg    INTEGER,                -- actual video duration in seconds
-    privacy_status  TEXT DEFAULT 'unlisted',
+    privacy_status  TEXT DEFAULT 'public',
     uploaded_at     TIMESTAMP,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

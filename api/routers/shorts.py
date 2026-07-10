@@ -12,6 +12,7 @@ Endpoints:
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
@@ -175,11 +176,11 @@ async def render_short(short_id: int, background_tasks: BackgroundTasks):
     if not short.get("source_video_id"):
         raise HTTPException(400, "Short has no source video — cannot render")
 
-    # Get source video path
+    # Get source video path + word timestamps for subtitle rendering
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     source_video = conn.execute(
-        "SELECT video_path, channel_id FROM videos WHERE id = ?",
+        "SELECT video_path, channel_id, timing_data FROM videos WHERE id = ?",
         (short["source_video_id"],),
     ).fetchone()
     conn.close()
@@ -191,11 +192,25 @@ async def render_short(short_id: int, background_tasks: BackgroundTasks):
     if not source_path.exists():
         raise HTTPException(400, f"Source video file does not exist: {source_path}")
 
+    # ── Extract word-level TTS timestamps for subtitles ──
+    import json as _json
+    tts_word_ts: list = []
+    try:
+        td_raw = source_video.get("timing_data") or "{}"
+        td = _json.loads(td_raw) if isinstance(td_raw, str) else (td_raw or {})
+        tts_word_ts = td.get("phases", {}).get("tts_timestamps", [])
+        if not isinstance(tts_word_ts, list):
+            tts_word_ts = []
+    except Exception:
+        pass
+
     # Render
     scheduler.mark_rendering(short_id)
 
     renderer = ShortsRenderer()
-    output_path = renderer.render(source_path, short)
+    output_path = renderer.render(
+        source_path, short, word_timestamps=tts_word_ts if tts_word_ts else None,
+    )
 
     if output_path and output_path.exists():
         scheduler.mark_ready(short_id, str(output_path))
@@ -255,11 +270,25 @@ async def publish_short(short_id: int):
         raise HTTPException(500, "YouTube authentication failed")
 
     title = short.get("title") or short.get("hook_title") or "Short sin título"
-    description = f"""{short.get('hook_text', '')}
 
-{' '.join(f'#{t}' for t in getattr(ch_config, 'SHORTS_HASHTAGS', ['#Shorts']))}
+    # ── Cross-promotion: link to long-form video ──────────
+    from pipeline.shorts_cross_promote import (
+        get_best_longform_link, build_short_description, run_post_publish_promotion,
+        should_cross_promote,
+    )
+    longform_url = None
+    if should_cross_promote(ch_config):
+        longform_url = get_best_longform_link(
+            ch["id"],
+            source_video_id=short.get("source_video_id"),
+        )
 
-📺 Video completo en el canal."""
+    description = build_short_description(
+        hook_text=short.get("hook_text", ""),
+        hashtags=getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"]),
+        longform_url=longform_url,
+        channel_url=getattr(ch_config, "YOUTUBE_CHANNEL_URL", ""),
+    )
 
     tags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])[:60]
 
@@ -279,6 +308,15 @@ async def publish_short(short_id: int):
             video_id,
             result.get("url", ""),
             short.get("file_path", ""),
+        )
+        # ── Post-publish cross-promotion ──────────────
+        run_post_publish_promotion(
+            channel_slug=ch["slug"],
+            short_yt_id=video_id,
+            channel_id=ch["id"],
+            source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+            source_video_id=short.get("source_video_id"),
+            channel_config=ch_config,
         )
         return {
             "message": "Short published successfully",
@@ -324,15 +362,137 @@ def get_clips_for_video(video_id: int):
     return scheduler.get_clips_for_video(video_id)
 
 
+def _build_block_timestamps(bloques: list[dict], total_duration_sec: float) -> list[dict]:
+    """Build approximate word-level timestamps from script blocks.
+
+    Each block's text is assigned a position proportional to its index
+    in the block list, using the total video duration to distribute time
+    evenly across blocks. This lets the LLM extract timecodes that
+    roughly match the real video timeline instead of inventing them.
+    """
+    if not bloques or total_duration_sec <= 0:
+        return []
+
+    n = len(bloques)
+    timestamps = []
+
+    for idx, block in enumerate(bloques):
+        texto = block.get("texto", "")
+        if not texto:
+            continue
+        words = texto.split()
+        block_start = (idx / n) * total_duration_sec
+        block_end = ((idx + 1) / n) * total_duration_sec
+        word_duration = (block_end - block_start) / max(len(words), 1)
+
+        for wi, word in enumerate(words):
+            ts_start = round(block_start + wi * word_duration, 1)
+            ts_end = round(ts_start + word_duration, 1)
+            timestamps.append({"word": word, "start": ts_start, "end": ts_end})
+
+    return timestamps
+
+
+def _resolve_source_video(
+    video: dict,
+    video_id: int,
+    clip_start: float,
+    clip_end: float,
+) -> tuple[Path, float] | tuple[None, None]:
+    """Find or download the source video for a clip extraction.
+
+    Returns (source_path, offset_seconds) where:
+      - If local file:            offset = 0 (timecodes match original video)
+      - If downloaded segment:    offset = padding (renderer uses relative timecodes)
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    # 1. Try local file
+    if video.get("video_path"):
+        for p in [Path(video["video_path"]), Path("/root/autotube") / str(video["video_path"])]:
+            if p.exists():
+                logger.info("Using local file for short: %s", p)
+                return p, 0.0
+
+    # 2. Download clip segment from YouTube
+    yt_id = video.get("yt_video_id")
+    if not yt_id:
+        return None, None
+
+    yt_url = video.get("yt_url") or f"https://www.youtube.com/watch?v={yt_id}"
+
+    # Add buffer around the clip so ffmpeg -ss / -t can seek properly
+    padding = 3.0
+    section_start = max(0, clip_start - padding)
+    section_end = clip_end + padding
+    section_spec = f"*{section_start:.1f}-{section_end:.1f}"
+
+    logger.info(
+        "Downloading clip segment [%.1fs-%.1fs] from %s ...",
+        section_start, section_end, yt_url[:60],
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["yt-dlp",
+             "--download-sections", section_spec,
+             "-f", "best[height<=720]/best",
+             "--no-playlist",
+             "--socket-timeout", "30",
+             "--force-overwrites",
+             "--no-warnings",
+             "-o", tmp_path,
+             yt_url],
+            capture_output=True, text=True, timeout=180,
+        )
+
+        if result.returncode != 0:
+            stderr_tail = result.stderr.strip()[-300:] if result.stderr else "(no output)"
+            logger.error("yt-dlp download failed (code %d): %s", result.returncode, stderr_tail)
+            Path(tmp_path).unlink(missing_ok=True)
+            return None, None
+
+        if not Path(tmp_path).exists():
+            logger.error("yt-dlp reported success but output file missing: %s", tmp_path)
+            return None, None
+
+        fsize_mb = Path(tmp_path).stat().st_size / (1024 * 1024)
+        logger.info("Downloaded clip segment: %.1f MB → %s", fsize_mb, tmp_path)
+        # Downloaded segment starts at section_start; the clip begins at padding seconds in
+        return Path(tmp_path), padding
+
+    except subprocess.TimeoutExpired:
+        logger.error("yt-dlp download timed out (180s) for video #%d", video_id)
+        Path(tmp_path).unlink(missing_ok=True)
+        return None, None
+    except Exception as e:
+        logger.error("yt-dlp failed for video #%d: %s", video_id, e)
+        Path(tmp_path).unlink(missing_ok=True)
+        return None, None
+
+
 @router.post("/extract-and-publish/{video_id}")
 async def extract_and_publish(video_id: int):
     """Extract the #1 most impactful clip from a video, render it, 
     and publish immediately to YouTube. One-shot operation.
 
+    Optimized flow:
+      1. Get video info + script + blocks from DB (no download needed)
+      2. LLM extracts best clip with real timestamps
+      3. Download only the clip segment from YouTube (yt-dlp) if local file gone
+      4. Render → upload YT → cross-promotion → cleanup temp files
+
     Returns { short_id, youtube_id, youtube_url, title } on success.
     """
     import sqlite3
     import json as _json
+    import subprocess
+    import tempfile
     from pathlib import Path
     from config.settings import DATABASE_PATH
     from pipeline.shorts_extractor import ShortsExtractor
@@ -341,7 +501,6 @@ async def extract_and_publish(video_id: int):
     from pipeline.youtube_uploader import YouTubeUploader
     from config.config_bridge import get_channel_config
 
-    # 1. Get video info
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
@@ -358,135 +517,183 @@ async def extract_and_publish(video_id: int):
         conn.close()
         raise HTTPException(404, "Video not found")
 
+    video = dict(video)  # sqlite3.Row → dict
     channel_slug = video["channel_slug"]
 
-    # 2. Resolve source video file
-    source_path = None
-    if video["video_path"]:
-        candidate = Path(video["video_path"])
-        # Try project-root-relative or absolute
-        for p in [candidate, Path("/root/autotube") / str(video["video_path"])]:
-            if p.exists():
-                source_path = p
-                break
-
-    # If no local file but video is on YouTube, try to download
-    if source_path is None and video.get("yt_video_id"):
-        try:
-            import subprocess
-            import tempfile
-            yt_url = video.get("yt_url") or f"https://www.youtube.com/watch?v={video['yt_video_id']}"
-            # Try yt-dlp (lightweight download, just the first 3 minutes)
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-                tmp_path = tmp.name
-            result = subprocess.run(
-                ["yt-dlp", "-f", "best[height<=1080]", "--max-filesize", "100M",
-                 "-o", tmp_path, "--no-playlist", yt_url],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode == 0 and Path(tmp_path).exists():
-                source_path = Path(tmp_path)
-        except Exception as e:
-            logger.warning("yt-dlp download failed for video #%d: %s", video_id, e)
-
-    if source_path is None:
-        conn.close()
-        raise HTTPException(
-            400,
-            "Video file not available locally and could not be downloaded. "
-            "Try regenerating the video first.",
-        )
-
-    # 2. Get script text
+    # ── Phase 1: Script + blocks from DB (no download needed) ──
     script_text = ""
+    bloques = []
     if video["script_id"]:
         script_row = conn.execute(
-            "SELECT * FROM scripts WHERE id = ?",
+            "SELECT guion, bloques_json FROM scripts WHERE id = ?",
             (video["script_id"],),
         ).fetchone()
         if script_row:
-            script_text = script_row["contenido"] or script_row["script_text"] or ""
+            script_text = script_row["guion"] or ""
+            try:
+                bloques = _json.loads(script_row["bloques_json"] or "[]") if script_row["bloques_json"] else []
+            except:
+                bloques = []
 
-    # Try bloques_json if available
+    if not script_text and bloques:
+        script_text = " ".join(b.get("texto", "") for b in bloques if b.get("texto"))
+
     if not script_text:
         bloques_raw = video.get("title_options") or "{}"
         try:
-            bloques = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
+            fallback = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
         except:
-            bloques = {}
-        script_text = str(bloques.get("script", "")) or script_text
+            fallback = {}
+        script_text = str(fallback.get("script", "")) or script_text
 
     if not script_text:
         conn.close()
         raise HTTPException(400, "Video has no script text — cannot extract clips")
 
-    conn.close()
-
-    # 3. Extract best clip (ranking=1 only)
+    # ── Phase 2: LLM extracts best clip timecodes ──
+    timestamps = _build_block_timestamps(bloques, video.get("duracion_seg") or 0)
     extractor = ShortsExtractor()
-    clips = extractor.extract(script_text=script_text, timestamps=[], max_clips=3, min_clips=1)
+    clips = extractor.extract(script_text=script_text, timestamps=timestamps, max_clips=3, min_clips=1)
 
     if not clips:
+        conn.close()
         raise HTTPException(400, "No suitable clip found in video script")
 
-    best_clip = clips[0]  # Already sorted by ranking
+    best_clip = clips[0]
 
-    # 4. Render the clip
-    renderer = ShortsRenderer()
-    output_path = renderer.render(source_path, best_clip)
+    # ── Extract word-level TTS timestamps for subtitle rendering ──
+    tts_word_ts: list[dict] = []
+    try:
+        td_raw = video.get("timing_data") or "{}"
+        td = _json.loads(td_raw) if isinstance(td_raw, str) else td_raw
+        tts_word_ts = td.get("phases", {}).get("tts_timestamps", [])
+        if not isinstance(tts_word_ts, list):
+            tts_word_ts = []
+        if tts_word_ts:
+            logger.info("Loaded %d word-level TTS timestamps for subtitle generation", len(tts_word_ts))
+    except Exception as _exc:
+        logger.debug("Could not parse timing_data for subtitles: %s", _exc)
 
-    if not output_path or not output_path.exists():
-        raise HTTPException(500, "Render failed — no output produced")
+    conn.close()
 
-    # 5. Schedule + mark as ready
-    scheduler = ShortsScheduler()
-    short_ids = scheduler.schedule_clips(video_id, channel_slug, [best_clip])
-    if not short_ids:
-        raise HTTPException(500, "Failed to create short DB record")
-
-    short_id = short_ids[0]
-    scheduler.mark_ready(short_id, str(output_path))
-
-    # 6. Upload to YouTube
-    ch_config = get_channel_config(channel_slug)
-    hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
-
-    uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
-    if not uploader.authenticate():
-        scheduler.mark_failed(short_id, "YouTube authentication failed")
-        raise HTTPException(500, "YouTube authentication failed")
-
-    title = best_clip.get("hook_title", "Short")[:100]
-    hook_text = best_clip.get("hook_text", "")
-    description = f"""{hook_text}
-
-{' '.join(f'#{t}' for t in hashtags[:10])}
-
-📺 Video completo en el canal."""
-
-    result = uploader.upload(
-        video_path=output_path,
-        title=title,
-        description=description[:5000],
-        tags=hashtags[:60],
-        category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-        privacy="public",
+    # ── Phase 3: Find or download source video ──
+    source_path, clip_offset = _resolve_source_video(
+        video, video_id, best_clip["start_time"], best_clip["end_time"],
     )
+    if source_path is None:
+        raise HTTPException(
+            400,
+            "Video file not available locally and could not be downloaded from YouTube. "
+            "Try regenerating the video first.",
+        )
 
-    yt_id = result.get("video_id")
-    if not yt_id:
-        scheduler.mark_failed(short_id, "Upload returned no video ID")
-        raise HTTPException(500, "Upload failed — no video ID returned")
+    # If we downloaded a segment, adjust timecodes to be relative to the segment start
+    if clip_offset > 0:
+        original_start = best_clip["start_time"]
+        original_end = best_clip["end_time"]
+        clip_duration = original_end - original_start
+        best_clip["start_time"] = clip_offset
+        best_clip["end_time"] = clip_offset + clip_duration
+        logger.debug(
+            "Adjusted clip timecodes for downloaded segment: "
+            "%.1f-%.1f → %.1f-%.1f (offset=%.1f)",
+            original_start, original_end,
+            best_clip["start_time"], best_clip["end_time"],
+            clip_offset,
+        )
 
-    scheduler.mark_published(short_id, yt_id, result.get("url", ""), str(output_path))
+    # ── Phase 4: Render → Upload → Promote ──
+    _downloaded_temp = source_path  # track for cleanup
+    renderer = ShortsRenderer()
+    output_path = None
 
-    return {
-        "short_id": short_id,
-        "youtube_id": yt_id,
-        "youtube_url": result.get("url", ""),
-        "title": title,
-        "message": "Short created and published successfully",
-    }
+    try:
+        # Pass word timestamps only for local file (clip_offset==0).
+        # Downloaded segments have a different timebase that doesn't
+        # match the original TTS timestamps.
+        render_word_ts = tts_word_ts if clip_offset == 0 else None
+        output_path = renderer.render(
+            source_path, best_clip, word_timestamps=render_word_ts,
+        )
+        if not output_path or not output_path.exists():
+            raise HTTPException(500, "Render failed — no output produced")
+
+        scheduler = ShortsScheduler()
+        short_ids = scheduler.schedule_clips(video_id, channel_slug, [best_clip])
+        if not short_ids:
+            raise HTTPException(500, "Failed to create short DB record")
+
+        short_id = short_ids[0]
+        scheduler.mark_ready(short_id, str(output_path))
+
+        ch_config = get_channel_config(channel_slug)
+        hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
+
+        uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
+        if not uploader.authenticate():
+            scheduler.mark_failed(short_id, "YouTube authentication failed")
+            raise HTTPException(500, "YouTube authentication failed")
+
+        title = best_clip.get("hook_title", "Short")[:100]
+        hook_text = best_clip.get("hook_text", "")
+
+        from pipeline.shorts_cross_promote import (
+            get_best_longform_link, build_short_description, run_post_publish_promotion,
+            should_cross_promote,
+        )
+        longform_url = None
+        if should_cross_promote(ch_config):
+            longform_url = get_best_longform_link(
+                video["channel_id"],
+                source_video_id=video_id,
+            )
+
+        description = build_short_description(
+            hook_text=hook_text,
+            hashtags=hashtags,
+            longform_url=longform_url,
+            channel_url=getattr(ch_config, "YOUTUBE_CHANNEL_URL", ""),
+        )
+
+        result = uploader.upload(
+            video_path=output_path,
+            title=title,
+            description=description[:5000],
+            tags=hashtags[:60],
+            category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+            privacy="public",
+        )
+
+        yt_id = result.get("video_id")
+        if not yt_id:
+            scheduler.mark_failed(short_id, "Upload returned no video ID")
+            raise HTTPException(500, "Upload failed — no video ID returned")
+
+        scheduler.mark_published(short_id, yt_id, result.get("url", ""), str(output_path))
+
+        run_post_publish_promotion(
+            channel_slug=channel_slug,
+            short_yt_id=yt_id,
+            channel_id=video["channel_id"],
+            source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+        )
+
+        return {
+            "short_id": short_id,
+            "youtube_id": yt_id,
+            "youtube_url": result.get("url", ""),
+            "title": title,
+            "message": "Short created and published successfully",
+        }
+
+    finally:
+        # Cleanup temp file if we downloaded it from YouTube
+        if _downloaded_temp and str(_downloaded_temp).startswith("/tmp/"):
+            try:
+                _downloaded_temp.unlink(missing_ok=True)
+                logger.debug("Cleaned up temp download: %s", _downloaded_temp)
+            except Exception:
+                pass
 
 
 @router.post("/generate-native/{channel_id}")
@@ -504,10 +711,13 @@ async def generate_native(channel_id: int):
     import subprocess
     import tempfile
     import time
+    import traceback as tb
     from pathlib import Path
     from config.settings import DATABASE_PATH, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OUTPUT_DIR
     from config.config_bridge import get_channel_config
     from pipeline.youtube_uploader import YouTubeUploader
+
+    logger.info("generate-native START for channel_id=%d", channel_id)
 
     # 1. Get channel info
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
@@ -666,15 +876,22 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     if not uploader.authenticate():
         raise HTTPException(500, "YouTube authentication failed")
 
-    # Build channel subscription link
+    # ── Cross-promotion: link to long-form video ──────────
+    from pipeline.shorts_cross_promote import (
+        get_best_longform_link, build_short_description, run_post_publish_promotion,
+        should_cross_promote,
+    )
+    longform_url = None
+    if should_cross_promote(ch_config):
+        longform_url = get_best_longform_link(channel_id)
+
     channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
-    sub_link = f"\n\n📺 Suscríbete: {channel_url}?sub_confirmation=1" if channel_url else ""
-
-    description = f"""{hook_text}
-
-{' '.join(f'#{t}' for t in hashtags[:10])}{sub_link}
-
-🔔 Suscríbete para más contenido como este."""
+    description = build_short_description(
+        hook_text=hook_text,
+        hashtags=hashtags,
+        longform_url=longform_url,
+        channel_url=channel_url,
+    )
 
     result = uploader.upload(
         video_path=video_path,
@@ -713,6 +930,14 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     )
     conn.commit()
     conn.close()
+
+    # ── Post-publish cross-promotion ──────────────
+    run_post_publish_promotion(
+        channel_slug=channel_slug,
+        short_yt_id=yt_id,
+        channel_id=channel_id,
+        source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+    )
 
     return {
         "short_id": short_id,

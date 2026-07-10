@@ -34,9 +34,10 @@ interface TimingData {
 
 interface Props {
   timing: TimingData | null | undefined
+  className?: string
 }
 
-export default function VideoTiming({ timing }: Props) {
+export default function VideoTiming({ timing, className = '' }: Props) {
   const [expanded, setExpanded] = useState(false)
 
   const hasTiming = timing && timing.total_duration_ms
@@ -44,7 +45,7 @@ export default function VideoTiming({ timing }: Props) {
   const hasPhases = Object.keys(phases).length > 0
 
   return (
-    <div className="mt-1">
+    <div className={`mt-1 ${className}`}>
       {hasTiming ? (
         <>
           <button

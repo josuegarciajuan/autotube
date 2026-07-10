@@ -230,6 +230,15 @@ class RedditScraper(BaseScraper):
                     self._empty_subreddits = 0  # reset fail counter on success
                     self._reddit_blocked = False
                     return posts
+            except PermanentBlock as exc:
+                # 403 = IP blocked globally by Reddit. Stop immediately.
+                self._reddit_blocked = True
+                self._blocked_at_source = f"{source_name} returned 403 for r/{subreddit}"
+                self.logger.warning(
+                    "🔒 Reddit global block — %s (via %s). Skipping remaining sources.",
+                    self._blocked_at_source, source_name,
+                )
+                break
             except Exception as exc:
                 self.logger.warning("r/%s: source '%s' failed: %s",
                                     subreddit, source_name, exc)

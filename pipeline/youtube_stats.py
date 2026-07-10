@@ -82,7 +82,7 @@ class YouTubeStatsFetcher:
         try:
             resp = (
                 self._service.videos()
-                .list(part="statistics,snippet,contentDetails", id=yt_video_id)
+                .list(part="statistics,snippet,contentDetails,status", id=yt_video_id)
                 .execute()
             )
             items = resp.get("items", [])
@@ -93,11 +93,13 @@ class YouTubeStatsFetcher:
 
             item = items[0]
             stats = item.get("statistics", {})
+            status_obj = item.get("status", {})
             return {
                 "viewCount": stats.get("viewCount", "0"),
                 "likeCount": stats.get("likeCount", "0"),
                 "commentCount": stats.get("commentCount", "0"),
                 "title": item.get("snippet", {}).get("title", ""),
+                "embeddable": status_obj.get("embeddable", True),
                 "is_mock": False,
             }
         except HttpError as exc:

@@ -794,6 +794,14 @@ SHORTS_HASHTAGS = [
     "#RuinasAntiguas",
 ]
 
+# ── Cross-promotion ──────────────────────────────────────────
+# Link shorts to long-form videos for conversion funnel
+SHORTS_LONGFORM_LINK_ENABLED = True
+SHORTS_PLAYLIST_AUTO = True
+SHORTS_FIRST_COMMENT_LINK = True
+SHORTS_PER_VIDEO_PLAYLIST = True
+SHORTS_PLAYLIST_NAME = "Shorts"
+
 # ═══════════════════════════════════════════════════════════════════
 # DESCRIPTION TEMPLATE
 # ═══════════════════════════════════════════════════════════════════
