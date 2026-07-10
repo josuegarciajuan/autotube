@@ -82,7 +82,7 @@ def delete_video(video_id: int):
 
 
 @router.post("/generate")
-def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks):
+async def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks):
     """Start video generation (async background job).
     
     Rejected with 409 if another generation is already running.
@@ -139,7 +139,7 @@ def generate_video(data: VideoGenerateRequest, background_tasks: BackgroundTasks
 
 
 @router.post("/{video_id}/resume")
-def resume_video(video_id: int, background_tasks: BackgroundTasks):
+async def resume_video(video_id: int, background_tasks: BackgroundTasks):
     """Resume video generation from the last completed phase.
     
     Loads checkpoint data from the DB and skips already-completed
