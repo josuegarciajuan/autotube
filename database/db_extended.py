@@ -1876,6 +1876,28 @@ class ExtendedDatabase(Database):
                         (eng_aggr["engagement"] or 0) + (shorts_eng_aggr["engagement"] or 0)
                     )
 
+            # ── Recent published videos (last 5) ──
+            recent_videos = conn.execute(
+                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
+                          c.name as channel_name, c.slug as channel_slug
+                   FROM videos v
+                   JOIN channels c ON v.channel_id = c.id
+                   WHERE v.yt_video_id IS NOT NULL
+                   ORDER BY v.uploaded_at DESC
+                   LIMIT 5"""
+            ).fetchall()
+
+            # ── Recent published shorts (last 5) ──
+            recent_shorts = conn.execute(
+                """SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
+                          c.name as channel_name, c.slug as channel_slug
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
+                   ORDER BY s.published_at DESC
+                   LIMIT 5"""
+            ).fetchall()
+
         return {
             "global_kpis": {
                 "subscribers": {
@@ -1919,6 +1941,8 @@ class ExtendedDatabase(Database):
             "pipeline": [dict(r) for r in pipeline],
             "upcoming": [dict(r) for r in upcoming],
             "top_videos": [dict(r) for r in top_videos],
+            "recent_videos": [dict(r) for r in recent_videos],
+            "recent_shorts": [dict(r) for r in recent_shorts],
             "ypp_progress": channels_data,
             "revenue_overview": {
                 "total_min": round(total_revenue_min, 2),
