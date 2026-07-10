@@ -170,6 +170,33 @@ STYLE_DEFAULTS: dict[str, dict] = {
             "sin_senal_stamp": True,
         },
     },
+    "clinical_mystery": {
+        "visual_style": "clinical_mystery",
+        "color_palette": {
+            "primary": "#E63946",
+            "secondary": "#1A0A0F",
+            "accent": "#00B4D8",
+            "text": "#FFFFFF",
+            "background": "#0A0A0F",
+        },
+        "base_composition": "dark_reveal",
+        "effects": {"contrast_boost": 1.25, "saturation": 1.50, "vignette": 0.40},
+        "text_style": {"uppercase": True, "max_words": 4},
+        "pollo_prompt_suffix": (
+            "dramatic medical imagery, human anatomy close-ups, DNA helix "
+            "visualization, cellular structures under microscope, X-ray aesthetic, "
+            "surgical lighting with dramatic shadows, heart monitor ECG waveforms, "
+            "viral YouTube medical thumbnail aesthetic, high contrast, bold vivid "
+            "colors, 16:9 aspect ratio, photorealistic, no text overlay, no gore, "
+            "no explicit blood or open wounds, medical drama documentary style"
+        ),
+        "negative": "flat lighting, boring sterile, dull muted colors, generic, peaceful, calm, pastel",
+        "medical_elements": {
+            "ecg_waveform": True,
+            "medical_cross": True,
+            "diagnosis_badge": True,
+        },
+    },
 }
 
 # ── LLM prompt for style decision ────────────────────────────────

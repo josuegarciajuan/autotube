@@ -124,6 +124,11 @@ class ThumbnailMaker:
         self.rescue_coordinates = getattr(config, "THUMBNAIL_RESCUE_COORDINATES", False)
         self.rescue_sin_senal = getattr(config, "THUMBNAIL_RESCUE_SIN_SENAL", False)
 
+        # ── Medical-themed overlays (clinical_mystery style) ───────
+        self.medical_ecg = getattr(config, "THUMBNAIL_MEDICAL_ECG", False)
+        self.medical_cross = getattr(config, "THUMBNAIL_MEDICAL_CROSS", False)
+        self.medical_diagnosis = getattr(config, "THUMBNAIL_MEDICAL_DIAGNOSIS", False)
+
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
         self.font_small = _find_font(int(self.font_size * 0.65), bold=True,
@@ -540,6 +545,14 @@ class ThumbnailMaker:
         if self.rescue_coordinates:
             self._draw_coordinates_overlay(draw)
 
+        # ── Medical-themed overlays (clinical_mystery) ──────────
+        if self.medical_ecg:
+            self._draw_ecg_waveform(draw)
+        if self.medical_cross:
+            self._draw_medical_cross_stamp(draw)
+        if self.medical_diagnosis:
+            self._draw_diagnosis_badge(draw)
+
         # ── Save ─────────────────────────────────────────────
         if video_id and canal_slug:
             out_dir = self.output_dir / canal_slug
@@ -871,6 +884,190 @@ class ThumbnailMaker:
         tx = stamp_x + (stamp_w - tw) // 2
         ty = stamp_y + (stamp_h - th) // 2 - 1
         draw.text((tx, ty), label, font=stamp_font, fill=(255, 255, 255))
+
+    # ── Medical-themed overlays (clinical_mystery style) ────────
+
+    def _draw_ecg_waveform(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw an ECG heartbeat waveform across the bottom of the thumbnail.
+
+        A glowing cyan medical monitor line with a characteristic
+        PQRST complex (normal sinus rhythm) that pulses across
+        the bottom edge, giving a clinical monitoring aesthetic.
+        """
+        medical_cyan = (0, 180, 216)      # bright medical cyan
+        dark_cyan = (0, 60, 80)
+        glow_cyan = (0, 220, 255)          # glow highlight
+
+        # ── ECG baseline strip at bottom ──────────────────────
+        ecg_y_center = self.height - 55
+        strip_h = 40
+        draw.rectangle(
+            [0, ecg_y_center - strip_h // 2, self.width, ecg_y_center + strip_h // 2],
+            fill=(6, 12, 24),               # deep navy background
+        )
+        # Subtle top edge glow
+        draw.line(
+            [(0, ecg_y_center - strip_h // 2), (self.width, ecg_y_center - strip_h // 2)],
+            fill=(*medical_cyan, 80), width=1,
+        )
+
+        # ── ECG waveform (simplified PQRST complex x3) ────────
+        # Each complex spans ~140px, with flat line between
+        complex_width = 140
+        gap_width = 180
+        start_x = 60
+        amp = 18  # amplitude (pixels from baseline)
+
+        for rep in range(3):
+            cx = start_x + rep * (complex_width + gap_width)
+            if cx > self.width - 40:
+                break
+
+            # P wave (small bump)
+            draw.arc(
+                [cx, ecg_y_center - amp // 2, cx + 20, ecg_y_center + amp // 2],
+                180, 360, fill=medical_cyan, width=2,
+            )
+            # Flat return to baseline
+            draw.line(
+                [(cx + 20, ecg_y_center), (cx + 35, ecg_y_center)],
+                fill=medical_cyan, width=2,
+            )
+            # Q dip (small downward spike)
+            draw.line(
+                [(cx + 35, ecg_y_center), (cx + 42, ecg_y_center + 8),
+                 (cx + 48, ecg_y_center)],
+                fill=medical_cyan, width=2,
+            )
+            # R spike (tall upward spike — main beat)
+            draw.line(
+                [(cx + 48, ecg_y_center), (cx + 54, ecg_y_center - amp),
+                 (cx + 60, ecg_y_center)],
+                fill=glow_cyan, width=3,
+            )
+            # S dip (downward)
+            draw.line(
+                [(cx + 60, ecg_y_center), (cx + 66, ecg_y_center + 10),
+                 (cx + 72, ecg_y_center)],
+                fill=medical_cyan, width=2,
+            )
+            # T wave (broad bump)
+            draw.arc(
+                [cx + 72, ecg_y_center - 10, cx + 100, ecg_y_center + 10],
+                180, 360, fill=medical_cyan, width=2,
+            )
+            # Return to baseline
+            draw.line(
+                [(cx + 100, ecg_y_center), (cx + complex_width, ecg_y_center)],
+                fill=medical_cyan, width=2,
+            )
+
+        # ── Glowing dot (heartbeat indicator) at top-left of strip
+        dot_x, dot_y = 18, ecg_y_center - strip_h // 2 + 12
+        for r in range(3, 0, -1):
+            alpha = 100 - r * 25
+            draw.ellipse(
+                [dot_x - r * 2, dot_y - r * 2, dot_x + r * 2, dot_y + r * 2],
+                fill=(*glow_cyan, alpha),
+            )
+        draw.ellipse([dot_x - 3, dot_y - 3, dot_x + 3, dot_y + 3], fill=glow_cyan)
+
+        # ── Small "HR" label
+        hr_font = _find_font(11, bold=True)
+        draw.text((32, ecg_y_center - strip_h // 2 + 3), "HR: 72 BPM",
+                  font=hr_font, fill=(0, 180, 216))
+
+    def _draw_medical_cross_stamp(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw a glowing medical cross (+) stamp in the top-left corner.
+
+        A semi-transparent red pill with a bold white '+' symbol,
+        surrounded by a subtle cyan glow to create a medical
+        urgency aesthetic. Positioned opposite the 4K badge.
+        """
+        medical_red = (230, 57, 70)       # emergency red
+        glow_cyan = (0, 220, 255)
+        padding = 15
+
+        # ── Cross stamp pill ──────────────────────────────────
+        cross_size = 54
+        cross_x = padding
+        cross_y = padding
+
+        # Glow halo behind
+        for r in range(4, 0, -1):
+            draw.rounded_rectangle(
+                [cross_x - r, cross_y - r, cross_x + cross_size + r, cross_y + cross_size + r],
+                radius=14,
+                fill=(*glow_cyan, 25 - r * 5),
+            )
+
+        # Red pill background
+        draw.rounded_rectangle(
+            [cross_x, cross_y, cross_x + cross_size, cross_y + cross_size],
+            radius=12,
+            fill=medical_red,
+            outline=(*glow_cyan, 180),
+            width=2,
+        )
+
+        # White '+' cross
+        cross_font = _find_font(36, bold=True)
+        cross_label = "+"
+        bbox = draw.textbbox((0, 0), cross_label, font=cross_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = cross_x + (cross_size - tw) // 2
+        ty = cross_y + (cross_size - th) // 2 - 2
+        # Shadow
+        draw.text((tx + 1, ty + 1), cross_label, font=cross_font,
+                  fill=(0, 0, 0, 80))
+        # Main text
+        draw.text((tx, ty), cross_label, font=cross_font,
+                  fill=(255, 255, 255))
+
+    def _draw_diagnosis_badge(self, draw: ImageDraw.ImageDraw) -> None:
+        """Draw a 'DIAGNÓSTICO' badge pill in the top-right corner.
+
+        Positioned below the 4K badge (if present) in the same column.
+        Uses an emergency red pill with cyan border for a
+        'medical alert / case file' aesthetic.
+        """
+        medical_red = (200, 40, 45)
+        medical_cyan = (0, 200, 230)
+
+        # Position: below 4K badge if present
+        badge_offset = 80 if self.show_4k_badge else 0
+        badge_x = self.width - 155
+        badge_y = 15 + badge_offset
+        badge_w = 140
+        badge_h = 36
+
+        # Glow halo
+        for r in range(3, 0, -1):
+            draw.rounded_rectangle(
+                [badge_x - r, badge_y - r, badge_x + badge_w + r, badge_y + badge_h + r],
+                radius=10,
+                fill=(*medical_cyan, 20 - r * 6),
+            )
+
+        # Red pill background
+        draw.rounded_rectangle(
+            [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
+            radius=8,
+            fill=medical_red,
+            outline=medical_cyan,
+            width=2,
+        )
+
+        # "DIAGNÓSTICO" text
+        badge_font = _find_font(16, bold=True)
+        label = "DIAGNÓSTICO"
+        bbox = draw.textbbox((0, 0), label, font=badge_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = badge_x + (badge_w - tw) // 2
+        ty = badge_y + (badge_h - th) // 2 - 1
+        draw.text((tx, ty), label, font=badge_font, fill=(255, 255, 255))
 
     # ── helpers ──────────────────────────────────────────────────
 

@@ -210,6 +210,13 @@ STYLE_PSYCHOLOGY_RULES = {
         "text_strategy": "PALABRAS DE EMERGENCIA: PERDIDO, SIN SEÑAL, ÚLTIMA TRANSMISIÓN, MAYDAY, RESCATE",
         "avoid": "rostros sonrientes, colores cálidos y acogedores, fondos claros o pastel, composiciones relajadas, naturaleza pacífica",
     },
+    "clinical_mystery": {
+        "color_triggers": "rojo emergencia (#E63946) + cian médico (#00B4D8) = urgencia clínica, drama médico, curiosidad morbosa. El rojo activa alerta (CTR +12%), el cian transmite tecnología/ciencia. Combinación de alto contraste = máxima llamada de atención.",
+        "composition_rule": "primer plano de elemento anatómico/científico con iluminación dramática + texto overlay inferior + badge 'DIAGNÓSTICO' + cruz médica + ECG waveform. Regla de tercios estricta con punto focal dominante ocupando 50%+ del frame.",
+        "emotional_hooks": ["morbid_curiosity", "fear_of_disease", "scientific_awe", "diagnostic_urgency", "survival_hope", "body_horror_mild"],
+        "text_strategy": "PALABRAS DE IMPACTO MÉDICO: DIAGNÓSTICO, ANOMALÍA, EXTRAÑO, CURADO, EXPLICACIÓN, DESCUBIERTO. Palabras cortas (2-4), UPPERCASE, contraste blanco sobre fondo oscuro. NUNCA repetir el título.",
+        "avoid": "colores apagados, estilo estéril, fondos blancos, sonrisas, niños, procedimientos explícitos, sangre visible, gore, tono académico aburrido, calma",
+    },
 }
 
 # ── Thumbnail Concept Builder (LLM Prompt Fragment) ────────────

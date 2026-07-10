@@ -578,31 +578,32 @@ VIDEO_RESOLUTION = (1280, 720)
 THUMBNAIL_VISUAL_STYLE = "clinical_mystery"
 THUMBNAIL_STYLE_OVERRIDE = True
 
-# Manual style config for clinical_mystery
+# Manual style config for clinical_mystery — viral medical documentary
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "clinical_mystery",
     "color_palette": {
-        "primary": "#005F73",
-        "accent": "#DC8228",
-        "text": "#F0F5FA",
-        "shadow": "#04060C",
+        "primary": "#E63946",      # red: medical urgency / emergency
+        "accent": "#00B4D8",       # cyan: medical technology / contrast
+        "text": "#FFFFFF",
+        "shadow": "#0A0A0F",
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.15,
-        "saturation": 0.65,
-        "vignette": 0.30,
+        "contrast_boost": 1.25,    # boosted for viral impact
+        "saturation": 1.50,        # vibrant, NOT desaturated
+        "vignette": 0.40,          # deeper drama
     },
     "text_style": {
         "uppercase": True,
         "max_words": 4,
     },
     "pollo_prompt_suffix": (
-        "medical documentary cinematography, clinical sterile atmosphere, "
-        "teal and amber accents, dramatic scientific lighting, anatomical "
-        "precision, laboratory and hospital aesthetic, 16:9 aspect ratio, "
-        "high contrast, no text overlay, no gore, no explicit medical "
-        "procedures, clean professional documentary style"
+        "dramatic medical imagery, human anatomy close-ups, DNA helix "
+        "visualization, cellular structures under microscope, X-ray aesthetic, "
+        "surgical lighting with dramatic shadows, heart monitor ECG waveforms, "
+        "viral YouTube medical thumbnail aesthetic, high contrast, bold vivid "
+        "colors, 16:9 aspect ratio, photorealistic, no text overlay, no gore, "
+        "no explicit blood or open wounds, medical drama documentary style"
     ),
 }
 
@@ -836,10 +837,15 @@ THUMBNAIL_BORDER_WIDTH = 5
 
 # ── Per-channel thumbnail customisation ────────────────
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
-THUMBNAIL_BORDER_COLOR = "#DC8228"       # amber medical alert
+THUMBNAIL_BORDER_COLOR = "#FF2D55"       # hot pink/red — viral medical alert
 THUMBNAIL_SHOW_4K_BADGE = True
 THUMBNAIL_TEXT_STROKE_WIDTH = 0
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
+
+# ── Medical-themed overlays (clinical_mystery style) ──────────
+THUMBNAIL_MEDICAL_ECG = True             # ECG heartbeat waveform across bottom
+THUMBNAIL_MEDICAL_CROSS = True           # medical cross (+) glowing stamp
+THUMBNAIL_MEDICAL_DIAGNOSIS = True       # "DIAGNÓSTICO" badge pill
 
 THUMBNAIL_STYLE = {
     "layout": "image_full_background_text_overlay",
@@ -857,11 +863,12 @@ THUMBNAIL_STYLE = {
         "radiografias, manos sosteniendo diagnosticos OK."
     ),
     "number_preference": "odd_numbers_for_lists",
-    "amber_accent_rule": (
-        "Amber medical alert accents on key elements boost CTR. "
-        "Contrast cool teal blues with warm amber. "
-        "NEVER use blood red or horror styling. "
-        "Medical = clean, professional, scientific aesthetic."
+    "medical_viral_rule": (
+        "Red/cyan medical alert accents on key elements boost CTR dramatically. "
+        "Contrast emergency reds with bright medical cyan for viral impact. "
+        "Use red accents for urgency, cyan for technology/science contrast. "
+        "NO gore, NO explicit procedures — medical drama without horror. "
+        "Medical = high contrast, dramatic, viral documentary aesthetic."
     ),
 }
 
