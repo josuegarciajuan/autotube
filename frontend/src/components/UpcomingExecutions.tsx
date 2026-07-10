@@ -82,14 +82,14 @@ export default function UpcomingExecutions() {
 
       for (const day of (week.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && s.scheduled_at > new Date().toISOString()) {
+          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()) {
             allSlots.push({ ...s, kind: 'video' })
           }
         }
       }
       for (const day of (shortsWeek.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && s.scheduled_at > new Date().toISOString()) {
+          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()) {
             allSlots.push({ ...s, kind: 'short' })
           }
         }
@@ -201,7 +201,7 @@ export default function UpcomingExecutions() {
       {Array.from(groups.entries()).map(([dateKey, daySlots]) => {
         const first = daySlots[0]
         const countdown = (() => {
-          const target = new Date(first.scheduled_at)
+          const target = new Date(first.scheduled_at + 'Z')
           const diff = target.getTime() - now
           if (diff <= 0) return 'AHORA'
           const mins = Math.floor(diff / 60000)
