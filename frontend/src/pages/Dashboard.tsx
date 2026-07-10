@@ -5,6 +5,8 @@ import KpiCard from '../components/KpiCard'
 import ChannelTable from '../components/ChannelTable'
 import PipelineSection from '../components/PipelineSection'
 import TopVideos from '../components/TopVideos'
+import RecentVideos from '../components/RecentVideos'
+import RecentShorts from '../components/RecentShorts'
 import YppProgressSection from '../components/YppProgressSection'
 import RevenueOverview from '../components/RevenueOverview'
 import MilestonesTimeline from '../components/MilestonesTimeline'
@@ -143,6 +145,8 @@ export default function Dashboard() {
   const channels = data?.channels || []
   const pipeline = data?.pipeline || []
   const topVideos = data?.top_videos || []
+  const recentVideos = data?.recent_videos || []
+  const recentShorts = data?.recent_shorts || []
 
   return (
     <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 animate-fade-in">
@@ -258,6 +262,12 @@ export default function Dashboard() {
 
       {/* Top videos */}
       <TopVideos videos={topVideos} />
+
+      {/* Recently published: videos + shorts side by side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <RecentVideos videos={recentVideos} />
+        <RecentShorts shorts={recentShorts} />
+      </div>
 
       {/* Stabilization result - embedded inline notification */}
       {stabilizeResult && (

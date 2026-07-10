@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, apiUrl } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
@@ -194,6 +194,7 @@ function PromotionTab({ channelId, videos, playlists, setPlaylists, loadingPlayl
 export default function ChannelDetail() {
   const { id } = useParams<{ id: string }>()
   const channelId = Number(id)
+  const navigate = useNavigate()
 
   const [channel, setChannel] = useState<any>(null)
   const [videos, setVideos] = useState<any[]>([])
@@ -470,6 +471,19 @@ export default function ChannelDetail() {
 
   async function handleUpload(videoId: number) {
     try { await api.uploadVideo(videoId); alert('Subida iniciada'); const vids = await api.getChannelVideos(channelId); setVideos(vids) } catch (e: any) { alert('Error: ' + e.message) }
+  }
+
+  async function handleDownloadThumbnail(videoId: number) {
+    try {
+      const res = await fetch(apiUrl(`/thumbnail/${videoId}`))
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `miniatura-${videoId}.jpg`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e: any) { alert('Error al descargar: ' + e.message) }
   }
 
   async function handleDelete(videoId: number) {
@@ -1326,7 +1340,7 @@ export default function ChannelDetail() {
               // overwrite it to 'error').
               const displayStatus = v.yt_video_id ? 'uploaded' : (v.status || 'draft');
               return (
-              <Link key={v.id} to={`/videos/${v.id}/edit`} className="group">
+              <div key={v.id} className="group cursor-pointer" onClick={() => navigate(`/videos/${v.id}/edit`)}>
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
                   {v.thumbnail_path ? (
                     <img src={apiUrl(`/thumbnail/${v.id}?v=${v.updated_at || v.id}`)} alt={v.titulo_final} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
@@ -1371,12 +1385,13 @@ export default function ChannelDetail() {
                     <VideoTiming timing={v.timing_data} />
                   )}
                   <div className="flex gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {v.thumbnail_path && <button onClick={e => { e.preventDefault(); e.stopPropagation(); handleDownloadThumbnail(v.id) }} className="text-[11px] text-neon-cyan bg-neon-cyan/10 px-2 py-0.5 rounded hover:bg-neon-cyan/20 flex items-center gap-1"><Download size={11} /> Mini</button>}
                     {v.status === 'ready' && !v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-red bg-neon-red/10 px-2 py-0.5 rounded hover:bg-neon-red/20">Subir a YT</button>}
                     {v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-gold bg-neon-gold/10 px-2 py-0.5 rounded hover:bg-neon-gold/20">Resubir</button>}
                     {(displayStatus === 'error' || displayStatus === 'failed') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
                   </div>
                 </div>
-              </Link>
+              </div>
               );
             })}
           </div>

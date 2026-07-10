@@ -47,6 +47,30 @@ async def lifespan(app: FastAPI):
         root_logger.addHandler(fh)
     logging.getLogger("autotube").info("File logging enabled → logs/api.log")
     
+    # ── Port pre-flight guard ─────────────────────────────────
+    # If port 8000 is already bound (a previous instance still holds it),
+    # uvicorn will crash with [Errno 98] AFTER the lifespan startup runs —
+    # which would create orphan videos/jobs on every failed restart.
+    # Abort BEFORE touching the DB so a doomed restart leaves no garbage.
+    import os as _os
+    import socket as _socket
+    _bind_host = _os.getenv("API_HOST", "0.0.0.0")
+    _bind_port = int(_os.getenv("API_PORT", "8000"))
+    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    _probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    try:
+        _probe.bind((_bind_host, _bind_port))
+    except OSError:
+        logging.getLogger("autotube.startup").critical(
+            "Port %s:%d already in use — another instance is running. "
+            "Aborting startup BEFORE DB/slot init to avoid orphan jobs.",
+            _bind_host, _bind_port,
+        )
+        _probe.close()
+        raise SystemExit(1)
+    finally:
+        _probe.close()
+
     # Startup
     init_db()
     migrate_v2()
@@ -73,13 +97,10 @@ async def lifespan(app: FastAPI):
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
     
     # Auto-recover failed/interrupted videos from previous run
-    # DISABLED: interferes with new generation jobs and causes ffmpeg
-    # BrokenPipeError due to concurrent renders. Recovery will be
-    # re-enabled after fixing serialization of ffmpeg access.
     try:
         from api.services.generation_service import auto_recover_on_startup
-        # await auto_recover_on_startup()
-        logging.getLogger("autotube.startup").info("Auto-recovery skipped (disabled pending fix)")
+        await auto_recover_on_startup()
+        logging.getLogger("autotube.startup").info("Auto-recovery completed")
     except Exception as exc:
         logging.getLogger("autotube.startup").warning(
             "Auto-recovery skipped: %s", exc
