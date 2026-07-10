@@ -61,28 +61,22 @@ const SHORTS_TYPE_LABEL: Record<string, string> = {
 }
 
 // ── Helpers ────────────────────────────────────────────
-function isCEST(): boolean {
-  return new Date().getMonth() >= 2 && new Date().getMonth() <= 9
-}
+const TZ_OFFSET = 1  // GMT+1 (CET)
+
 function toLocalTime(ts: string | null | undefined): string {
   if (!ts) return '??:??'
-  // Try ISO format: "2026-07-10T14:00:00+00:00"
   let m = ts.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
   if (m) {
     const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
-    const offset = isCEST() ? 2 : 1
-    date.setHours(date.getHours() + offset)
+    date.setHours(date.getHours() + TZ_OFFSET)
     return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
   }
-  // Try space format: "2026-07-10 14:00:00"
   m = ts.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
   if (m) {
     const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
-    const offset = isCEST() ? 2 : 1
-    date.setHours(date.getHours() + offset)
+    date.setHours(date.getHours() + TZ_OFFSET)
     return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
   }
-  // Fallback: just extract HH:MM
   m = ts.match(/(\d{2}):(\d{2})/)
   return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
 }
@@ -241,7 +235,7 @@ export default function DailySchedule() {
           <Calendar size={18} className="text-neon-gold" />
           Planificacion Diaria
           <span className="text-xs text-gray-500 font-normal">
-            (horario {isCEST() ? 'GMT+2 CEST' : 'GMT+1 CET'})
+            (horario GMT+1)
           </span>
         </h3>
         <div className="flex flex-wrap gap-1.5">

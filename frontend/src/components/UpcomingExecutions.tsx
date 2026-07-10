@@ -21,22 +21,14 @@ interface Slot {
 }
 
 // ── Timezone helper ──────────────────────────────────────
-function isCEST(): boolean {
-  // Europe/Madrid: CEST = last Sun March to last Sun October; GMT+2
-  const now = new Date()
-  const month = now.getMonth() // 0-11
-  return month >= 2 && month <= 9 // rough: Mar-Oct
-}
+const TZ_OFFSET = 1  // GMT+1 (CET) — fixed, no DST
 
 function toLocal(utcStr: string): string {
-  // Input: "2026-07-10 14:00:00" (UTC)
-  // Output: "14:00" (CEST or CET depending on season)
   const match = utcStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
   if (!match) return utcStr.slice(0, 5)
   const [, year, month, day, hour, minute] = match.map(Number)
   const date = new Date(Date.UTC(year, month - 1, day, hour, minute))
-  const offset = isCEST() ? 2 : 1
-  date.setHours(date.getHours() + offset)
+  date.setHours(date.getHours() + TZ_OFFSET)
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
@@ -45,8 +37,7 @@ function toLocalFull(utcStr: string): string {
   if (!match) return utcStr
   const [, year, month, day, hour, minute] = match.map(Number)
   const date = new Date(Date.UTC(year, month - 1, day, hour, minute))
-  const offset = isCEST() ? 2 : 1
-  date.setHours(date.getHours() + offset)
+  date.setHours(date.getHours() + TZ_OFFSET)
   return date.toLocaleString('es-ES', {
     weekday: 'short', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
@@ -91,14 +82,14 @@ export default function UpcomingExecutions() {
 
       for (const day of (week.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending') {
+          if (s.status === 'pending' && s.scheduled_at > new Date().toISOString()) {
             allSlots.push({ ...s, kind: 'video' })
           }
         }
       }
       for (const day of (shortsWeek.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending') {
+          if (s.status === 'pending' && s.scheduled_at > new Date().toISOString()) {
             allSlots.push({ ...s, kind: 'short' })
           }
         }
@@ -140,7 +131,7 @@ export default function UpcomingExecutions() {
     groups.get(dateKey)!.push(s)
   }
 
-  const tzLabel = isCEST() ? 'GMT+2 (CEST)' : 'GMT+1 (CET)'
+  const tzLabel = 'GMT+1'
 
   if (loading) {
     return (
