@@ -182,10 +182,16 @@ class ImageProcessor:
         img = ImageEnhance.Color(img).enhance(desaturation)
 
         primary = self.config.COLOR_PALETTE.get("primary", (180, 30, 30))
+        # Per-channel override: IMAGE_TINT_COLOR decouples the image tint
+        # from the branding palette (e.g. a neutral tint so warm scenes
+        # don't get a cold cast). Falls back to COLOR_PALETTE.primary.
+        tint_color = getattr(self.config, "IMAGE_TINT_COLOR", None)
+        if tint_color is None:
+            tint_color = primary
         # JSON round-trip may turn tuples into lists; ensure tuple for PIL
-        if isinstance(primary, list):
-            primary = tuple(primary)
-        tint = Image.new("RGB", img.size, primary)
+        if isinstance(tint_color, list):
+            tint_color = tuple(tint_color)
+        tint = Image.new("RGB", img.size, tint_color)
         img = Image.blend(img, tint, tint_strength)
 
         return img

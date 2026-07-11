@@ -59,7 +59,7 @@ def _build_block_rules(cfg, theme_context=None, word_target=None) -> str:
 REGLAS DE COHERENCIA VISUAL:
 - Cada search_query_en DEBE incluir al menos una de estas keywords tematicas: {theme_kw_str}
 - Las escenas consecutivas deben tener progresion visual coherente (plano general → primer plano → detalle → plano de situacion). No pueden saltar bruscamente de una epoca/tema a otro.
-- search_query_en DEBE incluir era/period keywords del contexto visual. Ej: si es expedicion artica → 'arctic', 'frozen', 'ice', '19th century', 'expedition'.
+- search_query_en DEBE incluir era/period keywords del contexto visual. Ej: si es expedicion artica → 'arctic', 'frozen', 'ice', '19th century', 'expedition'; si es desierto → 'desert', 'sand', 'hot', 'sun', 'survival'; si es selva → 'jungle', 'rainforest', 'expedition', 'green'. Adapta el ambiente al tema REAL, NO impongas frio/nieve si la expedicion no es polar.
 - PROHIBIDO mostrar elementos de: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}"""
 
     return f"""ESTRUCTURA DE BLOQUES NARRATIVOS:
@@ -72,15 +72,15 @@ El guion debe organizarse en bloques semanticos cohesivos agrupados en parrafos 
 - "search_query_en": 4-7 keywords en INGLES para buscar en Unsplash/Pexels. REGLAS ESTRICTAS:
   * FORMATO OBLIGATORIO: [keywords del TEMA historico] + [keywords visuales]. AMBAS partes necesarias.
   * ANCLAJE TEMATICO: incluye 1-2 keywords del CONTENIDO del bloque (expedicion, epoca, lugar mencionado).
-  * Ej: "franklin expedition arctic ship ice cinematic", "donner party snow pioneer wagon documentary style"
+  * Ej: "egypt desert expedition sand cinematic", "amazon jungle river documentary style", "franklin expedition arctic ship ice cinematic", "donner party snow pioneer wagon documentary style", "ocean storm survival ship cinematic"
   * SOLO terminos que EXISTAN en bancos de stock gratuitos (Unsplash, Pexels, Pixabay)
   * Equilibra especificidad con disponibilidad: "arctic exploration 19th century" (OK) vs "HMS Erebus trapped in ice 1846" (demasiado especifico)
   * Si el concepto es muy especifico, MANTEN el tema pero simplifica: "Franklin Expedition" → "arctic exploration ship ice", NO lo conviertas en algo generico sin tema
-  * Incluye UN modificador de estilo: "cinematic", "cold atmosphere", "dramatic lighting", "documentary style"
-  * Para video, usa queries de 3-5 palabras con tema + visual: "frozen ocean cinematic", "storm clouds time lapse", "arctic expedition ship"
+  * Incluye UN modificador de estilo: "cinematic", "hot atmosphere", "dramatic lighting", "documentary style", "wilderness", "expedition"
+  * Para video, usa queries de 3-5 palabras con tema + visual: "frozen ocean cinematic", "desert sandstorm aerial", "jungle river expedition", "storm clouds time lapse", "arctic expedition ship"
   * Para video, añade "slow motion" o "aerial" o "time lapse" SOLO si realmente aplica — no fuerces estos terminos si no corresponden
 - "media_tipo": Decide si este bloque se vera mejor con un minivideo o una imagen fija:
-  * "video" si el plano tiene movimiento natural: paisajes, tormentas, oceano, nubes, time-lapses, olas, hielo flotando, nieve cayendo, caminata en nieve, paneos sobre paisajes
+  * "video" si el plano tiene movimiento natural: paisajes, tormentas, oceano, nubes, time-lapses, olas, dunas de arena, niebla, cascadas, animales en movimiento, caminata en desierto o selva, paneos sobre paisajes
   * "imagen" SOLO si el plano es inherentemente estatico: un retrato fotografico, un mapa antiguo, un diagrama de supervivencia, un documento historico, una carta manuscrita
   * En caso de duda, elige "video" — el sistema tiene fallback a imagen si no encuentra video
   * Aproximadamente el 60-70% de los bloques deberian ser video
@@ -96,19 +96,22 @@ REGLAS DE FRAGMENTACION:
 - Los bloques consecutivos deben tener progresion visual coherente.{theme_rules}
 
 EJEMPLOS DE BUENAS QUERIES:
+  - "sahara desert expedition sand cinematic"
+  - "amazon rainforest river expedition documentary"
   - "frozen ocean arctic landscape cinematic"
   - "old wooden ship sails storm documentary style"
-  - "close up frost on face cold atmosphere"
+  - "jungle waterfall tropical expedition dramatic"
   - "snowstorm wilderness dramatic lighting"
   - "storm clouds time lapse dark sky"
   - "person silhouette mountain peak contemplative"
   - "compass navigation map vintage exploration"
-  - "ice crack frozen sea cinematic"
+  - "ocean waves storm ship survival"
 
 EJEMPLOS DE MALAS QUERIES (NO USAR):
   - "HMS Erebus trapped in ice 1846" (demasiado especifico)
   - "Donner Party survival cannibalism" (abstracto, no existe en stock)
-  - "Sir John Franklin portrait expedition" (demasiado especifico)"""
+  - "Sir John Franklin portrait expedition" (demasiado especifico)
+  - "Napoleon crossing Alps with army" (especifico, mejor usar generic landscape)"""
 
 
 def build_outline_prompt(config=None, duration_min: float = 15, word_target: int = 2500) -> str:
