@@ -302,16 +302,15 @@ AUDIENCIA: {audience}
 REGLAS ESTRICTAS:
 1. Español latinoamericano neutro. PROHIBIDO "vosotros", "os", conjugaciones ibéricas.
 2. NO inventes datos. Usa SOLO la información de las fuentes proporcionadas.
-3. Cada bloque debe ser breve: ENTRE 20 y 35 PALABRAS (¡OBLIGATORIO!). Un bloque de 100 palabras es INVÁLIDO — divídelo en 3-4 bloques más cortos.
-4. Cada bloque debe comunicar UNA sola idea concreta. Si necesitas decir más, crea OTRO bloque.
-5. Incluye detalles sensoriales, descripciones vívidas y contexto.
-6. NO uses relleno ni repeticiones. Cada bloque aporta contenido NUEVO.
-7. CRÍTICO: Cada bloque debe CONTENER al menos un hecho concreto (número, fecha, nombre, lugar, cita). PROHIBIDO escribir párrafos puramente metafóricos sin datos. Si un párrafo no comunica ningún hecho verificable, es INVÁLIDO.{source_context}{context_text}{outline_context}
+3. Cada bloque debe ser un párrafo completo y sustancial (no frases sueltas).
+4. Incluye detalles sensoriales, descripciones vívidas y contexto.
+5. NO uses relleno ni repeticiones. Cada bloque aporta contenido NUEVO.
+6. CRÍTICO: Cada bloque debe CONTENER al menos un hecho concreto (número, fecha, nombre, lugar, cita). PROHIBIDO escribir párrafos puramente metafóricos sin datos. Si un párrafo no comunica ningún hecho verificable, es INVÁLIDO.{source_context}{context_text}{outline_context}
 
-Genera entre 2 y 5 bloques narrativos (~{word_guidance} palabras total, ~20-35 palabras CADA BLOQUE).
+Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
 Cada bloque SOLO necesita el campo "texto" (el párrafo que narrará el locutor).
 
-Responde ÚNICAMENTE con JSON: {{"bloques": [{{"texto": "párrafo breve de 20-35 palabras aquí..."}}, ...]}}
+Responde ÚNICAMENTE con JSON: {{"bloques": [{{"texto": "párrafo aquí..."}}, ...]}}
 Sin explicaciones, sin markdown, sin texto fuera del JSON."""
 
 
