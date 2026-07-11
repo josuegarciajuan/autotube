@@ -32,7 +32,6 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 # Ensure the project root is on sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -140,28 +139,49 @@ def _kill_orphaned_ffmpeg() -> None:
 
 # ── RAM gate ──────────────────────────────────────────────────────
 
-def _get_available_memory_mb() -> Optional[float]:
-    """Return available system memory in MB, or None if unknown."""
+def _get_available_memory_mb() -> float:
+    """Return available system memory in MB using MemAvailable from /proc/meminfo.
+
+    Delegates to pipeline.ram_governor.available_mb() which reads MemAvailable
+    (includes reclaimable page cache), not just MemFree. This avoids false
+    positives when ffmpeg/moviepy have saturated the page cache but plenty of
+    reclaimable memory is still available.
+
+    Returns -1 on any error.
+    """
     try:
-        avail_bytes = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
-        return avail_bytes / (1024 * 1024)
-    except Exception:
-        return None
+        from pipeline.ram_governor import available_mb
+        return float(available_mb())
+    except (ImportError, Exception):
+        # Fallback: sysconf (legacy — underreports available RAM by 5-10 GB)
+        try:
+            avail_bytes = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+            return avail_bytes / (1024 * 1024)
+        except Exception:
+            return -1.0
 
 
 def _check_ram_gate(logger) -> bool:
     """Check if there's enough RAM to proceed with generation.
-    
+
+    Uses MIN_FREE_FOR_RENDER_MB from config.settings as the threshold
+    (default 3000 MB). Delegates to pipeline.ram_governor which reads
+    MemAvailable — this correctly counts reclaimable page cache and
+    avoids false positives from prior render activity.
+
     Returns True if OK, False if insufficient.
     """
+    from config.settings import MIN_FREE_FOR_RENDER_MB
+
+    threshold = MIN_FREE_FOR_RENDER_MB
     avail_mb = _get_available_memory_mb()
-    if avail_mb is not None and avail_mb < 4000:  # 4 GB minimum
+    if avail_mb >= 0 and avail_mb < threshold:
         logger.error(
-            "Aborting: insufficient RAM — only %.0f MB free (need ≥ 4000 MB)",
-            avail_mb,
+            "Aborting: insufficient RAM — only %.0f MB free (need ≥ %d MB)",
+            avail_mb, threshold,
         )
         return False
-    if avail_mb is not None:
+    if avail_mb >= 0:
         logger.info("RAM check: %.0f MB free — OK", avail_mb)
     return True
 
@@ -301,12 +321,12 @@ def run_job(
     # ── 4. RAM gate ───────────────────────────────────────────
     if not test_mode:
         avail_mb = _get_available_memory_mb()
-        if avail_mb is not None and avail_mb < 2500:
+        if avail_mb >= 0 and avail_mb < 2500:
             logger.warning("Low RAM: only %.0f MB free", avail_mb)
     
     if test_mode:
         avail_mb = _get_available_memory_mb()
-        if avail_mb is not None and avail_mb < 1000:
+        if avail_mb >= 0 and avail_mb < 1000:
             logger.error("Aborting test: only %.0f MB free (need ≥ 1000 MB)", avail_mb)
             db.update_job(job_id, status="failed", error_msg="RAM insuficiente para test")
             db.update_video(video_id, status="error", progress_phase="blocked")

@@ -1963,12 +1963,17 @@ async def auto_recover_on_startup():
     """Scan failed videos on startup and auto-reassemble interrupted ones.
 
     Called from ``api/main.py`` lifespan block.  Logic:
-    1. Mark all running/queued jobs as failed (server restarted).
-    2. Fix videos stuck in 'generating'/'reassembling' → 'error'.
+    1. Mark stale jobs as failed (PID-aware):
+         - queued jobs → failed (never started).
+         - running jobs → only mark failed if worker process is DEAD.
+           Workers that survived the API restart remain 'running'.
+    2. Reset stuck video states (PID-aware):
+         - Only reset videos to 'error' if their job is not running.
+         - Videos from surviving workers stay as 'generating'.
     3. For each video in 'error' with checkpoint data:
-        - If the failure was a bug → skip (leave for manual analysis).
-        - If the failure was an interruption → create a reassemble job.
-        - If >= 3 reassembly attempts already failed → mark as bug_crash, skip.
+         - If the failure was a bug → skip (leave for manual analysis).
+         - If the failure was an interruption → create a reassemble job.
+         - If >= 3 reassembly attempts already failed → mark as bug_crash, skip.
     """
     import json
     
@@ -1979,21 +1984,105 @@ async def auto_recover_on_startup():
     conn = db._connect()
 
     # ── Step 1: Kill stale jobs ───────────────────────────────
-    killed = conn.execute(
+    # queued jobs: never started → always stale → mark failed
+    queued_killed = conn.execute(
         "UPDATE generation_jobs SET status='failed', "
         "error_msg='Server restarted — old process no longer exists' "
-        "WHERE status IN ('running','queued')"
+        "WHERE status = 'queued'"
     ).rowcount
-    if killed:
-        log.info("Marked %d stale job(s) as failed (server restart)", killed)
+    if queued_killed:
+        log.info("Marked %d queued job(s) as failed (server restart)", queued_killed)
+
+    # running jobs: only mark as failed if the worker process is DEAD.
+    # If the subprocess survived the API restart, leave it running so
+    # reconnect_active_workers() can pick it up.
+    running_rows = conn.execute(
+        "SELECT id, video_id FROM generation_jobs WHERE status='running'"
+    ).fetchall()
+    running_killed = 0
+    running_alive = 0
+    for rrow in running_rows:
+        job_id = rrow["id"]
+        worker_alive = False
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip():
+                worker_alive = True
+        except Exception:
+            pass  # can't determine → conservatively mark failed
+        if worker_alive:
+            running_alive += 1
+            log.info("Job #%d: worker alive (PID %s) — keeping as running",
+                     job_id, result.stdout.strip().split()[0])
+        else:
+            conn.execute(
+                "UPDATE generation_jobs SET status='failed', "
+                "error_msg='Server restarted — old process no longer exists' "
+                "WHERE id=?", (job_id,)
+            )
+            conn.execute(
+                "UPDATE videos SET status='error', progress_phase='interrupted' "
+                "WHERE id=? AND status='generating'",
+                (rrow["video_id"],)
+            )
+            running_killed += 1
+    if running_killed or running_alive:
+        log.info("Running jobs: %d killed (worker dead), %d kept alive (worker survived restart)",
+                 running_killed, running_alive)
+
+    total_killed = queued_killed + running_killed
+    if total_killed:
+        log.info("Total stale jobs killed: %d", total_killed)
 
     # ── Step 2: Reset stuck video states ──────────────────────
-    stuck = conn.execute(
-        "UPDATE videos SET status='error', progress_phase='interrupted' "
-        "WHERE status IN ('generating','reassembling')"
-    ).rowcount
+    # Only reset videos whose job is NOT currently running (i.e., worker dead).
+    # Videos from surviving workers must stay as 'generating'.
+    stuck_rows = conn.execute(
+        "SELECT v.id, v.canal FROM videos v "
+        "JOIN generation_jobs j ON j.video_id = v.id "
+        "WHERE v.status IN ('generating','reassembling') "
+        "AND j.status != 'running'"
+    ).fetchall()
+    stuck = 0
+    skipped_alive = 0
+    for srow in stuck_rows:
+        vid = srow["id"]
+        conn.execute(
+            "UPDATE videos SET status='error', progress_phase='interrupted' "
+            "WHERE id=?", (vid,)
+        )
+        stuck += 1
+
+    # Also catch videos stuck in generating/reassembling with NO job at all
+    orphan_videos = conn.execute(
+        "SELECT v.id FROM videos v "
+        "LEFT JOIN generation_jobs j ON j.video_id = v.id "
+        "WHERE v.status IN ('generating','reassembling') "
+        "AND j.id IS NULL"
+    ).fetchall()
+    for orow in orphan_videos:
+        conn.execute(
+            "UPDATE videos SET status='error', progress_phase='interrupted' "
+            "WHERE id=?", (orow["id"],)
+        )
+        stuck += 1
+
     if stuck:
         log.info("Reset %d stuck video(s) generating/reassembling → error", stuck)
+
+    # Count videos kept as generating (worker alive — will be reconnected)
+    alive_count = conn.execute(
+        "SELECT COUNT(*) FROM videos v "
+        "JOIN generation_jobs j ON j.video_id = v.id "
+        "WHERE v.status IN ('generating','reassembling') "
+        "AND j.status='running'"
+    ).fetchone()[0]
+    if alive_count:
+        log.info("Kept %d video(s) as generating (worker survived restart)", alive_count)
 
     conn.commit()
 
