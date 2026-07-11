@@ -142,7 +142,8 @@ async def lifespan(app: FastAPI):
         from api.services.shorts_scheduler import generate_upcoming_shorts
         result = generate_upcoming_shorts(days=7)
         logger = logging.getLogger("autotube.startup")
-        logger.info("Shorts scheduler: 7-day plan generated (%d slots)", sum(result.values()))
+        total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
+        logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
     except Exception as exc:
         logging.getLogger("autotube.startup").warning(
             "Shorts scheduler init skipped: %s", exc

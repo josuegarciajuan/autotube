@@ -2249,6 +2249,19 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return dict(row) if row else None
     
+    def get_active_shorts_job(self) -> dict | None:
+        """Check if any short generation job is running/queued. Returns it or None.
+        
+        Distinct from get_active_job() which blocks on ANY job. Shorts can run
+        concurrently with long-form videos (1 video + 1 short max at a time).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE status IN ('running','queued') "
+                "AND action IN ('generate_native_short', 'generate_clip_short') LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    
     def get_active_job_for_channel(self, channel_id: int) -> dict | None:
         """Check if a generation job is active for a specific channel. Returns it or None.
         

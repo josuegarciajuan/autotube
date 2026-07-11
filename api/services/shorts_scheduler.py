@@ -318,14 +318,14 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # 2. Cancel stale pending slots (>6h past scheduled_at)
     _cancel_stale_shorts_slots(db)
 
-    # 3. Guard: only one job at a time
-    active = db.get_active_job()
+    # 3. Guard: only one SHORT at a time (videos can run concurrently)
+    active = db.get_active_shorts_job()
     if active:
-        logger.debug("Shorts dispatch skipped: job #%d is %s", active["id"], active["status"])
+        logger.debug("Shorts dispatch skipped: short job #%d is %s", active["id"], active["status"])
         return None
 
-    # 4. Memory gate
-    if not _memory_ok():
+    # 4. Memory gate (shorts use minimal RAM — 1 GB is enough)
+    if not _memory_ok(min_free_gb=1.0):
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
@@ -998,10 +998,17 @@ def _cancel_stale_shorts_slots(db):
         logger.info("Cancelled %d stale pending shorts slots (>8h past scheduled)", cancelled)
 
 
-def _memory_ok() -> bool:
-    """Check if enough RAM is available."""
+def _memory_ok(min_free_gb: float = 4.0) -> bool:
+    """Check if enough RAM is available for dispatch.
+    
+    Shorts use minimal RAM (1.0 GB), long-form videos need 4.0 GB.
+    """
     try:
-        from pipeline.ram_governor import is_ram_ok_for_dispatch
-        return is_ram_ok_for_dispatch()
+        from pipeline.ram_governor import available_mb
+        avail_mb = available_mb()
+        if avail_mb < 0:
+            return True  # Can't determine — let it proceed
+        min_free_mb = min_free_gb * 1024
+        return avail_mb >= min_free_mb
     except ImportError:
         return True
