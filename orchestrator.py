@@ -319,7 +319,32 @@ class PipelineOrchestrator:
                     _hb_thread.start()
                     logger.info("[%s] TTS heartbeat emitter started for job #%d (every 30s)", self.canal, job_id)
 
-                audio_path, timestamps = self.tts.generate_segmented(bloques)
+                # ── Acquire cross-process TTS lock (prevents concurrent Kokoro for same channel) ──
+                channel_id = self._get_channel_id()
+                tts_lock_acquired = False
+                if channel_id is not None:
+                    tts_lock_acquired = self.db.acquire_tts_lock(channel_id, job_id or 0)
+                    if not tts_lock_acquired:
+                        logger.warning("[%s] TTS lock BUSY for channel_id=%d — another Kokoro worker is active. Waiting up to 60s...",
+                                    self.canal, channel_id)
+                        # Poll for up to 60 seconds
+                        for _ in range(12):
+                            time.sleep(5)
+                            tts_lock_acquired = self.db.acquire_tts_lock(channel_id, job_id or 0)
+                            if tts_lock_acquired:
+                                logger.info("[%s] TTS lock acquired after wait", self.canal)
+                                break
+                        if not tts_lock_acquired:
+                            logger.error("[%s] TTS lock STILL busy after 60s — proceeding anyway (potential RTF degradation)", self.canal)
+                    else:
+                        logger.info("[%s] TTS lock acquired for channel_id=%d", self.canal, channel_id)
+
+                try:
+                    audio_path, timestamps = self.tts.generate_segmented(bloques)
+                finally:
+                    if tts_lock_acquired and channel_id is not None:
+                        self.db.release_tts_lock(channel_id, job_id or 0)
+                        logger.info("[%s] TTS lock released for channel_id=%d", self.canal, channel_id)
 
                 # Stop heartbeat
                 if _hb_stop is not None:

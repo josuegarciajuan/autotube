@@ -394,13 +394,7 @@ def dispatch_next_due_slot(db=None) -> dict | None:
     # 2. Cancel stale pending slots (>3h past scheduled_at)
     _cancel_stale_slots(db)
 
-    # 3. Guard: only one job at a time
-    active = db.get_active_job()
-    if active:
-        logger.debug("Smart dispatch skipped: job #%d is %s", active["id"], active["status"])
-        return None
-
-    # 4. Memory gate
+    # 3. Memory gate
     if not _memory_ok():
         logger.warning("Low memory — delaying planned slot dispatch")
         return None
@@ -409,6 +403,13 @@ def dispatch_next_due_slot(db=None) -> dict | None:
     next_slot = db.get_next_pending_slot()
     if not next_slot:
         logger.debug("No pending slots due")
+        return None
+
+    # 5b. Per-channel guard: skip if this channel already has an active job
+    active = db.get_active_job_for_channel(next_slot["channel_id"])
+    if active:
+        logger.debug("Smart dispatch skipped: channel %d already has active job #%d",
+                     next_slot["channel_id"], active["id"])
         return None
 
     slot_id = next_slot["id"]

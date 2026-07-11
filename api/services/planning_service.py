@@ -539,14 +539,16 @@ def process_planned_slots(db=None) -> dict | None:
     # 1b. Cancel stale pending slots (>3h past their scheduled time)
     _cancel_stale_slots(db)
     
-    # 2. Is there already an active job? Only one at a time.
-    active = db.get_active_job()
-    if active:
-        return None
-    
-    # 3. Find the next pending slot whose time is due
+    # 2. Find the next pending slot whose time is due
     next_slot = db.get_next_pending_slot()
     if not next_slot:
+        return None
+    
+    # 2b. Is there already an active job for this channel?
+    active = db.get_active_job_for_channel(next_slot["channel_id"])
+    if active:
+        logger.debug("Planned slot skipped: channel %d already has active job #%d",
+                     next_slot["channel_id"], active["id"])
         return None
     
     # 3b. Memory guard: skip dispatch if RAM is critically low

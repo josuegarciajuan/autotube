@@ -89,14 +89,14 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
     """
     db = get_db()
     
-    # Guard: only one generation at a time
-    active = db.get_active_job()
-    if active:
-        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
-    
     ch = db.get_channel(data.channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
+    
+    # Guard: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(data.channel_id)
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
     import sqlite3
     with db._connect() as conn:
@@ -150,14 +150,18 @@ async def resume_video(video_id: int, background_tasks: BackgroundTasks):
     """
     db = get_db()
     
-    # Guard: only one generation at a time
-    active = db.get_active_job()
-    if active:
-        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
-    
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
+    
+    channel_id = v.get("channel_id")
+    if not channel_id:
+        raise HTTPException(400, "Video has no channel_id")
+    
+    # Guard: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(channel_id)
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
     # Guard: reject resume if video was already uploaded to YouTube.
     # A new generation would overwrite the existing upload status via the
@@ -168,10 +172,6 @@ async def resume_video(video_id: int, background_tasks: BackgroundTasks):
             f"Este video ya fue subido a YouTube (ID: {v['yt_video_id']}). "
             "Usa el boton Resubir si necesitas reemplazarlo."
         )
-    
-    channel_id = v.get("channel_id")
-    if not channel_id:
-        raise HTTPException(400, "Video has no channel_id")
     
     # Check if there's checkpoint data to resume from
     checkpoint_raw = v.get("checkpoint_data", "{}")
@@ -230,16 +230,16 @@ def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
     """
     db = get_db()
     
-    # Guard: only one generation at a time
-    active = db.get_active_job()
-    if active:
-        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
-    
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
     if v.get("status") not in ("error", "ready", "assembled", "reassembling"):
         raise HTTPException(400, "Video must be in error/ready/assembled state")
+    
+    # Guard: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(v.get("channel_id", 0))
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
     # Check we have checkpoint data
     import json
@@ -272,16 +272,16 @@ def upload_video(video_id: int, background_tasks: BackgroundTasks):
     """Upload (or re-upload) a video to YouTube."""
     db = get_db()
     
-    # Guard: only one generation at a time
-    active = db.get_active_job()
-    if active:
-        raise HTTPException(409, "Ya hay una generacion en curso. Espera a que termine.")
-    
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
     if not v.get("video_path"):
         raise HTTPException(400, "Video has no file path")
+    
+    # Guard: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(v.get("channel_id", 0))
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
     from api.services.generation_service import start_upload_job
     job_id = db.create_job(v["channel_id"] or 1, "upload_only", video_id)

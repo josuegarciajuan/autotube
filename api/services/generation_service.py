@@ -2132,21 +2132,21 @@ async def start_generation_job_subprocess(
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
 
-    # ── Guard: don't spawn if a job is already running for this channel ──
-    active = db.get_active_job()
+    # ── Guard: don't spawn if a job is already running for THIS channel ──
+    active = db.get_active_job_for_channel(channel_id)
     if active and active["id"] != job_id:
         logger.warning(
-            "Subprocess spawn blocked: active job #%d is running for channel %d",
+            "Subprocess spawn blocked: active job #%d already running for channel %d",
             active["id"], channel_id,
         )
         await _broadcast_progress(
             job_id, 0, "blocked",
-            f"Ya hay un job activo (#{active['id']}). Espera a que termine.",
+            f"Ya hay un job activo para este canal (#{active['id']}). Espera a que termine.",
             "failed", video_id,
-            detail="No se puede iniciar otro job mientras hay uno en curso",
+            detail="No se puede iniciar otro job en el mismo canal mientras hay uno en curso",
         )
         db.update_job(job_id, status="failed",
-                      error_msg="Active job already running")
+                      error_msg="Active job already running for this channel")
         return None
 
     # ── Build command ─────────────────────────────────────────

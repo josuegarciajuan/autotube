@@ -183,15 +183,16 @@ async def _queue_consumer():
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
         
-        # Guard: don't dispatch if a job is already running
-        jobs = db.get_active_jobs()
-        running = [j for j in jobs if j["status"] == "running"]
-        if running:
-            return
-        
         # Find next queued job
         next_job = db.get_next_queued_job()
         if not next_job:
+            return
+        
+        # Guard: don't dispatch if this channel already has an active job
+        active_for_channel = db.get_active_job_for_channel(next_job["channel_id"])
+        if active_for_channel:
+            logger.debug("Queue consumer: channel %d already has active job #%d — skipping",
+                        next_job["channel_id"], active_for_channel["id"])
             return
         
         # RAM gate: need at least 4 GB free
@@ -373,25 +374,8 @@ async def _process_due_schedules():
     from config.settings import DATABASE_PATH
     logger = logging.getLogger("autotube.scheduler")
     
-    # Guard: don't dispatch if another generation is already running
     from database.db_extended import ExtendedDatabase
     db = ExtendedDatabase()
-    active = db.get_active_job()
-    if active:
-        logger.debug("Due schedules skipped: active job #%d running", active["id"])
-        # BUGFIX 1.2: push next_run_at forward 5 min so we don't retry
-        # every 5 min while a job is running (tight retry loop).
-        try:
-            skip_conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
-            skip_conn.execute(
-                "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
-                "WHERE active = 1 AND datetime(next_run_at) <= datetime('now', 'localtime')"
-            )
-            skip_conn.commit()
-            skip_conn.close()
-        except Exception:
-            pass
-        return
     
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -412,6 +396,22 @@ async def _process_due_schedules():
     for row in rows:
         s = dict(row)
         logger.info(f"Running schedule #{s['id']}: {s['channel_slug']} action={s['action']}")
+        
+        # ── Per-channel guard: skip if this channel already has a running job ──
+        active_for_channel = db.get_active_job_for_channel(s["channel_id"])
+        if active_for_channel:
+            logger.debug("Schedule #%d skipped: channel %d already has active job #%d",
+                        s["id"], s["channel_id"], active_for_channel["id"])
+            # Push next_run_at forward 5 min to avoid tight retry loop
+            try:
+                conn.execute(
+                    "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
+                    "WHERE id = ?", (s["id"],)
+                )
+                conn.commit()
+            except Exception:
+                pass
+            continue
         
         try:
             # Launch the generation job

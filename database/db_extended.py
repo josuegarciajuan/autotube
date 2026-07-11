@@ -163,6 +163,22 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v5 schema applied")
 
+    # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
+    # Prevents concurrent Kokoro TTS workers on the same channel,
+    # which would cause RTF degradation and 600s timeouts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_tts_lock (
+            channel_id INTEGER PRIMARY KEY,
+            job_id INTEGER NOT NULL,
+            locked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tts_lock_channel ON channel_tts_lock(channel_id)")
+    except Exception:
+        pass
+
     # ── v4.1: Migrate shorts_planning_config to new column schema ──
     _migrate_shorts_planning_config(conn, logger)
     
@@ -2232,6 +2248,61 @@ class ExtendedDatabase(Database):
                 "SELECT * FROM generation_jobs WHERE status IN ('running','queued') LIMIT 1"
             ).fetchone()
         return dict(row) if row else None
+    
+    def get_active_job_for_channel(self, channel_id: int) -> dict | None:
+        """Check if a generation job is active for a specific channel. Returns it or None.
+        
+        This replaces the global get_active_job() guard with a per-channel check,
+        allowing parallel generation across different channels while preventing
+        concurrent Kokoro TTS for the same channel.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE channel_id = ? AND status IN ('running','queued') LIMIT 1",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
+    
+    # ── Cross-process TTS lock for Kokoro ────────────────────────
+    
+    def acquire_tts_lock(self, channel_id: int, job_id: int) -> bool:
+        """Acquire the TTS lock for a channel. Returns True if acquired, False if already locked.
+        
+        This prevents two subprocess workers from running Kokoro TTS simultaneously
+        for the same channel, which would cause RTF degradation and timeouts.
+        Uses a DB table with UNIQUE constraint as a cross-process mutex.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO channel_tts_lock (channel_id, job_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (channel_id, job_id),
+                )
+                conn.commit()
+            return True
+        except Exception:
+            return False
+    
+    def release_tts_lock(self, channel_id: int, job_id: int) -> None:
+        """Release the TTS lock for a channel."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM channel_tts_lock WHERE channel_id = ? AND job_id = ?",
+                    (channel_id, job_id),
+                )
+                conn.commit()
+        except Exception:
+            pass
+    
+    def is_tts_locked(self, channel_id: int) -> bool:
+        """Check if the TTS lock is held for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM channel_tts_lock WHERE channel_id = ? LIMIT 1",
+                (channel_id,),
+            ).fetchone()
+        return row is not None
     
     def upsert_channel_template(self, channel_id: int, segment_type: str,
                                  video_path: str, image_path: str = None,
