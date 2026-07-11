@@ -548,8 +548,8 @@ GOOGLE_NEWS_COUNTRY = "ES"
 # ═══════════════════════════════════════════════════════════════════
 
 IMAGE_STYLE_MODIFIERS = (
-    "cold arctic landscape photography, natural lighting, wide shot, 16:9, "
-    "professional photography, survival documentary, frozen wilderness"
+    "cinematic documentary photography, natural lighting, wide shot, 16:9, "
+    "professional photography, dramatic atmosphere, expedition landscape"
 )
 
 COLOR_PALETTE = {
@@ -561,6 +561,12 @@ COLOR_PALETTE = {
     "tertiary": (35, 45, 55),         # dark steel blue — safe background
     "warning": (255, 92, 0),          # rescue orange for thumbnail CTR
 }
+
+# Per-channel image tint (decoupled from brand palette): neutral desaturated
+# so warm expeditions (Egypt, desert) don't get a cold blue cast from the
+# brand palette primary (15,40,65). Falls back to COLOR_PALETTE.primary
+# when absent. Used by pipeline/image_processor.py _color_grade().
+IMAGE_TINT_COLOR = (40, 42, 48)  # neutral warm-gray, barely perceptible
 
 FILM_GRAIN_OPACITY = 5
 FILM_GRAIN_FRAMES = 10
@@ -590,6 +596,19 @@ THUMBNAIL_RESCUE_MAYDAY = True
 THUMBNAIL_RESCUE_COORDINATES = True
 THUMBNAIL_RESCUE_SIN_SENAL = True
 
+# ── Per-channel concept directive (small face + environment-first) ──
+THUMBNAIL_ALLOW_FACES = True
+THUMBNAIL_CONCEPT_DIRECTIVE = (
+    "El rostro humano con expresion de sorpresa/impacto PUEDE aparecer pero "
+    "PEQUEÑO (max ~25-30% del encuadre), integrado en el entorno de la expedicion. "
+    "El PAISAJE/ENTORNO de la expedicion es el protagonista y ocupa la mayor parte "
+    "de la imagen. EVITA primerisimos planos extremos tipo MrBeast; prioriza planos "
+    "medios o generales que muestren la escala epica del entorno. La cara debe ser "
+    "un elemento secundario que añade emocion, NO el foco dominante. "
+    "Composicion: entorno inmenso (60-70%) + cara pequeña en una esquina o tercio "
+    "lateral (25-30%), dejando espacio negativo para texto overlay."
+)
+
 # Manual style config for distress_signal
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "distress_signal",
@@ -602,7 +621,7 @@ THUMBNAIL_MANUAL_STYLE = {
     "base_composition": "dark_reveal",
     "effects": {
         "contrast_boost": 1.25,
-        "saturation": 0.70,
+        "saturation": 0.90,
         "vignette": 0.40,
     },
     "text_style": {
@@ -610,11 +629,10 @@ THUMBNAIL_MANUAL_STYLE = {
         "max_words": 4,
     },
     "pollo_prompt_suffix": (
-        "cold desaturated cinematography, arctic survival atmosphere, "
-        "distress signal aesthetic, emergency orange accents, deep blue and snow white tones, "
-        "dramatic documentary lighting, frozen wilderness landscape, 16:9 aspect ratio, "
-        "high contrast, no text overlay, no human faces or if present with cold weathered "
-        "expressions, no gore, no explicit violence"
+        "cinematic documentary photography, dramatic expedition atmosphere, "
+        "distress signal aesthetic, emergency orange accents, "
+        "dramatic documentary lighting, vast landscape 16:9 aspect ratio, "
+        "high contrast, no text overlay, no gore, no explicit violence"
     ),
 }
 
@@ -647,8 +665,8 @@ MEDIA_STRATEGY = {
         {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
         {"name": "mixkit"},
     ],
-    "fallback_query": "cold arctic landscape dramatic frozen wilderness 16:9",
-    "fallback_query_simple": "icy mountains storm ocean survival",
+    "fallback_query": "dramatic expedition landscape cinematic 16:9",
+    "fallback_query_simple": "expedition wilderness dramatic nature",
     "ken_burns_zoom_min": 10,
     "ken_burns_zoom_max": 18,
     "crossfade_min": 0.3,

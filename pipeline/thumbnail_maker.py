@@ -368,6 +368,11 @@ class ThumbnailMaker:
         """Run psychology + marketing agents."""
         from pipeline.thumbnail_brainstorm import ThumbnailBrainstorm
 
+        # Per-channel concept directive (overrides default surprised-face pattern)
+        cfg = self._channel_cfg
+        allow_faces = getattr(cfg, "THUMBNAIL_ALLOW_FACES", True)
+        concept_directive = getattr(cfg, "THUMBNAIL_CONCEPT_DIRECTIVE", "")
+
         brainstorm = ThumbnailBrainstorm()
         return brainstorm.brainstorm(
             script_text=script_text[:1500] if script_text else "",
@@ -376,6 +381,8 @@ class ThumbnailMaker:
             style_profile=style,
             channel_name=channel_name,
             channel_theme=channel_theme,
+            allow_faces=allow_faces,
+            concept_directive=concept_directive,
         )
 
     # ── F3: Image Generation + Quality Control ────────────────

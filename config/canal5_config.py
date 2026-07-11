@@ -847,6 +847,18 @@ THUMBNAIL_MEDICAL_ECG = True             # ECG heartbeat waveform across bottom
 THUMBNAIL_MEDICAL_CROSS = True           # medical cross (+) glowing stamp
 THUMBNAIL_MEDICAL_DIAGNOSIS = True       # "DIAGNÓSTICO" badge pill
 
+# ── Per-channel concept directive (overrides default surprised-face pattern) ──
+THUMBNAIL_ALLOW_FACES = False
+THUMBNAIL_CONCEPT_DIRECTIVE = (
+    "Este es un canal medico. NUNCA usar rostros AI con sorpresa/shock/miedo/asombro. "
+    "Usar SOLO imagenes clinicas y cientificas de alto impacto: primeros planos anatomicos, "
+    "radiografias y resonancias magneticas con iluminacion dramatica, helices de ADN, "
+    "estructuras celulares al microscopio, monitores cardiacos ECG, instrumental quirurgico, "
+    "siluetas humanas contra luz clinica fria, manos sosteniendo diagnosticos, "
+    "tubos de ensayo y laboratorios, X-rays y tomografias. Estilo documental medico "
+    "de alto contraste, fotorealista, cinematografico. SIN caras, SIN sonrisas, SIN sangre visible."
+)
+
 THUMBNAIL_STYLE = {
     "layout": "image_full_background_text_overlay",
     "max_text_words": 4,
