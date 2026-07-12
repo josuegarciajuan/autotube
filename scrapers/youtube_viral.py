@@ -201,28 +201,39 @@ class YouTubeViralScraper(BaseScraper):
         self._llm_initialized = True
 
     def _call_llm(self, system_prompt: str, user_message: str, temperature: float = 0.7) -> str | None:
-        """Call the LLM for translation/paraphrasing/adaptation."""
+        """Call the LLM for translation/paraphrasing/adaptation with retries."""
         self._init_llm()
         if not self._llm_api_key:
             return None
 
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=self._llm_api_key, base_url=self._llm_base_url)
-            resp = client.chat.completions.create(
-                model=self._llm_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=temperature,
-                max_tokens=4096,
-            )
-            content = resp.choices[0].message.content
-            return content.strip() if content else None
-        except Exception as e:
-            logger.error("[%s] LLM call failed: %s", self.canal, e)
-            return None
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=self._llm_api_key, base_url=self._llm_base_url)
+                resp = client.chat.completions.create(
+                    model=self._llm_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=temperature,
+                    max_tokens=4096,
+                )
+                content = resp.choices[0].message.content
+                return content.strip() if content else None
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    wait = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
+                    logger.warning("[%s] LLM call failed (attempt %d/%d): %s — retrying in %ds",
+                                   self.canal, attempt, self.max_retries, e, wait)
+                    time.sleep(wait)
+                else:
+                    logger.error("[%s] LLM call failed after %d attempts: %s",
+                                 self.canal, self.max_retries, e)
+
+        return None
 
     # ── YouTube discovery via yt-dlp ────────────────────────────
 
@@ -564,8 +575,8 @@ class YouTubeViralScraper(BaseScraper):
         target_min = max(self.target_duration_min, 1)
         target_max = self.target_duration_max
 
-        # If already within range (±20%), accept without adaptation
-        if abs(current_minutes - ((target_min + target_max) / 2)) <= max(1, (target_max - target_min)):
+        # If already within target range, accept without adaptation
+        if target_min <= current_minutes <= target_max:
             logger.info("[%s] Script duration %.1f min already in range [%d-%d min] — skipping adaptation",
                         self.canal, current_minutes, target_min, target_max)
             return script_es
@@ -590,6 +601,14 @@ class YouTubeViralScraper(BaseScraper):
             new_words = len(adapted.split())
             logger.info("[%s] Duration adapted: %d → %d words (~%.1f → ~%.1f min)",
                         self.canal, word_count, new_words, current_minutes, new_words / 150)
+
+            # Validate: adapted script must reach at least 50% of target min words
+            min_acceptable_words = int(target_words_min * 0.5)
+            if new_words < min_acceptable_words:
+                logger.warning("[%s] Adapt duration FAILED: output %d words < %d minimum (50%% of target). "
+                               "Input had %d words — gap too large for LLM to fill.",
+                               self.canal, new_words, min_acceptable_words, word_count)
+                return None
 
         return adapted or script_es
 
@@ -620,8 +639,11 @@ class YouTubeViralScraper(BaseScraper):
         blocks = []
 
         if n == 1:
-            blocks.append({"tipo": "hook", "texto": paragraphs[0].split(".")[0] + "."})
-            blocks.append({"tipo": "desarrollo", "texto": paragraphs[0]})
+            first_sentence = paragraphs[0].split(".")[0] + "."
+            blocks.append({"tipo": "hook", "texto": first_sentence})
+            # Desarrollo: use the full paragraph, but skip the hook text to avoid duplication
+            rest = paragraphs[0][len(first_sentence):].strip()
+            blocks.append({"tipo": "desarrollo", "texto": rest if rest else paragraphs[0]})
         elif n <= 4:
             block_types = ["hook", "desarrollo", "climax", "cierre"][:n]
             for i, p in enumerate(paragraphs):
@@ -748,7 +770,11 @@ class YouTubeViralScraper(BaseScraper):
                     self.canal, self.target_duration_min, self.target_duration_max)
         adapted_script = self._adapt_duration(translated_script)
         if not adapted_script:
-            adapted_script = translated_script
+            logger.error("[%s] Step 6 FAILED: Cannot adapt %d-word script to [%d-%d]min target. "
+                          "Content gap too large — aborting scrape.",
+                          self.canal, len(translated_script.split()),
+                          self.target_duration_min, self.target_duration_max)
+            return items
         logger.info("[%s] Step 6 (adapt): done in %.1fs → %d words (~%.1f min)",
                     self.canal, time.time() - t6, len(adapted_script.split()),
                     len(adapted_script.split()) / 150)
@@ -757,7 +783,7 @@ class YouTubeViralScraper(BaseScraper):
         blocks = self._build_script_blocks(adapted_script)
         logger.info("[%s] Step 7: Built %d blocks for TTS: %s",
                     self.canal, len(blocks),
-                    [b["type"] for b in blocks])
+                    [b["tipo"] for b in blocks])
 
         # Step 8: Construct metadata JSON (for viral_cloner use later)
         viral_meta = {
@@ -822,9 +848,6 @@ class YouTubeViralScraper(BaseScraper):
         )
 
         for item in items:
-            # Build blocks_json if present
-            blocks_json = item.pop("viral_blocks_json", None)
-
             row_id = db.insert_raw_content_viral(
                 source=item["source"],
                 url=item["url"],

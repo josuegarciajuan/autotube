@@ -837,6 +837,29 @@ class ExtendedDatabase(Database):
                 "WHERE v.id = ?", (video_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def get_videos_published_today(self, channel_id: int) -> int:
+        """Count videos successfully uploaded/published today for a channel.
+
+        Used by the recovery planner to determine how many of today's
+        target videos have already been published.
+
+        Returns count of videos where:
+        - channel_id matches
+        - uploaded_at is today (local time)
+        - yt_video_id is not null (successfully uploaded to YouTube)
+        - status is one of: uploaded, uploaded_private, published
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos
+                   WHERE channel_id = ?
+                     AND DATE(uploaded_at) = DATE('now', 'localtime')
+                     AND yt_video_id IS NOT NULL
+                     AND status IN ('uploaded', 'uploaded_private', 'published')""",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
     
     def update_video(self, video_id: int, **kwargs) -> bool:
         allowed = ["titulo_final", "description", "tags_json", "title_options",
@@ -2401,9 +2424,18 @@ class ExtendedDatabase(Database):
         This prevents two subprocess workers from running Kokoro TTS simultaneously
         for the same channel, which would cause RTF degradation and timeouts.
         Uses a DB table with UNIQUE constraint as a cross-process mutex.
+
+        Before acquiring, cleans up any stale locks (>30 min old) to prevent
+        permanent lock leaks after process crashes.
         """
         try:
             with self._connect() as conn:
+                # Clean up stale locks (>30 minutes old) before attempting acquire
+                conn.execute(
+                    "DELETE FROM channel_tts_lock "
+                    "WHERE locked_at < datetime('now', '-30 minutes')"
+                )
+                conn.commit()
                 conn.execute(
                     "INSERT INTO channel_tts_lock (channel_id, job_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
                     (channel_id, job_id),

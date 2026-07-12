@@ -2781,7 +2781,6 @@ class VideoEditor:
                 return None  # caller will use fallback image
 
             # Set timeline position
-            start_s = block_range.get("start", 0.0)
             seg_clip = clip.with_start(0.0)  # segment starts at 0 internally
 
             # Apply color grade if set (same logic as original)

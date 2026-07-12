@@ -365,17 +365,17 @@ class PipelineOrchestrator:
             if paragraphs:
                 n = len(paragraphs)
                 if n == 1:
-                    blocks = [{"type": "hook", "text": paragraphs[0]}]
+                    blocks = [{"tipo": "hook", "texto": paragraphs[0]}]
                 elif n <= 4:
                     types = ["hook", "desarrollo", "climax", "cierre"][:n]
-                    blocks = [{"type": t, "text": p} for t, p in zip(types, paragraphs)]
+                    blocks = [{"tipo": t, "texto": p} for t, p in zip(types, paragraphs)]
                 else:
-                    blocks = [{"type": "hook", "text": paragraphs[0]}]
+                    blocks = [{"tipo": "hook", "texto": paragraphs[0]}]
                     for p in paragraphs[1:-3]:
-                        blocks.append({"type": "desarrollo", "text": p})
-                    blocks.append({"type": "climax", "text": paragraphs[-3]})
-                    blocks.append({"type": "reflexion", "text": paragraphs[-2]})
-                    blocks.append({"type": "cierre", "text": paragraphs[-1]})
+                        blocks.append({"tipo": "desarrollo", "texto": p})
+                    blocks.append({"tipo": "climax", "texto": paragraphs[-3]})
+                    blocks.append({"tipo": "reflexion", "texto": paragraphs[-2]})
+                    blocks.append({"tipo": "cierre", "texto": paragraphs[-1]})
 
         # Get translated title
         translated_title = viral_meta.get("translated_title") or original_title or "Video"

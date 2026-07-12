@@ -36,23 +36,19 @@ _THUMB_DIR = _OUTPUT_DIR / "thumbnails"
 # ── LLM helpers ──────────────────────────────────────────────────────
 
 def _get_llm_client(config: Optional[SimpleNamespace] = None):
-    """Get an OpenAI-compatible client from config settings."""
+    """Get an OpenAI-compatible client from config settings (text-only LLM)."""
     from config.settings import (
-        DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
-        OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
+        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+        OPENAI_API_KEY, OPENAI_MODEL,
     )
     from openai import OpenAI
 
-    if DEEPSEEK_API_KEY:
-        return OpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url=getattr(config, 'DEEPSEEK_BASE_URL', DEEPSEEK_BASE_URL) if config else DEEPSEEK_BASE_URL,
-        ), getattr(config, 'DEEPSEEK_MODEL', DEEPSEEK_MODEL) if config else DEEPSEEK_MODEL
-    elif OPENAI_API_KEY:
-        return OpenAI(
-            api_key=OPENAI_API_KEY,
-            base_url=getattr(config, 'OPENAI_BASE_URL', OPENAI_BASE_URL) if config else OPENAI_BASE_URL,
-        ), getattr(config, 'OPENAI_MODEL', OPENAI_MODEL) if config else OPENAI_MODEL
+    api_key = LLM_API_KEY or OPENAI_API_KEY
+    base_url = LLM_BASE_URL
+    model = LLM_MODEL or OPENAI_MODEL
+
+    if api_key:
+        return OpenAI(api_key=api_key, base_url=base_url), model
     return None, None
 
 
@@ -156,9 +152,7 @@ def clone_title_description(
 
 
 def _extract_tags_from_script(block_texts: list[str], config: SimpleNamespace) -> list[str]:
-    """Extract SEO tags from script content using channel config defaults."""
-    all_text = " ".join(block_texts)
-
+    """Extract SEO tags using channel config defaults plus viral marker."""
     # Start with channel default tags
     default_tags = getattr(config, "YT_DEFAULT_TAGS", [])
     hashtags = getattr(config, "SEO_HASHTAGS", [])
@@ -183,12 +177,18 @@ def _generate_alt_titles(title: str, config: SimpleNamespace) -> list[str]:
 
     alt_titles = [title]
 
-    # Simple synonym-based alternation
-    if "más" in title.lower():
-        alt_titles.append(title.replace("más", "MAS").replace("más", "más"))
-    if "que no" in title.lower() or "que la" in title.lower():
-        alt = title.replace("que no", "que la ciencia no").replace("que la", "que la medicina no")
-        alt_titles.append(alt)
+    # Variant 1: emphasis on 'más' → replace with uppercase
+    if "más" in title.lower() and len(alt_titles) < 3:
+        emphatic = title.replace("más", "MÁS")
+        if emphatic != title:
+            alt_titles.append(emphatic)
+
+    # Variant 2: common viral pattern — "lo que no sabías sobre..."
+    if len(alt_titles) < 3:
+        # Extract a subject from the end of the title
+        words = title.split()
+        subject = " ".join(words[-3:]) if len(words) >= 3 else title
+        alt_titles.append(f"Lo que no sabías sobre {subject.lower()}")
 
     # Add formula-based variation if configured
     if title_formulas and len(alt_titles) < 3:
@@ -272,6 +272,7 @@ def clone_thumbnail(
     # Step 5: Apply channel composition (F4 from thumbnail_maker)
     t5 = time.time()
     logger.info("[%s] clone_thumbnail: Step 5 — Applying channel composition (F4)...", canal_slug)
+    final_thumb = _apply_channel_composition(
         base_image_path=str(pollo_result),
         channel_slug=canal_slug,
         channel_display_name=channel_display_name,
@@ -319,22 +320,25 @@ def _download_thumbnail(url: str, canal_slug: str) -> str | None:
 
 
 def _analyze_thumbnail_vision(image_path: str, config: SimpleNamespace) -> dict | None:
-    """Use vision-capable LLM to analyze thumbnail composition."""
-    client, model = _get_llm_client(config)
-    if not client:
-        logger.warning("No LLM client for vision analysis")
+    """Use vision-capable LLM (gpt-4o-mini) to analyze thumbnail composition."""
+    from config.settings import VISION_MODEL, VISION_API_KEY, VISION_BASE_URL
+    from openai import OpenAI
+    import base64
+
+    if not VISION_API_KEY:
+        logger.warning("No VISION_API_KEY configured — cannot analyze thumbnail")
         return None
 
-    # Check if the model supports vision (try to use it)
     # Read image as base64
-    import base64
     try:
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to read image for vision analysis: %s", e)
         return None
 
-    # Try vision-capable call
+    # Vision-capable model (OpenAI gpt-4o-mini supports multimodal)
+    vision_client = OpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
     system = """You are a thumbnail design analyst. Analyze the YouTube thumbnail image.
 Return a JSON object with:
 {
@@ -348,8 +352,8 @@ Return a JSON object with:
 }"""
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
+        resp = vision_client.chat.completions.create(
+            model=VISION_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {
@@ -367,16 +371,8 @@ Return a JSON object with:
         content = resp.choices[0].message.content
         return json.loads(content) if content else None
     except Exception as e:
-        logger.warning("Vision AI call failed (model may not support vision): %s", e)
-        # Fallback: text-only description
-        fallback = _call_llm_json(
-            config,
-            system,
-            "Describe a YouTube thumbnail that would be highly clickable and viral. "
-            "Return the same JSON format with a hypothetical description.",
-            temp=0.7,
-        )
-        return fallback
+        logger.warning("Vision AI call failed: %s", e)
+        return None
 
 
 def _modify_thumbnail_prompt(vision_analysis: dict, config: SimpleNamespace, keywords: list[str]) -> str:
