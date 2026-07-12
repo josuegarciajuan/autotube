@@ -442,15 +442,19 @@ class VideoEditor:
                     "  Scene %d FAILED (type=%s) — retrying with fallback image", i, media_type,
                 )
                 if _real_image_paths:
-                    fb_asset = {
-                        "type": "image",
-                        "path": str(random.choice(_real_image_paths)),
-                    }
-                    fb_path = seg_dir / f"scene_{i:04d}_fb.mp4"
-                    result_path = self._render_scene_segment(
-                        br, fb_asset, str(fb_path), clip_idx=i,
-                        fallback_pool=_real_image_paths,
-                    )
+                    # Filter out images already used in this video
+                    _available = [p for p in _real_image_paths
+                                  if str(p) not in self._used_asset_paths]
+                    if _available:
+                        fb_asset = {
+                            "type": "image",
+                            "path": str(random.choice(_available)),
+                        }
+                        fb_path = seg_dir / f"scene_{i:04d}_fb.mp4"
+                        result_path = self._render_scene_segment(
+                            br, fb_asset, str(fb_path), clip_idx=i,
+                            fallback_pool=_available,
+                        )
                 if result_path is None:
                     self.logger.warning(
                         "  Scene %d [%s]: ULTIMATE FALLBACK — using black placeholder",
@@ -1181,10 +1185,9 @@ class VideoEditor:
         returns ``None`` so the caller can merge the scene with its neighbour
         instead of rendering the blue-text placeholder.
 
-        Image deduplication (LRU-based):
-        - Images: reused after IMAGE_REUSE_MIN_GAP different clips have been shown
-          since the last use of that image. When reused, Ken Burns parameters are
-          varied (different zoom direction/focus area) to avoid visual monotony.
+        Image deduplication (strict):
+        - Images: NEVER reused within the same video. If an image path or
+          content_hash was already used, returns None immediately.
         - Videos: offset tracking — different scenes get different segments
           of the same source video file (no more frozen/looped frames).
         """
@@ -1193,31 +1196,19 @@ class VideoEditor:
         asset_path = str(asset.get("path", "")) if asset.get("path") else ""
         content_hash = asset.get("content_hash", "")
 
-        # ── Image reuse: check LRU gap ──────────────────────────────
-        image_reuse_gap = self.canal.get("IMAGE_REUSE_MIN_GAP", 2)
+        # ── Image dedup: STRICT — never reuse any image in the same video ─
         if media_type == "image" and asset_path and asset_path in self._used_asset_paths:
-            last_idx = self._image_last_clip_idx.get(asset_path, -999)
-            clips_since = self._current_clip_idx - last_idx
-            if clips_since < image_reuse_gap:
-                self.logger.warning(
-                    "Image %s reused too soon (gap=%d < %d) — returning None (caller will merge)",
-                    Path(asset_path).name, clips_since, image_reuse_gap,
-                )
-                return None
-            # Allow reuse — will apply varied Ken Burns below
-            self.logger.info(
-                "Image %s reused at gap=%d (allowed) — varying Ken Burns for variety",
-                Path(asset_path).name, clips_since,
+            self.logger.warning(
+                "Image %s already used in this video — returning None (will use fallback)",
+                Path(asset_path).name,
             )
+            return None
         if media_type == "image" and content_hash and content_hash in self._used_asset_paths:
-            last_idx = self._image_last_clip_idx.get(content_hash, -999)
-            clips_since = self._current_clip_idx - last_idx
-            if clips_since < image_reuse_gap:
-                self.logger.warning(
-                    "Image hash %s reused too soon (gap=%d < %d) — returning None",
-                    content_hash[:12], clips_since, image_reuse_gap,
-                )
-                return None
+            self.logger.warning(
+                "Image hash %s already used in this video — returning None",
+                content_hash[:12],
+            )
+            return None
 
         # Initialize per-video color grade on first non-placeholder clip (P3)
         if self._video_color_grade is None and media_type not in ("placeholder", "duplicate"):
@@ -1247,12 +1238,23 @@ class VideoEditor:
                 # the previous clip (which would lose the video scene entirely).
                 if fallback_pool:
                     import random as _random2
-                    fb_path = str(_random2.choice(fallback_pool))
-                    self.logger.info("  Using fallback image for scene: %s", Path(fb_path).name)
-                    clip = self._image_clip_for_block(Path(fb_path), block_dur)
-                    self._used_asset_paths.add(fb_path)
-                    self._image_last_clip_idx[fb_path] = self._current_clip_idx
-                    self._image_reuse_count.setdefault(fb_path, 0)
+                    # Shuffle pool and find first unused image to avoid duplicates
+                    _shuffled = list(fallback_pool)
+                    _random2.shuffle(_shuffled)
+                    fb_path = None
+                    for _fb in _shuffled:
+                        _fb_str = str(_fb)
+                        if _fb_str not in self._used_asset_paths:
+                            fb_path = _fb_str
+                            break
+                    if fb_path:
+                        self.logger.info("  Using fallback image for scene: %s", Path(fb_path).name)
+                        clip = self._image_clip_for_block(Path(fb_path), block_dur)
+                        self._used_asset_paths.add(fb_path)
+                        self._image_last_clip_idx[fb_path] = self._current_clip_idx
+                    else:
+                        self.logger.warning("  All fallback images already used — returning None")
+                        return None
                 else:
                     return None
             else:
@@ -1263,13 +1265,9 @@ class VideoEditor:
                 if content_hash:
                     self._used_asset_paths.add(content_hash)
         if clip is None and asset_path and Path(asset_path).exists():
-            # Vary Ken Burns for reused images: alternate zoom direction
-            reuse_count = self._image_reuse_count.get(asset_path, 0)
-            clip = self._image_clip_for_block(Path(asset_path), block_dur,
-                                               reuse_count=reuse_count)
+            clip = self._image_clip_for_block(Path(asset_path), block_dur)
             self._used_asset_paths.add(asset_path)
             self._image_last_clip_idx[asset_path] = self._current_clip_idx
-            self._image_reuse_count[asset_path] = reuse_count + 1
             if content_hash:
                 self._used_asset_paths.add(content_hash)
                 self._image_last_clip_idx[content_hash] = self._current_clip_idx

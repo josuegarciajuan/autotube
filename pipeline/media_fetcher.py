@@ -460,30 +460,6 @@ class MediaFetcher:
                     if result:
                         asset = result
 
-            # ── Sub-scene fallback: reuse media without dedup ─
-            # Sub-scenes (split blocks) share the same asset_idx and have
-            # slightly varied queries. When dedup blocks all fresh results,
-            # allow reusing a previously fetched asset — the video_editor
-            # will handle visual variety with offset tracking (video) or
-            # varied Ken Burns parameters (image).
-            if asset is None and is_sub:
-                logger.info(
-                    "Scene %d (sub-scene of block %d): retrying without URL dedup for query %r",
-                    i, asset_idx, query[:60],
-                )
-                # Try video first (with no URL dedup)
-                if want_video and self.video_providers:
-                    asset = self._try_video_providers(query, target_dur, skip_urls=set())
-                # Then image (with no URL dedup)
-                if asset is None:
-                    result = self._try_image_pexels(query, skip_urls=None)
-                    if result:
-                        asset = result
-                    else:
-                        result = self._try_image_unsplash(query, skip_urls=None)
-                        if result:
-                            asset = result
-
             # ── Fallback: simplified query (Pexels + Unsplash) ─
             if asset is None:
                 # Simplified query retry
@@ -507,8 +483,9 @@ class MediaFetcher:
                 import random as _random
                 fb_query = _random.choice(generic_queries)
                 logger.info("Scene %d: trying hard fallback query: %r", i, fb_query)
-                asset = self._try_image_pexels(fb_query) or \
-                        self._try_image_unsplash(fb_query)
+                image_skip = self._used_image_urls.copy()
+                asset = self._try_image_pexels(fb_query, skip_urls=image_skip) or \
+                        self._try_image_unsplash(fb_query, skip_urls=image_skip)
 
             # ── Pollo AI: rescate si stock falló completamente y hay cupo ─
             if asset is None and ai_enabled and ai_used < ai_max:

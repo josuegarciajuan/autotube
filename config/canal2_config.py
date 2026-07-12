@@ -118,11 +118,12 @@ SCENE_DURATION_MIN = 4.0   # default 6.0 — shorter scenes force more visual ch
 # instead of further extending the same image. Prevents "same image for 200s".
 MAX_CLIP_EXTEND_SEC = 25.0
 
-# ── Image reuse gap (video_editor LRU dedup) ──
-# Minimum number of different clips that must appear before the same image
-# can be reused in another scene. Prevents back-to-back repetition while
-# allowing limited reuse for variety.
-IMAGE_REUSE_MIN_GAP = 2   # was 3 — allow faster reuse with shorter scenes (global SCENE_MAX=15)
+# ── Image reuse: STRICTLY FORBIDDEN (Jul 2026) ──
+# Images are NEVER reused within the same video to prevent YouTube
+# demonetization from duplicate frames. The video_editor now blocks
+# any image path/content_hash already seen in the current build.
+# Old config key (deprecated — no longer read):
+# IMAGE_REUSE_MIN_GAP = 2
 
 # ── Average video duration target (approx, in minutes) ──
 # The pipeline picks a random duration between (mean - discrepancy) and (mean + discrepancy)
