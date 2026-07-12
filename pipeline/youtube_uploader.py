@@ -333,6 +333,7 @@ class YouTubeUploader:
         privacy: str = "public",
         language: str = "es",
         heartbeat_callback=None,
+        progress_callback=None,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -342,6 +343,8 @@ class YouTubeUploader:
         - Quota: 1600 upload + 50 thumbnail = 1650 units
         - heartbeat_callback: optional callable invoked between upload chunks
           to signal the orphan detector that the upload is still alive.
+        - progress_callback: optional callable(pct: int) invoked on each chunk
+          with the upload progress percentage (0-100).
 
         Returns {video_id: str, url: str, warnings: list}
         """
@@ -394,7 +397,8 @@ class YouTubeUploader:
         )
 
         logger.info("Uploading: %s (privacy=%s)", title, privacy)
-        response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback)
+        response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback,
+                                          progress_callback=progress_callback)
 
         # ── Validate YouTube response ─────────────────────────
         self._validate_upload_response(response)
@@ -685,10 +689,12 @@ class YouTubeUploader:
 
     # ── Helpers ─────────────────────────────────────────────────
 
-    def _resumable_upload(self, request: Any, heartbeat_callback=None) -> dict:
+    def _resumable_upload(self, request: Any, heartbeat_callback=None,
+                           progress_callback=None) -> dict:
         response = None
         error_count = 0
         consecutive_errors = 0
+        last_reported_pct = -1
         
         while response is None:
             try:
@@ -696,6 +702,13 @@ class YouTubeUploader:
                 if status:
                     pct = int(status.progress() * 100)
                     logger.info("Upload progress: %d%%", pct)
+                    # ── Propagate progress to external callback ──
+                    if progress_callback and pct != last_reported_pct:
+                        last_reported_pct = pct
+                        try:
+                            progress_callback(pct)
+                        except Exception:
+                            pass
                 if response is not None:
                     return response
                 consecutive_errors = 0  # reset on successful chunk

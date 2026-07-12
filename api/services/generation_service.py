@@ -1615,6 +1615,51 @@ async def start_upload_job(job_id: int, video_id: int):
         else:
             tags = tags_raw or []
         
+        # ── Progress callback: maps YouTube 0-100% → our 30-90% ──
+        # Called from the upload thread, so only does sync DB updates.
+        # The background monitor task (below) handles WebSocket broadcasts.
+        def _upload_progress_cb(yt_pct: int):
+            """Sync progress callback — safe to call from thread."""
+            try:
+                our_pct = 30 + int(yt_pct * 0.6)  # map 0-100 → 30-90
+                db2 = _get_db()
+                db2.update_job(job_id, progress=our_pct, phase="upload")
+                db2.update_video(video_id, progress=our_pct, progress_phase="upload")
+            except Exception:
+                pass
+
+        # ── Background monitor: broadcasts DB progress via WebSocket ──
+        monitor_stop = asyncio.Event()
+
+        async def _upload_monitor():
+            """Poll DB for upload progress and broadcast to WebSocket."""
+            last_pct = 30
+            try:
+                while not monitor_stop.is_set():
+                    await asyncio.sleep(3.0)
+                    try:
+                        db2 = _get_db()
+                        job2 = db2.get_job(job_id)
+                        if job2 and job2.get("status") not in ("running",):
+                            break  # job finished or failed
+                        video2 = db2.get_video(video_id) if video_id else None
+                        cur_pct = video2.get("progress", job2.get("progress", 30)) if video2 else (job2.get("progress", 30) or 30)
+                        cur_pct = int(cur_pct) if cur_pct else 30
+                        if cur_pct != last_pct:
+                            last_pct = cur_pct
+                            await _broadcast_progress(
+                                job_id, cur_pct, "upload",
+                                f"Subiendo video... {cur_pct}%",
+                                video_id=video_id,
+                                detail="Transfiriendo archivo a YouTube"
+                            )
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                pass
+
+        monitor_task = asyncio.create_task(_upload_monitor())
+
         def _do_upload():
             return orch.uploader.upload(
                 video_path=Path(v["video_path"]),
@@ -1623,9 +1668,15 @@ async def start_upload_job(job_id: int, video_id: int):
                 tags=tags,
                 thumbnail_path=Path(v["thumbnail_path"]) if v.get("thumbnail_path") else None,
                 privacy=v.get("privacy_status", "public"),
+                progress_callback=_upload_progress_cb,
             )
         
         ok, result = await _run_in_executor(_do_upload, timeout=PHASE_TIMEOUTS["upload"])
+        monitor_stop.set()  # signal monitor to stop
+        try:
+            await asyncio.wait_for(monitor_task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            monitor_task.cancel()
         
         if not ok:
             await _broadcast_progress(job_id, 30, "upload", f"Error: {result}", "failed", video_id,
