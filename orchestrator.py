@@ -320,7 +320,7 @@ class PipelineOrchestrator:
             if candidates:
                 viral_content = candidates[0]
                 self.viral_candidate_id = viral_content["id"]
-                logger.info("[%s] VIRAL SCRIPT: Auto-selected candidate #%d: '%s' (score=%.1f, views=%,d)",
+                logger.info("[%s] VIRAL SCRIPT: Auto-selected candidate #%d: '%s' (score=%.1f, views=%d)",
                             self.canal, viral_content["id"],
                             viral_content.get("viral_original_title", "")[:60],
                             viral_content.get("viral_score", 0),
@@ -394,7 +394,7 @@ class PipelineOrchestrator:
         # Build GUIóN (narration text) from blocks
         guion_parts = []
         for b in blocks:
-            guion_parts.append(f"[{b['type'].upper()}]\n{b['text']}")
+            guion_parts.append(f"[{b.get('tipo', 'desarrollo').upper()}]\n{b.get('texto', '')}")
         guion = "\n\n".join(guion_parts)
 
         # Keywords from channel config

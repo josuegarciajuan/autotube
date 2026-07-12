@@ -597,8 +597,8 @@ class YouTubeViralScraper(BaseScraper):
         """Build script blocks in Autotube format from adapted Spanish script.
 
         Returns a list of blocks compatible with pipeline/bloques_json format:
-        [{"type": "hook"|"desarrollo"|"climax"|"reflexion"|"cierre",
-          "text": "...", "voice_rate": "...", "voice_pitch": "..."}]
+        [{"tipo": "hook"|"desarrollo"|"climax"|"reflexion"|"cierre",
+          "texto": "...", "voice_rate": "...", "voice_pitch": "..."}]
         """
         if not script_es:
             return []
@@ -614,26 +614,26 @@ class YouTubeViralScraper(BaseScraper):
                 paragraphs = sentences
 
         if not paragraphs:
-            return [{"type": "desarrollo", "text": script_es}]
+            return [{"tipo": "desarrollo", "texto": script_es}]
 
         n = len(paragraphs)
         blocks = []
 
         if n == 1:
-            blocks.append({"type": "hook", "text": paragraphs[0].split(".")[0] + "."})
-            blocks.append({"type": "desarrollo", "text": paragraphs[0]})
+            blocks.append({"tipo": "hook", "texto": paragraphs[0].split(".")[0] + "."})
+            blocks.append({"tipo": "desarrollo", "texto": paragraphs[0]})
         elif n <= 4:
             block_types = ["hook", "desarrollo", "climax", "cierre"][:n]
             for i, p in enumerate(paragraphs):
-                blocks.append({"type": block_types[i], "text": p})
+                blocks.append({"tipo": block_types[i], "texto": p})
         else:
             # Distribute: hook, N-3 desarrollo, climax, reflexion, cierre
-            blocks.append({"type": "hook", "text": paragraphs[0]})
+            blocks.append({"tipo": "hook", "texto": paragraphs[0]})
             for p in paragraphs[1:-3]:
-                blocks.append({"type": "desarrollo", "text": p})
-            blocks.append({"type": "climax", "text": paragraphs[-3]})
-            blocks.append({"type": "reflexion", "text": paragraphs[-2]})
-            blocks.append({"type": "cierre", "text": paragraphs[-1]})
+                blocks.append({"tipo": "desarrollo", "texto": p})
+            blocks.append({"tipo": "climax", "texto": paragraphs[-3]})
+            blocks.append({"tipo": "reflexion", "texto": paragraphs[-2]})
+            blocks.append({"tipo": "cierre", "texto": paragraphs[-1]})
 
         return blocks
 
@@ -702,7 +702,7 @@ class YouTubeViralScraper(BaseScraper):
             return items
 
         logger.info("[%s] Selected candidate: '%s'", self.canal, top["title"][:80])
-        logger.info("[%s]   views=%,d  score=%.1f  age=%.1fh  duration=%ds  channel='%s'",
+        logger.info("[%s]   views=%d  score=%.1f  age=%.1fh  duration=%ds  channel='%s'",
                     self.canal, top["views"], top["viral_score"],
                     top["hours_since_pub"], top["duration_sec"], top["channel_name"])
 
