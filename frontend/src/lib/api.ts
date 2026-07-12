@@ -259,6 +259,15 @@ export const api = {
 
   cancelSchedule: (videoId: number) =>
     request<any>(`/videos/${videoId}/cancel-schedule`, { method: 'POST' }),
+
+  // Peak info per channel
+  getChannelPeakInfo: (channelId: number) =>
+    request<{
+      channel_id: number; channel_name: string; publish_mode: string;
+      peak_hour: number; secondary_peaks: number[];
+      jitter_min: number; timezone: string; warmup_min: number;
+      source: string; niche: string;
+    }>(`/channels/${channelId}/peak-info`),
 };
 
 /** Format seconds to mm:ss */

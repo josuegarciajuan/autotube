@@ -512,3 +512,36 @@ def get_scheduled_mode(channel_id: int):
         "publish_mode": config.get("PUBLISH_MODE", "immediate"),
         "channel_name": ch.get("name", ""),
     }
+
+
+@router.get("/{channel_id}/peak-info")
+def get_channel_peak_info(channel_id: int):
+    """Get the computed peak publication window for a channel.
+
+    Returns peak hour, secondary peaks, niche, and source
+    (config vs heuristic). Does NOT schedule anything.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    cfg = db.get_channel_planning_config(channel_id)
+    if not cfg:
+        raise HTTPException(404, "Channel planning config not found")
+
+    from pipeline.publish_scheduler import get_channel_peak_info as calc_peak
+    info = calc_peak(cfg)
+
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch.get("name", ""),
+        "publish_mode": cfg.get("publish_mode", "immediate"),
+        "peak_hour": info["peak_hour"],
+        "secondary_peaks": info["secondary_peaks"],
+        "jitter_min": info["jitter_min"],
+        "timezone": info["timezone"],
+        "warmup_min": info["warmup_min"],
+        "source": info["source"],
+        "niche": info["niche"],
+    }

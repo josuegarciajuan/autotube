@@ -12,7 +12,7 @@ import sys
 import time
 import threading
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -1060,7 +1060,8 @@ class PipelineOrchestrator:
             return self.metadata_gen._fallback_metadata(script)
 
     def phase_upload(self, script: dict, video_data: dict,
-                      metadata: dict = None, job_id: int = None) -> Optional[str]:
+                      metadata: dict = None, job_id: int = None,
+                      planned_public_at: str = None) -> Optional[str]:
         """Upload video to YouTube. Returns video_id or None.
         
         Args:
@@ -1071,6 +1072,9 @@ class PipelineOrchestrator:
                       If None, falls back to config templates (backward compat).
             job_id: Optional generation_jobs.id. If provided, heartbeats are
                     emitted during upload to prevent false orphan detection.
+            planned_public_at: Optional ISO8601 string from planning system.
+                      If provided and publish_mode=scheduled, overrides the
+                      calculated target_public_at to align with the planning.
         """
         start = time.time()
         self._emit_progress(80, "upload", "Preparando subida a YouTube...")
@@ -1099,18 +1103,39 @@ class PipelineOrchestrator:
                 jitter = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
                 warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 120)
                 channel_id = self._get_channel_id()
-                
-                publish_schedule_info = calculate_target_public_time(
-                    slug=self.canal,
-                    primary_keyword=primary_kw,
-                    secondary_keywords=secondary_kws,
-                    timezone_str=tz,
-                    target_hour=target_h,
-                    jitter_min=jitter,
-                    warmup_min=warmup,
-                    db=self.db,
-                    channel_id=channel_id,
-                )
+
+                # ── If the planning system provided a target, use it ──
+                if planned_public_at:
+                    from datetime import datetime as _dt, timezone as _tz
+                    warmup_until = (_dt.now(_tz.utc) + timedelta(minutes=warmup)).isoformat()
+                    target_dt = _dt.fromisoformat(planned_public_at.replace("Z", "+00:00"))
+                    if target_dt.tzinfo is None:
+                        target_dt = target_dt.replace(tzinfo=_tz.utc)
+                    if target_dt < _dt.now(_tz.utc) + timedelta(minutes=warmup):
+                        logger.info("[%s] Planned public time too soon, using warmup end instead", self.canal)
+                        target_dt = _dt.now(_tz.utc) + timedelta(minutes=warmup)
+                    
+                    publish_schedule_info = {
+                        "target_public_at": target_dt.isoformat(),
+                        "peak_hour_local": target_h or 0,
+                        "peak_source": "planning",
+                        "niche": "planning",
+                        "jitter_applied": 0,
+                        "warmup_until": warmup_until,
+                    }
+                    logger.info("[%s] Using planned public time: %s", self.canal, target_dt.isoformat())
+                else:
+                    publish_schedule_info = calculate_target_public_time(
+                        slug=self.canal,
+                        primary_keyword=primary_kw,
+                        secondary_keywords=secondary_kws,
+                        timezone_str=tz,
+                        target_hour=target_h,
+                        jitter_min=jitter,
+                        warmup_min=warmup,
+                        db=self.db,
+                        channel_id=channel_id,
+                    )
                 upload_privacy = "private"
                 logger.info(
                     "[%s] SCHEDULED PUBLISH: peak=%d (source=%s), "

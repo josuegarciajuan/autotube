@@ -29,7 +29,8 @@ NICHO_PEAK_HOURS = {
             "secreto", "oculto", "enigma", "leyenda", "maldición",
         ],
         "peak_hour": 21,       # 9 PM — consumo nocturno de misterio
-        "peak_day": "daily",   # Pico diario (no solo fin de semana)
+        "secondary_peaks": [0, 14, 17],  # madrugada (insomnes), sobremesa, tarde-noche
+        "peak_day": "daily",
         "note": "El contenido de misterio tiene pico nocturno (20-23h)."
                " Las notificaciones previas al prime time (21h) maximizan CTR.",
     },
@@ -40,7 +41,8 @@ NICHO_PEAK_HOURS = {
             "culturas", "perdida", "olvidada", "tumba", "pirámide",
         ],
         "peak_hour": 20,       # 8 PM — franja documental vespertina
-        "peak_day": "weekend", # Fines de semana (domingo tarde)
+        "secondary_peaks": [11, 14, 17],  # mañana-tarde, sobremesa, media tarde
+        "peak_day": "weekend",
         "note": "Documentales funcionan mejor en fin de semana tarde (18-21h).",
     },
     "noticias_actualidad": {
@@ -49,7 +51,8 @@ NICHO_PEAK_HOURS = {
             "breaking", "urgente", "análisis",
         ],
         "peak_hour": 12,       # Mediodía
-        "peak_day": "weekday", # Laborables
+        "secondary_peaks": [7, 19, 22],  # mañana, tarde-noche, noche
+        "peak_day": "weekday",
         "note": "Noticias/actualidad pico al mediodía y a las 19h.",
     },
     "educacion_ciencia": {
@@ -59,12 +62,14 @@ NICHO_PEAK_HOURS = {
             "dato curioso", "sabías que", "educación",
         ],
         "peak_hour": 18,       # 6 PM — después del trabajo/escuela
+        "secondary_peaks": [10, 14, 21],  # media mañana, sobremesa, noche
         "peak_day": "daily",
         "note": "Contenido educativo pico 17-19h y fines de semana.",
     },
     "entretenimiento_general": {
         "keywords": [],
         "peak_hour": 20,       # 8 PM — default prime time
+        "secondary_peaks": [12, 15, 22],  # mediodía, media tarde, noche
         "peak_day": "daily",
         "note": "Entretenimiento general: prime time 20-22h.",
     },
@@ -113,6 +118,105 @@ def detect_niche(keywords: list[str]) -> str:
         logger.debug("Detected niche '%s' (score=%d)", best_niche, best_score)
 
     return best_niche
+
+
+def get_channel_peak_info(config_or_dict) -> dict:
+    """Obtener la(s) franja(s) pico efectiva(s) de un canal sin agendar nada.
+
+    Prioridad: config.PUBLISH_TARGET_HOUR > heurística del nicho > historial > default.
+    Usable desde el planning, la UI y el uploader.
+
+    Args:
+        config_or_dict: objeto de config (SimpleNamespace) o dict con keys:
+            SEO_PRIMARY_KEYWORD, SEO_SECONDARY_KEYWORDS, PUBLISH_TARGET_HOUR,
+            PUBLISH_TIMEZONE, PUBLISH_JITTER_MIN, PUBLISH_WARMUP_MIN
+
+    Returns:
+        {
+            "peak_hour": int,           # hora principal (local)
+            "secondary_peaks": [int],   # picos secundarios por orden
+            "jitter_min": int,
+            "timezone": str,
+            "warmup_min": int,
+            "source": "config"|"heuristic",
+            "niche": str,
+        }
+    """
+    # Normalize to dict
+    cfg = config_or_dict
+    if not isinstance(cfg, dict):
+        cfg = {k: v for k, v in vars(config_or_dict).items() if not k.startswith("_")}
+
+    primary_kw = cfg.get("SEO_PRIMARY_KEYWORD", "") or cfg.get("seo_primary_keyword", "")
+    secondary_kws = cfg.get("SEO_SECONDARY_KEYWORDS", []) or cfg.get("seo_secondary_keywords", [])
+    target_hour = cfg.get("PUBLISH_TARGET_HOUR") or cfg.get("publish_target_hour")
+    jitter = cfg.get("PUBLISH_JITTER_MIN", 20) or cfg.get("publish_jitter_min", 20)
+    warmup = cfg.get("PUBLISH_WARMUP_MIN", 120) or cfg.get("publish_warmup_min", 120)
+    tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid") or cfg.get("publish_timezone", "Europe/Madrid")
+
+    all_keywords = [primary_kw] if primary_kw else []
+    if secondary_kws:
+        all_keywords.extend(secondary_kws)
+
+    niche = detect_niche(all_keywords)
+    niche_data = NICHO_PEAK_HOURS.get(niche, NICHO_PEAK_HOURS["entretenimiento_general"])
+
+    if target_hour is not None:
+        peak = int(target_hour)
+        source = "config"
+        secondary = niche_data.get("secondary_peaks", [])
+    else:
+        peak = niche_data["peak_hour"]
+        source = "heuristic"
+        secondary = niche_data.get("secondary_peaks", [])
+
+    # Ensure peak is not duplicated in secondary
+    secondary = [h for h in secondary if h != peak]
+
+    return {
+        "peak_hour": peak,
+        "secondary_peaks": secondary,
+        "jitter_min": jitter,
+        "timezone": tz_str,
+        "warmup_min": warmup,
+        "source": source,
+        "niche": niche,
+    }
+
+
+def get_peak_windows(config_or_dict, n: int = 1) -> list[tuple]:
+    """Devuelve las n mejores franjas (hora, peso, nombre) para distribuir n vídeos/día.
+
+    Usa el pico principal primero, luego picos secundarios. Si necesita más,
+    reutiliza el principal con offsets (±1h, ±2h).
+
+    Returns:
+        Lista de (start_hour, end_hour, weight, name) al estilo de SPAIN_UPLOAD_WINDOWS.
+    """
+    info = get_channel_peak_info(config_or_dict)
+    peak = info["peak_hour"]
+    secondary = info["secondary_peaks"]
+
+    windows = []
+    priority_hours = [peak] + [h for h in secondary if h != peak]
+
+    for i in range(n):
+        if i < len(priority_hours):
+            h = priority_hours[i]
+            name = "pico principal" if h == peak else f"pico secundario {i}"
+            weight = 3 if h == peak else (2 if i < 3 else 1)
+        else:
+            # Overflow: offset from peak (±1h, ±2h...)
+            offset_idx = i - len(priority_hours) + 1
+            h = (peak + offset_idx) % 24
+            name = f"pico+{offset_idx}h"
+            weight = 1
+
+        start_h = max(0, h - 1)
+        end_h = min(23, h + 1)
+        windows.append((start_h, end_h, weight, name))
+
+    return windows
 
 
 def calculate_target_public_time(

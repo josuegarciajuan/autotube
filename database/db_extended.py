@@ -2331,6 +2331,14 @@ class ExtendedDatabase(Database):
             "slug": ch.get("slug", ""),
             "videos_per_day": config.get("videos_per_day", 1),
             "planning_enabled": config.get("planning_enabled", True),
+            # ── Scheduled publishing config ──
+            "publish_mode": config.get("PUBLISH_MODE", "immediate"),
+            "publish_target_hour": config.get("PUBLISH_TARGET_HOUR"),
+            "publish_jitter_min": config.get("PUBLISH_JITTER_MIN", 20),
+            "publish_warmup_min": config.get("PUBLISH_WARMUP_MIN", 120),
+            "publish_timezone": config.get("PUBLISH_TIMEZONE", "Europe/Madrid"),
+            "seo_primary_keyword": config.get("SEO_PRIMARY_KEYWORD", ""),
+            "seo_secondary_keywords": config.get("SEO_SECONDARY_KEYWORDS", []),
         }
     
     def update_channel_planning_config(self, channel_id: int,

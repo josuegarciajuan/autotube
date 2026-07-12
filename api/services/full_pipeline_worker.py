@@ -674,7 +674,16 @@ def run_job(
             db.update_video(video_id, progress=90, progress_phase="upload")
             logger.info("Phase 6/6: Uploading to YouTube...")
             
-            yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id)
+            # ── Read planned target from the video record (set by planning) ──
+            planned_public_at = None
+            video_record = db.get_video(video_id)
+            if video_record and video_record.get("publish_mode") == "scheduled":
+                planned_public_at = video_record.get("target_public_at")
+                if planned_public_at:
+                    logger.info("Using planned public time from slot: %s", planned_public_at)
+            
+            yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,
+                                             planned_public_at=planned_public_at)
             if yt_video_id:
                 yt_url = f"https://youtube.com/watch?v={yt_video_id}"
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url)

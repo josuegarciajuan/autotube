@@ -2,8 +2,9 @@
  *  Allows setting videos_per_day and toggling planning_enabled.
  */
 
-import { useState } from 'react'
-import { Plus, Minus, Video, Play } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Plus, Minus, Video, Play, Clock } from 'lucide-react'
+import { api } from '../lib/api'
 
 interface ChannelConfig {
   channel_id: number
@@ -27,16 +28,19 @@ export default function ChannelConfigCard({
   onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean }) => void
 }) {
   const [saving, setSaving] = useState(false)
+  const [peakInfo, setPeakInfo] = useState<any>(null)
   const colors = CHANNEL_COLORS[config.channel_slug] || { dot: 'bg-gray-400' }
+
+  useEffect(() => {
+    api.getChannelPeakInfo(config.channel_id).then(setPeakInfo).catch(() => {})
+  }, [config.channel_id])
 
   async function update(data: { videos_per_day?: number; planning_enabled?: boolean }) {
     setSaving(true)
-    try {
-      onUpdate(data)
-    } finally {
-      setTimeout(() => setSaving(false), 500)
-    }
+    try { onUpdate(data) } finally { setTimeout(() => setSaving(false), 500) }
   }
+
+  const isScheduled = peakInfo?.publish_mode === 'scheduled'
 
   return (
     <div className={`bg-dark-700/50 rounded-xl p-4 space-y-3 border border-surface-border transition-opacity ${
@@ -91,7 +95,7 @@ export default function ChannelConfigCard({
       <div className="text-[10px] text-gray-500 flex items-center gap-1">
         <Play size={10} />
         {config.planning_enabled && config.videos_per_day > 0
-          ? `${config.videos_per_day} video${config.videos_per_day !== 1 ? 's' : ''}/dia programado${config.videos_per_day !== 1 ? 's' : ''}`
+          ? `${config.videos_per_day} video${config.videos_per_day !== 1 ? 's' : ''}/dia`
           : config.planning_enabled
           ? 'Planificacion activa pero con 0 videos/dia'
           : 'Planificacion desactivada'}
@@ -108,6 +112,17 @@ export default function ChannelConfigCard({
           {(config as any).default_source_mode === 'viral' ? 'Viral' : 'Original'}
         </span>
       </div>
+
+      {/* Peak info for scheduled channels */}
+      {isScheduled && peakInfo && (
+        <div className="text-[10px] text-neon-gold/80 flex items-center gap-1">
+          <Clock size={10} />
+          <span>
+            Franja pico: {peakInfo.peak_hour}:00
+            {peakInfo.source === 'config' ? ' (config)' : ' (heuristica)'}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

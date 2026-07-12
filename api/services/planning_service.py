@@ -90,17 +90,36 @@ def _distribute_slots(
     videos_per_day: int,
     day_seed: int,
     channel_id: int,
+    is_scheduled: bool = False,
+    scheduled_cfg: dict = None,
 ) -> list[tuple]:
-    """Distribute N daily slots across the optimal windows.
-    
-    Strategy:
-      1/day → rotate preferred window each day (based on day_seed)
-      2/day → pick 2 best windows
-      3/day → all 3 windows
+    """Distribute N video slots across time windows for one channel.
+
+    For scheduled channels, uses niche-specific peak windows (publish_scheduler).
+    For immediate channels, uses generic SPAIN_UPLOAD_WINDOWS.
+
+    Returns list of (hour, minute) tuples — TARGET UPLOAD times (public for scheduled).
+
+    Logic:
+      1/dia → best window
+      2/dia → best window + second best (spread)
+      3/dia → three best windows
       4+/day → distribute across all 3 windows evenly, overflow to fallback
     """
     windows = list(SPAIN_UPLOAD_WINDOWS)
+    fallback = SPAIN_FALLBACK_WINDOW
     ch_seed = _channel_seed(day_seed, channel_id)
+
+    # ── Scheduled mode: use niche-specific peak windows ──
+    if is_scheduled and scheduled_cfg:
+        try:
+            from pipeline.publish_scheduler import get_peak_windows
+            peak_wins = get_peak_windows(scheduled_cfg, n=max(videos_per_day, 3))
+            if peak_wins:
+                windows = peak_wins
+                fallback = windows[-1] if len(windows) > 2 else windows[0]
+        except Exception as exc:
+            logger.debug("Failed to load peak windows, falling back to generic: %s", exc)
     
     if videos_per_day <= 0:
         return []
@@ -144,7 +163,7 @@ def _distribute_slots(
         remaining = videos_per_day - planned
         for j in range(remaining):
             sub_seed = ch_seed ^ (0xFFFF + j * 0x3333)
-            h, m = _pick_time_in_window(SPAIN_FALLBACK_WINDOW, sub_seed)
+            h, m = _pick_time_in_window(fallback, sub_seed)
             slots.append((h, m))
     
     # Sort slots by time within this channel
@@ -183,16 +202,28 @@ def compute_daily_slots(
         n = ch.get("videos_per_day", 1)
         if n <= 0:
             continue
+
+        is_scheduled = ch.get("publish_mode") == "scheduled"
+        warmup_min = ch.get("publish_warmup_min", 120) if is_scheduled else 0
+        jitter_min = ch.get("publish_jitter_min", 20) if is_scheduled else 0
         
-        # _distribute_slots returns (h, m) = TARGET_UPLOAD times
-        raw_slots = _distribute_slots(n, day_seed, ch["channel_id"])
+        # _distribute_slots returns (h, m) = TARGET_UPLOAD (public for scheduled)
+        raw_slots = _distribute_slots(n, day_seed, ch["channel_id"],
+                                       is_scheduled=is_scheduled,
+                                       scheduled_cfg=ch if is_scheduled else None)
         
         for pos, (target_h, target_m) in enumerate(raw_slots, 1):
-            # target_upload_at: the time we want the video to appear on YT
+            # target_upload_at: for scheduled = public peak time; for immediate = upload time
             target_str = f"{date_str} {target_h:02d}:{target_m:02d}:00"
             
-            # scheduled_at = target_upload_at − pipeline duration (work backwards)
-            total_min = target_h * 60 + target_m - ESTIMATED_PIPELINE_MINUTES
+            # ── Generation START: work backwards from target ──
+            if is_scheduled:
+                # Back out: pipeline + warmup (no extra buffer — collision resolution handles gaps)
+                reverse_min = ESTIMATED_PIPELINE_MINUTES + warmup_min
+            else:
+                reverse_min = ESTIMATED_PIPELINE_MINUTES
+            
+            total_min = target_h * 60 + target_m - reverse_min
             if total_min < 0:
                 total_min = 0  # clamp to midnight
             sched_h = total_min // 60
@@ -203,11 +234,14 @@ def compute_daily_slots(
                 "channel_id": ch["channel_id"],
                 "date_key": date_str,
                 "scheduled_at": sched_str,
+                # For scheduled: target_upload_at is the PUBLIC peak time
+                # For immediate: target_upload_at is the upload time (unchanged)
                 "target_upload_at": target_str,
                 "slot_position": pos,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
                 "source_mode": ch.get("default_source_mode", "original"),
+                "publish_mode": ch.get("publish_mode", "immediate"),
             })
     
     # Sort all slots chronologically by generation START time
@@ -242,7 +276,10 @@ def compute_daily_slots(
         up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES
         uh = min(up_total // 60, 23)
         um = min(up_total % 60, 59)
-        s["target_upload_at"] = f"{date_str} {uh:02d}:{um:02d}:00"
+        # For scheduled channels, target_upload_at stays as original peak time
+        # (don't recalculate — the generation start was already backed out from peak)
+        if s.get("publish_mode") != "scheduled":
+            s["target_upload_at"] = f"{date_str} {uh:02d}:{um:02d}:00"
     
     # Update slot positions after collision resolution
     for pos, s in enumerate(resolved, 1):
@@ -401,6 +438,13 @@ def sync_midday(db=None) -> dict:
                 "name": ch["name"],
                 "videos_per_day": target,
                 "planning_enabled": True,
+                "publish_mode": cfg.get("publish_mode", "immediate"),
+                "publish_target_hour": cfg.get("publish_target_hour"),
+                "publish_jitter_min": cfg.get("publish_jitter_min", 20),
+                "publish_warmup_min": cfg.get("publish_warmup_min", 120),
+                "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
+                "seo_primary_keyword": cfg.get("seo_primary_keyword", ""),
+                "seo_secondary_keywords": cfg.get("seo_secondary_keywords", []),
             }])
             
             # Filter: only take slots NOT already covered by existing non-cancelled slots
@@ -572,10 +616,18 @@ def process_planned_slots(db=None) -> dict | None:
     
     # 5. Create the video record
     from database.db_extended import ExtendedDatabase
+    
+    # Get channel config to check publish mode
+    ch_cfg = db.get_channel_planning_config(channel_id)
+    publish_mode = ch_cfg.get("publish_mode", "immediate") if ch_cfg else "immediate"
+    
     with db._connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
-            (slug, channel_id),
+            "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
+            "publish_mode, target_public_at, created_at) "
+            "VALUES (?, ?, '', 'generating', 0, ?, ?, CURRENT_TIMESTAMP)",
+            (slug, channel_id, publish_mode,
+             next_slot.get("target_upload_at") if publish_mode == "scheduled" else None),
         )
         conn.commit()
         video_id = cursor.lastrowid
