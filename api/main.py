@@ -748,6 +748,54 @@ async def ws_progress(ws: WebSocket, job_id: int):
     await ws.accept()
     mgr = get_progress_manager()
     mgr.subscribe(job_id, ws)
+
+    # ── Send initial state on connect ───────────────────────
+    # Clients connecting mid-generation need the current progress
+    # immediately, since broadcast() only fires on changes.
+    try:
+        db = get_db()
+        job = db.get_job(job_id)
+        if job:
+            video_id = job.get("video_id")
+            video = db.get_video(video_id) if video_id else None
+            phase = (
+                video.get("progress_phase", job.get("phase", ""))
+                if video else job.get("phase", "")
+            )
+            progress = (
+                video.get("progress", job.get("progress", 0))
+                if video else (job.get("progress", 0) or 0)
+            )
+            phase_messages = {
+                "scrape": "Buscando nuevo contenido...",
+                "script": "Generando guion con IA...",
+                "tts": "Generando voz con IA (TTS)...",
+                "media": "Buscando imagenes y videos...",
+                "video": "Ensamblando video (MoviePy)...",
+                "metadata": "Generando metadatos SEO...",
+                "upload": "Subiendo a YouTube...",
+                "inicio": "Iniciando pipeline...",
+            }
+            message = phase_messages.get(
+                phase,
+                f"Fase: {phase}" if phase else "Generando...",
+            )
+            status = "failed" if job.get("status") == "failed" else \
+                     "completed" if job.get("status") in ("completed",) else \
+                     "running"
+            data = {
+                "job_id": job_id,
+                "status": status,
+                "progress": progress,
+                "phase": phase,
+                "message": message,
+            }
+            if video_id:
+                data["video_id"] = video_id
+            await ws.send_json(data)
+    except Exception:
+        pass  # If DB fails, client will get updates via broadcast later
+
     try:
         while True:
             # Keep connection alive, client sends pings

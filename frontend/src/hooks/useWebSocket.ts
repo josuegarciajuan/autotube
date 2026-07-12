@@ -118,9 +118,9 @@ export function useGenerationProgress(jobId: number | null) {
     };
   }, [jobId, connect]);
 
-  // ── Polling fallback: fetch job status every 3s when WS is disconnected ──
+  // ── Polling fallback: always do an initial fetch, then poll every 3s when WS is disconnected ──
   useEffect(() => {
-    if (!jobId || connected) return; // only poll when WS is down
+    if (!jobId) return;
 
     let active = true;
     let pollTimer: ReturnType<typeof setTimeout>;
@@ -129,7 +129,11 @@ export function useGenerationProgress(jobId: number | null) {
       if (!active) return;
       try {
         const res = await fetch(`api/jobs/${jobId}`);
-        if (!res.ok) { pollTimer = setTimeout(poll, 3000); return; }
+        if (!res.ok) {
+          // Retry on error only if still disconnected
+          if (!connected) pollTimer = setTimeout(poll, 3000);
+          return;
+        }
         const job = await res.json();
         const data: ProgressData = {
           job_id: job.id ?? jobId,
@@ -149,12 +153,15 @@ export function useGenerationProgress(jobId: number | null) {
           return; // stop polling
         }
       } catch {
-        // ignore network errors, retry
+        // ignore network errors, retry only if disconnected
       }
-      pollTimer = setTimeout(poll, 3000);
+      // Only schedule next poll if WS is still disconnected
+      if (active && !connected) {
+        pollTimer = setTimeout(poll, 3000);
+      }
     }
 
-    pollTimer = setTimeout(poll, 1000); // first poll after 1s delay
+    pollTimer = setTimeout(poll, 1000); // first poll after 1s delay always runs
 
     return () => {
       active = false;

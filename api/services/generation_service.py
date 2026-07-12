@@ -2314,12 +2314,15 @@ async def _monitor_worker_progress(
     last_progress = -1
     last_phase = ""
     poll_interval = 2.0  # seconds — fast enough for responsive UI
+    ticks_since_broadcast = 0  # force periodic broadcast during long phases
+    BROADCAST_EVERY_N_TICKS = 8  # every ~16s (8 * 2.0s)
 
     logger.info("Progress monitor started for job #%d (worker pid=%d)", job_id, proc.pid)
 
     try:
         while True:
             await asyncio.sleep(poll_interval)
+            ticks_since_broadcast += 1
 
             # Check if the worker process is still alive
             poll_result = proc.poll()
@@ -2342,9 +2345,12 @@ async def _monitor_worker_progress(
             current_status = video.get("status", "") if video else ""
 
             # Detect progress changes and broadcast
-            if (current_progress != last_progress or current_phase != last_phase):
+            force_broadcast = ticks_since_broadcast >= BROADCAST_EVERY_N_TICKS
+            if (current_progress != last_progress or current_phase != last_phase
+                    or force_broadcast):
                 last_progress = current_progress
                 last_phase = current_phase
+                ticks_since_broadcast = 0  # reset periodic counter
 
                 # Build a human-readable message
                 phase_messages = {
