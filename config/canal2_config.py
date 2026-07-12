@@ -666,6 +666,15 @@ LOGO_PATH = ""
 YT_CATEGORY_ID = "24"              # Entertainment
 YT_PRIVACY_STATUS = "public"
 
+# ── Scheduled Publishing ──────────────────────────────────────────
+# "immediate" = legacy (pública al subir)
+# "scheduled" = sube en privado, se publica solo a la hora pico
+PUBLISH_MODE = "scheduled"
+PUBLISH_TIMEZONE = "Europe/Madrid"
+PUBLISH_TARGET_HOUR = 21           # 9 PM — peak para contenido de misterio
+PUBLISH_JITTER_MIN = 20            # ±20 min de variación aleatoria
+PUBLISH_WARMUP_MIN = 120           # Mínimo 2h en 'private' antes de publicar
+
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
     "casualidades imposibles",

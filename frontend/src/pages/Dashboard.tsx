@@ -10,6 +10,8 @@ import RecentShorts from '../components/RecentShorts'
 import YppProgressSection from '../components/YppProgressSection'
 import RevenueOverview from '../components/RevenueOverview'
 import MilestonesTimeline from '../components/MilestonesTimeline'
+import PendingManualActions from '../components/PendingManualActions'
+import UpcomingPublications from '../components/UpcomingPublications'
 import type { StabilizeResult } from '../components/StabilizeProgress'
 
 export default function Dashboard() {
@@ -259,6 +261,12 @@ export default function Dashboard() {
 
       {/* Pipeline activo */}
       <PipelineSection pipeline={pipeline} />
+
+      {/* ── Scheduled publishing: pending manual actions ── */}
+      <PendingManualActions />
+
+      {/* ── Scheduled publishing: upcoming publications ── */}
+      <UpcomingPublications />
 
       {/* Top videos */}
       <TopVideos videos={topVideos} />

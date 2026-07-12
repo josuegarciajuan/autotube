@@ -462,3 +462,53 @@ async def get_templates(channel_id: int):
             "generated_at": str(t["generated_at"]) if t.get("generated_at") else None,
         }
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Scheduled publishing mode toggle
+# ═══════════════════════════════════════════════════════════════════
+
+@router.post("/{channel_id}/scheduled-mode/toggle")
+def toggle_scheduled_publishing(channel_id: int):
+    """Toggle scheduled publishing mode for a channel.
+
+    Returns the new mode ('immediate' or 'scheduled').
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    import json
+    config = json.loads(ch.get("config_json", "{}")) if isinstance(ch.get("config_json"), str) else (ch.get("config_json") or {})
+
+    current_mode = config.get("PUBLISH_MODE", "immediate")
+    new_mode = "scheduled" if current_mode == "immediate" else "immediate"
+
+    config["PUBLISH_MODE"] = new_mode
+    db.update_channel(channel_id, config=config)
+
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "publish_mode": new_mode,
+        "previous_mode": current_mode,
+    }
+
+
+@router.get("/{channel_id}/scheduled-mode")
+def get_scheduled_mode(channel_id: int):
+    """Get the current publishing mode for a channel."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    import json
+    config = json.loads(ch.get("config_json", "{}")) if isinstance(ch.get("config_json"), str) else (ch.get("config_json") or {})
+
+    return {
+        "channel_id": channel_id,
+        "publish_mode": config.get("PUBLISH_MODE", "immediate"),
+        "channel_name": ch.get("name", ""),
+    }

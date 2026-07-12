@@ -120,6 +120,133 @@ class VideoLifecycleManager:
                      self.slug, scheduled_count, db_video_id, yt_video_id)
         return scheduled_count
 
+    def on_video_uploaded_scheduled(self, db_video_id: int, yt_video_id: str,
+                                     channel_id: int, script_text: str = None,
+                                     target_public_at: str = None,
+                                     warmup_until: str = None) -> int:
+        """Schedule the scheduled-publishing lifecycle for a video uploaded as private.
+
+        Unlike on_video_published (immediate mode), the actions are timed relative
+        to the target PUBLIC time, not the upload time. The key action is 'go_public'
+        which sets privacy=public at the peak target hour.
+        """
+        if not LIFECYCLE_ENABLED:
+            logger.debug("[%s] Lifecycle disabled — skipping for video %d", self.slug, db_video_id)
+            return 0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        scheduled_count = 0
+
+        # ── 1. go_public: set video to public at target time ──
+        if target_public_at:
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="go_public",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=target_public_at,
+                config_json=None,
+            )
+            scheduled_count += 1
+            logger.info("[%s] Scheduled go_public for video %d at %s",
+                        self.slug, db_video_id, target_public_at)
+
+            # ── 2. Playlist add: 1 min after go_public (i.e., after public) ──
+            from datetime import datetime as _dt, timedelta as _td
+            try:
+                target_dt = _dt.fromisoformat(target_public_at)
+            except (ValueError, TypeError):
+                target_dt = _dt.now(timezone.utc) + _td(hours=2)  # fallback
+            playlist_at = (target_dt + _td(minutes=1)).isoformat()
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="playlist_add",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=playlist_at,
+            )
+            scheduled_count += 1
+
+            # ── 3. First comment: 5 min after public ──
+            comment_at = (target_dt + _td(minutes=5)).isoformat()
+            config_json = None
+            if script_text:
+                import json
+                config_json = json.dumps({"script_snippet": script_text[:2000]})
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="first_comment",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=comment_at,
+                config_json=config_json,
+            )
+            scheduled_count += 1
+
+            # ── 4-5. Comment replies at 12h and 24h after public ──
+            reply1_at = (target_dt + _td(hours=12)).isoformat()
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="comment_reply_1",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=reply1_at,
+            )
+            scheduled_count += 1
+
+            reply2_at = (target_dt + _td(hours=24)).isoformat()
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="comment_reply_2",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=reply2_at,
+            )
+            scheduled_count += 1
+
+            # ── 6. CTR check at 48h after public ──
+            ctr_at = (target_dt + _td(hours=48)).isoformat()
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="ctr_check",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=ctr_at,
+            )
+            scheduled_count += 1
+
+            # ── 7. Metadata reoptimize at 72h after public ──
+            meta_at = (target_dt + _td(hours=72)).isoformat()
+            meta_config = None
+            if script_text:
+                import json
+                meta_config = json.dumps({"script_snippet": script_text[:2500]})
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="metadata_reoptimize",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=meta_at,
+                config_json=meta_config,
+            )
+            scheduled_count += 1
+
+        else:
+            # No target time provided — fallback to wrap-up now
+            logger.warning("[%s] No target_public_at — scheduling go_public with warmup only", self.slug)
+            self.db.create_lifecycle_action(
+                video_id=db_video_id,
+                action_type="go_public",
+                channel_id=channel_id,
+                yt_video_id=yt_video_id,
+                scheduled_for=warmup_until or now_iso,
+            )
+            scheduled_count += 1
+
+        logger.info("[%s] Lifecycle (scheduled): %d actions for video %d (target: %s)",
+                     self.slug, scheduled_count, db_video_id, target_public_at or "N/A")
+        return scheduled_count
+
     # ════════════════════════════════════════════════════════════
     # Execution: called by scheduler
     # ════════════════════════════════════════════════════════════
@@ -217,6 +344,8 @@ class VideoLifecycleManager:
 
         if action_type == "playlist_add":
             return self._handle_playlist_add(yt_video_id, db_video_id, action)
+        elif action_type == "go_public":
+            return self._handle_go_public(yt_video_id, db_video_id, action)
         elif action_type == "first_comment":
             return self._handle_first_comment(yt_video_id, db_video_id, action)
         elif action_type in ("comment_reply_1", "comment_reply_2"):
@@ -233,7 +362,7 @@ class VideoLifecycleManager:
 
     def _handle_playlist_add(self, yt_video_id: str, db_video_id: int,
                               _action: dict) -> bool:
-        """Add video to all configured playlists."""
+        """Add video to best-matching playlist (auto-classify)."""
         from pipeline.youtube_playlists import YouTubePlaylistManager
 
         mgr = YouTubePlaylistManager(self.slug)
@@ -258,8 +387,18 @@ class VideoLifecycleManager:
                     channel_id, pl["slug"], pl["yt_playlist_id"], pl["name"],
                 )
 
-        # Add video to all playlists
-        add_result = mgr.add_video_to_all_playlists(yt_video_id)
+        # Get video title/description for auto-classification
+        video = self.db.get_video(db_video_id)
+        title = (video.get("titulo_final") or "") if video else ""
+        description = (video.get("description") or "") if video else ""
+
+        # Add video with auto-classify to pick the single best playlist
+        add_result = mgr.add_video_to_all_playlists(
+            yt_video_id,
+            auto_classify=True,
+            title=title,
+            description=description,
+        )
 
         # Record in DB
         if channel_id:
@@ -273,6 +412,26 @@ class VideoLifecycleManager:
                 if cached:
                     self.db.add_video_to_playlist_db(db_video_id, cached["id"])
 
+        # ── Store auto-selected playlist name in video record ──
+        auto_selected = add_result.get("auto_selected")
+        if auto_selected:
+            playlist_name = None
+            mgr_config = getattr(mgr, "config", None)
+            playlists = getattr(mgr_config, "PLAYLISTS", []) if mgr_config else []
+            for pl in playlists:
+                if pl.get("slug") == auto_selected:
+                    playlist_name = pl.get("name", auto_selected)
+                    break
+            if playlist_name:
+                cached = self.db.get_playlist_by_slug(channel_id, auto_selected)
+                pl_id = cached["id"] if cached else None
+                self.db.update_video(
+                    db_video_id,
+                    auto_playlist_id=pl_id,
+                    auto_playlist_name=playlist_name,
+                )
+                logger.info("[%s] Video %d assigned to playlist '%s'", self.slug, db_video_id, playlist_name)
+
         # Store result
         import json
         self.db.update_lifecycle_action_status(
@@ -280,6 +439,41 @@ class VideoLifecycleManager:
             result_json=json.dumps(add_result, ensure_ascii=False),
         )
         return True
+
+    def _handle_go_public(self, yt_video_id: str, db_video_id: int,
+                           _action: dict) -> bool:
+        """Set a private/unlisted video to public at the scheduled peak time."""
+        from pipeline.youtube_uploader import YouTubeUploader
+
+        # Get channel slug for this video
+        ch = self.db.get_video(db_video_id)
+        slug = ch.get("canal") if ch else self.slug
+
+        uploader = YouTubeUploader(slug)
+        if not uploader.authenticate():
+            logger.error("[%s] Cannot auth for go_public", self.slug)
+            return False
+
+        try:
+            result = uploader.set_privacy(yt_video_id, "public")
+            if result.get("updated") or result.get("privacy") == "public":
+                # Update video status in DB
+                from datetime import datetime, timezone
+                self.db.update_video(
+                    db_video_id,
+                    status="published",
+                    privacy_status="public",
+                    published_at=datetime.now(timezone.utc).isoformat(),
+                )
+                logger.info("[%s] Video %s set to PUBLIC (published at peak time)",
+                            self.slug, yt_video_id)
+                return True
+            else:
+                logger.error("[%s] go_public failed: %s", self.slug, result)
+                return False
+        except Exception as e:
+            logger.error("[%s] go_public exception: %s", self.slug, e)
+            return False
 
     def _handle_first_comment(self, yt_video_id: str, db_video_id: int,
                                _action: dict) -> bool:

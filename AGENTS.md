@@ -143,8 +143,19 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 | Subtítulos | ✅ (API aparte) | — |
 | Playlists | ✅ (API aparte) | — |
 | End screens | ❌ | ✅ YouTube Studio |
+| Contenido alterado/IA | ❌ | ✅ YouTube Studio > Contenido > ¿Contenido alterado o sintético? > Sí |
+| Pantallas finales | ❌ | ✅ YouTube Studio > Pantalla final > 2 elementos (vídeo recomendado + suscribirse) |
+| Hora de publicación | ✅ `publishAt` | — |
 
 *Descripción del canal: API bloquea `snippet.description` para canales no verificados.
+
+## Publicación programada (nuevo modo scheduled)
+- **Activación por canal:** `PUBLISH_MODE = "scheduled"` en `config/canalX_config.py`.
+- **Flujo:** sube el vídeo como `private` → período de "calentamiento" (warmup) → se publica automáticamente a la **hora pico** calculada (con ±X minutos de jitter).
+- **Hora pico:** heurística por nicho/palabras clave (tabla en `pipeline/publish_scheduler.py`) + auto-ajuste con histórico de rendimiento del canal (`video_stats_history`).
+- **Config relevante por canal:** `PUBLISH_MODE`, `PUBLISH_TIMEZONE`, `PUBLISH_TARGET_HOUR`, `PUBLISH_JITTER_MIN`, `PUBLISH_WARMUP_MIN`.
+- **Acciones manuales:** al subir en modo programado, el sistema muestra alertas para que completes manualmente: "marcar contenido alterado/IA" y "configurar pantallas finales". Haz check en la UI cuando estén hechas.
+- **Playlist inteligente:** cada vídeo se asigna automáticamente a la playlist que mejor encaja con su contenido (clasificador LLM en `pipeline/youtube_playlists.py`).
 
 ## Stats collection
 - Stats de YouTube se recolectan automáticamente cada 6h (scheduler en `api/main.py`)

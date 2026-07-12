@@ -83,10 +83,20 @@
   .badge-ready { @apply bg-green-900/50 text-green-300 border border-green-500/30; }
   .badge-uploaded { @apply bg-purple-900/50 text-purple-300 border border-purple-500/30; }
   .badge-error { @apply bg-red-900/50 text-red-300 border border-red-500/30; }
+  /* Scheduled publishing badges */
+  .badge-uploaded_private { @apply bg-cyan-900/50 text-cyan-300 border border-cyan-500/30; }
+  .badge-warming { @apply bg-amber-900/50 text-amber-300 border border-amber-500/30; animation: warming-pulse 2s ease-in-out infinite; }
+  .badge-scheduled { @apply bg-yellow-900/50 text-yellow-300 border border-yellow-500/30; }
+  .badge-published { @apply bg-emerald-900/50 text-emerald-300 border border-emerald-500/30; }
 
   /* Video thumbnail hover overlay */
   .video-thumb-overlay {
     @apply absolute inset-0 bg-black/0 group-hover:bg-black/60 transition-all duration-300 flex items-center justify-center;
+  }
+
+  @keyframes warming-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
 
   /* Safe area for iPhone notch */

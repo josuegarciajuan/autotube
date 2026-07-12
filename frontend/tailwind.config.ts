@@ -17,6 +17,17 @@ export default {
           cyan: '#00e5ff',
           gold: '#ffb830',
           purple: '#a855f7',
+          pink: '#ec4899',
+        },
+        emerald: {
+          300: '#6ee7b7',
+          500: '#10b981',
+          900: '#064e3b',
+        },
+        yellow: {
+          300: '#fde047',
+          500: '#eab308',
+          900: '#713f12',
         },
         surface: {
           DEFAULT: '#14141f',

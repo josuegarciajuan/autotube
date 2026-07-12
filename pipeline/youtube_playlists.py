@@ -278,12 +278,24 @@ class YouTubePlaylistManager:
         return {"created": created, "existing": existing, "errors": errors}
 
     def add_video_to_all_playlists(self, yt_video_id: str,
-                                    playlist_configs: list[dict] = None) -> dict:
+                                    playlist_configs: list[dict] = None,
+                                    auto_classify: bool = False,
+                                    title: str = None,
+                                    description: str = None) -> dict:
         """Add a video to all configured playlists for the channel.
 
         Uses cached playlist IDs from DB when available.
 
-        Returns {added_to: [...], already_in: [...], errors: [...]}.
+        Args:
+            yt_video_id: YouTube video ID
+            playlist_configs: Optional override playlist configs
+            auto_classify: If True and multiple playlists, use AI to pick the
+                          best matching playlist and add ONLY to that one.
+            title: Video title (needed for auto_classify)
+            description: Video description (needed for auto_classify)
+
+        Returns {added_to: [...], already_in: [...], errors: [...],
+                 auto_selected: slug or None}.
         """
         if playlist_configs is None:
             playlist_configs = getattr(self.config, "PLAYLISTS", [])
@@ -301,8 +313,22 @@ class YouTubePlaylistManager:
 
         channel_id = ch["id"]
         added_to, already_in, errors = [], [], []
+        auto_selected = None
 
-        for pl_cfg in playlist_configs:
+        # ── Auto-classify: pick the single best matching playlist ──
+        target_playlists = list(playlist_configs)  # copy
+        if auto_classify and len(target_playlists) > 1 and title:
+            try:
+                best_slug = self._classify_playlist(title, description or "", target_playlists)
+                if best_slug:
+                    target_playlists = [pl for pl in target_playlists if pl.get("slug") == best_slug]
+                    auto_selected = best_slug
+                    logger.info("[%s] Auto-selected playlist '%s' for video '%s'",
+                                self.slug, best_slug, title[:50])
+            except Exception as e:
+                logger.warning("[%s] Playlist classification failed: %s", self.slug, e)
+
+        for pl_cfg in target_playlists:
             slug_key = pl_cfg.get("slug", "")
             name = pl_cfg.get("name", "")
 
@@ -335,4 +361,69 @@ class YouTubePlaylistManager:
                 errors.append(f"{name}: {exc}")
                 logger.error("[%s] Error adding video to playlist %s: %s", self.slug, name, exc)
 
-        return {"added_to": added_to, "already_in": already_in, "errors": errors}
+        return {"added_to": added_to, "already_in": already_in, "errors": errors,
+                "auto_selected": auto_selected}
+
+    def _classify_playlist(self, title: str, description: str,
+                            playlists: list[dict]) -> str | None:
+        """Use AI to classify which playlist best matches a video's content.
+
+        Args:
+            title: Video title
+            description: Video description
+            playlists: List of playlist configs [{slug, name, description, type}]
+
+        Returns the slug of the best matching playlist, or None.
+        """
+        if not playlists or len(playlists) <= 1:
+            return playlists[0]["slug"] if playlists else None
+
+        import json as _json
+        from openai import OpenAI
+        from config.settings import OPENAI_API_KEY, LLM_MODEL
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        # Build playlist descriptions for the prompt
+        playlist_desc = "\n".join(
+            f"- {pl['slug']}: {pl.get('description', pl.get('name', ''))}"
+            for pl in playlists
+        )
+
+        system_prompt = (
+            "Eres un clasificador experto en contenido de YouTube. "
+            "Tu tarea es leer el título y la descripción de un vídeo, "
+            "y elegir la lista de reproducción que mejor encaje con el contenido. "
+            "Responde SOLO con el slug de la playlist elegida, sin comillas ni explicaciones."
+        )
+
+        user_prompt = (
+            f"TÍTULO DEL VÍDEO: {title[:200]}\n\n"
+            f"DESCRIPCIÓN: {description[:500]}\n\n"
+            f"LISTAS DE REPRODUCCIÓN DISPONIBLES:\n{playlist_desc}\n\n"
+            f"Elige el slug de la lista que mejor encaje."
+        )
+
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=50,
+            )
+            result = response.choices[0].message.content.strip().lower()
+            # Validate that the result matches one of the slugs
+            valid_slugs = {pl["slug"].lower() for pl in playlists}
+            if result in valid_slugs:
+                # Return the original casing
+                for pl in playlists:
+                    if pl["slug"].lower() == result:
+                        return pl["slug"]
+            logger.warning("[%s] AI returned invalid playlist slug: %s", self.slug, result)
+            return None
+        except Exception as e:
+            logger.warning("[%s] Playlist classification LLM error: %s", self.slug, e)
+            return None

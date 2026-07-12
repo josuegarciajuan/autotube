@@ -424,7 +424,14 @@ class YouTubeUploader:
         })
         warnings.append({
             "field": "end_screens",
-            "reason": "Pantallas finales solo configurables en YouTube Studio.",
+            "reason": "Pantallas finales solo configurables en YouTube Studio. "
+                      "Recomendado: 2 elementos (vídeo recomendado 'mejor para el espectador' + botón suscribirse).",
+            "ready": False,
+        })
+        warnings.append({
+            "field": "altered_content",
+            "reason": "YouTube exige marcar 'contenido alterado' si se ha generado con IA. "
+                      "Márcalo en YouTube Studio > Contenido > ¿Contenido alterado o sintético? > Sí.",
             "ready": False,
         })
 

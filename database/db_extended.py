@@ -107,6 +107,15 @@ def migrate_v2(db_path: str = None):
         ("channel_id", "INTEGER REFERENCES channels(id)"),
         ("checkpoint_data", "TEXT DEFAULT '{}'"),
         ("timing_data", "TEXT DEFAULT '{}'"),
+        # ── Scheduled publishing (v7 migration) ──
+        ("publish_mode", "TEXT DEFAULT 'immediate'"),
+        ("target_public_at", "TIMESTAMP"),
+        ("published_at", "TIMESTAMP"),
+        ("peak_source", "TEXT"),
+        ("auto_playlist_id", "INTEGER"),
+        ("auto_playlist_name", "TEXT"),
+        ("manual_altered_content_done", "INTEGER DEFAULT 0"),
+        ("manual_end_screens_done", "INTEGER DEFAULT 0"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -824,7 +833,11 @@ class ExtendedDatabase(Database):
         allowed = ["titulo_final", "description", "tags_json", "title_options",
                     "privacy_status", "status", "progress", "progress_phase",
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
-                    "script_id", "channel_id", "checkpoint_data", "timing_data"]
+                    "script_id", "channel_id", "checkpoint_data", "timing_data",
+                    # ── Scheduled publishing ──
+                    "publish_mode", "target_public_at", "published_at",
+                    "peak_source", "auto_playlist_id", "auto_playlist_name",
+                    "manual_altered_content_done", "manual_end_screens_done"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -854,11 +867,12 @@ class ExtendedDatabase(Database):
             conn.commit()
         return True
     
-    def mark_video_uploaded(self, video_id, yt_video_id, yt_url):
+    def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
+        """Mark a video as uploaded to YouTube. Supports scheduled mode statuses."""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, status='uploaded' WHERE id=?",
-                (yt_video_id, yt_url, video_id),
+                "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, status=? WHERE id=?",
+                (yt_video_id, yt_url, status, video_id),
             )
             conn.commit()
     

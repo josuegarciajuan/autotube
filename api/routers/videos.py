@@ -2,6 +2,7 @@
 import json
 import logging
 import asyncio
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from api.deps import get_db
 from api.progress import get_progress_manager
@@ -512,3 +513,188 @@ def get_video_stats_history(video_id: int, days: int = 30):
     db = get_db()
     history = db.get_video_stats_history(video_id, days)
     return history
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Scheduled Publishing endpoints
+# ═══════════════════════════════════════════════════════════════════
+
+@router.patch("/{video_id}/manual-checklist")
+def update_manual_checklist(video_id: int, data: dict):
+    """Mark a manual action as done or undone.
+
+    Body: {"item": "altered_content"|"end_screens", "done": true|false}
+    """
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+
+    item = data.get("item", "")
+    done = data.get("done", False)
+
+    if item == "altered_content":
+        db.update_video(video_id, manual_altered_content_done=int(done))
+    elif item == "end_screens":
+        db.update_video(video_id, manual_end_screens_done=int(done))
+    else:
+        raise HTTPException(400, f"Unknown manual checklist item: {item}")
+
+    return {"ok": True, "item": item, "done": done}
+
+
+@router.get("/manual-actions/pending")
+def get_pending_manual_actions(channel_id: int = None):
+    """Get aggregate count of pending manual actions, optionally filtered by channel."""
+    db = get_db()
+    import sqlite3
+    conn = db._connect()
+    try:
+        params = []
+        where = "WHERE manual_altered_content_done = 0 OR manual_end_screens_done = 0"
+        if channel_id:
+            where += " AND channel_id = ?"
+            params.append(channel_id)
+
+        rows = conn.execute(
+            f"SELECT channel_id, "
+            f"SUM(CASE WHEN manual_altered_content_done = 0 THEN 1 ELSE 0 END) as pending_altered, "
+            f"SUM(CASE WHEN manual_end_screens_done = 0 THEN 1 ELSE 0 END) as pending_endscreens, "
+            f"COUNT(*) as affected_videos "
+            f"FROM videos {where} "
+            f"AND yt_video_id IS NOT NULL "
+            f"GROUP BY channel_id",
+            params,
+        ).fetchall()
+
+        channels = {}
+        total_pending = 0
+        total_affected = 0
+        for row in rows:
+            ch = db.get_channel(row["channel_id"])
+            channel_slug = ch["slug"] if ch else f"ch{row['channel_id']}"
+            channel_name = ch["name"] if ch else "Unknown"
+            pending = (row["pending_altered"] or 0) + (row["pending_endscreens"] or 0)
+            channels[channel_slug] = {
+                "channel_id": row["channel_id"],
+                "channel_name": channel_name,
+                "channel_slug": channel_slug,
+                "pending_altered": row["pending_altered"] or 0,
+                "pending_endscreens": row["pending_endscreens"] or 0,
+                "total_pending": pending,
+                "affected_videos": row["affected_videos"] or 0,
+            }
+            total_pending += pending
+            total_affected += max(total_affected, row["affected_videos"] or 0)
+
+        return {
+            "total_pending": total_pending,
+            "total_affected_videos": total_pending,
+            "channels": channels,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/publications/upcoming")
+def get_upcoming_publications(channel_id: int = None, days: int = 2):
+    """Get upcoming scheduled publications (warming + scheduled status)."""
+    db = get_db()
+    base_query = (
+        "SELECT v.*, ch.slug as channel_slug, ch.name as channel_name "
+        "FROM videos v "
+        "JOIN channels ch ON v.channel_id = ch.id "
+        "WHERE v.status IN ('uploaded_private', 'warming', 'scheduled') "
+        "AND v.target_public_at IS NOT NULL "
+    )
+    params = []
+    if channel_id:
+        base_query += "AND v.channel_id = ? "
+        params.append(channel_id)
+
+    base_query += "ORDER BY v.target_public_at ASC LIMIT 50"
+
+    import sqlite3
+    conn = db._connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(base_query, params).fetchall()
+    finally:
+        conn.close()
+
+    result = []
+    for r in rows:
+        row = dict(r)
+        # Calculate countdown
+        remaining_seconds = 0
+        if row.get("target_public_at"):
+            try:
+                target_dt = datetime.fromisoformat(str(row["target_public_at"]).replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                remaining_seconds = max(0, (target_dt - now).total_seconds())
+            except (ValueError, TypeError):
+                pass
+
+        # Determine sub-state
+        if row.get("status") == "uploaded_private":
+            # Check if still in warmup
+            warmup_elapsed = True
+            if remaining_seconds > 0:
+                warmup_elapsed = False
+
+        result.append({
+            "video_id": row["id"],
+            "channel_id": row["channel_id"],
+            "channel_name": row.get("channel_name", ""),
+            "channel_slug": row.get("channel_slug", ""),
+            "titulo_final": row.get("titulo_final", ""),
+            "status": row.get("status", ""),
+            "target_public_at": row.get("target_public_at"),
+            "peak_source": row.get("peak_source", ""),
+            "published_at": row.get("published_at"),
+            "auto_playlist_name": row.get("auto_playlist_name"),
+            "remaining_seconds": int(remaining_seconds),
+            "pending_altered": int(not row.get("manual_altered_content_done")),
+            "pending_endscreens": int(not row.get("manual_end_screens_done")),
+            "yt_video_id": row.get("yt_video_id"),
+            "yt_url": row.get("yt_url"),
+            "uploaded_at": str(row["uploaded_at"]) if row.get("uploaded_at") else None,
+        })
+
+    return result
+
+
+@router.post("/{video_id}/publish-now")
+def publish_video_now(video_id: int):
+    """Immediately set a scheduled video to public, bypassing the schedule."""
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if not v.get("yt_video_id"):
+        raise HTTPException(400, "Video has no YouTube ID")
+
+    from orchestrator import PipelineOrchestrator
+    ch = db.get_channel(v["channel_id"]) if v.get("channel_id") else None
+    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    orch = PipelineOrchestrator(canal=canal)
+    if not orch.uploader.authenticate():
+        raise HTTPException(500, "Failed to authenticate")
+
+    result = orch.uploader.set_privacy(v["yt_video_id"], "public")
+    db.update_video(video_id, status="published", privacy_status="public",
+                     published_at=datetime.now(timezone.utc).isoformat())
+    return {"ok": True, "published": True, "video_id": video_id}
+
+
+@router.post("/{video_id}/cancel-schedule")
+def cancel_scheduled_publish(video_id: int):
+    """Cancel scheduled publishing. Video stays private."""
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+
+    db.update_video(video_id, status="uploaded_private", target_public_at=None,
+                     peak_source=None, publish_mode="immediate")
+    return {"ok": True, "cancelled": True, "video_id": video_id}

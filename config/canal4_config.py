@@ -720,6 +720,9 @@ LOGO_PATH = ""
 YT_CATEGORY_ID = "27"              # Education
 YT_PRIVACY_STATUS = "public"     # Public — upload directly visible
 
+# ── Scheduled Publishing ──────────────────────────────────────────
+PUBLISH_MODE = "immediate"         # Legacy: publicar al subir
+
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
     "expediciones fallidas",

@@ -227,6 +227,38 @@ export const api = {
   // Metadata
   reoptimizeMetadata: (videoId: number) =>
     request<any>(`/videos/${videoId}/reoptimize-metadata`, { method: 'POST' }),
+
+  // ── Scheduled publishing ──────────────────────────────
+  getScheduledMode: (channelId: number) =>
+    request<{ channel_id: number; publish_mode: string; channel_name: string }>(`/channels/${channelId}/scheduled-mode`),
+
+  toggleScheduledMode: (channelId: number) =>
+    request<{ ok: boolean; channel_id: number; publish_mode: string; previous_mode: string }>(`/channels/${channelId}/scheduled-mode/toggle`, { method: 'POST' }),
+
+  getUpcomingPublications: (channelId?: number, days?: number) => {
+    const params = new URLSearchParams();
+    if (channelId) params.set('channel_id', String(channelId));
+    if (days) params.set('days', String(days));
+    return request<any[]>(`/videos/publications/upcoming?${params}`);
+  },
+
+  getPendingManualActions: (channelId?: number) => {
+    const params = new URLSearchParams();
+    if (channelId) params.set('channel_id', String(channelId));
+    return request<any>(`/videos/manual-actions/pending?${params}`);
+  },
+
+  updateManualChecklist: (videoId: number, item: string, done: boolean) =>
+    request<any>(`/videos/${videoId}/manual-checklist`, {
+      method: 'PATCH',
+      body: JSON.stringify({ item, done }),
+    }),
+
+  publishNow: (videoId: number) =>
+    request<any>(`/videos/${videoId}/publish-now`, { method: 'POST' }),
+
+  cancelSchedule: (videoId: number) =>
+    request<any>(`/videos/${videoId}/cancel-schedule`, { method: 'POST' }),
 };
 
 /** Format seconds to mm:ss */
@@ -289,6 +321,10 @@ export function statusBadge(status: string): string {
     ready: 'badge-ready',
     uploaded: 'badge-uploaded',
     error: 'badge-error',
+    uploaded_private: 'badge-uploaded_private',
+    warming: 'badge-warming',
+    scheduled: 'badge-scheduled',
+    published: 'badge-published',
   };
   return map[status] || 'badge-draft';
 }
@@ -302,6 +338,10 @@ export function statusLabel(status: string): string {
     ready: 'Listo',
     uploaded: 'Subido',
     error: 'Error',
+    uploaded_private: 'Subido (privado)',
+    warming: 'Calentando',
+    scheduled: 'Programado',
+    published: 'Publicado',
   };
   return map[status] || status;
 }
@@ -328,4 +368,71 @@ export function mediaUrl(storedPath: string | null | undefined): string {
 /** Build a relative API URL that respects the <base href="/autotube/"> */
 export function apiUrl(path: string): string {
   return `api${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+/** Format a target time into a countdown string in Spanish */
+export function formatCountdown(targetIso: string | null): string {
+  if (!targetIso) return '';
+  try {
+    const target = new Date(targetIso.replace(' ', 'T'));
+    const now = new Date();
+    const diff = target.getTime() - now.getTime();
+    if (diff <= 0) return 'Ahora';
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ${mins % 60}m`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  } catch {
+    return '';
+  }
+}
+
+/** Format target time as HH:MM (local) with jitter indicator */
+export function formatTargetTime(targetIso: string | null): string {
+  if (!targetIso) return '';
+  try {
+    const d = new Date(targetIso.replace(' ', 'T'));
+    return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TypeScript interfaces for scheduled publishing
+// ═══════════════════════════════════════════════════════════════
+
+export interface UpcomingPublication {
+  video_id: number;
+  channel_id: number;
+  channel_name: string;
+  channel_slug: string;
+  titulo_final: string;
+  status: string;
+  target_public_at: string | null;
+  peak_source: string;
+  published_at: string | null;
+  auto_playlist_name: string | null;
+  remaining_seconds: number;
+  pending_altered: number;
+  pending_endscreens: number;
+  yt_video_id: string | null;
+  yt_url: string | null;
+  uploaded_at: string | null;
+}
+
+export interface PendingManualSummary {
+  total_pending: number;
+  total_affected_videos: number;
+  channels: Record<string, {
+    channel_id: number;
+    channel_name: string;
+    channel_slug: string;
+    pending_altered: number;
+    pending_endscreens: number;
+    total_pending: number;
+    affected_videos: number;
+  }>;
 }

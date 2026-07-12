@@ -1082,6 +1082,45 @@ class PipelineOrchestrator:
                                       "Auth failed")
                 return None
 
+            # ── Scheduled publishing: check if channel uses scheduled mode ──
+            publish_mode = getattr(self.config, "PUBLISH_MODE", "immediate")
+            publish_schedule_info = None
+            
+            if publish_mode == "scheduled":
+                from pipeline.publish_scheduler import calculate_target_public_time
+                primary_kw = getattr(self.config, "SEO_PRIMARY_KEYWORD", "")
+                secondary_kws = getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])
+                tz = getattr(self.config, "PUBLISH_TIMEZONE", "Europe/Madrid")
+                target_h = getattr(self.config, "PUBLISH_TARGET_HOUR", None)
+                jitter = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
+                warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 120)
+                channel_id = self._get_channel_id()
+                
+                publish_schedule_info = calculate_target_public_time(
+                    slug=self.canal,
+                    primary_keyword=primary_kw,
+                    secondary_keywords=secondary_kws,
+                    timezone_str=tz,
+                    target_hour=target_h,
+                    jitter_min=jitter,
+                    warmup_min=warmup,
+                    db=self.db,
+                    channel_id=channel_id,
+                )
+                upload_privacy = "private"
+                logger.info(
+                    "[%s] SCHEDULED PUBLISH: peak=%d (source=%s), "
+                    "target=%s UTC, warmup_until=%s, jitter=%+dmin",
+                    self.canal,
+                    publish_schedule_info["peak_hour_local"],
+                    publish_schedule_info["peak_source"],
+                    publish_schedule_info["target_public_at"],
+                    publish_schedule_info["warmup_until"],
+                    publish_schedule_info["jitter_applied"],
+                )
+            else:
+                upload_privacy = self.config.YT_PRIVACY_STATUS
+
             # Determine title, description, tags — prefer AI metadata over templates
             if metadata:
                 title = metadata.get("selected_title", video_data.get("titulo", "Video sin título"))
@@ -1147,12 +1186,18 @@ class PipelineOrchestrator:
                 tags=tags,
                 thumbnail_path=Path(video_data["thumbnail_path"]),
                 category_id=metadata.get("category_id", self.config.YT_CATEGORY_ID) if metadata else self.config.YT_CATEGORY_ID,
-                privacy=self.config.YT_PRIVACY_STATUS,
+                privacy=upload_privacy,
                 heartbeat_callback=upload_heartbeat,
             )
 
             video_id = result.get("video_id")
             url = result.get("url", "")
+
+            # ── Determine upload status based on publish mode ──
+            if publish_mode == "scheduled":
+                upload_status = "uploaded_private"
+            else:
+                upload_status = "uploaded"
 
             if video_id:
                 channel_id = self._get_channel_id()
@@ -1166,15 +1211,19 @@ class PipelineOrchestrator:
                 db_video_id = None  # always defined, used below for stats + lifecycle
                 if self.db_video_id is not None:
                     # API mode: update the pre-created record (don't insert a new one)
-                    self.db.update_video(
-                        self.db_video_id,
+                    update_kwargs = dict(
                         titulo_final=title,
                         description=description,
                         tags_json=tags_json_str,
                         title_options=titles_json_str,
-                        privacy_status=self.config.YT_PRIVACY_STATUS,
+                        privacy_status=upload_privacy,
                         channel_id=channel_id,
+                        publish_mode=publish_mode,
                     )
+                    if publish_schedule_info:
+                        update_kwargs["target_public_at"] = publish_schedule_info["target_public_at"]
+                        update_kwargs["peak_source"] = publish_schedule_info["peak_source"]
+                    self.db.update_video(self.db_video_id, **update_kwargs)
                     # Note: mark_video_uploaded is called by the API layer (generation_service)
                     # to ensure the tracked record gets yt_video_id/yt_url
                     db_video_id = self.db_video_id  # for stats + lifecycle below
@@ -1187,14 +1236,22 @@ class PipelineOrchestrator:
                         thumbnail_path=video_data["thumbnail_path"],
                         audio_path=video_data.get("audio_path", ""),
                         titulo_final=title,
-                        privacy_status=self.config.YT_PRIVACY_STATUS,
+                        privacy_status=upload_privacy,
                         channel_id=channel_id,
                         description=description,
                         tags_json=tags_json_str,
                         title_options=titles_json_str,
                     )
                     if db_video_id:
-                        self.db.mark_video_uploaded(db_video_id, video_id, url)
+                        self.db.mark_video_uploaded(db_video_id, video_id, url, status=upload_status)
+                        # ── Store scheduled publishing info ──
+                        if publish_schedule_info:
+                            self.db.update_video(
+                                db_video_id,
+                                publish_mode=publish_mode,
+                                target_public_at=publish_schedule_info["target_public_at"],
+                                peak_source=publish_schedule_info["peak_source"],
+                            )
 
             duration_ms = int((time.time() - start) * 1000)
             self._timing["phases"]["upload"] = duration_ms
@@ -1221,13 +1278,28 @@ class PipelineOrchestrator:
                 script_text = script.get("script_text") or script.get("texto_completo", "")
                 db_vid_for_lifecycle = db_video_id or self.db_video_id
                 channel_id_for_lifecycle = self._get_channel_id()
-                lifecycle.on_video_published(
-                    db_video_id=db_vid_for_lifecycle,
-                    yt_video_id=video_id,
-                    channel_id=channel_id_for_lifecycle,
-                    script_text=script_text,
-                )
-                logger.info(f"[{self.canal}] Lifecycle actions scheduled for video {video_id}")
+                
+                if publish_mode == "scheduled" and publish_schedule_info:
+                    # Scheduled mode: schedule warmup + go_public timeline
+                    lifecycle.on_video_uploaded_scheduled(
+                        db_video_id=db_vid_for_lifecycle,
+                        yt_video_id=video_id,
+                        channel_id=channel_id_for_lifecycle,
+                        script_text=script_text,
+                        target_public_at=publish_schedule_info["target_public_at"],
+                        warmup_until=publish_schedule_info["warmup_until"],
+                    )
+                    logger.info(f"[{self.canal}] Scheduled lifecycle actions for video {video_id} "
+                               f"(target public: {publish_schedule_info['target_public_at']})")
+                else:
+                    # Immediate mode: standard lifecycle from upload time
+                    lifecycle.on_video_published(
+                        db_video_id=db_vid_for_lifecycle,
+                        yt_video_id=video_id,
+                        channel_id=channel_id_for_lifecycle,
+                        script_text=script_text,
+                    )
+                    logger.info(f"[{self.canal}] Lifecycle actions scheduled for video {video_id}")
             except Exception as lifecycle_exc:
                 logger.warning(f"[{self.canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
 

@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, apiUrl } from '../lib/api'
+import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
+import PublicationModeToggle from '../components/PublicationModeToggle'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
 
 // ── PromotionTab (inline component) ─────────────────────────
@@ -258,6 +259,9 @@ export default function ChannelDetail() {
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [growthDays, setGrowthDays] = useState(30)
 
+  // Scheduled publishing mode
+  const [scheduledMode, setScheduledMode] = useState('immediate')
+
   // Promotion tab state
   const [playlists, setPlaylists] = useState<any[]>([])
   const [loadingPlaylists, setLoadingPlaylists] = useState(false)
@@ -284,6 +288,11 @@ export default function ChannelDetail() {
         ])
         setChannel(ch)
         setVideos(vids)
+        // Parse scheduled mode from config_json
+        try {
+          const cfg = typeof ch.config_json === 'string' ? JSON.parse(ch.config_json) : (ch.config_json || {})
+          setScheduledMode(cfg.PUBLISH_MODE || 'immediate')
+        } catch { setScheduledMode('immediate') }
         setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '', google_account: ch.google_account || '' })
       } catch (e) { console.error(e) }
       setLoading(false)
@@ -844,6 +853,7 @@ export default function ChannelDetail() {
           className="flex items-center gap-1.5 px-3 py-2 bg-dark-600 border border-surface-border text-gray-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-dark-500 transition-colors">
           <Clipboard size={14} /> <span className="hidden sm:inline">Setup Manual</span><span className="sm:hidden">Setup</span>
         </button>
+        <PublicationModeToggle channelId={channelId} currentMode={scheduledMode} onToggle={setScheduledMode} />
         <Link to="/channels"
           className="flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm text-gray-400 hover:text-white transition-colors">
           <ArrowLeft size={14} /> <span className="hidden sm:inline">Canales</span>
@@ -1342,7 +1352,9 @@ export default function ChannelDetail() {
               // If YouTube ID exists, the video was successfully uploaded regardless
               // of what status says (orphan-detector / zombie-thread races can
               // overwrite it to 'error').
-              const displayStatus = v.yt_video_id ? 'uploaded' : (v.status || 'draft');
+              const displayStatus = v.yt_video_id ? v.status === 'uploaded_private' || v.status === 'warming' || v.status === 'scheduled' || v.status === 'published' ? v.status : 'uploaded' : (v.status || 'draft');
+              const hasScheduledInfo = v.target_public_at && ['uploaded_private', 'warming', 'scheduled'].includes(v.status);
+              const pendingManual = (v.manual_altered_content_done ? 0 : 1) + (v.manual_end_screens_done ? 0 : 1);
               return (
               <div key={v.id} className="group cursor-pointer" onClick={() => navigate(`/videos/${v.id}/edit`)}>
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
@@ -1352,8 +1364,8 @@ export default function ChannelDetail() {
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-dark-700 to-dark-900"><Video size={28} className="text-gray-700" /></div>
                   )}
                   {v.duracion_seg && <span className="absolute bottom-1.5 right-1.5 bg-black/85 text-white text-[11px] px-1.5 py-0.5 rounded font-mono">{formatDuration(v.duracion_seg)}</span>}
-                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium ${displayStatus === 'uploaded' ? 'bg-green-600/90 text-white' : displayStatus === 'ready' ? 'bg-neon-cyan/90 text-dark-900' : displayStatus === 'generating' ? 'bg-blue-600/90 text-white' : displayStatus === 'error' ? 'bg-red-600/90 text-white' : displayStatus === 'failed' ? 'bg-red-600/90 text-white' : 'bg-gray-700/90 text-gray-300'}`}>
-                    {displayStatus === 'uploaded' ? 'Subido' : displayStatus === 'ready' ? 'Listo' : displayStatus === 'generating' ? 'Generando' : displayStatus === 'error' ? 'Error' : displayStatus === 'failed' ? 'Error' : displayStatus || 'Borrador'}
+                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium badge ${statusBadge(displayStatus)}`}>
+                    {statusLabel(displayStatus)}
                   </span>
                   <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
                     <div className="w-12 h-12 rounded-full bg-neon-red/90 flex items-center justify-center shadow-lg"><Play size={20} className="text-white ml-0.5" /></div>
@@ -1378,6 +1390,30 @@ export default function ChannelDetail() {
                       )
                     )}
                   </div>
+                  
+                  {/* ── Scheduled publish info strip ── */}
+                  {hasScheduledInfo && (
+                    <div className="mt-2 pt-2 border-t border-surface-border/50 space-y-1">
+                      <div className="flex items-center gap-1.5">
+                        <Clock size={10} className="text-neon-gold" />
+                        <span className="text-[10px] text-neon-gold font-mono tabular-nums">
+                          {formatCountdown(v.target_public_at)}
+                        </span>
+                      </div>
+                      {v.auto_playlist_name && (
+                        <div className="flex items-center gap-1">
+                          <ListPlus size={10} className="text-neon-purple" />
+                          <span className="text-[10px] text-neon-purple/70">{v.auto_playlist_name}</span>
+                        </div>
+                      )}
+                      {pendingManual > 0 && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-neon-red bg-neon-red/10 px-1.5 py-0.5 rounded-full">
+                          <AlertTriangle size={10} /> {pendingManual}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {v.yt_video_id && videoStats[v.yt_video_id] && videoStats[v.yt_video_id].viewCount ? (
                     <div className="flex items-center gap-2 mt-0.5 text-[11px] text-gray-500">
                       <span>{formatShortNumber(videoStats[v.yt_video_id].viewCount || '0')} vistas</span>
