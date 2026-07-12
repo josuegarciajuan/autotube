@@ -154,8 +154,15 @@ def get_channel_config(slug: str, force_reload: bool = False) -> SimpleNamespace
     return merged
 
 
-def sync_config_to_db(slug: str) -> dict | None:
+def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
     """Write the Python module config into the ``channels.config_json`` column.
+
+    Args:
+        slug: Channel slug (e.g. ``"canal2"``).
+        merge_mode: If True, only add NEW Python fields that don't already
+            exist in the DB — preserves all existing user edits. If False
+            (default), replace the entire DB config with Python values
+            (used by the "Sync Python" button for full override).
 
     Returns the updated channel dict or None on failure.
     """
@@ -180,14 +187,30 @@ def sync_config_to_db(slug: str) -> dict | None:
             logger.warning("sync_config_to_db: channel slug=%s not in DB", slug)
             return None
 
-        # Preserve DB-only planning keys that don't exist in Python configs
+        # Read existing DB config
         try:
             existing_db = json.loads(ch.get("config_json", "{}"))
         except (json.JSONDecodeError, TypeError):
             existing_db = {}
-        for key in ("videos_per_day", "planning_enabled"):
-            if key in existing_db and key not in safe:
-                safe[key] = existing_db[key]
+
+        if merge_mode and existing_db:
+            # Merge: start with DB values (preserve all user edits),
+            # only add NEW Python fields that don't exist in DB yet.
+            merged = dict(existing_db)
+            for key, value in safe.items():
+                if key not in existing_db:
+                    merged[key] = value
+            # Preserve DB-only planning keys
+            for key in ("videos_per_day", "planning_enabled"):
+                if key in existing_db and key not in merged:
+                    merged[key] = existing_db[key]
+            safe = merged
+        else:
+            # Full replace: Python values overwrite everything (manual sync).
+            # Keep DB-only planning keys that don't exist in Python configs.
+            for key in ("videos_per_day", "planning_enabled"):
+                if key in existing_db and key not in safe:
+                    safe[key] = existing_db[key]
 
         # Update name from display name
         display_name = safe.get("CANAL_DISPLAY_NAME") or safe.get("canal_display_name")
@@ -218,7 +241,7 @@ def sync_all_configs_to_db() -> list[str]:
         db = ExtendedDatabase()
         for ch in db.get_channels(active_only=True):
             slug = ch["slug"]
-            if sync_config_to_db(slug) is not None:
+            if sync_config_to_db(slug, merge_mode=True) is not None:
                 synced.append(slug)
     except Exception as exc:
         logger.error("sync_all_configs_to_db failed: %s", exc)
