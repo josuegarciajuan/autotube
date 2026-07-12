@@ -163,6 +163,13 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v5 schema applied")
 
+    # Run v6 schema (viral mirror support)
+    schema_v6 = Path(__file__).parent / "schema_v6.sql"
+    if schema_v6.exists():
+        with open(schema_v6) as f:
+            conn.executescript(f.read())
+        logger.info("Migration: v6 schema applied")
+
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
     # which would cause RTF degradation and 600s timeouts.
@@ -2009,10 +2016,11 @@ class ExtendedDatabase(Database):
             for s in slots:
                 conn.execute(
                     """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                       target_upload_at, slot_position)
-                       VALUES (?, ?, ?, ?, ?)""",
+                       target_upload_at, slot_position, source_mode)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
                     (s["channel_id"], s["date_key"], s["scheduled_at"],
-                     s.get("target_upload_at"), s.get("slot_position", 0)),
+                     s.get("target_upload_at"), s.get("slot_position", 0),
+                     s.get("source_mode", "original")),
                 )
                 count += 1
             conn.commit()
@@ -2104,6 +2112,16 @@ class ExtendedDatabase(Database):
             conn.commit()
         return True
     
+    def update_slot_source_mode(self, slot_id: int, source_mode: str) -> bool:
+        """Update a planned slot's source_mode ('original' or 'viral')."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE planned_slots SET source_mode = ? WHERE id = ?",
+                (source_mode, slot_id),
+            )
+            conn.commit()
+        return True
+
     def cancel_slots(self, slot_ids: list[int]) -> int:
         """Cancel multiple planned slots. Returns count."""
         if not slot_ids:

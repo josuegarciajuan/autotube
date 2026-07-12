@@ -280,6 +280,21 @@ def preview_week(data: PreviewOverrides = None):
     return do_preview(overrides=overrides)
 
 
+# ── Slot Source Mode ──────────────────────────────────────────────
+
+class SlotSourceModeUpdate(BaseModel):
+    source_mode: str = "original"  # "original" | "viral"
+
+@router.put("/slots/{slot_id}/mode")
+def update_slot_source_mode(slot_id: int, data: SlotSourceModeUpdate):
+    """Change the source_mode of a planned slot ('original' or 'viral')."""
+    db = get_db()
+    if data.source_mode not in ("original", "viral"):
+        raise HTTPException(400, "source_mode must be 'original' or 'viral'")
+    db.update_slot_source_mode(slot_id, data.source_mode)
+    return {"ok": True, "slot_id": slot_id, "source_mode": data.source_mode}
+
+
 # ── Shorts Planning ──────────────────────────────────────────────
 
 @router.get("/shorts-config")

@@ -18,6 +18,7 @@ interface Slot {
   slot_position: number
   kind: string
   short_type?: string
+  source_mode?: string
 }
 
 // ── Timezone helper ──────────────────────────────────────
@@ -247,12 +248,23 @@ export default function UpcomingExecutions() {
                     </th>
                     <th className="text-left px-3 py-2 text-gray-400 font-medium uppercase tracking-wider">
                       Canal
+                     </th>
+                    <th className="text-left px-3 py-2 text-gray-400 font-medium uppercase tracking-wider">
+                      Metodo
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-border/30">
                   {daySlots.map((s) => {
                     const isShort = s.kind === 'short'
+                    const mode = s.source_mode || 'original'
+                    const toggleMode = async () => {
+                      const newMode = mode === 'original' ? 'viral' : 'original'
+                      try {
+                        await api.updateSlotSourceMode(s.id, newMode)
+                        s.source_mode = newMode
+                      } catch (_) {}
+                    }
                     return (
                       <tr key={`${s.kind}-${s.id}`} className="hover:bg-dark-700/30 transition-colors">
                         <td className="px-3 py-2">
@@ -283,6 +295,17 @@ export default function UpcomingExecutions() {
                             }`} />
                             {CHANNEL_SHORT[s.channel_slug] || s.channel_name}
                           </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <button
+                            onClick={toggleMode}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer transition-all ${
+                              mode === 'viral'
+                                ? 'bg-purple-500/15 text-purple-400 border-purple-500/30 hover:bg-purple-500/25'
+                                : 'bg-gray-500/15 text-gray-400 border-gray-500/30 hover:bg-gray-500/25'
+                            }`}>
+                            {mode === 'viral' ? 'Viral' : 'Original'}
+                          </button>
                         </td>
                       </tr>
                     )

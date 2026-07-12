@@ -207,6 +207,7 @@ def compute_daily_slots(
                 "slot_position": pos,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
+                "source_mode": ch.get("default_source_mode", "original"),
             })
     
     # Sort all slots chronologically by generation START time
@@ -559,6 +560,7 @@ def process_planned_slots(db=None) -> dict | None:
     slot_id = next_slot["id"]
     channel_id = next_slot["channel_id"]
     slug = next_slot.get("channel_slug", "")
+    source_mode = next_slot.get("source_mode", "original")
     
     logger.info(
         "Dispatching slot #%d: %s at %s",
@@ -599,6 +601,7 @@ def process_planned_slots(db=None) -> dict | None:
                 channel_id=channel_id,
                 video_id=video_id,
                 action="generate_and_upload",
+                source_mode=source_mode,
             )
         )
     else:
@@ -608,6 +611,7 @@ def process_planned_slots(db=None) -> dict | None:
                 channel_id=channel_id,
                 video_id=video_id,
                 action="generate_and_upload",
+                source_mode=source_mode,
             )
         )
     

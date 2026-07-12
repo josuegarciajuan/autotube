@@ -812,7 +812,9 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
 async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                  action: str, content_id: int = None,
                                  resume: bool = False, test_mode: bool = False,
-                                 upload: bool = True):
+                                 upload: bool = True,
+                                 source_mode: str = "original",
+                                 viral_candidate_id: int = None):
     """Run the full pipeline as an async background job.
 
     When test_mode=True: low resolution (480x270), no upload, no effects,
@@ -931,7 +933,9 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             )
         
         orch = PipelineOrchestrator(canal=canal, db_video_id=video_id,
-                                     progress_callback=_progress_cb)
+                                      progress_callback=_progress_cb,
+                                      source_mode=source_mode,
+                                      viral_candidate_id=viral_candidate_id)
         register_orchestrator(job_id, orch)
 
         # ── Fast-test mode: apply unified test profile ──────────
@@ -2251,6 +2255,7 @@ def _get_worker_script() -> Path:
 async def start_generation_job_subprocess(
     job_id: int, channel_id: int, video_id: int,
     action: str, test_mode: bool = False, upload: bool = True,
+    source_mode: str = "original", viral_candidate_id: int = None,
 ) -> subprocess.Popen:
     """Spawn the pipeline as an independent subprocess that survives API restarts.
 
@@ -2302,6 +2307,10 @@ async def start_generation_job_subprocess(
         cmd.append("--test-mode")
     if not upload:
         cmd.append("--no-upload")
+    if source_mode != "original":
+        cmd.extend(["--source-mode", source_mode])
+    if viral_candidate_id is not None:
+        cmd.extend(["--viral-candidate-id", str(viral_candidate_id)])
 
     # ── Spawn worker ──────────────────────────────────────────
     log_path = settings.LOGS_DIR / f"worker_{job_id}.log"

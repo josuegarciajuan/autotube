@@ -423,6 +423,8 @@ def run_job(
             canal=canal,
             db_video_id=video_id,
             progress_callback=_progress_to_db,
+            source_mode=args.source_mode,
+            viral_candidate_id=args.viral_candidate_id,
         )
         if test_mode:
             orch.config = config
@@ -767,6 +769,11 @@ def main():
                         help="Fast test mode: low-res, no upload, less content")
     parser.add_argument("--no-upload", action="store_true",
                         help="Skip YouTube upload (video stays local)")
+    parser.add_argument("--source-mode", type=str, default="original",
+                        choices=["original", "viral"],
+                        help="Content source mode: original (AI-generated) or viral (mirrored from YouTube)")
+    parser.add_argument("--viral-candidate-id", type=int, default=None,
+                        help="raw_content.id for the viral candidate to use")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()

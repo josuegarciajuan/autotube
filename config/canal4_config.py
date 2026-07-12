@@ -1188,3 +1188,23 @@ CONTENT_PILLARS = [
         "desc": "Video mas corto analizando que salio mal, lecciones de supervivencia",
     },
 ]
+
+# ═══════════════════════════════════════════════════════════════════
+# VIRAL MIRROR
+# ═══════════════════════════════════════════════════════════════════
+VIRAL_ENABLED = True
+
+NICHE_KEYWORDS_ENG = [
+    "survival stories",
+    "expeditions gone wrong",
+    "unexplained disappearances",
+    "survival documentary",
+    "lost in the wilderness",
+    "expedition mysteries",
+    "true survival stories",
+    "missing explorers",
+    "wilderness survival documentary",
+    "deadliest expeditions",
+    "survival against all odds",
+    "mysterious disappearances documentary",
+]

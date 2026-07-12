@@ -43,10 +43,13 @@ class PipelineOrchestrator:
     """Master orchestrator for the Autotube content pipeline."""
 
     def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None,
-                 progress_callback: Optional[callable] = None):
+                 progress_callback: Optional[callable] = None,
+                 source_mode: str = "original", viral_candidate_id: Optional[int] = None):
         self.canal = canal
         self.db_video_id = db_video_id  # Si != None, modo API: update en vez de insert
         self._progress_cb = progress_callback  # (percent, phase, message) → None
+        self.source_mode = source_mode  # "original" | "viral"
+        self.viral_candidate_id = viral_candidate_id  # raw_content.id for viral mode
 
         # Phase timing tracking
         self._timing: dict = {"phases": {}}
@@ -88,6 +91,13 @@ class PipelineOrchestrator:
                 "reddit": RedditScraper(config=self.config),
                 "wikipedia": WikipediaScraper(config=self.config),
             }
+            # Add viral scraper if enabled for this channel
+            if getattr(self.config, "VIRAL_ENABLED", False):
+                try:
+                    from scrapers.youtube_viral import YouTubeViralScraper
+                    self._scraper["youtube_viral"] = YouTubeViralScraper(config=self.config)
+                except Exception as e:
+                    logger.warning("[%s] Could not load viral scraper: %s", self.canal, e)
         return self._scraper
 
     @property
@@ -221,17 +231,24 @@ class PipelineOrchestrator:
         self._emit_progress(5, "scrape", "Buscando historias en Reddit y Wikipedia...")
 
         # Reddit scraping with per-source timeout (5 min per scraper)
+        # Viral scraper gets longer timeout (10 min) due to download+transcribe+translate
         for scraper_name, s in self.scraper.items():
             try:
-                self._emit_progress(7, "scrape", f"Scraping {scraper_name}...")
+                timeout = 600 if scraper_name == "youtube_viral" else 300
+                progress_msg = (
+                    f"Buscando videos virales en YouTube ({scraper_name})..."
+                    if scraper_name == "youtube_viral"
+                    else f"Scraping {scraper_name}..."
+                )
+                self._emit_progress(7, "scrape", progress_msg)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(s.save_to_db, self.db)
-                    count = future.result(timeout=300)  # 5 min hard timeout per scraper
+                    count = future.result(timeout=timeout)
                 added += count
                 logger.info(f"[{self.canal}] {scraper_name}: {count} items scraped")
             except concurrent.futures.TimeoutError:
-                logger.error(f"[{self.canal}] {scraper_name} scrape timed out after 5min")
-                self.db.log_pipeline(self.canal, "scrape", "error", "timeout after 5min")
+                logger.error(f"[{self.canal}] {scraper_name} scrape timed out after {timeout}s")
+                self.db.log_pipeline(self.canal, "scrape", "error", f"timeout after {timeout}s")
             except Exception as e:
                 logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
                 self.db.log_pipeline(self.canal, "scrape", "error", str(e))
@@ -244,8 +261,15 @@ class PipelineOrchestrator:
         return added
 
     def phase_generate_script(self) -> Optional[dict]:
-        """Generate ONE script from unused content. Returns script dict or None."""
+        """Generate ONE script from unused content. Returns script dict or None.
+
+        When source_mode='viral', uses the pre-translated/adapted viral script
+        from raw_content instead of calling the LLM script generator.
+        """
         start = time.time()
+
+        if self.source_mode == "viral":
+            return self._phase_generate_script_viral(start)
 
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
@@ -269,6 +293,157 @@ class PipelineOrchestrator:
         else:
             self.db.log_pipeline(self.canal, "script", "error",
                                  "Script generation failed",
+                                 duration_ms=duration_ms)
+        return result
+
+    def _phase_generate_script_viral(self, start: float) -> Optional[dict]:
+        """Generate script from a viral mirror candidate.
+
+        Uses the pre-translated/adapted Spanish script stored in raw_content
+        instead of calling the LLM script generator. Builds a compatible script
+        dict for the rest of the pipeline.
+        """
+        self._emit_progress(15, "script", "Preparando script viral traducido y adaptado...")
+
+        # Get the viral candidate
+        viral_content = None
+        if self.viral_candidate_id:
+            viral_content = self.db.get_content_by_id(self.viral_candidate_id)
+            if not viral_content or viral_content.get("source_mode") != "viral":
+                logger.warning("[%s] Viral candidate #%d not found or not viral, falling back",
+                               self.canal, self.viral_candidate_id)
+                viral_content = None
+
+        if not viral_content:
+            # Pick the highest-score unused viral candidate
+            candidates = self.db.get_viral_candidates(self.canal, limit=1)
+            if candidates:
+                viral_content = candidates[0]
+                self.viral_candidate_id = viral_content["id"]
+                logger.info("[%s] Auto-selected viral candidate #%d: %s",
+                            self.canal, viral_content["id"], viral_content.get("viral_original_title", "")[:50])
+
+        if not viral_content:
+            logger.error("[%s] No viral candidates available — falling back to original mode", self.canal)
+            self.source_mode = "original"
+            # Fall through to normal script generation
+            content_items = self.db.get_unused_content(canal=self.canal, limit=5)
+            if not content_items:
+                return None
+            self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
+            return self.script_gen.generate(content_items[0])
+
+        # Get pre-processed viral data
+        script_es = viral_content.get("viral_script_es", "")
+        original_title = viral_content.get("viral_original_title", "")
+        viral_meta_json = viral_content.get("viral_meta_json", "{}")
+
+        if not script_es:
+            logger.error("[%s] Viral candidate #%d has no script (viral_script_es empty)",
+                         self.canal, viral_content["id"])
+            return None
+
+        # Parse viral metadata
+        try:
+            viral_meta = json.loads(viral_meta_json) if isinstance(viral_meta_json, str) else viral_meta_json
+        except (json.JSONDecodeError, TypeError):
+            viral_meta = {}
+
+        blocks = viral_meta.get("blocks", [])
+
+        # If no blocks, build simple block structure from script text
+        if not blocks:
+            import re
+            paragraphs = [p.strip() for p in script_es.split("\n\n") if p.strip() and len(p.strip()) > 20]
+            if not paragraphs:
+                # Fallback: split by sentences
+                sentences = re.split(r'(?<=[.!?])\s+', script_es)
+                paragraphs = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+            if paragraphs:
+                n = len(paragraphs)
+                if n == 1:
+                    blocks = [{"type": "hook", "text": paragraphs[0]}]
+                elif n <= 4:
+                    types = ["hook", "desarrollo", "climax", "cierre"][:n]
+                    blocks = [{"type": t, "text": p} for t, p in zip(types, paragraphs)]
+                else:
+                    blocks = [{"type": "hook", "text": paragraphs[0]}]
+                    for p in paragraphs[1:-3]:
+                        blocks.append({"type": "desarrollo", "text": p})
+                    blocks.append({"type": "climax", "text": paragraphs[-3]})
+                    blocks.append({"type": "reflexion", "text": paragraphs[-2]})
+                    blocks.append({"type": "cierre", "text": paragraphs[-1]})
+
+        # Get translated title
+        translated_title = viral_meta.get("translated_title") or original_title or "Video"
+
+        # Generate alternative titles
+        alt_titles = [translated_title]
+        if len(translated_title) > 5:
+            words = translated_title.split()
+            if len(words) > 2:
+                alt_titles.append(" ".join(words[1:] + words[:1]))  # Rotate words
+
+        # Estimate duration
+        word_count = len(script_es.split())
+        duracion_estimada = max(1, word_count // 150)
+
+        # Build GUIóN (narration text) from blocks
+        guion_parts = []
+        for b in blocks:
+            guion_parts.append(f"[{b['type'].upper()}]\n{b['text']}")
+        guion = "\n\n".join(guion_parts)
+
+        # Keywords from channel config
+        keywords = list(getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])[:5])
+
+        # Insert script into DB
+        script_id = self.db.insert_script(
+            raw_content_id=viral_content["id"],
+            canal=self.canal,
+            titulo_options=alt_titles,
+            guion=guion,
+            escenas=blocks,  # Use blocks as scenes for backward compat
+            bloques=blocks,
+            keywords=keywords,
+            duracion_estimada=duracion_estimada,
+        )
+
+        # Build result dict (same shape as script_generator.generate() output)
+        result = {
+            "id": script_id,
+            "raw_content_id": viral_content["id"],
+            "guion": guion,
+            "bloques": blocks,
+            "bloques_json": json.dumps(blocks, ensure_ascii=False),
+            "titulo_options": json.dumps(alt_titles, ensure_ascii=False),
+            "titulo_selected": translated_title,
+            "keywords": keywords,
+            "keywords_json": json.dumps(keywords, ensure_ascii=False),
+            "duracion_estimada": duracion_estimada,
+            "canal": self.canal,
+            # Extra: viral-specific data for later phases
+            "_viral_meta": viral_meta,
+            "_viral_meta_json": viral_meta_json,
+            "_viral_original_thumbnail": viral_content.get("viral_original_thumbnail_url", ""),
+            "_viral_original_title": original_title,
+            "_viral_content_id": viral_content["id"],
+        }
+
+        duration_ms = int((time.time() - start) * 1000)
+        self._timing["phases"]["script"] = duration_ms
+        if result:
+            self._emit_progress(23, "script",
+                                f"Guion viral listo: {word_count} palabras, {len(blocks)} bloques")
+            self.db.log_pipeline(self.canal, "script", "success",
+                                 f"Viral script {script_id} from candidate #{viral_content['id']}",
+                                 content_id=script_id, duration_ms=duration_ms)
+            # Mark viral content as used
+            self.db.mark_content_used(viral_content["id"])
+        else:
+            self.db.log_pipeline(self.canal, "script", "error",
+                                 "Viral script generation failed",
                                  duration_ms=duration_ms)
         return result
 
@@ -636,33 +811,52 @@ class PipelineOrchestrator:
             # Generate thumbnail (non-fatal: video is still valid without it)
             thumbnail_path = None
             try:
-                self._emit_progress(65, "video", "Generando miniatura viral (Pollo AI)...")
-                # Collect scene images for thumbnail from media_assets (images only, not videos)
-                scene_images_for_thumb = []
-                if isinstance(media_assets, list):
-                    for asset in media_assets:
-                        if asset["type"] == "image" and asset["path"]:
-                            scene_images_for_thumb.append([asset["path"]])
-
-                keywords_raw = script.get("keywords_json") if isinstance(script.get("keywords_json"), str) else (script.get("keywords") or script.get("keywords_json", []))
-                if isinstance(keywords_raw, str):
-                    keywords = json.loads(keywords_raw)
+                # Check if viral mode with original thumbnail URL
+                viral_thumb_url = script.get("_viral_original_thumbnail", "")
+                if self.source_mode == "viral" and viral_thumb_url:
+                    self._emit_progress(65, "video", "Clonando miniatura viral (Vision AI + Pollo AI)...")
+                    from pipeline.viral_cloner import clone_thumbnail
+                    thumbnail_path = clone_thumbnail(
+                        original_thumbnail_url=viral_thumb_url,
+                        channel_slug=self.canal,
+                        channel_display_name=getattr(self.config, "CANAL_DISPLAY_NAME", ""),
+                        channel_description=getattr(self.config, "CHANNEL_ABOUT_SECTION", ""),
+                        channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
+                        script_text=script.get("guion", "")[:1500],
+                        keywords=keywords if 'keywords' in dir() else [],
+                        video_id=self.db_video_id or 0,
+                    )
+                    logger.info("[%s] Viral thumbnail cloned: %s", self.canal, thumbnail_path)
                 else:
-                    keywords = keywords_raw or []
+                    self._emit_progress(65, "video", "Generando miniatura viral (Pollo AI)...")
+                    # Collect scene images for thumbnail from media_assets (images only, not videos)
+                    scene_images_for_thumb = []
+                    if isinstance(media_assets, list):
+                        for asset in media_assets:
+                            if asset["type"] == "image" and asset["path"]:
+                                scene_images_for_thumb.append([asset["path"]])
 
-                thumbnail_path = self.thumbnail_maker.make_viral_thumbnail(
-                    title=titulo_selected,
-                    overlay_text="",
-                    keywords=keywords,
-                    scene_images=scene_images_for_thumb or [],
-                    script_text=script.get("guion", "")[:1500],
-                    canal_slug=self.canal,
-                    channel_display_name=getattr(self.config, "CANAL_DISPLAY_NAME", ""),
-                    channel_description=getattr(self.config, "CHANNEL_ABOUT_SECTION", ""),
-                    channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
-                )
+                    keywords_raw = script.get("keywords_json") if isinstance(script.get("keywords_json"), str) else (script.get("keywords") or script.get("keywords_json", []))
+                    if isinstance(keywords_raw, str):
+                        keywords = json.loads(keywords_raw)
+                    else:
+                        keywords = keywords_raw or []
+
+                    thumbnail_path = self.thumbnail_maker.make_viral_thumbnail(
+                        title=titulo_selected,
+                        overlay_text="",
+                        keywords=keywords,
+                        scene_images=scene_images_for_thumb or [],
+                        script_text=script.get("guion", "")[:1500],
+                        canal_slug=self.canal,
+                        channel_display_name=getattr(self.config, "CANAL_DISPLAY_NAME", ""),
+                        channel_description=getattr(self.config, "CHANNEL_ABOUT_SECTION", ""),
+                        channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
+                    )
             except Exception as thumb_exc:
                 logger.warning("[%s] Thumbnail generation failed (non-fatal): %s", self.canal, thumb_exc)
+                import traceback
+                logger.debug(traceback.format_exc())
                 thumbnail_path = ""
 
             duration_ms = int((time.time() - start) * 1000)
@@ -738,6 +932,9 @@ class PipelineOrchestrator:
     def phase_metadata(self, script: dict, video_data: dict,
                         source_content: dict = None) -> Optional[dict]:
         """Generate SEO metadata via AI and regenerate thumbnail with overlay text.
+
+        When source_mode='viral', uses cloned metadata from the viral source
+        instead of generating new metadata with AI.
         
         Args:
             script: Script dict from phase_generate_script
@@ -752,18 +949,35 @@ class PipelineOrchestrator:
         self._emit_progress(57, "video", "Ensamblando video...")
 
         try:
-            # 1. Generate AI-powered metadata
-            logger.info(f"[{self.canal}] Phase 5a: Generating SEO metadata via AI...")
-            metadata = self.metadata_gen.generate(script, source_content)
-            
-            if not metadata:
-                logger.warning(f"[{self.canal}] Metadata generation returned empty — using fallback")
-                metadata = self.metadata_gen._fallback_metadata(script)
-            
-            logger.info(
-                f"[{self.canal}] Metadata: title='{metadata['selected_title'][:60]}', "
-                f"{len(metadata['tags'])} tags, thumbnail_text='{metadata['thumbnail_text']}'"
-            )
+            if self.source_mode == "viral" and script.get("_viral_meta_json"):
+                # Viral mode: use cloned metadata instead of AI generation
+                logger.info(f"[{self.canal}] Phase 5a: Building viral metadata from clone...")
+                from pipeline.viral_cloner import build_viral_metadata
+                metadata = build_viral_metadata(
+                    viral_meta_json=script["_viral_meta_json"],
+                    channel_slug=self.canal,
+                )
+                if metadata:
+                    logger.info(
+                        f"[{self.canal}] Viral metadata: title='{metadata['selected_title'][:60]}', "
+                        f"{len(metadata['tags'])} tags"
+                    )
+                else:
+                    logger.warning("[%s] Viral metadata build returned empty — using fallback", self.canal)
+                    metadata = self.metadata_gen._fallback_metadata(script)
+            else:
+                # 1. Generate AI-powered metadata (original mode)
+                logger.info(f"[{self.canal}] Phase 5a: Generating SEO metadata via AI...")
+                metadata = self.metadata_gen.generate(script, source_content)
+                
+                if not metadata:
+                    logger.warning(f"[{self.canal}] Metadata generation returned empty — using fallback")
+                    metadata = self.metadata_gen._fallback_metadata(script)
+                
+                logger.info(
+                    f"[{self.canal}] Metadata: title='{metadata['selected_title'][:60]}', "
+                    f"{len(metadata['tags'])} tags, thumbnail_text='{metadata['thumbnail_text']}'"
+                )
             
             # 2. Regenerate thumbnail with viral composition + marketing overlay text
             if metadata.get("thumbnail_text"):
@@ -1033,7 +1247,9 @@ class PipelineOrchestrator:
         job_id: Optional generation_jobs.id for heartbeat emission during long phases.
         """
         logger.info(f"{'='*60}")
-        logger.info(f"[{self.canal}] STARTING FULL PIPELINE")
+        logger.info(f"[{self.canal}] STARTING FULL PIPELINE (mode: {self.source_mode})")
+        if self.source_mode == "viral" and self.viral_candidate_id:
+            logger.info(f"[{self.canal}] Viral candidate ID: {self.viral_candidate_id}")
         logger.info(f"{'='*60}")
 
         # ── Disk cleanup before pipeline (moved from phase_media) ──

@@ -235,6 +235,8 @@ export default function ChannelDetail() {
 
   // Upload confirmation modal (before generation)
   const [showUploadConfirm, setShowUploadConfirm] = useState(false)
+  const [showSourceModeModal, setShowSourceModeModal] = useState(false)
+  const [sourceMode, setSourceMode] = useState<'original' | 'viral'>('original')
   
   // Short creation state (per video)
   const [creatingShort, setCreatingShort] = useState<number | null>(null)
@@ -390,9 +392,10 @@ export default function ChannelDetail() {
     api.getVideoStats(ytIds).then(stats => setShortStats(stats)).catch(() => {})
   }, [shorts])
 
-  async function handleGenerate(upload: boolean = true) {
+  async function handleGenerate(upload: boolean = true, mode: 'original' | 'viral' = 'original') {
     setGenerating(true)
     setShowUploadConfirm(false)
+    setShowSourceModeModal(false)
     try {
       const isTestChannel = channel?.slug === 'test'
       const result = await api.generateVideo({
@@ -400,6 +403,7 @@ export default function ChannelDetail() {
         action: isTestChannel ? 'generate_and_upload' : 'generate_and_upload',
         test_mode: isTestChannel,
         upload,
+        source_mode: mode,
       })
       addJob({
         jobId: result.job_id,
@@ -889,7 +893,7 @@ export default function ChannelDetail() {
           </div>
         ) : (
           <button
-            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : () => setShowUploadConfirm(true)}
+            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : () => setShowSourceModeModal(true)}
             disabled={videoTab === 'shorts' ? generatingNativeShort : busy}
             className="w-full py-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-display font-semibold text-lg hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3">
             <Wand2 size={22} /> {videoTab === 'shorts' ? 'Generar Short' : channel?.slug === 'test' ? 'Generar video de pruebas' : 'Generar Video'}
@@ -1456,6 +1460,39 @@ export default function ChannelDetail() {
         </div>
       )}
 
+      {/* --- Source Mode Modal --- */}
+      {showSourceModeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSourceModeModal(false)}>
+          <div className="glass rounded-xl p-6 w-full max-w-md mx-4 animate-slide-up space-y-5" onClick={e => e.stopPropagation()}>
+            <div className="text-center">
+              <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-neon-cyan/10 flex items-center justify-center">
+                <Wand2 size={28} className="text-neon-cyan" />
+              </div>
+              <h3 className="font-display text-xl font-semibold text-white">¿Que metodo usar?</h3>
+              <p className="text-sm text-gray-400 mt-2">
+                Elige como se creara el contenido del video.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setSourceMode('original'); setShowUploadConfirm(true) }}
+                className="flex-1 py-4 px-4 bg-dark-700 border border-surface-border text-gray-300 rounded-xl font-medium text-sm hover:bg-dark-600 hover:border-gray-600 transition-all flex flex-col items-center gap-2">
+                <RefreshCw size={20} className="text-gray-400" />
+                <span className="font-semibold">Original</span>
+                <span className="text-[10px] text-gray-500 text-center">Generar contenido nuevo con IA desde fuentes habituales</span>
+              </button>
+              <button
+                onClick={() => { setSourceMode('viral'); setShowUploadConfirm(true) }}
+                className="flex-1 py-4 px-4 bg-gradient-to-r from-neon-purple/20 to-purple-600/20 border border-purple-500/30 text-purple-300 rounded-xl font-medium text-sm hover:border-purple-400 hover:bg-purple-600/10 transition-all flex flex-col items-center gap-2">
+                <TrendingUp size={20} className="text-purple-400" />
+                <span className="font-semibold text-white">Viral</span>
+                <span className="text-[10px] text-gray-400 text-center">Buscar video viral en ingles, traducir y adaptar</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- Upload Confirmation Modal --- */}
       {showUploadConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowUploadConfirm(false)}>
@@ -1471,20 +1508,22 @@ export default function ChannelDetail() {
             </div>
             <div className="flex gap-3">
               <button
-                onClick={() => handleGenerate(false)}
+                onClick={() => handleGenerate(false, sourceMode)}
                 className="flex-1 py-3 px-4 bg-dark-700 border border-surface-border text-gray-300 rounded-xl font-medium text-sm hover:bg-dark-600 hover:border-gray-600 transition-all flex items-center justify-center gap-2">
                 <Eye size={16} />
                 No, solo generar
               </button>
               <button
-                onClick={() => handleGenerate(true)}
+                onClick={() => handleGenerate(true, sourceMode)}
                 className="flex-1 py-3 px-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-bold text-sm hover:shadow-lg hover:shadow-neon-red/20 transition-all flex items-center justify-center gap-2">
                 <Upload size={16} />
                 Sí, subir
               </button>
             </div>
             <p className="text-[10px] text-gray-600 text-center">
-              "Sí, subir" — genera y publica automáticamente. "No, solo generar" — el video quedará en "Listo" con botón para subir después.
+              {sourceMode === 'viral' 
+                ? 'Modo Viral: se buscara un video en YouTube en ingles, se traducira y adaptara.' 
+                : '"Sí, subir" — genera y publica automaticamente. "No, solo generar" — el video quedara en "Listo" con boton para subir despues.'}
             </p>
           </div>
         </div>

@@ -57,7 +57,7 @@ export const api = {
   getVideo: (id: number) => request<any>(`/videos/${id}`),
   updateVideo: (id: number, data: any) => request<any>(`/videos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteVideo: (id: number) => request<any>(`/videos/${id}`, { method: 'DELETE' }),
-  generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean; upload?: boolean }) =>
+  generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean; upload?: boolean; source_mode?: string; viral_candidate_id?: number }) =>
     request<any>('/videos/generate', { method: 'POST', body: JSON.stringify(data) }),
   uploadVideo: (id: number) => request<any>(`/videos/${id}/upload`, { method: 'POST' }),
   regenerateThumbnail: (id: number) => request<any>(`/videos/${id}/regenerate-thumbnail`, { method: 'POST' }),
@@ -142,6 +142,8 @@ export const api = {
     if (channelId) params.set('channel_id', String(channelId));
     return request<any>(`/planning/slots/week?${params}`);
   },
+  updateSlotSourceMode: (slotId: number, sourceMode: string) =>
+    request<any>(`/planning/slots/${slotId}/mode`, { method: 'PUT', body: JSON.stringify({ source_mode: sourceMode }) }),
   getPlanningTimeline: () => request<any>('/planning/timeline'),
   getPlanningStats: () => request<any>('/planning/stats'),
   forceReplan: (date?: string) => {

@@ -1272,3 +1272,23 @@ SEASON1_EPISODES = [
         "hook": "Estos hallazgos demostraron que todo lo que creíamos saber sobre la historia antigua... era mentira.",
     },
 ]
+
+# ═══════════════════════════════════════════════════════════════════
+# VIRAL MIRROR
+# ═══════════════════════════════════════════════════════════════════
+VIRAL_ENABLED = True
+
+NICHE_KEYWORDS_ENG = [
+    "lost civilizations",
+    "ancient mysteries",
+    "forgotten civilizations",
+    "ancient technology documentary",
+    "archaeological discoveries",
+    "ancient ruins unexplained",
+    "lost cities found",
+    "mysterious archaeological sites",
+    "ancient artifacts unexplained",
+    "hidden history documentary",
+    "ancient civilizations documentary",
+    "prehistoric discoveries",
+]

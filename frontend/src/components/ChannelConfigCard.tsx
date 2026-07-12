@@ -96,6 +96,18 @@ export default function ChannelConfigCard({
           ? 'Planificacion activa pero con 0 videos/dia'
           : 'Planificacion desactivada'}
       </div>
+
+      {/* Default source mode indicator */}
+      <div className="text-[10px] text-gray-500 flex items-center gap-1">
+        <span>Metodo por defecto:</span>
+        <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${
+          (config as any).default_source_mode === 'viral'
+            ? 'bg-purple-500/15 text-purple-400'
+            : 'bg-gray-500/15 text-gray-400'
+        }`}>
+          {(config as any).default_source_mode === 'viral' ? 'Viral' : 'Original'}
+        </span>
+      </div>
     </div>
   )
 }

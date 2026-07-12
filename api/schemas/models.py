@@ -148,6 +148,8 @@ class VideoGenerateRequest(BaseModel):
     content_id: Optional[int] = None
     test_mode: bool = False  # fast-test: low res, no upload, no effects
     upload: bool = True  # si False, genera el video sin subir a YouTube
+    source_mode: Optional[str] = "original"  # "original" | "viral"
+    viral_candidate_id: Optional[int] = None  # raw_content.id for viral mode
 
 
 class VideoUpdate(BaseModel):

@@ -18,6 +18,7 @@ interface Slot {
   slot_position: number
   kind?: string      // "video" or "short"
   short_type?: string // "native" or "clip" (only for shorts)
+  source_mode?: string // "original" or "viral"
 }
 
 interface WeekDay {
@@ -434,6 +435,22 @@ export default function DailySchedule() {
                   }`} />
                   {CHANNEL_SHORT[s.channel_slug] || s.channel_name}
                 </span>
+
+                {/* Source Mode */}
+                {s.kind !== 'short' && (
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer transition-all ${
+                    (s.source_mode || 'original') === 'viral'
+                      ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                      : 'bg-gray-500/15 text-gray-500 border-gray-500/30'
+                  }`}
+                  title="Click para cambiar metodo"
+                  onClick={async () => {
+                    const newMode = (s.source_mode || 'original') === 'original' ? 'viral' : 'original'
+                    try { await api.updateSlotSourceMode(s.id, newMode); s.source_mode = newMode } catch (_) {}
+                  }}>
+                    {(s.source_mode || 'original') === 'viral' ? 'Viral' : 'Orig'}
+                  </span>
+                )}
 
                 {/* Spacer */}
                 <div className="flex-1" />

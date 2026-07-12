@@ -1170,3 +1170,24 @@ CONTENT_PILLARS = [
         "desc": "Video más corto conectando el tema con la vida cotidiana",
     },
 ]
+
+# ═══════════════════════════════════════════════════════════════════
+# VIRAL MIRROR
+# ═══════════════════════════════════════════════════════════════════
+VIRAL_ENABLED = True
+
+NICHE_KEYWORDS_ENG = [
+    "unexplained mysteries",
+    "incredible coincidences",
+    "synchronicity explained",
+    "miracles caught on camera",
+    "mind blowing coincidences",
+    "strange synchronicities",
+    "real life miracles",
+    "unexplained phenomena",
+    "incredible true stories",
+    "mysteries science can't explain",
+    "paranormal stories real",
+    "strange but true stories",
+]
+]

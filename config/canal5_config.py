@@ -1183,3 +1183,37 @@ CONTENT_PILLARS = [
         "desc": "Video mas corto analizando el caso desde la perspectiva cientifica",
     },
 ]
+
+# ═══════════════════════════════════════════════════════════════════
+# VIRAL MIRROR
+# ═══════════════════════════════════════════════════════════════════
+
+# Enable viral mirror discovery for this channel
+VIRAL_ENABLED = True
+
+# English niche keywords for YouTube viral search
+NICHE_KEYWORDS_ENG = [
+    "medical anomalies",
+    "rare medical cases",
+    "mysterious diseases",
+    "unexplained medical conditions",
+    "medical mysteries",
+    "rare diseases explained",
+    "medical phenomena science can't explain",
+    "bizarre medical conditions",
+    "most shocking medical cases",
+    "doctors couldn't explain this",
+    "rarest diseases in the world",
+    "medical cases that changed science",
+    "patients who baffled doctors",
+    "unexplained recoveries medical",
+    "medical miracles true stories",
+    "strangest syndromes",
+    "rare genetic disorders",
+    "weird medical conditions",
+    "undiagnosed diseases documentary",
+    "medical documentary rare cases",
+]
+
+# Override viral scoring thresholds for this channel (optional)
+# VIRAL_MIN_VIEWS = 300000  # Lower threshold for smaller niche

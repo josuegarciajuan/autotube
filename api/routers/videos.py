@@ -120,6 +120,8 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
                 action=data.action,
                 test_mode=data.test_mode,
                 upload=data.upload,
+                source_mode=data.source_mode or "original",
+                viral_candidate_id=data.viral_candidate_id,
             )
         )
     else:
@@ -133,9 +135,11 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
             content_id=data.content_id,
             test_mode=data.test_mode,
             upload=data.upload,
+            source_mode=data.source_mode or "original",
+            viral_candidate_id=data.viral_candidate_id,
         )
     
-    return {"job_id": job_id, "video_id": video_id, "message": "Generation started"}
+    return {"job_id": job_id, "video_id": video_id, "message": "Generation started", "source_mode": data.source_mode or "original"}
 
 
 @router.post("/{video_id}/resume")

@@ -66,6 +66,72 @@ class Database:
             except sqlite3.IntegrityError:
                 return None
 
+    def insert_raw_content_viral(self, source, url, title, text,
+                                  subreddit=None, score=0, canal="canal2",
+                                  source_mode="viral",
+                                  viral_original_title=None,
+                                  viral_original_description=None,
+                                  viral_original_thumbnail_url=None,
+                                  viral_original_video_url=None,
+                                  viral_views=0,
+                                  viral_upload_date=None,
+                                  viral_duration_sec=0,
+                                  viral_channel_name=None,
+                                  viral_score=0.0,
+                                  viral_script_es=None,
+                                  viral_meta_json=None):
+        """Insert viral content with all viral metadata columns. Returns row id. Skips duplicates by URL."""
+        with self._connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO raw_content
+                       (source, subreddit, url, title, text, score, canal,
+                        source_mode, viral_original_title, viral_original_description,
+                        viral_original_thumbnail_url, viral_original_video_url,
+                        viral_views, viral_upload_date, viral_duration_sec,
+                        viral_channel_name, viral_score, viral_script_es, viral_meta_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (source, subreddit, url, title, text, score, canal,
+                     source_mode, viral_original_title, viral_original_description,
+                     viral_original_thumbnail_url, viral_original_video_url,
+                     viral_views, viral_upload_date, viral_duration_sec,
+                     viral_channel_name, viral_score, viral_script_es, viral_meta_json),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            except sqlite3.IntegrityError:
+                return None
+
+    def get_viral_candidates(self, canal="canal2", min_score=0.0, limit=20):
+        """Fetch viral candidates ordered by viral_score (highest first)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM raw_content
+                   WHERE canal = ? AND source_mode = 'viral' AND used = 0 AND viral_score >= ?
+                   ORDER BY viral_score DESC, scraped_at DESC
+                   LIMIT ?""",
+                (canal, min_score, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_content_by_url(self, url, canal="canal2"):
+        """Check if a URL already exists in raw_content for deduplication."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM raw_content WHERE url = ? AND canal = ?",
+                (url, canal),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_content_by_id(self, content_id: int):
+        """Get a raw_content row by id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM raw_content WHERE id = ?",
+                (content_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_unused_content(self, canal="canal2", limit=10, strategy: str = "best_first"):
         """Fetch unused scraped content.
 
