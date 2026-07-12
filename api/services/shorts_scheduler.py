@@ -352,9 +352,15 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         long_pos = next_slot.get("long_slot_position")
         source_video_id = _resolve_clip_source(channel_id, long_pos)
         if source_video_id is None:
+            # No source video available — cancel this slot so it doesn't
+            # block the queue. Next cycle picks the next due slot.
+            db.update_shorts_slot_status(
+                slot_id, "cancelled",
+                error_message="No completed source long video available",
+            )
             logger.info(
-                "Shorts slot #%d: clip type but no completed source long video "
-                "(channel=%s, long_slot=%s) — skipping",
+                "Shorts slot #%d cancelled: clip type but no completed source "
+                "long video (channel=%s, long_slot=%s)",
                 slot_id, slug, long_pos,
             )
             return None
@@ -977,15 +983,25 @@ def _sync_running_shorts_slots(db):
 
 
 def _cancel_stale_shorts_slots(db):
-    """Cancel pending shorts slots that are >8h past their scheduled_at (UTC)."""
-    today = datetime.now(CEST).date().isoformat()
-    pending = db.get_shorts_planned_slots(date_key=today, status="pending")
-    if not pending:
+    """Cancel pending shorts slots that are >8h past their scheduled_at (UTC).
+    
+    Scans ALL dates (not just today) to catch stuck slots from previous days.
+    """
+    # Fetch pending slots across all recent dates (past 7 days)
+    today = datetime.now(CEST).date()
+    all_pending = []
+    for offset in range(-7, 1):  # from 7 days ago to today
+        date_key = (today + timedelta(days=offset)).isoformat()
+        pending = db.get_shorts_planned_slots(date_key=date_key, status="pending")
+        if pending:
+            all_pending.extend(pending)
+
+    if not all_pending:
         return
 
     now_utc = datetime.now(UTC)
     cancelled = 0
-    for s in pending:
+    for s in all_pending:
         try:
             sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         except (ValueError, TypeError):
