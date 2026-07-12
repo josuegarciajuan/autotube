@@ -172,6 +172,7 @@ class YouTubeViralScraper(BaseScraper):
         self._cached_candidates: list[dict] = []
         self._last_search_time: float = 0.0
         self._search_cache_ttl: float = 3600.0  # 1 hour cache
+        self._suggested_queries: list[str] = []  # external queries from query builder
 
     # ── LLM lazy init ────────────────────────────────────────────
 
@@ -182,22 +183,15 @@ class YouTubeViralScraper(BaseScraper):
 
         # Try DeepSeek first (already used by script_generator), fallback to OpenAI
         from config.settings import (
-            DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
-            OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
+            LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+            OPENAI_API_KEY, OPENAI_MODEL,
         )
 
-        if DEEPSEEK_API_KEY:
-            self._llm_api_key = DEEPSEEK_API_KEY
-            self._llm_base_url = getattr(self.config, 'DEEPSEEK_BASE_URL', DEEPSEEK_BASE_URL) \
-                if self.config else DEEPSEEK_BASE_URL
-            self._llm_model = getattr(self.config, 'DEEPSEEK_MODEL', DEEPSEEK_MODEL) \
-                if self.config else DEEPSEEK_MODEL
-        elif OPENAI_API_KEY:
-            self._llm_api_key = OPENAI_API_KEY
-            self._llm_base_url = getattr(self.config, 'OPENAI_BASE_URL', OPENAI_BASE_URL) \
-                if self.config else OPENAI_BASE_URL
-            self._llm_model = getattr(self.config, 'OPENAI_MODEL', OPENAI_MODEL) \
-                if self.config else OPENAI_MODEL
+        api_key = LLM_API_KEY or OPENAI_API_KEY
+        if api_key:
+            self._llm_api_key = api_key
+            self._llm_base_url = LLM_BASE_URL
+            self._llm_model = LLM_MODEL or OPENAI_MODEL
 
         if not self._llm_api_key:
             logger.warning("[%s] No LLM API key configured — viral translation will use simple approach", self.canal)
@@ -375,14 +369,19 @@ class YouTubeViralScraper(BaseScraper):
             return None
 
     def _build_queries(self) -> list[str]:
-        """Build search queries from niche keywords with viral hooks."""
-        queries = []
+        """Build search queries.
 
-        # Direct keyword queries
+        If suggested_queries was set externally (from viral_query_builder),
+        use those directly. Otherwise fall back to the old static query building.
+        """
+        if self._suggested_queries:
+            logger.info("[%s] Using %d suggested queries from viral_query_builder", self.canal, len(self._suggested_queries))
+            return self._suggested_queries[:self.max_queries]
+
+        # Legacy: build from niche keywords
+        queries = []
         for kw in self.keywords_eng[:self.max_queries]:
             queries.append(kw)
-
-        # Add viral-formatted versions for top keywords
         if len(self.keywords_eng) >= 3:
             viral_formats = [
                 "most shocking {}",
@@ -396,8 +395,6 @@ class YouTubeViralScraper(BaseScraper):
                     formatted = fmt.format(kw)
                     if formatted not in queries and len(queries) < self.max_queries:
                         queries.append(formatted)
-
-        # Shuffle to avoid predictable patterns
         random.shuffle(queries)
         return queries[:self.max_queries]
 
@@ -666,21 +663,48 @@ class YouTubeViralScraper(BaseScraper):
             return items
         logger.info("[%s] Step 1 (discover): %d candidates in %.1fs", self.canal, len(candidates), time.time() - t1)
 
-        # Step 2: Process the top candidate (one per scrape call, to save resources)
-        top = candidates[0]
-        logger.info("[%s] Processing candidate: '%s'", self.canal, top["title"][:80])
+        # Step 2: Select the best UNUSED candidate (skip already-in-DB ones)
+        db = getattr(self, "_db", None)
+        top = None
+        for candidate in candidates:
+            url = candidate.get("url", "")
+            if db:
+                existing = db.get_content_by_url(url, self.canal)
+                if existing:
+                    logger.info("[%s] Skipping already-in-DB candidate: '%s' (id=%d, used=%s)",
+                                self.canal, candidate["title"][:50],
+                                existing["id"], existing.get("used", "?"))
+                    continue
+            top = candidate
+            break
+
+        if not top:
+            # All candidates already in DB — try expanded search with lower threshold
+            saved_min_views = self.min_views
+            self.min_views = max(50000, self.min_views // 5)
+            logger.warning("[%s] All %d candidates already in DB — expanding search (min_views: %d→%d)",
+                           self.canal, len(candidates), saved_min_views, self.min_views)
+            self._cached_candidates = []  # force fresh search
+            expanded = self._discover_candidates(force_refresh=True)
+            self.min_views = saved_min_views  # restore
+            if expanded:
+                for candidate in expanded:
+                    url = candidate.get("url", "")
+                    if db:
+                        existing = db.get_content_by_url(url, self.canal)
+                        if existing:
+                            continue
+                    top = candidate
+                    break
+
+        if not top:
+            logger.warning("[%s] No unused viral candidates available after expansion", self.canal)
+            return items
+
+        logger.info("[%s] Selected candidate: '%s'", self.canal, top["title"][:80])
         logger.info("[%s]   views=%,d  score=%.1f  age=%.1fh  duration=%ds  channel='%s'",
                     self.canal, top["views"], top["viral_score"],
                     top["hours_since_pub"], top["duration_sec"], top["channel_name"])
-
-        # Check if already in DB
-        db = getattr(self, "_db", None)
-        if db:
-            existing = db.get_content_by_url(top["url"], self.canal)
-            if existing:
-                logger.info("[%s] Candidate already in DB (id=%d), skipping re-processing",
-                            self.canal, existing["id"])
-                return [existing]
 
         # Step 3: Download audio
         t3 = time.time()

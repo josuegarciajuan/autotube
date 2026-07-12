@@ -1295,3 +1295,36 @@ NICHE_KEYWORDS_ENG = [
     "ancient civilizations documentary",
     "prehistoric discoveries",
 ]
+
+VIRAL_PLAYLIST_KEYWORDS = {
+    "expediciones-completas": [
+        "lost civilizations full documentary",
+        "ancient cities discovered",
+        "archaeological expedition documentary",
+        "forgotten history documentary",
+    ],
+    "lo-mas-impactante": [
+        "most amazing archaeological discoveries",
+        "unbelievable ancient technology",
+        "discoveries that changed history",
+        "most mysterious ancient artifacts",
+    ],
+    "civilizaciones-perdidas": [
+        "vanished civilizations documentary",
+        "sumerian mesopotamia documentary",
+        "mysterious ancient civilizations",
+        "advanced prehistoric civilizations",
+    ],
+    "misterios-arqueologicos": [
+        "archaeological mysteries unsolved",
+        "ancient artifacts scientists can't explain",
+        "impossible ancient structures",
+        "out of place artifacts documentary",
+    ],
+    "maravillas-del-mundo": [
+        "ancient wonders of the world documentary",
+        "greatest archaeological sites",
+        "amazing ancient monuments",
+        "forgotten temples documentary",
+    ],
+}

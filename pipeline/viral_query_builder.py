@@ -1,0 +1,249 @@
+"""Viral Mirror — Query Builder.
+
+Generates diverse YouTube search queries for viral discovery by combining:
+  1. Base keywords from the selected playlist (2-3 queries)
+  2. Base keywords from channel identity (2-3 queries)
+  3. AI-invented concepts (3-4 fresh queries each execution)
+  4. Viral-format variations on AI concepts (2-3 queries)
+
+Avoids repeating queries already used in recent runs (30-day window).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Optional
+
+from types import SimpleNamespace
+
+logger = logging.getLogger(__name__)
+
+
+# ── LLM Concept Generation Prompt ────────────────────────────────────
+
+_CONCEPT_SYSTEM_PROMPT = """You are a viral YouTube content strategist. Your job is to invent
+FRESH search angles to find high-performing English YouTube videos that will be
+adapted for a Spanish-language documentary channel.
+
+Generate CONCEPTS, not full queries. Each concept must be 2-5 English words,
+specific enough to find real videos on YouTube, and DIFFERENT from recently used ones.
+
+Rules:
+- Must relate to the channel's theme AND the target playlist
+- Must NOT repeat any concept from the "already used" list
+- Must be specific (avoid vague terms like "interesting stories")
+- Think about sub-niches, angles, formats, and variations
+- Output as JSON array of strings: ["concept1", "concept2", "concept3"]
+
+Generate EXACTLY 4 concepts."""
+
+
+def _get_llm_client(config: Optional[SimpleNamespace] = None):
+    """Get OpenAI-compatible client from config."""
+    from config.settings import (
+        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+        OPENAI_API_KEY, OPENAI_MODEL,
+    )
+    from openai import OpenAI
+
+    api_key = LLM_API_KEY or OPENAI_API_KEY
+    base_url = LLM_BASE_URL
+    model = LLM_MODEL or OPENAI_MODEL
+
+    if api_key:
+        return OpenAI(api_key=api_key, base_url=base_url), model
+    return None, None
+
+
+def _llm_generate_concepts(
+    channel_name: str,
+    channel_theme: str,
+    playlist_name: str,
+    playlist_description: str,
+    recently_used_keywords: list[str],
+    config: Optional[SimpleNamespace] = None,
+) -> list[str]:
+    """Generate 4 fresh search concepts using LLM."""
+    client, model = _get_llm_client(config)
+    if not client:
+        logger.warning("No LLM client — using fallback concepts")
+        return [
+            f"{channel_theme.split(',')[0].strip()} documentary",
+            f"best {playlist_name.lower()} stories",
+            f"shocking {channel_theme.split()[0]} stories",
+            f"unexplained {playlist_name.lower()}",
+        ]
+
+    user_msg = f"""Channel: {channel_name}
+Theme: {channel_theme}
+Target Playlist: {playlist_name}
+Playlist Description: {playlist_description}
+
+Already used concepts (DO NOT repeat any of these):
+{json.dumps(recently_used_keywords[:15], indent=2)}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _CONCEPT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.85,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        if content:
+            data = json.loads(content)
+            concepts = data if isinstance(data, list) else data.get("concepts", [])
+            concepts = [c.strip() for c in concepts if isinstance(c, str) and len(c.strip()) > 3]
+            if concepts:
+                logger.info("LLM generated %d fresh concepts: %s", len(concepts), concepts)
+                return concepts[:4]
+    except Exception as e:
+        logger.warning("LLM concept generation failed: %s", e)
+
+    # Fallback
+    return [
+        f"unbelievable {playlist_name.lower().split()[0]} stories",
+        f"rarest {channel_theme.split(',')[0]}",
+        f"documentary {playlist_name.lower()}",
+        f"viral {channel_theme.split()[0]} stories",
+    ]
+
+
+def _get_recently_used(db, canal: str, limit: int = 30) -> list[str]:
+    """Extract keywords from recently used viral candidates to avoid repeats."""
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT viral_original_title FROM raw_content
+                   WHERE canal = ? AND source_mode = 'viral' AND used = 1
+                   ORDER BY scraped_at DESC LIMIT ?""",
+                (canal, limit),
+            ).fetchall()
+
+        # Extract significant words from titles (avoid generic words)
+        stopwords = {"the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
+                     "is", "it", "that", "this", "with", "was", "are", "be", "from"}
+
+        all_words = []
+        for row in rows:
+            title = row["viral_original_title"] or ""
+            words = [w.lower().strip(",.!?;:()[]\"'") for w in title.split()
+                     if len(w) > 3 and w.lower() not in stopwords]
+            all_words.extend(words[:5])  # take top 5 significant words
+
+        # Get unique, and also preserve original titles as full concepts
+        seen = set()
+        unique = []
+        for w in all_words:
+            if w not in seen:
+                seen.add(w)
+                unique.append(w)
+
+        logger.debug("Recently used keywords for %s: %s", canal, unique[:10])
+        return unique[:15]
+    except Exception as e:
+        logger.debug("Could not get recently used keywords: %s", e)
+        return []
+
+
+# ── Public API ─────────────────────────────────────────────────────────
+
+def build_viral_queries(
+    channel_slug: str,
+    channel_name: str,
+    channel_theme: str,
+    playlist_name: str,
+    playlist_description: str,
+    canal_keywords_eng: list[str],
+    playlist_keywords: list[str],
+    db,
+    config: Optional[SimpleNamespace] = None,
+) -> list[str]:
+    """Build 10-12 diverse search queries for viral discovery.
+
+    Args:
+        channel_slug: Channel slug (canal2, canal3, ...)
+        channel_name: Display name ("Sincronías")
+        channel_theme: Channel tagline/theme
+        playlist_name: Selected playlist name
+        playlist_description: Playlist description
+        canal_keywords_eng: Base English keywords for the channel
+        playlist_keywords: English keywords for this specific playlist
+        db: Database instance (for recently-used tracking)
+        config: Optional channel config
+
+    Returns:
+        List of 10-12 unique English search queries.
+    """
+    queries = []
+
+    # ── 1. Base keywords from playlist (2-3 queries) ────────────
+    for kw in playlist_keywords[:3]:
+        if kw not in queries:
+            queries.append(kw)
+
+    # ── 2. Base keywords from channel (2-3 queries) ─────────────
+    for kw in canal_keywords_eng[:3]:
+        if kw not in queries:
+            queries.append(kw)
+
+    # ── 3. AI-invented concepts (3-4 fresh queries) ─────────────
+    recently_used = _get_recently_used(db, channel_slug, limit=30)
+
+    ai_concepts = _llm_generate_concepts(
+        channel_name=channel_name,
+        channel_theme=channel_theme,
+        playlist_name=playlist_name,
+        playlist_description=playlist_description,
+        recently_used_keywords=recently_used,
+        config=config,
+    )
+
+    for concept in ai_concepts[:4]:
+        if concept not in queries:
+            queries.append(concept)
+
+    # ── 4. Viral-format variations on AI concepts (2-3 queries) ──
+    viral_formats = [
+        "top 5 {}",
+        "most shocking {}",
+        "{} documentary",
+        "the {} you won't believe",
+        "incredible {} stories",
+    ]
+    import random
+    random.shuffle(viral_formats)
+    for concept in ai_concepts[:2]:
+        for fmt in viral_formats[:2]:
+            formatted = fmt.format(concept)
+            if formatted not in queries and len(queries) < 15:
+                queries.append(formatted)
+
+    # ── 5. Filter out recently-used keywords ───────────────────
+    filtered = []
+    for q in queries:
+        q_lower = q.lower().strip()
+        is_duplicate = False
+        for used in recently_used:
+            if used.lower() in q_lower or q_lower in used.lower():
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            filtered.append(q)
+
+    if len(filtered) < 6:
+        # If too many filtered out, keep the original queries
+        filtered = queries
+
+    # Mix order for variety
+    random.shuffle(filtered)
+
+    result = filtered[:12]
+    logger.info("[%s] Query builder: %d total → %d after dedup → %d final (playlist='%s')",
+                channel_slug, len(queries), len(filtered), len(result), playlist_name)
+    return result

@@ -1373,6 +1373,41 @@ class PipelineOrchestrator:
 
         # Phase 0: Scrape fresh content for this video
         logger.info(f"[{self.canal}] Phase 0/6: Scraping fresh content...")
+
+        # ── Viral mode: build playlist-driven queries before scraping ──
+        if self.source_mode == "viral" and getattr(self.config, "VIRAL_ENABLED", False):
+            try:
+                from pipeline.youtube_playlists import pick_playlist_for_viral
+                from pipeline.viral_query_builder import build_viral_queries
+
+                pl_name, pl_desc, pl_keywords = pick_playlist_for_viral(self.canal, self.db)
+                if pl_name:
+                    logger.info("[%s] Viral query builder — playlist='%s'", self.canal, pl_name)
+
+                    queries = build_viral_queries(
+                        channel_slug=self.canal,
+                        channel_name=getattr(self.config, "CANAL_DISPLAY_NAME", self.canal),
+                        channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
+                        playlist_name=pl_name,
+                        playlist_description=pl_desc or pl_name,
+                        canal_keywords_eng=getattr(self.config, "NICHE_KEYWORDS_ENG", []),
+                        playlist_keywords=pl_keywords,
+                        db=self.db,
+                        config=self.config,
+                    )
+
+                    # Inject queries into the youtube_viral scraper
+                    if queries and "youtube_viral" in self.scraper:
+                        self.scraper["youtube_viral"]._suggested_queries = queries
+                        logger.info("[%s] Injected %d playlist-driven queries into viral scraper",
+                                    self.canal, len(queries))
+                    else:
+                        logger.warning("[%s] Query builder returned no queries — scraper will use defaults", self.canal)
+                else:
+                    logger.info("[%s] No playlist found — viral scraper will use default keywords", self.canal)
+            except Exception as e:
+                logger.warning("[%s] Viral query builder failed (non-fatal): %s — using default keywords", self.canal, e)
+
         self.phase_scrape()
 
         # Phase 1: Generate script from best scraped item

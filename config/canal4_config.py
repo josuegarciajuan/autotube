@@ -1211,3 +1211,24 @@ NICHE_KEYWORDS_ENG = [
     "survival against all odds",
     "mysterious disappearances documentary",
 ]
+
+VIRAL_PLAYLIST_KEYWORDS = {
+    "tragedias-polares": [
+        "arctic expedition disaster documentary",
+        "antarctic survival stories",
+        "polar exploration tragedies",
+        "franklin expedition documentary",
+    ],
+    "naufragios-historicos": [
+        "shipwreck survival stories",
+        "famous maritime disasters",
+        "lost ships found documentary",
+        "ocean survival true stories",
+    ],
+    "montanas-mortales": [
+        "mount everest disaster documentary",
+        "deadliest mountain expeditions",
+        "k2 climbing tragedy stories",
+        "high altitude survival stories",
+    ],
+}

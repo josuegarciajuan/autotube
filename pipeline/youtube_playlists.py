@@ -1,8 +1,10 @@
 """YouTube Playlist Manager — CRUD operations via YouTube Data API v3.
-
+ 
 Creates, lists, and manages playlists per channel. Caches YouTube playlist IDs
 in the local database for idempotent operations.
 
+Also provides playlist selection for viral mirror discovery.
+ 
 Quota costs (per operation):
   - playlists().list()     → 1 unit
   - playlists().insert()   → 50 units
@@ -12,6 +14,7 @@ Quota costs (per operation):
 
 import logging
 import pickle
+import random
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,6 +56,97 @@ def _load_credentials(token_path: Path) -> Optional[Credentials]:
         return None
 
     return creds
+
+
+# ── Viral Mirror playlist selection ──────────────────────────────────
+
+def pick_playlist_for_viral(channel_slug: str, db) -> tuple[str | None, str | None, list[str]]:
+    """Pick the best playlist for a viral mirror search cycle.
+
+    Strategy:
+      1. Load all playlists from the channel config (config_bridge or config module).
+      2. For each playlist, check when its keywords were last used for a viral search.
+      3. Pick the playlist with the OLDEST last-used date (rotación justa).
+      4. If no playlist has a "last used" date, pick randomly to avoid always #1.
+      5. Return (playlist_name, playlist_slug, playlist_keywords_eng).
+
+    Returns:
+        (name, slug, keywords) — all may be None if no playlists configured.
+    """
+    try:
+        from config.config_bridge import get_channel_config
+        config = get_channel_config(channel_slug)
+    except ImportError:
+        logger.warning("[%s] Cannot load config for playlist selection", channel_slug)
+        return None, None, []
+
+    playlists = getattr(config, "PLAYLISTS", None)
+    if not playlists:
+        logger.info("[%s] No PLAYLISTS configured — viral will use channel keywords only", channel_slug)
+        return None, None, []
+
+    # Get per-playlist keywords (English)
+    playlist_kw = getattr(config, "VIRAL_PLAYLIST_KEYWORDS", {})
+    if not playlist_kw:
+        logger.info("[%s] No VIRAL_PLAYLIST_KEYWORDS configured — using all playlists with empty keywords", channel_slug)
+        # Return first playlist with empty keywords
+        first = playlists[0]
+        return first.get("name", ""), first.get("slug", ""), []
+
+    # Check last-used timestamps for each playlist from raw_content
+    playlist_last_used = {}
+    try:
+        with db._connect() as conn:
+            for pl in playlists:
+                slug = pl.get("slug", "")
+                row = conn.execute(
+                    """SELECT MAX(scraped_at) as last_used
+                       FROM raw_content
+                       WHERE canal = ? AND source_mode = 'viral'
+                       AND viral_meta_json LIKE ?
+                       AND used = 1""",
+                    (channel_slug, f"%{slug}%"),
+                ).fetchone()
+                playlist_last_used[slug] = row["last_used"] if row and row["last_used"] else None
+    except Exception as e:
+        logger.debug("[%s] Could not query last-used playlist: %s", channel_slug, e)
+
+    # Pick: oldest last-used (fair rotation), or random if all unused
+    best_slug = None
+    best_date = "9999-99-99"  # far future — any real date will be older
+
+    for pl in playlists:
+        slug = pl.get("slug", "")
+        if slug and slug in playlist_kw:
+            last_used = playlist_last_used.get(slug)
+            if last_used and last_used < best_date:
+                best_date = last_used
+                best_slug = slug
+
+    # If nobody has a last_used date (all new), pick randomly
+    if best_slug is None:
+        candidates = [pl for pl in playlists
+                       if pl.get("slug") and pl.get("slug") in playlist_kw]
+        if candidates:
+            chosen = random.choice(candidates)
+            best_slug = chosen["slug"]
+        elif playlists:
+            # Fallback: first playlist with empty keywords
+            chosen = playlists[0]
+            best_slug = chosen.get("slug", "")
+
+    # Get the info for the chosen playlist
+    for pl in playlists:
+        if pl.get("slug") == best_slug:
+            name = pl.get("name", "")
+            desc = pl.get("description", "")
+            keywords = playlist_kw.get(best_slug, [])
+            logger.info("[%s] Viral playlist selected: '%s' (slug=%s, last_used=%s, %d keywords)",
+                        channel_slug, name, best_slug,
+                        playlist_last_used.get(best_slug, "never"), len(keywords))
+            return name, desc, keywords
+
+    return None, None, []
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -1200,3 +1200,37 @@ NICHE_KEYWORDS_ENG = [
     "paranormal stories real",
     "strange but true stories",
 ]
+
+# English keywords per playlist — used by viral_query_builder for diverse searches
+VIRAL_PLAYLIST_KEYWORDS = {
+    "historias-completas": [
+        "deep documentary mystery",
+        "amazing true stories full documentary",
+        "incredible unexplained phenomena",
+        "in depth mystery documentary",
+    ],
+    "lo-mas-increible": [
+        "most amazing stories ever",
+        "unbelievable true stories compilation",
+        "most shocking unsolved mysteries",
+        "stories that will blow your mind",
+    ],
+    "milagros-modernos": [
+        "documented miracles true stories",
+        "modern day miracles caught on camera",
+        "scientific evidence for miracles",
+        "medical miracles unexplained recovery",
+    ],
+    "casualidades-imposibles": [
+        "impossible coincidences true stories",
+        "historical coincidences too strange to be random",
+        "scientists explain synchronicity",
+        "probability one in a million true stories",
+    ],
+    "predicciones-que-se-cumplieron": [
+        "predictions that actually came true",
+        "prophetic dreams verified",
+        "people who predicted the future correctly",
+        "prophecies that were fulfilled",
+    ],
+}
