@@ -693,6 +693,15 @@ def _migrate_v6(conn, logger):
         except sqlite3.OperationalError as e:
             logger.debug("v6 shorts_planned_slots.source_mode: %s", e)
 
+    # ── videos source_url (viral original video reference) ────
+    existing_vid = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
+    if "source_url" not in existing_vid:
+        try:
+            conn.execute("ALTER TABLE videos ADD COLUMN source_url TEXT")
+            logger.info("Migration v6: added source_url column to videos")
+        except sqlite3.OperationalError as e:
+            logger.debug("v6 videos.source_url: %s", e)
+
     conn.commit()
 
 

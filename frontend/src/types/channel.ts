@@ -149,6 +149,18 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     ],
   },
   {
+    key: 'viral',
+    label: '🦠 Viral Mirror',
+    fields: [
+      { key: 'VIRAL_ENABLED', label: 'Activar búsqueda viral', affectsVideo: true, type: 'boolean' },
+      { key: 'NICHE_KEYWORDS_ENG', label: 'Keywords en inglés', affectsVideo: true, type: 'list' },
+      { key: 'VIRAL_MIN_VIEWS', label: 'Mínimo de vistas', affectsVideo: true, type: 'number' },
+      { key: 'VIRAL_MAX_AGE_DAYS', label: 'Antigüedad máxima (días)', affectsVideo: false, type: 'number' },
+      { key: 'VIRAL_MAX_QUERIES', label: 'Queries máximas/día', affectsVideo: false, type: 'number' },
+      { key: 'VIRAL_MAX_CANDIDATES', label: 'Candidatos máximos', affectsVideo: false, type: 'number' },
+    ],
+  },
+  {
     key: 'visual',
     label: '🎨 Estilo Visual',
     fields: [

@@ -430,6 +430,7 @@ class PipelineOrchestrator:
             "_viral_meta_json": viral_meta_json,
             "_viral_original_thumbnail": viral_content.get("viral_original_thumbnail_url", ""),
             "_viral_original_title": original_title,
+            "_viral_original_video_url": viral_content.get("viral_original_video_url", ""),
             "_viral_content_id": viral_content["id"],
         }
 
@@ -874,6 +875,7 @@ class PipelineOrchestrator:
             timestamps = audio_data.get("timestamps", [])
             duracion_seg = int(timestamps[-1]["end_ms"] / 1000) if timestamps and "end_ms" in timestamps[-1] else (
                 int(timestamps[-1]["end"]) if timestamps else 0)
+            source_url = script.get("_viral_original_video_url", "") if self.source_mode == "viral" else ""
 
             if self.db_video_id is not None:
                 # API mode: update the pre-created record (single-source-of-truth)
@@ -886,6 +888,7 @@ class PipelineOrchestrator:
                     titulo_final=titulo_selected,
                     duracion_seg=duracion_seg,
                     channel_id=channel_id,
+                    source_url=source_url,
                 )
                 video_id = self.db_video_id
             else:
@@ -899,6 +902,7 @@ class PipelineOrchestrator:
                     titulo_final=titulo_selected,
                     duracion_seg=duracion_seg,
                     channel_id=channel_id,
+                    source_url=source_url,
                 )
 
             return {

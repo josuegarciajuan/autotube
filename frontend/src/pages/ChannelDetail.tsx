@@ -1376,6 +1376,7 @@ export default function ChannelDetail() {
                   <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-600">
                     <span>{formatDateTime(v.uploaded_at || v.created_at)}</span>
                     {v.yt_url && <><span>·</span><a href={v.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-red hover:underline flex items-center gap-0.5" onClick={e => e.stopPropagation()}><Youtube size={10} /> YT</a></>}
+                    {v.source_url && <><span>·</span><a href={v.source_url} target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline flex items-center gap-0.5 text-xs" onClick={e => e.stopPropagation()} title="Video original (viral mirror)"><ExternalLink size={10} /> Original</a></>}
                     {v.script_id && (
                       creatingShort === v.id ? (
                         <button disabled className="text-purple-400 text-xs flex items-center gap-1 px-2 py-0.5 rounded bg-purple-400/10 cursor-wait">

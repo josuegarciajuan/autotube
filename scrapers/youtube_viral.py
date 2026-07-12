@@ -280,7 +280,12 @@ class YouTubeViralScraper(BaseScraper):
         return results
 
     def _parse_ytdlp_result(self, data: dict) -> dict | None:
-        """Extract relevant fields from a yt-dlp flat result."""
+        """Extract relevant fields from a yt-dlp flat result.
+
+        When using --flat-playlist, upload_date and timestamp are often NOT
+        available. In that case we skip the age filter (assume recent) rather
+        than discarding the candidate.
+        """
         try:
             view_count = data.get("view_count")
             if view_count is None:
@@ -296,27 +301,40 @@ class YouTubeViralScraper(BaseScraper):
                 return None
 
             # Parse upload date
-            upload_date_str = data.get("upload_date", "")
+            upload_date_str = data.get("upload_date", "") or ""
             upload_timestamp = data.get("timestamp")
             hours_since_pub = float("inf")
+            date_available = False
 
-            if upload_date_str and len(upload_date_str) == 8:
+            if upload_date_str and len(str(upload_date_str)) == 8:
                 # yt-dlp format: YYYYMMDD
                 try:
-                    upload_dt = datetime.strptime(upload_date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
+                    upload_dt = datetime.strptime(str(upload_date_str), "%Y%m%d").replace(tzinfo=timezone.utc)
                     hours_since_pub = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
+                    date_available = True
                 except ValueError:
                     pass
             elif upload_timestamp:
                 try:
-                    upload_dt = datetime.fromtimestamp(upload_timestamp, tz=timezone.utc)
+                    upload_dt = datetime.fromtimestamp(float(upload_timestamp), tz=timezone.utc)
                     hours_since_pub = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
+                    date_available = True
                 except (ValueError, TypeError, OSError):
                     pass
 
-            # Skip too old (> max_age_days)
-            if hours_since_pub > (self.max_age_days * 24) or hours_since_pub <= 0:
-                return None
+            if date_available:
+                # Only filter by age when we have real date data
+                if hours_since_pub > (self.max_age_days * 24) or hours_since_pub <= 0:
+                    logger.debug("[%s] Filtered out (age=%.1fh, max=%dh): %s",
+                                 self.canal, hours_since_pub, self.max_age_days * 24,
+                                 data.get("title", "")[:50])
+                    return None
+            else:
+                # --flat-playlist does not include upload_date/timestamp.
+                # Assume the video is recent enough to pass the age filter
+                # but use a conservative score (24h) so it doesn't get an
+                # unfair "freshness bonus" from a tiny divisor.
+                hours_since_pub = 168  # ~7 days — flat penalty
 
             # Duration
             duration_sec = data.get("duration", 0) or 0
@@ -332,7 +350,7 @@ class YouTubeViralScraper(BaseScraper):
                 viral_score *= 1.0
             elif hours_since_pub < 336:  # 7-14 days
                 viral_score *= 0.7
-            else:  # 14-30 days
+            else:  # 14-30 days (or unknown age → 7-day bucket)
                 viral_score *= 0.4
 
             return {
@@ -809,3 +827,223 @@ class YouTubeViralScraper(BaseScraper):
 
         self.logger.info("[%s] Viral scraper: saved %d/%d items to database", self.canal, inserted, len(items))
         return inserted
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Standalone search function (testable from CLI)
+# ═══════════════════════════════════════════════════════════════════
+
+def search_viral_candidates(
+    keywords: list[str],
+    min_views: int = DEFAULT_MIN_VIEWS,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+    max_queries: int = DEFAULT_MAX_QUERIES,
+    results_per_query: int = DEFAULT_RESULTS_PER_QUERY,
+    max_candidates: int = DEFAULT_MAX_CANDIDATES,
+) -> list[dict]:
+    """Standalone viral candidate search — no DB, no config, no LLM.
+
+    Args:
+        keywords: List of English search queries.
+        min_views: Minimum view count for a candidate.
+        max_age_days: Maximum age in days (ignored if flat-playlist has no date).
+        max_queries: Maximum number of search queries to run.
+        results_per_query: Results per yt-dlp search.
+        max_candidates: Maximum candidates to return.
+
+    Returns:
+        List of candidate dicts sorted by viral_score descending, with keys:
+        title, url, video_id, views, upload_date, duration_sec,
+        channel_name, channel_id, description, thumbnail_url,
+        viral_score, hours_since_pub.
+    """
+    log = logging.getLogger("viral_search")
+
+    seen_ids: set[str] = set()
+    all_candidates: list[dict] = []
+
+    queries = list(keywords[:max_queries])
+    log.info("search_viral_candidates: %d queries, min_views=%d, max_age=%d days",
+             len(queries), min_views, max_age_days)
+
+    for i, query in enumerate(queries):
+        log.info("Query %d/%d: '%s'", i + 1, len(queries), query)
+
+        # Build the same yt-dlp command as the scraper
+        user_agent = random.choice(_USER_AGENTS)
+        ytdl_query = f"ytsearch{results_per_query}:{query}"
+        cmd = [
+            _YTDLP_BIN, ytdl_query,
+            "--dump-json", "--flat-playlist",
+            "--no-warnings", "--no-check-certificate",
+            "--user-agent", user_agent,
+            "--extractor-args", "youtubetab:skip=webpage",
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+
+            for line in proc.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Parse with manual thresholds (same logic as _parse_ytdlp_result)
+                view_count = data.get("view_count")
+                if view_count is None:
+                    continue
+                if isinstance(view_count, str):
+                    view_count = int(view_count) if view_count.isdigit() else 0
+                view_count = int(view_count)
+                if view_count < min_views:
+                    continue
+
+                video_id = data.get("id", "")
+                if not video_id or video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+
+                # Upload date parsing
+                upload_date_str = data.get("upload_date", "") or ""
+                upload_timestamp = data.get("timestamp")
+                hours_since_pub = float("inf")
+                date_available = False
+
+                if upload_date_str and len(str(upload_date_str)) == 8:
+                    try:
+                        upload_dt = datetime.strptime(str(upload_date_str), "%Y%m%d").replace(tzinfo=timezone.utc)
+                        hours_since_pub = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
+                        date_available = True
+                    except ValueError:
+                        pass
+                elif upload_timestamp:
+                    try:
+                        upload_dt = datetime.fromtimestamp(float(upload_timestamp), tz=timezone.utc)
+                        hours_since_pub = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
+                        date_available = True
+                    except (ValueError, TypeError, OSError):
+                        pass
+
+                if date_available:
+                    if hours_since_pub > (max_age_days * 24) or hours_since_pub <= 0:
+                        continue
+                else:
+                    hours_since_pub = 168
+
+                # Duration
+                duration_sec = data.get("duration", 0) or 0
+                if isinstance(duration_sec, str):
+                    duration_sec = int(duration_sec) if duration_sec.isdigit() else 0
+                duration_sec = int(duration_sec)
+
+                # Score
+                viral_score = view_count / max(hours_since_pub, 1)
+                if hours_since_pub < 168:
+                    viral_score *= 1.0
+                elif hours_since_pub < 336:
+                    viral_score *= 0.7
+                else:
+                    viral_score *= 0.4
+
+                all_candidates.append({
+                    "title": data.get("title", ""),
+                    "url": data.get("webpage_url", "") or data.get("url", ""),
+                    "video_id": video_id,
+                    "views": view_count,
+                    "upload_date": str(upload_date_str) if upload_date_str else "unknown",
+                    "duration_sec": duration_sec,
+                    "channel_name": data.get("channel", "") or data.get("uploader", ""),
+                    "channel_id": data.get("channel_id", ""),
+                    "description": (data.get("description", "") or "")[:200],
+                    "thumbnail_url": data.get("thumbnail", "") or (
+                        f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg" if video_id else ""
+                    ),
+                    "viral_score": round(viral_score, 1),
+                    "hours_since_pub": round(hours_since_pub, 1),
+                })
+
+            # Rate limit between queries
+            time.sleep(random.uniform(2.0, 4.0))
+
+        except subprocess.TimeoutExpired:
+            log.warning("yt-dlp search timed out for query: '%s'", query)
+        except Exception as e:
+            log.error("yt-dlp search error for '%s': %s", query, e)
+
+    # Sort by viral_score, deduplicate, take top N
+    all_candidates.sort(key=lambda x: x["viral_score"], reverse=True)
+    top = all_candidates[:max_candidates]
+
+    log.info("search_viral_candidates: %d total → %d returned", len(all_candidates), len(top))
+    return top
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CLI test entrypoint
+# ═══════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Test Viral Candidate Search")
+    parser.add_argument("--keywords", nargs="+", default=["medical mysteries"],
+                        help="English keywords to search")
+    parser.add_argument("--min-views", type=int, default=100000,
+                        help="Minimum views (default: 100000)")
+    parser.add_argument("--max-age", type=int, default=30,
+                        help="Maximum age in days (default: 30)")
+    parser.add_argument("--max-queries", type=int, default=5,
+                        help="Max queries (default: 5)")
+    parser.add_argument("--results-per-query", type=int, default=10,
+                        help="Results per query (default: 10)")
+    parser.add_argument("--max-candidates", type=int, default=10,
+                        help="Max candidates to return (default: 10)")
+    args_cli = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+    print(f"\n{'='*60}")
+    print(f"VIRAL CANDIDATE SEARCH")
+    print(f"{'='*60}")
+    print(f"Keywords: {args_cli.keywords}")
+    print(f"Min views: {args_cli.min_views:,}")
+    print(f"Max age: {args_cli.max_age} days")
+    print(f"Queries: {args_cli.max_queries}")
+    print(f"Results/query: {args_cli.results_per_query}")
+    print(f"{'='*60}\n")
+
+    candidates = search_viral_candidates(
+        keywords=args_cli.keywords,
+        min_views=args_cli.min_views,
+        max_age_days=args_cli.max_age,
+        max_queries=args_cli.max_queries,
+        results_per_query=args_cli.results_per_query,
+        max_candidates=args_cli.max_candidates,
+    )
+
+    if not candidates:
+        print("NO candidates found.")
+    else:
+        print(f"TOP {len(candidates)} CANDIDATES:\n")
+        print(f"{'#':<4} {'Score':<10} {'Views':<12} {'Age':<8} {'Dur':<8} {'Title'}")
+        print(f"{'-'*4} {'-'*10} {'-'*12} {'-'*8} {'-'*8} {'-'*50}")
+        for i, c in enumerate(candidates, 1):
+            age = f"{c['hours_since_pub']:.0f}h" if c['hours_since_pub'] != 168 else "unknown"
+            dur = f"{c['duration_sec']//60}m" if c['duration_sec'] else "?"
+            print(f"{i:<4} {c['viral_score']:>10,.0f} {c['views']:>12,} {age:<8} {dur:<8} {c['title'][:50]}")
+        print(f"\n{'='*60}")
+        print(f"Full URLs:")
+        for i, c in enumerate(candidates, 1):
+            print(f"  {i}. {c['url']}")
