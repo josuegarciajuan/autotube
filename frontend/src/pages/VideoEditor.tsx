@@ -563,16 +563,27 @@ export default function VideoEditor() {
         )}
       </div>
 
-      {/* YouTube Link */}
-      {video.yt_url && (
-        <div className="glass rounded-xl p-5 border border-purple-500/30">
-          <p className="text-sm text-purple-300 flex items-center gap-2">
-            <Play size={16} />
-            Subido a YouTube:{' '}
-            <a href={video.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-cyan hover:underline font-mono">
-              {video.yt_video_id}
-            </a>
-          </p>
+      {/* External Links */}
+      {(video.yt_url || video.source_url) && (
+        <div className="glass rounded-xl p-5 border border-purple-500/30 space-y-2">
+          {video.yt_url && (
+            <p className="text-sm text-purple-300 flex items-center gap-2">
+              <Play size={16} />
+              Subido a YouTube:{' '}
+              <a href={video.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-cyan hover:underline font-mono">
+                {video.yt_video_id}
+              </a>
+            </p>
+          )}
+          {video.source_url && (
+            <p className="text-sm text-purple-300 flex items-center gap-2">
+              <ExternalLink size={16} />
+              Fuente viral:{' '}
+              <a href={video.source_url} target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline font-mono break-all">
+                {video.source_url}
+              </a>
+            </p>
+          )}
         </div>
       )}
     </div>
