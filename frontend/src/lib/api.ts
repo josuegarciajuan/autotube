@@ -22,6 +22,7 @@ export const api = {
   updateChannel: (id: number, data: any) => request<any>(`/channels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   updateChannelProfile: (id: number, data: any) => request<any>(`/channels/${id}/profile`, { method: 'PUT', body: JSON.stringify(data) }),
   syncYoutube: (id: number) => request<any>(`/channels/${id}/sync-youtube`, { method: 'POST' }),
+  collectChannelStats: (id: number) => request<any>(`/channels/${id}/collect-stats`, { method: 'POST' }),
   syncChannelConfig: (id: number) => request<any>(`/channels/${id}/sync-config`, { method: 'POST' }),
   deleteChannel: (id: number) => request<any>(`/channels/${id}`, { method: 'DELETE' }),
   getChannelVideos: (id: number, status?: string) => request<any[]>(`/channels/${id}/videos${status ? `?status=${status}` : ''}`),

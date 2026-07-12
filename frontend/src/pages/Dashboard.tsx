@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../lib/api'
-import { Users, Eye, Heart, Video, Wrench, Loader2, RefreshCw, X } from 'lucide-react'
+import { Users, Eye, Heart, Video, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
 import KpiCard from '../components/KpiCard'
 import ChannelTable from '../components/ChannelTable'
 import PipelineSection from '../components/PipelineSection'
@@ -27,6 +27,20 @@ export default function Dashboard() {
   const [collectingStats, setCollectingStats] = useState(false)
   const [collectStatsMsg, setCollectStatsMsg] = useState<string | null>(null)
   const [collectStatsError, setCollectStatsError] = useState(false)
+  const [collectStatsState, setCollectStatsState] = useState<any>(null)
+  const [collectStatsFinishedAt, setCollectStatsFinishedAt] = useState<string | null>(null)
+
+  // Refrescar datos del Dashboard
+  const loadDashboard = useCallback(async () => {
+    try {
+      const d = await api.getDashboard()
+      setData(d)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   // Load last/current stats-collection state on mount (survives reloads)
   useEffect(() => {
@@ -60,9 +74,11 @@ export default function Dashboard() {
   }
 
   function applyStatsStatus(s: any) {
+    setCollectStatsState(s)
     if (s.status === 'success') {
       setCollectStatsError(false)
       setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
+      setCollectStatsFinishedAt(s.finished_at ? new Date(s.finished_at * 1000).toLocaleTimeString() : null)
     } else if (s.status === 'error') {
       setCollectStatsError(true)
       setCollectStatsMsg(`Error: ${s.error || 'fallo en la recoleccion'}`)
@@ -81,6 +97,8 @@ export default function Dashboard() {
           setTimeout(poll, 2000)
         } else {
           setCollectingStats(false)
+          // Refresh dashboard data immediately after stats collection completes
+          loadDashboard()
         }
       } catch {
         setCollectingStats(false)
@@ -90,20 +108,10 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    async function load() {
-      try {
-        const d = await api.getDashboard()
-        setData(d)
-      } catch (e) {
-        console.error(e)
-      } finally {
-        setLoading(false)
-      }
-    }
-    load()
-    const interval = setInterval(load, 15000)
+    loadDashboard()
+    const interval = setInterval(loadDashboard, 15000)
     return () => clearInterval(interval)
-  }, [])
+  }, [loadDashboard])
 
   async function handleStabilize() {
     if (stabilizing) return
@@ -184,25 +192,57 @@ export default function Dashboard() {
 
       {/* Stats collection feedback */}
       {collectStatsMsg && (
-        <div className={`flex items-center justify-between gap-2 text-xs py-1.5 px-3 rounded-md animate-fade-in ${
+        <div className={`rounded-lg border animate-fade-in ${
           collectStatsError
-            ? 'text-red-400 bg-red-500/10 border border-red-500/20'
+            ? 'bg-red-500/5 border-red-500/20'
             : collectingStats
-            ? 'text-cyan-400 bg-cyan-500/10 border border-cyan-500/20'
-            : 'text-green-400 bg-green-500/10 border border-green-500/20'
+            ? 'bg-cyan-500/5 border-cyan-500/20'
+            : 'bg-green-500/5 border-green-500/20'
         }`}>
-          <span className="flex items-center gap-1.5">
-            {collectingStats && <Loader2 size={12} className="animate-spin" />}
-            {collectStatsMsg}
-          </span>
-          {!collectingStats && (
+          <div className={`flex items-center justify-between gap-2 text-xs py-2 px-3 ${
+            collectStatsError ? 'text-red-400' : collectingStats ? 'text-cyan-400' : 'text-green-400'
+          }`}>
+            <span className="flex items-center gap-1.5 font-medium">
+              {collectingStats ? <Loader2 size={12} className="animate-spin" /> : collectStatsError ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+              {collectStatsMsg}
+              {collectStatsFinishedAt && <span className="text-[10px] opacity-60 ml-1">({collectStatsFinishedAt})</span>}
+            </span>
             <button
-              onClick={() => setCollectStatsMsg(null)}
+              onClick={() => { setCollectStatsMsg(null); setCollectStatsState(null) }}
               className="opacity-60 hover:opacity-100 transition-opacity"
               title="Cerrar"
             >
               <X size={13} />
             </button>
+          </div>
+          {/* Per-channel breakdown on success */}
+          {!collectingStats && !collectStatsError && collectStatsState?.channels?.length > 0 && (
+            <div className="px-3 pb-2 pt-0">
+              <div className="flex flex-wrap gap-1.5">
+                {collectStatsState.channels.map((ch: any, i: number) => (
+                  <div key={i} className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] ${
+                    ch.ok
+                      ? 'bg-green-500/10 text-green-300 border border-green-500/15'
+                      : ch.skipped
+                      ? 'bg-gray-500/10 text-gray-400 border border-gray-500/15'
+                      : 'bg-red-500/10 text-red-300 border border-red-500/15'
+                  }`}>
+                    {ch.ok ? <CheckCircle2 size={10} /> : ch.skipped ? <SkipForward size={10} /> : <AlertCircle size={10} />}
+                    <span className="font-medium">{ch.slug}</span>
+                    {ch.ok ? (
+                      <span className="opacity-70">
+                        {ch.channel_updated ? 'C+' : ''}{ch.videos_updated > 0 ? ` V${ch.videos_updated}` : ''}{ch.shorts_updated > 0 ? ` S${ch.shorts_updated}` : ''}
+                        {(ch.channel_updated || ch.videos_updated > 0 || ch.shorts_updated > 0) ? '' : ' sin cambios'}
+                      </span>
+                    ) : ch.skipped ? (
+                      <span className="opacity-60">{ch.reason || 'sin token'}</span>
+                    ) : (
+                      <span className="opacity-70">{ch.error || 'error'}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       )}

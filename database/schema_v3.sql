@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS video_stats_history (
     estimated_minutes_watched  REAL DEFAULT 0,
     average_view_duration      REAL DEFAULT 0,
     subscribers_gained         INTEGER DEFAULT 0,
+    estimated_revenue_min      REAL DEFAULT 0,
+    estimated_revenue_max      REAL DEFAULT 0,
     embeddable                 INTEGER DEFAULT 1,
     fetched_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -27,6 +29,8 @@ CREATE TABLE IF NOT EXISTS channel_stats_history (
     total_views               INTEGER DEFAULT 0,
     video_count               INTEGER DEFAULT 0,
     estimated_minutes_watched  REAL DEFAULT 0,
+    estimated_revenue_min      REAL DEFAULT 0,
+    estimated_revenue_max      REAL DEFAULT 0,
     fetched_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

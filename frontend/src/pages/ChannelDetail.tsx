@@ -211,6 +211,8 @@ export default function ChannelDetail() {
   const [channelVideosAggregate, setChannelVideosAggregate] = useState<any>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [refreshingStats, setRefreshingStats] = useState(false)
+  const [statsRefreshMsg, setStatsRefreshMsg] = useState<string | null>(null)
   const [editingConfig, setEditingConfig] = useState(false)
   const [editConfig, setEditConfig] = useState<Record<string, any>>({})
   
@@ -535,6 +537,32 @@ export default function ChannelDetail() {
     setSyncing(false)
   }
 
+  async function handleRefreshStats() {
+    setRefreshingStats(true)
+    setStatsRefreshMsg(null)
+    try {
+      const result = await api.collectChannelStats(channelId)
+      setStatsRefreshMsg(`${result.videos_updated} videos · ${result.shorts_updated} shorts · canal=${result.channel_updated ? 'OK' : 'no actualizado'}`)
+      // Refresh channel stats display
+      try {
+        const ytStats = await api.getChannelYoutubeStats(channelId)
+        if (ytStats?.ok && ytStats.stats) setChannelYtStats(ytStats.stats)
+      } catch {}
+      try {
+        const shortsStats = await api.getChannelShortsStats(channelId)
+        if (shortsStats?.ok && shortsStats.shorts_stats) setChannelShortsStats(shortsStats.shorts_stats)
+      } catch {}
+      try {
+        const aggStats = await api.getChannelVideosAggregate(channelId)
+        if (aggStats?.ok && aggStats.videos_stats) setChannelVideosAggregate(aggStats.videos_stats)
+      } catch {}
+    } catch (e: any) {
+      setStatsRefreshMsg(`Error: ${e.message || 'desconocido'}`)
+    } finally {
+      setRefreshingStats(false)
+    }
+  }
+
   async function handleStartAuth() {
     setAuthLoading(true)
     try {
@@ -849,6 +877,17 @@ export default function ChannelDetail() {
           className="flex items-center gap-1.5 px-3 py-2 bg-red-600/10 border border-red-600/30 text-red-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-red-600/20 transition-colors">
           <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> <span className="hidden sm:inline">{syncing ? 'Syncing...' : 'Sync YouTube'}</span><span className="sm:hidden">Sync</span>
         </button>
+        <button onClick={handleRefreshStats} disabled={refreshingStats}
+          className="flex items-center gap-1.5 px-3 py-2 bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-cyan-500/20 transition-colors disabled:opacity-50"
+          title="Refrescar estadisticas de YouTube para este canal">
+          {refreshingStats ? <Loader2 size={14} className="animate-spin" /> : <BarChart3 size={14} />}
+          <span className="hidden sm:inline">{refreshingStats ? 'Refrescando...' : 'Refresh Stats'}</span><span className="sm:hidden">Stats</span>
+        </button>
+        {statsRefreshMsg && (
+          <span className={`text-xs ${statsRefreshMsg.startsWith('Error') ? 'text-red-400' : 'text-green-400'} animate-fade-in`}>
+            {statsRefreshMsg}
+          </span>
+        )}
         <button onClick={handleGetManualSetup}
           className="flex items-center gap-1.5 px-3 py-2 bg-dark-600 border border-surface-border text-gray-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-dark-500 transition-colors">
           <Clipboard size={14} /> <span className="hidden sm:inline">Setup Manual</span><span className="sm:hidden">Setup</span>

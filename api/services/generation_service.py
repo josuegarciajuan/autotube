@@ -1465,16 +1465,43 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 yt_url = f"https://youtube.com/watch?v={video_yt_id}"
                 db.mark_video_uploaded(video_id, video_yt_id, yt_url)
 
-                # ── Post-upload: baseline stats snapshot (0 views/likes, para DB cache) ──
+                # ── Post-upload: real YouTube stats snapshot ──
                 try:
-                    db.insert_video_stats(
-                        video_id=video_id,
-                        yt_video_id=video_yt_id,
-                        stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
-                    )
-                    logger.debug(f"[{canal}] Baseline stats saved for video {video_yt_id}")
+                    from pipeline.youtube_stats import YouTubeStatsFetcher
+                    fetcher = YouTubeStatsFetcher(canal)
+                    if fetcher.authenticate():
+                        real_stats = fetcher.get_video_stats(video_yt_id)
+                        if real_stats and not real_stats.get("is_mock"):
+                            db.insert_video_stats(
+                                video_id=video_id,
+                                yt_video_id=video_yt_id,
+                                stats=real_stats,
+                            )
+                            logger.info(f"[{canal}] Real stats collected for video {video_yt_id}: {real_stats.get('viewCount', '?')} views, {real_stats.get('likeCount', '?')} likes")
+                        else:
+                            db.insert_video_stats(
+                                video_id=video_id,
+                                yt_video_id=video_yt_id,
+                                stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
+                            )
+                            logger.info(f"[{canal}] Baseline stats saved for video {video_yt_id} (API returned mock/no data)")
+                    else:
+                        db.insert_video_stats(
+                            video_id=video_id,
+                            yt_video_id=video_yt_id,
+                            stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
+                        )
+                        logger.warning(f"[{canal}] Auth failed for stats fetch, saved baseline for video {video_yt_id}")
                 except Exception as stats_exc:
-                    logger.warning(f"[{canal}] Failed to save baseline stats: {stats_exc}")
+                    logger.warning(f"[{canal}] Failed to collect post-upload stats: {stats_exc}")
+                    try:
+                        db.insert_video_stats(
+                            video_id=video_id,
+                            yt_video_id=video_yt_id,
+                            stats={"viewCount": 0, "likeCount": 0, "commentCount": 0},
+                        )
+                    except Exception:
+                        pass
 
                 # ── Post-upload: schedule lifecycle promotion actions ──
                 try:

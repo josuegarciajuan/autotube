@@ -238,8 +238,8 @@ class YouTubeStatsFetcher:
                 result["channel_updated"] = True
                 result["channel_stats"] = channel_stats
 
-        # Video stats
-        videos = db.get_videos(channel_id=channel["id"] if channel else None)
+        # Video stats — use high limit to cover all videos, not just the 50 most recent
+        videos = db.get_videos(channel_id=channel["id"] if channel else None, limit=10000)
         for v in videos:
             yt_id = v.get("yt_video_id")
             if not yt_id:
@@ -259,7 +259,7 @@ class YouTubeStatsFetcher:
         # Shorts stats
         result["shorts_updated"] = 0
         if channel:
-            shorts = db.get_shorts(channel_id=channel["id"], status="published")
+            shorts = db.get_shorts(channel_id=channel["id"], status="published", limit=10000)
             for s in shorts:
                 yt_id = s.get("youtube_id")
                 if not yt_id:

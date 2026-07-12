@@ -186,6 +186,35 @@ def sync_youtube(channel_id: int):
     }
 
 
+@router.post("/{channel_id}/collect-stats")
+def collect_channel_stats(channel_id: int):
+    """Recolecta stats de YouTube para un solo canal (videos, shorts, canal).
+
+    Útil para refrescar stats de un canal específico sin ejecutar
+    la recolección global de todos los canales.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    from pipeline.youtube_stats import YouTubeStatsFetcher
+
+    fetcher = YouTubeStatsFetcher(ch["slug"])
+    result = fetcher.collect_and_store(db)
+
+    if "error" in result:
+        raise HTTPException(502, result["error"])
+
+    return {
+        "ok": True,
+        "slug": ch["slug"],
+        "videos_updated": result.get("videos_updated", 0),
+        "shorts_updated": result.get("shorts_updated", 0),
+        "channel_updated": result.get("channel_updated", False),
+    }
+
+
 @router.post("/{channel_id}/generate-profile")
 def generate_channel_profile(channel_id: int):
     """Generate banner, avatar, and description for a channel via Pollo AI.

@@ -698,11 +698,34 @@ def run_job(
                     except Exception:
                         pass
                 
+                # ── Post-upload: real YouTube stats snapshot ──
                 try:
-                    db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id,
-                                         stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
-                except Exception:
-                    pass
+                    from pipeline.youtube_stats import YouTubeStatsFetcher
+                    fetcher = YouTubeStatsFetcher(canal)
+                    if fetcher.authenticate():
+                        real_stats = fetcher.get_video_stats(yt_video_id)
+                        if real_stats and not real_stats.get("is_mock"):
+                            db.insert_video_stats(
+                                video_id=video_id,
+                                yt_video_id=yt_video_id,
+                                stats=real_stats,
+                            )
+                            logger.info("[%s] Real stats collected for video %s: %s views", canal, yt_video_id, real_stats.get('viewCount', '?'))
+                        else:
+                            db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id,
+                                                 stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
+                            logger.info("[%s] Baseline stats saved (API returned mock/no data)", canal)
+                    else:
+                        db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id,
+                                             stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
+                        logger.warning("[%s] Auth failed for stats fetch, saved baseline", canal)
+                except Exception as stats_exc:
+                    logger.warning("[%s] Failed to collect post-upload stats: %s", canal, stats_exc)
+                    try:
+                        db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id,
+                                             stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
+                    except Exception:
+                        pass
                 logger.info("UPLOADED: %s", yt_url)
             else:
                 logger.error("Upload failed — video saved locally")
