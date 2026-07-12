@@ -19,17 +19,37 @@ CHANNELS = {
     "canal2": "canal2",
     "canal3": "canal3",
     "canal4": "canal4",
+    "canal5": "canal5",
 }
 
 
 def regen_channel(slug: str) -> dict:
     """Regenerate templates for a single channel using config bridge (honours panel voice)."""
     from config.config_bridge import get_channel_config
+    from database.db_extended import ExtendedDatabase
+    import json
+
     config = get_channel_config(slug)
 
     from pipeline.template_generator import TemplateGenerator
     gen = TemplateGenerator(slug, channel_config=config)
     results = gen.generate_all()
+
+    # Register generated templates in DB so the panel can see them
+    db = ExtendedDatabase()
+    ch = db.get_channel_by_slug(slug)
+    if ch:
+        for seg_type, video_path in results.items():
+            if video_path and Path(video_path).exists():
+                db.upsert_channel_template(
+                    channel_id=ch["id"],
+                    segment_type=seg_type,
+                    video_path=str(video_path),
+                    image_path=None,
+                    config_json=json.dumps({}),
+                )
+                logger.info("  📋 DB registered: %s → channel_templates", seg_type)
+
     return results
 
 

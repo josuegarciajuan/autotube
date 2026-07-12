@@ -270,6 +270,8 @@ def run_job(
     action: str = "generate_and_upload",
     test_mode: bool = False,
     upload: bool = True,
+    source_mode: str = "original",
+    viral_candidate_id: int = None,
 ) -> bool:
     """Run the complete video generation pipeline as a standalone process.
 
@@ -423,8 +425,8 @@ def run_job(
             canal=canal,
             db_video_id=video_id,
             progress_callback=_progress_to_db,
-            source_mode=args.source_mode,
-            viral_candidate_id=args.viral_candidate_id,
+            source_mode=source_mode,
+            viral_candidate_id=viral_candidate_id,
         )
         if test_mode:
             orch.config = config
@@ -803,6 +805,8 @@ def main():
         action=args.action,
         test_mode=args.test_mode,
         upload=not args.no_upload,
+        source_mode=args.source_mode,
+        viral_candidate_id=args.viral_candidate_id,
     )
 
     logger.info("Worker finished: success=%s", success)
