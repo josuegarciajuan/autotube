@@ -163,12 +163,9 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v5 schema applied")
 
-    # Run v6 schema (viral mirror support)
-    schema_v6 = Path(__file__).parent / "schema_v6.sql"
-    if schema_v6.exists():
-        with open(schema_v6) as f:
-            conn.executescript(f.read())
-        logger.info("Migration: v6 schema applied")
+    # Run v6 schema (viral mirror support) — idempotent per-column ALTER
+    _migrate_v6(conn, logger)
+
 
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
@@ -617,6 +614,77 @@ def _migrate_content_schedules(db_path: str = None):
     
     conn.commit()
     conn.close()
+
+
+def _migrate_v6(conn, logger):
+    """Idempotent v6 migration: add viral columns to raw_content and source_mode to planned_slots.
+
+    Uses per-column existence checks (PRAGMA table_info) to avoid "duplicate column" errors.
+    """
+    import sqlite3
+
+    # ── raw_content viral columns ──────────────────────────────
+    existing_rc = {row[1] for row in conn.execute("PRAGMA table_info(raw_content)").fetchall()}
+    viral_columns = [
+        ("source_mode", "TEXT DEFAULT 'original'"),
+        ("viral_original_title", "TEXT"),
+        ("viral_original_description", "TEXT"),
+        ("viral_original_thumbnail_url", "TEXT"),
+        ("viral_original_video_url", "TEXT"),
+        ("viral_views", "INTEGER DEFAULT 0"),
+        ("viral_upload_date", "TEXT"),
+        ("viral_duration_sec", "INTEGER DEFAULT 0"),
+        ("viral_channel_name", "TEXT"),
+        ("viral_score", "REAL DEFAULT 0.0"),
+        ("viral_script_es", "TEXT"),
+        ("viral_meta_json", "TEXT"),
+    ]
+    added = 0
+    for col_name, col_def in viral_columns:
+        if col_name not in existing_rc:
+            try:
+                conn.execute(f"ALTER TABLE raw_content ADD COLUMN {col_name} {col_def}")
+                added += 1
+            except sqlite3.OperationalError as e:
+                logger.debug("v6 raw_content.%s: %s", col_name, e)
+
+    # Create indexes for viral queries (idempotent)
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_raw_source_mode ON raw_content(source_mode)",
+        "CREATE INDEX IF NOT EXISTS idx_raw_viral_score ON raw_content(viral_score)",
+    ]:
+        try:
+            conn.execute(idx_sql)
+        except sqlite3.OperationalError:
+            pass
+
+    if added > 0:
+        logger.info("Migration v6: added %d viral columns to raw_content", added)
+    else:
+        logger.debug("Migration v6: viral columns already present in raw_content")
+
+    # ── planned_slots source_mode ──────────────────────────────
+    existing_ps = {row[1] for row in conn.execute("PRAGMA table_info(planned_slots)").fetchall()}
+    if "source_mode" not in existing_ps:
+        try:
+            conn.execute("ALTER TABLE planned_slots ADD COLUMN source_mode TEXT DEFAULT 'original'")
+            logger.info("Migration v6: added source_mode column to planned_slots")
+        except sqlite3.OperationalError as e:
+            logger.debug("v6 planned_slots.source_mode: %s", e)
+
+    # ── shorts_planned_slots source_mode ───────────────────────
+    try:
+        existing_sps = {row[1] for row in conn.execute("PRAGMA table_info(shorts_planned_slots)").fetchall()}
+    except sqlite3.OperationalError:
+        existing_sps = set()
+    if "source_mode" not in existing_sps:
+        try:
+            conn.execute("ALTER TABLE shorts_planned_slots ADD COLUMN source_mode TEXT DEFAULT 'original'")
+            logger.info("Migration v6: added source_mode column to shorts_planned_slots")
+        except sqlite3.OperationalError as e:
+            logger.debug("v6 shorts_planned_slots.source_mode: %s", e)
+
+    conn.commit()
 
 
 class ExtendedDatabase(Database):

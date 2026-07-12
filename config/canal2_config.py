@@ -1190,4 +1190,3 @@ NICHE_KEYWORDS_ENG = [
     "paranormal stories real",
     "strange but true stories",
 ]
-]
