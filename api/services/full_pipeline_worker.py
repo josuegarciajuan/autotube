@@ -161,29 +161,41 @@ def _get_available_memory_mb() -> float:
             return -1.0
 
 
-def _check_ram_gate(logger) -> bool:
+def _check_ram_gate(logger, timeout_sec: int = 600) -> bool:
     """Check if there's enough RAM to proceed with generation.
 
     Uses MIN_FREE_FOR_RENDER_MB from config.settings as the threshold
-    (default 3000 MB). Delegates to pipeline.ram_governor which reads
-    MemAvailable — this correctly counts reclaimable page cache and
-    avoids false positives from prior render activity.
+    (default 3000 MB). Delegates to pipeline.ram_governor.wait_for_ram()
+    which blocks until enough RAM is free or timeout expires.
 
-    Returns True if OK, False if insufficient.
+    This avoids the previous hard abort — the pipeline now waits for
+    memory to free up (e.g. from other processes finishing), matching
+    the behaviour of the shorts scheduler.
+
+    Returns True if OK, False if timeout expires.
     """
     from config.settings import MIN_FREE_FOR_RENDER_MB
+    from pipeline.ram_governor import wait_for_ram, available_mb
 
     threshold = MIN_FREE_FOR_RENDER_MB
-    avail_mb = _get_available_memory_mb()
-    if avail_mb >= 0 and avail_mb < threshold:
-        logger.error(
-            "Aborting: insufficient RAM — only %.0f MB free (need ≥ %d MB)",
-            avail_mb, threshold,
-        )
-        return False
-    if avail_mb >= 0:
+    avail_mb = available_mb()
+    if avail_mb >= threshold:
         logger.info("RAM check: %.0f MB free — OK", avail_mb)
-    return True
+        return True
+
+    logger.warning(
+        "RAM gate: %.0f MB free < %d MB needed — waiting up to %ds for memory to free",
+        avail_mb, threshold, timeout_sec,
+    )
+    if wait_for_ram(threshold, timeout_sec=timeout_sec):
+        logger.info("RAM gate: memory freed — %.0f MB free", available_mb())
+        return True
+
+    logger.error(
+        "RAM gate: timeout after %ds waiting for %d MB — only %.0f MB free",
+        timeout_sec, threshold, available_mb(),
+    )
+    return False
 
 
 # ── Pre-flight cleanup ────────────────────────────────────────────
@@ -235,6 +247,15 @@ def _load_checkpoint(video_id: int, db) -> tuple[dict, str, int]:
     # Find the last completed phase
     last_phase = v.get("progress_phase") or ""
     last_idx = _PHASE_INDEX.get(last_phase, -1)
+    
+    # If progress_phase is invalid (e.g. "error" set by a prior failed run),
+    # scan checkpoint keys for the furthest completed phase
+    if last_idx < 0:
+        for phase in reversed(_PHASE_ORDER):
+            if phase in cp:
+                last_phase = phase
+                last_idx = _PHASE_INDEX[phase]
+                break
     
     return cp, last_phase, last_idx
 
@@ -488,7 +509,7 @@ def run_job(
                 "titulo_options": script.get("titulo_options", []),
             }, db)
         
-        titulo = script.get("titulo_selected", "Sin titulo")[:60] if script else ""
+        titulo = (script.get("titulo_selected") or script.get("titulo") or "Sin titulo")[:60] if script else ""
         logger.info("Script: '%s' (%d words)", titulo,
                     len(script.get("guion", "").split()) if script else 0)
 
@@ -499,9 +520,15 @@ def run_job(
             logger.info("Skipping TTS (loaded from checkpoint)")
             db.update_video(video_id, progress=40, progress_phase="tts")
         else:
+            # ── RAM gate before TTS (avoid wasting 5-9 min of compute) ──
+            if not _check_ram_gate(logger, timeout_sec=300):
+                db.update_job(job_id, status="failed", error_msg="RAM insuficiente (pre-TTS gate)")
+                db.update_video(video_id, status="error", progress_phase="script")
+                return False
+
             db.update_video(video_id, progress=30, progress_phase="tts")
             logger.info("Phase 2/6: Generating TTS audio...")
-            
+
             audio_data = orch.phase_tts(script, job_id=job_id)
             if not audio_data:
                 error_msg = "Fallo la generacion de voz (TTS)"
@@ -524,9 +551,9 @@ def run_job(
                 audio_dur = int(ts[-1].get("end_ms", 0) / 1000)
         logger.info("TTS: %ds audio", audio_dur)
 
-        # ── RAM gate before heavy phases ──────────────────────
+        # ── RAM gate before heavy phases (media + video assembly) ──
         if not _check_ram_gate(logger):
-            db.update_job(job_id, status="failed", error_msg="RAM insuficiente (pre-render gate)")
+            db.update_job(job_id, status="failed", error_msg="RAM insuficiente tras timeout (pre-render gate)")
             db.update_video(video_id, status="error", progress_phase="tts")
             return False
 

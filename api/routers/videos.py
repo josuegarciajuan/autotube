@@ -197,9 +197,9 @@ async def resume_video(video_id: int, background_tasks: BackgroundTasks):
     job_id = db.create_job(channel_id, "generate_and_upload", video_id)
     
     if USE_SUBPROCESS_WORKER:
-        # Note: resume in subprocess mode = full regeneration
-        # The worker runs run_full_pipeline which doesn't support partial resume.
-        # This is acceptable because the subprocess worker is more robust.
+        # Resume in subprocess mode: the spawned full_pipeline_worker.py
+        # loads checkpoint_data and progress_phase from the DB and
+        # skips already-completed phases (scrape/script/TTS).
         asyncio.create_task(
             start_generation_job_subprocess(
                 job_id=job_id,
