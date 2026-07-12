@@ -1,4 +1,4 @@
-/** UpcomingExecutions — Show all FUTURE pending slots (videos + shorts) for next 7 days.
+/** UpcomingExecutions — Show today's FUTURE pending slots (videos + shorts).
  *  Clear table sorted by time, with countdown to the next execution.
  *  Filters: by channel, by type (videos/shorts/all).
  */
@@ -83,14 +83,16 @@ export default function UpcomingExecutions() {
 
       for (const day of (week.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()) {
+          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()
+              && (s.scheduled_at || '').slice(0, 10) === todayUtc) {
             allSlots.push({ ...s, kind: 'video' })
           }
         }
       }
       for (const day of (shortsWeek.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()) {
+          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()
+              && (s.scheduled_at || '').slice(0, 10) === todayUtc) {
             allSlots.push({ ...s, kind: 'short' })
           }
         }
