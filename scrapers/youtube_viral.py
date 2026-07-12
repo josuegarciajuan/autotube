@@ -66,14 +66,20 @@ so the result is NOT a direct translation — it's a fresh adaptation that prese
 emotional arc, and search keywords but reads like original native Spanish content.
 
 RULES:
-1. Translate accurately first, preserving all factual content, names, and numbers.
-2. Then rewrite ~30% of words using synonyms, different sentence structures, and regional
+1. Translate accurately first, preserving all factual content, dates, and numbers.
+2. CRITICAL — REMOVE or REPLACE any host/narrator/creator/presenter names (e.g. "Danny Trejo",
+   "Joe Rogan", "MrBeast", "Johnny Harris", any channel name or on-screen personality).
+   Historical figures and subjects of the story (e.g. "Cleopatra", "Einstein") should be kept.
+   The adapted script must NOT sound like it was narrated by, written by, or associated with
+   the original content creator. Replace host references with neutral phrasing like
+   "el documental", "los investigadores", "los expertos", "este video", or omit them entirely.
+3. Then rewrite ~30% of words using synonyms, different sentence structures, and regional
    Spanish variations. Change word order where natural.
-3. Keep the emotional tone and pacing of the original (if it builds suspense, keep it).
-4. Preserve SEO keywords — these must survive the paraphrasing (translate them but keep
+4. Keep the emotional tone and pacing of the original (if it builds suspense, keep it).
+5. Preserve SEO keywords — these must survive the paraphrasing (translate them but keep
    them as close equivalents).
-5. Output ONLY the final adapted Spanish text — no explanations, no markers, no prefixes.
-6. If the text contains [MUSIC], [APPLAUSE], or similar production markers, drop them."""
+6. Output ONLY the final adapted Spanish text — no explanations, no markers, no prefixes.
+7. If the text contains [MUSIC], [APPLAUSE], or similar production markers, drop them."""
 
 _ADAPT_DURATION_SYSTEM_PROMPT = """You are a video script editor. Your job: adapt a Spanish script
 to fit a target duration of {target_minutes}-{target_max} minutes.
@@ -379,6 +385,59 @@ class YouTubeViralScraper(BaseScraper):
             logger.debug("[%s] Error parsing yt-dlp result: %s", self.canal, e)
             return None
 
+    def _fetch_real_upload_date(self, video_url: str) -> datetime | None:
+        """Fetch the real upload date for a single video using yt-dlp without --flat-playlist.
+
+        --flat-playlist searches skip upload_date metadata. This method does a
+        dedicated yt-dlp call for a specific video URL to get the real date.
+
+        Returns:
+            datetime object (naive, UTC), or None if date cannot be determined.
+        """
+        if not video_url:
+            return None
+
+        cmd = [
+            _YTDLP_BIN,
+            video_url,
+            "--dump-json",
+            "--skip-download",
+            "--no-warnings",
+            "--no-check-certificate",
+            "--user-agent", random.choice(_USER_AGENTS),
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            data = json.loads(proc.stdout.strip()) if proc.stdout.strip() else {}
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+            logger.debug("[%s] _fetch_real_upload_date failed for %s: %s", self.canal, video_url, e)
+            return None
+
+        # Parse upload_date (yt-dlp format: YYYYMMDD)
+        upload_date_str = str(data.get("upload_date", "") or "")
+        if upload_date_str and len(upload_date_str) == 8:
+            try:
+                return datetime.strptime(upload_date_str, "%Y%m%d")
+            except ValueError:
+                pass
+
+        # Fallback: try timestamp
+        upload_timestamp = data.get("timestamp")
+        if upload_timestamp:
+            try:
+                return datetime.fromtimestamp(float(upload_timestamp))
+            except (ValueError, TypeError, OSError):
+                pass
+
+        return None
+
     def _build_queries(self) -> list[str]:
         """Build search queries.
 
@@ -445,6 +504,51 @@ class YouTubeViralScraper(BaseScraper):
         # Sort by viral_score descending, take top N
         all_candidates.sort(key=lambda x: x["viral_score"], reverse=True)
         top_candidates = all_candidates[:self.max_candidates]
+
+        # ── Second pass: fetch real dates for candidates with unknown age ──
+        # --flat-playlist often omits upload_date. For top candidates,
+        # we do a dedicated yt-dlp call (without --flat-playlist) to get
+        # the real upload date, then re-score and re-filter.
+        candidates_with_unknown_age = [
+            c for c in top_candidates
+            if c.get("hours_since_pub") == 168  # sentinel: date was unavailable
+        ]
+        if candidates_with_unknown_age:
+            logger.info("[%s] %d/%d candidates have unknown upload dates — fetching real dates...",
+                        self.canal, len(candidates_with_unknown_age), len(top_candidates))
+            for candidate in candidates_with_unknown_age[:10]:  # limit to top 10
+                real_date = self._fetch_real_upload_date(candidate.get("url", ""))
+                if real_date is not None:
+                    # Recompute hours_since_pub and re-check age filter
+                    upload_dt = real_date.replace(tzinfo=timezone.utc)
+                    hours = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
+                    candidate["hours_since_pub"] = round(hours, 1)
+                    candidate["upload_date"] = real_date.strftime("%Y%m%d")
+                    
+                    # Re-score with real date
+                    candidate["viral_score"] = round(
+                        candidate["views"] / max(hours, 1) * (0.7 if hours < 336 else 0.4), 1
+                    )
+                    
+                    # Filter out if too old
+                    if hours > self.max_age_days * 24 or hours <= 0:
+                        logger.info("[%s] Removed candidate after date verification: '%s' (age=%.1fh, max=%dh)",
+                                    self.canal, candidate.get("title", "")[:50], hours,
+                                    self.max_age_days * 24)
+                        top_candidates = [c for c in top_candidates if c.get("video_id") != candidate.get("video_id")]
+                    else:
+                        logger.info("[%s] Verified date for '%s': %.1fh old (score=%.0f)",
+                                    self.canal, candidate.get("title", "")[:50], hours, candidate["viral_score"])
+                else:
+                    # Could not get real date — candidate stays with penalty score
+                    # but we log a warning so operators can investigate
+                    logger.warning("[%s] Could not fetch real date for '%s' (%s) — "
+                                   "keeping with penalty score (168h assumed)",
+                                   self.canal, candidate.get("title", "")[:60],
+                                   candidate.get("url", "")[:60])
+
+        # Re-sort after date verification
+        top_candidates.sort(key=lambda x: x["viral_score"], reverse=True)
 
         # Cache
         self._cached_candidates = top_candidates

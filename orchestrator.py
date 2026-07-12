@@ -820,6 +820,7 @@ class PipelineOrchestrator:
                     self._emit_progress(65, "video", "Clonando miniatura viral (Vision AI + Pollo AI)...")
                     logger.info("[%s] VIRAL THUMB: Cloning from '%s'", self.canal, viral_thumb_url[:100])
                     from pipeline.viral_cloner import clone_thumbnail
+                    video_id_for_thumb = self.db_video_id or 0
                     thumbnail_path = clone_thumbnail(
                         original_thumbnail_url=viral_thumb_url,
                         channel_slug=self.canal,
@@ -828,9 +829,15 @@ class PipelineOrchestrator:
                         channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
                         script_text=script.get("guion", "")[:1500],
                         keywords=keywords if 'keywords' in dir() else [],
-                        video_id=self.db_video_id or 0,
+                        video_id=video_id_for_thumb,
                     )
                     logger.info("[%s] Viral thumbnail cloned: %s", self.canal, thumbnail_path)
+                    # Save raw base path for phase_metadata recompose (pre-F4 Pollo image)
+                    if video_id_for_thumb:
+                        _viral_raw_base = Path("output/thumbnails") / self.canal / f"viral_raw_{video_id_for_thumb}.jpg"
+                        if _viral_raw_base.exists():
+                            self._viral_raw_base_path = str(_viral_raw_base)
+                            logger.info("[%s] Saved viral raw base for metadata phase: %s", self.canal, self._viral_raw_base_path)
                 else:
                     self._emit_progress(65, "video", "Generando miniatura viral (Pollo AI)...")
                     # Collect scene images for thumbnail from media_assets (images only, not videos)
@@ -909,9 +916,11 @@ class PipelineOrchestrator:
                 "video_path": str(video_path),
                 "thumbnail_path": str(thumbnail_path),
                 "thumbnail_base_path": str(
-                    # Use raw Pollo image (before text/gradient) so phase_metadata
-                    # recomposes from scratch instead of double-stacking effects.
-                    getattr(self.thumbnail_maker, '_last_raw_base', None) or str(thumbnail_path)
+                    # Viral mode: use saved raw base from clone_thumbnail
+                    # Non-viral mode: use raw Pollo image from thumbnail_maker
+                    getattr(self, '_viral_raw_base_path', None) or
+                    getattr(self.thumbnail_maker, '_last_raw_base', None) or 
+                    str(thumbnail_path)
                 ),
                 "titulo": titulo_selected,
                 "video_id": video_id,

@@ -77,6 +77,73 @@ def _call_llm_json(config: Optional[SimpleNamespace], system: str, user: str, te
 
 # ── Title/Description Cloning ───────────────────────────────────────
 
+# Patterns that indicate a host/narrator/channel name in a title
+# These are removed because they reference the original creator, not subject matter
+_HOST_NAME_PATTERNS = [
+    # "with Name" / "con Nombre" patterns
+    (r'\|\s*[Ss]ecretos al descubierto con\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?', ''),
+    (r'\|\s*[A-Za-z\s]+ with\s+[A-Z][a-z]+\s*[A-Z][a-z]+(?:\s*[A-Z][a-z]+)?', ''),
+    (r'with\s+[A-Z][a-z]+\s*[A-Z][a-z]+(?:\s*[A-Z][a-z]+)?\s*$', ''),
+    (r'con\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?\s*$', ''),
+    # "| Show Name" patterns (remove network/channel show names after pipe)
+    (r'\|\s*(?:Mysteries\s*Unearthed|Unsolved\s*Mysteries|History\s*Channel\s*Presents|Discovery\s*Channel|National\s*Geographic)\s*.*$', ''),
+    # Clean up dangling pipes
+    (r'\s*\|\s*$', ''),
+    # Clean up double pipes
+    (r'\|\s*\|', '|'),
+]
+
+
+def _strip_host_names(title: str, original_channel: str = "") -> str:
+    """Remove host/narrator/creator names from a viral title.
+    
+    The original video's host or channel is NOT part of our content —
+    we only want the subject matter (the mystery, event, or topic).
+    
+    Also strips show names from networks/channels.
+    """
+    import re
+    
+    original = title
+    cleaned = title.strip()
+    
+    # Apply regex patterns for common host-name constructions
+    for pattern, replacement in _HOST_NAME_PATTERNS:
+        cleaned = re.sub(pattern, replacement, cleaned)
+    
+    # If we know the original channel name, remove it from title
+    if original_channel and original_channel.lower() in cleaned.lower():
+        # Remove channel name patterns like "| OriginalChannel", "- OriginalChannel", "by OriginalChannel"
+        cleaned = re.sub(
+            rf'[\|\-–—]\s*{re.escape(original_channel)}.*$',
+            '',
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            rf'by\s+{re.escape(original_channel)}\s*$',
+            '',
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    
+    # Clean up any remaining artifacts
+    cleaned = re.sub(r'\s*\|\s*$', '', cleaned)  # trailing pipe
+    cleaned = re.sub(r'\s*-\s*$', '', cleaned)   # trailing dash
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)     # double spaces
+    cleaned = cleaned.strip()
+    
+    # Ensure the title is not completely stripped
+    if not cleaned or len(cleaned) < 10:
+        logger.warning("_strip_host_names: title stripped too aggressively, keeping original: '%s'", original)
+        return original
+    
+    if cleaned != original:
+        logger.info("_strip_host_names: stripped host name — '%s' → '%s'", original[:80], cleaned[:80])
+    
+    return cleaned
+
+
 def clone_title_description(
     viral_meta_json: str,
     channel_slug: str,
@@ -108,7 +175,12 @@ def clone_title_description(
 
     translated_title = viral_meta.get("translated_title", "")
     translated_desc = viral_meta.get("translated_description", "")
+    original_channel = viral_meta.get("original_channel", "")
     block_texts = [b.get("text", "") for b in viral_meta.get("blocks", [])]
+
+    # ── Strip host/creator names from title ──────────────────
+    if translated_title:
+        translated_title = _strip_host_names(translated_title, original_channel)
 
     # If no translated title, try to rebuild from the script text
     if not translated_title and block_texts:
@@ -117,23 +189,42 @@ def clone_title_description(
         if len(first_sentence) > 20:
             translated_title = first_sentence
 
-    # Build description from script blocks if no translated description
-    if not translated_desc and block_texts:
+    # ── Fix description: detect and replace English fragments ──
+    # The scraper may fall back to the original English description.
+    # We detect English content and rebuild from translated script blocks.
+    _ENGLISH_MARKERS = [
+        "from ", "into ", "through ", "with ", "the ", "and ", "that ",
+        "this ", "have ", "been ", "will ", "would ", "could ", "should ",
+        "discover", "uncover", "reveal", "ancient", "history",
+    ]
+    desc_is_english = (
+        translated_desc
+        and any(
+            translated_desc.lower().startswith(m) or m in translated_desc.lower()[:200]
+            for m in _ENGLISH_MARKERS[:5]
+        )
+    )
+
+    if (not translated_desc or desc_is_english) and block_texts:
+        if desc_is_english:
+            logger.warning("[%s] clone_title_description: description appears to be in English — rebuilding from script blocks", channel_slug)
         desc_lines = []
         for block in viral_meta.get("blocks", []):
-            text = block.get("text", "")
+            text = block.get("text", "") if isinstance(block, dict) else block
             if text and len(text) > 30:
                 # Take first 2 sentences of each block
                 sentences = text.split(".")
                 desc_lines.append(". ".join(sentences[:2]) + ".")
                 if len(desc_lines) >= 4:
                     break
-        translated_desc = "\n\n".join(desc_lines)
+        if desc_lines:
+            translated_desc = "\n\n".join(desc_lines)
+            logger.info("[%s] Rebuilt description from %d blocks (%d chars)", channel_slug, len(desc_lines), len(translated_desc))
 
     # Generate tags from keyword extraction
     tags = _extract_tags_from_script(block_texts, channel_config)
 
-    # Build thumbnail overlay text (short punchy phrase from title)
+    # Build thumbnail overlay text (short punchy phrase from title, without names)
     thumbnail_text = translated_title[:40] if translated_title else channel_tagline[:40]
 
     # Generate alternative titles by paraphrasing
@@ -268,6 +359,15 @@ def clone_thumbnail(
         logger.warning("[%s] clone_thumbnail: Step 4 FAILED — Pollo AI generation failed, falling back to normal pipeline", canal_slug)
         return None
     logger.info("[%s] clone_thumbnail: Step 4 (Pollo) done in %.1fs → %s", canal_slug, time.time() - t4, pollo_result)
+
+    # Save raw base (pre-F4) copy for later recomposition with overlay text.
+    # phase_metadata() needs the raw Pollo image to re-compose F4 with the
+    # final SEO text overlay, without regenerating via Pollo AI.
+    raw_base_path = _THUMB_DIR / canal_slug / f"viral_raw_{video_id}.jpg" if video_id else None
+    if raw_base_path:
+        import shutil
+        shutil.copy2(pollo_result, raw_base_path)
+        logger.info("[%s] clone_thumbnail: Raw base saved → %s", canal_slug, raw_base_path)
 
     # Step 5: Apply channel composition (F4 from thumbnail_maker)
     t5 = time.time()
@@ -437,19 +537,42 @@ def _apply_channel_composition(
     """Apply F4 composition (channel-specific overlays) to the generated image.
 
     Reuses the existing thumbnail_maker._compose_final() logic.
+    Loads the actual channel config so overlays match the channel style.
     """
     try:
         from pipeline.thumbnail_maker import ThumbnailMaker
-        from types import SimpleNamespace
+        from config.config_bridge import get_channel_config
 
-        # Create a minimal config for ThumbnailMaker
+        # Load REAL channel config so overlays match the channel style.
+        # Previously hardcoded RESCUE_MAYDAY=True and MEDICAL_ECG=True
+        # which added irrelevant banners to non-rescue/non-medical channels.
+        channel_config = get_channel_config(channel_slug)
+        
+        # Build a config namespace that preserves the channel's overlay settings
+        # while adding any required defaults
+        from types import SimpleNamespace
         maker_config = SimpleNamespace(
-            THUMBNAIL_WIDTH=1280,
-            THUMBNAIL_HEIGHT=720,
-            THUMBNAIL_FONT_SIZE=56,
-            THUMBNAIL_BORDER_WIDTH=5,
-            THUMBNAIL_RESCUE_MAYDAY=True,
-            THUMBNAIL_MEDICAL_ECG=True,
+            THUMBNAIL_WIDTH=getattr(channel_config, "THUMBNAIL_WIDTH", 1280),
+            THUMBNAIL_HEIGHT=getattr(channel_config, "THUMBNAIL_HEIGHT", 720),
+            THUMBNAIL_FONT_SIZE=getattr(channel_config, "THUMBNAIL_FONT_SIZE", 56),
+            THUMBNAIL_BORDER_WIDTH=getattr(channel_config, "THUMBNAIL_BORDER_WIDTH", 5),
+            THUMBNAIL_FONT_FAMILY=getattr(channel_config, "THUMBNAIL_FONT_FAMILY", "DejaVuSans-Bold"),
+            THUMBNAIL_BORDER_COLOR=getattr(channel_config, "THUMBNAIL_BORDER_COLOR", "#CC0000"),
+            THUMBNAIL_SHOW_4K_BADGE=getattr(channel_config, "THUMBNAIL_SHOW_4K_BADGE", True),
+            THUMBNAIL_TEXT_STROKE_WIDTH=getattr(channel_config, "THUMBNAIL_TEXT_STROKE_WIDTH", 0),
+            THUMBNAIL_TEXT_STROKE_COLOR=getattr(channel_config, "THUMBNAIL_TEXT_STROKE_COLOR", "#000000"),
+            THUMBNAIL_VISUAL_STYLE=getattr(channel_config, "THUMBNAIL_VISUAL_STYLE", "dark_cinematic"),
+            THUMBNAIL_MANUAL_STYLE=getattr(channel_config, "THUMBNAIL_MANUAL_STYLE", None),
+            COLOR_PALETTE=getattr(channel_config, "COLOR_PALETTE", {}),
+            CANAL_DISPLAY_NAME=getattr(channel_config, "CANAL_DISPLAY_NAME", ""),
+            THUMBNAILS_DIR=getattr(channel_config, "THUMBNAILS_DIR", "output/thumbnails"),
+            # ── Overlays: use channel config, NEVER hardcode to True ──
+            THUMBNAIL_RESCUE_MAYDAY=getattr(channel_config, "THUMBNAIL_RESCUE_MAYDAY", False),
+            THUMBNAIL_RESCUE_COORDINATES=getattr(channel_config, "THUMBNAIL_RESCUE_COORDINATES", False),
+            THUMBNAIL_RESCUE_SIN_SENAL=getattr(channel_config, "THUMBNAIL_RESCUE_SIN_SENAL", False),
+            THUMBNAIL_MEDICAL_ECG=getattr(channel_config, "THUMBNAIL_MEDICAL_ECG", False),
+            THUMBNAIL_MEDICAL_CROSS=getattr(channel_config, "THUMBNAIL_MEDICAL_CROSS", False),
+            THUMBNAIL_MEDICAL_DIAGNOSIS=getattr(channel_config, "THUMBNAIL_MEDICAL_DIAGNOSIS", False),
         )
 
         maker = ThumbnailMaker(config=maker_config)

@@ -497,6 +497,26 @@ class ThumbnailMaker:
 
         # ── Marketing text overlay ───────────────────────────
         text_for_visual = overlay_text.strip() if overlay_text else brief.text_overlay
+        
+        # Validate overlay text for thumbnail readability:
+        # - Truncate to max 60 chars (too long = illegible on 1280x720)
+        # - Remove pipe separators "|" (YouTube title convention, not thumbnail)
+        # - Strip trailing punctuation that looks bad UPPERCASE
+        if len(text_for_visual) > 60:
+            # Truncate at word boundary
+            truncated = text_for_visual[:57].rsplit(" ", 1)[0]
+            text_for_visual = truncated
+            logger.info("_compose_final: truncated overlay text from %d → %d chars",
+                        len(overlay_text) if overlay_text else len(brief.text_overlay),
+                        len(text_for_visual))
+        
+        # Clean pipe separators (used in YouTube titles, not visual overlays)
+        if "|" in text_for_visual:
+            text_for_visual = text_for_visual.split("|")[0].strip()
+        
+        # Strip trailing punctuation that looks odd in uppercase thumbnails
+        text_for_visual = text_for_visual.rstrip(".,;:-")
+        
         text_style = style.get("text_style", {})
         use_uppercase = text_style.get("uppercase", True)
         if use_uppercase:
