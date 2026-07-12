@@ -170,10 +170,18 @@ export default function VideoEditor() {
           <Link to={`/channels/${video.channel_id}`} className="text-xs sm:text-sm text-gray-500 hover:text-white flex items-center gap-1 mb-1">
             <ArrowLeft size={14} /> Volver al canal
           </Link>
-          <h2 className="font-display text-lg sm:text-xl font-bold text-white flex items-center gap-2">
-            <Edit3 size={18} className="text-neon-red" />
-            {video.titulo_final || 'Video sin título'}
-          </h2>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="font-display text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+              <Edit3 size={18} className="text-neon-red" />
+              {video.titulo_final || 'Video sin título'}
+            </h2>
+            {video.source_url && (
+              <a href={video.source_url} target="_blank" rel="noopener noreferrer"
+                 className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 bg-purple-500/10 px-2 py-0.5 rounded-full border border-purple-500/20 transition-colors">
+                <ExternalLink size={11} /> Ver original
+              </a>
+            )}
+          </div>
           <div className="flex items-center gap-2 mt-1">
             <span className={`badge ${statusBadge(video.status || 'draft')}`}>{statusLabel(video.status || 'draft')}</span>
             {video.duracion_seg && <span className="text-xs text-gray-500">{formatDuration(video.duracion_seg)}</span>}

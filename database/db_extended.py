@@ -866,6 +866,7 @@ class ExtendedDatabase(Database):
                     "privacy_status", "status", "progress", "progress_phase",
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
                     "script_id", "channel_id", "checkpoint_data", "timing_data",
+                    "source_url",
                     # ── Scheduled publishing ──
                     "publish_mode", "target_public_at", "published_at",
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
