@@ -632,58 +632,90 @@ class YouTubeViralScraper(BaseScraper):
             source, url, title, text, subreddit, score, AND additional
             viral-specific keys for insert_raw_content_viral().
         """
+        t0 = time.time()
         logger.info("[%s] ========== VIRAL SCRAPE START ==========", self.canal)
+        logger.info("[%s] Config: min_views=%d, max_age_days=%d, target_duration=[%d-%d]min, queries_limit=%d",
+                    self.canal, self.min_views, self.max_age_days,
+                    self.target_duration_min, self.target_duration_max, self.max_queries)
 
         items = []
 
         # Step 1: Discover candidates
+        t1 = time.time()
         candidates = self._discover_candidates(force_refresh=False)
         if not candidates:
-            logger.info("[%s] No viral candidates found", self.canal)
+            logger.info("[%s] No viral candidates found after %.1fs", self.canal, time.time() - t0)
             return items
+        logger.info("[%s] Step 1 (discover): %d candidates in %.1fs", self.canal, len(candidates), time.time() - t1)
 
         # Step 2: Process the top candidate (one per scrape call, to save resources)
         top = candidates[0]
-        logger.info("[%s] Processing candidate: '%s' (score=%.1f)", self.canal, top["title"][:60], top["viral_score"])
+        logger.info("[%s] Processing candidate: '%s'", self.canal, top["title"][:80])
+        logger.info("[%s]   views=%,d  score=%.1f  age=%.1fh  duration=%ds  channel='%s'",
+                    self.canal, top["views"], top["viral_score"],
+                    top["hours_since_pub"], top["duration_sec"], top["channel_name"])
 
         # Check if already in DB
         db = getattr(self, "_db", None)
         if db:
             existing = db.get_content_by_url(top["url"], self.canal)
             if existing:
-                logger.info("[%s] Candidate already in DB, skipping: %s", self.canal, top["title"][:40])
-                # Still return it so it shows up in get_viral_candidates
+                logger.info("[%s] Candidate already in DB (id=%d), skipping re-processing",
+                            self.canal, existing["id"])
                 return [existing]
 
         # Step 3: Download audio
+        t3 = time.time()
         video_url = top["url"]
         video_id = top["video_id"]
+        logger.info("[%s] Step 3: Downloading audio from %s...", self.canal, video_url[:80])
         audio_path = self._download_audio(video_url, video_id)
         if not audio_path:
-            logger.error("[%s] Audio download failed for %s — skipping", self.canal, video_id)
+            logger.error("[%s] Step 3 FAILED: Audio download failed for %s — skipping candidate", self.canal, video_id)
             return items
+        logger.info("[%s] Step 3 (download): done in %.1fs → %s", self.canal, time.time() - t3, audio_path)
 
         # Step 4: Transcribe (English → text)
+        t4 = time.time()
+        logger.info("[%s] Step 4: Transcribing audio with faster-whisper...", self.canal)
         transcript_en = self._transcribe(audio_path)
         if not transcript_en:
-            logger.warning("[%s] Transcription empty — using title + description as fallback", self.canal)
+            logger.warning("[%s] Step 4 WARNING: Transcription empty — using title+description as fallback", self.canal)
             transcript_en = f"{top['title']}. {top.get('description', '')}"
+        else:
+            logger.info("[%s] Step 4 (transcribe): done in %.1fs → %d words EN",
+                        self.canal, time.time() - t4, len(transcript_en.split()))
 
         # Step 5: Translate + paraphrase
+        t5 = time.time()
+        logger.info("[%s] Step 5: Translating + paraphrasing (%d EN words → ES)...", self.canal, len(transcript_en.split()))
         translated_script, translated_title, translated_desc = self._translate_and_paraphrase(
             transcript_en, top["title"]
         )
         if not translated_script:
-            logger.error("[%s] Translation failed — using raw transcription as fallback", self.canal)
-            translated_script = transcript_en  # Will still be in English, but better than nothing
+            logger.error("[%s] Step 5 FAILED: Translation returned empty — using raw EN transcription", self.canal)
+            translated_script = transcript_en
+        else:
+            logger.info("[%s] Step 5 (translate): done in %.1fs → %d words ES, title='%s'",
+                        self.canal, time.time() - t5, len(translated_script.split()),
+                        (translated_title or "N/A")[:60])
 
         # Step 6: Adapt duration to channel config
+        t6 = time.time()
+        logger.info("[%s] Step 6: Adapting script duration to [%d-%d]min target...",
+                    self.canal, self.target_duration_min, self.target_duration_max)
         adapted_script = self._adapt_duration(translated_script)
         if not adapted_script:
             adapted_script = translated_script
+        logger.info("[%s] Step 6 (adapt): done in %.1fs → %d words (~%.1f min)",
+                    self.canal, time.time() - t6, len(adapted_script.split()),
+                    len(adapted_script.split()) / 150)
 
         # Step 7: Build block structure for TTS
         blocks = self._build_script_blocks(adapted_script)
+        logger.info("[%s] Step 7: Built %d blocks for TTS: %s",
+                    self.canal, len(blocks),
+                    [b["type"] for b in blocks])
 
         # Step 8: Construct metadata JSON (for viral_cloner use later)
         viral_meta = {
@@ -702,10 +734,9 @@ class YouTubeViralScraper(BaseScraper):
             "source": "youtube_viral",
             "url": top["url"],
             "title": translated_title or top["title"],
-            "text": transcript_en[:500],  # Store original EN snippet
+            "text": transcript_en[:500],
             "subreddit": top["channel_name"],
             "score": int(top["viral_score"]),
-            # Viral-specific fields
             "source_mode": "viral",
             "viral_original_title": top["title"],
             "viral_original_description": top.get("description", ""),
@@ -729,7 +760,11 @@ class YouTubeViralScraper(BaseScraper):
         except OSError:
             pass
 
-        logger.info("[%s] ========== VIRAL SCRAPE COMPLETE ==========", self.canal)
+        elapsed = time.time() - t0
+        logger.info("[%s] ========== VIRAL SCRAPE COMPLETE (%.1fs total) ==========", self.canal, elapsed)
+        logger.info("[%s] Result: script=%d words, title='%s', score=%.1f, blocks=%d",
+                    self.canal, len(adapted_script.split()),
+                    (translated_title or "N/A")[:60], top["viral_score"], len(blocks))
         return items
 
     def save_to_db(self, db) -> int:

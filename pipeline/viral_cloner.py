@@ -96,6 +96,7 @@ def clone_title_description(
             "thumbnail_text": str,
         }
     """
+    logger.info("[%s] clone_title_description: START", channel_slug)
     channel_config = get_channel_config(channel_slug)
     channel_name = getattr(channel_config, "CANAL_DISPLAY_NAME", "")
     channel_tagline = getattr(channel_config, "CANAL_TAGLINE", "")
@@ -142,13 +143,16 @@ def clone_title_description(
     # Generate alternative titles by paraphrasing
     alt_titles = _generate_alt_titles(translated_title, channel_config)
 
-    return {
+    result = {
         "selected_title": translated_title,
         "description": translated_desc,
         "tags": tags,
         "titles": alt_titles if alt_titles else [translated_title],
         "thumbnail_text": thumbnail_text,
     }
+    logger.info("[%s] clone_title_description: DONE — title='%s', %d tags, desc=%d chars",
+                channel_slug, translated_title[:60], len(tags), len(translated_desc))
+    return result
 
 
 def _extract_tags_from_script(block_texts: list[str], config: SimpleNamespace) -> list[str]:
@@ -225,32 +229,49 @@ def clone_thumbnail(
     channel_config = get_channel_config(channel_slug)
     canal_slug = channel_slug
 
+    logger.info("[%s] clone_thumbnail: START — original_url=%s", canal_slug, original_thumbnail_url[:100])
+
     # Step 1: Download original thumbnail
+    t1 = time.time()
     original_img_path = _download_thumbnail(original_thumbnail_url, canal_slug)
     if not original_img_path:
-        logger.warning("[%s] Could not download original thumbnail, skipping clone", canal_slug)
+        logger.warning("[%s] clone_thumbnail: Step 1 FAILED — could not download thumbnail, skipping clone", canal_slug)
         return None
+    logger.info("[%s] clone_thumbnail: Step 1 (download) done in %.1fs → %s",
+                canal_slug, time.time() - t1, original_img_path)
 
     # Step 2: Vision AI analysis
+    t2 = time.time()
+    logger.info("[%s] clone_thumbnail: Step 2 — Vision AI analyzing thumbnail composition...", canal_slug)
     vision_analysis = _analyze_thumbnail_vision(original_img_path, channel_config)
     if not vision_analysis:
-        logger.warning("[%s] Vision AI analysis failed, using simplified prompt", canal_slug)
+        logger.warning("[%s] clone_thumbnail: Step 2 WARNING — Vision AI analysis failed, using simplified prompt", canal_slug)
         vision_analysis = {"description": "a dramatic documentary-style YouTube thumbnail",
                            "objects": [], "colors": [], "composition": "", "text_overlay": ""}
+    else:
+        logger.info("[%s] clone_thumbnail: Step 2 (vision) done in %.1fs — objects=%s, colors=%s",
+                    canal_slug, time.time() - t2,
+                    vision_analysis.get("objects", [])[:3],
+                    vision_analysis.get("colors", [])[:3])
 
     # Step 3: Modify prompt for channel style
     modified_prompt = _modify_thumbnail_prompt(vision_analysis, channel_config, keywords or [])
+    logger.info("[%s] clone_thumbnail: Step 3 (modify prompt) — prompt=%s...", canal_slug, modified_prompt[:120])
 
     # Step 4: Generate with Pollo AI
+    t4 = time.time()
+    logger.info("[%s] clone_thumbnail: Step 4 — Pollo AI generating image...", canal_slug)
     from pipeline.ai_image_generator import AIImageGenerator
     generator = AIImageGenerator()
     pollo_result = generator.generate(modified_prompt, f"/tmp/viral_thumb_{canal_slug}_{int(time.time())}.jpg")
     if not pollo_result:
-        logger.warning("[%s] Pollo AI generation failed, falling back to normal thumbnail pipeline", canal_slug)
+        logger.warning("[%s] clone_thumbnail: Step 4 FAILED — Pollo AI generation failed, falling back to normal pipeline", canal_slug)
         return None
+    logger.info("[%s] clone_thumbnail: Step 4 (Pollo) done in %.1fs → %s", canal_slug, time.time() - t4, pollo_result)
 
     # Step 5: Apply channel composition (F4 from thumbnail_maker)
-    final_thumb = _apply_channel_composition(
+    t5 = time.time()
+    logger.info("[%s] clone_thumbnail: Step 5 — Applying channel composition (F4)...", canal_slug)
         base_image_path=str(pollo_result),
         channel_slug=canal_slug,
         channel_display_name=channel_display_name,
@@ -261,6 +282,8 @@ def clone_thumbnail(
         video_id=video_id,
     )
 
+    logger.info("[%s] clone_thumbnail: Step 5 (composition) done in %.1fs", canal_slug, time.time() - t5)
+    logger.info("[%s] clone_thumbnail: DONE → %s", canal_slug, final_thumb)
     return final_thumb
 
 

@@ -303,6 +303,7 @@ class PipelineOrchestrator:
         instead of calling the LLM script generator. Builds a compatible script
         dict for the rest of the pipeline.
         """
+        logger.info("[%s] VIRAL SCRIPT: Using viral candidate #%s", self.canal, self.viral_candidate_id or "auto")
         self._emit_progress(15, "script", "Preparando script viral traducido y adaptado...")
 
         # Get the viral candidate
@@ -310,23 +311,24 @@ class PipelineOrchestrator:
         if self.viral_candidate_id:
             viral_content = self.db.get_content_by_id(self.viral_candidate_id)
             if not viral_content or viral_content.get("source_mode") != "viral":
-                logger.warning("[%s] Viral candidate #%d not found or not viral, falling back",
+                logger.warning("[%s] VIRAL SCRIPT: Candidate #%d not found or not viral, falling back",
                                self.canal, self.viral_candidate_id)
                 viral_content = None
 
         if not viral_content:
-            # Pick the highest-score unused viral candidate
             candidates = self.db.get_viral_candidates(self.canal, limit=1)
             if candidates:
                 viral_content = candidates[0]
                 self.viral_candidate_id = viral_content["id"]
-                logger.info("[%s] Auto-selected viral candidate #%d: %s",
-                            self.canal, viral_content["id"], viral_content.get("viral_original_title", "")[:50])
+                logger.info("[%s] VIRAL SCRIPT: Auto-selected candidate #%d: '%s' (score=%.1f, views=%,d)",
+                            self.canal, viral_content["id"],
+                            viral_content.get("viral_original_title", "")[:60],
+                            viral_content.get("viral_score", 0),
+                            viral_content.get("viral_views", 0))
 
         if not viral_content:
-            logger.error("[%s] No viral candidates available — falling back to original mode", self.canal)
+            logger.warning("[%s] VIRAL SCRIPT: No viral candidates available — FALLING BACK to original mode", self.canal)
             self.source_mode = "original"
-            # Fall through to normal script generation
             content_items = self.db.get_unused_content(canal=self.canal, limit=5)
             if not content_items:
                 return None
@@ -815,6 +817,7 @@ class PipelineOrchestrator:
                 viral_thumb_url = script.get("_viral_original_thumbnail", "")
                 if self.source_mode == "viral" and viral_thumb_url:
                     self._emit_progress(65, "video", "Clonando miniatura viral (Vision AI + Pollo AI)...")
+                    logger.info("[%s] VIRAL THUMB: Cloning from '%s'", self.canal, viral_thumb_url[:100])
                     from pipeline.viral_cloner import clone_thumbnail
                     thumbnail_path = clone_thumbnail(
                         original_thumbnail_url=viral_thumb_url,
