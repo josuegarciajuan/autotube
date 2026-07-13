@@ -1100,7 +1100,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now'))", (channel_id, title, title[:60], hook_text, str(video_path), yt_id, result.get("url", "")))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, str(video_path), yt_id, result.get("url", "")))
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()

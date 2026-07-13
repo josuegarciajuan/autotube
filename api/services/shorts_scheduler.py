@@ -678,7 +678,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
         """INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text,
             status, file_path, youtube_id, youtube_url, published_at)
-           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now'))""",
+           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text,
          str(video_path), yt_id, result.get("url", "")),
     )
@@ -889,7 +889,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             """INSERT INTO shorts
                (channel_id, source_video_id, type, title, hook_title, hook_text,
                 start_time, end_time, status, file_path, youtube_id, youtube_url, published_at)
-               VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now'))""",
+               VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
             (channel_id, source_video_id, title, title[:60], hook_text,
              best_clip.get("start_time"), best_clip.get("end_time"),
              str(output_path), yt_id, result.get("url", "")),

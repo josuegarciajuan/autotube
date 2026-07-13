@@ -76,6 +76,8 @@ NICHO_PEAK_HOURS = {
 }
 
 # ── Por país/región: offset UTC para convertir hora local → UTC ──
+# NOTE: This table is currently unused by active code. All timezone
+# conversions use pytz.timezone(channel_config.PUBLISH_TIMEZONE) instead.
 COUNTRY_UTC_OFFSETS = {
     # Latinoamérica
     "mx": -6, "ar": -3, "co": -5, "pe": -5, "cl": -4, "ve": -4,

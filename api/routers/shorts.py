@@ -912,7 +912,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
         """INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text,
             status, file_path, youtube_id, youtube_url, published_at)
-           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now'))""",
+           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text,
          str(video_path), yt_id, result.get("url", "")),
     )

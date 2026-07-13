@@ -62,23 +62,12 @@ const SHORTS_TYPE_LABEL: Record<string, string> = {
 }
 
 // ── Helpers ────────────────────────────────────────────
-const TZ_OFFSET = 1  // GMT+1 (CET)
+// DB stores Europe/Madrid local time strings (e.g. "2026-07-13 21:00:00")
 
 function toLocalTime(ts: string | null | undefined): string {
   if (!ts) return '??:??'
-  let m = ts.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
-  if (m) {
-    const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
-    date.setHours(date.getHours() + TZ_OFFSET)
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-  }
-  m = ts.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
-  if (m) {
-    const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
-    date.setHours(date.getHours() + TZ_OFFSET)
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-  }
-  m = ts.match(/(\d{2}):(\d{2})/)
+  // Parse as local time — supported formats: "YYYY-MM-DD HH:MM:SS", "YYYY-MM-DDTHH:MM:SS", "HH:MM:SS"
+  const m = ts.match(/(\d{2}):(\d{2})/)
   return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
 }
 
@@ -236,7 +225,7 @@ export default function DailySchedule() {
           <Calendar size={18} className="text-neon-gold" />
           Planificacion Diaria
           <span className="text-xs text-gray-500 font-normal">
-            (horario GMT+1)
+             (Europe/Madrid)
           </span>
         </h3>
         <div className="flex flex-wrap gap-1.5">

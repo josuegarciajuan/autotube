@@ -235,8 +235,8 @@ class ShortsScheduler:
                    youtube_id = ?,
                    youtube_url = ?,
                    file_path = COALESCE(file_path, ?),
-                   published_at = datetime('now'),
-                   updated_at = datetime('now')
+                   published_at = datetime('now','localtime'),
+                   updated_at = datetime('now','localtime')
                WHERE id = ?""",
             (youtube_id, youtube_url, file_path, short_id),
         )
@@ -250,7 +250,7 @@ class ShortsScheduler:
             """UPDATE shorts
                SET status = 'failed',
                    error_message = ?,
-                   updated_at = datetime('now')
+                   updated_at = datetime('now','localtime')
                WHERE id = ?""",
             (error_message[:500], short_id),
         )
@@ -261,7 +261,7 @@ class ShortsScheduler:
         """Mark a short as being rendered."""
         conn = self._get_conn()
         conn.execute(
-            "UPDATE shorts SET status = 'rendering', updated_at = datetime('now') WHERE id = ?",
+            "UPDATE shorts SET status = 'rendering', updated_at = datetime('now','localtime') WHERE id = ?",
             (short_id,),
         )
         conn.commit()
@@ -271,7 +271,7 @@ class ShortsScheduler:
         """Mark a short as ready to upload."""
         conn = self._get_conn()
         conn.execute(
-            "UPDATE shorts SET status = 'ready', file_path = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE shorts SET status = 'ready', file_path = ?, updated_at = datetime('now','localtime') WHERE id = ?",
             (file_path, short_id),
         )
         conn.commit()
@@ -357,7 +357,7 @@ class ShortsScheduler:
             if k in allowed and v is not None:
                 fields.append(f"{k} = ?")
                 values.append(v)
-        fields.append("updated_at = datetime('now')")
+        fields.append("updated_at = datetime('now','localtime')")
         values.append(short_id)
 
         if not fields:

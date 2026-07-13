@@ -446,7 +446,7 @@ def migrate_v2(db_path: str = None):
             report_type TEXT NOT NULL,
             dimension TEXT,
             metric_value REAL NOT NULL,
-            fetched_at TEXT DEFAULT (datetime('now'))
+            fetched_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_vad_video ON video_analytics_detailed(video_id, report_type)")
@@ -1962,7 +1962,7 @@ class ExtendedDatabase(Database):
                    FROM content_schedules cs
                    JOIN channels c ON cs.channel_id = c.id
                    LEFT JOIN videos v ON cs.video_id = v.id
-                   WHERE cs.active = 1 AND cs.next_run_at > datetime('now')
+                   WHERE cs.active = 1 AND cs.next_run_at > datetime('now','localtime')
                    ORDER BY cs.next_run_at ASC LIMIT 8"""
             ).fetchall()
 
@@ -2807,7 +2807,7 @@ class ExtendedDatabase(Database):
                    FROM video_lifecycle_actions vla
                    JOIN channels c ON vla.channel_id = c.id
                    WHERE vla.status = 'pending'
-                     AND datetime(vla.scheduled_for) <= datetime('now')
+                     AND datetime(vla.scheduled_for) <= datetime('now','localtime')
                    ORDER BY vla.scheduled_for ASC
                    LIMIT 50""",
             ).fetchall()
@@ -2992,7 +2992,7 @@ class ExtendedDatabase(Database):
             if not fields:
                 return False
 
-            fields.append("updated_at = datetime('now')")
+            fields.append("updated_at = datetime('now','localtime')")
             values.append(channel_id)
             conn.execute(
                 f"UPDATE shorts_planning_config SET {', '.join(fields)} WHERE channel_id = ?",

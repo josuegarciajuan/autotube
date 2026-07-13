@@ -22,23 +22,18 @@ interface Slot {
 }
 
 // ── Timezone helper ──────────────────────────────────────
-const TZ_OFFSET = 1  // GMT+1 (CET) — fixed, no DST
+// DB stores Europe/Madrid local time strings (e.g. "2026-07-13 21:00:00")
 
-function toLocal(utcStr: string): string {
-  const match = utcStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
-  if (!match) return utcStr.slice(0, 5)
-  const [, year, month, day, hour, minute] = match.map(Number)
-  const date = new Date(Date.UTC(year, month - 1, day, hour, minute))
-  date.setHours(date.getHours() + TZ_OFFSET)
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+function toLocal(ts: string): string {
+  const match = ts.match(/(\d{2}):(\d{2})/)
+  return match ? `${match[1]}:${match[2]}` : ts.slice(0, 5)
 }
 
-function toLocalFull(utcStr: string): string {
-  const match = utcStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
-  if (!match) return utcStr
-  const [, year, month, day, hour, minute] = match.map(Number)
-  const date = new Date(Date.UTC(year, month - 1, day, hour, minute))
-  date.setHours(date.getHours() + TZ_OFFSET)
+function toLocalFull(ts: string): string {
+  // Parse "YYYY-MM-DD HH:MM:SS" as local time
+  const m = ts.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
+  if (!m) return ts
+  const date = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
   return date.toLocaleString('es-ES', {
     weekday: 'short', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
@@ -79,20 +74,20 @@ export default function UpcomingExecutions() {
 
       // Collect all future pending slots
       const allSlots: Slot[] = []
-      const todayUtc = new Date().toISOString().slice(0, 10)
+      const todayLocal = new Date().toLocaleDateString('sv-SE')  // YYYY-MM-DD in local timezone
 
       for (const day of (week.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()
-              && (s.scheduled_at || '').slice(0, 10) === todayUtc) {
+          if (s.status === 'pending' && new Date(s.scheduled_at.replace(' ', 'T')).getTime() > Date.now()
+              && (s.scheduled_at || '').slice(0, 10) === todayLocal) {
             allSlots.push({ ...s, kind: 'video' })
           }
         }
       }
       for (const day of (shortsWeek.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at + 'Z').getTime() > Date.now()
-              && (s.scheduled_at || '').slice(0, 10) === todayUtc) {
+          if (s.status === 'pending' && new Date(s.scheduled_at.replace(' ', 'T')).getTime() > Date.now()
+              && (s.scheduled_at || '').slice(0, 10) === todayLocal) {
             allSlots.push({ ...s, kind: 'short' })
           }
         }
@@ -134,7 +129,7 @@ export default function UpcomingExecutions() {
     groups.get(dateKey)!.push(s)
   }
 
-  const tzLabel = 'GMT+1'
+  const tzLabel = 'Europe/Madrid'
 
   if (loading) {
     return (
@@ -204,7 +199,7 @@ export default function UpcomingExecutions() {
       {Array.from(groups.entries()).map(([dateKey, daySlots]) => {
         const first = daySlots[0]
         const countdown = (() => {
-          const target = new Date(first.scheduled_at + 'Z')
+          const target = new Date(first.scheduled_at.replace(' ', 'T'))
           const diff = target.getTime() - now
           if (diff <= 0) return 'AHORA'
           const mins = Math.floor(diff / 60000)

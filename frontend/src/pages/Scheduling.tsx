@@ -30,13 +30,10 @@ interface PlanningConfig {
 }
 
 // ── Timezone ─────────────────────────────────────────────
-const TZ_OFFSET = 1  // GMT+1 (CET)
-function toLocal(utcStr: string): string {
-  const m = utcStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
-  if (!m) return utcStr.slice(0, 5)
-  const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
-  date.setHours(date.getHours() + TZ_OFFSET)
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+// DB stores Europe/Madrid local time strings (e.g. "2026-07-13 21:00:00")
+function toLocal(ts: string): string {
+  const m = ts.match(/(\d{2}):(\d{2})/)
+  return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
 }
 
 const CHANNEL_COLORS: Record<string, { dot: string; text: string; bg: string; border: string }> = {
@@ -147,7 +144,7 @@ function TodayStatus() {
     return <p className="text-xs text-gray-500 text-center py-4">Sin actividad hoy.</p>
   }
 
-  const tzLabel = 'GMT+1'
+  const tzLabel = 'Europe/Madrid'
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -310,7 +307,7 @@ export default function Scheduling() {
       <section className="glass rounded-xl p-5 space-y-3">
         <h3 className="font-display text-base font-semibold text-white flex items-center gap-2">
           <Clock size={16} className="text-neon-cyan" /> Estado de Hoy
-          <span className="text-xs text-gray-500 font-normal">(GMT+1)</span>
+           <span className="text-xs text-gray-500 font-normal">(Europe/Madrid)</span>
         </h3>
         <TodayStatus />
       </section>

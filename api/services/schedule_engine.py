@@ -16,7 +16,7 @@ from typing import Optional
 
 logger = logging.getLogger("autotube.schedule_engine")
 
-# ── Target windows (CEST, center of jitter range) ─────────────
+# ── Target windows (Europe/Madrid local time) ──────────────
 TARGET_WINDOWS = [
     (16, 0),    # afternoon slot (target ~16:00)
     (21, 30),   # prime time slot (target ~21:30)
@@ -351,7 +351,7 @@ def get_day_schedule_summary(date_str: str = None, db=None) -> str:
     if not slots:
         return f"No hay horarios programados para {date_str}."
 
-    lines = [f"Horario {date_str} (CEST)"]
+    lines = [f"Horario {date_str} (Europe/Madrid)"]
     status_emoji = {
         "pending": "-", "running": "*", "completed": "+", "cancelled": "x",
     }

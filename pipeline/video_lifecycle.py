@@ -156,7 +156,7 @@ class VideoLifecycleManager:
             try:
                 target_dt = _dt.fromisoformat(target_public_at)
             except (ValueError, TypeError):
-                target_dt = _dt.now(timezone.utc) + _td(hours=2)  # fallback
+                target_dt = _dt.now() + _td(hours=2)  # fallback — uses Europe/Madrid local time
             playlist_at = (target_dt + _td(minutes=1)).isoformat()
             self.db.create_lifecycle_action(
                 video_id=db_video_id,

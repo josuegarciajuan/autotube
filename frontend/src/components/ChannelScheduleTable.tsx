@@ -194,7 +194,7 @@ export default function ChannelScheduleTable() {
                   {firstNext.channel_name}
                 </span>
                 {' · '}
-                                {fmtTime(firstNext.next_slot_time)} GMT+1
+                                {fmtTime(firstNext.next_slot_time)} Europe/Madrid
               </p>
             </div>
           </div>
