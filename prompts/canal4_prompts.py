@@ -193,8 +193,11 @@ def build_content_only_prompt(config=None, previous_blocks: list = None, word_gu
             f"INSTRUCCIONES DE CONTINUIDAD:\n"
             f"- Continua la narracion desde donde quedo, de forma NATURAL.\n"
             f"- El texto debe fluir como si fuera un solo documento escrito.\n"
-            f"- NO repitas informacion ya dicha. AVANZA la historia.\n"
-            f"- Si has cubierto ya un aspecto de la expedicion, explora otro angulo.\n"
+            f"- AVANZA la historia: cada bloque debe aportar contenido GENUINAMENTE NUEVO.\n"
+            f"  PROHIBIDO repetir los mismos ejemplos, metaforas o analogias ya usadas.\n"
+            f"  Si ya narraste un evento o detalle, NO lo vuelvas a contar.\n"
+            f"- Si has cubierto ya un aspecto de la expedicion, explora otro angulo DISTINTO.\n"
+            f"- Los bloques de cierre deben SINTETIZAR (no repetir) lo ya dicho.\n"
             f"- Manten el mismo tono y estilo que los bloques anteriores.\n"
         )
 
@@ -213,8 +216,9 @@ REGLAS ESTRICTAS:
 2. NO inventes datos. Usa SOLO la informacion de las fuentes proporcionadas.
 3. Cada bloque debe ser un PARRAFO COMPLETO y sustancial (no frases sueltas).
 4. Incluye detalles de la expedicion: fechas, nombres, lugares, condiciones extremas, decisiones criticas.
-5. NO uses relleno ni repeticiones. Cada bloque aporta contenido NUEVO.
-6. Oscila entre la escala epica (la inmensidad del hielo, el poder de la naturaleza) y lo intimo (el miedo, la desesperacion, las decisiones imposibles).{source_context}{context_text}
+5. NO uses relleno ni repeticiones. Cada bloque aporta contenido GENUINAMENTE NUEVO. PROHIBIDO repetir los mismos ejemplos, eventos o detalles en bloques diferentes. Si ya narraste un momento de la expedicion, NO lo cuentes otra vez.
+6. Oscila entre la escala epica (la inmensidad del hielo, el poder de la naturaleza) y lo intimo (el miedo, la desesperacion, las decisiones imposibles).
+7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. Plantea un misterio, un momento de tension extrema o una pregunta que el espectador NECESITE ver respondida. NUNCA empieces con frases como "En este video vamos a..." o "Hoy conoceremos...". Entra directo al momento mas dramatico de la expedicion.{source_context}{context_text}
 
 Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
 Cada bloque SOLO necesita el campo "texto" (el parrafo que narrara el locutor).
@@ -407,6 +411,21 @@ El ultimo bloque (tipo "cierre") debe contener SOLO la reflexion final y la conc
 NO incluyas llamadas a la accion (suscribete, like, campana, comparte, etc.).
 Las llamadas a la accion se añaden automaticamente en una seccion separada DESPUES de que termine el video.
 El cierre debe sentirse como un final narrativo completo, no como un anuncio.
+
+REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRITICO para retencion!):
+Los primeros minutos deciden si el espectador se queda hasta el final. Debes:
+- Abrir con un momento de tension extrema, un dato tragico impactante o una pregunta que el espectador NECESITE ver respondida.
+- Crear una "promesa narrativa": el espectador debe intuir que si se queda, conocera el desenlace de una expedicion tragica.
+- NUNCA empezar con frases como "En este video vamos a...", "Hoy conoceremos..." o "Bienvenidos a...".
+- La primera oracion del guion debe ser IMPACTANTE. Entra directo al momento mas dramatico.
+
+REGLA ANTI-REPETICION TEMATICA (¡OBLIGATORIO!):
+Cada seccion de la expedicion debe aportar informacion GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:
+- Repetir los mismos eventos, detalles o tragedias en diferentes bloques. Si ya narraste un momento, NO lo cuentes otra vez.
+- Reformular la misma idea con sinonimos. Cada bloque debe explorar un ANGULO DIFERENTE de la expedicion.
+- Usar la misma metafora, analogia o recurso retorico mas de una vez.
+- Los bloques de cierre deben SINTETIZAR (no repetir) lo ya narrado.
+- Si no tienes contenido realmente nuevo que aportar, es MEJOR terminar el guion antes que repetir.
 
 {virality_text}
 

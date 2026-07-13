@@ -9,7 +9,9 @@ import importlib
 import json
 import logging
 import random
+import re
 import time
+from difflib import SequenceMatcher
 from typing import Optional
 
 from openai import OpenAI
@@ -72,6 +74,24 @@ TOKEN_CHAR_RATIO = 2.8
 MAX_EXPANSION_ROUNDS = 3
 # Stale threshold: stop expansion if no growth for this many consecutive rounds
 EXPANSION_STALE_ROUNDS = 2
+
+# ── Narrative quality check thresholds ────────────────────
+# Sentence similarity above this is considered repetitive
+REPETITION_SIMILARITY_THRESHOLD = 0.60
+# Max fraction of block pairs that can be flagged as repetitive
+MAX_REPETITION_PAIR_RATIO = 0.15
+# Max blocks overall that can be involved in repetition
+MAX_REPETITION_BLOCK_RATIO = 0.30
+# Minimum number of blocks for coherence check to apply
+MIN_BLOCKS_FOR_COHERENCE_CHECK = 5
+# Banned opening phrases that indicate weak hooks
+BANNED_OPENING_PATTERNS = [
+    r"en\s+este\s+video\s+(vamos|hablaremos|exploraremos|veremos)",
+    r"hoy\s+(vamos|hablaremos|exploraremos|conoceremos|veremos)",
+    r"bienvenidos?\s+a",
+    r"en\s+el\s+video\s+de\s+hoy",
+    r"te\s+(voy|vamos)\s+a\s+(contar|hablar|explicar)",
+]
 
 
 class ScriptGenerator:
@@ -912,6 +932,56 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
         enriched = self._enrich_blocks(all_bloques, content_item, word_target)
 
+        # Step 3.5: Narrative quality check (anti-repetition + coherence + hook)
+        if enriched and enriched.get("bloques"):
+            try:
+                check = self._check_narrative_quality(enriched)
+                if not check.get("passes", True):
+                    logger.warning(
+                        "Narrative quality check found issues: %s (score: rep=%.2f coh=%.2f hook=%.2f)",
+                        check.get("issues", []),
+                        check.get("repetition_score", 0),
+                        check.get("coherence_score", 0),
+                        check.get("hook_score", 0),
+                    )
+                    # Attempt regeneration
+                    regenerated = self._regenerate_problematic_paragraphs(
+                        enriched, check, content_item
+                    )
+                    if regenerated:
+                        # Re-check regenerated script (single retry)
+                        check2 = self._check_narrative_quality(regenerated)
+                        if check2.get("passes", True):
+                            logger.info(
+                                "Narrative quality check PASSED after regeneration "
+                                "(was: rep=%.2f coh=%.2f hook=%.2f → rep=%.2f coh=%.2f hook=%.2f)",
+                                check.get("repetition_score", 0),
+                                check.get("coherence_score", 0),
+                                check.get("hook_score", 0),
+                                check2.get("repetition_score", 0),
+                                check2.get("coherence_score", 0),
+                                check2.get("hook_score", 0),
+                            )
+                        enriched = regenerated
+                    else:
+                        logger.warning(
+                            "Regeneration failed or returned no changes — "
+                            "proceeding with original script"
+                        )
+                else:
+                    logger.info(
+                        "Narrative quality check PASSED (rep=%.2f coh=%.2f hook=%.2f)",
+                        check.get("repetition_score", 0),
+                        check.get("coherence_score", 0),
+                        check.get("hook_score", 0),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Narrative quality check failed with exception: %s — "
+                    "proceeding with original script",
+                    exc,
+                )
+
         # Step 4: Save to DB
         if hasattr(self, '_progress_cb') and self._progress_cb:
             try:
@@ -1648,6 +1718,493 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             )
 
         return best_data
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Narrative Quality Checks (anti-repetition, coherence, hook)
+    # ═══════════════════════════════════════════════════════════════
+
+    def _check_narrative_quality(self, enriched: dict) -> dict:
+        """Post-generation quality check for repetition, coherence and hook.
+
+        Analyzes the enriched script to detect:
+        1. Thematic repetition: sentences/blocks that say the same thing
+        2. Narrative coherence: story has clear beginning and end
+        3. Hook quality: opening blocks are engaging (no weak intros)
+
+        Args:
+            enriched: Dict from _enrich_blocks() with parrafos, bloques, guion.
+
+        Returns:
+            dict with:
+                passes: bool — True if all checks pass
+                repetition_score: float 0-1 — higher means more repetition
+                coherence_score: float 0-1 — 1 = perfect structure
+                hook_score: float 0-1 — 1 = strong hook
+                issues: list of descriptive strings
+                problem_paragraphs: list[int] — paragraph indices to regenerate
+                avoid_themes: list[str] — themes the LLM should avoid
+        """
+        parrafos = enriched.get("parrafos", [])
+        if not parrafos:
+            return self._empty_check_result("No paragraphs found")
+
+        all_bloques = enriched.get("bloques", [])
+        if len(all_bloques) < MIN_BLOCKS_FOR_COHERENCE_CHECK:
+            return {
+                "passes": True,
+                "repetition_score": 0.0,
+                "coherence_score": 1.0,
+                "hook_score": 1.0,
+                "issues": [],
+                "problem_paragraphs": [],
+                "avoid_themes": [],
+                "notes": "Script too short for quality checks",
+            }
+
+        issues = []
+        problem_paragraphs = set()
+        avoid_themes = set()
+
+        # ── 1. Repetition check ──────────────────────────
+        rep_result = self._check_repetition(all_bloques, parrafos)
+        issues.extend(rep_result["issues"])
+        problem_paragraphs.update(rep_result["problem_paragraphs"])
+        avoid_themes.update(rep_result["avoid_themes"])
+
+        # ── 2. Coherence check ───────────────────────────
+        coh_result = self._check_coherence(all_bloques, parrafos)
+        issues.extend(coh_result["issues"])
+        if coh_result.get("missing_hook_para") is not None:
+            problem_paragraphs.add(coh_result["missing_hook_para"])
+
+        # ── 3. Hook quality check ────────────────────────
+        hook_result = self._check_hook_quality(all_bloques)
+        issues.extend(hook_result["issues"])
+        if hook_result.get("weak_hook_para") is not None:
+            problem_paragraphs.add(hook_result["weak_hook_para"])
+
+        # ── Aggregate scores ─────────────────────────────
+        n_paragraphs = len(parrafos)
+        n_repetition_issues = len(rep_result["issues"])
+        n_coherence_issues = len(coh_result["issues"])
+        n_hook_issues = len(hook_result["issues"])
+
+        repetition_score = min(1.0, n_repetition_issues / max(1, n_paragraphs))
+        coherence_score = max(0.0, 1.0 - n_coherence_issues * 0.5)
+        hook_score = max(0.0, 1.0 - n_hook_issues * 0.5)
+        total_issues = n_repetition_issues + n_coherence_issues + n_hook_issues
+
+        # Determine if regeneration is needed
+        needs_regeneration = (
+            len(problem_paragraphs) > 0
+            and total_issues > 0
+        )
+
+        return {
+            "passes": not needs_regeneration,
+            "repetition_score": round(repetition_score, 3),
+            "coherence_score": round(coherence_score, 3),
+            "hook_score": round(hook_score, 3),
+            "issues": issues,
+            "problem_paragraphs": sorted(problem_paragraphs),
+            "avoid_themes": sorted(avoid_themes),
+            "total_issues": total_issues,
+        }
+
+    @staticmethod
+    def _empty_check_result(reason: str) -> dict:
+        return {
+            "passes": True,
+            "repetition_score": 0.0,
+            "coherence_score": 1.0,
+            "hook_score": 1.0,
+            "issues": [reason],
+            "problem_paragraphs": [],
+            "avoid_themes": [],
+        }
+
+    def _check_repetition(self, all_bloques: list, parrafos: list) -> dict:
+        """Check for thematic repetition across paragraphs.
+
+        Uses sentence-level similarity analysis and keyword overlap
+        to detect blocks that rephrase the same ideas.
+        """
+        issues = []
+        problem_paragraphs = set()
+        avoid_themes = set()
+
+        if len(all_bloques) < 3:
+            return {"issues": issues, "problem_paragraphs": problem_paragraphs, "avoid_themes": avoid_themes}
+
+        # Build paragraph→blocks mapping
+        para_blocks: dict[int, list[dict]] = {}
+        for b in all_bloques:
+            pi = b.get("paragraph_idx", 0)
+            if pi not in para_blocks:
+                para_blocks[pi] = []
+            para_blocks[pi].append(b)
+
+        # Extract full text per paragraph and per block
+        para_texts = {}
+        for pi, blocks in para_blocks.items():
+            para_texts[pi] = " ".join(b.get("texto", "") for b in blocks)
+
+        block_texts = [b.get("texto", "") for b in all_bloques]
+
+        # ── Sentence-level similarity across paragraphs ────
+        # Extract all sentences with their paragraph index
+        all_sentences = []
+        for b in all_bloques:
+            text = b.get("texto", "")
+            pi = b.get("paragraph_idx", 0)
+            sents = re.split(r'(?<=[.!?])\s+', text)
+            for s in sents:
+                s = s.strip()
+                if len(s) > 25:  # meaningful sentences only
+                    all_sentences.append((s, pi))
+
+        # Compare sentences from DIFFERENT paragraphs only
+        flagged_pairs = []
+        flagged_block_indices = set()
+        for i in range(len(all_sentences)):
+            for j in range(i + 1, len(all_sentences)):
+                si, pi = all_sentences[i]
+                sj, pj = all_sentences[j]
+                if pi == pj:
+                    continue  # same paragraph is fine
+                ratio = SequenceMatcher(None, si.lower(), sj.lower()).ratio()
+                if ratio > REPETITION_SIMILARITY_THRESHOLD:
+                    flagged_pairs.append((i, j, ratio, si[:80], sj[:80]))
+                    flagged_block_indices.add(i)
+                    flagged_block_indices.add(j)
+                    problem_paragraphs.add(pj)  # later paragraph is the "repeater"
+
+        # Report if too many pairs
+        total_pairs = max(1, len(all_sentences) * (len(all_sentences) - 1) // 2)
+        actual_pairs = len(flagged_pairs)
+        if actual_pairs > 0:
+            ratio = actual_pairs / max(1, total_pairs)
+            if ratio > MAX_REPETITION_PAIR_RATIO or len(flagged_block_indices) / max(1, len(all_sentences)) > MAX_REPETITION_BLOCK_RATIO:
+                issues.append(
+                    f"Repeticion tematica: {actual_pairs} pares de oraciones similares "
+                    f"(>{REPETITION_SIMILARITY_THRESHOLD:.0%} similitud) entre parrafos distintos"
+                )
+                # Log examples for debugging
+                for a, b, r, s1, s2 in flagged_pairs[:5]:
+                    logger.debug(f"  Repeticion: [{a}] vs [{b}] ({r:.0%}): {s1} ≈ {s2}")
+
+        # ── Conceptual keyword overlap across paragraphs ──
+        # Extract key nouns/phrases (words > 5 chars) and check overuse
+        concept_keywords = [
+            "proporción áurea", "número áureo", "proporcione",
+            "escala musical", "escalas pentatónicas", "escalas heptatónicas",
+            "intervalos armónicos", "músico compone", "armonía matemática",
+            "templo", "calendario", "360 día", "ciclos",
+            "sistema operativo", "código", "ADN cultural",
+            "no necesitaron", "no construyeron imperio", "no arrasaron",
+            "campo de batalla", "guerra no terminó", "no fue militar",
+            "linaje", "sacrificio", "pruebas de sangre", "hermetismo",
+            "élite que custodiaba", "rituales", "registro akáshico",
+            "núcleo de dato", "conocimiento akáshico",
+            "cada vez que un arquitecto", "cada vez que un músico",
+            "cada vez que medimos",
+        ]
+        concept_usage = {kw: set() for kw in concept_keywords}
+        for b in all_bloques:
+            text = b.get("texto", "").lower()
+            pi = b.get("paragraph_idx", 0)
+            for kw in concept_keywords:
+                if kw in text:
+                    concept_usage[kw].add(pi)
+
+        # Flag concepts used in 3+ different paragraphs
+        overused = []
+        for kw, paras in concept_usage.items():
+            if len(paras) >= 3:
+                overused.append(kw)
+                for p in paras:
+                    problem_paragraphs.add(p)
+                avoid_themes.add(kw)
+
+        if overused:
+            # Only flag as issue if there are multiple overused concepts
+            if len(overused) >= 3:
+                issues.append(
+                    f"Conceptos repetidos en ≥3 parrafos: {', '.join(overused[:6])}"
+                    + ("..." if len(overused) > 6 else "")
+                )
+
+        return {
+            "issues": issues,
+            "problem_paragraphs": problem_paragraphs,
+            "avoid_themes": avoid_themes,
+        }
+
+    def _check_coherence(self, all_bloques: list, parrafos: list) -> dict:
+        """Check that the script has a coherent narrative arc.
+
+        Verifies:
+        - First paragraph starts with hook-type blocks
+        - Last paragraph ends with closure-type blocks
+        - Story has both intro and conclusion
+        """
+        issues = []
+
+        if not all_bloques or not parrafos:
+            return {"issues": issues}
+
+        # Check for hook at the beginning
+        first_blocks = all_bloques[:3]
+        has_hook = any(b.get("tipo") == "hook" for b in first_blocks if isinstance(b, dict))
+        if not has_hook:
+            first_para = 0
+            issues.append("Falta bloque de tipo 'hook' en los primeros 3 bloques (enganche inicial debil)")
+            return {"issues": issues, "missing_hook_para": first_para}
+
+        # Check for closure at the end
+        last_blocks = all_bloques[-3:]
+        has_cierre = any(b.get("tipo") == "cierre" for b in last_blocks if isinstance(b, dict))
+        if not has_cierre:
+            last_para = all_bloques[-1].get("paragraph_idx", len(parrafos) - 1) if all_bloques else 0
+            issues.append("Falta bloque de tipo 'cierre' al final del guion")
+
+        # Check that last paragraph has is_last_in_paragraph markers working
+        last_para_blocks = [b for b in all_bloques if b.get("paragraph_idx") == len(parrafos) - 1]
+        if last_para_blocks and not any(b.get("is_last_in_paragraph") for b in last_para_blocks):
+            pass  # minor, not critical
+
+        return {"issues": issues}
+
+    def _check_hook_quality(self, all_bloques: list) -> dict:
+        """Check the quality of the hook / opening blocks.
+
+        Flags:
+        - Weak opening phrases ("En este video vamos a...")
+        - First sentence not impactful enough
+        """
+        issues = []
+        if not all_bloques:
+            return {"issues": issues}
+
+        first_block_text = all_bloques[0].get("texto", "") if all_bloques else ""
+
+        # Check for banned weak opening patterns
+        first_text_lower = first_block_text.lower()
+        for pattern in BANNED_OPENING_PATTERNS:
+            if re.search(pattern, first_text_lower):
+                issues.append(f"Gancho debil detectado: '{first_block_text[:80]}...' usa frase prohibida")
+                return {
+                    "issues": issues,
+                    "weak_hook_para": all_bloques[0].get("paragraph_idx", 0),
+                }
+
+        # Check first sentence length — too short is weak
+        first_sentences = re.split(r'(?<=[.!?])\s+', first_block_text)
+        if first_sentences:
+            first_sentence = first_sentences[0].strip()
+            if len(first_sentence.split()) < 8:
+                issues.append(f"Primera oracion demasiado corta ({len(first_sentence.split())} palabras): '{first_sentence[:80]}'")
+
+        # Check early blocks for engagement markers
+        early_texts = " ".join(b.get("texto", "") for b in all_bloques[:3]).lower()
+        if "?" not in early_texts and "!" not in early_texts:
+            issues.append("Primeros bloques no contienen preguntas ni exclamaciones — posible falta de gancho emocional")
+
+        return {"issues": issues}
+
+    def _regenerate_problematic_paragraphs(
+        self, enriched: dict, check_result: dict, content_item: dict,
+    ) -> Optional[dict]:
+        """Re-generate problematic paragraphs via LLM while keeping good ones.
+
+        Sends the LLM the full script context plus explicit instructions about
+        which themes to avoid and what to replace. Only the problematic
+        paragraphs are rewritten; good ones are preserved.
+
+        Args:
+            enriched: Full enriched script dict from _enrich_blocks().
+            check_result: Result from _check_narrative_quality().
+            content_item: Raw content dict for context.
+
+        Returns:
+            Updated enriched dict with regenerated paragraphs, or None on failure.
+        """
+        if not enriched or not check_result:
+            return None
+
+        parrafos = enriched.get("parrafos", [])
+        problem_indices = set(check_result.get("problem_paragraphs", []))
+        avoid_themes = check_result.get("avoid_themes", [])
+
+        if not problem_indices:
+            logger.info("_regenerate_problematic_paragraphs: nothing to regenerate")
+            return enriched
+
+        # Separate good vs problematic paragraphs
+        good_paras = [p for i, p in enumerate(parrafos) if i not in problem_indices]
+        bad_paras = [(i, parrafos[i]) for i in sorted(problem_indices) if i < len(parrafos)]
+
+        if not bad_paras:
+            return enriched
+
+        logger.info(
+            "_regenerate_problematic_paragraphs: regenerating %d/%d paragraphs (indices: %s, avoid: %s)",
+            len(bad_paras), len(parrafos),
+            sorted(problem_indices),
+            avoid_themes[:5],
+        )
+
+        # Build context from good paragraphs
+        good_context = ""
+        for p in good_paras:
+            if isinstance(p, dict):
+                idea = p.get("idea_central", "")
+                blocks_text = " ".join(
+                    b.get("texto", "") for b in p.get("bloques", [])
+                    if isinstance(b, dict)
+                )[:300]
+                good_context += f"\n[PÁRRAFO BUENO — CONSERVAR]: {idea}\n{blocks_text}\n"
+
+        # Build description of what to regenerate and what to avoid
+        bad_descriptions = []
+        for idx, p in bad_paras:
+            blocks_text = " ".join(
+                b.get("texto", "") for b in p.get("bloques", [])
+                if isinstance(b, dict)
+            )[:300]
+            n_blocks = len(p.get("bloques", []))
+            bad_descriptions.append(
+                f"Párrafo {idx} ({n_blocks} bloques) — A REGENERAR:\n{blocks_text}"
+            )
+
+        avoid_text = ""
+        if avoid_themes:
+            avoid_text = (
+                f"\n⛔ TEMAS/CONCEPTOS PROHIBIDOS (ya aparecen en otros párrafos):\n"
+                + "\n".join(f"  - {t}" for t in avoid_themes[:10])
+                + "\n\nNO repitas ninguno de estos conceptos en los nuevos bloques."
+            )
+
+        # Build regeneration prompt
+        system_prompt = (
+            "Eres un editor de guiones documentales. Tu tarea es REGENERAR "
+            "párrafos específicos de un guion que tienen repeticiones temáticas.\n\n"
+            "Recibirás:\n"
+            "1. Los párrafos BUENOS (que debes CONSERVAR como están)\n"
+            "2. Los párrafos PROBLEMÁTICOS (que debes REESCRIBIR)\n"
+            "3. Una lista de temas PROHIBIDOS (no debes mencionarlos)\n\n"
+            "REGLAS:\n"
+            "- Reescribe SOLO los párrafos problemáticos.\n"
+            "- Introduce ideas GENUINAMENTE NUEVAS, no reformules lo mismo.\n"
+            "- Respeta el tono y estilo del canal.\n"
+            "- Cada bloque nuevo debe tener tipo, emocion, texto, escena_descripcion, "
+            "search_query_en, media_tipo, media_duracion.\n"
+            "- search_query_en SIEMPRE en inglés.\n"
+            "- Mantén el MISMO número de bloques por párrafo que el original.\n"
+            "- La historia debe fluir naturalmente entre los párrafos buenos y los regenerados.\n\n"
+            f"{avoid_text}\n\n"
+            "Responde ÚNICAMENTE con JSON: {\"regenerated_parrafos\": [...]} "
+            "donde cada elemento tiene la misma estructura que los parrafos originales "
+            "(idea_central, cambio_tematico, bloques con todos sus campos)."
+        )
+
+        user_prompt = (
+            f"Tema del video: {content_item.get('title', 'Documental')}\n\n"
+            f"=== PÁRRAFOS BUENOS (CONSERVAR) ==={good_context}\n\n"
+            f"=== PÁRRAFOS A REGENERAR ===\n"
+            + "\n---\n".join(bad_descriptions)
+            + f"\n\n{avoid_text}\n\n"
+            f"Regenera los párrafos problemáticos. Mantén el mismo número de bloques "
+            f"por párrafo. Cada bloque debe tener TODOS los campos completos."
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=min(4000, OPENAI_MAX_TOKENS),
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content.strip()
+            data = json.loads(raw)
+            regenerated_paras = data.get("regenerated_parrafos", [])
+
+            if not isinstance(regenerated_paras, list) or not regenerated_paras:
+                logger.warning(
+                    "_regenerate_problematic_paragraphs: LLM returned no regenerated paragraphs"
+                )
+                return enriched  # return original, don't break the pipeline
+
+            # Validate paragraph structure
+            for p in regenerated_paras:
+                if not isinstance(p, dict) or "bloques" not in p or not p.get("bloques"):
+                    logger.warning(
+                        "_regenerate_problematic_paragraphs: invalid paragraph in response, "
+                        "keeping original"
+                    )
+                    return enriched
+
+            # Merge: replace problematic paragraphs with regenerated ones
+            new_parrafos = []
+            regen_idx = 0
+            for i in range(len(parrafos)):
+                if i in problem_indices and regen_idx < len(regenerated_paras):
+                    new_parrafos.append(regenerated_paras[regen_idx])
+                    regen_idx += 1
+                    logger.info(
+                        "_regenerate_problematic_paragraphs: replaced paragraph %d", i
+                    )
+                else:
+                    new_parrafos.append(parrafos[i])
+
+            # Rebuild flat bloques list and guion
+            new_bloques = []
+            new_guion_parts = []
+            for pi, p in enumerate(new_parrafos):
+                if isinstance(p, dict):
+                    bloques = p.get("bloques", [])
+                    for bi, b in enumerate(bloques):
+                        if isinstance(b, dict):
+                            b["paragraph_idx"] = pi
+                            b["is_last_in_paragraph"] = (bi == len(bloques) - 1)
+                            new_bloques.append(b)
+                            new_guion_parts.append(b.get("texto", ""))
+
+            # Update enriched dict
+            new_enriched = dict(enriched)
+            new_enriched["parrafos"] = new_parrafos
+            new_enriched["bloques"] = new_bloques
+            new_enriched["guion"] = "\n\n".join(new_guion_parts)
+            new_enriched["escenas"] = [
+                {"descripcion": b.get("escena_descripcion", "")}
+                for b in new_bloques
+            ]
+            new_enriched["emociones"] = [
+                b.get("emocion", "") for b in new_bloques if b.get("emocion")
+            ]
+
+            logger.info(
+                "_regenerate_problematic_paragraphs: SUCCESS — %d paragraphs regenerated, "
+                "new total: %d paragraphs, %d blocks",
+                len(bad_paras), len(new_parrafos), len(new_bloques),
+            )
+
+            return new_enriched
+
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "_regenerate_problematic_paragraphs: JSON parse error: %s", exc
+            )
+            return enriched
+        except Exception as exc:
+            logger.error(
+                "_regenerate_problematic_paragraphs: LLM call failed: %s", exc
+            )
+            return enriched
 
     def generate(self, content_item: dict) -> Optional[dict]:
         """Generate a script from a single raw_content row.

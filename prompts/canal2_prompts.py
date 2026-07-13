@@ -284,8 +284,11 @@ PRÓXIMO CAPÍTULO: {next_chapter}
             f"INSTRUCCIONES DE CONTINUIDAD:\n"
             f"- Continúa la narración desde donde quedó, de forma NATURAL.\n"
             f"- El texto debe fluir como si fuera un solo documento escrito.\n"
-            f"- NO repitas información ya dicha. AVANZA la historia.\n"
-            f"- Si has cubierto ya un aspecto del tema, explora otro ángulo.\n"
+            f"- AVANZA la historia: cada bloque debe aportar contenido GENUINAMENTE NUEVO.\n"
+            f"  PROHIBIDO repetir los mismos ejemplos, metáforas o analogías ya usadas.\n"
+            f"  Si ya mencionaste ciertos casos o fenómenos, NO los uses otra vez.\n"
+            f"- Si has cubierto ya un aspecto del tema, explora otro ángulo DISTINTO.\n"
+            f"- Los bloques de cierre deben SINTETIZAR (no repetir) lo ya dicho.\n"
             f"- Mantén el mismo tono y estilo que los bloques anteriores.\n"
         )
 
@@ -304,8 +307,9 @@ REGLAS ESTRICTAS:
 2. NO inventes datos. Usa SOLO la información de las fuentes proporcionadas.
 3. Cada bloque debe ser un párrafo completo y sustancial (no frases sueltas).
 4. Incluye detalles sensoriales, descripciones vívidas y contexto.
-5. NO uses relleno ni repeticiones. Cada bloque aporta contenido NUEVO.
-6. CRÍTICO: Cada bloque debe CONTENER al menos un hecho concreto (número, fecha, nombre, lugar, cita). PROHIBIDO escribir párrafos puramente metafóricos sin datos. Si un párrafo no comunica ningún hecho verificable, es INVÁLIDO.{source_context}{context_text}{outline_context}
+5. NO uses relleno ni repeticiones. Cada bloque aporta contenido GENUINAMENTE NUEVO. PROHIBIDO repetir los mismos ejemplos, metáforas o analogías en bloques diferentes. Si ya mencionaste un caso concreto, NO lo uses otra vez.
+6. CRÍTICO: Cada bloque debe CONTENER al menos un hecho concreto (número, fecha, nombre, lugar, cita). PROHIBIDO escribir párrafos puramente metafóricos sin datos. Si un párrafo no comunica ningún hecho verificable, es INVÁLIDO.
+7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. Plantea un misterio, un dato impactante o una pregunta que el espectador NECESITE ver respondida. NUNCA empieces con frases como "En este video vamos a..." o "Hoy hablaremos de...". Entra directo al contenido más fascinante.{source_context}{context_text}{outline_context}
 
 Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
 Cada bloque SOLO necesita el campo "texto" (el párrafo que narrará el locutor).
@@ -508,6 +512,21 @@ REGLAS INQUEBRANTABLES:
 6. ESTRUCTURA NARRATIVA — método "Espiral de Asombro":
 {structure_text}
 {retention_text}
+
+REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRÍTICO para retención!):
+Los primeros minutos son los que deciden si el espectador se queda hasta el final. Debes:
+- Abrir con un misterio, dato impactante o pregunta que el espectador NECESITE ver resuelta.
+- Crear una "promesa narrativa": el espectador debe intuir que si se queda, descubrirá algo que no sabía.
+- NUNCA empezar con frases como "En este video vamos a hablar de...", "Hoy exploraremos..." o "Bienvenidos a...".
+- La primera oración del guion debe ser IMPACTANTE. Entra directo al fenómeno más fascinante.
+
+REGLA ANTI-REPETICIÓN TEMÁTICA (¡OBLIGATORIO!):
+Cada párrafo debe aportar una idea GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:
+- Repetir los mismos ejemplos, casos o fenómenos en diferentes párrafos. Si ya hablaste de un caso concreto, NO lo menciones otra vez.
+- Reformular la misma tesis con sinónimos. Cada párrafo debe explorar un ÁNGULO DIFERENTE del tema.
+- Usar la misma metáfora, analogía o recurso retórico más de una vez.
+- Los bloques de cierre deben SINTETIZAR (no repetir) las ideas ya expuestas.
+- Si no tienes contenido realmente nuevo que aportar, es MEJOR terminar el guion antes que repetir ideas.
 
 7. Genera 1 ÚNICO título viral optimizado (no múltiples opciones). Debe ser impactante, honesto sobre el contenido, incluir power words ({power_words_text}) y la keyword principal. Usa estas fórmulas como inspiración:
 {title_formulas_text}

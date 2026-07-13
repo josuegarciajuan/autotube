@@ -171,8 +171,11 @@ def build_content_only_prompt(config=None, previous_blocks: list = None, word_gu
             f"INSTRUCCIONES DE CONTINUIDAD:\n"
             f"- Continúa la narración desde donde quedó, de forma NATURAL.\n"
             f"- El texto debe fluir como si fuera un solo documento escrito.\n"
-            f"- NO repitas información ya dicha. AVANZA la historia.\n"
-            f"- Si has cubierto ya un aspecto del tema, explora otro ángulo.\n"
+            f"- AVANZA la historia: cada bloque debe aportar contenido GENUINAMENTE NUEVO.\n"
+            f"  PROHIBIDO repetir los mismos ejemplos, metáforas o analogías ya usadas.\n"
+            f"  Si ya mencionaste templos, proporciones o calendarios, NO los uses otra vez.\n"
+            f"- Si has cubierto ya un aspecto del tema, explora otro ángulo DISTINTO.\n"
+            f"- Los bloques de cierre deben SINTETIZAR (no repetir) lo ya dicho.\n"
             f"- Mantén el mismo tono y estilo que los bloques anteriores.\n"
         )
 
@@ -191,8 +194,9 @@ REGLAS ESTRICTAS:
 2. NO inventes datos arqueológicos. Usa SOLO la información de las fuentes.
 3. Cada bloque debe ser un PÁRRAFO COMPLETO y sustancial (no frases sueltas).
 4. Incluye detalles sensoriales, descripciones de lugares, fechas y contexto.
-5. NO uses relleno ni repeticiones. Cada bloque aporta contenido NUEVO.
-6. El tono debe ser solemne, evocador, como un explorador narrando su descubrimiento.{source_context}{context_text}
+5. NO uses relleno ni repeticiones. Cada bloque aporta contenido GENUINAMENTE NUEVO. PROHIBIDO repetir los mismos ejemplos, metáforas o analogías en bloques diferentes. Si ya mencionaste un sitio arqueológico o concepto, NO lo uses otra vez.
+6. El tono debe ser solemne, evocador, como un explorador narrando su descubrimiento.
+7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. Plantea un misterio, un dato impactante o una pregunta que el espectador NECESITE ver respondida. NUNCA empieces con frases como "En este video vamos a..." o "Hoy exploraremos...". Entra directo al contenido más fascinante.{source_context}{context_text}
 
 Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
 Cada bloque SOLO necesita el campo "texto" (el párrafo que narrará el locutor).
@@ -387,6 +391,21 @@ REGLAS INQUEBRANTABLES:
 6. ESTRUCTURA NARRATIVA — método "Expedición al Pasado":
 {structure_text}
 {retention_text}
+
+REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRÍTICO para retención!):
+Los primeros minutos son los que deciden si el espectador se queda hasta el final. Debes:
+- Abrir con un misterio arqueológico, dato impactante o pregunta que el espectador NECESITE ver resuelta.
+- Crear una "promesa narrativa": el espectador debe intuir que si se queda, descubrirá algo fascinante sobre una civilización perdida.
+- NUNCA empezar con frases como "En este video vamos a hablar de...", "Hoy exploraremos..." o "Bienvenidos a...".
+- La primera oración del guion debe ser IMPACTANTE. Entra directo al descubrimiento más asombroso.
+
+REGLA ANTI-REPETICIÓN TEMÁTICA (¡OBLIGATORIO!):
+Cada párrafo debe aportar una idea GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:
+- Repetir los mismos ejemplos, sitios arqueológicos o conceptos en diferentes párrafos. Si ya hablaste de un templo o civilización, NO lo menciones otra vez.
+- Reformular la misma tesis con sinónimos. Cada párrafo debe explorar un ÁNGULO DIFERENTE del descubrimiento.
+- Usar la misma metáfora, analogía o recurso retórico más de una vez.
+- Los bloques de cierre deben SINTETIZAR (no repetir) las ideas ya expuestas.
+- Si no tienes contenido realmente nuevo que aportar, es MEJOR terminar el guion antes que repetir ideas.
 
 7. Genera 1 ÚNICO título viral optimizado (no múltiples opciones). Debe ser impactante, honesto sobre el contenido, incluir power words ({power_words_text}) y la keyword principal. Usa estas fórmulas como inspiración:
 {title_formulas_text}
