@@ -6,6 +6,7 @@ optionally the YouTube Analytics API for advanced metrics.
 
 import logging
 import pickle
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Any
 
@@ -118,12 +119,14 @@ class YouTubeStatsFetcher:
             return self.get_video_stats(yt_video_id)
 
         try:
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            end_date = datetime.now().strftime("%Y-%m-%d")
             resp = (
                 self._analytics_service.reports()
                 .query(
                     ids=f"channel==MINE",
-                    startDate=f"{days}dAgo",
-                    endDate="today",
+                    startDate=start_date,
+                    endDate=end_date,
                     metrics="estimatedMinutesWatched,averageViewDuration",
                     filters=f"video=={yt_video_id}",
                 )
@@ -168,12 +171,14 @@ class YouTubeStatsFetcher:
         for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
             batch = video_ids[i : i + MAX_IDS_PER_CALL]
             try:
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                end_date = datetime.now().strftime("%Y-%m-%d")
                 resp = (
                     self._analytics_service.reports()
                     .query(
                         ids="channel==MINE",
-                        startDate=f"{days}dAgo",
-                        endDate="today",
+                        startDate=start_date,
+                        endDate=end_date,
                         metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
@@ -220,12 +225,14 @@ class YouTubeStatsFetcher:
             return []
 
         try:
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            end_date = datetime.now().strftime("%Y-%m-%d")
             resp = (
                 self._analytics_service.reports()
                 .query(
                     ids="channel==MINE",
-                    startDate=f"{days}dAgo",
-                    endDate="today",
+                    startDate=start_date,
+                    endDate=end_date,
                     metrics="estimatedMinutesWatched,subscribersGained",
                     dimensions="day",
                     maxResults=min(days, 200),
@@ -292,12 +299,14 @@ class YouTubeStatsFetcher:
             return {}
 
         try:
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            end_date = datetime.now().strftime("%Y-%m-%d")
             resp = (
                 self._analytics_service.reports()
                 .query(
                     ids="channel==MINE",
-                    startDate=f"{days}dAgo",
-                    endDate="today",
+                    startDate=start_date,
+                    endDate=end_date,
                     metrics="estimatedMinutesWatched",
                 )
                 .execute()
