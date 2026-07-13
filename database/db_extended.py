@@ -114,6 +114,8 @@ def migrate_v2(db_path: str = None):
         ("peak_source", "TEXT"),
         ("auto_playlist_id", "INTEGER"),
         ("auto_playlist_name", "TEXT"),
+        ("target_playlist_id", "INTEGER REFERENCES youtube_playlists(id)"),
+        ("target_playlist_slug", "TEXT"),
         ("manual_altered_content_done", "INTEGER DEFAULT 0"),
         ("manual_end_screens_done", "INTEGER DEFAULT 0"),
     ]
@@ -811,13 +813,22 @@ class ExtendedDatabase(Database):
     
     # ── Videos (extended) ────────────────────────────────────
     
-    def get_videos(self, channel_id: int = None, status: str = None, limit: int = 50, offset: int = 0) -> list[dict]:
+    def get_videos(self, channel_id: int = None, status: str = None, limit: int = 50,
+                    offset: int = 0, playlist_id: int = None) -> list[dict]:
         with self._connect() as conn:
-            q = "SELECT v.*, c.name as channel_name FROM videos v LEFT JOIN channels c ON v.channel_id = c.id WHERE 1=1"
+            q = ("SELECT v.*, c.name as channel_name, "
+                 "yp.name as target_playlist_name "
+                 "FROM videos v "
+                 "LEFT JOIN channels c ON v.channel_id = c.id "
+                 "LEFT JOIN youtube_playlists yp ON v.target_playlist_id = yp.id "
+                 "WHERE 1=1")
             params = []
             if channel_id is not None:
                 q += " AND v.channel_id = ?"
                 params.append(channel_id)
+            if playlist_id is not None:
+                q += " AND v.target_playlist_id = ?"
+                params.append(playlist_id)
             if status:
                 q += " AND v.status = ?"
                 params.append(status)
@@ -832,8 +843,11 @@ class ExtendedDatabase(Database):
     def get_video(self, video_id: int) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT v.*, c.name as channel_name "
-                "FROM videos v LEFT JOIN channels c ON v.channel_id = c.id "
+                "SELECT v.*, c.name as channel_name, "
+                "yp.name as target_playlist_name "
+                "FROM videos v "
+                "LEFT JOIN channels c ON v.channel_id = c.id "
+                "LEFT JOIN youtube_playlists yp ON v.target_playlist_id = yp.id "
                 "WHERE v.id = ?", (video_id,)
             ).fetchone()
         return dict(row) if row else None
@@ -870,6 +884,7 @@ class ExtendedDatabase(Database):
                     # ── Scheduled publishing ──
                     "publish_mode", "target_public_at", "published_at",
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
+                    "target_playlist_id", "target_playlist_slug",
                     "manual_altered_content_done", "manual_end_screens_done"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──

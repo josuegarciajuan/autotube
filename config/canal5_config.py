@@ -688,6 +688,13 @@ LOGO_PATH = ""
 YT_CATEGORY_ID = "27"              # Education
 YT_PRIVACY_STATUS = "public"
 
+# ── Scheduled Publishing ──────────────────────────────────────────
+PUBLISH_MODE = "scheduled"
+PUBLISH_TIMEZONE = "Europe/Madrid"
+PUBLISH_JITTER_MIN = 20
+PUBLISH_WARMUP_MIN = 120
+# PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (educacion_ciencia → 18:00)
+
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
     "enfermedades raras",

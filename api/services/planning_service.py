@@ -34,6 +34,24 @@ SPAIN_FALLBACK_WINDOW = (8, 10, 0.5, "madrugada-overflow")
 ESTIMATED_PIPELINE_MINUTES = 75   # typical gen duration; used to calc scheduled_at
 MIN_GAP_MINUTES = 90               # minimum gap between generation START times
 
+
+# ── Alternate pattern resolution ─────────────────────────────────
+
+def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
+    """Resolve effective videos_per_day, supporting alternate patterns.
+
+    If ch has 'alternate_pattern' (a list like [2, 3]), alternates based on
+    the day ordinal + channel-specific offset. Otherwise uses 'videos_per_day'.
+    """
+    pattern = ch.get("alternate_pattern")
+    if pattern and isinstance(pattern, list) and len(pattern) >= 2:
+        from datetime import datetime
+        day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
+        offset = ch.get("alternate_offset", 0)
+        idx = (day_ordinal + offset) % len(pattern)
+        return pattern[idx]
+    return ch.get("videos_per_day", 1)
+
 # ── Seed helpers ──────────────────────────────────────────────
 
 def _day_seed(date_str: str) -> int:
@@ -199,7 +217,7 @@ def compute_daily_slots(
     for ch in channel_configs:
         if not ch.get("planning_enabled", True):
             continue
-        n = ch.get("videos_per_day", 1)
+        n = _resolve_videos_per_day(ch, date_str)
         if n <= 0:
             continue
 

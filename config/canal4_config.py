@@ -721,7 +721,11 @@ YT_CATEGORY_ID = "27"              # Education
 YT_PRIVACY_STATUS = "public"     # Public — upload directly visible
 
 # ── Scheduled Publishing ──────────────────────────────────────────
-PUBLISH_MODE = "immediate"         # Legacy: publicar al subir
+PUBLISH_MODE = "scheduled"
+PUBLISH_TIMEZONE = "Europe/Madrid"
+PUBLISH_JITTER_MIN = 20
+PUBLISH_WARMUP_MIN = 120
+# PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (historia_documental → 20:00)
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
