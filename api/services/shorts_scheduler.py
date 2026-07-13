@@ -969,19 +969,52 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
 # ── Internal helpers ───────────────────────────────────────────
 
 def _sync_running_shorts_slots(db):
-    """Check running shorts slots: mark completed if their short exists."""
-    today = datetime.now(CEST).date().isoformat()
-    running_slots = db.get_shorts_planned_slots(date_key=today, status="running")
-    if not running_slots:
+    """Check running shorts slots across ALL recent dates: mark completed if their
+    short exists, mark failed if their generation job died (e.g. server restart).
+
+    Previously only scanned today's slots, which left server-restart orphans
+    stuck in 'running' state indefinitely for previous days.
+    """
+    today = datetime.now(CEST).date()
+    all_running = []
+    for offset in range(-7, 1):  # scan last 7 days including today
+        date_key = (today + timedelta(days=offset)).isoformat()
+        slots = db.get_shorts_planned_slots(date_key=date_key, status="running")
+        if slots:
+            all_running.extend(slots)
+
+    if not all_running:
         return
 
-    for s in running_slots:
+    for s in all_running:
+        slot_id = s["id"]
         short_id = s.get("short_id")
+        job_id = s.get("job_id")
+
+        # Case 1: short exists and is published → mark completed
         if short_id:
             short = db.get_short(short_id)
             if short and short.get("status") == "published":
-                db.update_shorts_slot_status(s["id"], "completed")
-                logger.info("Shorts slot #%d marked completed", s["id"])
+                db.update_shorts_slot_status(slot_id, "completed")
+                logger.info("Shorts slot #%d marked completed", slot_id)
+                continue
+
+        # Case 2: linked job failed (server restart, error, etc.) → mark failed
+        if job_id:
+            job = db.get_job(job_id)
+            if job is None:
+                # Job record deleted — slot is orphaned
+                db.update_shorts_slot_status(
+                    slot_id, "failed",
+                    error_message="Orphaned: job record missing",
+                )
+                logger.info("Shorts slot #%d marked failed (job #%d missing)", slot_id, job_id)
+            elif job.get("status") == "failed":
+                db.update_shorts_slot_status(
+                    slot_id, "failed",
+                    error_message=f"Job #{job_id} failed: {(job.get('error_msg') or '')[:200]}",
+                )
+                logger.info("Shorts slot #%d marked failed (job #%d failed)", slot_id, job_id)
 
 
 def _cancel_stale_shorts_slots(db):

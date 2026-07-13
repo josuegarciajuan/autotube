@@ -2168,6 +2168,23 @@ async def auto_recover_on_startup():
 
     conn.commit()
 
+    # ── Step 2b: Clean up orphaned shorts_planned_slots ───────
+    # When a generation_job is killed by server restart, the
+    # shorts_planned_slots row stays as 'running' indefinitely.
+    # This closes the gap: any slot whose linked job is now failed
+    # gets marked as failed too.
+    orphaned_slots = conn.execute(
+        """UPDATE shorts_planned_slots
+           SET status = 'failed',
+               error_message = 'Server restart — linked job failed'
+           WHERE status = 'running'
+             AND job_id IS NOT NULL
+             AND job_id IN (SELECT id FROM generation_jobs WHERE status = 'failed')"""
+    ).rowcount
+    if orphaned_slots:
+        conn.commit()
+        log.info("Cleaned up %d orphaned shorts slot(s) (job died on restart)", orphaned_slots)
+
     # ── Step 3: Auto-recover recoverable videos ───────────────
     rows = conn.execute(
         "SELECT * FROM videos WHERE status='error' "
