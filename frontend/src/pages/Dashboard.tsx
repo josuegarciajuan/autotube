@@ -1,22 +1,71 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
-import { Users, Eye, Heart, Video, Clock, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
-import KpiCard from '../components/KpiCard'
-import ChannelTable from '../components/ChannelTable'
+import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { useChannelFilter } from '../context/ChannelFilterContext'
+import { useEasterEgg } from '../context/EasterEggContext'
+import ChannelFilter from '../components/ChannelFilter'
+import VitalSignsBar from '../components/VitalSignsBar'
+import ActivityHeatmap from '../components/ActivityHeatmap'
 import PipelineSection from '../components/PipelineSection'
 import TopVideos from '../components/TopVideos'
 import RecentVideos from '../components/RecentVideos'
 import RecentShorts from '../components/RecentShorts'
 import YppProgressSection from '../components/YppProgressSection'
 import RevenueOverview from '../components/RevenueOverview'
-import MilestonesTimeline from '../components/MilestonesTimeline'
+import BossFight from '../components/BossFight'
+import Console from '../components/Console'
+import DeepDivePanel from '../components/DeepDivePanel'
 import PendingManualActions from '../components/PendingManualActions'
 import UpcomingPublications from '../components/UpcomingPublications'
 import type { StabilizeResult } from '../components/StabilizeProgress'
 
+// Collapsible section wrapper
+function CollapsibleSection({ title, icon, defaultOpen, children }: {
+  title: string; icon?: string; defaultOpen?: boolean; children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? true)
+  return (
+    <div className="mb-6">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between p-3 rounded-xl border border-dark-500 bg-dark-800/60 hover:border-gray-400 transition-all"
+      >
+        <span className="flex items-center gap-2 text-sm font-semibold text-gray-300">
+          {icon && <span className="text-lg">{icon}</span>}
+          {title}
+        </span>
+        <motion.span
+          animate={{ rotate: open ? 180 : 0 }}
+          transition={{ duration: 0.3 }}
+          className="text-gray-500 text-xs"
+        >
+          ▼
+        </motion.span>
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.4, ease: 'easeInOut' }}
+            className="overflow-hidden"
+          >
+            <div className="pt-3">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [deepDiveChannel, setDeepDiveChannel] = useState<any>(null)
+  const { selectedChannelId } = useChannelFilter()
+  const { partyMode, matrixMode, glitchTick } = useEasterEgg()
 
   // Stabilization state
   const [stabilizing, setStabilizing] = useState(false)
@@ -30,7 +79,10 @@ export default function Dashboard() {
   const [collectStatsState, setCollectStatsState] = useState<any>(null)
   const [collectStatsFinishedAt, setCollectStatsFinishedAt] = useState<string | null>(null)
 
-  // Refrescar datos del Dashboard
+  // Console events
+  const [consoleEvents, setConsoleEvents] = useState<any[]>([])
+
+  // Refrescar dashboard
   const loadDashboard = useCallback(async () => {
     try {
       const d = await api.getDashboard()
@@ -42,25 +94,18 @@ export default function Dashboard() {
     }
   }, [])
 
-  // Load last/current stats-collection state on mount (survives reloads)
   useEffect(() => {
-    let cancelled = false
-    async function loadStatus() {
-      try {
-        const s = await api.getStatsCollectStatus()
-        if (cancelled) return
-        applyStatsStatus(s)
-        if (s.status === 'running') {
-          setCollectingStats(true)
-          pollStatsStatus()
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    loadStatus()
-    return () => { cancelled = true }
-  }, [])
+    loadDashboard()
+    const interval = setInterval(loadDashboard, 15000)
+    return () => clearInterval(interval)
+  }, [loadDashboard])
+
+  // Load console events
+  useEffect(() => {
+    api.getRecentEvents(20, selectedChannelId ?? undefined)
+      .then(setConsoleEvents)
+      .catch(() => {})
+  }, [selectedChannelId, glitchTick])
 
   function summarize(s: any): string {
     const chans = s.channels || []
@@ -99,7 +144,6 @@ export default function Dashboard() {
           setTimeout(poll, 2000)
         } else {
           setCollectingStats(false)
-          // Refresh dashboard data immediately after stats collection completes
           loadDashboard()
         }
       } catch {
@@ -110,10 +154,21 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    loadDashboard()
-    const interval = setInterval(loadDashboard, 15000)
-    return () => clearInterval(interval)
-  }, [loadDashboard])
+    let cancelled = false
+    async function loadStatus() {
+      try {
+        const s = await api.getStatsCollectStatus()
+        if (cancelled) return
+        applyStatsStatus(s)
+        if (s.status === 'running') {
+          setCollectingStats(true)
+          pollStatsStatus()
+        }
+      } catch { /* ignore */ }
+    }
+    loadStatus()
+    return () => { cancelled = true }
+  }, [])
 
   async function handleStabilize() {
     if (stabilizing) return
@@ -159,9 +214,111 @@ export default function Dashboard() {
   const topVideos = data?.top_videos || []
   const recentVideos = data?.recent_videos || []
   const recentShorts = data?.recent_shorts || []
+  const heatmapData = data?.heatmap_data || []
+  const channelNames: Record<string, string> = {}
+  const channelSlugs: Record<string, string> = {}
+  const channelColors: Record<string, string> = {}
+  const pipelineCounts: Record<number, number> = {}
+
+  channels.forEach((ch: any, i: number) => {
+    channelNames[ch.id] = ch.name
+    channelSlugs[ch.id] = ch.slug
+    const cols = ['#ff3355', '#a855f7', '#00e5ff', '#22c55e', '#ffb830', '#ec4899']
+    channelColors[ch.id] = cols[i % cols.length]
+  })
+
+  pipeline.forEach((p: any) => {
+    // Find channel_id from pipeline data - we need to look it up from channel slug
+    const ch = channels.find((c: any) => c.slug === p.channel_slug || c.id === p.channel_id)
+    if (ch) {
+      pipelineCounts[ch.id] = (pipelineCounts[ch.id] || 0) + 1
+    }
+  })
+
+  // Build KPI list for VitalSignsBar
+  const kpiList = [
+    {
+      key: 'sparkline_subscribers',
+      label: 'Subs',
+      value: kpis?.subscribers?.value ?? 0,
+      delta: kpis?.subscribers?.delta,
+      icon: Users,
+      color: '#00e5ff',
+    },
+    {
+      key: 'sparkline_views',
+      label: 'Views',
+      value: kpis?.total_views?.value ?? 0,
+      delta: kpis?.total_views?.delta,
+      icon: Eye,
+      color: '#ff3355',
+      breakdown: kpis?.total_views?.breakdown,
+    },
+    {
+      key: 'sparkline_engagement',
+      label: 'Engage',
+      value: kpis?.engagement?.value ?? 0,
+      delta: kpis?.engagement?.delta,
+      icon: Heart,
+      color: '#ffb830',
+      breakdown: kpis?.engagement?.breakdown,
+    },
+    {
+      key: 'sparkline_watch_hours',
+      label: 'Horas',
+      value: kpis?.watch_hours?.value ?? 0,
+      delta: kpis?.watch_hours?.delta,
+      icon: Clock,
+      color: '#22c55e',
+    },
+    {
+      key: 'in_production',
+      label: 'Pipeline',
+      value: kpis?.in_production?.value ?? 0,
+      delta: null,
+      icon: Cog,
+      color: '#a855f7',
+    },
+  ]
+
+  // Sparkline mapping
+  const sparklines: Record<string, number[]> = {
+    sparkline_subscribers: kpis?.sparkline_subscribers || [],
+    sparkline_views: kpis?.sparkline_views || [],
+    sparkline_engagement: kpis?.sparkline_engagement || [],
+    sparkline_watch_hours: kpis?.sparkline_watch_hours || [],
+    in_production: Array(8).fill(kpis?.in_production?.value || 0),
+  }
+
+  // Channel breakdown for expanded KPI view (views per channel)
+  const viewsBreakdown = channels.map((ch: any) => ({
+    name: ch.name,
+    slug: ch.slug,
+    value: (ch.longform_views || 0) + (ch.shorts_views || 0),
+  }))
 
   return (
-    <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 animate-fade-in">
+    <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6"
+      style={partyMode ? { animation: 'party-bg 2s linear infinite' } : {}}
+    >
+      {/* Party mode overlay */}
+      {partyMode && (
+        <div className="fixed inset-0 pointer-events-none z-40"
+          style={{
+            background: 'linear-gradient(90deg, rgba(255,51,85,0.05), rgba(168,85,247,0.05), rgba(0,229,255,0.05), rgba(255,51,85,0.05))',
+            backgroundSize: '400% 100%',
+            animation: 'party-bg 2s linear infinite',
+          }}
+        />
+      )}
+
+      {/* Matrix mode global effect */}
+      {matrixMode && (
+        <div className="fixed inset-0 pointer-events-none z-39"
+          style={{ background: 'rgba(0,15,0,0.3)', backdropFilter: 'hue-rotate(180deg)' }}
+        />
+      )}
+
       {/* Toolbar: Refresh Stats + Stabilize */}
       <div className="flex items-center justify-end gap-2">
         <button
@@ -170,35 +327,24 @@ export default function Dashboard() {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           title="Recolectar estadisticas de YouTube bajo demanda"
         >
-          {collectingStats ? (
-            <Loader2 size={13} className="animate-spin" />
-          ) : (
-            <RefreshCw size={13} />
-          )}
+          {collectingStats ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
           <span>{collectingStats ? 'Recolectando...' : 'Recolectar stats'}</span>
         </button>
         <button
           onClick={handleStabilize}
           disabled={stabilizing}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Estabilizar: reinicia API, mata procesos zombie, libera espacio en disco"
         >
-          {stabilizing ? (
-            <Loader2 size={13} className="animate-spin" />
-          ) : (
-            <Wrench size={13} />
-          )}
-          <span>{stabilizing ? 'Estabilizando...' : 'Estabilizar Herramienta'}</span>
+          {stabilizing ? <Loader2 size={13} className="animate-spin" /> : <Wrench size={13} />}
+          <span>{stabilizing ? 'Estabilizando...' : 'Estabilizar'}</span>
         </button>
       </div>
 
       {/* Stats collection feedback */}
       {collectStatsMsg && (
         <div className={`rounded-lg border animate-fade-in ${
-          collectStatsError
-            ? 'bg-red-500/5 border-red-500/20'
-            : collectingStats
-            ? 'bg-cyan-500/5 border-cyan-500/20'
+          collectStatsError ? 'bg-red-500/5 border-red-500/20'
+            : collectingStats ? 'bg-cyan-500/5 border-cyan-500/20'
             : 'bg-green-500/5 border-green-500/20'
         }`}>
           <div className={`flex items-center justify-between gap-2 text-xs py-2 px-3 ${
@@ -209,126 +355,14 @@ export default function Dashboard() {
               {collectStatsMsg}
               {collectStatsFinishedAt && <span className="text-[10px] opacity-60 ml-1">({collectStatsFinishedAt})</span>}
             </span>
-            <button
-              onClick={() => { setCollectStatsMsg(null); setCollectStatsState(null) }}
-              className="opacity-60 hover:opacity-100 transition-opacity"
-              title="Cerrar"
-            >
+            <button onClick={() => { setCollectStatsMsg(null); setCollectStatsState(null) }} className="opacity-60 hover:opacity-100 transition-opacity">
               <X size={13} />
             </button>
           </div>
-          {/* Per-channel breakdown on success */}
-          {!collectingStats && !collectStatsError && collectStatsState?.channels?.length > 0 && (
-            <div className="px-3 pb-2 pt-0">
-              <div className="flex flex-wrap gap-1.5">
-                {collectStatsState.channels.map((ch: any, i: number) => (
-                  <div key={i} className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] ${
-                    ch.ok
-                      ? 'bg-green-500/10 text-green-300 border border-green-500/15'
-                      : ch.skipped
-                      ? 'bg-gray-500/10 text-gray-400 border border-gray-500/15'
-                      : 'bg-red-500/10 text-red-300 border border-red-500/15'
-                  }`}>
-                    {ch.ok ? <CheckCircle2 size={10} /> : ch.skipped ? <SkipForward size={10} /> : <AlertCircle size={10} />}
-                    <span className="font-medium">{ch.slug}</span>
-                    {ch.ok ? (
-                      <span className="opacity-70">
-                        {ch.channel_updated ? 'C+' : ''}{ch.videos_updated > 0 ? ` V${ch.videos_updated}` : ''}{ch.shorts_updated > 0 ? ` S${ch.shorts_updated}` : ''}{ch.analytics_updated > 0 ? ` A${ch.analytics_updated}` : ''}
-                        {(ch.channel_updated || ch.videos_updated > 0 || ch.shorts_updated > 0 || ch.analytics_updated > 0) ? '' : ' sin cambios'}
-                      </span>
-                    ) : ch.skipped ? (
-                      <span className="opacity-60">{ch.reason || 'sin token'}</span>
-                    ) : (
-                      <span className="opacity-70">{ch.error || 'error'}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
-      {/* KPIs Globales */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 sm:gap-4">
-        <KpiCard
-          label="Suscriptores"
-          value={kpis?.subscribers?.value ?? 0}
-          delta={kpis?.subscribers?.delta}
-          icon={Users}
-          color="text-neon-cyan"
-          sparkline={kpis?.sparkline_subscribers}
-        />
-        <KpiCard
-          label="Vistas totales"
-          value={kpis?.total_views?.value ?? 0}
-          delta={kpis?.total_views?.delta}
-          icon={Eye}
-          color="text-neon-red"
-          sparkline={kpis?.sparkline_views}
-          breakdown={kpis?.total_views?.breakdown}
-        />
-        <KpiCard
-          label="Interacciones"
-          value={kpis?.engagement?.value ?? 0}
-          delta={kpis?.engagement?.delta}
-          icon={Heart}
-          color="text-neon-gold"
-          sparkline={kpis?.sparkline_engagement}
-          breakdown={kpis?.engagement?.breakdown}
-        />
-        <KpiCard
-          label="Horas reproducción"
-          value={kpis?.watch_hours?.value ?? 0}
-          delta={kpis?.watch_hours?.delta}
-          icon={Clock}
-          color="text-green-400"
-          sparkline={kpis?.sparkline_watch_hours}
-          format="hours"
-        />
-        <KpiCard
-          label="En producción"
-          value={kpis?.in_production?.value ?? 0}
-          delta={null}
-          icon={Video}
-          color="text-neon-purple"
-          format="pipeline"
-          generating={kpis?.in_production?.generating}
-          ready={kpis?.in_production?.ready}
-        />
-      </div>
-
-      {/* YPP Progress — Camino a Monetización */}
-      <YppProgressSection channels={channels} />
-
-      {/* Revenue Overview */}
-      <RevenueOverview revenue={data?.revenue_overview} />
-
-      {/* Próximos Hitos */}
-      <MilestonesTimeline milestones={data?.upcoming_milestones || []} />
-
-      {/* Tabla comparativa de canales */}
-      <ChannelTable channels={channels} />
-
-      {/* Pipeline activo */}
-      <PipelineSection pipeline={pipeline} />
-
-      {/* ── Scheduled publishing: pending manual actions ── */}
-      <PendingManualActions />
-
-      {/* ── Scheduled publishing: upcoming publications ── */}
-      <UpcomingPublications />
-
-      {/* Top videos */}
-      <TopVideos videos={topVideos} />
-
-      {/* Recently published: videos + shorts side by side */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-        <RecentVideos videos={recentVideos} />
-        <RecentShorts shorts={recentShorts} />
-      </div>
-
-      {/* Stabilization result - embedded inline notification */}
+      {/* ═══════ NO SE TOCA: Stabilize result ═══════ */}
       {stabilizeResult && (
         <div className="glass p-4 rounded-xl border border-green-500/20">
           <div className="flex items-start gap-3">
@@ -338,7 +372,7 @@ export default function Dashboard() {
               </svg>
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-semibold text-green-400">Estabilización completada</h3>
+              <h3 className="text-sm font-semibold text-green-400">Estabilizacion completada</h3>
               <p className="text-xs text-gray-300 mt-1">{stabilizeResult.message}</p>
               <div className="mt-2 space-y-0.5">
                 {stabilizeResult.steps.map((step: string, i: number) => (
@@ -348,14 +382,11 @@ export default function Dashboard() {
                   </div>
                 ))}
               </div>
-              <p className="text-[10px] text-neon-gold mt-2 animate-pulse">
-                La API se está reiniciando automáticamente...
-              </p>
+              <p className="text-[10px] text-neon-gold mt-2 animate-pulse">La API se esta reiniciando automaticamente...</p>
             </div>
           </div>
         </div>
       )}
-
       {stabilizeError && (
         <div className="glass p-4 rounded-xl border border-red-500/20">
           <div className="flex items-start gap-3">
@@ -369,6 +400,104 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ═══════ NIVEL 1: Channel Filter Pills ═══════ */}
+      <ChannelFilter channels={channels} pipelineCounts={pipelineCounts} />
+
+      {/* ═══════ NIVEL 1: Vital Signs Bar (KPIs gamificados) ═══════ */}
+      <VitalSignsBar
+        kpis={kpiList}
+        sparklines={sparklines}
+        channelBreakdown={viewsBreakdown}
+      />
+
+      {/* ═══════ NIVEL 1: Activity Heatmap ═══════ */}
+      <ActivityHeatmap
+        data={heatmapData}
+        channelSlugs={channelSlugs}
+        channelNames={channelNames}
+        channelColors={channelColors}
+      />
+
+      {/* ═══════ NIVEL 2: Pipeline Activo ═══════ */}
+      {pipeline.length > 0 && (
+        <CollapsibleSection title="Pipeline Activo" icon="⚙️">
+          <PipelineSection pipeline={pipeline} />
+        </CollapsibleSection>
+      )}
+
+      {/* ═══════ NIVEL 2: YPP + Revenue ═══════ */}
+      <CollapsibleSection title="Monetizacion" icon="💰" defaultOpen={false}>
+        <YppProgressSection channels={channels} />
+        <div className="mt-3">
+          <RevenueOverview revenue={data?.revenue_overview} />
+        </div>
+      </CollapsibleSection>
+
+      {/* ═══════ NIVEL 2: Boss Fights (Milestones gamificados) ═══════ */}
+      {(data?.upcoming_milestones || []).length > 0 && (
+        <CollapsibleSection title="Jefes a Derrotar" icon="⚔️" defaultOpen={false}>
+          {channels.slice(0, 3).map((ch: any) => (
+            <BossFight key={ch.id} channelId={ch.id} channelName={ch.name} />
+          ))}
+        </CollapsibleSection>
+      )}
+
+      {/* ═══════ NIVEL 2: Scheduled Publishing ═══════ */}
+      <CollapsibleSection title="Publicaciones Programadas" icon="📅" defaultOpen={false}>
+        <PendingManualActions />
+        <div className="mt-3">
+          <UpcomingPublications />
+        </div>
+      </CollapsibleSection>
+
+      {/* ═══════ NIVEL 2: Top Videos ═══════ */}
+      {topVideos.length > 0 && (
+        <CollapsibleSection title="Top Videos" icon="🏆">
+          <TopVideos videos={topVideos} />
+        </CollapsibleSection>
+      )}
+
+      {/* ═══════ NIVEL 2: Recents ═══════ */}
+      <CollapsibleSection title="Publicado Recientemente" icon="🕐" defaultOpen={false}>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+          <RecentVideos videos={recentVideos} />
+          <RecentShorts shorts={recentShorts} />
+        </div>
+      </CollapsibleSection>
+
+      {/* ═══════ NIVEL 3: Deep Dive Panel (slide on channel click) ═══════ */}
+      {selectedChannelId && (
+        <div className="text-center">
+          <button
+            onClick={() => {
+              const ch = channels.find((c: any) => c.id === selectedChannelId)
+              if (ch) setDeepDiveChannel(ch)
+            }}
+            className="px-4 py-2 rounded-xl bg-neon-red/10 border border-neon-red/30 text-neon-red text-sm font-medium hover:bg-neon-red/20 transition-all"
+          >
+            🔬 Abrir Deep Dive: {channels.find((c: any) => c.id === selectedChannelId)?.name || 'Canal'}
+          </button>
+        </div>
+      )}
+
+      <DeepDivePanel
+        channel={deepDiveChannel}
+        open={!!deepDiveChannel}
+        onClose={() => setDeepDiveChannel(null)}
+        comparisonChannels={channels}
+      />
+
+      {/* ═══════ Console (fixed bottom-right) ═══════ */}
+      <Console events={consoleEvents} />
+
+      {/* Party/matrix background animations */}
+      <style>{`
+        @keyframes party-bg {
+          0% { background-position: 0% 50%; }
+          100% { background-position: 400% 50%; }
+        }
+      `}</style>
     </div>
   )
 }

@@ -285,7 +285,33 @@ export const api = {
       planned: PlannedSlot[];
       generating: GeneratingVideo[];
       warming: WarmingVideo[];
+      shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[] };
     }>('/planning/pipeline-status'),
+
+  // ── Gamification v3 ─────────────────────────────────
+  getStreaks: (channelId?: number) => {
+    const params = channelId ? `?channel_id=${channelId}` : ''
+    return request<any[]>(`/streaks${params}`)
+  },
+
+  getBadges: (channelId?: number) => {
+    const params = channelId ? `?channel_id=${channelId}` : ''
+    return request<any[]>(`/badges${params}`)
+  },
+
+  checkBadges: (channelId?: number) => {
+    const params = channelId ? `?channel_id=${channelId}` : ''
+    return request<any>(`/badges/check${params}`, { method: 'POST' })
+  },
+
+  getRecentEvents: (limit = 50, channelId?: number) => {
+    let url = `/events/recent?limit=${limit}`
+    if (channelId) url += `&channel_id=${channelId}`
+    return request<any[]>(url)
+  },
+
+  getContentFlow: (channelId: number) =>
+    request<any>(`/channels/${channelId}/content-flow`),
 };
 
 // ── Pipeline status types ────────────────────────────────────
@@ -333,6 +359,25 @@ export interface WarmingVideo {
   auto_playlist_name: string | null;
   manual_altered_content_done: number;
   manual_end_screens_done: number;
+  channel_name: string;
+  channel_slug: string;
+}
+
+export interface ShortsPipelineSlot {
+  slot_id: number;
+  channel_id: number;
+  date_key: string;
+  scheduled_at: string;
+  target_upload_at: string | null;
+  short_type: string;   // 'native' | 'clip'
+  slot_position: number;
+  long_slot_position: number | null;
+  source_video_id: number | null;
+  status: string;       // 'pending' | 'running'
+  job_id: number | null;
+  job_status: string | null;
+  job_progress: number | null;
+  job_phase: string | null;
   channel_name: string;
   channel_slug: string;
 }

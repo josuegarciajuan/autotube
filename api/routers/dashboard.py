@@ -1,14 +1,15 @@
 """Dashboard router — unified data for the main dashboard."""
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from typing import Optional
 from api.deps import get_db
 
 router = APIRouter()
 
 
 @router.get("/dashboard")
-def get_dashboard():
+def get_dashboard(channel_id: Optional[int] = Query(None, description="Filter by channel ID")):
     db = get_db()
-    data = db.get_dashboard_data()
+    data = db.get_dashboard_data(channel_id=channel_id)
 
     # Serialize datetime objects
     for ch in data.get("channels", []):
@@ -28,6 +29,11 @@ def get_dashboard():
         for k in ("created_at", "stats_updated"):
             if v.get(k):
                 v[k] = str(v[k])
+
+    # Serialize heatmap dates
+    for h in data.get("heatmap_data", []):
+        if h.get("date"):
+            h["date"] = str(h["date"])
 
     # Add upcoming milestones
     try:

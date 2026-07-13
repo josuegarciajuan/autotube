@@ -180,6 +180,12 @@ def migrate_v2(db_path: str = None):
     # Run v7 schema (channel_daily_watchtime for YPP monetization tracking)
     _migrate_v7(conn, logger)
 
+    # Run v8 schema (streaks, badges, system_events for dashboard v3)
+    schema_v8 = Path(__file__).parent / "schema_v8.sql"
+    if schema_v8.exists():
+        with open(schema_v8) as f:
+            conn.executescript(f.read())
+        logger.info("Migration: v8 schema applied")
 
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
@@ -2033,28 +2039,30 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_dashboard_data(self) -> dict:
-        """Unified dashboard data: KPIs, channels, pipeline, upcoming, top videos."""
+    def get_dashboard_data(self, channel_id: int = None) -> dict:
+        """Unified dashboard data: KPIs, channels, pipeline, upcoming, top videos.
+        If channel_id is provided, filters all data to that channel."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
 
+            ch_filter = "AND v.channel_id = ?" if channel_id else ""
+            ch_params = (channel_id,) if channel_id else ()
+
             # ── Engagement per channel (likes + comments from latest video stats, real Data API v3 data) ──
-            engagement_by_channel = conn.execute(
-                """SELECT v.channel_id,
+            engagement_sql = f"""SELECT v.channel_id,
                           COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
                    FROM videos v
                    JOIN video_stats_history vsh ON vsh.id = (
                        SELECT MAX(vsh2.id) FROM video_stats_history vsh2
                        WHERE vsh2.video_id = v.id AND (vsh2.likes > 0 OR vsh2.comments > 0)
                    )
-                   WHERE v.yt_video_id IS NOT NULL
+                   WHERE v.yt_video_id IS NOT NULL {ch_filter.replace('v.channel_id', 'v.channel_id')}
                    GROUP BY v.channel_id"""
-            ).fetchall()
+            engagement_by_channel = conn.execute(engagement_sql, ch_params).fetchall()
             engagement_map = {r["channel_id"]: r["engagement"] for r in engagement_by_channel}
 
             # ── Engagement from shorts (likes + comments from latest short_stats) ──
-            shorts_engagement_by_channel = conn.execute(
-                """SELECT s.channel_id,
+            shorts_eng_sql = f"""SELECT s.channel_id,
                           COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
                    FROM shorts s
                    JOIN short_stats ss ON ss.id = (
@@ -2062,13 +2070,14 @@ class ExtendedDatabase(Database):
                        WHERE ss2.short_id = s.id AND (ss2.likes > 0 OR ss2.comments > 0)
                    )
                    WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
+                     {ch_filter.replace('v.channel_id', 's.channel_id')}
                    GROUP BY s.channel_id"""
-            ).fetchall()
+            shorts_engagement_by_channel = conn.execute(shorts_eng_sql, ch_params).fetchall()
             shorts_engagement_map = {r["channel_id"]: r["engagement"] for r in shorts_engagement_by_channel}
 
             # ── Channel comparison with latest stats ──
-            channels = conn.execute(
-                """SELECT ch.id, ch.name, ch.slug, ch.active,
+            ch_where = "AND ch.id = ?" if channel_id else ""
+            channels_sql = f"""SELECT ch.id, ch.name, ch.slug, ch.active,
                           ch.cpm_min, ch.cpm_max, ch.monetization_vertical, ch.ypp_status,
                           csh.subscribers, csh.total_views, csh.video_count,
                           csh.estimated_minutes_watched, csh.fetched_at as stats_updated,
@@ -2104,9 +2113,9 @@ class ExtendedDatabase(Database):
                    LEFT JOIN channel_stats_history csh ON csh.id = (
                        SELECT MAX(csh2.id) FROM channel_stats_history csh2 WHERE csh2.channel_id = ch.id
                    )
-                   WHERE ch.active = 1
+                   WHERE ch.active = 1 {ch_where}
                    ORDER BY ch.name"""
-            ).fetchall()
+            channels = conn.execute(channels_sql, ch_params).fetchall()
 
             channels_data = []
             total_subscribers = 0
@@ -2201,54 +2210,65 @@ class ExtendedDatabase(Database):
                 return None
 
             # ── Pipeline: videos generating or ready ──
+            pipe_where = "AND v.channel_id = ?" if channel_id else ""
             pipeline = conn.execute(
-                """SELECT v.id, v.titulo_final, v.status, v.progress, v.progress_phase,
+                f"""SELECT v.id, v.titulo_final, v.status, v.progress, v.progress_phase,
                           v.created_at, c.name as channel_name, c.slug as channel_slug
                    FROM videos v
                    JOIN channels c ON v.channel_id = c.id
-                   WHERE v.status IN ('generating', 'ready')
-                   ORDER BY v.created_at DESC LIMIT 10"""
+                   WHERE v.status IN ('generating', 'ready') {pipe_where.replace('v.channel_id', 'v.channel_id')}
+                   ORDER BY v.created_at DESC LIMIT 10""",
+                ch_params,
             ).fetchall()
 
+            in_prod_where = "AND channel_id = ?" if channel_id else ""
             in_production = conn.execute(
-                "SELECT COUNT(*) as c FROM videos WHERE status = 'generating'"
+                f"SELECT COUNT(*) as c FROM videos WHERE status = 'generating' {in_prod_where}",
+                ch_params,
             ).fetchone()["c"]
             ready_count = conn.execute(
-                "SELECT COUNT(*) as c FROM videos WHERE status = 'ready'"
+                f"SELECT COUNT(*) as c FROM videos WHERE status = 'ready' {in_prod_where}",
+                ch_params,
             ).fetchone()["c"]
 
             # ── Upcoming schedules ──
+            up_where = "AND cs.channel_id = ?" if channel_id else ""
             upcoming = conn.execute(
-                """SELECT cs.*, c.name as channel_name, c.slug as channel_slug,
-                          v.titulo_final as video_title
-                   FROM content_schedules cs
-                   JOIN channels c ON cs.channel_id = c.id
-                   LEFT JOIN videos v ON cs.video_id = v.id
-                   WHERE cs.active = 1 AND cs.next_run_at > datetime('now','localtime')
-                   ORDER BY cs.next_run_at ASC LIMIT 8"""
+                f"""SELECT cs.*, c.name as channel_name, c.slug as channel_slug,
+                           v.titulo_final as video_title
+                    FROM content_schedules cs
+                    JOIN channels c ON cs.channel_id = c.id
+                    LEFT JOIN videos v ON cs.video_id = v.id
+                    WHERE cs.active = 1 AND cs.next_run_at > datetime('now','localtime') {up_where}
+                    ORDER BY cs.next_run_at ASC LIMIT 8""",
+                ch_params,
             ).fetchall()
 
             # ── Top 5 videos by views ──
+            top_where = "AND v.channel_id = ?" if channel_id else ""
             top_videos = conn.execute(
-                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
-                          v.video_path, v.created_at, c.name as channel_name, c.slug as channel_slug,
-                          vsh.views, vsh.likes, vsh.comments, vsh.estimated_minutes_watched,
-                          vsh.average_view_duration, vsh.estimated_revenue_min,
-                          vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
-                   FROM videos v
-                   JOIN channels c ON v.channel_id = c.id
-                   JOIN video_stats_history vsh ON vsh.id = (
-                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
-                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
-                   )
-                   ORDER BY vsh.views DESC LIMIT 5"""
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
+                           v.video_path, v.created_at, c.name as channel_name, c.slug as channel_slug,
+                           vsh.views, vsh.likes, vsh.comments, vsh.estimated_minutes_watched,
+                           vsh.average_view_duration, vsh.estimated_revenue_min,
+                           vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
+                    FROM videos v
+                    JOIN channels c ON v.channel_id = c.id
+                    JOIN video_stats_history vsh ON vsh.id = (
+                        SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                        WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                    )
+                    WHERE 1=1 {top_where}
+                    ORDER BY vsh.views DESC LIMIT 5""",
+                ch_params,
             ).fetchall()
 
-            # ── Sparkline data for KPI cards (last 7 days) ──
+            # ── Sparkline data for KPI cards (last 8 days) ──
             sparkline_subscribers = []
             sparkline_views = []
             sparkline_engagement = []
             sparkline_watch_hours = []
+            spark_ch_filter = "AND csh.channel_id = ?" if channel_id else ""
             for days_ago in range(7, -1, -1):
                 date_point = f"datetime('now', '-{days_ago} days')"
                 aggr = conn.execute(
@@ -2260,9 +2280,11 @@ class ExtendedDatabase(Database):
                             FROM channel_stats_history
                             WHERE fetched_at <= {date_point}
                             GROUP BY channel_id
-                        ) latest ON csh.id = latest.max_id"""
+                        ) latest ON csh.id = latest.max_id
+                        WHERE 1=1 {spark_ch_filter}""",
+                    ch_params,
                 ).fetchone()
-                # Real engagement from Data API v3 (likes + comments)
+                eng_where = "AND v.channel_id = ?" if channel_id else ""
                 eng_aggr = conn.execute(
                     f"""SELECT COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
                         FROM videos v
@@ -2272,9 +2294,10 @@ class ExtendedDatabase(Database):
                               AND (vsh2.likes > 0 OR vsh2.comments > 0)
                               AND vsh2.fetched_at <= {date_point}
                         )
-                        WHERE v.yt_video_id IS NOT NULL"""
+                        WHERE v.yt_video_id IS NOT NULL {eng_where}""",
+                    ch_params,
                 ).fetchone()
-                # Include shorts engagement in sparkline
+                shorts_eng_where = "AND s.channel_id = ?" if channel_id else ""
                 shorts_eng_aggr = conn.execute(
                     f"""SELECT COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
                         FROM shorts s
@@ -2284,7 +2307,8 @@ class ExtendedDatabase(Database):
                               AND (ss2.likes > 0 OR ss2.comments > 0)
                               AND ss2.fetched_at <= {date_point}
                         )
-                        WHERE s.status = 'published' AND s.youtube_id IS NOT NULL"""
+                        WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {shorts_eng_where}""",
+                    ch_params,
                 ).fetchone()
                 if aggr:
                     sparkline_subscribers.append(aggr["subs"] or 0)
@@ -2297,26 +2321,73 @@ class ExtendedDatabase(Database):
                     )
 
             # ── Recent published videos (last 5) ──
+            rec_where = "AND v.channel_id = ?" if channel_id else ""
             recent_videos = conn.execute(
-                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
-                          c.name as channel_name, c.slug as channel_slug
-                   FROM videos v
-                   JOIN channels c ON v.channel_id = c.id
-                   WHERE v.yt_video_id IS NOT NULL
-                   ORDER BY v.uploaded_at DESC
-                   LIMIT 5"""
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
+                           c.name as channel_name, c.slug as channel_slug
+                    FROM videos v
+                    JOIN channels c ON v.channel_id = c.id
+                    WHERE v.yt_video_id IS NOT NULL {rec_where}
+                    ORDER BY v.uploaded_at DESC
+                    LIMIT 5""",
+                ch_params,
             ).fetchall()
 
             # ── Recent published shorts (last 5) ──
+            recs_where = "AND s.channel_id = ?" if channel_id else ""
             recent_shorts = conn.execute(
-                """SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
-                          c.name as channel_name, c.slug as channel_slug
-                   FROM shorts s
-                   JOIN channels c ON s.channel_id = c.id
-                   WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
-                   ORDER BY s.published_at DESC
-                   LIMIT 5"""
+                f"""SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
+                           c.name as channel_name, c.slug as channel_slug
+                    FROM shorts s
+                    JOIN channels c ON s.channel_id = c.id
+                    WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {recs_where}
+                    ORDER BY s.published_at DESC
+                    LIMIT 5""",
+                ch_params,
             ).fetchall()
+
+            # ── Heatmap data: daily views last 30 days per channel ──
+            heatmap_data = []
+            for days_back in range(29, -1, -1):
+                day_start = f"datetime('now', '-{days_back} days', 'start of day')"
+                day_end = f"datetime('now', '-{days_back} days', 'start of day', '+1 day')"
+                day_date = f"date('now', '-{days_back} days')"
+                per_channel = {}
+                hd_channels = conn.execute("SELECT id FROM channels WHERE active = 1").fetchall()
+                for hch in hd_channels:
+                    total_day = conn.execute(
+                        """SELECT COALESCE(SUM(vsh.views), 0) as v
+                           FROM videos v
+                           JOIN video_stats_history vsh ON vsh.id = (
+                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                               WHERE vsh2.video_id = v.id
+                                 AND vsh2.fetched_at >= ? AND vsh2.fetched_at < ?
+                           )
+                           WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL""",
+                        (day_start, day_end, hch["id"]),
+                    ).fetchone()
+                    per_channel[str(hch["id"])] = total_day["v"] or 0
+                heatmap_data.append({
+                    "date": day_date,
+                    "total_views": sum(per_channel.values()),
+                    "channels": per_channel,
+                })
+
+            # ── Streaks: rachas activas ──
+            streaks_sql = "SELECT * FROM streaks"
+            streaks_params = ()
+            if channel_id:
+                streaks_sql += " WHERE channel_id = ?"
+                streaks_params = (channel_id,)
+            streaks = [dict(r) for r in conn.execute(streaks_sql, streaks_params).fetchall()]
+
+            # ── Badges: logros desbloqueados ──
+            badges_sql = "SELECT * FROM badges"
+            badges_params = ()
+            if channel_id:
+                badges_sql += " WHERE channel_id = ?"
+                badges_params = (channel_id,)
+            badges = [dict(r) for r in conn.execute(badges_sql, badges_params).fetchall()]
 
         return {
             "global_kpis": {
@@ -2375,6 +2446,9 @@ class ExtendedDatabase(Database):
                 "avg_cpm_min": round(total_revenue_min / max(total_longform_views, 1) * 1000, 2),
                 "avg_cpm_max": round(total_revenue_max / max(total_longform_views, 1) * 1000, 2),
             },
+            "heatmap_data": heatmap_data,
+            "streaks": streaks,
+            "badges": badges,
         }
 
     # ── Channel Templates ─────────────────────────────────────
@@ -3434,12 +3508,14 @@ class ExtendedDatabase(Database):
     def get_pipeline_status(self) -> dict:
         """Return full pipeline status for the visual scheduling view.
 
-        Returns 3 lists:
-        - planned:   slots pending today (not yet dispatched) with channel info
-        - generating: videos currently being generated with job progress
+        Returns 4 sections:
+        - planned:   video slots pending today (not dispatched yet)
+        - generating: long-form videos currently being generated
         - warming:   videos uploaded as private waiting to go public
+        - shorts:   { pending: shorts slots not yet dispatched,
+                       generating: shorts slots currently running with job progress }
         """
-        result = {"planned": [], "generating": [], "warming": []}
+        result = {"planned": [], "generating": [], "warming": [], "shorts": {"pending": [], "generating": []}}
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
 
@@ -3515,6 +3591,56 @@ class ExtendedDatabase(Database):
                    ORDER BY v.target_public_at ASC""",
             ).fetchall()
             result["warming"] = [dict(r) for r in warming]
+
+            # ── 4. Shorts pending (slots for today, not dispatched yet) ──
+            shorts_pending = conn.execute(
+                """SELECT
+                    sps.id as slot_id,
+                    sps.channel_id,
+                    sps.date_key,
+                    sps.scheduled_at,
+                    sps.target_upload_at,
+                    sps.short_type,
+                    sps.slot_position,
+                    sps.long_slot_position,
+                    sps.source_video_id,
+                    sps.status,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels ch ON ch.id = sps.channel_id
+                   WHERE sps.date_key = date('now', 'localtime')
+                     AND sps.status = 'pending'
+                   ORDER BY sps.scheduled_at ASC""",
+            ).fetchall()
+            result["shorts"]["pending"] = [dict(r) for r in shorts_pending]
+
+            # ── 5. Shorts generating (running slots with job progress) ──
+            shorts_generating = conn.execute(
+                """SELECT
+                    sps.id as slot_id,
+                    sps.channel_id,
+                    sps.date_key,
+                    sps.scheduled_at,
+                    sps.target_upload_at,
+                    sps.short_type,
+                    sps.slot_position,
+                    sps.long_slot_position,
+                    sps.source_video_id,
+                    sps.status,
+                    sps.job_id,
+                    gj.status as job_status,
+                    gj.progress as job_progress,
+                    gj.phase as job_phase,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels ch ON ch.id = sps.channel_id
+                   LEFT JOIN generation_jobs gj ON gj.id = sps.job_id
+                   WHERE sps.status = 'running'
+                   ORDER BY sps.scheduled_at ASC""",
+            ).fetchall()
+            result["shorts"]["generating"] = [dict(r) for r in shorts_generating]
 
         return result
 
