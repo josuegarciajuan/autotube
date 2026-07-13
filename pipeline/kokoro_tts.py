@@ -93,6 +93,12 @@ class KokoroTTSEngine:
 
         Also attempts ``torch.cuda.empty_cache()`` for GPU-accelerated
         systems (harmless no-op on CPU-only).
+
+        After releasing all references and running gc.collect(), calls
+        ``malloc_trim(0)`` to return the released heap memory to the OS
+        immediately — without this, glibc holds onto freed pages and
+        /proc/meminfo shows artificially low ``MemAvailable``, causing
+        false-positive RAM gate timeouts.
         """
         if self._pipeline is not None:
             import gc
@@ -100,7 +106,13 @@ class KokoroTTSEngine:
             del self._pipeline
             self._pipeline = None
             gc.collect()
-            # Try to force-release any torch memory
+            # Release freed heap pages back to the OS
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
+            # Try to force-release any torch GPU memory
             try:
                 import torch
                 if hasattr(torch, 'cuda') and torch.cuda.is_available():
