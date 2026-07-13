@@ -96,6 +96,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
     
+    # ── Clean up orphaned ffmpeg/edge-tts/yt-dlp processes from prior runs ──
+    try:
+        from api.services.generation_service import _kill_orphaned_ffmpeg
+        _kill_orphaned_ffmpeg()
+        logging.getLogger("autotube.startup").info("Orphan process cleanup completed")
+    except Exception as exc:
+        logging.getLogger("autotube.startup").warning("Orphan cleanup skipped: %s", exc)
+
     # Auto-recover failed/interrupted videos from previous run
     try:
         from api.services.generation_service import auto_recover_on_startup

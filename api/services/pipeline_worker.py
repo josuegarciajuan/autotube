@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import sys
 import traceback
 from pathlib import Path
@@ -154,6 +155,19 @@ def run_video_render(
             "Worker started: canal=%s video=%d job=%d test_mode=%s",
             canal, video_id, job_id, test_mode,
         )
+
+        # ── 0. Reap zombie children automatically ────────────────
+        # SIGCHLD handler that drains all terminated child processes
+        # so ffmpeg subprocesses don't accumulate as <defunct> zombies.
+        def _reap_zombies(signum, frame):
+            while True:
+                try:
+                    wpid, status = os.waitpid(-1, os.WNOHANG)
+                    if wpid == 0:
+                        break
+                except (ChildProcessError, OSError):
+                    break
+        signal.signal(signal.SIGCHLD, _reap_zombies)
 
         # ── 1. Parse JSON arguments ────────────────────────────
         bloques = json.loads(bloques_json) if bloques_json else []

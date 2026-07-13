@@ -2258,13 +2258,16 @@ async def auto_recover_on_startup():
             job_id = db.create_job(channel_id, "reassemble", video_id)
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",
                      video_id, job_id, progress_phase)
-            await _run_reassembly_job(job_id, video_id)  # serial: one at a time
+            # Launch as background task — do NOT await.
+            # The render semaphore serializes concurrent jobs automatically.
+            # If we awaited here, the API startup would block for 20–40 min.
+            asyncio.create_task(_run_reassembly_job(job_id, video_id))
             recovered += 1
         except Exception as exc:
-            log.warning("Video %d: recovery failed — %s", video_id, exc)
+            log.warning("Video %d: recovery dispatch failed — %s", video_id, exc)
             unrecoverable += 1
 
-    log.info("Startup recovery complete: %d bug(s) skipped, %d recovered, %d unrecoverable",
+    log.info("Startup recovery complete: %d bug(s) skipped, %d dispatched, %d unrecoverable",
              bugs_skipped, recovered, unrecoverable)
 
 
