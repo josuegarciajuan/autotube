@@ -244,6 +244,7 @@ async def _schedule_checker_loop():
     last_stats_collection = 0
     last_lifecycle_check = 0
     last_midnight_check = time.time()
+    last_recovery_check = 0
     first_run = True
 
     while True:
@@ -269,6 +270,11 @@ async def _schedule_checker_loop():
             if now - last_lifecycle_check > 900:  # 15 minutes
                 await _process_lifecycle_actions()
                 last_lifecycle_check = now
+            
+            # Auto-recovery: replan missing publications every 60 minutes
+            if now - last_recovery_check > 3600:  # 60 minutes
+                await _process_recovery_planner()
+                last_recovery_check = now
             
             # Regenerate the schedule forecast at midnight (daily)
             if now - last_midnight_check > 3600:  # Check once per hour
@@ -325,6 +331,29 @@ async def _process_planned_slots():
             )
     except Exception as e:
         logger.error("Planning dispatch error: %s", e)
+
+
+async def _process_recovery_planner():
+    """Check for channels behind daily target and replan missing slots.
+
+    Runs every 60 min. Only active between 10:00-23:00 local time.
+    Delegates to api.services.recovery_planner.auto_recover_missing_publications.
+    """
+    import asyncio
+    import logging
+    logger = logging.getLogger("autotube.recovery")
+    try:
+        from api.services.recovery_planner import auto_recover_missing_publications
+        result = await asyncio.to_thread(auto_recover_missing_publications)
+        if result and result.get("recovered_count", 0) > 0:
+            logger.info(
+                "Recovery: %d slot(s) created across %d channel(s): %s",
+                result["recovered_count"],
+                len(result.get("channels_affected", [])),
+                ", ".join(result.get("channels_affected", [])),
+            )
+    except Exception as e:
+        logger.error("Recovery planner error: %s", e)
 
 
 async def _process_smart_slots():

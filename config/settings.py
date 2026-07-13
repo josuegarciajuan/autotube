@@ -72,6 +72,13 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.8"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
 
+# ── Vision model (image analysis: thumbnails, etc.) ────────────
+# Uses OpenAI by default (gpt-4o-mini supports vision/multimodal)
+# Override with VISION_MODEL / VISION_API_KEY / VISION_BASE_URL env vars
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
+VISION_API_KEY = os.getenv("VISION_API_KEY", OPENAI_API_KEY)
+VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
+
 
 # ── Video ──────────────────────────────────────────────────────
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "24"))
