@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { api, formatCountdown, PlannedSlot, GeneratingVideo, WarmingVideo } from '../lib/api'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight } from 'lucide-react'
+import { api, formatCountdown, PlannedSlot, GeneratingVideo, WarmingVideo, ShortsPipelineSlot } from '../lib/api'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors } from 'lucide-react'
 
 // ── Channel colors (same as Scheduling.tsx) ──────────────────
 const CHANNEL_COLORS: Record<string, { dot: string; text: string; bg: string; border: string; accent: string }> = {
@@ -231,6 +231,112 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
   )
 }
 
+// ── Card: Shorts planned (pending slot) ─────────────────────
+function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
+  const colors = CHANNEL_COLORS[slot.channel_slug] || CHANNEL_COLORS.canal2
+  const isNative = slot.short_type === 'native'
+  const typeColor = isNative ? 'text-emerald-400' : 'text-orange-400'
+  const typeBg = isNative ? 'bg-emerald-400/10' : 'bg-orange-400/10'
+  const typeBorder = isNative ? 'border-emerald-400/30' : 'border-orange-400/30'
+  const TypeIcon = isNative ? Smartphone : Scissors
+  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
+  const countdown = formatCountdown(slot.scheduled_at)
+
+  return (
+    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} border-l-2 ${typeBorder} animate-fade-in`}>
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
+        <span className={`text-xs font-semibold ${colors.text}`}>
+          {CHANNEL_SHORT[slot.channel_slug]}
+        </span>
+        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
+          <TypeIcon size={10} />
+          {typeLabel}
+        </span>
+      </div>
+
+      {/* Timeline */}
+      <div className="flex items-center gap-2 text-xs">
+        <Smartphone size={11} className="text-gray-500" />
+        <span className="text-gray-400">Inicio:</span>
+        <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
+      </div>
+      {slot.target_upload_at && (
+        <div className="flex items-center gap-2 text-xs mt-1">
+          <ArrowRight size={11} className="text-gray-500" />
+          <span className="text-gray-400">Publicacion:</span>
+          <span className="text-white font-mono">{toLocalTime(slot.target_upload_at)}</span>
+        </div>
+      )}
+
+      {/* Countdown */}
+      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
+        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'} />
+        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
+          {countdown === 'Ahora' ? 'Inminente' : `En ${countdown}`}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── Card: Shorts generating (running slot with progress) ────
+function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
+  const colors = CHANNEL_COLORS[slot.channel_slug] || CHANNEL_COLORS.canal2
+  const isNative = slot.short_type === 'native'
+  const typeColor = isNative ? 'text-emerald-400' : 'text-orange-400'
+  const typeBg = isNative ? 'bg-emerald-400/10' : 'bg-orange-400/10'
+  const TypeIcon = isNative ? Smartphone : Scissors
+  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
+  const pct = slot.job_progress || 0
+  const phase = slot.job_phase || 'inicio'
+
+  return (
+    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/80 border-l-2 border-emerald-400/30 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot} animate-pulse`} />
+        <span className={`text-xs font-semibold ${colors.text}`}>
+          {CHANNEL_SHORT[slot.channel_slug]}
+        </span>
+        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
+          <TypeIcon size={10} />
+          {typeLabel}
+        </span>
+        <span className="text-[10px] text-neon-cyan font-mono flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
+          Generando
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="mb-2">
+        <div className="flex justify-between text-[10px] mb-1">
+          <span className="text-gray-400">{phaseLabel(phase)}</span>
+          <span className="text-white font-mono">{pct}%</span>
+        </div>
+        <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
+          <div
+            className="h-full rounded-full pipeline-progress-bar"
+            style={{ width: `${Math.max(pct, 3)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Target upload */}
+      {slot.target_upload_at && (
+        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-white/5">
+          <Clock size={11} className="text-gray-500" />
+          <span className="text-[10px] text-gray-500">
+            Publicacion estimada: <span className="text-gray-300 font-mono">{toLocalTime(slot.target_upload_at)}</span>
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Column header ────────────────────────────────────────────
 function ColumnHeader({ icon: Icon, title, count, colorClass }: {
   icon: any; title: string; count: number; colorClass: string
@@ -249,6 +355,8 @@ export default function PipelineView() {
   const [planned, setPlanned] = useState<PlannedSlot[]>([])
   const [generating, setGenerating] = useState<GeneratingVideo[]>([])
   const [warming, setWarming] = useState<WarmingVideo[]>([])
+  const [shortsPending, setShortsPending] = useState<ShortsPipelineSlot[]>([])
+  const [shortsGenerating, setShortsGenerating] = useState<ShortsPipelineSlot[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -258,6 +366,8 @@ export default function PipelineView() {
       setPlanned(data.planned || [])
       setGenerating(data.generating || [])
       setWarming(data.warming || [])
+      setShortsPending(data.shorts?.pending || [])
+      setShortsGenerating(data.shorts?.generating || [])
       setError(null)
     } catch (e: any) {
       console.error('PipelineView load error:', e)
@@ -282,6 +392,7 @@ export default function PipelineView() {
   }
 
   const totalItems = planned.length + generating.length + warming.length
+    + shortsPending.length + shortsGenerating.length
 
   if (loading) {
     return (
@@ -303,8 +414,8 @@ export default function PipelineView() {
     return (
       <div className="text-center py-10 glass rounded-xl">
         <Clock size={32} className="mx-auto mb-3 text-gray-700" />
-        <p className="text-xs text-gray-500">No hay videos en el pipeline ahora.</p>
-        <p className="text-[10px] text-gray-600 mt-1">Los videos apareceran aqui cuando esten planificados.</p>
+        <p className="text-xs text-gray-500">No hay videos ni shorts en el pipeline ahora.</p>
+        <p className="text-[10px] text-gray-600 mt-1">Apareceran aqui cuando esten planificados.</p>
       </div>
     )
   }
@@ -313,13 +424,24 @@ export default function PipelineView() {
     <div className="pipeline-grid">
       {/* ── Column 1: Planned ─────────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Clock} title="Pendientes" count={planned.length} colorClass="text-amber-400" />
-        {planned.length === 0 ? (
+        <ColumnHeader icon={Clock} title="Pendientes" count={planned.length + shortsPending.length} colorClass="text-amber-400" />
+        {planned.length === 0 && shortsPending.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay pendientes</p>
         ) : (
           <div className="space-y-3">
             {planned.map((slot) => (
-              <PlannedCard key={slot.slot_id} slot={slot} />
+              <PlannedCard key={`vid-${slot.slot_id}`} slot={slot} />
+            ))}
+            {shortsPending.length > 0 && planned.length > 0 && (
+              <div className="flex items-center gap-2 py-1">
+                <div className="flex-1 h-px bg-surface-border/30" />
+                <Smartphone size={11} className="text-gray-600" />
+                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts</span>
+                <div className="flex-1 h-px bg-surface-border/30" />
+              </div>
+            )}
+            {shortsPending.map((slot) => (
+              <ShortsPlannedCard key={`short-${slot.slot_id}`} slot={slot} />
             ))}
           </div>
         )}
@@ -327,13 +449,24 @@ export default function PipelineView() {
 
       {/* ── Column 2: Generating ──────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Loader2} title="Generando" count={generating.length} colorClass="text-neon-cyan animate-spin" />
-        {generating.length === 0 ? (
+        <ColumnHeader icon={Loader2} title="Generando" count={generating.length + shortsGenerating.length} colorClass="text-neon-cyan animate-spin" />
+        {generating.length === 0 && shortsGenerating.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay generaciones activas</p>
         ) : (
           <div className="space-y-3">
             {generating.map((video) => (
-              <GeneratingCard key={video.video_id} video={video} />
+              <GeneratingCard key={`vid-${video.video_id}`} video={video} />
+            ))}
+            {shortsGenerating.length > 0 && generating.length > 0 && (
+              <div className="flex items-center gap-2 py-1">
+                <div className="flex-1 h-px bg-surface-border/30" />
+                <Smartphone size={11} className="text-gray-600" />
+                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts</span>
+                <div className="flex-1 h-px bg-surface-border/30" />
+              </div>
+            )}
+            {shortsGenerating.map((slot) => (
+              <ShortsGeneratingCard key={`short-${slot.slot_id}`} slot={slot} />
             ))}
           </div>
         )}
