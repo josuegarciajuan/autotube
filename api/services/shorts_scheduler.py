@@ -271,7 +271,12 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
 
 
 def ensure_today_shorts_scheduled(db=None) -> bool:
-    """Check if today has shorts planned slots. If not, generate them.
+    """Check if today has pending/running shorts slots. If not, generate them.
+    
+    Only considers 'pending' and 'running' slots as needing to exist.
+    Completed, cancelled, and failed slots are ignored - they don't prevent
+    regeneration of new pending slots.
+    
     Returns True if slots exist (existing or newly generated).
     """
     if db is None:
@@ -281,12 +286,13 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
     today = datetime.now(CEST).date().isoformat()
     existing = db.get_shorts_planned_slots(date_key=today)
 
-    active_slots = [s for s in existing if s["status"] != "cancelled"]
+    # Only count pending and running slots as "needs no regeneration"
+    active_slots = [s for s in existing if s["status"] in ("pending", "running")]
     if len(active_slots) > 0:
-        logger.debug("Today's shorts schedule OK: %d active slots", len(active_slots))
+        logger.debug("Today's shorts schedule OK: %d pending/running slots", len(active_slots))
         return True
 
-    logger.info("Regenerating today's shorts schedule")
+    logger.info("No pending/running shorts slots for today — regenerating schedule")
     slots = compute_daily_shorts_slots(today, db)
     count = persist_daily_shorts_slots(today, slots, db)
     return count > 0

@@ -18,6 +18,7 @@ interface PipelineItem {
 
 interface PipelineSectionProps {
   pipeline: PipelineItem[]
+  shortsPipeline?: Record<string, number>
 }
 
 function PhaseLabel(phase: string | null): string {
@@ -211,10 +212,15 @@ function PipelineCard({ v }: { v: PipelineItem }) {
   )
 }
 
-export default function PipelineSection({ pipeline }: PipelineSectionProps) {
+export default function PipelineSection({ pipeline, shortsPipeline }: PipelineSectionProps) {
+  const shortsPending = shortsPipeline?.pending || 0
+  const shortsRunning = shortsPipeline?.running || 0
+  const shortsCompleted = shortsPipeline?.completed || 0
+  const shortsTotal = shortsPending + shortsRunning + shortsCompleted
+  const isEmpty = pipeline.length === 0 && shortsTotal === 0
   return (
     <div>
-      {pipeline.length === 0 ? (
+      {isEmpty ? (
         <div className="text-center py-8">
           <Zap size={36} className="mx-auto mb-3 text-gray-700" />
           <p className="text-gray-500 text-sm">Sin actividad en este momento</p>
@@ -231,10 +237,37 @@ export default function PipelineSection({ pipeline }: PipelineSectionProps) {
           </Link>
         </div>
       ) : (
-        <div className="grid gap-2 sm:grid-cols-2">
-          {pipeline.map(v => (
-            <PipelineCard key={v.id} v={v} />
-          ))}
+        <div className="space-y-3">
+          {/* Long-form pipeline cards */}
+          {pipeline.length > 0 && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {pipeline.map(v => (
+                <PipelineCard key={v.id} v={v} />
+              ))}
+            </div>
+          )}
+          {/* Shorts pipeline summary */}
+          {shortsTotal > 0 && (
+            <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-dark-700/60 border border-surface-border/30">
+              <div className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span className="text-xs text-gray-300">Shorts hoy:</span>
+              {shortsPending > 0 && (
+                <span className="text-[10px] font-mono text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded">
+                  {shortsPending} pendientes
+                </span>
+              )}
+              {shortsRunning > 0 && (
+                <span className="text-[10px] font-mono text-neon-cyan bg-neon-cyan/10 px-1.5 py-0.5 rounded">
+                  {shortsRunning} generando
+                </span>
+              )}
+              {shortsCompleted > 0 && (
+                <span className="text-[10px] font-mono text-green-400 bg-green-400/10 px-1.5 py-0.5 rounded">
+                  {shortsCompleted} completados
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

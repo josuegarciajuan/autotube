@@ -470,7 +470,7 @@ def get_pipeline_status():
                 if hasattr(val, "strftime"):
                     item[key] = str(val)
     # Shorts subsections
-    for sub in ("pending", "generating"):
+    for sub in ("pending", "generating", "completed"):
         for item in data["shorts"][sub]:
             for key, val in list(item.items()):
                 if hasattr(val, "strftime"):

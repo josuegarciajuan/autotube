@@ -212,6 +212,7 @@ export default function Dashboard() {
   const kpis = data?.global_kpis
   const channels = data?.channels || []
   const pipeline = data?.pipeline || []
+  const shortsPipeline = data?.shorts_pipeline || {}
   const topVideos = data?.top_videos || []
   const recentVideos = data?.recent_videos || []
   const recentShorts = data?.recent_shorts || []
@@ -421,9 +422,9 @@ export default function Dashboard() {
       />
 
       {/* ═══════ NIVEL 2: Pipeline Activo ═══════ */}
-      {pipeline.length > 0 && (
+      {(pipeline.length > 0 || Object.keys(shortsPipeline).length > 0) && (
         <CollapsibleSection title="Pipeline Activo" icon="⚙️">
-          <PipelineSection pipeline={pipeline} />
+          <PipelineSection pipeline={pipeline} shortsPipeline={shortsPipeline} />
         </CollapsibleSection>
       )}
 

@@ -288,7 +288,7 @@ export const api = {
       planned: PlannedSlot[];
       generating: GeneratingVideo[];
       warming: WarmingVideo[];
-      shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[] };
+      shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[]; completed: ShortsPipelineSlot[] };
     }>('/planning/pipeline-status'),
 
   // ── Gamification v3 ─────────────────────────────────

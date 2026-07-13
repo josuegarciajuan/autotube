@@ -2389,6 +2389,21 @@ class ExtendedDatabase(Database):
                 badges_params = (channel_id,)
             badges = [dict(r) for r in conn.execute(badges_sql, badges_params).fetchall()]
 
+            # ── Shorts pipeline: today's status counts ──
+            shorts_pipe_where = "AND sps.channel_id = ?" if channel_id else ""
+            shorts_pipeline = conn.execute(
+                f"""SELECT sps.status, COUNT(*) as count
+                    FROM shorts_planned_slots sps
+                    JOIN channels ch ON sps.channel_id = ch.id
+                    WHERE sps.date_key = date('now', 'localtime')
+                      AND ch.active = 1 {shorts_pipe_where}
+                    GROUP BY sps.status""",
+                ch_params,
+            ).fetchall()
+            shorts_pipeline_data = {}
+            for r in shorts_pipeline:
+                shorts_pipeline_data[r["status"]] = r["count"]
+
         return {
             "global_kpis": {
                 "subscribers": {
@@ -2435,6 +2450,7 @@ class ExtendedDatabase(Database):
             },
             "channels": channels_data,
             "pipeline": [dict(r) for r in pipeline],
+            "shorts_pipeline": shorts_pipeline_data,
             "upcoming": [dict(r) for r in upcoming],
             "top_videos": [dict(r) for r in top_videos],
             "recent_videos": [dict(r) for r in recent_videos],
@@ -3537,9 +3553,10 @@ class ExtendedDatabase(Database):
         - generating: long-form videos currently being generated
         - warming:   videos uploaded as private waiting to go public
         - shorts:   { pending: shorts slots not yet dispatched,
-                       generating: shorts slots currently running with job progress }
+                       generating: shorts slots currently running with job progress,
+                       completed: shorts slots completed today }
         """
-        result = {"planned": [], "generating": [], "warming": [], "shorts": {"pending": [], "generating": []}}
+        result = {"planned": [], "generating": [], "warming": [], "shorts": {"pending": [], "generating": [], "completed": []}}
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
 
@@ -3665,6 +3682,30 @@ class ExtendedDatabase(Database):
                    ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
             result["shorts"]["generating"] = [dict(r) for r in shorts_generating]
+
+            # ── 6. Shorts completed today ──
+            shorts_completed = conn.execute(
+                """SELECT
+                    sps.id as slot_id,
+                    sps.channel_id,
+                    sps.date_key,
+                    sps.scheduled_at,
+                    sps.target_upload_at,
+                    sps.short_type,
+                    sps.slot_position,
+                    sps.long_slot_position,
+                    sps.source_video_id,
+                    sps.status,
+                    sps.short_id,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels ch ON ch.id = sps.channel_id
+                   WHERE sps.date_key = date('now', 'localtime')
+                     AND sps.status = 'completed'
+                   ORDER BY sps.scheduled_at ASC""",
+            ).fetchall()
+            result["shorts"]["completed"] = [dict(r) for r in shorts_completed]
 
         return result
 

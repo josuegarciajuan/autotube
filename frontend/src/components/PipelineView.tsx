@@ -337,6 +337,40 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
   )
 }
 
+// ── Card: Shorts completed (done today) ──────────────────────
+function ShortsCompletedCard({ slot }: { slot: ShortsPipelineSlot }) {
+  const colors = CHANNEL_COLORS[slot.channel_slug] || CHANNEL_COLORS.canal2
+  const isNative = slot.short_type === 'native'
+  const typeColor = isNative ? 'text-emerald-400/60' : 'text-orange-400/60'
+  const typeBg = isNative ? 'bg-emerald-400/5' : 'bg-orange-400/5'
+  const TypeIcon = isNative ? Smartphone : Scissors
+  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
+
+  return (
+    <div className="pipeline-card rounded-xl p-3 border bg-dark-800/40 border-l-2 border-l-green-500/30 opacity-60 hover:opacity-80 transition-opacity">
+      <div className="flex items-center gap-2">
+        <span className={`w-2 h-2 rounded-full ${colors.dot} opacity-50`} />
+        <span className={`text-xs font-semibold ${colors.text} opacity-70`}>
+          {CHANNEL_SHORT[slot.channel_slug]}
+        </span>
+        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
+          <TypeIcon size={9} />
+          {typeLabel}
+        </span>
+        <span className="text-[10px] text-green-400 font-mono flex items-center gap-1">
+          <CheckCircle2 size={10} />
+          Completado
+        </span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px] mt-1.5">
+        <Smartphone size={10} className="text-gray-500" />
+        <span className="text-gray-500">Inicio:</span>
+        <span className="text-gray-400 font-mono">{toLocalTime(slot.scheduled_at)}</span>
+      </div>
+    </div>
+  )
+}
+
 // ── Column header ────────────────────────────────────────────
 function ColumnHeader({ icon: Icon, title, count, colorClass }: {
   icon: any; title: string; count: number; colorClass: string
@@ -357,6 +391,7 @@ export default function PipelineView() {
   const [warming, setWarming] = useState<WarmingVideo[]>([])
   const [shortsPending, setShortsPending] = useState<ShortsPipelineSlot[]>([])
   const [shortsGenerating, setShortsGenerating] = useState<ShortsPipelineSlot[]>([])
+  const [shortsCompleted, setShortsCompleted] = useState<ShortsPipelineSlot[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -368,6 +403,7 @@ export default function PipelineView() {
       setWarming(data.warming || [])
       setShortsPending(data.shorts?.pending || [])
       setShortsGenerating(data.shorts?.generating || [])
+      setShortsCompleted(data.shorts?.completed || [])
       setError(null)
     } catch (e: any) {
       console.error('PipelineView load error:', e)
@@ -392,7 +428,7 @@ export default function PipelineView() {
   }
 
   const totalItems = planned.length + generating.length + warming.length
-    + shortsPending.length + shortsGenerating.length
+    + shortsPending.length + shortsGenerating.length + shortsCompleted.length
 
   if (loading) {
     return (
@@ -424,8 +460,8 @@ export default function PipelineView() {
     <div className="pipeline-grid">
       {/* ── Column 1: Planned ─────────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Clock} title="Pendientes" count={planned.length + shortsPending.length} colorClass="text-amber-400" />
-        {planned.length === 0 && shortsPending.length === 0 ? (
+        <ColumnHeader icon={Clock} title="Planificado" count={planned.length + shortsPending.length + shortsCompleted.length} colorClass="text-amber-400" />
+        {planned.length === 0 && shortsPending.length === 0 && shortsCompleted.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay pendientes</p>
         ) : (
           <div className="space-y-3">
@@ -436,12 +472,25 @@ export default function PipelineView() {
               <div className="flex items-center gap-2 py-1">
                 <div className="flex-1 h-px bg-surface-border/30" />
                 <Smartphone size={11} className="text-gray-600" />
-                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts</span>
+                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts pendientes</span>
                 <div className="flex-1 h-px bg-surface-border/30" />
               </div>
             )}
             {shortsPending.map((slot) => (
               <ShortsPlannedCard key={`short-${slot.slot_id}`} slot={slot} />
+            ))}
+            {shortsCompleted.length > 0 && (
+              <div className="flex items-center gap-2 py-1">
+                <div className="flex-1 h-px bg-green-500/15" />
+                <CheckCircle2 size={11} className="text-green-500/60" />
+                <span className="text-[9px] text-green-500/80 uppercase tracking-wider">
+                  Shorts completados ({shortsCompleted.length})
+                </span>
+                <div className="flex-1 h-px bg-green-500/15" />
+              </div>
+            )}
+            {shortsCompleted.map((slot) => (
+              <ShortsCompletedCard key={`short-done-${slot.slot_id}`} slot={slot} />
             ))}
           </div>
         )}
