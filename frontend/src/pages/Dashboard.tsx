@@ -84,21 +84,22 @@ export default function Dashboard() {
 
   // Refrescar dashboard
   const loadDashboard = useCallback(async () => {
+    setLoading(true)
     try {
-      const d = await api.getDashboard()
+      const d = await api.getDashboard(selectedChannelId ?? undefined)
       setData(d)
     } catch (e) {
       console.error(e)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [selectedChannelId])
 
   useEffect(() => {
     loadDashboard()
     const interval = setInterval(loadDashboard, 15000)
     return () => clearInterval(interval)
-  }, [loadDashboard])
+  }, [loadDashboard, selectedChannelId])
 
   // Load console events
   useEffect(() => {

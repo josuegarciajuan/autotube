@@ -105,7 +105,10 @@ export const api = {
 
   // Stats
   getStats: () => request<any>('/stats'),
-  getDashboard: () => request<any>('/dashboard'),
+  getDashboard: (channelId?: number) => {
+    const qs = channelId != null ? `?channel_id=${channelId}` : ''
+    return request<any>(`/dashboard${qs}`)
+  },
   getAllChannelStats: () => request<any>('/channels/stats-summary'),
   collectStats: () => request<any>('/stats/collect', { method: 'POST' }),
   getStatsCollectStatus: () => request<any>('/stats/collect/status'),
