@@ -29,7 +29,7 @@ logger = logging.getLogger("autotube.recovery_planner")
 
 # ── Constants ────────────────────────────────────────────────────
 MIN_GAP_MINUTES = 90               # Minimum gap between same-channel slot starts
-ESTIMATED_PIPELINE_MINUTES = 75    # Typical generation duration
+ESTIMATED_PIPELINE_MINUTES = 180   # Typical generation duration (~2-3h) + margin
 MIN_HOUR_AHEAD = 2                 # Minimum hours from now to schedule a recovery slot
 # Window during which recovery is active (local hours in CEST)
 RECOVERY_START_HOUR = 10           # 10:00 AM

@@ -103,4 +103,51 @@
   .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
+
+  /* ── Pipeline View (3-column scheduling) ────────────────── */
+  .pipeline-grid {
+    @apply grid grid-cols-1 lg:grid-cols-3 gap-4;
+  }
+
+  .pipeline-column {
+    @apply min-h-[100px];
+  }
+
+  .pipeline-card {
+    @apply transition-all duration-300;
+  }
+  .pipeline-card:hover {
+    @apply shadow-lg shadow-black/20;
+    transform: translateY(-1px);
+  }
+
+  /* Progress bar gradient for generating videos */
+  .pipeline-progress-bar {
+    background: linear-gradient(90deg, #06b6d4, #8b5cf6, #f59e0b);
+    background-size: 200% 100%;
+    animation: progress-shift 2s linear infinite;
+  }
+
+  @keyframes progress-shift {
+    0% { background-position: 200% 0; }
+    100% { background-position: 0 0; }
+  }
+
+  /* Warmup progress bar with shimmer */
+  .warming-progress-bar {
+    background: linear-gradient(90deg, #f59e0b, #eab308, #f59e0b);
+    background-size: 200% 100%;
+    animation: warming-shimmer 3s ease-in-out infinite;
+  }
+
+  @keyframes warming-shimmer {
+    0% { background-position: 200% 0; }
+    50% { background-position: 0 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  @keyframes warming-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
 }

@@ -66,8 +66,8 @@ def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
     conn.close()
 
     if not rows:
-        logger.warning("No timing data for channel_id=%d, using default 120 min", channel_id)
-        return 120.0
+        logger.warning("No timing data for channel_id=%d, using default 180 min", channel_id)
+        return 180.0
 
     total_ms = 0
     count = 0
@@ -82,8 +82,8 @@ def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
             pass
 
     if count == 0:
-        logger.warning("No valid timing_data for channel_id=%d, using default 120 min", channel_id)
-        return 120.0
+        logger.warning("No valid timing_data for channel_id=%d, using default 180 min", channel_id)
+        return 180.0
 
     avg_min = (total_ms / count) / 60000.0
     logger.info("channel_id=%d: avg creation = %.1f min (from %d videos)", channel_id, avg_min, count)
