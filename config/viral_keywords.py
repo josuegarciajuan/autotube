@@ -110,7 +110,7 @@ NICHE_KEYWORDS_ENG: dict[str, list[str]] = {
 VIRAL_MIN_VIEWS: int = 500_000
 
 # Maximum days since publication (videos older than this are discarded)
-VIRAL_MAX_AGE_DAYS: int = 30
+VIRAL_MAX_AGE_DAYS: int = 29
 
 # Max queries per search session (per channel, per day)
 VIRAL_MAX_QUERIES: int = 8

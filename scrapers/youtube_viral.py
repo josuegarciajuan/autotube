@@ -38,7 +38,7 @@ _SCRIPTS_DIR = _TEMP_DIR / "viral_scripts"
 
 # Default viral scoring thresholds (channel configs can override)
 DEFAULT_MIN_VIEWS = 500_000
-DEFAULT_MAX_AGE_DAYS = 30
+DEFAULT_MAX_AGE_DAYS = 29
 DEFAULT_MAX_QUERIES = 8
 DEFAULT_RESULTS_PER_QUERY = 15
 DEFAULT_MAX_CANDIDATES = 20
@@ -290,12 +290,117 @@ class YouTubeViralScraper(BaseScraper):
 
         return results
 
+    @staticmethod
+    def _is_documentary_style_title(title: str, channel_name: str = "") -> bool:
+        """Check if a video title looks like documentary/story content.
+
+        Returns True if the title suggests documentary, educational, or storytelling
+        content (not a personal vlog, reaction, or host-driven channel).
+
+        Rejects titles that clearly come from a YouTuber/personality format:
+        - Personal vlogs ("I tried...", "My experience...")
+        - Reaction/prank/challenge videos
+        - Gaming content
+        - Titles that include the host/presenter name (e.g., "with John Smith")
+        """
+        if not title or len(title) < 10:
+            return True  # too short to judge, let it through
+
+        title_lower = title.lower().strip()
+        import re
+
+        # ── Hard rejects: personal YouTuber / Vlogger patterns ──
+        _REJECT_PATTERNS = [
+            r'\bi\s+(tried|tested|ate|visited|went|built|made|spent|survived|react)\b',
+            r'\bmy\s+(experience|journey|first|top|favorite|worst|scariest)\b',
+            r'\bwe\s+(tried|tested|went|built|made|found)\b',
+            r'\b(reaction|reacting|reaccion)\s+to\b',
+            r'\bprank\b', r'\bvlog\b', r'\bchallenge\b',
+            r'\bvs\b.*\bvs\b',  # "X vs Y vs Z" clickbait
+            r'\bgone\s+(wrong|wild|sexual|too far)\b',
+            r'\b(try not to|24 hour|overnight)\b',
+            r'\b(mukbang|asmr|unboxing|haul)\b',
+            r'\b(roblox|minecraft|fortnite|gta\s*[56])\b',
+        ]
+        for pattern in _REJECT_PATTERNS:
+            if re.search(pattern, title_lower):
+                return False
+
+        # ── Host/presenter name patterns ──
+        # Check if the channel name appears as a host credit in the title
+        if channel_name and len(channel_name) > 2:
+            ch_lower = channel_name.lower()
+            # Patterns like "| ChannelName", "- ChannelName", "by ChannelName"
+            _HOST_CREDIT_PATTERNS = [
+                rf'[\|\-–—]\s*{re.escape(ch_lower)}',
+                rf'\bby\s+{re.escape(ch_lower)}\b',
+                rf'\bwith\s+{re.escape(ch_lower)}\b',
+                rf'{re.escape(ch_lower)}\s+explains\b',
+                rf'{re.escape(ch_lower)}\s+(reacts|reviews|presents|shows)\b',
+            ]
+            for pat in _HOST_CREDIT_PATTERNS:
+                if re.search(pat, title_lower):
+                    logger.debug("[viral] Title rejected — host credit detected: '%s'", title[:80])
+                    return False
+
+        # Check for host intro patterns (any name, not just channel name)
+        _HOST_INTRO_PATTERNS = [
+            # "| First Last" — excludes known documentary/show suffixes
+            r'\|\s*(?!Full\s+Documentary|History\s+Channel|Discovery\s+Channel|National\s+Geographic|Real\s+Stories|DW\s+Documentary|BBC|PBS|Timeline)[A-Z][a-z]+\s+[A-Z][a-z]+',
+            r'\bwith\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b',  # "with John Smith"
+            r'\bfeat\.?\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b', # "feat. John Smith"
+            r'\bpresented by\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b', # "presented by John Smith"
+            # Note: "by" is NOT included because it's too ambiguous
+            # ("History by Ancient Scholars" = valid topic, not a host)
+        ]
+        for pattern in _HOST_INTRO_PATTERNS:
+            if re.search(pattern, title):
+                logger.debug("[viral] Title rejected — host intro detected: '%s'", title[:80])
+                return False
+
+        # ── Positive signals: documentary/story format keywords ──
+        _DOC_POSITIVES = [
+            r'\b(documentary|documental)\b',
+            r'\b(history|historia)\b',
+            r'\b(explained|explicado|explicación)\b',
+            r'\b(how|why|what)\s+(the|a|an|is|are|was|were)\b',
+            r'\b(the|el|la|los|las)\s+(mystery|misterio|secret|secreto|truth|verdad)\b',
+            r'\b(mystery|mysteries|misterios|misterio)\b',
+            r'\b(ancient|antigu[oa]|lost|perdid[oa]|forgotten|olvidad[oa])\b',
+            r'\b(discovery|descubrimiento|found)\b',
+            r'\b(unsolved|sin\s*resolver)\b',
+            r'\b(the story of|la historia de)\b',
+            r'\b(what happened to|qué pasó con)\b',
+            r'\b(investigation|investigación)\b',
+            r'\b(conspiracy|conspiración)\b',
+            r'\b(curse|maldición)\b',
+            r'\b(legend|leyenda)\b',
+            r'\b(phenomenon|fenómeno)\b',
+            r'\b(evidence|evidencia)\b',
+            r'\b(theory|teoría)\b',
+            r'\b(secrets|secretos)\b',
+            r'\b(revealed|revelad[oa])\b',
+            r'\b(shocking|impactante)\b',
+            r'\b(incredible|increíble)\b',
+            r'\b(origins|origen|orígenes)\b',
+            r'\b(extinction|extinción)\b',
+            r'\b(truth about|verdad sobre)\b',
+        ]
+        for pattern in _DOC_POSITIVES:
+            if re.search(pattern, title_lower):
+                return True
+
+        # ── Neutral: no strong signal either way ──
+        # Let it through — will be filtered by age + views + DB dedup
+        return True
+
     def _parse_ytdlp_result(self, data: dict) -> dict | None:
-        """Extract relevant fields from a yt-dlp flat result.
+        """Extract relevant fields from a yt-dlp result.
 
         When using --flat-playlist, upload_date and timestamp are often NOT
-        available. In that case we skip the age filter (assume recent) rather
-        than discarding the candidate.
+        available. In that case the candidate is marked as date_verified=False
+        and MUST go through a second-pass date verification in _discover_candidates()
+        before being accepted. No fake dates are invented.
         """
         try:
             view_count = data.get("view_count")
@@ -309,6 +414,15 @@ class YouTubeViralScraper(BaseScraper):
 
             # Skip videos with too few views
             if view_count < self.min_views:
+                return None
+
+            title = data.get("title", "") or ""
+            channel_name = data.get("channel", "") or data.get("uploader", "") or ""
+
+            # ── Filter: reject non-documentary / youtuber-style titles ──
+            if not self._is_documentary_style_title(title, channel_name):
+                logger.debug("[%s] Filtered out (not documentary style): %s",
+                             self.canal, title[:80])
                 return None
 
             # Parse upload date
@@ -334,18 +448,20 @@ class YouTubeViralScraper(BaseScraper):
                     pass
 
             if date_available:
-                # Only filter by age when we have real date data
+                # Hard filter: discard if too old (real date)
                 if hours_since_pub > (self.max_age_days * 24) or hours_since_pub <= 0:
                     logger.debug("[%s] Filtered out (age=%.1fh, max=%dh): %s",
                                  self.canal, hours_since_pub, self.max_age_days * 24,
-                                 data.get("title", "")[:50])
+                                 title[:50])
                     return None
+                date_verified = True
             else:
-                # --flat-playlist does not include upload_date/timestamp.
-                # Assume the video is recent enough to pass the age filter
-                # but use a conservative score (24h) so it doesn't get an
-                # unfair "freshness bonus" from a tiny divisor.
-                hours_since_pub = 168  # ~7 days — flat penalty
+                # --flat-playlist does NOT include upload_date/timestamp.
+                # DO NOT invent a fake date. Mark as unverified so
+                # _discover_candidates() second pass can fetch the real date.
+                hours_since_pub = -1  # sentinel: unknown
+                date_verified = False
+                upload_date_str = ""
 
             # Duration
             duration_sec = data.get("duration", 0) or 0
@@ -353,25 +469,30 @@ class YouTubeViralScraper(BaseScraper):
                 duration_sec = int(duration_sec) if duration_sec.isdigit() else 0
             duration_sec = int(duration_sec)
 
-            # Viral score: views per hour + freshness bonus
-            viral_score = view_count / max(hours_since_pub, 1)
-
-            # Freshness bonus: newer videos get a multiplier
-            if hours_since_pub < 168:  # < 7 days
-                viral_score *= 1.0
-            elif hours_since_pub < 336:  # 7-14 days
-                viral_score *= 0.7
-            else:  # 14-30 days (or unknown age → 7-day bucket)
-                viral_score *= 0.4
+            # Provisional score: views-based, neutral for unverified dates
+            if date_verified:
+                viral_score = view_count / max(hours_since_pub, 1)
+                # Freshness bonus for verified dates
+                if hours_since_pub < 168:       # < 7 days
+                    viral_score *= 1.0
+                elif hours_since_pub < 336:      # 7-14 days
+                    viral_score *= 0.7
+                else:                            # 14+ days
+                    viral_score *= 0.4
+            else:
+                # No date = neutral score (views / 100 ≈ ~4-day equivalent).
+                # This keeps high-view candidates ranked high for second-pass
+                # verification, but without giving an unfair freshness bonus.
+                viral_score = view_count / 100.0
 
             return {
-                "title": data.get("title", ""),
+                "title": title,
                 "url": data.get("webpage_url", "") or data.get("url", ""),
                 "video_id": data.get("id", ""),
                 "views": view_count,
-                "upload_date": str(upload_date_str) if upload_date_str else "",
+                "upload_date": upload_date_str,
                 "duration_sec": duration_sec,
-                "channel_name": data.get("channel", "") or data.get("uploader", ""),
+                "channel_name": channel_name,
                 "channel_id": data.get("channel_id", ""),
                 "description": data.get("description", "") or "",
                 "thumbnail_url": data.get("thumbnail", "") or (
@@ -380,6 +501,7 @@ class YouTubeViralScraper(BaseScraper):
                 ),
                 "viral_score": round(viral_score, 1),
                 "hours_since_pub": round(hours_since_pub, 1),
+                "date_verified": date_verified,
             }
         except Exception as e:
             logger.debug("[%s] Error parsing yt-dlp result: %s", self.canal, e)
@@ -391,6 +513,9 @@ class YouTubeViralScraper(BaseScraper):
         --flat-playlist searches skip upload_date metadata. This method does a
         dedicated yt-dlp call for a specific video URL to get the real date.
 
+        Uses --print to extract just the upload_date field, which is faster than
+        --dump-json because yt-dlp skips downloading all other metadata.
+
         Returns:
             datetime object (naive, UTC), or None if date cannot be determined.
         """
@@ -400,10 +525,11 @@ class YouTubeViralScraper(BaseScraper):
         cmd = [
             _YTDLP_BIN,
             video_url,
-            "--dump-json",
+            "--print", "%(upload_date)s",
             "--skip-download",
             "--no-warnings",
             "--no-check-certificate",
+            "--extractor-args", "youtube:skip=webpage",
             "--user-agent", random.choice(_USER_AGENTS),
         ]
 
@@ -412,29 +538,43 @@ class YouTubeViralScraper(BaseScraper):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=90,  # increased from 60s for reliability
                 env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
-            data = json.loads(proc.stdout.strip()) if proc.stdout.strip() else {}
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+            upload_date_str = proc.stdout.strip().split("\n")[0].strip()
+        except subprocess.TimeoutExpired:
+            logger.debug("[%s] _fetch_real_upload_date timed out for: %s", self.canal, video_url)
+            return None
+        except Exception as e:
             logger.debug("[%s] _fetch_real_upload_date failed for %s: %s", self.canal, video_url, e)
             return None
 
         # Parse upload_date (yt-dlp format: YYYYMMDD)
-        upload_date_str = str(data.get("upload_date", "") or "")
-        if upload_date_str and len(upload_date_str) == 8:
+        if upload_date_str and len(upload_date_str) == 8 and upload_date_str.isdigit():
             try:
                 return datetime.strptime(upload_date_str, "%Y%m%d")
             except ValueError:
                 pass
 
-        # Fallback: try timestamp
-        upload_timestamp = data.get("timestamp")
-        if upload_timestamp:
-            try:
-                return datetime.fromtimestamp(float(upload_timestamp))
-            except (ValueError, TypeError, OSError):
-                pass
+        # Fallback: try --dump-json if --print didn't work (older yt-dlp versions)
+        try:
+            cmd[2] = "--dump-json"
+            proc2 = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            data = json.loads(proc2.stdout.strip()) if proc2.stdout.strip() else {}
+            upload_date_str = str(data.get("upload_date", "") or "")
+            if upload_date_str and len(upload_date_str) == 8:
+                return datetime.strptime(upload_date_str, "%Y%m%d")
+            timestamp = data.get("timestamp")
+            if timestamp:
+                return datetime.fromtimestamp(float(timestamp))
+        except Exception:
+            pass
 
         return None
 
@@ -469,9 +609,13 @@ class YouTubeViralScraper(BaseScraper):
         return queries[:self.max_queries]
 
     def _discover_candidates(self, force_refresh: bool = False) -> list[dict]:
-        """Run discovery: search → parse → score → deduplicate → cache.
+        """Run discovery: search → parse → score → deduplicate → verify dates → cache.
 
-        Returns the top candidates sorted by viral_score descending.
+        ALL candidates without real upload dates go through mandatory date
+        verification. Candidates that fail verification are discarded
+        (no fake dates, no penalty scores for unverified content).
+
+        Returns the top candidates sorted by views descending.
         """
         # Use cached results if fresh enough
         if not force_refresh and self._cached_candidates:
@@ -501,54 +645,82 @@ class YouTubeViralScraper(BaseScraper):
             if len(all_candidates) >= self.max_candidates * 2:
                 break
 
-        # Sort by viral_score descending, take top N
-        all_candidates.sort(key=lambda x: x["viral_score"], reverse=True)
-        top_candidates = all_candidates[:self.max_candidates]
-
-        # ── Second pass: fetch real dates for candidates with unknown age ──
-        # --flat-playlist often omits upload_date. For top candidates,
-        # we do a dedicated yt-dlp call (without --flat-playlist) to get
-        # the real upload date, then re-score and re-filter.
-        candidates_with_unknown_age = [
-            c for c in top_candidates
-            if c.get("hours_since_pub") == 168  # sentinel: date was unavailable
+        # ── Second pass: MANDATORY date verification for ALL unverified candidates ──
+        # --flat-playlist often omits upload_date. Every candidate without a real
+        # date MUST be verified via a dedicated yt-dlp call. If verification fails,
+        # the candidate is DISCARDED (we refuse to use videos of unknown age).
+        candidates_need_verification = [
+            c for c in all_candidates
+            if not c.get("date_verified", False)
         ]
-        if candidates_with_unknown_age:
-            logger.info("[%s] %d/%d candidates have unknown upload dates — fetching real dates...",
-                        self.canal, len(candidates_with_unknown_age), len(top_candidates))
-            for candidate in candidates_with_unknown_age[:10]:  # limit to top 10
+        if candidates_need_verification:
+            logger.info("[%s] %d/%d candidates have unverified upload dates — "
+                         "MANDATORY date verification starting...",
+                         self.canal, len(candidates_need_verification), len(all_candidates))
+
+            verified_count = 0
+            discarded_count = 0
+            discard_video_ids: set[str] = set()
+
+            for candidate in candidates_need_verification:
                 real_date = self._fetch_real_upload_date(candidate.get("url", ""))
                 if real_date is not None:
-                    # Recompute hours_since_pub and re-check age filter
                     upload_dt = real_date.replace(tzinfo=timezone.utc)
                     hours = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
-                    candidate["hours_since_pub"] = round(hours, 1)
-                    candidate["upload_date"] = real_date.strftime("%Y%m%d")
-                    
-                    # Re-score with real date
-                    candidate["viral_score"] = round(
-                        candidate["views"] / max(hours, 1) * (0.7 if hours < 336 else 0.4), 1
-                    )
-                    
-                    # Filter out if too old
+
+                    # Age check: discard if too old
                     if hours > self.max_age_days * 24 or hours <= 0:
-                        logger.info("[%s] Removed candidate after date verification: '%s' (age=%.1fh, max=%dh)",
-                                    self.canal, candidate.get("title", "")[:50], hours,
-                                    self.max_age_days * 24)
-                        top_candidates = [c for c in top_candidates if c.get("video_id") != candidate.get("video_id")]
-                    else:
-                        logger.info("[%s] Verified date for '%s': %.1fh old (score=%.0f)",
-                                    self.canal, candidate.get("title", "")[:50], hours, candidate["viral_score"])
+                        logger.debug("[%s] Removed (age=%.1fh, max=%dh): '%s'",
+                                     self.canal, hours, self.max_age_days * 24,
+                                     candidate.get("title", "")[:60])
+                        discard_video_ids.add(candidate.get("video_id", ""))
+                        discarded_count += 1
+                        continue
+
+                    # Update candidate with real date data
+                    candidate["upload_date"] = real_date.strftime("%Y%m%d")
+                    candidate["hours_since_pub"] = round(hours, 1)
+                    candidate["date_verified"] = True
+
+                    # Re-score with real date
+                    if hours < 168:       # < 7 days
+                        freshness = 1.0
+                    elif hours < 336:      # 7-14 days
+                        freshness = 0.7
+                    else:                  # 14+ days
+                        freshness = 0.4
+                    candidate["viral_score"] = round(
+                        candidate["views"] / max(hours, 1) * freshness, 1
+                    )
+
+                    logger.debug("[%s] Verified: '%s' (%.1fh old, views=%s, score=%.0f)",
+                                 self.canal, candidate.get("title", "")[:60],
+                                 hours, candidate["views"], candidate["viral_score"])
+                    verified_count += 1
                 else:
-                    # Could not get real date — candidate stays with penalty score
-                    # but we log a warning so operators can investigate
-                    logger.warning("[%s] Could not fetch real date for '%s' (%s) — "
-                                   "keeping with penalty score (168h assumed)",
+                    # Could not fetch real date — DISCARD this candidate
+                    # We refuse to use content of unknown age
+                    logger.warning("[%s] DISCARDING candidate with unknown age: '%s' (%s)",
                                    self.canal, candidate.get("title", "")[:60],
                                    candidate.get("url", "")[:60])
+                    discard_video_ids.add(candidate.get("video_id", ""))
+                    discarded_count += 1
 
-        # Re-sort after date verification
-        top_candidates.sort(key=lambda x: x["viral_score"], reverse=True)
+            # Remove all discarded candidates from all_candidates
+            if discard_video_ids:
+                all_candidates = [
+                    c for c in all_candidates
+                    if c.get("video_id") not in discard_video_ids
+                ]
+
+            logger.info("[%s] Date verification complete: %d verified, %d discarded, "
+                         "%d remaining with known dates",
+                         self.canal, verified_count, discarded_count,
+                         len([c for c in all_candidates if c.get("date_verified", False)]))
+
+        # Sort by views descending (not viral_score) — once age-filtered, pick highest views
+        all_candidates.sort(key=lambda x: x.get("views", 0), reverse=True)
+        top_candidates = all_candidates[:self.max_candidates]
 
         # Cache
         self._cached_candidates = top_candidates
@@ -559,9 +731,11 @@ class YouTubeViralScraper(BaseScraper):
 
         if top_candidates:
             best = top_candidates[0]
-            logger.info("[%s] Top candidate: '%s' (score=%.0f, views=%s, %sh ago)",
-                        self.canal, best["title"][:60], best["viral_score"],
-                        best["views"], best["hours_since_pub"])
+            age_str = f"{best.get('hours_since_pub', '?'):.0f}h ago" if best.get('hours_since_pub', -1) > 0 else "?"
+            logger.info("[%s] Top candidate: '%s' (views=%s, %s, verified=%s)",
+                        self.canal, best["title"][:60],
+                        best["views"], age_str,
+                        best.get("date_verified", False))
 
         return top_candidates
 
@@ -863,7 +1037,7 @@ class YouTubeViralScraper(BaseScraper):
             if vid and vid not in seen_ids:
                 seen_ids.add(vid)
                 unique_so_far.append(c)
-        unique_so_far.sort(key=lambda x: x.get("viral_score", 0), reverse=True)
+        unique_so_far.sort(key=lambda x: x.get("views", 0), reverse=True)
 
         s5_queries = self._generate_title_queries(unique_so_far[:20], count=15)
         if s5_queries:
@@ -883,17 +1057,18 @@ class YouTubeViralScraper(BaseScraper):
         strategy_results["6_genre"] = len(candidates)
         logger.info("[%s]   Strategy 6: %d candidates", self.canal, len(candidates))
 
-        # ── Merge + deduplicate + filter ────────────────────────
+        # ── Merge + deduplicate + filter + final safety check ────
         seen_vids: set[str] = set()
         seen_urls: set[str] = set()
         unique: list[dict] = []
+        unverified_discarded = 0
 
         for c in all_candidates:
             vid = c.get("video_id", "")
             url = c.get("url", "")
             if not vid or vid in seen_vids:
                 continue
-            # Check if already in DB
+            # Check if already in DB (already used in another generation)
             if db and url:
                 try:
                     existing = db.get_content_by_url(url, self.canal)
@@ -901,25 +1076,37 @@ class YouTubeViralScraper(BaseScraper):
                         continue
                 except Exception:
                     pass
+            # ── FINAL SAFETY: discard any candidate still unverified ──
+            if not c.get("date_verified", False):
+                logger.warning("[%s] DISCARDING unverified candidate in final merge: '%s'",
+                               self.canal, c.get("title", "")[:60])
+                unverified_discarded += 1
+                continue
             seen_vids.add(vid)
             if url:
                 seen_urls.add(url)
             unique.append(c)
 
-        unique.sort(key=lambda x: x.get("viral_score", 0), reverse=True)
+        # Sort by views descending — once age-filtered, pick the one with most views
+        unique.sort(key=lambda x: x.get("views", 0), reverse=True)
 
         elapsed = time.time() - t0
         logger.info("[%s] ========== DISCOVERY COMPLETE (%.1fs) ==========", self.canal, elapsed)
         logger.info("[%s] Strategies: %s", self.canal,
                     ", ".join(f"{k}={v}" for k, v in strategy_results.items()))
-        logger.info("[%s] Total raw candidates: %d → unique after dedup+DB-filter: %d",
+        logger.info("[%s] Total raw candidates: %d → unique after dedup+DB+verification: %d",
                     self.canal, sum(strategy_results.values()), len(unique))
+        if unverified_discarded > 0:
+            logger.warning("[%s] ⚠ Discarded %d candidates in final merge (dates unverified)",
+                           self.canal, unverified_discarded)
 
         if unique:
             best = unique[0]
-            logger.info("[%s] Best candidate: '%s' (score=%.0f, views=%s)",
+            age_str = f"{best.get('hours_since_pub', '?'):.0f}h ago" if best.get('hours_since_pub', -1) > 0 else "?"
+            logger.info("[%s] Best candidate: '%s' (views=%s, %s, verified=%s)",
                         self.canal, best.get("title", "")[:60],
-                        best.get("viral_score", 0), best.get("views", 0))
+                        best.get("views", 0), age_str,
+                        best.get("date_verified", False))
 
         return unique
 

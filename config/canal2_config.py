@@ -1185,6 +1185,7 @@ CONTENT_PILLARS = [
 # VIRAL MIRROR
 # ═══════════════════════════════════════════════════════════════════
 VIRAL_ENABLED = True
+VIRAL_MAX_AGE_DAYS = 29  # Max days since publication (videos older are discarded)
 
 NICHE_KEYWORDS_ENG = [
     "unexplained mysteries",
