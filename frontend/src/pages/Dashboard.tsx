@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../lib/api'
-import { Users, Eye, Heart, Video, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
+import { Users, Eye, Heart, Video, Clock, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
 import KpiCard from '../components/KpiCard'
 import ChannelTable from '../components/ChannelTable'
 import PipelineSection from '../components/PipelineSection'
@@ -68,7 +68,9 @@ export default function Dashboard() {
     const failed = chans.filter((c: any) => !c.ok && !c.skipped)
     const totalVideos = ok.reduce((n: number, c: any) => n + (c.videos_updated || 0), 0)
     const totalShorts = ok.reduce((n: number, c: any) => n + (c.shorts_updated || 0), 0)
+    const totalAnalytics = ok.reduce((n: number, c: any) => n + (c.analytics_updated || 0), 0)
     let msg = `${ok.length} canal(es) OK · ${totalVideos} videos · ${totalShorts} shorts`
+    if (totalAnalytics > 0) msg += ` · ${totalAnalytics} analytics`
     if (failed.length) msg += ` · ${failed.length} con error`
     return msg
   }
@@ -231,8 +233,8 @@ export default function Dashboard() {
                     <span className="font-medium">{ch.slug}</span>
                     {ch.ok ? (
                       <span className="opacity-70">
-                        {ch.channel_updated ? 'C+' : ''}{ch.videos_updated > 0 ? ` V${ch.videos_updated}` : ''}{ch.shorts_updated > 0 ? ` S${ch.shorts_updated}` : ''}
-                        {(ch.channel_updated || ch.videos_updated > 0 || ch.shorts_updated > 0) ? '' : ' sin cambios'}
+                        {ch.channel_updated ? 'C+' : ''}{ch.videos_updated > 0 ? ` V${ch.videos_updated}` : ''}{ch.shorts_updated > 0 ? ` S${ch.shorts_updated}` : ''}{ch.analytics_updated > 0 ? ` A${ch.analytics_updated}` : ''}
+                        {(ch.channel_updated || ch.videos_updated > 0 || ch.shorts_updated > 0 || ch.analytics_updated > 0) ? '' : ' sin cambios'}
                       </span>
                     ) : ch.skipped ? (
                       <span className="opacity-60">{ch.reason || 'sin token'}</span>
@@ -248,7 +250,7 @@ export default function Dashboard() {
       )}
 
       {/* KPIs Globales */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 sm:gap-4">
         <KpiCard
           label="Suscriptores"
           value={kpis?.subscribers?.value ?? 0}
@@ -274,6 +276,15 @@ export default function Dashboard() {
           color="text-neon-gold"
           sparkline={kpis?.sparkline_engagement}
           breakdown={kpis?.engagement?.breakdown}
+        />
+        <KpiCard
+          label="Horas reproducción"
+          value={kpis?.watch_hours?.value ?? 0}
+          delta={kpis?.watch_hours?.delta}
+          icon={Clock}
+          color="text-green-400"
+          sparkline={kpis?.sparkline_watch_hours}
+          format="hours"
         />
         <KpiCard
           label="En producción"

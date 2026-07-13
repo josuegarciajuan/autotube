@@ -150,3 +150,21 @@ def get_channels_comparison():
         })
 
     return {"channels": result}
+
+
+@router.get("/channels/{channel_id}/analytics/watch-time")
+def get_channel_watch_time(channel_id: int):
+    """Get watch time summary for YPP monetization tracking.
+
+    Returns cumulative watch hours, daily breakdown, daily average,
+    projection to 4,000h, and top videos by watch time.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    summary = db.get_channel_watch_time_summary(channel_id)
+    summary["channel_name"] = ch["name"]
+    summary["channel_slug"] = ch["slug"]
+    return summary

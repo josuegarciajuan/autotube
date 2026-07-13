@@ -140,6 +140,112 @@ class YouTubeStatsFetcher:
 
         return self.get_video_stats(yt_video_id)
 
+    def get_all_videos_analytics(self, video_ids: list[str], days: int = 365) -> dict[str, dict]:
+        """Get analytics for multiple videos in a single API call.
+
+        Uses dimensions=video to fetch estimatedMinutesWatched,
+        averageViewDuration, and subscribersGained for all videos at once.
+
+        Args:
+            video_ids: List of YouTube video IDs.
+            days: Lookback window in days.
+
+        Returns:
+            Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration, subscribersGained}
+            Empty dict if no analytics data available.
+        """
+        if not self._analytics_service:
+            logger.debug("Analytics API not available for bulk video analytics")
+            return {}
+
+        if not video_ids:
+            return {}
+
+        # YouTube Analytics API limit: max 200 videos in a single filter
+        MAX_IDS_PER_CALL = 200
+        result = {}
+
+        for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
+            batch = video_ids[i : i + MAX_IDS_PER_CALL]
+            try:
+                resp = (
+                    self._analytics_service.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=f"{days}dAgo",
+                        endDate="today",
+                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained",
+                        dimensions="video",
+                        filters=f"video=={','.join(batch)}",
+                        maxResults=200,
+                    )
+                    .execute()
+                )
+                rows = resp.get("rows", [])
+                for row in rows:
+                    # rows: [video_id, estimatedMinutesWatched, averageViewDuration, subscribersGained]
+                    vid = row[0]
+                    result[vid] = {
+                        "estimatedMinutesWatched": str(row[1]) if row[1] else "0",
+                        "averageViewDuration": str(row[2]) if row[2] else "0",
+                        "subscribersGained": str(row[3]) if row[3] else "0",
+                    }
+                logger.debug(
+                    "Bulk analytics: %d videos returned for %d requested (batch %d/%d)",
+                    len(rows), len(batch), i // MAX_IDS_PER_CALL + 1,
+                    (len(video_ids) + MAX_IDS_PER_CALL - 1) // MAX_IDS_PER_CALL,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Bulk analytics API failed for batch (size=%d): %s", len(batch), exc
+                )
+
+        return result
+
+    def get_channel_daily_analytics(self, days: int = 365) -> list[dict]:
+        """Get daily channel watch time breakdown.
+
+        Uses dimensions=day to fetch daily estimatedMinutesWatched
+        and subscribersGained for trend tracking.
+
+        Args:
+            days: Lookback window in days.
+
+        Returns:
+            List of {date, estimatedMinutesWatched, subscribersGained}.
+            Empty list if no data available.
+        """
+        if not self._analytics_service:
+            logger.debug("Analytics API not available for daily analytics")
+            return []
+
+        try:
+            resp = (
+                self._analytics_service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=f"{days}dAgo",
+                    endDate="today",
+                    metrics="estimatedMinutesWatched,subscribersGained",
+                    dimensions="day",
+                    maxResults=min(days, 200),
+                )
+                .execute()
+            )
+            rows = resp.get("rows", [])
+            result = []
+            for row in rows:
+                result.append({
+                    "date": row[0],  # YYYY-MM-DD
+                    "estimatedMinutesWatched": float(row[1]) if row[1] else 0.0,
+                    "subscribersGained": int(row[2]) if row[2] else 0,
+                })
+            logger.debug("Daily analytics: %d days returned for %s", len(rows), self.slug)
+            return result
+        except Exception as exc:
+            logger.warning("Daily analytics API failed for %s: %s", self.slug, exc)
+            return []
+
     # ── Channel Stats ──────────────────────────────────────────
 
     def get_channel_stats(self) -> dict:
@@ -218,12 +324,12 @@ class YouTubeStatsFetcher:
         Args:
             db: ExtendedDatabase instance.
 
-        Returns summary dict.
+        Returns summary dict including analytics_updated count.
         """
         if not self.authenticate():
             return {"error": "Authentication failed"}
 
-        result = {"videos_updated": 0, "channel_updated": False}
+        result = {"videos_updated": 0, "channel_updated": False, "analytics_updated": 0}
 
         # Channel stats
         channel = db.get_channel_by_slug(self.slug)
@@ -240,10 +346,12 @@ class YouTubeStatsFetcher:
 
         # Video stats — use high limit to cover all videos, not just the 50 most recent
         videos = db.get_videos(channel_id=channel["id"] if channel else None, limit=10000)
+        video_yt_ids: list[str] = []
         for v in videos:
             yt_id = v.get("yt_video_id")
             if not yt_id:
                 continue
+            video_yt_ids.append(yt_id)
             try:
                 stats = self.get_video_stats(yt_id)
                 # Skip mock/synthetic stats — only store real YouTube API data
@@ -258,12 +366,14 @@ class YouTubeStatsFetcher:
 
         # Shorts stats
         result["shorts_updated"] = 0
+        short_yt_ids: list[str] = []
         if channel:
             shorts = db.get_shorts(channel_id=channel["id"], status="published", limit=10000)
             for s in shorts:
                 yt_id = s.get("youtube_id")
                 if not yt_id:
                     continue
+                short_yt_ids.append(yt_id)
                 try:
                     stats = self.get_video_stats(yt_id)
                     if stats.get("is_mock"):
@@ -275,10 +385,41 @@ class YouTubeStatsFetcher:
                 except Exception as exc:
                     logger.error("Failed to store stats for short %s: %s", s.get("id"), exc)
 
+        # ── Bulk video analytics (1 API call for ALL videos) ──
+        if video_yt_ids and self._analytics_service:
+            try:
+                bulk_analytics = self.get_all_videos_analytics(video_yt_ids)
+                if bulk_analytics:
+                    # Map yt_video_id → video DB id
+                    video_id_map = {v.get("yt_video_id"): v["id"] for v in videos if v.get("yt_video_id")}
+                    count = db.batch_update_video_analytics(video_id_map, bulk_analytics)
+                    result["analytics_updated"] = count
+                    logger.info("Analytics updated for %d videos via bulk query", count)
+
+                    # Also update shorts with analytics data (shorts can have watch time too)
+                    if short_yt_ids:
+                        short_id_map = {s.get("youtube_id"): s["id"] for s in shorts if s.get("youtube_id")}
+                        short_count = db.batch_update_short_analytics(short_id_map, bulk_analytics)
+                        result["analytics_updated"] += short_count
+                        logger.info("Analytics updated for %d shorts via bulk query", short_count)
+            except Exception as exc:
+                logger.error("Bulk analytics update failed for %s: %s", self.slug, exc)
+
+        # ── Daily channel analytics ──
+        if channel and self._analytics_service:
+            try:
+                daily = self.get_channel_daily_analytics(days=365)
+                if daily:
+                    db.upsert_daily_watchtime(channel["id"], daily)
+                    logger.info("Daily watchtime stored for %s: %d days", self.slug, len(daily))
+            except Exception as exc:
+                logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
+
         logger.info(
-            "Stats collection: %s videos, %s shorts, channel=%s",
+            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s",
             result["videos_updated"],
             result["shorts_updated"],
+            result["analytics_updated"],
             result["channel_updated"],
         )
         return result

@@ -7,6 +7,7 @@ import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, 
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
+import WatchTimeChart from '../components/WatchTimeChart'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
 
 // ── PromotionTab (inline component) ─────────────────────────
@@ -260,6 +261,7 @@ export default function ChannelDetail() {
   // Growth tab state
   const [growthData, setGrowthData] = useState<any>(null)
   const [monetizationData, setMonetizationData] = useState<any>(null)
+  const [watchTimeData, setWatchTimeData] = useState<any>(null)
   const [milestonesData, setMilestonesData] = useState<any>(null)
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [growthDays, setGrowthDays] = useState(30)
@@ -391,16 +393,18 @@ export default function ChannelDetail() {
     if (videoTab !== 'growth' || !channelId) return
     async function loadGrowth() {
       try {
-        const [growth, mon, milestones, content] = await Promise.all([
+        const [growth, mon, milestones, content, watchtime] = await Promise.all([
           api.getChannelGrowth(channelId, growthDays),
           api.getChannelMonetization(channelId),
           api.getChannelMilestones(channelId),
           api.getChannelContentRanking(channelId, 'views', 15),
+          api.getChannelWatchTime(channelId),
         ])
         setGrowthData(growth)
         setMonetizationData(mon)
         setMilestonesData(milestones)
         setContentRanking(content?.videos || [])
+        setWatchTimeData(watchtime)
       } catch (e) {
         console.error('Error loading growth data:', e)
       }
@@ -1210,6 +1214,18 @@ export default function ChannelDetail() {
               </div>
             )}
 
+            {/* Watch Time Chart */}
+            {watchTimeData?.daily_breakdown && watchTimeData.daily_breakdown.length > 0 && (
+              <WatchTimeChart
+                data={watchTimeData.daily_breakdown}
+                totalWatchHours={watchTimeData.total_watch_hours}
+                dailyAvgHours={watchTimeData.daily_avg_hours}
+                estimatedDays={watchTimeData.estimated_days_to_4000h}
+                yppProgressPct={watchTimeData.ypp_progress_pct}
+                remainingHours={watchTimeData.remaining_hours}
+              />
+            )}
+
             {/* Content Ranking */}
             {contentRanking.length > 0 && (
               <div className="glass p-4 rounded-xl">
@@ -1223,6 +1239,7 @@ export default function ChannelDetail() {
                       <tr className="text-gray-500 border-b border-white/5">
                         <th className="text-left py-2 font-medium">Video</th>
                         <th className="text-right py-2 font-medium">Vistas</th>
+                        <th className="text-right py-2 font-medium">Watch h</th>
                         <th className="text-right py-2 font-medium">Likes</th>
                         <th className="text-right py-2 font-medium hidden sm:table-cell">Revenue est.</th>
                       </tr>
@@ -1234,6 +1251,9 @@ export default function ChannelDetail() {
                             <span className="text-gray-300 line-clamp-1">{v.title}</span>
                           </td>
                           <td className="py-2 text-right font-mono tabular-nums text-neon-cyan">{formatShortNumber(v.views)}</td>
+                          <td className="py-2 text-right font-mono tabular-nums text-green-400">
+                            {v.estimated_minutes_watched ? `${Math.round(v.estimated_minutes_watched / 6) / 10}h` : '—'}
+                          </td>
                           <td className="py-2 text-right font-mono tabular-nums text-neon-gold">{formatShortNumber(v.likes)}</td>
                           <td className="py-2 text-right font-mono tabular-nums text-green-400 hidden sm:table-cell">
                             ${v.revenue_min?.toFixed(2)}–${v.revenue_max?.toFixed(2)}

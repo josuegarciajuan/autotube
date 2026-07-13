@@ -177,6 +177,9 @@ def migrate_v2(db_path: str = None):
     # Run v6 schema (viral mirror support) — idempotent per-column ALTER
     _migrate_v6(conn, logger)
 
+    # Run v7 schema (channel_daily_watchtime for YPP monetization tracking)
+    _migrate_v7(conn, logger)
+
 
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
@@ -705,6 +708,30 @@ def _migrate_v6(conn, logger):
             logger.debug("v6 videos.source_url: %s", e)
 
     conn.commit()
+
+
+def _migrate_v7(conn, logger):
+    """Idempotent v7 migration: channel_daily_watchtime table for 365-day watch time tracking.
+
+    Stores daily estimatedMinutesWatched and subscribersGained from YouTube Analytics API
+    to compute cumulative watch hours for YPP monetization progress.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_daily_watchtime (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            estimated_minutes_watched REAL DEFAULT 0.0,
+            subscribers_gained INTEGER DEFAULT 0,
+            UNIQUE(channel_id, date)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cdw_channel_date
+        ON channel_daily_watchtime(channel_id, date)
+    """)
+    conn.commit()
+    logger.info("Migration v7: channel_daily_watchtime table ensured")
 
 
 class ExtendedDatabase(Database):
@@ -1510,6 +1537,237 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── Bulk Analytics Updates ─────────────────────────────────
+
+    def batch_update_video_analytics(
+        self, video_id_map: dict[str, int], analytics_data: dict[str, dict]
+    ) -> int:
+        """Update estimated_minutes_watched, average_view_duration, subscribers_gained
+        for multiple videos from a single Analytics API call.
+
+        Args:
+            video_id_map: Dict mapping yt_video_id → internal video id.
+            analytics_data: Dict mapping yt_video_id → {estimatedMinutesWatched,
+                            averageViewDuration, subscribersGained}
+
+        Returns:
+            Number of rows updated.
+        """
+        if not analytics_data or not video_id_map:
+            return 0
+
+        with self._connect() as conn:
+            count = 0
+            for yt_id, aid in video_id_map.items():
+                data = analytics_data.get(yt_id)
+                if not data:
+                    continue
+                conn.execute(
+                    """UPDATE video_stats_history
+                       SET estimated_minutes_watched = ?,
+                           average_view_duration = ?,
+                           subscribers_gained = ?
+                       WHERE id = (
+                           SELECT MAX(id) FROM video_stats_history
+                           WHERE video_id = ? AND yt_video_id = ?
+                       )""",
+                    (
+                        float(data.get("estimatedMinutesWatched", 0)),
+                        float(data.get("averageViewDuration", 0)),
+                        int(float(data.get("subscribersGained", 0))),
+                        aid,
+                        yt_id,
+                    ),
+                )
+                count += conn.total_changes
+            conn.commit()
+        return count
+
+    def batch_update_short_analytics(
+        self, short_id_map: dict[str, int], analytics_data: dict[str, dict]
+    ) -> int:
+        """Update estimated_minutes_watched, average_view_duration for shorts
+        from bulk analytics data.
+
+        Args:
+            short_id_map: Dict mapping youtube_id → internal short id.
+            analytics_data: Dict mapping yt_video_id → {estimatedMinutesWatched,
+                            averageViewDuration, subscribersGained}
+
+        Returns:
+            Number of rows updated.
+        """
+        if not analytics_data or not short_id_map:
+            return 0
+
+        with self._connect() as conn:
+            count = 0
+            for yt_id, sid in short_id_map.items():
+                data = analytics_data.get(yt_id)
+                if not data:
+                    continue
+                conn.execute(
+                    """UPDATE short_stats
+                       SET estimated_minutes_watched = ?,
+                           average_view_duration = ?
+                       WHERE id = (
+                           SELECT MAX(id) FROM short_stats
+                           WHERE short_id = ? AND yt_video_id = ?
+                       )""",
+                    (
+                        float(data.get("estimatedMinutesWatched", 0)),
+                        float(data.get("averageViewDuration", 0)),
+                        sid,
+                        yt_id,
+                    ),
+                )
+                count += conn.total_changes
+            conn.commit()
+        return count
+
+    # ── Daily Watchtime (YPP tracking) ─────────────────────────
+
+    def upsert_daily_watchtime(self, channel_id: int, daily_data: list[dict]) -> int:
+        """Insert or update daily watch time records for a channel.
+
+        Args:
+            channel_id: Channel ID.
+            daily_data: List of {date, estimatedMinutesWatched, subscribersGained}.
+
+        Returns:
+            Number of rows inserted/updated.
+        """
+        if not daily_data:
+            return 0
+        with self._connect() as conn:
+            count = 0
+            for row in daily_data:
+                conn.execute(
+                    """INSERT INTO channel_daily_watchtime
+                       (channel_id, date, estimated_minutes_watched, subscribers_gained)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(channel_id, date) DO UPDATE SET
+                           estimated_minutes_watched = excluded.estimated_minutes_watched,
+                           subscribers_gained = excluded.subscribers_gained""",
+                    (
+                        channel_id,
+                        row["date"],
+                        row["estimatedMinutesWatched"],
+                        row.get("subscribersGained", 0),
+                    ),
+                )
+                count += 1
+            conn.commit()
+        return count
+
+    def get_channel_daily_watchtime(
+        self, channel_id: int, days: int = 365
+    ) -> list[dict]:
+        """Get daily watch time data for a channel.
+
+        Args:
+            channel_id: Channel ID.
+            days: Lookback window in days.
+
+        Returns:
+            List of {date, estimated_minutes_watched, subscribers_gained}.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT date, estimated_minutes_watched, subscribers_gained
+                   FROM channel_daily_watchtime
+                   WHERE channel_id = ?
+                   ORDER BY date ASC""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_channel_watch_time_summary(self, channel_id: int) -> dict:
+        """Get watch time summary for YPP monetization tracking.
+
+        Returns cumulative watch hours, daily average, and 365-day projection.
+        """
+        with self._connect() as conn:
+            # Total watch time from latest channel stats
+            latest = conn.execute(
+                """SELECT estimated_minutes_watched, subscribers
+                   FROM channel_stats_history
+                   WHERE channel_id = ?
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+
+            # Daily breakdown from channel_daily_watchtime
+            daily = conn.execute(
+                """SELECT date, estimated_minutes_watched, subscribers_gained
+                   FROM channel_daily_watchtime
+                   WHERE channel_id = ?
+                     AND date >= date('now', '-365 days')
+                   ORDER BY date ASC""",
+                (channel_id,),
+            ).fetchall()
+
+            # Compute per-video watch hours
+            video_watch = conn.execute(
+                """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url,
+                          vsh.estimated_minutes_watched, vsh.views, vsh.likes
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id
+                   )
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL
+                     AND vsh.estimated_minutes_watched > 0
+                   ORDER BY vsh.estimated_minutes_watched DESC""",
+                (channel_id,),
+            ).fetchall()
+
+        total_minutes = latest["estimated_minutes_watched"] if latest else 0
+        total_hours = round(total_minutes / 60.0, 1)
+
+        daily_data = [dict(r) for r in daily]
+        cumulative_hours = 0.0
+        for d in daily_data:
+            cumulative_hours += d["estimated_minutes_watched"] / 60.0
+            d["watch_hours"] = round(d["estimated_minutes_watched"] / 60.0, 2)
+            d["cumulative_hours"] = round(cumulative_hours, 1)
+
+        # Daily average from the last 30 days of daily data
+        daily_avg_hours = 0.0
+        recent_daily = [d for d in daily_data if d["estimated_minutes_watched"] > 0]
+        if recent_daily:
+            daily_avg_hours = round(
+                sum(d["estimated_minutes_watched"] for d in recent_daily)
+                / len(recent_daily)
+                / 60.0,
+                2,
+            )
+
+        # Projection to 4000h
+        ypp_target = 4000
+        remaining_hours = max(0, ypp_target - total_hours)
+        estimated_days = None
+        if daily_avg_hours > 0 and remaining_hours > 0:
+            estimated_days = round(remaining_hours / daily_avg_hours)
+
+        video_data = []
+        for v in video_watch:
+            vd = dict(v)
+            vd["watch_hours"] = round((vd["estimated_minutes_watched"] or 0) / 60.0, 1)
+            video_data.append(vd)
+
+        return {
+            "channel_id": channel_id,
+            "total_watch_hours": total_hours,
+            "ypp_target_hours": ypp_target,
+            "ypp_progress_pct": round(min(100, total_hours / ypp_target * 100), 1),
+            "remaining_hours": remaining_hours,
+            "daily_avg_hours": daily_avg_hours,
+            "estimated_days_to_4000h": estimated_days,
+            "daily_breakdown": daily_data,
+            "top_videos_by_watchtime": video_data[:10],
+        }
+
     # ── Channel Stats History ──────────────────────────────────
 
     def insert_channel_stats(self, channel_id: int, stats: dict) -> int | None:
@@ -1861,6 +2119,8 @@ class ExtendedDatabase(Database):
             total_shorts_views = 0
             total_revenue_min = 0
             total_revenue_max = 0
+            total_watch_hours = 0.0
+            total_watch_hours_prev = 0.0
             subscribers_prev = 0
             views_prev = 0
             engagement_prev = 0
@@ -1887,10 +2147,11 @@ class ExtendedDatabase(Database):
                 ch_dict["ypp_subs_pct"] = min(100, round(subs / 10, 1))  # target 1000
                 ch_dict["ypp_hours_pct"] = min(100, round(watch_hours / 40, 1))  # target 4000
                 ch_dict["watch_hours"] = watch_hours
+                total_watch_hours += watch_hours
 
                 # Get previous snapshot (~7 days ago) for delta
                 prev = conn.execute(
-                    """SELECT subscribers, total_views
+                    """SELECT subscribers, total_views, estimated_minutes_watched
                        FROM channel_stats_history
                        WHERE channel_id = ? AND fetched_at <= datetime('now', '-7 days')
                        ORDER BY fetched_at DESC LIMIT 1""",
@@ -1899,6 +2160,7 @@ class ExtendedDatabase(Database):
                 if prev:
                     subscribers_prev += (prev["subscribers"] or 0)
                     views_prev += (prev["total_views"] or 0)
+                    total_watch_hours_prev += round((prev["estimated_minutes_watched"] or 0) / 60.0, 1)
 
                 # Engagement at ~7 days ago
                 eng_prev = conn.execute(
@@ -1986,10 +2248,12 @@ class ExtendedDatabase(Database):
             sparkline_subscribers = []
             sparkline_views = []
             sparkline_engagement = []
+            sparkline_watch_hours = []
             for days_ago in range(7, -1, -1):
                 date_point = f"datetime('now', '-{days_ago} days')"
                 aggr = conn.execute(
-                    f"""SELECT SUM(csh.subscribers) as subs, SUM(csh.total_views) as views
+                    f"""SELECT SUM(csh.subscribers) as subs, SUM(csh.total_views) as views,
+                               SUM(csh.estimated_minutes_watched) as watch_minutes
                         FROM channel_stats_history csh
                         INNER JOIN (
                             SELECT channel_id, MAX(id) as max_id
@@ -2027,6 +2291,9 @@ class ExtendedDatabase(Database):
                     sparkline_views.append(aggr["views"] or 0)
                     sparkline_engagement.append(
                         (eng_aggr["engagement"] or 0) + (shorts_eng_aggr["engagement"] or 0)
+                    )
+                    sparkline_watch_hours.append(
+                        round((aggr["watch_minutes"] or 0) / 60.0, 1)
                     )
 
             # ── Recent published videos (last 5) ──
@@ -2086,9 +2353,14 @@ class ExtendedDatabase(Database):
                     "generating": in_production,
                     "ready": ready_count,
                 },
+                "watch_hours": {
+                    "value": total_watch_hours,
+                    "delta": _delta_pct(total_watch_hours, total_watch_hours_prev),
+                },
                 "sparkline_subscribers": sparkline_subscribers,
                 "sparkline_views": sparkline_views,
                 "sparkline_engagement": sparkline_engagement,
+                "sparkline_watch_hours": sparkline_watch_hours,
             },
             "channels": channels_data,
             "pipeline": [dict(r) for r in pipeline],

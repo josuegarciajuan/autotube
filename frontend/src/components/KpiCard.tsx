@@ -13,7 +13,7 @@ interface KpiCardProps {
   icon: React.ElementType
   color: string
   sparkline?: number[]
-  format?: 'number' | 'minutes' | 'pipeline'
+  format?: 'number' | 'minutes' | 'hours' | 'pipeline'
   generating?: number
   ready?: number
   breakdown?: Breakdown
@@ -79,6 +79,8 @@ export default function KpiCard({ label, value, delta, icon: Icon, color, sparkl
   let displayValue: string
   if (format === 'minutes') {
     displayValue = formatMinutes(value)
+  } else if (format === 'hours') {
+    displayValue = formatBigNumber(value) + 'h'
   } else if (format === 'pipeline') {
     displayValue = `${value} activos`
   } else {

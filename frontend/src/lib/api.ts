@@ -203,6 +203,8 @@ export const api = {
     request<any>(`/videos/${videoId}/analytics`),
   getChannelsComparison: () =>
     request<any>('/analytics/comparison'),
+  getChannelWatchTime: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analytics/watch-time`),
 
   // ── Promotion / Lifecycle ──
   // Playlists
@@ -432,6 +434,7 @@ export interface UpcomingPublication {
   peak_source: string;
   published_at: string | null;
   auto_playlist_name: string | null;
+  target_playlist_name: string | null;
   remaining_seconds: number;
   pending_altered: number;
   pending_endscreens: number;

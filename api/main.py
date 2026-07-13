@@ -651,9 +651,11 @@ async def _collect_youtube_stats():
                 fetcher = YouTubeStatsFetcher(slug)
                 result = fetcher.collect_and_store(db)
                 logger.info(
-                    "Stats collected for %s: %s videos, channel=%s",
+                    "Stats collected for %s: %s videos, %s shorts, %s analytics, channel=%s",
                     slug,
                     result.get("videos_updated", 0),
+                    result.get("shorts_updated", 0),
+                    result.get("analytics_updated", 0),
                     result.get("channel_updated", False),
                 )
                 STATS_COLLECTION_STATE["channels"].append({
@@ -661,6 +663,7 @@ async def _collect_youtube_stats():
                     "ok": "error" not in result,
                     "videos_updated": result.get("videos_updated", 0),
                     "shorts_updated": result.get("shorts_updated", 0),
+                    "analytics_updated": result.get("analytics_updated", 0),
                     "channel_updated": result.get("channel_updated", False),
                     "error": result.get("error"),
                 })

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Trophy, ExternalLink, Eye, ThumbsUp, MessageCircle, DollarSign } from 'lucide-react'
+import { Trophy, ExternalLink, Eye, ThumbsUp, MessageCircle, DollarSign, Clock } from 'lucide-react'
 import { formatShortNumber, formatDate, apiUrl } from '../lib/api'
 
 interface TopVideo {
@@ -84,6 +84,12 @@ export default function TopVideos({ videos }: TopVideosProps) {
                     <Eye size={11} />
                     {v.views != null ? formatShortNumber(v.views) : '—'}
                   </span>
+                  <span className="flex items-center gap-1 text-green-400" title="Horas de visualización">
+                    <Clock size={11} />
+                    {v.estimated_minutes_watched != null
+                      ? `${Math.round(v.estimated_minutes_watched / 6) / 10}h`
+                      : '—'}
+                  </span>
                   <span className="flex items-center gap-1 text-neon-red" title="Likes">
                     <ThumbsUp size={11} />
                     {v.likes != null ? formatShortNumber(v.likes) : '—'}
@@ -93,7 +99,7 @@ export default function TopVideos({ videos }: TopVideosProps) {
                     {v.comments != null ? formatShortNumber(v.comments) : '—'}
                   </span>
                   {(v.estimated_revenue_min != null || v.estimated_revenue_max != null) && (
-                    <span className="flex items-center gap-1 text-green-400" title="Revenue estimado">
+                    <span className="flex items-center gap-1 text-neon-gold" title="Revenue estimado">
                       <DollarSign size={11} />
                       {v.estimated_revenue_min != null ? `$${v.estimated_revenue_min.toFixed(1)}` : '—'}
                     </span>
