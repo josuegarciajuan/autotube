@@ -231,8 +231,11 @@ class PipelineOrchestrator:
         self._emit_progress(5, "scrape", "Buscando historias en Reddit y Wikipedia...")
 
         # Reddit scraping with per-source timeout (5 min per scraper)
-        # Viral scraper gets longer timeout (10 min) due to download+transcribe+translate
+        # Viral scraper: skip in non-viral mode (runs on-demand in _phase_generate_script_viral)
         for scraper_name, s in self.scraper.items():
+            if scraper_name == "youtube_viral" and self.source_mode != "viral":
+                logger.debug("[%s] Skipping viral scraper in %s mode", self.canal, self.source_mode)
+                continue
             try:
                 timeout = 600 if scraper_name == "youtube_viral" else 300
                 progress_msg = (
@@ -296,54 +299,183 @@ class PipelineOrchestrator:
                                  duration_ms=duration_ms)
         return result
 
-    def _phase_generate_script_viral(self, start: float) -> Optional[dict]:
-        """Generate script from a viral mirror candidate.
+    def _get_viral_scraper(self):
+        """Get or create the YouTubeViralScraper instance for on-demand use.
 
-        Uses the pre-translated/adapted Spanish script stored in raw_content
-        instead of calling the LLM script generator. Builds a compatible script
-        dict for the rest of the pipeline.
+        Returns None if viral is not enabled or scraper cannot be loaded.
         """
-        logger.info("[%s] VIRAL SCRIPT: Using viral candidate #%s", self.canal, self.viral_candidate_id or "auto")
-        self._emit_progress(15, "script", "Preparando script viral traducido y adaptado...")
+        if getattr(self, "_viral_scraper_instance", None) is not None:
+            return self._viral_scraper_instance
 
-        # Get the viral candidate
+        if not getattr(self.config, "VIRAL_ENABLED", False):
+            return None
+
+        try:
+            from scrapers.youtube_viral import YouTubeViralScraper
+            self._viral_scraper_instance = YouTubeViralScraper(config=self.config)
+            self._viral_scraper_instance._db = self.db  # for URL dedup checks
+            return self._viral_scraper_instance
+        except Exception as e:
+            logger.warning("[%s] Could not load viral scraper: %s", self.canal, e)
+            return None
+
+    def _phase_generate_script_viral(self, start: float) -> Optional[dict]:
+        """Generate script from a viral mirror candidate — two-phase approach.
+
+        FASE A (Discovery): Fast path checks DB; if no candidates, runs
+        multi-strategy YouTube search to find viral videos.
+        FASE B (Processing): Downloads, transcribes, translates, adapts and
+        builds script blocks from the best candidate. Tries up to 5 candidates
+        if earlier ones fail.
+        """
+        logger.info("[%s] VIRAL SCRIPT: Two-phase approach starting", self.canal)
+        self._emit_progress(12, "script", "Descubriendo videos virales...")
+
+        # ── Phase A: Discovery ──────────────────────────────────
         viral_content = None
+        saved_to_db = False  # whether we already inserted into raw_content
+
+        # A1 — Fast path: use explicitly provided candidate
         if self.viral_candidate_id:
             viral_content = self.db.get_content_by_id(self.viral_candidate_id)
-            if not viral_content or viral_content.get("source_mode") != "viral":
-                logger.warning("[%s] VIRAL SCRIPT: Candidate #%d not found or not viral, falling back",
+            if viral_content and viral_content.get("source_mode") == "viral":
+                logger.info("[%s] Using explicit viral candidate #%d: '%s'",
+                            self.canal, viral_content["id"],
+                            viral_content.get("viral_original_title", "")[:60])
+            else:
+                logger.warning("[%s] Explicit candidate #%d not found or not viral",
                                self.canal, self.viral_candidate_id)
                 viral_content = None
 
+        # A2 — Fast path: check DB for unused candidates
         if not viral_content:
-            candidates = self.db.get_viral_candidates(self.canal, limit=1)
+            candidates = self.db.get_viral_candidates(self.canal, limit=3)
             if candidates:
                 viral_content = candidates[0]
                 self.viral_candidate_id = viral_content["id"]
-                logger.info("[%s] VIRAL SCRIPT: Auto-selected candidate #%d: '%s' (score=%.1f, views=%d)",
+                logger.info("[%s] Fast path: DB candidate #%d '%s' (score=%.1f, views=%d)",
                             self.canal, viral_content["id"],
                             viral_content.get("viral_original_title", "")[:60],
                             viral_content.get("viral_score", 0),
                             viral_content.get("viral_views", 0))
 
+        # A3 — Broad discovery: run multi-strategy search on-demand
         if not viral_content:
-            logger.warning("[%s] VIRAL SCRIPT: No viral candidates available — FALLING BACK to original mode", self.canal)
-            self.source_mode = "original"
-            content_items = self.db.get_unused_content(canal=self.canal, limit=5)
-            if not content_items:
-                return None
-            self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
-            return self.script_gen.generate(content_items[0])
+            logger.info("[%s] No unused candidates in DB — running on-demand discovery", self.canal)
+            self._emit_progress(13, "script", "Buscando videos virales en YouTube (6 estrategias)...")
 
-        # Get pre-processed viral data
+            scraper = self._get_viral_scraper()
+            if not scraper:
+                logger.error("[%s] VIRAL SCRIPT: Viral scraper could not be loaded", self.canal)
+                return self._viral_fallback_to_original(start)
+
+            try:
+                discovered = scraper.discover_multi_strategy(db=self.db)
+            except Exception as exc:
+                logger.warning("[%s] Discovery failed: %s", self.canal, exc)
+                import traceback
+                logger.debug(traceback.format_exc())
+                return self._viral_fallback_to_original(start)
+
+            if not discovered:
+                logger.warning("[%s] Discovery returned 0 candidates — nothing found on YouTube", self.canal)
+                return self._viral_fallback_to_original(start)
+
+            # ── Phase B: Process candidates ─────────────────────
+            self._emit_progress(14, "script",
+                                f"Procesando {min(5, len(discovered))} candidatos virales...")
+
+            max_attempts = min(5, len(discovered))
+            for attempt, candidate in enumerate(discovered[:max_attempts], 1):
+                logger.info("[%s] Attempt %d/%d: '%s' (score=%.0f, views=%s)",
+                            self.canal, attempt, max_attempts,
+                            candidate.get("title", "")[:70],
+                            candidate.get("viral_score", 0),
+                            candidate.get("views", 0))
+
+                try:
+                    processed = scraper.process_candidate(candidate)
+                except Exception as exc:
+                    logger.warning("[%s] Candidate %d processing crashed: %s", self.canal, attempt, exc)
+                    continue
+
+                if processed:
+                    # Save to raw_content for future fast-path use
+                    try:
+                        canal = getattr(scraper, "canal", self.canal)
+                        self.db.insert_raw_content_viral(
+                            source=processed["source"],
+                            url=processed["url"],
+                            title=processed["title"],
+                            text=processed["text"],
+                            subreddit=processed.get("subreddit"),
+                            score=processed.get("score", 0),
+                            canal=canal,
+                            source_mode="viral",
+                            viral_original_title=processed.get("viral_original_title"),
+                            viral_original_description=processed.get("viral_original_description"),
+                            viral_original_thumbnail_url=processed.get("viral_original_thumbnail_url"),
+                            viral_original_video_url=processed.get("viral_original_video_url"),
+                            viral_views=processed.get("viral_views", 0),
+                            viral_upload_date=processed.get("viral_upload_date"),
+                            viral_duration_sec=processed.get("viral_duration_sec", 0),
+                            viral_channel_name=processed.get("viral_channel_name"),
+                            viral_score=processed.get("viral_score", 0.0),
+                            viral_script_es=processed.get("viral_script_es"),
+                            viral_meta_json=processed.get("viral_meta_json"),
+                        )
+                        saved_to_db = True
+                        # Re-read from DB to get the id
+                        db_content = self.db.get_content_by_url(processed["url"], self.canal)
+                        if db_content:
+                            viral_content = db_content
+                            self.viral_candidate_id = viral_content["id"]
+                        else:
+                            # Fallback: build pseudo-dict from processed data
+                            viral_content = {
+                                "id": 0,
+                                "source_mode": "viral",
+                                "viral_script_es": processed.get("viral_script_es", ""),
+                                "viral_original_title": processed.get("viral_original_title", ""),
+                                "viral_original_video_url": processed.get("viral_original_video_url", ""),
+                                "viral_original_thumbnail_url": processed.get("viral_original_thumbnail_url"),
+                                "viral_meta_json": processed.get("viral_meta_json", "{}"),
+                                "viral_score": processed.get("viral_score", 0),
+                                "viral_views": processed.get("viral_views", 0),
+                            }
+                    except Exception as exc:
+                        logger.warning("[%s] Failed to save candidate to DB: %s", self.canal, exc)
+                        # Still usable — build pseudo-dict
+                        viral_content = {
+                            "id": 0,
+                            "source_mode": "viral",
+                            "viral_script_es": processed.get("viral_script_es", ""),
+                            "viral_original_title": processed.get("viral_original_title", ""),
+                            "viral_original_video_url": processed.get("viral_original_video_url", ""),
+                            "viral_original_thumbnail_url": processed.get("viral_original_thumbnail_url"),
+                            "viral_meta_json": processed.get("viral_meta_json", "{}"),
+                            "viral_score": processed.get("viral_score", 0),
+                            "viral_views": processed.get("viral_views", 0),
+                        }
+                    break  # success!
+                else:
+                    logger.warning("[%s] Candidate %d returned None — trying next", self.canal, attempt)
+
+            if not viral_content:
+                logger.warning("[%s] All %d candidates failed during processing", self.canal, max_attempts)
+                return self._viral_fallback_to_original(start)
+
+        # ── Build script from viral_content ─────────────────────
+        if not viral_content:
+            return self._viral_fallback_to_original(start)
+
         script_es = viral_content.get("viral_script_es", "")
         original_title = viral_content.get("viral_original_title", "")
         viral_meta_json = viral_content.get("viral_meta_json", "{}")
 
         if not script_es:
-            logger.error("[%s] Viral candidate #%d has no script (viral_script_es empty)",
-                         self.canal, viral_content["id"])
-            return None
+            logger.error("[%s] Viral candidate has no script (viral_script_es empty)", self.canal)
+            return self._viral_fallback_to_original(start)
 
         # Parse viral metadata
         try:
@@ -358,7 +490,6 @@ class PipelineOrchestrator:
             import re
             paragraphs = [p.strip() for p in script_es.split("\n\n") if p.strip() and len(p.strip()) > 20]
             if not paragraphs:
-                # Fallback: split by sentences
                 sentences = re.split(r'(?<=[.!?])\s+', script_es)
                 paragraphs = [s.strip() for s in sentences if len(s.strip()) > 20]
 
@@ -385,13 +516,13 @@ class PipelineOrchestrator:
         if len(translated_title) > 5:
             words = translated_title.split()
             if len(words) > 2:
-                alt_titles.append(" ".join(words[1:] + words[:1]))  # Rotate words
+                alt_titles.append(" ".join(words[1:] + words[:1]))
 
         # Estimate duration
         word_count = len(script_es.split())
         duracion_estimada = max(1, word_count // 150)
 
-        # Build GUIóN (narration text) from blocks
+        # Build GUIóN from blocks
         guion_parts = []
         for b in blocks:
             guion_parts.append(f"[{b.get('tipo', 'desarrollo').upper()}]\n{b.get('texto', '')}")
@@ -402,20 +533,20 @@ class PipelineOrchestrator:
 
         # Insert script into DB
         script_id = self.db.insert_script(
-            raw_content_id=viral_content["id"],
+            raw_content_id=viral_content.get("id", 0) or 0,
             canal=self.canal,
             titulo_options=alt_titles,
             guion=guion,
-            escenas=blocks,  # Use blocks as scenes for backward compat
+            escenas=blocks,
             bloques=blocks,
             keywords=keywords,
             duracion_estimada=duracion_estimada,
         )
 
-        # Build result dict (same shape as script_generator.generate() output)
+        # Build result dict
         result = {
             "id": script_id,
-            "raw_content_id": viral_content["id"],
+            "raw_content_id": viral_content.get("id", 0),
             "guion": guion,
             "bloques": blocks,
             "bloques_json": json.dumps(blocks, ensure_ascii=False),
@@ -425,13 +556,12 @@ class PipelineOrchestrator:
             "keywords_json": json.dumps(keywords, ensure_ascii=False),
             "duracion_estimada": duracion_estimada,
             "canal": self.canal,
-            # Extra: viral-specific data for later phases
             "_viral_meta": viral_meta,
             "_viral_meta_json": viral_meta_json,
             "_viral_original_thumbnail": viral_content.get("viral_original_thumbnail_url", ""),
             "_viral_original_title": original_title,
             "_viral_original_video_url": viral_content.get("viral_original_video_url", ""),
-            "_viral_content_id": viral_content["id"],
+            "_viral_content_id": viral_content.get("id", 0),
         }
 
         duration_ms = int((time.time() - start) * 1000)
@@ -440,15 +570,31 @@ class PipelineOrchestrator:
             self._emit_progress(23, "script",
                                 f"Guion viral listo: {word_count} palabras, {len(blocks)} bloques")
             self.db.log_pipeline(self.canal, "script", "success",
-                                 f"Viral script {script_id} from candidate #{viral_content['id']}",
-                                 content_id=script_id, duration_ms=duration_ms)
-            # Mark viral content as used
-            self.db.mark_content_used(viral_content["id"])
+                                  f"Viral script {script_id} from candidate #{viral_content.get('id', 0)}",
+                                  content_id=script_id, duration_ms=duration_ms)
+            # Mark viral content as used (if it has a real DB id)
+            if viral_content.get("id", 0) > 0:
+                self.db.mark_content_used(viral_content["id"])
         else:
             self.db.log_pipeline(self.canal, "script", "error",
-                                 "Viral script generation failed",
-                                 duration_ms=duration_ms)
+                                  "Viral script generation failed",
+                                  duration_ms=duration_ms)
         return result
+
+    def _viral_fallback_to_original(self, start: float) -> Optional[dict]:
+        """Ultimate fallback: switch to original mode with explicit warning."""
+        logger.warning(
+            "[%s] ⚠ VIRAL FALLBACK: No viral candidates found after exhaustive search. "
+            "Switching to original mode as last resort.", self.canal
+        )
+        self.source_mode = "original"
+        self._emit_progress(15, "script",
+                            "⚠ Sin candidatos virales — generando guion original con IA...")
+        content_items = self.db.get_unused_content(canal=self.canal, limit=5)
+        if not content_items:
+            logger.error("[%s] No original content available either — pipeline cannot continue", self.canal)
+            return None
+        return self.script_gen.generate(content_items[0])
 
     def phase_tts(self, script: dict, job_id: int = None) -> Optional[dict]:
         """Generate TTS audio for a script using the channel's configured engine.

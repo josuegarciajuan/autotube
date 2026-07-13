@@ -247,3 +247,221 @@ def build_viral_queries(
     logger.info("[%s] Query builder: %d total → %d after dedup → %d final (playlist='%s')",
                 channel_slug, len(queries), len(filtered), len(result), playlist_name)
     return result
+
+
+# ── Strategy 2: AI-generated semantic concepts (20 concepts) ──────────
+
+_BUILD_CONCEPTS_SYSTEM = """You are a viral content discovery strategist. Your job is to generate
+diverse search concepts to find high-performing English YouTube videos about a specific niche.
+
+Generate SHORT search concepts (2-5 words each, in English) that someone would type into YouTube
+to discover fascinating, high-view-count documentary-style videos on the given topic.
+
+Rules:
+- Vary the angle: some should be specific, some broad, some trending-style
+- Include at least 3 concepts with "documentary" or "full documentary"
+- Include at least 3 with "2024" or "recent" for freshness
+- Include at least 3 that use viral-title formats (shocking, unbelievable, you won't believe, etc.)
+- Avoid repeating concepts from the "already used" list
+- Output as JSON object: {"concepts": ["concept1", "concept2", ...]}"""
+
+
+def build_expanded_queries(
+    channel_slug: str,
+    channel_name: str,
+    channel_theme: str,
+    niche_keywords: list[str],
+    count: int = 20,
+    db=None,
+    config=None,
+) -> list[str]:
+    """Strategy 2: Generate 20 diverse AI search concepts for viral discovery.
+
+    Uses LLM to invent fresh search angles, avoiding recently-used keywords.
+    """
+    client, model = _get_llm_client(config)
+    recently_used = _get_recently_used(db, channel_slug, limit=30) if db else []
+
+    if not client:
+        logger.warning("No LLM client — using keyword-based fallback concepts")
+        fallback = []
+        viral_formats = [
+            "{} documentary", "{} full documentary",
+            "incredible {}", "shocking {} stories",
+            "{} 2024 documentary"
+        ]
+        for kw in niche_keywords[:4]:
+            for fmt in viral_formats:
+                formatted = fmt.format(kw)
+                if formatted not in fallback:
+                    fallback.append(formatted)
+        for kw in niche_keywords[:8]:
+            if kw not in fallback:
+                fallback.append(kw)
+        return fallback[:count]
+
+    user_msg = f"""Channel: {channel_name}
+Theme: {channel_theme}
+Niche keywords: {', '.join(niche_keywords[:8])}
+
+Already used concepts (DO NOT repeat):
+{json.dumps(recently_used[:20], indent=2)}"""
+
+    concepts = []
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _BUILD_CONCEPTS_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.9,
+            max_tokens=1000,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        if content:
+            data = json.loads(content)
+            raw = data if isinstance(data, list) else data.get("concepts", [])
+            concepts = [c.strip() for c in raw if isinstance(c, str) and len(c.strip()) > 3]
+    except Exception as e:
+        logger.warning("AI concept generation failed: %s", e)
+
+    if len(concepts) < 5:
+        # Fallback: expand keywords
+        for kw in niche_keywords[:15]:
+            if kw not in concepts:
+                concepts.append(kw)
+
+    # Filter out recently used
+    filtered = []
+    for c in concepts:
+        c_lower = c.lower()
+        is_dup = any(used.lower() in c_lower or c_lower in used.lower() for used in recently_used)
+        if not is_dup:
+            filtered.append(c)
+
+    if len(filtered) < 8:
+        filtered = concepts  # keep all if too many filtered
+
+    import random
+    random.shuffle(filtered)
+    result = filtered[:count]
+    logger.info("[%s] Expanded queries: %d concepts → %d after dedup → %d final",
+                channel_slug, len(concepts), len(filtered), len(result))
+    return result
+
+
+# ── Strategy 4: Natural-language search queries (15 queries) ──────────
+
+_NATURAL_LANG_SYSTEM = """You are a YouTube search expert. Your job is to generate natural-language
+search queries that a real human would type into YouTube's search bar to find fascinating
+documentary-style videos on a specific topic.
+
+Generate full-sentence or long-phrase queries (5-12 words each) in English.
+These should sound like what someone would actually type:
+- "most mysterious archaeological discoveries of 2024 explained"
+- "ancient technology that scientists still can't explain"
+- "the lost city that rewrote human history documentary"
+
+Rules:
+- Each query must be 5-12 words long
+- Must sound natural (like a real person's search)
+- Cover different angles of the niche
+- At least 5 should include "documentary" or "full documentary"
+- At least 3 should have a curiosity-gap ("that changed everything", "they don't want you to know")
+- Output as JSON object: {"queries": ["query1", "query2", ...]}"""
+
+
+def build_natural_language_queries(
+    channel_slug: str,
+    channel_name: str,
+    channel_theme: str,
+    niche_keywords: list[str],
+    count: int = 15,
+    db=None,
+    config=None,
+) -> list[str]:
+    """Strategy 4: Generate 15 natural-language YouTube search queries via LLM."""
+    client, model = _get_llm_client(config)
+    recently_used = _get_recently_used(db, channel_slug, limit=30) if db else []
+
+    if not client:
+        logger.warning("No LLM client — using template-based fallback queries")
+        templates = [
+            "the most incredible {} documentary",
+            "fascinating {} explained",
+            "{} that changed history",
+            "unbelievable {} stories",
+            "{} full documentary 2024",
+            "top 10 {} discoveries",
+            "{} the world's greatest mysteries",
+            "shocking {} documentary",
+        ]
+        fallback = []
+        for kw in niche_keywords[:3]:
+            for tpl in templates:
+                q = tpl.format(kw)
+                if q not in fallback:
+                    fallback.append(q)
+        return fallback[:count]
+
+    user_msg = f"""Channel: {channel_name}
+Theme: {channel_theme}
+Niche keywords: {', '.join(niche_keywords[:5])}
+
+Already used topics to avoid:
+{json.dumps(recently_used[:15], indent=2)}"""
+
+    queries = []
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _NATURAL_LANG_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.9,
+            max_tokens=1500,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        if content:
+            data = json.loads(content)
+            raw = data if isinstance(data, list) else data.get("queries", [])
+            queries = [q.strip() for q in raw if isinstance(q, str) and len(q.strip()) > 8]
+    except Exception as e:
+        logger.warning("Natural language query generation failed: %s", e)
+
+    if len(queries) < 5:
+        # Fallback
+        templates = [
+            "the most incredible {} documentary",
+            "fascinating {} full documentary",
+            "{} explained documentary",
+            "unbelievable {} stories",
+            "{} documentary 2024",
+        ]
+        for kw in niche_keywords[:3]:
+            for tpl in templates:
+                q = tpl.format(kw)
+                if q not in queries:
+                    queries.append(q)
+
+    # Filter recently used
+    filtered = []
+    for q in queries:
+        q_lower = q.lower()
+        is_dup = any(used.lower() in q_lower for used in recently_used)
+        if not is_dup:
+            filtered.append(q)
+
+    if len(filtered) < 5:
+        filtered = queries
+
+    import random
+    random.shuffle(filtered)
+    result = filtered[:count]
+    logger.info("[%s] Natural language queries: %d generated → %d final",
+                channel_slug, len(queries), len(result))
+    return result

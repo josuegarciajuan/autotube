@@ -565,6 +565,459 @@ class YouTubeViralScraper(BaseScraper):
 
         return top_candidates
 
+    # ── Multi-strategy discovery ─────────────────────────────────────
+
+    def _discover_with_queries(
+        self, queries: list[str], min_views: int = None, max_age_days: int = None,
+        max_candidates: int = None, force_refresh: bool = True,
+    ) -> list[dict]:
+        """Run discovery with specific queries and thresholds, bypassing cache.
+
+        Used by discover_multi_strategy() for Strategy 1-6.
+        """
+        saved_views = self.min_views
+        saved_age = self.max_age_days
+        saved_max = self.max_candidates
+        saved_cache = list(self._cached_candidates)
+        saved_last = self._last_search_time
+
+        try:
+            if min_views is not None:
+                self.min_views = min_views
+            if max_age_days is not None:
+                self.max_age_days = max_age_days
+            if max_candidates is not None:
+                self.max_candidates = max_candidates
+
+            self._suggested_queries = queries
+            self._cached_candidates = []
+            self._last_search_time = 0.0
+
+            return self._discover_candidates(force_refresh=force_refresh)
+        finally:
+            self.min_views = saved_views
+            self.max_age_days = saved_age
+            self.max_candidates = saved_max
+            self._cached_candidates = saved_cache
+            self._last_search_time = saved_last
+
+    def _generate_title_queries(self, candidates: list[dict], count: int = 15) -> list[str]:
+        """Strategy 5: Extract key phrases from top candidates' titles as new queries."""
+        import re
+
+        stopwords = {"the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
+                     "is", "it", "that", "this", "with", "was", "are", "be", "from",
+                     "by", "at", "as", "but", "not", "we", "you", "all", "just",
+                     "its", "has", "have", "had", "been", "can", "will", "would",
+                     "what", "when", "where", "which", "who", "how"}
+
+        queries = []
+        seen = set()
+
+        for c in candidates[:5]:
+            title = c.get("title", "")
+            # Extract 2-4 word phrases that look like searchable topics
+            words = re.findall(r'\b[a-zA-Z]{3,}\b', title.lower())
+            for i in range(len(words)):
+                for length in [3, 4]:
+                    if i + length <= len(words):
+                        phrase = " ".join(words[i:i+length])
+                        filtered = [w for w in phrase.split() if w not in stopwords]
+                        if len(filtered) >= 2 and phrase not in seen:
+                            seen.add(phrase)
+                            queries.append(phrase)
+                            if len(queries) >= count:
+                                return queries[:count]
+
+        # Fallback: use full titles as queries
+        for c in candidates[:count]:
+            title = c.get("title", "")
+            if title and title not in seen:
+                seen.add(title)
+                queries.append(title)
+
+        logger.info("[%s] Title expansion: %d queries generated from %d candidate titles",
+                    self.canal, len(queries), min(len(candidates), 5))
+        return queries[:count]
+
+    def _get_genre_queries(self) -> list[str]:
+        """Strategy 6: Genre-level fallback queries without niche specificity."""
+        # Map niche keywords to genres (broad, always returns results on YouTube)
+        genre_map = {
+            "lost civilizations": [
+                "ancient history documentary full length",
+                "archaeology documentary 2024",
+                "forgotten history documentary",
+                "ancient mysteries documentary",
+                "history documentary ancient world",
+            ],
+            "ancient mysteries": [
+                "unsolved mysteries documentary",
+                "ancient aliens documentary full",
+                "mysterious discoveries documentary",
+                "history's greatest mysteries",
+                "unexplained phenomena documentary",
+            ],
+            "forgotten civilizations": [
+                "lost cities documentary",
+                "ancient civilizations documentary",
+                "vanished empires documentary",
+                "archaeological discoveries documentary",
+                "prehistoric civilizations documentary",
+            ],
+            "ancient technology documentary": [
+                "ancient engineering documentary",
+                "lost technology documentary",
+                "ancient inventions documentary",
+                "history of technology documentary",
+                "ancient marvels documentary",
+            ],
+            "archaeological discoveries": [
+                "greatest archaeological finds documentary",
+                "ancient artifacts documentary",
+                "archaeology documentary 2024",
+                "incredible discoveries documentary",
+                "history documentary ancient",
+            ],
+            "ancient ruins unexplained": [
+                "mysterious ancient structures documentary",
+                "unexplained ruins documentary",
+                "ancient monuments documentary",
+                "lost temples documentary",
+                "ancient architecture documentary",
+            ],
+        }
+
+        # Match channel keywords to genres
+        queries = []
+        seen = set()
+        for kw in self.keywords_eng:
+            kw_lower = kw.lower()
+            for genre_key, genre_queries in genre_map.items():
+                if genre_key in kw_lower:
+                    for q in genre_queries:
+                        if q not in seen:
+                            seen.add(q)
+                            queries.append(q)
+
+        # Fallback: universal genre queries
+        if len(queries) < 8:
+            universal = [
+                "best documentary 2024 history",
+                "incredible documentary full length",
+                "fascinating documentary history",
+                "amazing history documentary",
+                "world history documentary 2024",
+                "documentary history ancient civilizations",
+                "top documentary history",
+                "must watch documentary history",
+            ]
+            for q in universal:
+                if q not in seen:
+                    seen.add(q)
+                    queries.append(q)
+
+        logger.info("[%s] Genre queries: %d generated", self.canal, len(queries))
+        return queries[:15]
+
+    def discover_multi_strategy(self, db=None) -> list[dict]:
+        """Run all 6 discovery strategies and return deduplicated candidates.
+
+        This is the FASE A (Discovery) — cheap, no downloading, ~60 seconds.
+        Strategies:
+          1. Niche keywords + viral formats
+          2. AI-generated semantic concepts (via viral_query_builder)
+          3. Playlist-specific keywords
+          4. Natural-language queries (via viral_query_builder)
+          5. Title expansion from top results
+          6. Genre-level fallback queries
+
+        Returns list of candidate dicts with keys:
+          video_id, title, url, views, viral_score, hours_since_pub,
+          duration_sec, channel_name, thumbnail_url, description, upload_date
+        """
+        t0 = time.time()
+        logger.info("[%s] ========== MULTI-STRATEGY DISCOVERY START ==========", self.canal)
+
+        all_candidates: list[dict] = []
+        strategy_results: dict[str, int] = {}
+
+        # ── Collect playlist keyword info ──
+        pl_keywords = []
+        try:
+            from database.db_extended import ExtendedDatabase
+            ext_db = ExtendedDatabase() if db is None else db
+            channel_id = None
+            for row in ext_db._connect().execute(
+                "SELECT id FROM channels WHERE slug = ?", (self.slug,)
+            ).fetchall():
+                channel_id = row["id"]
+                break
+            if channel_id:
+                ch = ext_db.get_channel(channel_id)
+                if ch:
+                    import json
+                    cj = ch.get("config_json", "{}")
+                    if isinstance(cj, str):
+                        cj = json.loads(cj) if cj else {}
+                    generated = cj.get("PLAYLISTS_GENERATED", [])
+                    for pl_cfg in generated:
+                        pl_keywords.extend(pl_cfg.get("keywords_en", [])[:5])
+        except Exception as e:
+            logger.debug("[%s] Could not load playlist keywords: %s", self.canal, e)
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 1: Niche keywords + viral formats
+        # ═════════════════════════════════════════════════════════
+        logger.info("[%s] Strategy 1/6: Niche keywords + viral formats", self.canal)
+        s1_queries = self._build_queries()  # uses current _suggested_queries or keywords
+        if self._suggested_queries:
+            s1_queries = list(self._suggested_queries)  # use playlist-targeted if set
+            self._suggested_queries = []  # clear for subsequent strategies
+        candidates = self._discover_with_queries(s1_queries)
+        all_candidates.extend(candidates)
+        strategy_results["1_niche_keywords"] = len(candidates)
+        logger.info("[%s]   Strategy 1: %d candidates", self.canal, len(candidates))
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 2: AI-generated semantic concepts
+        # ═════════════════════════════════════════════════════════
+        logger.info("[%s] Strategy 2/6: AI semantic concepts", self.canal)
+        try:
+            from pipeline.viral_query_builder import build_expanded_queries
+            s2_queries = build_expanded_queries(
+                channel_slug=self.slug,
+                channel_name=getattr(self.config, "CANAL_NAME", self.canal),
+                channel_theme=getattr(self.config, "CANAL_THEME", ""),
+                niche_keywords=self.keywords_eng[:5],
+                count=20,
+                db=db,
+            )
+        except Exception as e:
+            logger.warning("[%s] Strategy 2 (AI concepts) failed: %s — using fallback", self.canal, e)
+            s2_queries = [
+                f"{kw} documentary 2024" for kw in self.keywords_eng[:10]
+            ]
+        if s2_queries:
+            candidates = self._discover_with_queries(s2_queries)
+            all_candidates.extend(candidates)
+            strategy_results["2_ai_concepts"] = len(candidates)
+            logger.info("[%s]   Strategy 2: %d candidates from %d queries",
+                       self.canal, len(candidates), len(s2_queries))
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 3: Playlist-specific keywords
+        # ═════════════════════════════════════════════════════════
+        if pl_keywords:
+            logger.info("[%s] Strategy 3/6: Playlist keywords (%d queries)", self.canal, len(pl_keywords))
+            # Add viral formats to playlist keywords
+            viral_fmts = ["{} documentary", "{} full documentary", "best {} stories"]
+            s3_queries = list(pl_keywords)
+            for kw in pl_keywords[:5]:
+                for fmt in viral_fmts:
+                    formatted = fmt.format(kw)
+                    if formatted not in s3_queries and len(s3_queries) < 25:
+                        s3_queries.append(formatted)
+            candidates = self._discover_with_queries(s3_queries)
+            all_candidates.extend(candidates)
+            strategy_results["3_playlist_kw"] = len(candidates)
+            logger.info("[%s]   Strategy 3: %d candidates", self.canal, len(candidates))
+        else:
+            logger.info("[%s] Strategy 3/6: SKIP — no playlist keywords", self.canal)
+            strategy_results["3_playlist_kw"] = 0
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 4: Natural-language queries via LLM
+        # ═════════════════════════════════════════════════════════
+        logger.info("[%s] Strategy 4/6: Natural-language queries", self.canal)
+        try:
+            from pipeline.viral_query_builder import build_natural_language_queries
+            s4_queries = build_natural_language_queries(
+                channel_slug=self.slug,
+                channel_name=getattr(self.config, "CANAL_NAME", self.canal),
+                channel_theme=getattr(self.config, "CANAL_THEME", ""),
+                niche_keywords=self.keywords_eng[:5],
+                count=15,
+                db=db,
+            )
+        except Exception as e:
+            logger.warning("[%s] Strategy 4 (natural language) failed: %s", self.canal, e)
+            s4_queries = [
+                f"most interesting {kw} explained" for kw in self.keywords_eng[:8]
+            ]
+        if s4_queries:
+            candidates = self._discover_with_queries(s4_queries)
+            all_candidates.extend(candidates)
+            strategy_results["4_natural_lang"] = len(candidates)
+            logger.info("[%s]   Strategy 4: %d candidates", self.canal, len(candidates))
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 5: Title expansion from top results
+        # ═════════════════════════════════════════════════════════
+        logger.info("[%s] Strategy 5/6: Title expansion", self.canal)
+        # Get unique top candidates so far, sorted by viral_score
+        seen_ids = set()
+        unique_so_far = []
+        for c in all_candidates:
+            vid = c.get("video_id")
+            if vid and vid not in seen_ids:
+                seen_ids.add(vid)
+                unique_so_far.append(c)
+        unique_so_far.sort(key=lambda x: x.get("viral_score", 0), reverse=True)
+
+        s5_queries = self._generate_title_queries(unique_so_far[:20], count=15)
+        if s5_queries:
+            candidates = self._discover_with_queries(s5_queries)
+            all_candidates.extend(candidates)
+            strategy_results["5_title_expansion"] = len(candidates)
+            logger.info("[%s]   Strategy 5: %d candidates from title expansion",
+                       self.canal, len(candidates))
+
+        # ═════════════════════════════════════════════════════════
+        # Strategy 6: Genre-level fallback
+        # ═════════════════════════════════════════════════════════
+        logger.info("[%s] Strategy 6/6: Genre queries", self.canal)
+        s6_queries = self._get_genre_queries()
+        candidates = self._discover_with_queries(s6_queries)
+        all_candidates.extend(candidates)
+        strategy_results["6_genre"] = len(candidates)
+        logger.info("[%s]   Strategy 6: %d candidates", self.canal, len(candidates))
+
+        # ── Merge + deduplicate + filter ────────────────────────
+        seen_vids: set[str] = set()
+        seen_urls: set[str] = set()
+        unique: list[dict] = []
+
+        for c in all_candidates:
+            vid = c.get("video_id", "")
+            url = c.get("url", "")
+            if not vid or vid in seen_vids:
+                continue
+            # Check if already in DB
+            if db and url:
+                try:
+                    existing = db.get_content_by_url(url, self.canal)
+                    if existing:
+                        continue
+                except Exception:
+                    pass
+            seen_vids.add(vid)
+            if url:
+                seen_urls.add(url)
+            unique.append(c)
+
+        unique.sort(key=lambda x: x.get("viral_score", 0), reverse=True)
+
+        elapsed = time.time() - t0
+        logger.info("[%s] ========== DISCOVERY COMPLETE (%.1fs) ==========", self.canal, elapsed)
+        logger.info("[%s] Strategies: %s", self.canal,
+                    ", ".join(f"{k}={v}" for k, v in strategy_results.items()))
+        logger.info("[%s] Total raw candidates: %d → unique after dedup+DB-filter: %d",
+                    self.canal, sum(strategy_results.values()), len(unique))
+
+        if unique:
+            best = unique[0]
+            logger.info("[%s] Best candidate: '%s' (score=%.0f, views=%s)",
+                        self.canal, best.get("title", "")[:60],
+                        best.get("viral_score", 0), best.get("views", 0))
+
+        return unique
+
+    def process_candidate(self, candidate: dict) -> dict | None:
+        """FASE B: Process a single candidate through the full viral pipeline.
+
+        Steps: download audio → transcribe → translate → adapt → build blocks.
+        Does NOT save to DB (caller handles that).
+
+        Returns full item dict (same shape as scrape() output) or None if fails.
+        """
+        video_url = candidate.get("url", "")
+        video_id = candidate.get("video_id", "")
+
+        logger.info("[%s] Processing candidate: '%s' (score=%.0f, views=%s)",
+                    self.canal, candidate.get("title", "")[:60],
+                    candidate.get("viral_score", 0), candidate.get("views", 0))
+
+        # Step 1: Download audio
+        audio_path = self._download_audio(video_url, video_id)
+        if not audio_path:
+            logger.warning("[%s] ✗ Candidate failed at DOWNLOAD: %s", self.canal, video_id)
+            return None
+
+        # Step 2: Transcribe
+        transcript_en = self._transcribe(audio_path)
+        if not transcript_en:
+            logger.warning("[%s] ⚠ Transcription empty — using title+description as fallback", self.canal)
+            transcript_en = f"{candidate.get('title', '')}. {candidate.get('description', '')}"
+            if len(transcript_en.strip()) < 50:
+                logger.warning("[%s] ✗ Candidate failed at TRANSCRIBE (fallback too short)", self.canal)
+                return None
+        logger.info("[%s]   Transcribed: %d words EN", self.canal, len(transcript_en.split()))
+
+        # Step 3: Translate + paraphrase
+        translated_script, translated_title, translated_desc = self._translate_and_paraphrase(
+            transcript_en, candidate.get("title", "")
+        )
+        if not translated_script:
+            logger.warning("[%s] ✗ Candidate failed at TRANSLATE", self.canal)
+            return None
+        logger.info("[%s]   Translated: %d words ES", self.canal, len(translated_script.split()))
+
+        # Step 4: Adapt duration
+        adapted_script = self._adapt_duration(translated_script)
+        if not adapted_script:
+            logger.warning("[%s] ✗ Candidate failed at ADAPT (duration gap too large)", self.canal)
+            return None
+        logger.info("[%s]   Adapted: %d words (~%.1f min)",
+                    self.canal, len(adapted_script.split()), len(adapted_script.split()) / 150)
+
+        # Step 5: Build blocks
+        blocks = self._build_script_blocks(adapted_script)
+        logger.info("[%s]   Blocks: %d — %s", self.canal, len(blocks),
+                    [b.get("tipo", "?") for b in blocks[:6]])
+
+        # Step 6: Construct metadata
+        viral_meta = {
+            "original_title": candidate.get("title", ""),
+            "translated_title": translated_title,
+            "translated_description": translated_desc or candidate.get("description", ""),
+            "blocks": blocks,
+            "original_views": candidate.get("views", 0),
+            "original_channel": candidate.get("channel_name", ""),
+            "original_url": video_url,
+            "word_count": len(adapted_script.split()),
+            "estimated_duration_min": round(len(adapted_script.split()) / 150, 1),
+        }
+
+        # Cleanup audio
+        try:
+            if audio_path and Path(audio_path).exists():
+                Path(audio_path).unlink()
+        except OSError:
+            pass
+
+        return {
+            "source": "youtube_viral",
+            "url": video_url,
+            "title": translated_title or candidate.get("title", ""),
+            "text": transcript_en[:500],
+            "subreddit": candidate.get("channel_name", ""),
+            "score": int(candidate.get("viral_score", 0)),
+            "source_mode": "viral",
+            "viral_original_title": candidate.get("title", ""),
+            "viral_original_description": candidate.get("description", ""),
+            "viral_original_thumbnail_url": candidate.get("thumbnail_url", ""),
+            "viral_original_video_url": video_url,
+            "viral_views": candidate.get("views", 0),
+            "viral_upload_date": candidate.get("upload_date", ""),
+            "viral_duration_sec": candidate.get("duration_sec", 0),
+            "viral_channel_name": candidate.get("channel_name", ""),
+            "viral_score": candidate.get("viral_score", 0.0),
+            "viral_script_es": adapted_script,
+            "viral_meta_json": json.dumps(viral_meta, ensure_ascii=False),
+            "viral_blocks_json": json.dumps(blocks, ensure_ascii=False),
+        }
+
     # ── Video download + transcription ──────────────────────────
 
     def _download_audio(self, video_url: str, video_id: str) -> str | None:
