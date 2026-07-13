@@ -2653,13 +2653,16 @@ class ExtendedDatabase(Database):
             # ── Alternate pattern (e.g. [2, 3] → alternates 2/3 daily) ──
             "alternate_pattern": config.get("alternate_pattern"),
             "alternate_offset": config.get("alternate_offset", 0),
+            # ── Source mode distribution (videos_per_day = total, viral_per_day = how many viral) ──
+            "viral_per_day": config.get("viral_per_day", 0),
         }
     
     def update_channel_planning_config(self, channel_id: int,
                                         videos_per_day: int = None,
                                         planning_enabled: bool = None,
                                         alternate_pattern: list = None,
-                                        alternate_offset: int = None) -> bool:
+                                        alternate_offset: int = None,
+                                        viral_per_day: int = None) -> bool:
         """Update planning fields in channel config_json."""
         ch = self.get_channel(channel_id)
         if not ch:
@@ -2676,6 +2679,10 @@ class ExtendedDatabase(Database):
             config["alternate_pattern"] = alternate_pattern
         if alternate_offset is not None:
             config["alternate_offset"] = alternate_offset
+        if viral_per_day is not None:
+            # Clamp: 0 <= viral_per_day <= videos_per_day (current total)
+            total = config.get("videos_per_day", 1)
+            config["viral_per_day"] = max(0, min(total, viral_per_day))
         return self.update_channel(channel_id, config=config)
     
     def get_active_job(self) -> dict | None:
@@ -3423,6 +3430,93 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
             return cursor.rowcount
+
+    def get_pipeline_status(self) -> dict:
+        """Return full pipeline status for the visual scheduling view.
+
+        Returns 3 lists:
+        - planned:   slots pending today (not yet dispatched) with channel info
+        - generating: videos currently being generated with job progress
+        - warming:   videos uploaded as private waiting to go public
+        """
+        result = {"planned": [], "generating": [], "warming": []}
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+
+            # ── 1. Planned (pending slots for today, not dispatched yet) ──
+            planned = conn.execute(
+                """SELECT
+                    ps.id as slot_id,
+                    ps.channel_id,
+                    ps.scheduled_at,
+                    ps.target_upload_at,
+                    ps.slot_position,
+                    ps.source_mode,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM planned_slots ps
+                   JOIN channels ch ON ch.id = ps.channel_id
+                   WHERE ps.date_key = date('now', 'localtime')
+                     AND ps.status = 'pending'
+                     AND ps.video_id IS NULL
+                   ORDER BY ps.scheduled_at ASC""",
+            ).fetchall()
+            result["planned"] = [dict(r) for r in planned]
+
+            # ── 2. Generating (active pipeline jobs) ──
+            generating = conn.execute(
+                """SELECT
+                    v.id as video_id,
+                    v.channel_id,
+                    v.status,
+                    v.progress,
+                    v.progress_phase,
+                    v.target_public_at,
+                    v.publish_mode,
+                    v.created_at,
+                    gj.id as job_id,
+                    gj.status as job_status,
+                    gj.progress as job_progress,
+                    gj.phase as job_phase,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM videos v
+                   JOIN channels ch ON ch.id = v.channel_id
+                   LEFT JOIN generation_jobs gj ON gj.video_id = v.id AND gj.status = 'running'
+                   WHERE v.status = 'generating'
+                   ORDER BY v.created_at ASC""",
+            ).fetchall()
+            result["generating"] = [dict(r) for r in generating]
+
+            # ── 3. Warming (uploaded private, waiting for go_public) ──
+            warming = conn.execute(
+                """SELECT
+                    v.id as video_id,
+                    v.channel_id,
+                    v.status,
+                    v.privacy_status,
+                    v.yt_video_id,
+                    v.titulo_final,
+                    v.target_public_at,
+                    v.uploaded_at,
+                    v.publish_mode,
+                    v.peak_source,
+                    v.auto_playlist_id,
+                    v.auto_playlist_name,
+                    v.manual_altered_content_done,
+                    v.manual_end_screens_done,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM videos v
+                   JOIN channels ch ON ch.id = v.channel_id
+                   WHERE v.status = 'uploaded_private'
+                     AND v.target_public_at IS NOT NULL
+                     AND datetime(v.target_public_at) > datetime('now')
+                   ORDER BY v.target_public_at ASC""",
+            ).fetchall()
+            result["warming"] = [dict(r) for r in warming]
+
+        return result
 
     def get_completed_videos_today(self, channel_id: int) -> list[dict]:
         """Get today's completed videos for a channel, ordered by created_at.

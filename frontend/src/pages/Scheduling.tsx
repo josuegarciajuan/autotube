@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus } from 'lucide-react'
-import UpcomingExecutions from '../components/UpcomingExecutions'
+import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
 
 interface ChannelSummary {
@@ -26,6 +26,7 @@ interface PlanningConfig {
   channel_name: string
   channel_slug: string
   videos_per_day: number
+  viral_per_day: number
   planning_enabled: boolean
 }
 
@@ -257,7 +258,7 @@ function PlanningConfigSection() {
 
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
 
-  async function update(channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean }) {
+  async function update(channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) {
     try {
       await api.updatePlanningConfig(channelId, data)
       load()
@@ -300,8 +301,14 @@ export default function Scheduling() {
         </h2>
       </div>
 
-      {/* ── Section 1: Proximas Ejecuciones (big table) ── */}
-      <UpcomingExecutions />
+      {/* ── Section 1: Pipeline Visual (3-columnas) ── */}
+      <section className="glass rounded-xl p-5 space-y-3">
+        <h3 className="font-display text-base font-semibold text-white flex items-center gap-2">
+          <Play size={16} className="text-neon-gold" /> Pipeline de Publicacion
+          <span className="text-xs text-gray-500 font-normal">(Europe/Madrid)</span>
+        </h3>
+        <PipelineView />
+      </section>
 
       {/* ── Section 2: Estado de Hoy ─────────────────────── */}
       <section className="glass rounded-xl p-5 space-y-3">

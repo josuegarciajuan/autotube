@@ -31,7 +31,7 @@ SPAIN_UPLOAD_WINDOWS = [
 ]
 SPAIN_FALLBACK_WINDOW = (8, 10, 0.5, "madrugada-overflow")
 
-ESTIMATED_PIPELINE_MINUTES = 75   # typical gen duration; used to calc scheduled_at
+ESTIMATED_PIPELINE_MINUTES = 180  # typical gen duration (~2-3h) + margin; used to calc scheduled_at
 MIN_GAP_MINUTES = 90               # minimum gap between generation START times
 
 
@@ -51,6 +51,58 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
         idx = (day_ordinal + offset) % len(pattern)
         return pattern[idx]
     return ch.get("videos_per_day", 1)
+
+# ── Source mode alternation ─────────────────────────────────
+
+def _build_source_mode_sequence(total: int, viral_per_day: int) -> list[str]:
+    """Build alternating source_mode sequence for one channel's daily slots.
+
+    Starts with 'original', then alternates with 'viral' when available.
+    If viral_per_day > original_count, the sequence starts with 'viral' instead
+    so that the alternating pattern distributes them evenly.
+
+    Examples:
+        total=3, viral=1 → ['original', 'viral', 'original']
+        total=3, viral=2 → ['viral', 'original', 'viral']
+        total=4, viral=2 → ['original', 'viral', 'original', 'viral']
+        total=4, viral=1 → ['original', 'viral', 'original', 'original']
+        total=2, viral=0 → ['original', 'original']
+        total=2, viral=2 → ['viral', 'viral']
+    """
+    if viral_per_day <= 0:
+        return ["original"] * total
+    if viral_per_day >= total:
+        return ["viral"] * total
+
+    original_count = total - viral_per_day
+    # Start with the style that has more items
+    if viral_per_day > original_count:
+        first, second = "viral", "original"
+        first_avail, second_avail = viral_per_day, original_count
+    else:
+        first, second = "original", "viral"
+        first_avail, second_avail = original_count, viral_per_day
+
+    result = []
+    for i in range(total):
+        if i % 2 == 0:
+            # Even slots → use the primary (more abundant) type
+            if first_avail > 0:
+                result.append(first)
+                first_avail -= 1
+            else:
+                result.append(second)
+                second_avail -= 1
+        else:
+            # Odd slots → use the secondary type
+            if second_avail > 0:
+                result.append(second)
+                second_avail -= 1
+            else:
+                result.append(first)
+                first_avail -= 1
+    return result
+
 
 # ── Seed helpers ──────────────────────────────────────────────
 
@@ -225,6 +277,10 @@ def compute_daily_slots(
         warmup_min = ch.get("publish_warmup_min", 120) if is_scheduled else 0
         jitter_min = ch.get("publish_jitter_min", 20) if is_scheduled else 0
         
+        # ── Build source_mode sequence for this channel's daily slots ──
+        viral_n = ch.get("viral_per_day", 0)
+        mode_sequence = _build_source_mode_sequence(n, viral_n) if n > 0 else []
+        
         # _distribute_slots returns (h, m) = TARGET_UPLOAD (public for scheduled)
         raw_slots = _distribute_slots(n, day_seed, ch["channel_id"],
                                        is_scheduled=is_scheduled,
@@ -248,6 +304,9 @@ def compute_daily_slots(
             sched_m = total_min % 60
             sched_str = f"{date_str} {sched_h:02d}:{sched_m:02d}:00"
             
+            # Assign source_mode from the pre-built alternating sequence (0-indexed)
+            slot_mode = mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original"
+            
             all_slots.append({
                 "channel_id": ch["channel_id"],
                 "date_key": date_str,
@@ -258,7 +317,7 @@ def compute_daily_slots(
                 "slot_position": pos,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
-                "source_mode": ch.get("default_source_mode", "original"),
+                "source_mode": slot_mode,
                 "publish_mode": ch.get("publish_mode", "immediate"),
             })
     
@@ -463,6 +522,7 @@ def sync_midday(db=None) -> dict:
                 "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
                 "seo_primary_keyword": cfg.get("seo_primary_keyword", ""),
                 "seo_secondary_keywords": cfg.get("seo_secondary_keywords", []),
+                "viral_per_day": cfg.get("viral_per_day", 0),
             }])
             
             # Filter: only take slots NOT already covered by existing non-cancelled slots

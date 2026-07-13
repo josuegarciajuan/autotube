@@ -135,7 +135,7 @@ export const api = {
 
   // Planning (dynamic scheduling v2)
   getPlanningConfig: () => request<any[]>('/planning/config'),
-  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean }) =>
+  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) =>
     request<any>(`/planning/config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   getPlannedSlots: (date?: string, channelId?: number, status?: string) => {
     const params = new URLSearchParams();
@@ -278,7 +278,64 @@ export const api = {
       jitter_min: number; timezone: string; warmup_min: number;
       source: string; niche: string;
     }>(`/channels/${channelId}/peak-info`),
+
+  // Pipeline status (visual scheduling view)
+  getPipelineStatus: () =>
+    request<{
+      planned: PlannedSlot[];
+      generating: GeneratingVideo[];
+      warming: WarmingVideo[];
+    }>('/planning/pipeline-status'),
 };
+
+// ── Pipeline status types ────────────────────────────────────
+
+export interface PlannedSlot {
+  slot_id: number;
+  channel_id: number;
+  scheduled_at: string;
+  target_upload_at: string;
+  slot_position: number;
+  source_mode: string;
+  channel_name: string;
+  channel_slug: string;
+}
+
+export interface GeneratingVideo {
+  video_id: number;
+  channel_id: number;
+  status: string;
+  progress: number;
+  progress_phase: string;
+  target_public_at: string | null;
+  publish_mode: string;
+  created_at: string;
+  job_id: number | null;
+  job_status: string | null;
+  job_progress: number | null;
+  job_phase: string | null;
+  channel_name: string;
+  channel_slug: string;
+}
+
+export interface WarmingVideo {
+  video_id: number;
+  channel_id: number;
+  status: string;
+  privacy_status: string;
+  yt_video_id: string;
+  titulo_final: string;
+  target_public_at: string;
+  uploaded_at: string;
+  publish_mode: string;
+  peak_source: string;
+  auto_playlist_id: number | null;
+  auto_playlist_name: string | null;
+  manual_altered_content_done: number;
+  manual_end_screens_done: number;
+  channel_name: string;
+  channel_slug: string;
+}
 
 /** Format seconds to mm:ss */
 export function formatDuration(seconds: number): string {

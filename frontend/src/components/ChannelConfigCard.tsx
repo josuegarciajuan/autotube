@@ -1,9 +1,9 @@
 /** Per-channel planning configuration card.
- *  Allows setting videos_per_day and toggling planning_enabled.
+ *  Allows setting videos_per_day, viral_per_day, and toggling planning_enabled.
  */
 
 import { useState, useEffect } from 'react'
-import { Plus, Minus, Video, Play, Clock } from 'lucide-react'
+import { Plus, Minus, Video, Play, Clock, Zap } from 'lucide-react'
 import { api } from '../lib/api'
 
 interface ChannelConfig {
@@ -11,6 +11,7 @@ interface ChannelConfig {
   channel_name: string
   channel_slug: string
   videos_per_day: number
+  viral_per_day: number
   planning_enabled: boolean
 }
 
@@ -25,7 +26,7 @@ export default function ChannelConfigCard({
   onUpdate,
 }: {
   config: ChannelConfig
-  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean }) => void
+  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) => void
 }) {
   const [saving, setSaving] = useState(false)
   const [peakInfo, setPeakInfo] = useState<any>(null)
@@ -35,7 +36,7 @@ export default function ChannelConfigCard({
     api.getChannelPeakInfo(config.channel_id).then(setPeakInfo).catch(() => {})
   }, [config.channel_id])
 
-  async function update(data: { videos_per_day?: number; planning_enabled?: boolean }) {
+  async function update(data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) {
     setSaving(true)
     try { onUpdate(data) } finally { setTimeout(() => setSaving(false), 500) }
   }
@@ -101,16 +102,28 @@ export default function ChannelConfigCard({
           : 'Planificacion desactivada'}
       </div>
 
-      {/* Default source mode indicator */}
-      <div className="text-[10px] text-gray-500 flex items-center gap-1">
-        <span>Metodo por defecto:</span>
-        <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${
-          (config as any).default_source_mode === 'viral'
-            ? 'bg-purple-500/15 text-purple-400'
-            : 'bg-gray-500/15 text-gray-400'
-        }`}>
-          {(config as any).default_source_mode === 'viral' ? 'Viral' : 'Original'}
+      {/* Viral/día slider — how many of the N daily videos are viral */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-gray-400 flex items-center gap-1.5">
+          <Zap size={12} className="text-purple-400" /> Virales/dia
         </span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => update({ viral_per_day: Math.max(0, (config.viral_per_day || 0) - 1) })}
+            disabled={!config.planning_enabled}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Minus size={12} />
+          </button>
+          <span className="text-white font-mono w-4 text-center">{config.viral_per_day || 0}</span>
+          <button
+            onClick={() => update({ viral_per_day: Math.min(config.videos_per_day, (config.viral_per_day || 0) + 1) })}
+            disabled={!config.planning_enabled || config.videos_per_day <= 0}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Plus size={12} />
+          </button>
+        </div>
       </div>
 
       {/* Peak info for scheduled channels */}
