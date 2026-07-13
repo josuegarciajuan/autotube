@@ -3452,6 +3452,30 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
 
+    def get_shorts_published_today(self, channel_id: int) -> int:
+        """Count shorts successfully published today for a channel.
+
+        Used by the shorts recovery planner to determine how many of
+        today's target shorts have already been published.
+
+        Returns count of shorts where:
+        - channel_id matches
+        - youtube_id IS NOT NULL (successfully uploaded to YouTube)
+        - status = 'published'
+        - published_at is today (local time)
+        """
+        with self._connect() as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM shorts
+                   WHERE channel_id = ?
+                     AND youtube_id IS NOT NULL
+                     AND status = 'published'
+                     AND DATE(published_at) = DATE('now', 'localtime')""",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
+
     def get_channel_shorts_slots_today(self, channel_id: int, date_key: str) -> list[dict]:
         """Get all shorts slots for a channel on a specific date."""
         with self._connect() as conn:

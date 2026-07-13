@@ -253,6 +253,7 @@ async def _schedule_checker_loop():
     last_lifecycle_check = time.time()
     last_midnight_check = time.time()
     last_recovery_check = 0
+    last_shorts_recovery_check = 0
     first_run = True
 
     while True:
@@ -283,6 +284,11 @@ async def _schedule_checker_loop():
             if now - last_recovery_check > 3600:  # 60 minutes
                 await _process_recovery_planner()
                 last_recovery_check = now
+            
+            # Shorts auto-recovery: rebalance shorts every 60 minutes
+            if now - last_shorts_recovery_check > 3600:  # 60 minutes
+                await _process_shorts_recovery_planner()
+                last_shorts_recovery_check = now
             
             # Regenerate the schedule forecast at midnight (daily)
             if now - last_midnight_check > 3600:  # Check once per hour
@@ -362,6 +368,33 @@ async def _process_recovery_planner():
             )
     except Exception as e:
         logger.error("Recovery planner error: %s", e)
+
+
+async def _process_shorts_recovery_planner():
+    """Check for channels behind/ahead daily shorts target and rebalance.
+
+    Runs every 60 min. Only active between 10:00-23:00 local time.
+    Delegates to api.services.shorts_recovery_planner.auto_recover_shorts.
+    """
+    import asyncio
+    import logging
+    logger = logging.getLogger("autotube.shorts_recovery")
+    try:
+        from api.services.shorts_recovery_planner import auto_recover_shorts
+        result = await asyncio.to_thread(auto_recover_shorts)
+        total = (result.get("recovered_count", 0) +
+                 result.get("cancelled_count", 0))
+        if total > 0:
+            logger.info(
+                "Shorts recovery: +%d added, -%d cancelled "
+                "across %d channel(s): %s",
+                result.get("recovered_count", 0),
+                result.get("cancelled_count", 0),
+                len(result.get("channels_affected", [])),
+                ", ".join(result.get("channels_affected", [])),
+            )
+    except Exception as e:
+        logger.error("Shorts recovery planner error: %s", e)
 
 
 async def _process_smart_slots():

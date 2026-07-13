@@ -115,6 +115,35 @@ def _find_first_available(now_minute_of_day: int,
     return fallback
 
 
+def _cancel_excess_pending_slots(db, channel_id: int, today: str,
+                                 excess: int, active_slots: list[dict],
+                                 slug: str) -> int:
+    """Cancel the last N pending slots to bring total back to target.
+
+    Sorts pending slots by scheduled_at descending (latest first), so
+    earlier slots that may already be in-process keep priority.
+    Never touches running slots.
+
+    Returns number of slots cancelled.
+    """
+    pending = [s for s in active_slots if s.get("status") == "pending"]
+    if not pending or excess <= 0:
+        return 0
+
+    pending_sorted = sorted(pending, key=lambda s: s.get("scheduled_at", ""),
+                            reverse=True)
+    to_cancel = [s["id"] for s in pending_sorted[:excess]]
+
+    if to_cancel:
+        db.cancel_slots(to_cancel)
+        logger.info(
+            "[%s] Excess: cancelled %d pending slot(s) (target exceeded): %s",
+            slug, len(to_cancel),
+            ", ".join(f"#{sid}" for sid in to_cancel),
+        )
+    return len(to_cancel)
+
+
 def auto_recover_missing_publications(db=None) -> dict:
     """Main recovery function. Checks all channels and replans missing slots.
 
@@ -183,7 +212,28 @@ def auto_recover_missing_publications(db=None) -> dict:
             slug, target, published_today, active_count, total_covered,
         )
 
-        if total_covered >= target:
+        if total_covered > target:
+            excess = total_covered - target
+            cancelled = _cancel_excess_pending_slots(
+                db, channel_id, today, excess, active_slots, slug,
+            )
+            result["details"].append({
+                "channel_id": channel_id,
+                "slug": slug,
+                "action": "cancelled_excess",
+                "target": target,
+                "published": published_today,
+                "active_planned": active_count,
+                "excess": excess,
+                "cancelled": cancelled,
+            })
+            if cancelled:
+                result["cancelled_count"] = result.get("cancelled_count", 0) + cancelled
+                if slug not in result["channels_affected"]:
+                    result["channels_affected"].append(slug)
+            continue
+
+        if total_covered == target:
             logger.debug("[%s] On track — no recovery needed", slug)
             continue
 
