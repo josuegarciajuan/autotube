@@ -485,6 +485,18 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             conn.close()
         except Exception:
             pass
+    finally:
+        # ── Release memory after EVERY short generation ──────────
+        # Without this, Python's heap fragments and the OS never gets
+        # pages back. gc.collect() finds unreachable objects;
+        # malloc_trim(0) returns freed pages to the OS immediately.
+        try:
+            import gc
+            gc.collect()
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
 
 
 # ── Native short generation ────────────────────────────────────

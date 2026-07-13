@@ -10,6 +10,34 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# ── Module-level image provider cache ──────────────────────────────────────
+# Creating new providers per call accumulates HTTP sessions and memory.
+# Singleton pattern ensures one instance per provider for the process lifetime.
+_providers_cache = {
+    "unsplash": None,
+    "pexels": None,
+}
+
+
+def _get_image_providers():
+    """Return (unsplash, pexels) provider instances, creating them once."""
+    from config import settings
+
+    unsplash = _providers_cache["unsplash"]
+    pexels = _providers_cache["pexels"]
+
+    if unsplash is None and settings.UNSPLASH_ACCESS_KEY:
+        from pipeline.image_fetcher import UnsplashProvider
+        unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
+        _providers_cache["unsplash"] = unsplash
+
+    if pexels is None and settings.PEXELS_API_KEY:
+        from pipeline.image_fetcher import PexelsProvider
+        pexels = PexelsProvider(settings.PEXELS_API_KEY)
+        _providers_cache["pexels"] = pexels
+
+    return unsplash, pexels
+
 
 def _esc_ffmpeg(t: str) -> str:
     """Escape single-quotes / colons / percent for FFmpeg drawtext."""
@@ -40,15 +68,9 @@ def fetch_portrait_images(
         on errors).
     """
     from config import settings
-    from pipeline.image_fetcher import UnsplashProvider, PexelsProvider
     import requests, hashlib, re
 
-    unsplash = None
-    pexels = None
-    if settings.UNSPLASH_ACCESS_KEY:
-        unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
-    if settings.PEXELS_API_KEY:
-        pexels = PexelsProvider(settings.PEXELS_API_KEY)
+    unsplash, pexels = _get_image_providers()
 
     if unsplash is None and pexels is None:
         logger.warning("No image providers configured — Short will have solid background")

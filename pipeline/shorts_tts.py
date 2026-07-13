@@ -307,10 +307,15 @@ def synthesize_shorts_blocks(
         dur = len(AudioSegment.from_mp3(str(output_audio_path))) / 1000.0
         total_words = len(all_timestamps)
         if dur > max_duration_sec:
+            # Unload model before raising to prevent memory leak on error path
+            engine.unload()
             raise RuntimeError(
                 f"Short audio too long: {dur:.1f}s exceeds maximum {max_duration_sec}s."
             )
         logger.info("✅ Kokoro Short TTS done: %d words, %.1fs, %d blocks", total_words, dur, len(bloques))
+        # CRITICAL: Unload the Kokoro pipeline to prevent ~1-2 GB RAM leak per Short.
+        # Without this, repeated Short generations accumulate model weights in memory.
+        engine.unload()
         return {
             "audio_path": str(output_audio_path),
             "srt_path": str(output_srt_path),
