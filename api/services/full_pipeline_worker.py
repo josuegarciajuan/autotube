@@ -457,6 +457,35 @@ def run_job(
         # ═══════════════════════════════════════════════════════
         # Phase 0: Scrape
         # ═══════════════════════════════════════════════════════
+        
+        # ── Pick a random playlist BEFORE scraping ──
+        if _phase_index("scrape") >= start_idx:
+            try:
+                channel_db_id = orch._get_channel_id()
+                playlists = db.get_channel_youtube_playlists(channel_db_id) if channel_db_id else []
+                if playlists:
+                    import random as _random
+                    target_pl = _random.choice(playlists)
+                    db.update_video(video_id,
+                                    target_playlist_id=target_pl["id"],
+                                    target_playlist_slug=target_pl["slug"])
+                    logger.info("[%s] Target playlist: '%s' (slug=%s)",
+                               canal, target_pl.get("name"), target_pl.get("slug"))
+                    # Inject playlist keywords into orchestrator for viral mode
+                    config_json = ch.get("config_json", "{}")
+                    if isinstance(config_json, str):
+                        import json; config_json = json.loads(config_json)
+                    generated = config_json.get("PLAYLISTS_GENERATED", [])
+                    for pl_cfg in generated:
+                        if pl_cfg.get("slug") == target_pl["slug"]:
+                            orch._target_playlist = target_pl
+                            orch._target_playlist_kw = pl_cfg.get("keywords_en", [])
+                            break
+                else:
+                    logger.warning("[%s] No playlists in DB — continuing without playlist", canal)
+            except Exception as e:
+                logger.warning("[%s] Playlist selection failed (non-critical): %s", canal, e)
+        
         if _phase_index("scrape") < start_idx:
             logger.info("Skipping scrape (resuming from %s)", start_phase)
         elif test_mode:

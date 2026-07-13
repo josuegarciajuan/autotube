@@ -58,95 +58,118 @@ def _load_credentials(token_path: Path) -> Optional[Credentials]:
     return creds
 
 
-# ── Viral Mirror playlist selection ──────────────────────────────────
+# ── Playlist creation from channel config ─────────────────────────────
 
-def pick_playlist_for_viral(channel_slug: str, db) -> tuple[str | None, str | None, list[str]]:
-    """Pick the best playlist for a viral mirror search cycle.
+def create_playlists_for_channel(channel_slug: str, force: bool = False) -> dict:
+    """Create 10 thematic playlists for a channel on YouTube.
 
-    Strategy:
-      1. Load all playlists from the channel config (config_bridge or config module).
-      2. For each playlist, check when its keywords were last used for a viral search.
-      3. Pick the playlist with the OLDEST last-used date (rotación justa).
-      4. If no playlist has a "last used" date, pick randomly to avoid always #1.
-      5. Return (playlist_name, playlist_slug, playlist_keywords_eng).
+    Uses the LLM-based playlist generator to produce subniche playlists,
+    creates them on YouTube via the API, and caches IDs in the local DB.
+
+    Idempotent: skips channels that already have playlists in DB unless
+    ``force=True``.
+
+    Args:
+        channel_slug: Channel slug (e.g. "canal2")
+        force: If True, regenerate even if playlists already exist in DB
 
     Returns:
-        (name, slug, keywords) — all may be None if no playlists configured.
+        {"created_count": int, "existing_count": int, "errors": [...],
+         "playlists": [config dicts]}
     """
+    import json as _json
+    from database.db_extended import ExtendedDatabase
+
+    db = ExtendedDatabase()
+
+    # Get channel DB record
+    ch = db.get_channel_by_slug(channel_slug)
+    if not ch:
+        return {"error": f"Channel slug '{channel_slug}' not found in DB"}
+
+    channel_id = ch["id"]
+    channel_name = ch.get("name", channel_slug)
+
+    # Check existing playlists (skip if already created, unless force)
+    if not force:
+        existing = db.get_channel_youtube_playlists(channel_id)
+        if existing:
+            logger.info("[%s] Channel already has %d playlists in DB — skipping. Use force=True to regenerate.",
+                       channel_slug, len(existing))
+            return {"created_count": 0, "existing_count": len(existing),
+                    "skipped": True, "playlists": existing}
+
+    # Load channel config for niche info
     try:
         from config.config_bridge import get_channel_config
         config = get_channel_config(channel_slug)
+        niche_kw = getattr(config, "NICHE_KEYWORDS_ENG", []) or getattr(config, "CHANNEL_KEYWORDS", [])
+        if isinstance(niche_kw, str):
+            niche_kw = [niche_kw]
+        niche_desc = getattr(config, "CANAL_TAGLINE", "") or ""
     except ImportError:
-        logger.warning("[%s] Cannot load config for playlist selection", channel_slug)
-        return None, None, []
+        logger.warning("[%s] Cannot load Python config — using channel name only", channel_slug)
+        niche_kw = []
+        niche_desc = ""
 
-    playlists = getattr(config, "PLAYLISTS", None)
-    if not playlists:
-        logger.info("[%s] No PLAYLISTS configured — viral will use channel keywords only", channel_slug)
-        return None, None, []
+    # Generate playlist configs via LLM
+    from pipeline.playlist_generator import generate_playlists_for_channel as _gen
 
-    # Get per-playlist keywords (English)
-    playlist_kw = getattr(config, "VIRAL_PLAYLIST_KEYWORDS", {})
-    if not playlist_kw:
-        logger.info("[%s] No VIRAL_PLAYLIST_KEYWORDS configured — using all playlists with empty keywords", channel_slug)
-        # Return first playlist with empty keywords
-        first = playlists[0]
-        return first.get("name", ""), first.get("slug", ""), []
+    playlist_configs = _gen(
+        channel_name=channel_name,
+        niche_keywords=list(niche_kw)[:10] if niche_kw else None,
+        niche_description=niche_desc,
+        language="es",
+        count=10,
+    )
 
-    # Check last-used timestamps for each playlist from raw_content
-    playlist_last_used = {}
+    if not playlist_configs:
+        return {"error": "LLM playlist generation returned empty result"}
+
+    # Store generated playlists in channel config_json
     try:
-        with db._connect() as conn:
-            for pl in playlists:
-                slug = pl.get("slug", "")
-                row = conn.execute(
-                    """SELECT MAX(scraped_at) as last_used
-                       FROM raw_content
-                       WHERE canal = ? AND source_mode = 'viral'
-                       AND viral_meta_json LIKE ?
-                       AND used = 1""",
-                    (channel_slug, f"%{slug}%"),
-                ).fetchone()
-                playlist_last_used[slug] = row["last_used"] if row and row["last_used"] else None
-    except Exception as e:
-        logger.debug("[%s] Could not query last-used playlist: %s", channel_slug, e)
+        config_json = _json.loads(ch.get("config_json", "{}")) if isinstance(ch.get("config_json"), str) else (ch.get("config_json") or {})
+    except (_json.JSONDecodeError, TypeError):
+        config_json = {}
+    config_json["PLAYLISTS_GENERATED"] = playlist_configs
+    db.update_channel(channel_id, config=config_json)
 
-    # Pick: oldest last-used (fair rotation), or random if all unused
-    best_slug = None
-    best_date = "9999-99-99"  # far future — any real date will be older
+    # Create on YouTube + cache in DB
+    mgr = YouTubePlaylistManager(channel_slug)
+    if not mgr.authenticate():
+        return {"error": f"Cannot authenticate channel '{channel_slug}' — check OAuth token"}
 
-    for pl in playlists:
-        slug = pl.get("slug", "")
-        if slug and slug in playlist_kw:
-            last_used = playlist_last_used.get(slug)
-            if last_used and last_used < best_date:
-                best_date = last_used
-                best_slug = slug
+    created, errors = [], []
+    for pl_cfg in playlist_configs:
+        name = pl_cfg.get("name", "")
+        slug_key = pl_cfg.get("slug", "")
+        description = pl_cfg.get("description", "")
+        pl_type = pl_cfg.get("type", "thematic")
 
-    # If nobody has a last_used date (all new), pick randomly
-    if best_slug is None:
-        candidates = [pl for pl in playlists
-                       if pl.get("slug") and pl.get("slug") in playlist_kw]
-        if candidates:
-            chosen = random.choice(candidates)
-            best_slug = chosen["slug"]
-        elif playlists:
-            # Fallback: first playlist with empty keywords
-            chosen = playlists[0]
-            best_slug = chosen.get("slug", "")
+        if not name or not slug_key:
+            errors.append(f"Invalid playlist config: {pl_cfg}")
+            continue
 
-    # Get the info for the chosen playlist
-    for pl in playlists:
-        if pl.get("slug") == best_slug:
-            name = pl.get("name", "")
-            desc = pl.get("description", "")
-            keywords = playlist_kw.get(best_slug, [])
-            logger.info("[%s] Viral playlist selected: '%s' (slug=%s, last_used=%s, %d keywords)",
-                        channel_slug, name, best_slug,
-                        playlist_last_used.get(best_slug, "never"), len(keywords))
-            return name, desc, keywords
+        try:
+            found = mgr.find_playlist_by_title(name)
+            if found:
+                yt_id = found["yt_playlist_id"]
+                logger.info("[%s] Playlist exists on YT: '%s' (%s)", channel_slug, name, yt_id)
+            else:
+                result = mgr.create_playlist(name, description)
+                yt_id = result["yt_playlist_id"]
 
-    return None, None, []
+            # Cache in DB
+            db.upsert_youtube_playlist(channel_id, slug_key, yt_id, name, pl_type)
+            created.append({"slug": slug_key, "name": name, "yt_playlist_id": yt_id})
+
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            logger.error("[%s] Error creating playlist '%s': %s", channel_slug, name, exc)
+
+    logger.info("[%s] Playlists created: %d, errors: %d", channel_slug, len(created), len(errors))
+    return {"created_count": len(created), "existing_count": 0, "errors": errors,
+            "playlists": playlist_configs}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -372,24 +395,12 @@ class YouTubePlaylistManager:
         return {"created": created, "existing": existing, "errors": errors}
 
     def add_video_to_all_playlists(self, yt_video_id: str,
-                                    playlist_configs: list[dict] = None,
-                                    auto_classify: bool = False,
-                                    title: str = None,
-                                    description: str = None) -> dict:
+                                    playlist_configs: list[dict] = None) -> dict:
         """Add a video to all configured playlists for the channel.
 
         Uses cached playlist IDs from DB when available.
 
-        Args:
-            yt_video_id: YouTube video ID
-            playlist_configs: Optional override playlist configs
-            auto_classify: If True and multiple playlists, use AI to pick the
-                          best matching playlist and add ONLY to that one.
-            title: Video title (needed for auto_classify)
-            description: Video description (needed for auto_classify)
-
-        Returns {added_to: [...], already_in: [...], errors: [...],
-                 auto_selected: slug or None}.
+        Returns {added_to: [...], already_in: [...], errors: [...]}.
         """
         if playlist_configs is None:
             playlist_configs = getattr(self.config, "PLAYLISTS", [])
@@ -407,22 +418,8 @@ class YouTubePlaylistManager:
 
         channel_id = ch["id"]
         added_to, already_in, errors = [], [], []
-        auto_selected = None
 
-        # ── Auto-classify: pick the single best matching playlist ──
-        target_playlists = list(playlist_configs)  # copy
-        if auto_classify and len(target_playlists) > 1 and title:
-            try:
-                best_slug = self._classify_playlist(title, description or "", target_playlists)
-                if best_slug:
-                    target_playlists = [pl for pl in target_playlists if pl.get("slug") == best_slug]
-                    auto_selected = best_slug
-                    logger.info("[%s] Auto-selected playlist '%s' for video '%s'",
-                                self.slug, best_slug, title[:50])
-            except Exception as e:
-                logger.warning("[%s] Playlist classification failed: %s", self.slug, e)
-
-        for pl_cfg in target_playlists:
+        for pl_cfg in playlist_configs:
             slug_key = pl_cfg.get("slug", "")
             name = pl_cfg.get("name", "")
 
@@ -430,10 +427,8 @@ class YouTubePlaylistManager:
                 continue
 
             try:
-                # Look up cached playlist ID
                 cached = db.get_playlist_by_slug(channel_id, slug_key)
                 if not cached or not cached.get("yt_playlist_id"):
-                    # Try to find or create it
                     found = self.find_playlist_by_title(name)
                     if found:
                         db.upsert_youtube_playlist(channel_id, slug_key, found["yt_playlist_id"],
@@ -455,69 +450,28 @@ class YouTubePlaylistManager:
                 errors.append(f"{name}: {exc}")
                 logger.error("[%s] Error adding video to playlist %s: %s", self.slug, name, exc)
 
-        return {"added_to": added_to, "already_in": already_in, "errors": errors,
-                "auto_selected": auto_selected}
+        return {"added_to": added_to, "already_in": already_in, "errors": errors}
 
-    def _classify_playlist(self, title: str, description: str,
-                            playlists: list[dict]) -> str | None:
-        """Use AI to classify which playlist best matches a video's content.
+    def add_video_to_playlist_by_slug(self, yt_video_id: str, playlist_slug: str,
+                                       channel_id: int = None) -> dict:
+        """Add a video to a specific playlist by its DB slug (not YouTube ID).
 
-        Args:
-            title: Video title
-            description: Video description
-            playlists: List of playlist configs [{slug, name, description, type}]
+        Looks up the YouTube playlist ID from the local cache, then delegates
+        to ``add_video_to_playlist()``.
 
-        Returns the slug of the best matching playlist, or None.
+        Returns: see ``add_video_to_playlist()``.
         """
-        if not playlists or len(playlists) <= 1:
-            return playlists[0]["slug"] if playlists else None
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
 
-        import json as _json
-        from openai import OpenAI
-        from config.settings import OPENAI_API_KEY, LLM_MODEL
+        if channel_id is None:
+            ch = db.get_channel_by_slug(self.slug)
+            if not ch:
+                return {"error": "Channel not found in DB"}
+            channel_id = ch["id"]
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        cached = db.get_playlist_by_slug(channel_id, playlist_slug)
+        if not cached or not cached.get("yt_playlist_id"):
+            return {"error": f"Playlist slug '{playlist_slug}' not cached in DB"}
 
-        # Build playlist descriptions for the prompt
-        playlist_desc = "\n".join(
-            f"- {pl['slug']}: {pl.get('description', pl.get('name', ''))}"
-            for pl in playlists
-        )
-
-        system_prompt = (
-            "Eres un clasificador experto en contenido de YouTube. "
-            "Tu tarea es leer el título y la descripción de un vídeo, "
-            "y elegir la lista de reproducción que mejor encaje con el contenido. "
-            "Responde SOLO con el slug de la playlist elegida, sin comillas ni explicaciones."
-        )
-
-        user_prompt = (
-            f"TÍTULO DEL VÍDEO: {title[:200]}\n\n"
-            f"DESCRIPCIÓN: {description[:500]}\n\n"
-            f"LISTAS DE REPRODUCCIÓN DISPONIBLES:\n{playlist_desc}\n\n"
-            f"Elige el slug de la lista que mejor encaje."
-        )
-
-        try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=50,
-            )
-            result = response.choices[0].message.content.strip().lower()
-            # Validate that the result matches one of the slugs
-            valid_slugs = {pl["slug"].lower() for pl in playlists}
-            if result in valid_slugs:
-                # Return the original casing
-                for pl in playlists:
-                    if pl["slug"].lower() == result:
-                        return pl["slug"]
-            logger.warning("[%s] AI returned invalid playlist slug: %s", self.slug, result)
-            return None
-        except Exception as e:
-            logger.warning("[%s] Playlist classification LLM error: %s", self.slug, e)
-            return None
+        return self.add_video_to_playlist(cached["yt_playlist_id"], yt_video_id)

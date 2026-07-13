@@ -35,6 +35,18 @@ def create_channel(data: ChannelCreate):
     ch_id = db.create_channel(data.name, data.slug, config_dict)
     if ch_id is None:
         raise HTTPException(400, "Channel name or slug already exists")
+    
+    # ── Auto-create 10 thematic playlists for new channel ──
+    try:
+        from pipeline.youtube_playlists import create_playlists_for_channel
+        create_playlists_for_channel(data.slug)
+    except Exception as e:
+        # Non-fatal: channel is usable even without playlists
+        import logging
+        logging.getLogger(__name__).warning(
+            "Auto-create playlists failed for new channel '%s': %s", data.slug, e
+        )
+    
     ch = db.get_channel(ch_id)
     if ch:
         ch["created_at"] = str(ch.get("created_at", ""))
@@ -260,12 +272,14 @@ def delete_channel(channel_id: int):
 
 
 @router.get("/{channel_id}/videos")
-def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, offset: int = 0):
+def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, offset: int = 0,
+                        playlist_id: int = None):
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
-    videos = db.get_videos(channel_id=channel_id, status=status, limit=limit, offset=offset)
+    videos = db.get_videos(channel_id=channel_id, status=status, limit=limit,
+                            offset=offset, playlist_id=playlist_id)
     for v in videos:
         for k in ("created_at", "uploaded_at"):
             if v.get(k):

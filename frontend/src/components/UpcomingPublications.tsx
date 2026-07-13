@@ -72,9 +72,9 @@ export default function UpcomingPublications() {
                 <span className="text-[10px] text-neon-purple/70">
                   {pub.channel_name}
                 </span>
-                {pub.auto_playlist_name && (
+                {(pub.target_playlist_name || pub.auto_playlist_name) && (
                   <span className="text-[10px] text-gray-600">
-                    ▶ {pub.auto_playlist_name}
+                    ▶ {pub.target_playlist_name || pub.auto_playlist_name}
                   </span>
                 )}
               </div>

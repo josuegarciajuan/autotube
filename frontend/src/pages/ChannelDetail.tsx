@@ -199,6 +199,9 @@ export default function ChannelDetail() {
 
   const [channel, setChannel] = useState<any>(null)
   const [videos, setVideos] = useState<any[]>([])
+
+  const [filterPlaylistId, setFilterPlaylistId] = useState<number | null>(null)
+  const [channelPlaylists, setChannelPlaylists] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
@@ -290,6 +293,8 @@ export default function ChannelDetail() {
         ])
         setChannel(ch)
         setVideos(vids)
+        // Load playlists for filter
+        try { const pl = await api.getChannelPlaylists(channelId); setChannelPlaylists(pl) } catch {}
         // Parse scheduled mode from config_json
         try {
           const cfg = typeof ch.config_json === 'string' ? JSON.parse(ch.config_json) : (ch.config_json || {})
@@ -310,7 +315,12 @@ export default function ChannelDetail() {
     }
   }, [channelActiveJob?.jobId, channelId])
 
-  // Check auth status
+  // Reload videos when filter changes
+  useEffect(() => {
+    if (!channelId) return
+    api.getChannelVideos(channelId, undefined, filterPlaylistId || undefined)
+      .then(setVideos).catch(() => {})
+  }, [filterPlaylistId, channelId])
   useEffect(() => {
     api.getAuthStatus(channelId).then(setAuthStatus).catch(() => {})
   }, [channelId])
@@ -1047,6 +1057,22 @@ export default function ChannelDetail() {
             }`}
             onClick={() => setVideoTab('promotion')}
           ><Megaphone size={14} className="inline mr-1" />Promoción</button>
+          
+          {/* ── Playlist filter ── */}
+          {videoTab === 'videos' && channelPlaylists.length > 0 && (
+            <div className="ml-auto">
+              <select
+                value={filterPlaylistId || ''}
+                onChange={e => setFilterPlaylistId(e.target.value ? Number(e.target.value) : null)}
+                className="bg-dark-700 text-gray-300 text-xs px-3 py-1.5 rounded-lg border border-surface-border focus:outline-none focus:border-neon-red/50"
+              >
+                <option value="">Todas las listas</option>
+                {channelPlaylists.map((pl: any) => (
+                  <option key={pl.id} value={pl.id}>{pl.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
         {videoTab === 'growth' ? (
           <div className="space-y-4">
@@ -1414,6 +1440,11 @@ export default function ChannelDetail() {
                   <p className="text-sm font-medium text-white leading-tight line-clamp-2 group-hover:text-neon-red transition-colors">{v.titulo_final || 'Video sin título'}</p>
                   <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-600">
                     <span>{formatDateTime(v.uploaded_at || v.created_at)}</span>
+                    {v.target_playlist_name && (
+                      <span className="text-[11px] bg-neon-purple/10 text-neon-purple/80 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                        <ListPlus size={10} /> {v.target_playlist_name}
+                      </span>
+                    )}
                     {v.yt_url && <><span>·</span><a href={v.yt_url} target="_blank" rel="noopener noreferrer" className="text-neon-red hover:underline flex items-center gap-0.5" onClick={e => e.stopPropagation()}><Youtube size={10} /> YT</a></>}
                     {v.source_url && <><span>·</span><a href={v.source_url} target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline flex items-center gap-0.5 text-xs" onClick={e => e.stopPropagation()} title="Video original (viral mirror)"><ExternalLink size={10} /> Original</a></>}
                     {v.script_id && (
@@ -1440,10 +1471,10 @@ export default function ChannelDetail() {
                           {formatCountdown(v.target_public_at)}
                         </span>
                       </div>
-                      {v.auto_playlist_name && (
+                      {v.target_playlist_name && (
                         <div className="flex items-center gap-1">
                           <ListPlus size={10} className="text-neon-purple" />
-                          <span className="text-[10px] text-neon-purple/70">{v.auto_playlist_name}</span>
+                          <span className="text-[10px] text-neon-purple/70">{v.target_playlist_name}</span>
                         </div>
                       )}
                       {pendingManual > 0 && (

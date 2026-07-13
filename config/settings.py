@@ -171,7 +171,6 @@ LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15
 # Timeline por defecto — delays relativos al momento de publicación
 # Cada canal puede sobrescribir via LIFECYCLE_TIMELINE en su config
 LIFECYCLE_DEFAULT_TIMELINE = [
-    {"action": "playlist_add",       "offset_minutes": 1},
     {"action": "first_comment",      "offset_minutes": 5},
     {"action": "comment_reply_1",    "offset_hours": 12},
     {"action": "comment_reply_2",    "offset_hours": 24},

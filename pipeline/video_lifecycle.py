@@ -362,7 +362,13 @@ class VideoLifecycleManager:
 
     def _handle_playlist_add(self, yt_video_id: str, db_video_id: int,
                               _action: dict) -> bool:
-        """Add video to best-matching playlist (auto-classify)."""
+        """Add video to all configured playlists (legacy — deprecated).
+        
+        Since the playlist redesign, videos are assigned to a single target
+        playlist during pipeline execution (before scraping). This handler
+        is kept for backward compatibility with any pending lifecycle actions
+        from older videos, but no longer uses auto-classify.
+        """
         from pipeline.youtube_playlists import YouTubePlaylistManager
 
         mgr = YouTubePlaylistManager(self.slug)
@@ -370,7 +376,7 @@ class VideoLifecycleManager:
             logger.error("[%s] Cannot auth for playlist add", self.slug)
             return False
 
-        # First sync playlists (create any missing)
+        # Sync playlists (create any missing)
         sync_result = mgr.sync_playlists_from_config()
 
         # Cache created/existing playlist IDs in DB
@@ -387,56 +393,41 @@ class VideoLifecycleManager:
                     channel_id, pl["slug"], pl["yt_playlist_id"], pl["name"],
                 )
 
-        # Get video title/description for auto-classification
+        # Check if video already has a target playlist assigned by pipeline
         video = self.db.get_video(db_video_id)
-        title = (video.get("titulo_final") or "") if video else ""
-        description = (video.get("description") or "") if video else ""
-
-        # Add video with auto-classify to pick the single best playlist
-        add_result = mgr.add_video_to_all_playlists(
-            yt_video_id,
-            auto_classify=True,
-            title=title,
-            description=description,
-        )
+        tgt_slug = (video.get("target_playlist_slug") or "") if video else ""
+        
+        if tgt_slug:
+            # Video already assigned to a playlist — use add_video_to_playlist_by_slug
+            result = mgr.add_video_to_playlist_by_slug(
+                yt_video_id, tgt_slug, channel_id=channel_id
+            )
+            added = [tgt_slug] if result.get("yt_playlist_item_id") else []
+            already_in = [tgt_slug] if result.get("was_already_present") else []
+        else:
+            # Legacy: add to all playlists
+            add_result = mgr.add_video_to_all_playlists(yt_video_id)
+            added = add_result.get("added_to", [])
+            already_in = add_result.get("already_in", [])
 
         # Record in DB
         if channel_id:
-            for slug_key in add_result.get("added_to", []):
+            for slug_key in added:
                 cached = self.db.get_playlist_by_slug(channel_id, slug_key)
                 if cached:
                     self.db.add_video_to_playlist_db(db_video_id, cached["id"])
 
-            for slug_key in add_result.get("already_in", []):
+            for slug_key in already_in:
                 cached = self.db.get_playlist_by_slug(channel_id, slug_key)
                 if cached:
                     self.db.add_video_to_playlist_db(db_video_id, cached["id"])
-
-        # ── Store auto-selected playlist name in video record ──
-        auto_selected = add_result.get("auto_selected")
-        if auto_selected:
-            playlist_name = None
-            mgr_config = getattr(mgr, "config", None)
-            playlists = getattr(mgr_config, "PLAYLISTS", []) if mgr_config else []
-            for pl in playlists:
-                if pl.get("slug") == auto_selected:
-                    playlist_name = pl.get("name", auto_selected)
-                    break
-            if playlist_name:
-                cached = self.db.get_playlist_by_slug(channel_id, auto_selected)
-                pl_id = cached["id"] if cached else None
-                self.db.update_video(
-                    db_video_id,
-                    auto_playlist_id=pl_id,
-                    auto_playlist_name=playlist_name,
-                )
-                logger.info("[%s] Video %d assigned to playlist '%s'", self.slug, db_video_id, playlist_name)
 
         # Store result
         import json
+        result_data = {"added_to": added, "already_in": already_in}
         self.db.update_lifecycle_action_status(
             _action["id"], "executed",
-            result_json=json.dumps(add_result, ensure_ascii=False),
+            result_json=json.dumps(result_data, ensure_ascii=False),
         )
         return True
 

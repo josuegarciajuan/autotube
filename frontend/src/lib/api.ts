@@ -25,7 +25,13 @@ export const api = {
   collectChannelStats: (id: number) => request<any>(`/channels/${id}/collect-stats`, { method: 'POST' }),
   syncChannelConfig: (id: number) => request<any>(`/channels/${id}/sync-config`, { method: 'POST' }),
   deleteChannel: (id: number) => request<any>(`/channels/${id}`, { method: 'DELETE' }),
-  getChannelVideos: (id: number, status?: string) => request<any[]>(`/channels/${id}/videos${status ? `?status=${status}` : ''}`),
+  getChannelVideos: (id: number, status?: string, playlistId?: number) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (playlistId) params.set('playlist_id', String(playlistId));
+    const qs = params.toString();
+    return request<any[]>(`/channels/${id}/videos${qs ? `?${qs}` : ''}`);
+  },
   getChannelContent: (id: number, unusedOnly = true) => request<any[]>(`/channels/${id}/content?unused_only=${unusedOnly}`),
   getManualSetup: (id: number) => request<any>(`/channels/${id}/manual-setup`),
   getChannelYoutubeStats: (id: number) => request<any>(`/channels/${id}/youtube-stats`),
@@ -48,11 +54,12 @@ export const api = {
   getVoices: () => request<any>('/voices'),
 
   // Videos
-  getVideos: (channelId?: number, status?: string, limit = 50) => {
+  getVideos: (channelId?: number, status?: string, limit = 50, playlistId?: number) => {
     const params = new URLSearchParams();
     if (channelId) params.set('channel_id', String(channelId));
     if (status) params.set('status', status);
     params.set('limit', String(limit));
+    if (playlistId) params.set('playlist_id', String(playlistId));
     return request<any[]>(`/videos?${params}`);
   },
   getVideo: (id: number) => request<any>(`/videos/${id}`),

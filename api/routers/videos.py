@@ -18,9 +18,11 @@ router = APIRouter()
 
 
 @router.get("")
-def list_videos(channel_id: int = None, status: str = None, limit: int = 50, offset: int = 0):
+def list_videos(channel_id: int = None, status: str = None, limit: int = 50, offset: int = 0,
+                playlist_id: int = None):
     db = get_db()
-    videos = db.get_videos(channel_id=channel_id, status=status, limit=limit, offset=offset)
+    videos = db.get_videos(channel_id=channel_id, status=status, limit=limit,
+                            offset=offset, playlist_id=playlist_id)
     for v in videos:
         for k in ("created_at", "uploaded_at"):
             if v.get(k):

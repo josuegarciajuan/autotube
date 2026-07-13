@@ -1119,7 +1119,11 @@ class PipelineOrchestrator:
                     warmup_until = (_dt.now(_tz.utc) + timedelta(minutes=warmup)).isoformat()
                     target_dt = _dt.fromisoformat(planned_public_at.replace("Z", "+00:00"))
                     if target_dt.tzinfo is None:
-                        target_dt = target_dt.replace(tzinfo=_tz.utc)
+                        # Planning provides local (Europe/Madrid) time without tzinfo.
+                        # Localize to the channel's configured timezone, then convert to UTC.
+                        import pytz
+                        local_tz = pytz.timezone(tz)
+                        target_dt = local_tz.localize(target_dt).astimezone(_tz.utc)
                     if target_dt < _dt.now(_tz.utc) + timedelta(minutes=warmup):
                         logger.info("[%s] Planned public time too soon, using warmup end instead", self.canal)
                         target_dt = _dt.now(_tz.utc) + timedelta(minutes=warmup)
@@ -1371,6 +1375,34 @@ class PipelineOrchestrator:
             except Exception as lifecycle_exc:
                 logger.warning(f"[{self.canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
 
+            # ── Post-upload: add video to the selected playlist ──
+            try:
+                db_vid = db_video_id or self.db_video_id
+                if db_vid:
+                    vid_record = self.db.get_video(db_vid)
+                    tgt_slug = vid_record.get("target_playlist_slug") if vid_record else None
+                    if tgt_slug and video_id:
+                        from pipeline.youtube_playlists import YouTubePlaylistManager
+                        pl_mgr = YouTubePlaylistManager(self.canal)
+                        pl_mgr.authenticate()
+                        result = pl_mgr.add_video_to_playlist_by_slug(
+                            video_id, tgt_slug,
+                            channel_id=channel_id_for_lifecycle
+                        )
+                        if result.get("was_already_present"):
+                            logger.info("[%s] Video %s already in playlist '%s'",
+                                       self.canal, video_id, tgt_slug)
+                        elif result.get("yt_playlist_item_id"):
+                            logger.info("[%s] Added video %s to playlist '%s' (item: %s)",
+                                       self.canal, video_id, tgt_slug,
+                                       result["yt_playlist_item_id"])
+                        else:
+                            logger.warning("[%s] Could not add video %s to playlist '%s': %s",
+                                         self.canal, video_id, tgt_slug, result.get("error", "unknown"))
+            except Exception as pl_exc:
+                logger.warning("[%s] Playlist assignment failed (non-critical): %s",
+                             self.canal, pl_exc)
+
             return video_id
 
         except Exception as e:
@@ -1410,25 +1442,68 @@ class PipelineOrchestrator:
                 except Exception as _exc:
                     logger.warning("[%s] Could not clean %s: %s", self.canal, _d, _exc)
 
+        # ── Playlist selection: pick a random playlist BEFORE scraping ──
+        target_playlist = getattr(self, '_target_playlist', None)
+        target_playlist_kw = getattr(self, '_target_playlist_kw', [])
+        if target_playlist is None:
+            try:
+                from database.db_extended import ExtendedDatabase
+                ext_db = ExtendedDatabase()
+                channel_id = self._get_channel_id()
+                playlists = ext_db.get_channel_youtube_playlists(channel_id) if channel_id else []
+                if playlists:
+                    target_playlist = random.choice(playlists)
+                    # Load full playlist config for keywords
+                    config_json = {}
+                    ch = ext_db.get_channel(channel_id)
+                    if ch:
+                        cj = ch.get("config_json", "{}")
+                        if isinstance(cj, str):
+                            import json; config_json = json.loads(cj) if cj else {}
+                        else:
+                            config_json = cj or {}
+                    generated = config_json.get("PLAYLISTS_GENERATED", [])
+                    for pl_cfg in generated:
+                        if pl_cfg.get("slug") == target_playlist.get("slug"):
+                            target_playlist_kw = pl_cfg.get("keywords_en", [])
+                            break
+                    # Store on video record
+                    if self.db_video_id is not None:
+                        self.db.update_video(self.db_video_id,
+                                             target_playlist_id=target_playlist["id"],
+                                             target_playlist_slug=target_playlist["slug"])
+                    logger.info("[%s] 🎯 Target playlist: '%s' (slug=%s, %d keywords)",
+                               self.canal, target_playlist.get("name"),
+                               target_playlist.get("slug"), len(target_playlist_kw))
+                else:
+                    logger.warning("[%s] No playlists in DB — playlist selection skipped", self.canal)
+            except Exception as e:
+                logger.warning("[%s] Playlist selection failed (non-critical): %s", self.canal, e)
+        else:
+            logger.info("[%s] 🎯 Using pre-selected playlist: '%s' (slug=%s, %d keywords)",
+                       self.canal, target_playlist.get("name"),
+                       target_playlist.get("slug"), len(target_playlist_kw))
+
         # Phase 0: Scrape fresh content for this video
         logger.info(f"[{self.canal}] Phase 0/6: Scraping fresh content...")
 
-        # ── Viral mode: build playlist-driven queries before scraping ──
+        # ── Viral mode: use selected playlist keywords for queries ──
         if self.source_mode == "viral" and getattr(self.config, "VIRAL_ENABLED", False):
             try:
-                from pipeline.youtube_playlists import pick_playlist_for_viral
                 from pipeline.viral_query_builder import build_viral_queries
 
-                pl_name, pl_desc, pl_keywords = pick_playlist_for_viral(self.canal, self.db)
-                if pl_name:
-                    logger.info("[%s] Viral query builder — playlist='%s'", self.canal, pl_name)
+                if target_playlist:
+                    pl_name = target_playlist.get("name", "")
+                    pl_keywords = target_playlist_kw
+                    logger.info("[%s] Viral query builder — playlist='%s' (pre-selected)",
+                               self.canal, pl_name)
 
                     queries = build_viral_queries(
                         channel_slug=self.canal,
                         channel_name=getattr(self.config, "CANAL_DISPLAY_NAME", self.canal),
                         channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
                         playlist_name=pl_name,
-                        playlist_description=pl_desc or pl_name,
+                        playlist_description="",
                         canal_keywords_eng=getattr(self.config, "NICHE_KEYWORDS_ENG", []),
                         playlist_keywords=pl_keywords,
                         db=self.db,
