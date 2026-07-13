@@ -1343,7 +1343,7 @@ class PipelineOrchestrator:
             try:
                 from pipeline.video_lifecycle import VideoLifecycleManager
                 lifecycle = VideoLifecycleManager(self.canal)
-                script_text = script.get("script_text") or script.get("texto_completo", "")
+                script_text = script.get("guion", "")
                 db_vid_for_lifecycle = db_video_id or self.db_video_id
                 channel_id_for_lifecycle = self._get_channel_id()
                 

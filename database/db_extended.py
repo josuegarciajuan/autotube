@@ -2363,11 +2363,16 @@ class ExtendedDatabase(Database):
             "publish_timezone": config.get("PUBLISH_TIMEZONE", "Europe/Madrid"),
             "seo_primary_keyword": config.get("SEO_PRIMARY_KEYWORD", ""),
             "seo_secondary_keywords": config.get("SEO_SECONDARY_KEYWORDS", []),
+            # ── Alternate pattern (e.g. [2, 3] → alternates 2/3 daily) ──
+            "alternate_pattern": config.get("alternate_pattern"),
+            "alternate_offset": config.get("alternate_offset", 0),
         }
     
     def update_channel_planning_config(self, channel_id: int,
                                         videos_per_day: int = None,
-                                        planning_enabled: bool = None) -> bool:
+                                        planning_enabled: bool = None,
+                                        alternate_pattern: list = None,
+                                        alternate_offset: int = None) -> bool:
         """Update planning fields in channel config_json."""
         ch = self.get_channel(channel_id)
         if not ch:
@@ -2380,6 +2385,10 @@ class ExtendedDatabase(Database):
             config["videos_per_day"] = max(0, min(10, videos_per_day))
         if planning_enabled is not None:
             config["planning_enabled"] = planning_enabled
+        if alternate_pattern is not None:
+            config["alternate_pattern"] = alternate_pattern
+        if alternate_offset is not None:
+            config["alternate_offset"] = alternate_offset
         return self.update_channel(channel_id, config=config)
     
     def get_active_job(self) -> dict | None:
@@ -2813,7 +2822,8 @@ class ExtendedDatabase(Database):
                                         executed_at: str = None,
                                         result_json: str = None,
                                         error_message: str = None,
-                                        retry_count: int = None) -> bool:
+                                        retry_count: int = None,
+                                        scheduled_for: str = None) -> bool:
         """Update a lifecycle action's status and results."""
         with self._connect() as conn:
             parts = ["status = ?"]
@@ -2831,6 +2841,9 @@ class ExtendedDatabase(Database):
             if retry_count is not None:
                 parts.append("retry_count = ?")
                 params.append(retry_count)
+            if scheduled_for is not None:
+                parts.append("scheduled_for = ?")
+                params.append(scheduled_for)
 
             params.append(action_id)
             conn.execute(

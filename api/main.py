@@ -242,7 +242,7 @@ async def _schedule_checker_loop():
     logger.info("Schedule checker loop started (checks every 5 min)")
     
     last_stats_collection = 0
-    last_lifecycle_check = 0
+    last_lifecycle_check = time.time()
     last_midnight_check = time.time()
     last_recovery_check = 0
     first_run = True

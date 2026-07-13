@@ -713,8 +713,11 @@ def run_job(
                                              planned_public_at=planned_public_at)
             if yt_video_id:
                 yt_url = f"https://youtube.com/watch?v={yt_video_id}"
+                # Determine correct upload status based on publish mode
+                pub_mode = video_record.get("publish_mode", "immediate") if video_record else "immediate"
+                worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url)
-                db.update_video(video_id, progress=100, status="uploaded")
+                db.update_video(video_id, progress=100, status=worker_status)
                 
                 vp = video_data.get("video_path", "") if video_data else ""
                 if vp and Path(vp).exists():
