@@ -457,6 +457,11 @@ KOKORO_BLOCK_SPEEDS = {
 }
 KOKORO_PAUSE_BETWEEN_BLOCKS = 0.8
 
+# Batch unload: reload Kokoro every N blocks to free RAM between batches.
+# 0 = disabled.  Set to e.g. 10 for long scripts (>5000 words) to avoid
+# memory exhaustion during TTS.  Overhead: ~5s per reload.
+KOKORO_UNLOAD_EVERY_N_BLOCKS = 10
+
 # ═══════════════════════════════════════════════════════════════════
 # CONTENT SOURCES
 # ═══════════════════════════════════════════════════════════════════

@@ -40,6 +40,8 @@ def _load_db_config(slug: str) -> dict | None:
         raw = ch.get("config_json")
         if not raw or raw == "{}":
             return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         if isinstance(raw, str):
             return json.loads(raw)
         return raw

@@ -82,12 +82,22 @@ def build_tts_engine(config: Any) -> Any:
 
     if engine_type == "kokoro":
         from pipeline.kokoro_tts import KokoroTTSEngine
+        # Resolve pause_between_blocks — try top-level key first,
+        # then fall back to TTS_STRATEGY dict.
+        pause_between = _get(config, "KOKORO_PAUSE_BETWEEN_BLOCKS", None)
+        if pause_between is None:
+            tts_strategy = _get(config, "TTS_STRATEGY", {})
+            if isinstance(tts_strategy, dict):
+                pause_between = tts_strategy.get("pause_between_blocks", 0.7)
+            else:
+                pause_between = 0.7
         voice_config = {
             "kokoro_voice": resolved["voice"],
             "block_speeds": resolved["block_speeds"],
-            "pause_between_blocks": _get(
-                _get(config, "TTS_STRATEGY", {}), "pause_between_blocks", 0.7
-            ) if isinstance(_get(config, "TTS_STRATEGY", {}), dict) else 0.7,
+            "pause_between_blocks": pause_between,
+            # Batch unload: reload Kokoro every N blocks to keep RAM low.
+            # 0 = disabled (legacy: model stays loaded for all blocks).
+            "unload_every_n_blocks": _get(config, "KOKORO_UNLOAD_EVERY_N_BLOCKS", 0),
         }
         logger.info("🔊 TTS engine: Kokoro (voice=%s)", resolved["voice"])
         return KokoroTTSEngine(voice_config)

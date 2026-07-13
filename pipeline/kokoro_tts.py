@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 import concurrent.futures
@@ -70,6 +71,10 @@ class KokoroTTSEngine:
         self.sample_rate = 24000
         self._pipeline = None  # lazy init
 
+        # Batch unload: reload Kokoro every N blocks to release RAM
+        # 0 = disabled (legacy: keep model loaded for all blocks)
+        self.unload_every_n_blocks = voice_config.get("unload_every_n_blocks", 0)
+
     @property
     def pipeline(self):
         """Lazy-load Kokoro pipeline (heavy model, loaded once)."""
@@ -80,11 +85,14 @@ class KokoroTTSEngine:
         return self._pipeline
 
     def unload(self):
-        """Release the Kokoro pipeline model to free ~500 MB RAM.
+        """Release the Kokoro pipeline model to free RAM.
 
-        After TTS phase completes, the KPipeline (KModel + voice packs + torch
-        tensors) is no longer needed.  Calling this drops the reference so the
-        garbage collector can reclaim the memory.
+        After TTS phase completes (or between batches), the KPipeline
+        (KModel + voice packs + torch tensors) is no longer needed.
+        Calling this drops the reference so the GC can reclaim the memory.
+
+        Also attempts ``torch.cuda.empty_cache()`` for GPU-accelerated
+        systems (harmless no-op on CPU-only).
         """
         if self._pipeline is not None:
             import gc
@@ -92,6 +100,13 @@ class KokoroTTSEngine:
             del self._pipeline
             self._pipeline = None
             gc.collect()
+            # Try to force-release any torch memory
+            try:
+                import torch
+                if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
             logger.info("Kokoro pipeline unloaded")
 
     def _speed_for_tipo(self, tipo: str) -> float:
@@ -287,6 +302,12 @@ class KokoroTTSEngine:
         every block. This prevents "microcortes" — annoying 1-2 second
         silences within paragraphs.
 
+        When ``self.unload_every_n_blocks > 0`` and the block count exceeds
+        it, the Kokoro model is reloaded every N blocks.  Block audio is
+        written to temporary WAV files instead of being accumulated in
+        memory.  This keeps peak RAM usage low (~model + N blocks) rather
+        than model + ALL blocks.
+
         Args:
             bloques: List of block dicts with ``tipo`` and ``texto`` keys.
             output_path: Optional base path for output files.
@@ -308,10 +329,23 @@ class KokoroTTSEngine:
         json_path = f"{base}_timestamps.json"
         srt_path = f"{base}_subtitles.srt"
 
-        logger.info(
-            "🎙️ Kokoro segmented TTS: %d blocks → %s (voice=%s)",
-            len(bloques), audio_path, self.kokoro_voice
-        )
+        # ── Decide batching strategy ───────────────────────────
+        unload_every = self.unload_every_n_blocks
+        use_temp_files = unload_every > 0 and len(bloques) > unload_every
+
+        if use_temp_files:
+            logger.info(
+                "🎙️ Kokoro batched TTS: %d blocks → %s (voice=%s, "
+                "unload every %d blocks)",
+                len(bloques), audio_path, self.kokoro_voice, unload_every,
+            )
+            temp_dir = tempfile.mkdtemp(prefix="kokoro_batch_")
+            audio_paths: list[str] = []  # ordered: block WAVs and pause WAVs
+        else:
+            logger.info(
+                "🎙️ Kokoro segmented TTS: %d blocks → %s (voice=%s)",
+                len(bloques), audio_path, self.kokoro_voice,
+            )
 
         all_audio: list[np.ndarray] = []
         all_timestamps: list[dict] = []
@@ -332,6 +366,15 @@ class KokoroTTSEngine:
         _ = self.pipeline
 
         for i, bloque in enumerate(bloques):
+            # ── Batch boundary: unload + reload to free RAM ──
+            if use_temp_files and i > 0 and i % unload_every == 0:
+                self.unload()
+                logger.info(
+                    "🔄 Kokoro batch boundary: reloading after %d/%d blocks, "
+                    "%d remaining", i, len(bloques), len(bloques) - i,
+                )
+                _ = self.pipeline  # re-trigger lazy init
+
             tipo = bloque.get("tipo", "desarrollo")
             texto = bloque.get("texto", "")
             if not texto.strip():
@@ -381,14 +424,30 @@ class KokoroTTSEngine:
                 prev_block = bloques[i - 1]
                 if prev_block.get("is_last_in_paragraph", False):
                     pause_samples = int(self.pause_between * self.sample_rate)
-                    all_audio.append(np.zeros(pause_samples, dtype=np.float32))
+                    if use_temp_files:
+                        pause_path = os.path.join(
+                            temp_dir, f"pause_{i:04d}.wav",
+                        )
+                        sf.write(pause_path,
+                                 np.zeros(pause_samples, dtype=np.float32),
+                                 self.sample_rate)
+                        audio_paths.append(pause_path)
+                    else:
+                        all_audio.append(np.zeros(pause_samples, dtype=np.float32))
                     cumulative_offset_ms += self.pause_between * 1000.0
                     logger.debug(
                         "    ⏸️ %.1fs pause at paragraph boundary (block %d → %d)",
                         self.pause_between, i - 1, i,
                     )
 
-            all_audio.append(block_audio)
+            if use_temp_files:
+                block_path = os.path.join(temp_dir, f"block_{i:04d}.wav")
+                sf.write(block_path, block_audio, self.sample_rate)
+                audio_paths.append(block_path)
+                del block_audio
+                del audio_chunks
+            else:
+                all_audio.append(block_audio)
 
             # Estimate word-level timestamps for this block
             words = clean.split()
@@ -409,10 +468,22 @@ class KokoroTTSEngine:
                 except Exception:
                     pass
 
-        if not all_audio:
+        if use_temp_files and not audio_paths:
+            raise RuntimeError("No blocks produced audio")
+        if not use_temp_files and not all_audio:
             raise RuntimeError("No blocks produced audio")
 
-        # Concatenate all blocks
+        # ── Build final audio ──────────────────────────────────
+        if use_temp_files:
+            logger.info("Reading %d temp WAV files for final concatenation…",
+                        len(audio_paths))
+            for wav_path in audio_paths:
+                wav_audio, _sr = sf.read(wav_path)
+                all_audio.append(wav_audio.astype(np.float32))
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Concatenate all blocks (and pauses)
         final_audio = np.concatenate(all_audio)
         total_dur = len(final_audio) / self.sample_rate
 
