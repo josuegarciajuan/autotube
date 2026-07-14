@@ -674,6 +674,14 @@ def process_planned_slots(db=None) -> dict | None:
                      next_slot["channel_id"], active["id"])
         return None
     
+    # 2c. Global guard: defer dispatch if ANY generation is running
+    # (only one worker at a time — prevents ffmpeg contention)
+    active_count = db.count_active_jobs()
+    if active_count > 0:
+        logger.info("Planned slot deferred: %d active job(s) running globally — retrying next tick",
+                    active_count)
+        return None
+    
     # 3b. Memory guard: skip dispatch if RAM is critically low
     if not _memory_ok():
         logger.warning("Low memory — delaying planned slot dispatch")
@@ -797,13 +805,19 @@ def _readjust_pending_slots(db):
 
     When a generation job completes, the real finish time may differ from
     the planned time.  This function recalculates the scheduled_at of all
-    pending slots for today starting from now + MIN_GAP_MINUTES, so that
+    pending slots for today starting from now + a small gap, so that
     subsequent upload targets stay as close as possible to the planned
     windows instead of drifting backwards in a cascade.
 
     Only affects slots whose scheduled_at is in the future (or has passed
     but wasn't dispatched yet).  Already-running slots are untouched.
+    
+    Uses a 2-minute gap (vs planning's 90-min MIN_GAP_MINUTES) because the
+    global concurrency guard (count_active_jobs) already prevents overlapping
+    generations — slots should fire as soon as the active worker finishes.
     """
+    POST_FINISH_GAP = 2  # minutes — global lock prevents concurrency
+    
     today = date.today().isoformat()
     pending = db.get_planned_slots(date_key=today, status="pending")
     if not pending:
@@ -815,15 +829,15 @@ def _readjust_pending_slots(db):
     now_h, now_m = map(int, now[11:16].split(":"))
     now_total = now_h * 60 + now_m
     
-    # Also check the last completed slot's scheduled_at + MIN_GAP_MINUTES
+    # Also check the last completed slot's scheduled_at + POST_FINISH_GAP
     # as a lower bound
     completed = db.get_planned_slots(date_key=today, status="completed")
     if completed:
         last_comp = sorted(completed, key=lambda s: s["scheduled_at"])[-1]
         lh, lm = map(int, last_comp["scheduled_at"][11:16].split(":"))
-        anchor = max(now_total, lh * 60 + lm + MIN_GAP_MINUTES)
+        anchor = max(now_total, lh * 60 + lm + POST_FINISH_GAP)
     else:
-        anchor = now_total + MIN_GAP_MINUTES
+        anchor = now_total + POST_FINISH_GAP
     
     # Sort pending slots by current scheduled_at
     pending_sorted = sorted(pending, key=lambda s: s["scheduled_at"])
@@ -866,7 +880,7 @@ def _readjust_pending_slots(db):
             )
             conn.commit()
         
-        next_start = nh * 60 + nm + MIN_GAP_MINUTES
+        next_start = nh * 60 + nm + POST_FINISH_GAP
 
 
 def _cancel_stale_slots(db):
@@ -875,7 +889,14 @@ def _cancel_stale_slots(db):
     These are zombie slots — the dispatcher should have picked them up but
     couldn't (e.g., server restart, checker loop crash).  Marking them as
     cancelled prevents the dispatcher from acting on stale times.
+    
+    Skips cancellation when an active generation is in progress — slots
+    blocked by the global concurrency guard are held intentionally, not abandoned.
     """
+    # Don't cancel slots held back by an active generation
+    if db.count_active_jobs() > 0:
+        return
+    
     today = date.today().isoformat()
     with db._connect() as conn:
         cancelled = conn.execute(

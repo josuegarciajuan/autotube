@@ -2810,6 +2810,19 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return dict(row) if row else None
     
+    def count_active_jobs(self) -> int:
+        """Count generation jobs currently running across all channels.
+        
+        Used by all dispatchers as a global concurrency guard: only one
+        generation job runs at a time system-wide, preventing ffmpeg
+        resource contention that causes video assembly timeouts.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs WHERE status = 'running'"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
     # ── Cross-process TTS lock for Kokoro ────────────────────────
     
     def acquire_tts_lock(self, channel_id: int, job_id: int) -> bool:

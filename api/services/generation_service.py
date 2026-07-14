@@ -2324,6 +2324,24 @@ async def start_generation_job_subprocess(
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
 
+    # ── Global guard: only ONE generation at a time across ALL channels ──
+    # Prevents ffmpeg resource contention (concurrent renders cause timeouts).
+    active_count = db.count_active_jobs()
+    if active_count > 0:
+        logger.warning(
+            "Subprocess spawn blocked: %d active job(s) running globally",
+            active_count,
+        )
+        await _broadcast_progress(
+            job_id, 0, "blocked",
+            f"Ya hay {active_count} generacion(es) en curso. Solo una a la vez.",
+            "failed", video_id,
+            detail="Solo se permite una generacion simultanea para evitar conflictos de recursos",
+        )
+        db.update_job(job_id, status="failed",
+                      error_msg=f"Global concurrency guard: {active_count} active job(s)")
+        return None
+
     # ── Guard: don't spawn if a job is already running for THIS channel ──
     active = db.get_active_job_for_channel(channel_id)
     if active and active["id"] != job_id:
@@ -2521,6 +2539,15 @@ async def _monitor_worker_progress(
                     job_id, job_status,
                     proc.returncode if not process_alive else "still running",
                 )
+                # ── Trigger immediate dispatch of next pending slot ──────
+                # Bypasses the 5-min checker loop tick so queued slots
+                # fire as soon as the active worker releases resources.
+                try:
+                    from api.services.planning_service import process_planned_slots as _dispatch_next
+                    db2 = _get_db()
+                    _dispatch_next(db=db2)
+                except Exception:
+                    pass
                 break
 
     except asyncio.CancelledError:

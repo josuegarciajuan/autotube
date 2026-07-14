@@ -204,6 +204,12 @@ async def _queue_consumer():
                         next_job["channel_id"], active_for_channel["id"])
             return
         
+        # Global guard: don't dispatch if ANY generation is running
+        if db.count_active_jobs() > 0:
+            logger.debug("Queue consumer deferred: %d active job(s) — retrying next tick",
+                        db.count_active_jobs())
+            return
+        
         # RAM gate: need at least 4 GB free
         try:
             from pipeline.ram_governor import is_ram_ok_for_dispatch
@@ -474,6 +480,20 @@ async def _process_due_schedules():
             logger.debug("Schedule #%d skipped: channel %d already has active job #%d",
                         s["id"], s["channel_id"], active_for_channel["id"])
             # Push next_run_at forward 5 min to avoid tight retry loop
+            try:
+                conn.execute(
+                    "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
+                    "WHERE id = ?", (s["id"],)
+                )
+                conn.commit()
+            except Exception:
+                pass
+            continue
+        
+        # ── Global guard: skip if ANY generation is running ──
+        if db.count_active_jobs() > 0:
+            logger.debug("Schedule #%d deferred: %d active job(s) running globally",
+                        s["id"], db.count_active_jobs())
             try:
                 conn.execute(
                     "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "

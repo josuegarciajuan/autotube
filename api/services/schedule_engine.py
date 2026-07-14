@@ -412,6 +412,13 @@ def dispatch_next_due_slot(db=None) -> dict | None:
                      next_slot["channel_id"], active["id"])
         return None
 
+    # 5c. Global guard: defer if ANY generation is running across all channels
+    active_count = db.count_active_jobs()
+    if active_count > 0:
+        logger.info("Smart dispatch deferred: %d active job(s) running — retrying next tick",
+                    active_count)
+        return None
+
     slot_id = next_slot["id"]
     channel_id = next_slot["channel_id"]
     slug = next_slot.get("channel_slug", "")
@@ -512,7 +519,15 @@ def _sync_running_slots(db):
 
 
 def _cancel_stale_slots(db):
-    """Cancel pending slots that are >3h past their scheduled_at."""
+    """Cancel pending slots that are >3h past their scheduled_at.
+    
+    Skips when an active generation is in progress — slots blocked
+    by the global concurrency guard are held intentionally.
+    """
+    # Don't cancel slots held back by an active generation
+    if db.count_active_jobs() > 0:
+        return
+    
     today = date.today().isoformat()
     pending = db.get_planned_slots(date_key=today, status="pending")
     if not pending:
