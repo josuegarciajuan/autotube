@@ -112,6 +112,7 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
         video_id = cursor.lastrowid
     
     job_id = db.create_job(data.channel_id, data.action, video_id)
+    db.update_job(job_id, status="running")  # close TOCTOU race window
     
     if USE_SUBPROCESS_WORKER:
         # Spawn independent worker subprocess (survives API restarts)
@@ -197,6 +198,7 @@ async def resume_video(video_id: int, background_tasks: BackgroundTasks):
     db.update_video(video_id, status="generating")
     
     job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+    db.update_job(job_id, status="running")  # close TOCTOU race window
     
     if USE_SUBPROCESS_WORKER:
         # Resume in subprocess mode: the spawned full_pipeline_worker.py
@@ -260,6 +262,7 @@ def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
         raise HTTPException(400, "Checkpoint missing tts/media data — cannot reassemble")
     
     job_id = db.create_job(v["channel_id"] or 1, "reassemble", video_id)
+    db.update_job(job_id, status="running")  # close TOCTOU race window
     
     background_tasks.add_task(
         _run_reassembly_job,
@@ -292,6 +295,7 @@ def upload_video(video_id: int, background_tasks: BackgroundTasks):
     
     from api.services.generation_service import start_upload_job
     job_id = db.create_job(v["channel_id"] or 1, "upload_only", video_id)
+    db.update_job(job_id, status="running")  # close TOCTOU race window
     
     background_tasks.add_task(
         start_upload_job,

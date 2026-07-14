@@ -517,8 +517,9 @@ async def _process_due_schedules():
             conn.commit()
             video_id = cursor.lastrowid
             
-            # Create job record
+            # Create job record — mark running IMMEDIATELY (close TOCTOU race)
             job_id = db.create_job(s["channel_id"], s["action"], video_id)
+            db.update_job(job_id, status="running")
             
             # Update schedule: calculate next run
             if s["schedule_type"] == "recurring":

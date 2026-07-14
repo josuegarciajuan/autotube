@@ -718,8 +718,14 @@ def process_planned_slots(db=None) -> dict | None:
         conn.commit()
         video_id = cursor.lastrowid
     
-    # 6. Create job
+    # 6. Create job and mark it running IMMEDIATELY
+    # CRITICAL: must set status='running' BEFORE the fire-and-forget below,
+    # otherwise count_active_jobs() returns 0 and the global concurrency
+    # guard allows overlapping dispatches → ffmpeg resource contention → timeout.
+    # (schedule_engine.py does the same — db.update_job(id, status="running")
+    #  before asyncio.create_task.)
     job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+    db.update_job(job_id, status="running")
     
     # 7. Link job to slot
     db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)

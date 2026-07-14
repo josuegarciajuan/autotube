@@ -2811,15 +2811,20 @@ class ExtendedDatabase(Database):
         return dict(row) if row else None
     
     def count_active_jobs(self) -> int:
-        """Count generation jobs currently running across all channels.
+        """Count generation jobs currently running or queued across all channels.
         
         Used by all dispatchers as a global concurrency guard: only one
         generation job runs at a time system-wide, preventing ffmpeg
         resource contention that causes video assembly timeouts.
+        
+        Counts both 'running' AND 'queued' to close the TOCTOU race window:
+        a job created by process_planned_slots() may briefly be 'queued'
+        before the async task sets it to 'running'. If another dispatcher
+        checks during that window, it must see the pending job.
         """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM generation_jobs WHERE status = 'running'"
+                "SELECT COUNT(*) as cnt FROM generation_jobs WHERE status IN ('running', 'queued')"
             ).fetchone()
         return row["cnt"] if row else 0
     

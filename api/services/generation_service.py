@@ -2273,6 +2273,7 @@ async def auto_recover_on_startup():
 
         try:
             job_id = db.create_job(channel_id, "reassemble", video_id)
+            db.update_job(job_id, status="running")  # close TOCTOU race
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",
                      video_id, job_id, progress_phase)
             # Launch as background task — do NOT await.
