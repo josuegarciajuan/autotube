@@ -468,12 +468,14 @@ def sync_midday(db=None) -> dict:
         # Current slots for this channel today
         ch_slots = [s for s in existing if s["channel_id"] == ch_id]
         
-        completed_running = sum(
-            1 for s in ch_slots if s["status"] in ("completed", "running")
-        )
+        # Count real publications (includes manual videos) + active slots only.
+        # NOT counting "completed" slots — they may be error videos (pre-fix)
+        # or already accounted for via published_today (avoiding double count).
+        published_today = db.get_videos_published_today(ch_id)
+        running = sum(1 for s in ch_slots if s["status"] == "running")
         pending = [s for s in ch_slots if s["status"] == "pending"]
         
-        current_planned = completed_running + len(pending)
+        current_planned = published_today + running + len(pending)
         target_planned = target
         
         if current_planned == target_planned:
