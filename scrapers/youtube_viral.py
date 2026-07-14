@@ -448,11 +448,13 @@ class YouTubeViralScraper(BaseScraper):
                     pass
 
             if date_available:
-                # Hard filter: discard if too old (real date)
-                if hours_since_pub > (self.max_age_days * 24) or hours_since_pub <= 0:
-                    logger.debug("[%s] Filtered out (age=%.1fh, max=%dh): %s",
-                                 self.canal, hours_since_pub, self.max_age_days * 24,
-                                 title[:50])
+                # Even if the video is older than max_age_days, keep it.
+                # The second-pass in _discover_candidates() will decide with
+                # a soft fallback: prefer recent videos, but fall back to the
+                # highest-viewed older video if nothing recent exists.
+                if hours_since_pub <= 0:
+                    logger.debug("[%s] Filtered out (invalid age=%.1fh): %s",
+                                 self.canal, hours_since_pub, title[:50])
                     return None
                 date_verified = True
             else:
@@ -625,6 +627,11 @@ class YouTubeViralScraper(BaseScraper):
                             self.canal, len(self._cached_candidates), cache_age / 60)
                 return self._cached_candidates
 
+        # ── Use extended 180-day window ──
+        original_max_age_days = self.max_age_days
+        if force_refresh:
+            self.max_age_days = 180
+
         # Build queries
         queries = self._build_queries()
         logger.info("[%s] Viral discovery: %d queries → running...", self.canal, len(queries))
@@ -647,8 +654,10 @@ class YouTubeViralScraper(BaseScraper):
 
         # ── Second pass: MANDATORY date verification for ALL unverified candidates ──
         # --flat-playlist often omits upload_date. Every candidate without a real
-        # date MUST be verified via a dedicated yt-dlp call. If verification fails,
-        # the candidate is DISCARDED (we refuse to use videos of unknown age).
+        # date MUST be verified via a dedicated yt-dlp call.
+        #
+        # v2: 180-day window, sorted by views descending. If nothing found
+        # within 180 days, fall back to the highest-viewed older video.
         candidates_need_verification = [
             c for c in all_candidates
             if not c.get("date_verified", False)
@@ -658,9 +667,8 @@ class YouTubeViralScraper(BaseScraper):
                          "MANDATORY date verification starting...",
                          self.canal, len(candidates_need_verification), len(all_candidates))
 
-            verified_count = 0
+            verified = []
             discarded_count = 0
-            discard_video_ids: set[str] = set()
 
             for candidate in candidates_need_verification:
                 real_date = self._fetch_real_upload_date(candidate.get("url", ""))
@@ -668,57 +676,54 @@ class YouTubeViralScraper(BaseScraper):
                     upload_dt = real_date.replace(tzinfo=timezone.utc)
                     hours = (datetime.now(timezone.utc) - upload_dt).total_seconds() / 3600
 
-                    # Age check: discard if too old
-                    if hours > self.max_age_days * 24 or hours <= 0:
-                        logger.debug("[%s] Removed (age=%.1fh, max=%dh): '%s'",
-                                     self.canal, hours, self.max_age_days * 24,
-                                     candidate.get("title", "")[:60])
-                        discard_video_ids.add(candidate.get("video_id", ""))
+                    if hours <= 0:
+                        logger.warning("[%s] Skipping candidate with invalid age: '%s'",
+                                       self.canal, candidate.get("title", "")[:60])
                         discarded_count += 1
                         continue
 
-                    # Update candidate with real date data
+                    # Update candidate with real date
                     candidate["upload_date"] = real_date.strftime("%Y%m%d")
                     candidate["hours_since_pub"] = round(hours, 1)
                     candidate["date_verified"] = True
 
                     # Re-score with real date
-                    if hours < 168:       # < 7 days
+                    if hours < 168:
                         freshness = 1.0
-                    elif hours < 336:      # 7-14 days
+                    elif hours < 336:
                         freshness = 0.7
-                    else:                  # 14+ days
+                    else:
                         freshness = 0.4
                     candidate["viral_score"] = round(
                         candidate["views"] / max(hours, 1) * freshness, 1
                     )
 
-                    logger.debug("[%s] Verified: '%s' (%.1fh old, views=%s, score=%.0f)",
-                                 self.canal, candidate.get("title", "")[:60],
-                                 hours, candidate["views"], candidate["viral_score"])
-                    verified_count += 1
+                    tag = "✅" if hours <= self.max_age_days * 24 else "📦"
+                    logger.warning("[%s] %s '%s' (%.0fh old, views=%s, score=%.0f)",
+                                   self.canal, tag, candidate.get("title", "")[:60],
+                                   hours, candidate["views"], candidate["viral_score"])
+                    verified.append(candidate)
                 else:
-                    # Could not fetch real date — DISCARD this candidate
-                    # We refuse to use content of unknown age
-                    logger.warning("[%s] DISCARDING candidate with unknown age: '%s' (%s)",
-                                   self.canal, candidate.get("title", "")[:60],
-                                   candidate.get("url", "")[:60])
-                    discard_video_ids.add(candidate.get("video_id", ""))
+                    logger.warning("[%s] DISCARDING candidate with unknown age: '%s'",
+                                   self.canal, candidate.get("title", "")[:60])
                     discarded_count += 1
 
-            # Remove all discarded candidates from all_candidates
-            if discard_video_ids:
-                all_candidates = [
-                    c for c in all_candidates
-                    if c.get("video_id") not in discard_video_ids
-                ]
+            # Sort by views descending — take best regardless of age
+            verified.sort(key=lambda x: x.get("views", 0), reverse=True)
+            all_candidates = verified
 
-            logger.info("[%s] Date verification complete: %d verified, %d discarded, "
-                         "%d remaining with known dates",
-                         self.canal, verified_count, discarded_count,
-                         len([c for c in all_candidates if c.get("date_verified", False)]))
+            within_window = [c for c in verified if c.get("hours_since_pub", 999) <= self.max_age_days * 24]
+            logger.info("[%s] Date verification: %d verified (%d within %dd window), %d discarded",
+                         self.canal, len(verified), len(within_window),
+                         self.max_age_days, discarded_count)
 
-        # Sort by views descending (not viral_score) — once age-filtered, pick highest views
+            # If nothing within 180d, mention fallback
+            if not within_window and verified:
+                logger.warning("[%s] ⚠ No videos within %dd window. Using highest-viewed: '%s' (views=%s)",
+                               self.canal, self.max_age_days,
+                               verified[0].get("title", "")[:60], verified[0].get("views", 0))
+
+        # Sort by views descending
         all_candidates.sort(key=lambda x: x.get("views", 0), reverse=True)
         top_candidates = all_candidates[:self.max_candidates]
 
@@ -726,7 +731,7 @@ class YouTubeViralScraper(BaseScraper):
         self._cached_candidates = top_candidates
         self._last_search_time = time.time()
 
-        logger.info("[%s] Viral discovery complete: %d results → %d top candidates",
+        logger.info("[%s] Viral discovery complete: %d candidates → %d top candidates",
                     self.canal, len(all_candidates), len(top_candidates))
 
         if top_candidates:
@@ -736,6 +741,9 @@ class YouTubeViralScraper(BaseScraper):
                         self.canal, best["title"][:60],
                         best["views"], age_str,
                         best.get("date_verified", False))
+
+        # Restore original max_age_days after randomization
+        self.max_age_days = original_max_age_days
 
         return top_candidates
 
@@ -1061,6 +1069,7 @@ class YouTubeViralScraper(BaseScraper):
         seen_vids: set[str] = set()
         seen_urls: set[str] = set()
         unique: list[dict] = []
+        unverified_pool: list[dict] = []
         unverified_discarded = 0
 
         for c in all_candidates:
@@ -1076,16 +1085,25 @@ class YouTubeViralScraper(BaseScraper):
                         continue
                 except Exception:
                     pass
-            # ── FINAL SAFETY: discard any candidate still unverified ──
+            # ── FINAL SAFETY: prefer verified, fall back to best unverified if needed ──
             if not c.get("date_verified", False):
-                logger.warning("[%s] DISCARDING unverified candidate in final merge: '%s'",
-                               self.canal, c.get("title", "")[:60])
+                unverified_pool.append(c)
                 unverified_discarded += 1
                 continue
             seen_vids.add(vid)
             if url:
                 seen_urls.add(url)
             unique.append(c)
+
+        # If no verified candidates, promote best unverified as last resort
+        if not unique and unverified_pool:
+            unverified_pool.sort(key=lambda x: x.get("views", 0), reverse=True)
+            best_unverified = unverified_pool[0]
+            logger.warning("[%s] ⚠ No verified candidates. Falling back to best unverified: '%s' (views=%s)",
+                           self.canal, best_unverified.get("title", "")[:60],
+                           best_unverified.get("views", 0))
+            unique = [best_unverified]
+            unverified_discarded -= 1  # don't count this one as discarded
 
         # Sort by views descending — once age-filtered, pick the one with most views
         unique.sort(key=lambda x: x.get("views", 0), reverse=True)
