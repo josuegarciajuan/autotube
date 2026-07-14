@@ -2325,10 +2325,13 @@ async def start_generation_job_subprocess(
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
 
-    # ── Global guard: only ONE generation at a time across ALL channels ──
+    # ── Global guard: only ONE long-form generation at a time across ALL channels ──
     # Prevents ffmpeg resource contention (concurrent renders cause timeouts).
+    # Since process_planned_slots() now sets status='running' BEFORE dispatching
+    # this async task, the current job is already counted. Threshold is > 1,
+    # NOT > 0, to allow the job itself through (count=1 = only self = ok).
     active_count = db.count_active_jobs()
-    if active_count > 0:
+    if active_count > 1:
         logger.warning(
             "Subprocess spawn blocked: %d active job(s) running globally",
             active_count,
