@@ -1930,14 +1930,78 @@ async def _do_reassembly(job_id: int, video_id: int):
         db.update_video(video_id, status="error", progress_phase="video")
         return
 
-    # ── Phase 3: Done ────────────────────────────────────────
-    db.update_video(video_id, video_path=str(output_path),
-                    status="ready", progress=100, progress_phase=None)
+    # ── Phase 3: Thumbnail + metadata + upload ───────────────
+    # Bug #2 fix: after rebuilding the video, generate a thumbnail,
+    # populate metadata from the script, and upload to YouTube.
+    import subprocess as _sp
+    from pathlib import Path as _P
+
+    # 3a. Generate thumbnail (ffmpeg frame grab — fast and reliable)
+    thumb_path = None
+    try:
+        _out_dir = _P(f"output/thumbnails/{canal}")
+        _out_dir.mkdir(parents=True, exist_ok=True)
+        _thumb_file = _out_dir / f"recover_{video_id}.jpg"
+        _sp.run(
+            ["ffmpeg", "-y", "-i", str(output_path),
+             "-ss", "00:00:15", "-vframes", "1",
+             "-q:v", "2", str(_thumb_file)],
+            capture_output=True, timeout=30,
+        )
+        if _thumb_file.exists():
+            thumb_path = str(_thumb_file)
+            logger.info("Reassembly thumbnail generated: %s", thumb_path)
+    except Exception as _te:
+        logger.warning("Reassembly thumbnail generation failed (non-fatal): %s", _te)
+
+    # 3b. Populate metadata from script
+    _keywords_raw = script.get("keywords_json", "[]")
+    if isinstance(_keywords_raw, str):
+        try:
+            _keywords = json.loads(_keywords_raw)
+        except json.JSONDecodeError:
+            _keywords = []
+    else:
+        _keywords = _keywords_raw or []
+
+    # Build a description from the script
+    _guion_preview = (script.get("guion") or "")[:500]
+
+    db.update_video(video_id,
+        video_path=str(output_path),
+        thumbnail_path=thumb_path or "",
+        titulo_final=titulo,
+        description=_guion_preview,
+        tags_json=json.dumps(_keywords, ensure_ascii=False),
+        status="ready",
+        progress=90,
+        progress_phase="upload",
+    )
+
+    # 3c. Upload to YouTube
+    await _broadcast_progress(job_id, 90, "upload",
+                               "Video re-ensamblado — subiendo a YouTube...",
+                               video_id=video_id,
+                               detail=f"Titulo: {titulo[:60]}")
+
+    try:
+        await start_upload_job(job_id, video_id)
+        # Mark reassembly job as completed after upload succeeds
+        db.update_job(job_id, status="completed", progress=100, phase="done")
+        logger.info("Reassembly + upload completed for video %d (job %d)", video_id, job_id)
+    except Exception as _ue:
+        logger.exception("Reassembly upload failed for video %d: %s", video_id, _ue)
+        db.update_video(video_id, status="ready", progress=100, progress_phase="upload_retry")
+        db.update_job(job_id, status="completed", progress=100, phase="upload_failed")
+        await _broadcast_progress(job_id, 100, "done",
+                                   f"Video listo pero subida fallo: {titulo[:60]}", "completed",
+                                   video_id=video_id,
+                                   detail="Upload fallo — reintentar manualmente desde el panel")
+
     await _broadcast_progress(job_id, 100, "done",
                                f"Video listo: {titulo[:60]}", "completed",
                                video_id=video_id,
                                detail=str(output_path))
-    logger.info("Reassembly job %d completed: %s", job_id, output_path)
 
 
 # ── Auto-recovery on startup ─────────────────────────────────
@@ -2628,6 +2692,15 @@ async def reconnect_active_workers():
 
         # Check if there's an actual worker process for each running job
         for job in running_jobs:
+            # ── Skip reassembly jobs ─────────────────────────────────
+            # Reassembly jobs run as async tasks (asyncio.create_task),
+            # NOT as full_pipeline_worker subprocesses.  Trying to pgrep
+            # for them will fail, causing the job to be incorrectly
+            # marked as failed (Bug #1).
+            if job.get("action") == "reassemble":
+                logger.debug("Skipping reassembly job #%d (no subprocess to reconnect)", job["id"])
+                continue
+
             job_id = job["id"]
             video_id = job.get("video_id") or 0
 
