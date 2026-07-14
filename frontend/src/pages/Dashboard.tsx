@@ -237,6 +237,7 @@ export default function Dashboard() {
   const topVideos = data?.top_videos || []
   const recentVideos = data?.recent_videos || []
   const recentShorts = data?.recent_shorts || []
+  const todayVideos = data?.today_videos || []
   const heatmapData = data?.heatmap_data || []
   const channelNames: Record<string, string> = {}
   const channelSlugs: Record<string, string> = {}
@@ -459,6 +460,14 @@ export default function Dashboard() {
           <PipelineSection pipeline={pipeline} shortsPipeline={shortsPipeline} />
         </CollapsibleSection>
       )}
+
+      {/* ═══════ NIVEL 1: Publicado Hoy ═══════ */}
+      <CollapsibleSection title={`Publicado Hoy (${todayVideos.length} videos · ${recentShorts.length} shorts)`} icon="📺" defaultOpen={true}>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+          <RecentVideos videos={todayVideos.slice(0, 10)} />
+          <RecentShorts shorts={recentShorts.slice(0, 10)} />
+        </div>
+      </CollapsibleSection>
 
       {/* ═══════ NIVEL 2: YPP + Revenue ═══════ */}
       <CollapsibleSection title="Monetizacion" icon="💰" defaultOpen={false}>

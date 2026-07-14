@@ -2333,7 +2333,21 @@ class ExtendedDatabase(Database):
                 ch_params,
             ).fetchall()
 
-            # ── Recent published shorts (last 5) ──
+            # ── Videos published today (last 10) ──
+            today_videos = conn.execute(
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
+                           c.name as channel_name, c.slug as channel_slug
+                    FROM videos v
+                    JOIN channels c ON v.channel_id = c.id
+                    WHERE v.yt_video_id IS NOT NULL
+                      AND DATE(v.uploaded_at) = DATE('now', 'localtime')
+                      {rec_where}
+                    ORDER BY v.uploaded_at DESC
+                    LIMIT 10""",
+                ch_params,
+            ).fetchall()
+
+            # ── Recent published shorts (last 10) ──
             recs_where = "AND s.channel_id = ?" if channel_id else ""
             recent_shorts = conn.execute(
                 f"""SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
@@ -2342,7 +2356,7 @@ class ExtendedDatabase(Database):
                     JOIN channels c ON s.channel_id = c.id
                     WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {recs_where}
                     ORDER BY s.published_at DESC
-                    LIMIT 5""",
+                    LIMIT 10""",
                 ch_params,
             ).fetchall()
 
@@ -2455,6 +2469,7 @@ class ExtendedDatabase(Database):
             "top_videos": [dict(r) for r in top_videos],
             "recent_videos": [dict(r) for r in recent_videos],
             "recent_shorts": [dict(r) for r in recent_shorts],
+            "today_videos": [dict(r) for r in today_videos],
             "ypp_progress": channels_data,
             "revenue_overview": {
                 "total_min": round(total_revenue_min, 2),
