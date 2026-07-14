@@ -36,7 +36,7 @@ function PhaseLabel(phase: string | null): string {
 }
 
 // Glitch text effect component
-function GlitchText({ text, interval = 5000 }: { text: string; interval?: number }) {
+function GlitchText({ text, interval = 30000 }: { text: string; interval?: number }) {
   const [display, setDisplay] = useState(text)
   const [glitching, setGlitching] = useState(false)
   const original = text
@@ -139,7 +139,7 @@ function PipelineCard({ v }: { v: PipelineItem }) {
             </p>
             <span className={`badge ${statusBadge(v.status)} shrink-0 text-[10px]`}>
               {isGenerating ? (
-                <GlitchText text={statusLabel(v.status)} interval={5000} />
+                <GlitchText text={statusLabel(v.status)} interval={30000} />
               ) : (
                 statusLabel(v.status)
               )}

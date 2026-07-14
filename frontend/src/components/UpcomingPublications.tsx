@@ -8,7 +8,7 @@ export default function UpcomingPublications() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 60000);
+    const interval = setInterval(loadData, 120000);
     return () => clearInterval(interval);
   }, []);
 

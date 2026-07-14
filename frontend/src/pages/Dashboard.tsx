@@ -82,9 +82,8 @@ export default function Dashboard() {
   // Console events
   const [consoleEvents, setConsoleEvents] = useState<any[]>([])
 
-  // Refrescar dashboard
+  // Refrescar dashboard (silent background refresh — no spinner)
   const loadDashboard = useCallback(async () => {
-    setLoading(true)
     try {
       const d = await api.getDashboard(selectedChannelId ?? undefined)
       setData(d)
@@ -97,7 +96,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadDashboard()
-    const interval = setInterval(loadDashboard, 15000)
+    const interval = setInterval(loadDashboard, 30000)
     return () => clearInterval(interval)
   }, [loadDashboard, selectedChannelId])
 
@@ -201,7 +200,7 @@ export default function Dashboard() {
     }
   }
 
-  if (loading) {
+  if (!data) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-2 border-neon-red border-t-transparent" />
