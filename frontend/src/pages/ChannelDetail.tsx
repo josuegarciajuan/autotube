@@ -365,14 +365,8 @@ export default function ChannelDetail() {
     }).catch(() => {})
   }, [channel?.id])
 
-  // Poll videos list when generating (since we use global progress bar now)
-  useEffect(() => {
-    if (!generating) return
-    const interval = setInterval(async () => {
-      try { const vids = await api.getChannelVideos(channelId); setVideos(vids) } catch {}
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [generating, channelId])
+  // Poll videos list only after generation completes (handled by pollForCompletion below)
+  // WebSocket provides real-time progress during generation — no need for separate polling
 
   // Load shorts when tab switches
   useEffect(() => {
@@ -451,13 +445,13 @@ export default function ChannelDetail() {
           const vids = await api.getChannelVideos(channelId)
           setVideos(vids)
         } else {
-          setTimeout(check, 2000)
+          setTimeout(check, 5000)
         }
       } catch {
-        setTimeout(check, 3000)
+        setTimeout(check, 5000)
       }
     }
-    setTimeout(check, 2000)
+    setTimeout(check, 5000)
   }
 
   async function handleCreateShort(videoId: number) {

@@ -414,7 +414,7 @@ export default function PipelineView() {
 
   useEffect(() => {
     load()
-    const t = setInterval(load, 15000)
+    const t = setInterval(load, 60000)
     return () => clearInterval(t)
   }, [load])
 

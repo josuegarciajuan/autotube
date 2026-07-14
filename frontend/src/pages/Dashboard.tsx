@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../lib/api'
 import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -63,9 +63,11 @@ function CollapsibleSection({ title, icon, defaultOpen, children }: {
 export default function Dashboard() {
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState<number>(0)
   const [deepDiveChannel, setDeepDiveChannel] = useState<any>(null)
   const { selectedChannelId } = useChannelFilter()
   const { partyMode, matrixMode, glitchTick } = useEasterEgg()
+  const lastUpdatedTimer = useRef<ReturnType<typeof setInterval>>()
 
   // Stabilization state
   const [stabilizing, setStabilizing] = useState(false)
@@ -82,11 +84,12 @@ export default function Dashboard() {
   // Console events
   const [consoleEvents, setConsoleEvents] = useState<any[]>([])
 
-  // Refrescar dashboard (silent background refresh — no spinner)
-  const loadDashboard = useCallback(async () => {
+  // Refrescar dashboard — solo en carga inicial y bajo demanda (botón, cambio de canal, fin de recolección)
+  const refreshDashboard = useCallback(async () => {
     try {
       const d = await api.getDashboard(selectedChannelId ?? undefined)
       setData(d)
+      setLastUpdated(Date.now())
     } catch (e) {
       console.error(e)
     } finally {
@@ -94,11 +97,20 @@ export default function Dashboard() {
     }
   }, [selectedChannelId])
 
+  // Carga inicial única + al cambiar de canal
   useEffect(() => {
-    loadDashboard()
-    const interval = setInterval(loadDashboard, 30000)
-    return () => clearInterval(interval)
-  }, [loadDashboard, selectedChannelId])
+    refreshDashboard()
+  }, [refreshDashboard])
+
+  // Mantener el timestamp "hace X segundos" actualizado en UI
+  useEffect(() => {
+    if (!lastUpdated) return
+    lastUpdatedTimer.current = setInterval(() => {
+      // forzar re-render solo para actualizar el texto del timestamp
+      setLastUpdated(t => t) // trigger re-render
+    }, 10000)
+    return () => clearInterval(lastUpdatedTimer.current)
+  }, [lastUpdated > 0])
 
   // Load console events
   useEffect(() => {
@@ -144,7 +156,7 @@ export default function Dashboard() {
           setTimeout(poll, 2000)
         } else {
           setCollectingStats(false)
-          loadDashboard()
+          refreshDashboard()
         }
       } catch {
         setCollectingStats(false)
@@ -169,6 +181,16 @@ export default function Dashboard() {
     loadStatus()
     return () => { cancelled = true }
   }, [])
+
+  function formatTimeAgo(ts: number): string {
+    const secs = Math.floor((Date.now() - ts) / 1000)
+    if (secs < 5) return 'ahora'
+    if (secs < 60) return `hace ${secs}s`
+    const mins = Math.floor(secs / 60)
+    if (mins < 60) return `hace ${mins}min`
+    const hrs = Math.floor(mins / 60)
+    return `hace ${hrs}h`
+  }
 
   async function handleStabilize() {
     if (stabilizing) return
@@ -320,8 +342,19 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Toolbar: Refresh Stats + Stabilize */}
+      {/* Toolbar: Refresh Dashboard + Refresh Stats + Stabilize */}
       <div className="flex items-center justify-end gap-2">
+        <span className="text-[10px] text-gray-600 tabular-nums">
+          {lastUpdated ? formatTimeAgo(lastUpdated) : ''}
+        </span>
+        <button
+          onClick={() => { setLoading(true); refreshDashboard() }}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-500/20 bg-gray-500/5 text-gray-400 hover:bg-gray-500/10 hover:border-gray-500/40 transition-all text-xs font-medium"
+          title="Refrescar dashboard"
+        >
+          <RefreshCw size={13} />
+          <span>Refrescar</span>
+        </button>
         <button
           onClick={handleCollectStats}
           disabled={collectingStats}

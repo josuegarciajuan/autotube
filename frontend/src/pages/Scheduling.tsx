@@ -136,7 +136,7 @@ function TodayStatus() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
 
   if (loading) {
     return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
@@ -226,7 +226,7 @@ function TodayStatus() {
 function ShortsSection() {
   const [configs, setConfigs] = useState<ShortsPlanningConfig[]>([])
   const [loading, setLoading] = useState(true)
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [])
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [])
   async function load() { try { setConfigs(await api.getShortsPlanningConfig()) } catch {} setLoading(false) }
   async function update(channelId: number, data: any) { try { await api.updateShortsPlanningConfig(channelId, data); load() } catch (e: any) { alert(e.message) } }
   if (loading || !configs.length) return null
@@ -256,7 +256,7 @@ function PlanningConfigSection() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
 
   async function update(channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) {
     try {
