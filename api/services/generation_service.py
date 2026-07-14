@@ -2272,8 +2272,15 @@ async def auto_recover_on_startup():
             continue
 
         try:
-            job_id = db.create_job(channel_id, "reassemble", video_id)
-            db.update_job(job_id, status="running")  # close TOCTOU race
+            # Use the same conn for INSERT to avoid SQLite lock contention
+            # (db.create_job opens a NEW connection which conflicts with conn).
+            cursor = conn.execute(
+                "INSERT INTO generation_jobs (channel_id, action, video_id, status, created_at) "
+                "VALUES (?, 'reassemble', ?, 'running', datetime('now', 'localtime'))",
+                (channel_id, video_id),
+            )
+            conn.commit()
+            job_id = cursor.lastrowid
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",
                      video_id, job_id, progress_phase)
             # Launch as background task — do NOT await.
@@ -2690,3 +2697,121 @@ async def reconnect_active_workers():
 
     except Exception as exc:
         logger.warning("Worker reconnection failed: %s", exc)
+
+
+# ── Force-cancel and cleanup ────────────────────────────────────────
+
+async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str) -> dict:
+    """Force-kill the worker subprocess and clean up generated files for a cancelled job.
+
+    1. Kills the worker subprocess (SIGTERM → 3s → SIGKILL)
+    2. Cleans orphan ffmpeg processes
+    3. Deletes generated video files, clips, and temp data
+    4. Marks job as 'cancelled' and video as 'error' in DB
+
+    Returns a dict with cleanup summary: {"killed_worker": bool, "files_cleaned": list, "db_updated": bool}
+    """
+    import shutil
+    from pathlib import Path
+
+    result = {"killed_worker": False, "files_cleaned": [], "db_updated": False}
+    project_root = Path(__file__).parent.parent  # api/services/ → project root
+
+    # ── 1. Kill the worker subprocess ──
+    proc = _active_workers.pop(job_id, None)
+    if proc is not None and proc.poll() is None:
+        logger.info("Force-cancelling worker for job #%d (pid=%d)", job_id, proc.pid)
+        try:
+            proc.terminate()
+            await asyncio.sleep(3)
+            if proc.poll() is None:
+                proc.kill()
+                logger.warning("Worker pid=%d did not respond to SIGTERM — sent SIGKILL", proc.pid)
+            logger.info("Worker pid=%d terminated (exit_code=%s)", proc.pid, proc.returncode)
+            result["killed_worker"] = True
+        except Exception as exc:
+            logger.error("Failed to kill worker pid=%d: %s", proc.pid, exc)
+
+    # If no active worker found, try to kill by pgrep
+    if not result["killed_worker"]:
+        try:
+            pgrep = subprocess.run(
+                ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if pgrep.stdout.strip():
+                pid = int(pgrep.stdout.strip().split()[0])
+                os.kill(pid, 15)  # SIGTERM
+                await asyncio.sleep(3)
+                try:
+                    os.kill(pid, 0)  # Check if still alive
+                    os.kill(pid, 9)  # SIGKILL
+                except ProcessLookupError:
+                    pass
+                logger.info("Killed orphan worker pid=%d for job #%d via pgrep", pid, job_id)
+                result["killed_worker"] = True
+        except Exception as exc:
+            logger.debug("pgrep kill fallback for job #%d: %s", job_id, exc)
+
+    # ── 2. Clean orphan ffmpeg / edge-tts processes ──
+    _kill_orphaned_ffmpeg()
+
+    # ── 3. Clean up generated files ──
+    cleaned = []
+
+    # Delete partial MP4 output for this video
+    if channel_slug and video_id:
+        video_output_dir = project_root / "output" / "videos" / channel_slug
+        if video_output_dir.exists():
+            import re
+            pattern = re.compile(rf".*_{video_id}\.mp4$|^{video_id}_.*\.mp4$|.*{video_id}.*\.mp4$")
+            for f in video_output_dir.iterdir():
+                if f.is_file() and pattern.search(f.name):
+                    try:
+                        f.unlink()
+                        cleaned.append(str(f))
+                        logger.info("Cleaned generated MP4: %s", f)
+                    except Exception as exc:
+                        logger.warning("Could not delete %s: %s", f, exc)
+
+        # Delete generated thumbnail for this video
+        thumb_dir = project_root / "output" / "thumbnails" / channel_slug
+        if thumb_dir.exists():
+            thumb_file = thumb_dir / f"thumb_{video_id}.jpg"
+            if thumb_file.exists():
+                try:
+                    thumb_file.unlink()
+                    cleaned.append(str(thumb_file))
+                    logger.info("Cleaned generated thumbnail: %s", thumb_file)
+                except Exception as exc:
+                    logger.warning("Could not delete thumbnail %s: %s", thumb_file, exc)
+
+    # Clean temp directories (shared across all jobs)
+    for temp_dir_name in ("video_clips", "temp"):
+        temp_dir = project_root / "output" / temp_dir_name
+        if temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                cleaned.append(f"output/{temp_dir_name}/ (purged)")
+                logger.info("Purged temp directory: %s", temp_dir)
+            except Exception as exc:
+                logger.warning("Could not clean %s: %s", temp_dir, exc)
+
+    result["files_cleaned"] = cleaned
+
+    # ── 4. Mark job as cancelled and video as error in DB ──
+    try:
+        db = _get_db()
+        db.update_job(job_id, status="cancelled",
+                      error_msg="Cancelled by user — files cleaned")
+        if video_id:
+            db.update_video(video_id, status="error",
+                            progress_phase="cancelled",
+                            progress=0)
+        result["db_updated"] = True
+        logger.info("DB updated: job #%d → cancelled, video #%d → error", job_id, video_id)
+    except Exception as exc:
+        logger.error("DB update after cancel failed for job #%d: %s", job_id, exc)
+
+    return result
