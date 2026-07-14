@@ -3528,6 +3528,23 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_channel_last_short_completed_at(self, channel_id: int) -> str | None:
+        """Get updated_at of the most recent completed short slot for a channel.
+
+        Used by the cooldown guard to enforce minimum spacing between
+        short generations per channel. Scans all dates, not just today.
+
+        Returns ISO timestamp string or None if no completed shorts.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT updated_at FROM shorts_planned_slots
+                   WHERE channel_id = ? AND status = 'completed'
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+        return row["updated_at"] if row and row["updated_at"] else None
+
     def update_shorts_slot_status(self, slot_id: int, status: str,
                                    source_video_id: int = None,
                                    short_id: int = None,

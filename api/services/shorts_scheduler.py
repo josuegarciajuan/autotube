@@ -52,6 +52,12 @@ CLIP_WINDOWS = [
 
 JITTER_MINUTES = 20
 
+# ── Shorts cooldown: minimum minutes between same-channel shorts ──
+# Prevents back-to-back shorts from the same channel when many slots
+# are past-due (e.g. after a server restart). Ensures real spacing
+# between short publications throughout the day.
+SHORTS_COOLDOWN_MINUTES = 30
+
 
 def _day_seed(date_str: str, channel_slug: str, slot_idx: int) -> int:
     """Deterministic seed for a date+channel+slot combination."""
@@ -253,6 +259,15 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
     for day_offset in range(days):
         day_str = (today + timedelta(days=day_offset)).isoformat()
         try:
+            # Skip if date already has any slots (pending, running, completed, etc.)
+            # This prevents server restarts from wiping and recreating today's slots,
+            # which would cause all past-due slots to fire back-to-back.
+            existing = db.get_shorts_planned_slots(date_key=day_str)
+            if existing and len(existing) > 0:
+                results[day_str] = f"{len(existing)} slots (existing, skipped)"
+                logger.debug("Shorts slots for %s: %d existing — skipping regeneration", day_str, len(existing))
+                continue
+
             slots = compute_daily_shorts_slots(day_str, db)
             count = persist_daily_shorts_slots(day_str, slots, db)
             results[day_str] = f"{count} slots"
@@ -277,6 +292,11 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
     Completed, cancelled, and failed slots are ignored - they don't prevent
     regeneration of new pending slots.
     
+    BUT: if there are already completed slots for today, the system has been
+    active and the recovery planner is managing deficits. Do NOT blindly
+    regenerate — that would create a cancel-regenerate loop with the recovery
+    planner. Let recovery handle any gaps.
+    
     Returns True if slots exist (existing or newly generated).
     """
     if db is None:
@@ -290,6 +310,17 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
     active_slots = [s for s in existing if s["status"] in ("pending", "running")]
     if len(active_slots) > 0:
         logger.debug("Today's shorts schedule OK: %d pending/running slots", len(active_slots))
+        return True
+
+    # Guard: if there are completed slots for today, the system has been
+    # working. Don't regenerate — the recovery planner manages gaps.
+    completed_slots = [s for s in existing if s["status"] == "completed"]
+    if len(completed_slots) > 0:
+        logger.info(
+            "Today has %d completed shorts slots — no pending/running. "
+            "Deferring to recovery planner (avoids cancel-regenerate loop).",
+            len(completed_slots),
+        )
         return True
 
     logger.info("No pending/running shorts slots for today — regenerating schedule")
@@ -348,6 +379,17 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     slug = next_slot.get("channel_slug", "")
     short_type = next_slot.get("short_type", "native")
     scheduled = next_slot.get("scheduled_at", "?")
+
+    # 5.5 Per-channel cooldown guard: enforce minimum spacing between
+    # same-channel shorts. Prevents rapid-fire dispatch when many
+    # slots are past-due (e.g. after server restart generates catch-up slots).
+    if not _channel_shorts_cooldown_ok(channel_id, db):
+        logger.debug(
+            "Shorts dispatch skipped for %s: cooldown active "
+            "(last short < %d min ago)",
+            slug, SHORTS_COOLDOWN_MINUTES,
+        )
+        return None
 
     logger.info(
         "Dispatching shorts slot #%d: %s type=%s (scheduled %s)",
@@ -451,7 +493,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             # Mark slot as completed
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
             conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'completed', short_id = ? WHERE id = ?",
+                "UPDATE shorts_planned_slots SET status = 'completed', short_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (short_id, slot_id),
             )
             conn.execute(
@@ -465,7 +507,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             # Mark slot as cancelled
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
             conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'cancelled' WHERE id = ?",
+                "UPDATE shorts_planned_slots SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (slot_id,),
             )
             conn.execute(
@@ -480,7 +522,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
         try:
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
             conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'cancelled' WHERE id = ?",
+                "UPDATE shorts_planned_slots SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (slot_id,),
             )
             conn.execute(
@@ -985,6 +1027,25 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
 
 
 # ── Internal helpers ───────────────────────────────────────────
+
+def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
+    """Check if enough time has passed since the channel's last completed short.
+
+    Returns True if the channel is clear to dispatch another short.
+    Returns False if the channel's last completed short was less than
+    SHORTS_COOLDOWN_MINUTES ago.
+    """
+    last_completed = db.get_channel_last_short_completed_at(channel_id)
+    if last_completed is None:
+        return True  # No completed shorts yet — always ok
+
+    try:
+        last_time = datetime.strptime(last_completed, "%Y-%m-%d %H:%M:%S")
+        elapsed = (datetime.now(UTC) - last_time.replace(tzinfo=UTC)).total_seconds()
+        return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
+    except (ValueError, TypeError):
+        return True  # Can't parse — let it proceed
+
 
 def _sync_running_shorts_slots(db):
     """Check running shorts slots across ALL recent dates: mark completed if their
