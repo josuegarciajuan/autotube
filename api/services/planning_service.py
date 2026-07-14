@@ -780,27 +780,25 @@ def _sync_running_slots(db):
     for s in running_slots:
         job_id = s.get("job_id")
         if not job_id:
-            # No job linked at all → stale, mark completed (slot was consumed)
-            db.update_slot_status(s["id"], "completed")
-            logger.info("Slot #%d marked completed (no job linked — stale)", s["id"])
-            any_completed = True
+            # No job linked at all → stale, mark cancelled (never consumed)
+            db.update_slot_status(s["id"], "cancelled")
+            logger.info("Slot #%d cancelled (no job linked — stale)", s["id"])
             continue
         job = db.get_job(job_id)
         if not job:
-            # Job row missing → stale, mark completed (slot was consumed)
-            db.update_slot_status(s["id"], "completed")
-            logger.info("Slot #%d marked completed (job #%d not found)", s["id"], job_id)
-            any_completed = True
+            # Job row missing → stale, mark cancelled (never consumed)
+            db.update_slot_status(s["id"], "cancelled")
+            logger.info("Slot #%d cancelled (job #%d not found)", s["id"], job_id)
             continue
         if job["status"] in ("completed", "success"):
             db.update_slot_status(s["id"], "completed")
             logger.info("Slot #%d marked completed (job #%d done)", s["id"], job_id)
             any_completed = True
         elif job["status"] in ("failed", "cancelled"):
-            # failed or cancelled = slot was consumed / is dead
-            db.update_slot_status(s["id"], "completed")
-            logger.info("Slot #%d marked completed (job #%d %s)", s["id"], job_id, job["status"])
-            any_completed = True
+            # Job failed or was cancelled → slot was never consumed
+            db.update_slot_status(s["id"], "cancelled")
+            logger.info("Slot #%d cancelled (job #%d %s)", s["id"], job_id, job["status"])
+            # NOT any_completed — failed slots should NOT trigger readjustment
     
     if any_completed:
         _readjust_pending_slots(db)

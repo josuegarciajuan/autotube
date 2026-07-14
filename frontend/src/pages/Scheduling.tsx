@@ -8,7 +8,7 @@ interface ChannelSummary {
   channel_id: number
   channel_name: string
   channel_slug: string
-  videos: { pending: number; running: number; completed: number }
+  videos: { pending: number; running: number; completed: number; cancelled: number }
   shorts: { pending: number; running: number; completed: number }
   next_time: string | null
   next_kind: string | null
@@ -104,7 +104,7 @@ function TodayStatus() {
         if (!map.has(id)) {
           map.set(id, {
             channel_id: id, channel_name: name, channel_slug: slug,
-            videos: { pending: 0, running: 0, completed: 0 },
+            videos: { pending: 0, running: 0, completed: 0, cancelled: 0 },
             shorts: { pending: 0, running: 0, completed: 0 },
             next_time: null, next_kind: null,
           })
@@ -117,6 +117,7 @@ function TodayStatus() {
         if (s.status === 'completed') ch.videos.completed++
         else if (s.status === 'running') ch.videos.running++
         else if (s.status === 'pending') ch.videos.pending++
+        else if (s.status === 'cancelled') ch.videos.cancelled++
         if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
           ch.next_time = s.scheduled_at; ch.next_kind = 'video'
         }
@@ -154,6 +155,7 @@ function TodayStatus() {
         const allDone = ch.videos.pending === 0 && ch.videos.running === 0 && ch.shorts.pending === 0 && ch.shorts.running === 0
         const hasRunning = ch.videos.running > 0 || ch.shorts.running > 0
         const hasPending = ch.videos.pending > 0 || ch.shorts.pending > 0
+        const hasCancelled = ch.videos.cancelled > 0
 
         return (
           <div key={ch.channel_id} className={`rounded-xl p-4 border ${hasRunning ? 'bg-neon-cyan/5 border-neon-cyan/30' : 'bg-dark-700/50 border-surface-border'}`}>
@@ -163,7 +165,8 @@ function TodayStatus() {
               <span className="text-sm font-semibold text-white">{ch.channel_name}</span>
               <span className="text-[10px] text-gray-600 font-mono">({CHANNEL_SHORT[ch.channel_slug]})</span>
               {hasRunning && <Loader2 size={12} className="text-neon-cyan animate-spin ml-auto" />}
-              {allDone && <CheckCircle2 size={12} className="text-green-400 ml-auto" />}
+              {allDone && !hasCancelled && <CheckCircle2 size={12} className="text-green-400 ml-auto" />}
+              {!hasRunning && !allDone && !hasPending && hasCancelled && <XCircle size={12} className="text-red-400 ml-auto" />}
               {!hasRunning && hasPending && <Clock size={12} className="text-amber-400 ml-auto" />}
             </div>
 
@@ -181,7 +184,10 @@ function TodayStatus() {
                 {ch.videos.pending > 0 && (
                   <span className="px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-400 text-[10px]">{ch.videos.pending}⏳</span>
                 )}
-                {ch.videos.completed === 0 && ch.videos.running === 0 && ch.videos.pending === 0 && (
+                {ch.videos.cancelled > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-red-400/15 text-red-400 text-[10px]">{ch.videos.cancelled}✕</span>
+                )}
+                {ch.videos.completed === 0 && ch.videos.running === 0 && ch.videos.pending === 0 && ch.videos.cancelled === 0 && (
                   <span className="text-gray-600 text-[10px]">—</span>
                 )}
               </div>
