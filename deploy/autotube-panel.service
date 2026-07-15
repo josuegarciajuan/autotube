@@ -1,0 +1,39 @@
+[Unit]
+Description=Autotube v2 Panel - YouTube Automation Dashboard
+After=network.target network-online.target
+Wants=network-online.target
+
+# Anti-flapping: stop the service if it crashes 5+ times in 5 minutes.
+# Prevents infinite restart loops like the OOM→kill→restart cascade.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/autotube
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Ensure DB is migrated, then start
+ExecStartPre=/usr/bin/python3 -c "from database.db import init_db; from database.db_extended import migrate_v2; init_db(); migrate_v2()"
+ExecStart=/usr/bin/python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info
+
+# Auto-restart on crash, but stop if it flaps (prevents restart storms)
+Restart=always
+RestartSec=10
+
+# KillMode: process = SIGTERM only to the main process (uvicorn).
+# Child processes (full_pipeline_worker subprocesses with start_new_session)
+# survive the restart, preserving running video generations.
+# Previously 'mixed' which SIGKILL'd the entire cgroup after TimeoutStopSec,
+# killing all in-flight renders on every apply_changes.sh deployment.
+KillMode=process
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=no
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target

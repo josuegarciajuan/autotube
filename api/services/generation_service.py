@@ -2343,6 +2343,14 @@ async def auto_recover_on_startup():
                 "VALUES (?, 'reassemble', ?, 'running', datetime('now', 'localtime'))",
                 (channel_id, video_id),
             )
+            # Update video to 'reassembling' in the same transaction so the
+            # orphan detector (Type 3 zombie-thread check) doesn't kill this
+            # freshly-created job. The orphan detector triggers on
+            #   jobs.status='running' AND videos.status='error'
+            # — a video in 'reassembling' status is naturally excluded.
+            conn.execute(
+                "UPDATE videos SET status='reassembling' WHERE id=?", (video_id,)
+            )
             conn.commit()
             job_id = cursor.lastrowid
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",

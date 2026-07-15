@@ -406,16 +406,91 @@ class VideoEditor:
                     _real_image_paths.append(Path(ap))
 
         # Temp dir for scene segments (resolved absolute to prevent ffmpeg concat path doubling)
+        # Use video_id instead of job_id so segments survive API restarts and
+        # reassembly retries (job_id changes, video content stays the same).
         seg_dir = Path(VIDEOS_DIR).resolve() / "segments"
-        if job_id is not None:
+        if video_id is not None and video_id > 0:
+            seg_dir = seg_dir / str(video_id)
+        elif job_id is not None:
             seg_dir = seg_dir / str(job_id)
         seg_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Render checkpoint: scan for already-completed segments ──
+        # Segments persist on disk after a failed render.  On reassembly,
+        # skip re-rendering segments that already have a valid primary
+        # output file (scene_NNNN.mp4, not _fb.mp4 or _black.mp4).
+        completed_scenes: set[int] = set()
+        _stale_fb = 0
+        _stale_black = 0
+        if seg_dir.exists():
+            for f in seg_dir.glob("scene_*.mp4"):
+                _stem = f.stem
+                # Only accept primary renders (not fallback _fb or placeholder _black)
+                if "_fb" in _stem or "_black" in _stem:
+                    if "_fb" in _stem:
+                        try:
+                            f.unlink(missing_ok=True)
+                            _stale_fb += 1
+                        except OSError:
+                            pass
+                    elif "_black" in _stem:
+                        try:
+                            f.unlink(missing_ok=True)
+                            _stale_black += 1
+                        except OSError:
+                            pass
+                    continue
+                # Extract scene index from "scene_NNNN"
+                try:
+                    _idx = int(_stem.split("_")[1])
+                except (IndexError, ValueError):
+                    continue
+                if f.stat().st_size > 0:
+                    completed_scenes.add(_idx)
+                else:
+                    # Corrupt/empty file — delete so it gets re-rendered
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        if completed_scenes:
+            self.logger.info(
+                "Resuming from checkpoint: %d/%d scenes already rendered "
+                "(%d stale _fb, %d stale _black cleaned)",
+                len(completed_scenes), len(block_ranges),
+                _stale_fb, _stale_black,
+            )
 
         segment_paths: list[str] = []
         self._current_clip_idx = 0
         n_fallback = 0
+        rendered_this_run = 0
 
         for i, br in enumerate(block_ranges):
+            # ── Checkpoint: skip already-rendered scenes ─────
+            if i in completed_scenes:
+                _existing = seg_dir / f"scene_{i:04d}.mp4"
+                if _existing.exists() and _existing.stat().st_size > 0:
+                    segment_paths.append(str(_existing.resolve()))
+                    # Progress for skipped scenes
+                    if video_id is not None and video_id > 0:
+                        _total = len(block_ranges)
+                        _update_interval = max(1, _total // 10)
+                        _total_done = len(completed_scenes)  # already the final count for this scene
+                        if (i == 0 or i == _total - 1
+                                or (i + 1) % _update_interval == 0):
+                            _pct = 60 + int(_total_done / _total * 15)
+                            try:
+                                from database.db_extended import ExtendedDatabase
+                                ExtendedDatabase().update_video(
+                                    video_id,
+                                    progress=_pct,
+                                    progress_phase="video",
+                                )
+                            except Exception:
+                                pass
+                    self._current_clip_idx += 1
+                    continue
             # Match asset to scene (1:1 with scene_ranges)
             asset = None
             if scene_ranges:
@@ -473,18 +548,21 @@ class VideoEditor:
                 segment_paths.append("")  # placeholder; will be caught by concat
 
             self._current_clip_idx += 1
+            rendered_this_run += 1
 
             # ── v4: subprocess progress via DB ─────────────────
             # Only active when called from the pipeline worker
             # (video_id is set).  Writes ~10 progress updates
             # across the segment loop so the frontend sees real
             # progress instead of being stuck at 60 %.
+            # Includes checkpoint-resumed scenes in the total.
             if video_id is not None and video_id > 0:
                 _total = len(block_ranges)
                 _update_interval = max(1, _total // 10)
                 if (i == 0 or i == _total - 1
                         or (i + 1) % _update_interval == 0):
-                    _pct = 60 + int((i + 1) / _total * 15)
+                    _total_done = len(completed_scenes) + rendered_this_run
+                    _pct = 60 + int(_total_done / _total * 15)
                     try:
                         from database.db_extended import ExtendedDatabase
                         ExtendedDatabase().update_video(
@@ -943,13 +1021,21 @@ class VideoEditor:
             # Force garbage collection
             import gc
             gc.collect()
-            # Clean up temp segments (always, to prevent stale files on next render)
+            # Clean up temp segments — only on success.
+            # On failure, leave segments on disk so the next reassembly can
+            # resume from the checkpoint instead of re-rendering everything.
             try:
                 import shutil
                 if seg_dir.exists():
-                    shutil.rmtree(seg_dir, ignore_errors=True)
-                    status = "after success" if render_ok else "after failure"
-                    self.logger.info("🧹 Segment tempdir cleaned (%s): %s", status, seg_dir.name)
+                    if render_ok:
+                        shutil.rmtree(seg_dir, ignore_errors=True)
+                        self.logger.info("🧹 Segment tempdir cleaned (after success): %s", seg_dir.name)
+                    else:
+                        self.logger.info(
+                            "📦 Segment tempdir preserved for reassembly checkpoint: %s "
+                            "(%d completed scenes out of %d)",
+                            seg_dir.name, len(completed_scenes), len(block_ranges),
+                        )
             except Exception:
                 self.logger.debug("Could not clean segment tempdir: %s", seg_dir)
             # Clean up temp music
