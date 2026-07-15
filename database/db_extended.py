@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -2639,10 +2640,12 @@ class ExtendedDatabase(Database):
 
             # ── Heatmap data: daily views last 30 days per channel ──
             heatmap_data = []
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             for days_back in range(29, -1, -1):
-                day_start = f"datetime('now', '-{days_back} days', 'start of day')"
-                day_end = f"datetime('now', '-{days_back} days', 'start of day', '+1 day')"
-                day_date = f"date('now', '-{days_back} days')"
+                target = today - timedelta(days=days_back)
+                day_start = target.strftime("%Y-%m-%d")
+                day_end   = (target + timedelta(days=1)).strftime("%Y-%m-%d")
+                day_date  = target.strftime("%Y-%m-%d")
                 per_channel = {}
                 hd_channels = conn.execute("SELECT id FROM channels WHERE active = 1").fetchall()
                 for hch in hd_channels:
