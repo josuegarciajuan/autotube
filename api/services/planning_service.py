@@ -60,15 +60,15 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
 def _build_source_mode_sequence(total: int, viral_per_day: int) -> list[str]:
     """Build alternating source_mode sequence for one channel's daily slots.
 
-    Starts with 'original', then alternates with 'viral' when available.
-    If viral_per_day > original_count, the sequence starts with 'viral' instead
-    so that the alternating pattern distributes them evenly.
+    Always starts with 'viral' when viral_per_day > 0 so viral slots get
+    earlier scheduled_at and are dispatched first. Then alternates to
+    distribute them evenly throughout the day.
 
     Examples:
-        total=3, viral=1 → ['original', 'viral', 'original']
+        total=3, viral=1 → ['viral', 'original', 'original']
         total=3, viral=2 → ['viral', 'original', 'viral']
-        total=4, viral=2 → ['original', 'viral', 'original', 'viral']
-        total=4, viral=1 → ['original', 'viral', 'original', 'original']
+        total=4, viral=2 → ['viral', 'original', 'viral', 'original']
+        total=4, viral=1 → ['viral', 'original', 'original', 'original']
         total=2, viral=0 → ['original', 'original']
         total=2, viral=2 → ['viral', 'viral']
     """
@@ -78,13 +78,11 @@ def _build_source_mode_sequence(total: int, viral_per_day: int) -> list[str]:
         return ["viral"] * total
 
     original_count = total - viral_per_day
-    # Start with the style that has more items
-    if viral_per_day > original_count:
-        first, second = "viral", "original"
-        first_avail, second_avail = viral_per_day, original_count
-    else:
-        first, second = "original", "viral"
-        first_avail, second_avail = original_count, viral_per_day
+    # Always start with viral first so they get earlier scheduled_at
+    # and are dispatched before original slots. The alternation still
+    # ensures even distribution throughout the day.
+    first, second = "viral", "original"
+    first_avail, second_avail = viral_per_day, original_count
 
     result = []
     for i in range(total):
@@ -799,9 +797,12 @@ def sync_midday(db=None) -> dict:
             continue  # No change needed
         
         if current_planned > target_planned:
-            # Too many: cancel the last N pending slots
+            # Too many: cancel the last N pending slots.
+            # Sort so 'original' slots are cancelled before 'viral' slots,
+            # preserving viral quota whenever possible.
             excess = current_planned - target_planned
-            to_cancel = pending[-excess:] if excess <= len(pending) else pending
+            pending.sort(key=lambda s: 0 if s.get("source_mode") == "viral" else 1)
+            to_cancel = pending[:excess] if excess <= len(pending) else pending
             if to_cancel:
                 ids = [s["id"] for s in to_cancel]
                 cancelled = db.cancel_slots(ids)
@@ -1205,41 +1206,69 @@ def _readjust_pending_slots(db):
 
 def _cancel_stale_slots(db):
     """Cancel pending slots whose upload window has already passed.
-    
+
     In the 3-phase model, a slot is "stale" if its target_upload_at is in the past
     (the upload window for that day has come and gone). These slots can never be
     generated+uploaded in time.
-    
+
     Also cancels slots whose scheduled_at is >6h in the past (server crash/restart
     scenarios where the dispatcher never picked them up).
-    
+
+    Viral protection: stale viral slots are preserved if the channel has NOT yet
+    generated any viral video today — this ensures the viral quota is met even when
+    scheduling delays push viral slots past their window.
+
     Skips cancellation when an active generation is in progress — slots
     blocked by the global concurrency guard are held intentionally.
     """
     # Don't cancel slots held back by an active generation
     if db.count_active_jobs() > 0:
         return
-    
+
+    # Subquery: channels that already generated a viral video today.
+    # Viral slots for these channels can be cancelled (quota met).
+    # Viral slots for other channels are preserved (quota not met yet).
+    channels_with_viral_today = """
+        SELECT DISTINCT v.channel_id
+        FROM videos v
+        JOIN scripts sc ON v.script_id = sc.id
+        JOIN raw_content rc ON sc.raw_content_id = rc.id
+        WHERE rc.source_mode = 'viral'
+          AND DATE(v.uploaded_at) = DATE('now', 'localtime')
+          AND v.yt_video_id IS NOT NULL
+    """
+
     cancelled = 0
     with db._connect() as conn:
-        # Cancel slots whose upload window has passed
+        # Cancel slots whose upload window has passed.
+        # Viral slots are only cancelled if the channel already has a
+        # viral video today; otherwise they are preserved.
         c1 = conn.execute(
-            """UPDATE planned_slots SET status = 'cancelled'
+            f"""UPDATE planned_slots SET status = 'cancelled'
                WHERE status = 'pending'
+                 AND (
+                     source_mode != 'viral'
+                     OR channel_id IN ({channels_with_viral_today})
+                 )
                  AND target_upload_at IS NOT NULL
                  AND target_upload_at <= datetime('now', 'localtime', '-30 minutes')"""
         ).rowcount
-        
+
         # Also cancel very old pending slots (>6h past scheduled_at)
+        # Same viral protection applies.
         c2 = conn.execute(
-            """UPDATE planned_slots SET status = 'cancelled'
+            f"""UPDATE planned_slots SET status = 'cancelled'
                WHERE status = 'pending'
+                 AND (
+                     source_mode != 'viral'
+                     OR channel_id IN ({channels_with_viral_today})
+                 )
                  AND scheduled_at <= datetime('now', 'localtime', '-6 hours')"""
         ).rowcount
-        
+
         conn.commit()
         cancelled = c1 + c2
-    
+
     if cancelled:
         logger.info("Cancelled %d stale pending slots (upload window passed: %d, very old: %d)",
                      cancelled, c1, c2)

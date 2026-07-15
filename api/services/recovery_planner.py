@@ -120,9 +120,8 @@ def _cancel_excess_pending_slots(db, channel_id: int, today: str,
                                  slug: str) -> int:
     """Cancel the last N pending slots to bring total back to target.
 
-    Sorts pending slots by scheduled_at descending (latest first), so
-    earlier slots that may already be in-process keep priority.
-    Never touches running slots.
+    Cancels 'original' slots before 'viral' slots, preserving the viral
+    quota. Never touches running slots.
 
     Returns number of slots cancelled.
     """
@@ -130,8 +129,10 @@ def _cancel_excess_pending_slots(db, channel_id: int, today: str,
     if not pending or excess <= 0:
         return 0
 
-    pending_sorted = sorted(pending, key=lambda s: s.get("scheduled_at", ""),
-                            reverse=True)
+    # Sort: cancel originals first, then virals; within same mode, latest first
+    pending_sorted = sorted(pending, key=lambda s: (
+        0 if s.get("source_mode") == "viral" else 1,  # virus last to cancel
+    ))
     to_cancel = [s["id"] for s in pending_sorted[:excess]]
 
     if to_cancel:
@@ -240,6 +241,25 @@ def auto_recover_missing_publications(db=None) -> dict:
         missing = target - total_covered
         logger.info("[%s] Behind by %d video(s) — attempting recovery", slug, missing)
 
+        # ── 2b. Compute source_mode distribution for recovery slots ──
+        viral_target = cfg.get("viral_per_day", 0)
+        active_viral = sum(1 for s in active_slots if s.get("source_mode") == "viral")
+        active_original = sum(1 for s in active_slots if s.get("source_mode") == "original")
+        # Virals still needed after accounting for active slots
+        virals_needed = max(0, viral_target - active_viral)
+        # Originals needed: fill the rest
+        originals_needed = max(0, missing - virals_needed)
+        # Adjust if originals_needed is short (shouldn't happen, but guard)
+        if virals_needed + originals_needed < missing:
+            originals_needed = missing - virals_needed
+        # Build the mode list: virals first (so they get dispatched first)
+        recovery_modes = (["viral"] * virals_needed) + (["original"] * originals_needed)
+        if recovery_modes:
+            logger.info(
+                "[%s] Recovery modes: %s (target=%d viral=%d, active_viral=%d active_orig=%d)",
+                slug, recovery_modes, target, viral_target, active_viral, active_original,
+            )
+
         # ── 3. Get peak info for low-audience calc ──
         from pipeline.publish_scheduler import get_channel_peak_info
         peak_info = get_channel_peak_info(cfg)
@@ -338,12 +358,15 @@ def auto_recover_missing_publications(db=None) -> dict:
             upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
 
             try:
+                # Determine source_mode for this recovery slot
+                slot_mode = recovery_modes[i] if i < len(recovery_modes) else "original"
                 slot_id = db.create_planned_slot(
                     channel_id=channel_id,
                     date_key=today,
                     scheduled_at=scheduled_str,
                     target_upload_at=upload_str,
                     slot_position=active_count + i + 1,
+                    source_mode=slot_mode,
                 )
 
                 existing_times.append(chosen_time)
@@ -352,12 +375,13 @@ def auto_recover_missing_publications(db=None) -> dict:
                     "scheduled_at": scheduled_str,
                     "target_upload_at": upload_str,
                     "source": source,
+                    "source_mode": slot_mode,
                 })
 
                 logger.info(
-                    "[%s] Recovery slot #%d created: gen=%02d:%02d upload=%02d:%02d source=%s",
+                    "[%s] Recovery slot #%d created: gen=%02d:%02d upload=%02d:%02d source=%s mode=%s",
                     slug, slot_id,
-                    scheduled_h, scheduled_m, up_h, up_m, source,
+                    scheduled_h, scheduled_m, up_h, up_m, source, slot_mode,
                 )
 
             except Exception as exc:

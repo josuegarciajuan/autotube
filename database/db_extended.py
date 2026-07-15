@@ -2582,14 +2582,16 @@ class ExtendedDatabase(Database):
     # ── Planning Slots ──────────────────────────────────────────
     
     def create_planned_slot(self, channel_id: int, date_key: str, scheduled_at: str,
-                            target_upload_at: str = None, slot_position: int = 0) -> int:
+                            target_upload_at: str = None, slot_position: int = 0,
+                            source_mode: str = "original") -> int:
         """Create a planned slot. Returns slot id."""
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                   target_upload_at, slot_position)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (channel_id, date_key, scheduled_at, target_upload_at, slot_position),
+                   target_upload_at, slot_position, source_mode)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (channel_id, date_key, scheduled_at, target_upload_at, slot_position,
+                 source_mode),
             )
             conn.commit()
             return cursor.lastrowid
