@@ -2821,10 +2821,12 @@ async def _monitor_worker_progress(
                 # ── Trigger immediate dispatch of next pending slot ──────
                 # Bypasses the 5-min checker loop tick so queued slots
                 # fire as soon as the active worker releases resources.
+                # Uses priority-aware dispatch: shorts get natural boost
+                # because they generate faster (~10 min vs ~45 min).
                 try:
-                    from api.services.planning_service import process_planned_slots as _dispatch_next
+                    from api.services.priority_dispatcher import dispatch_next_priority_slot
                     db2 = _get_db()
-                    _dispatch_next(db=db2)
+                    dispatch_next_priority_slot(db=db2)
                 except Exception:
                     pass
                 break

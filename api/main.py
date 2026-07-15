@@ -254,6 +254,7 @@ async def _schedule_checker_loop():
     last_midnight_check = time.time()
     last_recovery_check = 0
     last_shorts_recovery_check = 0
+    last_slot_calculation = 0
     first_run = True
 
     while True:
@@ -264,9 +265,9 @@ async def _schedule_checker_loop():
                 await asyncio.sleep(300)  # Check every 5 minutes after first run
 
             await _process_due_schedules()
-            await _process_planned_slots()    # F1: Dynamic planning engine (primary dispatcher)
+            await _process_shorts_slots()     # Shorts first: faster generation, tighter publish windows
             await _process_upload_slots()     # F2: Upload scheduler (awaiting_upload → private)
-            await _process_shorts_slots()     # Shorts scheduled dispatch
+            await _process_planned_slots()    # F1: Dynamic planning engine (long-form videos)
             await _queue_consumer()           # Process queued generation jobs sequentially
             await _detect_and_clean_orphans()
             
@@ -291,6 +292,11 @@ async def _schedule_checker_loop():
                 await _process_shorts_recovery_planner()
                 last_shorts_recovery_check = now
             
+            # ── Optimal publish slots: calculate once per day ──
+            if now - last_slot_calculation > 86400:  # 24 hours
+                await _calculate_optimal_slots()
+                last_slot_calculation = now
+
             # Regenerate the schedule forecast at midnight (daily)
             if now - last_midnight_check > 3600:  # Check once per hour
                 from datetime import date as _date
@@ -446,6 +452,60 @@ async def _process_shorts_slots():
             )
     except Exception as e:
         logger.error("Shorts dispatch error: %s", e)
+
+
+async def _calculate_optimal_slots():
+    """Calculate optimal publish slots for all channels using YouTube Analytics data.
+    
+    Runs once per day. Fetches viewer activity by hour from YT Analytics API,
+    crosses with historical DB performance, and computes 3 optimal time slots
+    (per channel, per content type: long-form and shorts).
+    
+    If slots change significantly (>1h), triggers replanning:
+    - Long-form: updates target_public_at for pending planned_slots
+    - Shorts: regenerates shorts_planned_slots for the 7-day horizon
+    """
+    import logging
+    logger = logging.getLogger("autotube.optimal_slots")
+    try:
+        from api.services.optimal_slots_calculator import calculate_and_replan_all
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        
+        result = calculate_and_replan_all(db)
+        
+        channels = result.get("channels_processed", 0)
+        slots = result.get("slots_calculated", 0)
+        replanned = result.get("channels_replanned", 0)
+        long_r = result.get("long_replanned", 0)
+        shorts_r = result.get("shorts_replanned", 0)
+        
+        logger.info(
+            "Optimal slots daily calc: %d channels, %d slots stored. "
+            "Replanned: %d channels (%d long, %d shorts)",
+            channels, slots, replanned, long_r, shorts_r,
+        )
+        
+        # Log per-channel details
+        for slug, detail in result.get("details", {}).items():
+            if detail.get("error"):
+                logger.warning("  %s: ERROR — %s", slug, detail["error"])
+            else:
+                long_s = detail.get("long_slots", [])
+                short_s = detail.get("short_slots", [])
+                niche = detail.get("niche", {})
+                logger.info(
+                    "  %s: long=%s short=%s niche=%s changed=(long:%s short:%s)",
+                    slug,
+                    [f"{s['hour']:02d}:00 (c={s.get('confidence',0):.2f})" for s in long_s],
+                    [f"{s['hour']:02d}:00 (c={s.get('confidence',0):.2f})" for s in short_s],
+                    niche.get("description", "unknown") if niche else "unknown",
+                    detail.get("long_changed", False),
+                    detail.get("shorts_changed", False),
+                )
+                
+    except Exception as e:
+        logger.error("Optimal slots calculation failed: %s", e)
 
 
 async def _process_due_schedules():
