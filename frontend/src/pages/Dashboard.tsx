@@ -11,6 +11,7 @@ import PipelineSection from '../components/PipelineSection'
 import TopVideos from '../components/TopVideos'
 import RecentVideos from '../components/RecentVideos'
 import RecentShorts from '../components/RecentShorts'
+import RecentActions from '../components/RecentActions'
 import YppProgressSection from '../components/YppProgressSection'
 import RevenueOverview from '../components/RevenueOverview'
 import BossFight from '../components/BossFight'
@@ -239,6 +240,7 @@ export default function Dashboard() {
   const recentShorts = data?.recent_shorts || []
   const todayVideos = data?.today_videos || []
   const heatmapData = data?.heatmap_data || []
+  const todayActions = data?.today_actions || []
   const channelNames: Record<string, string> = {}
   const channelSlugs: Record<string, string> = {}
   const channelColors: Record<string, string> = {}
@@ -467,6 +469,11 @@ export default function Dashboard() {
           <RecentVideos videos={todayVideos.slice(0, 10)} />
           <RecentShorts shorts={recentShorts.slice(0, 10)} />
         </div>
+      </CollapsibleSection>
+
+      {/* ═══════ NIVEL 1: Acciones de Hoy ═══════ */}
+      <CollapsibleSection title={`Acciones de Hoy (${todayActions.length})`} icon="📋" defaultOpen={true}>
+        <RecentActions actions={todayActions} />
       </CollapsibleSection>
 
       {/* ═══════ NIVEL 2: YPP + Revenue ═══════ */}

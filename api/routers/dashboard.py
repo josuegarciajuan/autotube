@@ -35,6 +35,11 @@ def get_dashboard(channel_id: Optional[int] = Query(None, description="Filter by
         if h.get("date"):
             h["date"] = str(h["date"])
 
+    # Serialize today_actions timestamps
+    for a in data.get("today_actions", []):
+        if a.get("action_at"):
+            a["action_at"] = str(a["action_at"])
+
     # Add upcoming milestones
     try:
         from pipeline.milestones import get_upcoming_milestones

@@ -2558,7 +2558,97 @@ class ExtendedDatabase(Database):
             "heatmap_data": heatmap_data,
             "streaks": streaks,
             "badges": badges,
+            "today_actions": self._get_today_actions(conn, channel_id, ch_params),
         }
+
+    def _get_today_actions(self, conn, channel_id=None, ch_params=()):
+        """Return a unified timeline of actions that occurred today.
+
+        Each action represents a discrete event: video generated, video uploaded,
+        video published, short generated, short published. Multiple actions can
+        refer to the same entity (e.g. a video generated and uploaded the same day).
+
+        Includes errored generations so operators can still see they were attempted.
+        """
+        v_where = "AND v.channel_id = ?" if channel_id else ""
+        s_where = "AND s.channel_id = ?" if channel_id else ""
+
+        sql = f"""
+            -- Videos generated today (any status, including errors)
+            SELECT v.id as entity_id, 'video' as entity_type,
+                   'generated' as action,
+                   v.created_at as action_at,
+                   v.titulo_final as title, v.status,
+                   c.name as channel_name, c.slug as channel_slug,
+                   v.yt_video_id as yt_id
+            FROM videos v
+            JOIN channels c ON v.channel_id = c.id
+            WHERE DATE(v.created_at) = DATE('now', 'localtime')
+              {v_where.replace('v.channel_id', 'v.channel_id')}
+
+            UNION ALL
+
+            -- Videos uploaded today
+            SELECT v.id, 'video',
+                   'uploaded',
+                   v.uploaded_at,
+                   v.titulo_final, v.status,
+                   c.name, c.slug,
+                   v.yt_video_id
+            FROM videos v
+            JOIN channels c ON v.channel_id = c.id
+            WHERE v.uploaded_at IS NOT NULL
+              AND DATE(v.uploaded_at) = DATE('now', 'localtime')
+              {v_where.replace('v.channel_id', 'v.channel_id')}
+
+            UNION ALL
+
+            -- Videos made public today
+            SELECT v.id, 'video',
+                   'published',
+                   v.published_at,
+                   v.titulo_final, v.status,
+                   c.name, c.slug,
+                   v.yt_video_id
+            FROM videos v
+            JOIN channels c ON v.channel_id = c.id
+            WHERE v.published_at IS NOT NULL
+              AND DATE(v.published_at) = DATE('now', 'localtime')
+              {v_where.replace('v.channel_id', 'v.channel_id')}
+
+            UNION ALL
+
+            -- Shorts generated today
+            SELECT s.id, 'short',
+                   'generated',
+                   s.created_at,
+                   s.title, s.status,
+                   c.name, c.slug,
+                   s.youtube_id
+            FROM shorts s
+            JOIN channels c ON s.channel_id = c.id
+            WHERE DATE(s.created_at) = DATE('now', 'localtime')
+              {s_where.replace('s.channel_id', 's.channel_id')}
+
+            UNION ALL
+
+            -- Shorts published today (always public)
+            SELECT s.id, 'short',
+                   'published',
+                   s.published_at,
+                   s.title, s.status,
+                   c.name, c.slug,
+                   s.youtube_id
+            FROM shorts s
+            JOIN channels c ON s.channel_id = c.id
+            WHERE s.published_at IS NOT NULL
+              AND DATE(s.published_at) = DATE('now', 'localtime')
+              {s_where.replace('s.channel_id', 's.channel_id')}
+
+            ORDER BY action_at DESC
+        """
+        rows = conn.execute(sql, ch_params * 5).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Channel Templates ─────────────────────────────────────
 
