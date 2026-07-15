@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { Clock, ExternalLink, Smartphone, Scissors, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
 import { formatDate } from '../lib/api'
 
@@ -130,17 +131,13 @@ export default function RecentShorts({ shorts }: RecentShortsProps) {
                 </div>
               </div>
 
-              {/* YouTube link */}
-              {s.youtube_url && (
-                <a
-                  href={s.youtube_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-emerald-400 hover:underline shrink-0 flex items-center gap-1"
-                >
-                  <ExternalLink size={12} />
-                </a>
-              )}
+              {/* Video detail link */}
+              <Link
+                to={`/videos/${s.id}/edit`}
+                className="text-xs text-emerald-400 hover:underline shrink-0 flex items-center gap-1"
+              >
+                <ExternalLink size={12} />
+              </Link>
             </div>
           ))}
         </div>

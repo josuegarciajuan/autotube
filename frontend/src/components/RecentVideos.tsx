@@ -131,17 +131,13 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                 </div>
               </div>
 
-              {/* YouTube link */}
-              {v.yt_url && (
-                <a
-                  href={v.yt_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-neon-red hover:underline shrink-0 flex items-center gap-1"
-                >
-                  <ExternalLink size={12} />
-                </a>
-              )}
+              {/* Video detail link */}
+              <Link
+                to={`/videos/${v.id}/edit`}
+                className="text-xs text-neon-red hover:underline shrink-0 flex items-center gap-1"
+              >
+                <ExternalLink size={12} />
+              </Link>
             </div>
           ))}
         </div>
