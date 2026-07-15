@@ -2320,42 +2320,41 @@ class ExtendedDatabase(Database):
                         round((aggr["watch_minutes"] or 0) / 60.0, 1)
                     )
 
-            # ── Recent published videos (last 5) ──
+            # ── Recent published videos (last 10, all statuses) ──
             rec_where = "AND v.channel_id = ?" if channel_id else ""
             recent_videos = conn.execute(
                 f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
-                           c.name as channel_name, c.slug as channel_slug
+                           v.status, c.name as channel_name, c.slug as channel_slug
                     FROM videos v
                     JOIN channels c ON v.channel_id = c.id
-                    WHERE v.yt_video_id IS NOT NULL {rec_where}
-                    ORDER BY v.uploaded_at DESC
-                    LIMIT 5""",
-                ch_params,
-            ).fetchall()
-
-            # ── Videos published today (last 10) ──
-            today_videos = conn.execute(
-                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
-                           c.name as channel_name, c.slug as channel_slug
-                    FROM videos v
-                    JOIN channels c ON v.channel_id = c.id
-                    WHERE v.yt_video_id IS NOT NULL
-                      AND DATE(v.uploaded_at) = DATE('now', 'localtime')
-                      {rec_where}
-                    ORDER BY v.uploaded_at DESC
+                    WHERE 1=1 {rec_where}
+                    ORDER BY COALESCE(v.uploaded_at, v.created_at) DESC
                     LIMIT 10""",
                 ch_params,
             ).fetchall()
 
-            # ── Recent published shorts (last 10) ──
+            # ── Videos published today (last 10, all statuses) ──
+            today_videos = conn.execute(
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
+                           v.status, c.name as channel_name, c.slug as channel_slug
+                    FROM videos v
+                    JOIN channels c ON v.channel_id = c.id
+                    WHERE DATE(COALESCE(v.uploaded_at, v.created_at)) = DATE('now', 'localtime')
+                      {rec_where}
+                    ORDER BY COALESCE(v.uploaded_at, v.created_at) DESC
+                    LIMIT 10""",
+                ch_params,
+            ).fetchall()
+
+            # ── Recent shorts (last 10, all statuses) ──
             recs_where = "AND s.channel_id = ?" if channel_id else ""
             recent_shorts = conn.execute(
                 f"""SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
-                           c.name as channel_name, c.slug as channel_slug
+                           s.status, c.name as channel_name, c.slug as channel_slug
                     FROM shorts s
                     JOIN channels c ON s.channel_id = c.id
-                    WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {recs_where}
-                    ORDER BY s.published_at DESC
+                    WHERE 1=1 {recs_where}
+                    ORDER BY COALESCE(s.published_at, s.created_at) DESC
                     LIMIT 10""",
                 ch_params,
             ).fetchall()

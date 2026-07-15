@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Clock, ExternalLink, Play, Film } from 'lucide-react'
+import { Clock, ExternalLink, Play, Film, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
 import { formatDate } from '../lib/api'
 
 interface RecentVideo {
@@ -9,6 +9,7 @@ interface RecentVideo {
   yt_url: string | null
   duracion_seg: number | null
   uploaded_at: string | null
+  status: string | null
   channel_name: string
   channel_slug: string
 }
@@ -38,6 +39,27 @@ function fmtDuration(sec: number | null): string {
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function statusBadge(status: string | null) {
+  const st = (status || '').toLowerCase()
+  if (st === 'error' || st === 'failed') {
+    return { icon: <AlertTriangle size={11} />, label: 'Error', cls: 'bg-red-500/15 text-red-400 border-red-500/30' }
+  }
+  if (st === 'generating' || st === 'rendering' || st === 'assembled' || st === 'reassembling') {
+    return { icon: <Loader2 size={11} className="animate-spin" />, label: st.charAt(0).toUpperCase() + st.slice(1), cls: 'bg-amber-400/15 text-amber-400 border-amber-400/30' }
+  }
+  if (st === 'uploaded' || st === 'published' || st === 'uploaded_private') {
+    return { icon: <CheckCircle size={11} />, label: st === 'uploaded_private' ? 'Scheduled' : (st.charAt(0).toUpperCase() + st.slice(1)), cls: 'bg-emerald-400/15 text-emerald-400 border-emerald-400/30' }
+  }
+  if (st === 'ready') {
+    return { icon: <CheckCircle size={11} />, label: 'Ready', cls: 'bg-blue-400/15 text-blue-400 border-blue-400/30' }
+  }
+  // draft, queued, or unknown
+  if (st === 'draft' || st === 'queued') {
+    return { icon: <Clock size={11} />, label: st === 'draft' ? 'Borrador' : 'En cola', cls: 'bg-gray-400/15 text-gray-400 border-gray-400/30' }
+  }
+  return null
 }
 
 const CHANNEL_COLORS: Record<string, string> = {
@@ -100,6 +122,12 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                     <Clock size={10} />
                     {timeAgo(v.uploaded_at)}
                   </span>
+                  {statusBadge(v.status) && (
+                    <span className={`ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium border flex items-center gap-1 ${statusBadge(v.status)!.cls}`}>
+                      {statusBadge(v.status)!.icon}
+                      {statusBadge(v.status)!.label}
+                    </span>
+                  )}
                 </div>
               </div>
 
