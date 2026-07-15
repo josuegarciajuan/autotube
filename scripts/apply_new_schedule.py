@@ -67,14 +67,14 @@ def main():
 
     # ── 4. Update long-form planning configs ─────────────────────
     planning_updates = [
-        # canal2: 2 videos/day fixed, all original
-        (ch2["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=0)),
-        # canal3: alternating 2/3, desfasado even=2 odd=3, all original
-        (ch3["id"], dict(videos_per_day=2, alternate_pattern=[2, 3], alternate_offset=0, viral_per_day=0)),
+        # canal2: 2 videos/day fixed, 1 viral + 1 original
+        (ch2["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=1)),
+        # canal3: alternating 2/3, desfasado even=2 odd=3, 1 viral + rest original
+        (ch3["id"], dict(videos_per_day=2, alternate_pattern=[2, 3], alternate_offset=0, viral_per_day=1)),
         # canal4: 3 videos/day fixed, ALL VIRAL (mirror content)
         (ch4["id"], dict(videos_per_day=3, alternate_pattern=None, alternate_offset=0, viral_per_day=3)),
-        # canal5: 2 videos/day fixed, all original
-        (ch5["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=0)),
+        # canal5: 2 videos/day fixed, 1 viral + 1 original
+        (ch5["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=1)),
     ]
 
     for ch_id, upd in planning_updates:
