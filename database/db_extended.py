@@ -3141,7 +3141,7 @@ class ExtendedDatabase(Database):
             config = {}
         return {
             "channel_id": channel_id,
-            "name": ch.get("name", ""),
+            "channel_name": ch.get("name", ""),
             "slug": ch.get("slug", ""),
             "videos_per_day": config.get("videos_per_day", 1),
             "planning_enabled": config.get("planning_enabled", True),
