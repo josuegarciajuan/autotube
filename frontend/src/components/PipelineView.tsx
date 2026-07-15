@@ -204,6 +204,8 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
       return Math.min(100, Math.max(0, Math.round(pct)))
     } catch { return 50 }
   })()
+  const countdown = formatCountdown(video.target_public_at)
+  const isDue = countdown === 'Ahora'
 
   return (
     <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} ${isDue ? 'animate-pulse border-neon-cyan/60' : ''} animate-fade-in`}>
