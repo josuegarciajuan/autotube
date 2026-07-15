@@ -693,6 +693,10 @@ YT_PRIVACY_STATUS = "public"
 
 # ── Scheduled Publishing ──────────────────────────────────────────
 PUBLISH_MODE = "scheduled"
+# ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
+GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
+UPLOAD_WINDOW_START = 9       # Upload window: 9:00 AM
+UPLOAD_WINDOW_END = 11        # Upload window: 11:00 AM
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 20
 PUBLISH_WARMUP_MIN = 120

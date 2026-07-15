@@ -482,9 +482,12 @@ def migrate_v2(db_path: str = None):
     # ── v4: Normalize media paths to project-root-relative form ──
     normalize_media_paths(conn, logger)
 
+    # ── v9: 3-phase pipeline (generate → upload → publish) ──
+    _migrate_v9(conn, logger)
+    
     conn.commit()
     conn.close()
-
+    
     # Generate channel profile (description, banner, avatar) for canal2 if needed
     if canal2_needs_profile:
         _seed_canal2_profile()
@@ -738,6 +741,82 @@ def _migrate_v7(conn, logger):
     """)
     conn.commit()
     logger.info("Migration v7: channel_daily_watchtime table ensured")
+
+
+def _migrate_v9(conn, logger):
+    """Idempotent v9 migration: 3-phase pipeline (generate → upload → publish).
+    
+    Adds:
+      - planned_slots.target_public_at (peak publish time, separate from target_upload_at which now = upload window time)
+      - planned_slots.upload_window_start / upload_window_end (per-slot upload window, denormalized for queries)
+      - Channel config_json defaults: GENERATION_LEAD_HOURS, UPLOAD_WINDOW_START, UPLOAD_WINDOW_END
+    """
+    # ── planned_slots: target_public_at ──────────────────────────
+    existing_ps = {row[1] for row in conn.execute("PRAGMA table_info(planned_slots)").fetchall()}
+    
+    ps_columns = [
+        ("target_public_at", "TIMESTAMP"),
+        ("upload_window_start", "INTEGER DEFAULT 9"),  # hour (0-23)
+        ("upload_window_end", "INTEGER DEFAULT 11"),   # hour (0-23)
+    ]
+    added = 0
+    for col_name, col_def in ps_columns:
+        if col_name not in existing_ps:
+            try:
+                conn.execute(f"ALTER TABLE planned_slots ADD COLUMN {col_name} {col_def}")
+                added += 1
+                logger.info("Migration v9: added %s column to planned_slots", col_name)
+            except Exception as e:
+                logger.debug("v9 planned_slots.%s: %s", col_name, e)
+    
+    if added > 0:
+        # Backfill target_public_at from target_upload_at for existing pending slots
+        conn.execute("""
+            UPDATE planned_slots 
+            SET target_public_at = target_upload_at 
+            WHERE target_public_at IS NULL AND target_upload_at IS NOT NULL
+        """)
+        logger.info("Migration v9: backfilled target_public_at from target_upload_at")
+    
+    # ── Seed channel config_json defaults for existing active channels ──
+    channels = conn.execute("SELECT id, slug, config_json FROM channels WHERE active = 1").fetchall()
+    seeded = 0
+    for ch in channels:
+        try:
+            config = json.loads(ch["config_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+        
+        modified = False
+        defaults = {
+            "GENERATION_LEAD_HOURS": 36,
+            "UPLOAD_WINDOW_START": 9,
+            "UPLOAD_WINDOW_END": 11,
+        }
+        for key, val in defaults.items():
+            if key not in config:
+                config[key] = val
+                modified = True
+        
+        if modified:
+            conn.execute(
+                "UPDATE channels SET config_json = ? WHERE id = ?",
+                (json.dumps(config, ensure_ascii=False), ch["id"]),
+            )
+            seeded += 1
+    
+    if seeded > 0:
+        logger.info("Migration v9: seeded 3-phase config defaults for %d channels", seeded)
+
+    # ── Create index for pending slot queries by target_public_at ──
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ps_target_public ON planned_slots(target_public_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ps_window ON planned_slots(upload_window_start, upload_window_end)"
+    )
+    conn.commit()
+    logger.info("Migration v9: complete (added %d columns, seeded %d channels)", added, seeded)
 
 
 class ExtendedDatabase(Database):
@@ -2522,10 +2601,13 @@ class ExtendedDatabase(Database):
             for s in slots:
                 conn.execute(
                     """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                       target_upload_at, slot_position, source_mode)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       target_upload_at, target_public_at, upload_window_start, upload_window_end,
+                       slot_position, source_mode)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (s["channel_id"], s["date_key"], s["scheduled_at"],
-                     s.get("target_upload_at"), s.get("slot_position", 0),
+                     s.get("target_upload_at"), s.get("target_public_at"),
+                     s.get("upload_window_start", 9), s.get("upload_window_end", 11),
+                     s.get("slot_position", 0),
                      s.get("source_mode", "original")),
                 )
                 count += 1
@@ -2577,6 +2659,32 @@ class ExtendedDatabase(Database):
                    WHERE ps.status = 'pending'
                       AND ps.scheduled_at <= datetime('now', 'localtime')
                    ORDER BY ps.scheduled_at ASC LIMIT 1"""
+            ).fetchone()
+        return dict(row) if row else None
+    
+    def get_next_available_slot(self, max_future_hours: int = 36) -> dict | None:
+        """Get the first pending slot (by scheduled_at) whose target_public_at
+        is within max_future_hours from now. Supports pull-forward dispatch.
+        
+        Unlike get_next_pending_slot(), this does NOT require scheduled_at <= now,
+        allowing generation to start early when the worker is idle.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
+                   FROM planned_slots ps
+                   JOIN channels c ON ps.channel_id = c.id
+                   WHERE ps.status = 'pending'
+                      AND (
+                          -- Due slot: scheduled_at has passed
+                          ps.scheduled_at <= datetime('now', 'localtime')
+                          OR
+                          -- Pull-forward: target upload is within the lead window
+                          (ps.target_public_at IS NOT NULL
+                           AND ps.target_public_at <= datetime('now', 'localtime', ? || ' hours'))
+                      )
+                   ORDER BY ps.scheduled_at ASC LIMIT 1""",
+                (f"+{max_future_hours}",),
             ).fetchone()
         return dict(row) if row else None
     
@@ -2759,6 +2867,10 @@ class ExtendedDatabase(Database):
             "alternate_offset": config.get("alternate_offset", 0),
             # ── Source mode distribution (videos_per_day = total, viral_per_day = how many viral) ──
             "viral_per_day": config.get("viral_per_day", 0),
+            # ── 3-phase pipeline config (v9) ──
+            "upload_window_start": config.get("UPLOAD_WINDOW_START", 9),
+            "upload_window_end": config.get("UPLOAD_WINDOW_END", 11),
+            "generation_lead_hours": config.get("GENERATION_LEAD_HOURS", 36),
         }
     
     def update_channel_planning_config(self, channel_id: int,
@@ -2766,7 +2878,10 @@ class ExtendedDatabase(Database):
                                         planning_enabled: bool = None,
                                         alternate_pattern: list = None,
                                         alternate_offset: int = None,
-                                        viral_per_day: int = None) -> bool:
+                                        viral_per_day: int = None,
+                                        upload_window_start: int = None,
+                                        upload_window_end: int = None,
+                                        generation_lead_hours: int = None) -> bool:
         """Update planning fields in channel config_json."""
         ch = self.get_channel(channel_id)
         if not ch:
@@ -2787,6 +2902,12 @@ class ExtendedDatabase(Database):
             # Clamp: 0 <= viral_per_day <= videos_per_day (current total)
             total = config.get("videos_per_day", 1)
             config["viral_per_day"] = max(0, min(total, viral_per_day))
+        if upload_window_start is not None:
+            config["UPLOAD_WINDOW_START"] = max(0, min(23, upload_window_start))
+        if upload_window_end is not None:
+            config["UPLOAD_WINDOW_END"] = max(0, min(23, upload_window_end))
+        if generation_lead_hours is not None:
+            config["GENERATION_LEAD_HOURS"] = max(1, min(72, generation_lead_hours))
         return self.update_channel(channel_id, config=config)
     
     def get_active_job(self) -> dict | None:
@@ -2836,6 +2957,9 @@ class ExtendedDatabase(Database):
         because they run concurrently with long-form and have their own
         guard (get_active_shorts_job).
         
+        Upload-only jobs (upload_only) are EXCLUDED because they are 
+        network-bound and can run concurrently with generation.
+        
         Counts both 'running' AND 'queued' to close the TOCTOU race window:
         a job created by process_planned_slots() may briefly be 'queued'
         before the async task sets it to 'running'. If another dispatcher
@@ -2845,9 +2969,31 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
-                "AND action NOT IN ('generate_native_short', 'generate_clip_short')"
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
+    
+    def count_active_upload_jobs(self) -> int:
+        """Count upload_only jobs currently running or queued."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status IN ('running', 'queued') "
+                "AND action = 'upload_only'"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def get_active_upload_job_for_channel(self, channel_id: int) -> dict | None:
+        """Check if a channel already has an active upload_only job."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs "
+                "WHERE status IN ('running', 'queued') "
+                "AND action = 'upload_only' "
+                "AND channel_id = ? LIMIT 1",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
     
     # ── Cross-process TTS lock for Kokoro ────────────────────────
     

@@ -721,11 +721,14 @@ def run_job(
         # ═══════════════════════════════════════════════════════
         # Phase 6: Upload
         # ═══════════════════════════════════════════════════════
-        skip_upload = not upload or test_mode
+        skip_upload = not upload or test_mode or action == "generate_only"
         if skip_upload:
-            skip_reason = "Test mode" if test_mode else "Upload disabled"
-            logger.info("Phase 6/6: %s — skipping upload", skip_reason)
-            db.update_video(video_id, progress=100, status="ready")
+            skip_reason = "Test mode" if test_mode else ("Phase 1 only (generate_only)" if action == "generate_only" else "Upload disabled")
+            logger.info("Phase 6/6: %s — skipping upload (video stays local)", skip_reason)
+            # ── generate_only: mark as awaiting_upload for later upload dispatch ──
+            gen_status = "awaiting_upload" if action == "generate_only" else "ready"
+            db.update_video(video_id, progress=100, status=gen_status)
+            logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")
             logger.info("Phase 6/6: Uploading to YouTube...")

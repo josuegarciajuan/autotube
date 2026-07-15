@@ -700,6 +700,11 @@ PUBLISH_JITTER_MIN = 20
 PUBLISH_WARMUP_MIN = 120
 # PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (educacion_ciencia → 18:00)
 
+# ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
+GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate (1.5 days)
+UPLOAD_WINDOW_START = 9       # Upload window: 9:00 AM
+UPLOAD_WINDOW_END = 11       # Upload window: 11:00 AM
+
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
     "enfermedades raras",

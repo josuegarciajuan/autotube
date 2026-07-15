@@ -670,6 +670,10 @@ YT_PRIVACY_STATUS = "public"
 # "immediate" = legacy (pública al subir)
 # "scheduled" = sube en privado, se publica solo a la hora pico
 PUBLISH_MODE = "scheduled"
+# ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
+GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
+UPLOAD_WINDOW_START = 9       # Upload window: 9:00 AM
+UPLOAD_WINDOW_END = 11        # Upload window: 11:00 AM
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_TARGET_HOUR = 21           # 9 PM — peak para contenido de misterio
 PUBLISH_JITTER_MIN = 20            # ±20 min de variación aleatoria

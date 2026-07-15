@@ -1744,6 +1744,160 @@ async def start_upload_job(job_id: int, video_id: int):
                                    "failed", video_id)
 
 
+async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id: int,
+                                           source_mode: str = "original"):
+    """Upload (F2) a video generated in Phase 1, using scheduled private mode.
+    
+    Called by upload_scheduler.py when an awaiting_upload video is within
+    its channel's upload window.
+    
+    This is like start_upload_job but:
+    - Uses the channel's publish_mode (scheduled = private + lifecycle)
+    - Sets target_public_at from the video record
+    - Schedules lifecycle actions (go_public, playlist, comments)
+    - Cleans up the local mp4 after successful upload
+    """
+    import asyncio, json, time
+
+    db = _get_db()
+    v = db.get_video(video_id)
+    if not v:
+        db.update_job(job_id, status="failed", error_msg="Video not found")
+        return
+
+    db.update_job(job_id, status="running")
+    ch = db.get_channel(channel_id)
+    canal = ch["slug"] if ch else v.get("canal", "canal2")
+
+    await _broadcast_progress(job_id, 5, "upload", "F2: Preparando subida programada...",
+                               video_id=video_id)
+
+    try:
+        await _broadcast_progress(job_id, 10, "upload", "Autenticando con YouTube...",
+                                   video_id=video_id)
+
+        from orchestrator import PipelineOrchestrator
+        orch = PipelineOrchestrator(canal=canal)
+
+        if not orch.uploader.authenticate():
+            db.update_job(job_id, status="failed", error_msg="YouTube auth failed")
+            db.update_video(video_id, status="error", progress_phase="upload")
+            return
+
+        # ── Build metadata ──
+        tags_raw = v.get("tags_json", "[]")
+        if isinstance(tags_raw, str):
+            try:
+                tags = json.loads(tags_raw)
+            except json.JSONDecodeError:
+                tags = []
+        else:
+            tags = tags_raw or []
+
+        # ── Scheduled publishing: use target_public_at from the video record ──
+        target_public_at = v.get("target_public_at")
+        if target_public_at:
+            logger.info("[%s] Upload scheduler: target_public_at=%s", canal, target_public_at)
+        else:
+            logger.warning("[%s] Upload scheduler: no target_public_at — will upload as private anyway", canal)
+
+        await _broadcast_progress(job_id, 20, "upload", "Subiendo video a YouTube...",
+                                   video_id=video_id)
+
+        upload_start = time.time()
+
+        # ── Progress callback ──
+        def _upload_progress_cb(yt_pct: int):
+            try:
+                our_pct = 20 + int(yt_pct * 0.6)
+                db2 = _get_db()
+                db2.update_job(job_id, progress=our_pct, phase="upload")
+                db2.update_video(video_id, progress=our_pct, progress_phase="upload")
+            except Exception:
+                pass
+
+        # ── Use orch.uploader with private mode ──
+        # The orchestrator's phase_upload handles scheduled vs immediate
+        # Build a minimal video_data dict for the uploader
+        video_data = {
+            "video_path": v.get("video_path", ""),
+            "titulo": v.get("titulo_final", "Video sin titulo"),
+            "thumbnail_path": v.get("thumbnail_path", ""),
+        }
+        metadata = {
+            "selected_title": v.get("titulo_final", ""),
+            "description": v.get("description", ""),
+            "tags": tags,
+        }
+
+        # Import lifecycle manager for post-upload scheduling
+        from pipeline.video_lifecycle import VideoLifecycleManager
+
+        # ── Upload as private (scheduled mode) ──
+        yt_video_id = orch.phase_upload(
+            script=None,
+            video_data=video_data,
+            metadata=metadata,
+            job_id=job_id,
+            planned_public_at=target_public_at,
+        )
+
+        if yt_video_id:
+            yt_url = f"https://youtube.com/watch?v={yt_video_id}"
+            db.mark_video_uploaded(video_id, yt_video_id, yt_url)
+            db.update_video(video_id, progress=100, status="uploaded_private")
+
+            # ── Clean up local mp4 ──
+            vp = video_data.get("video_path", "")
+            if vp and Path(vp).exists():
+                try:
+                    Path(vp).unlink()
+                    db.update_video(video_id, video_path="")
+                    logger.info("[%s] Deleted local mp4 after scheduled upload: %s", canal, vp)
+                except Exception:
+                    pass
+
+            # ── Schedule lifecycle actions (F3: go_public + playlists + comments) ──
+            try:
+                script_text = None
+                lifecycle = VideoLifecycleManager(canal, db)
+                lifecycle.on_video_uploaded_scheduled(
+                    db_video_id=video_id,
+                    yt_video_id=yt_video_id,
+                    channel_id=channel_id,
+                    script_text=script_text,
+                    target_public_at=target_public_at,
+                )
+                logger.info("[%s] Lifecycle actions scheduled for video %s", canal, yt_video_id)
+            except Exception as lc_exc:
+                logger.warning("[%s] Failed to schedule lifecycle for %s: %s", canal, yt_video_id, lc_exc)
+
+            # ── Post-upload stats ──
+            try:
+                from pipeline.youtube_stats import YouTubeStatsFetcher
+                fetcher = YouTubeStatsFetcher(canal)
+                if fetcher.authenticate():
+                    real_stats = fetcher.get_video_stats(yt_video_id)
+                    if real_stats and not real_stats.get("is_mock"):
+                        db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id, stats=real_stats)
+            except Exception:
+                pass
+
+            await _broadcast_progress(job_id, 100, "upload", f"Subido (privado): {yt_url}",
+                                       "completed", video_id)
+            logger.info("[%s] F2 upload complete: %s (pub scheduled for %s)",
+                         canal, yt_url, target_public_at)
+        else:
+            logger.error("[%s] Upload failed — video stays local", canal)
+            db.update_video(video_id, status="awaiting_upload", progress_phase="upload")
+            db.update_job(job_id, status="failed", error_msg="YouTube upload returned no video ID")
+
+    except Exception as e:
+        logger.exception("[%s] Upload scheduler job %d failed: %s", canal, job_id, e)
+        db.update_job(job_id, status="failed", error_msg=str(e)[:500])
+        db.update_video(video_id, status="awaiting_upload", progress_phase="upload")
+
+
 async def regenerate_scene_audio_task(scene_id: int, canal: str):
     """Regenerate TTS for a single scene."""
     db = _get_db()

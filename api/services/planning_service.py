@@ -33,6 +33,9 @@ SPAIN_FALLBACK_WINDOW = (8, 10, 0.5, "madrugada-overflow")
 
 ESTIMATED_PIPELINE_MINUTES = 180  # typical gen duration (~2-3h) + margin; used to calc scheduled_at
 MIN_GAP_MINUTES = 90               # minimum gap between generation START times
+GLOBAL_GAP_MINUTES = 5             # gap between consecutive generation jobs in the global queue (cross-day chaining)
+BUFFER_PCT = 0.15                  # safety buffer on per-channel avg creation time
+DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
 
 
 # ── Alternate pattern resolution ─────────────────────────────────
@@ -365,13 +368,194 @@ def compute_daily_slots(
     return resolved
 
 
+# ── 3-Phase Horizon Planning (v9) ──────────────────────────────
+
+def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
+                         window_start: int, window_end: int,
+                         videos_per_day: int = 1) -> tuple:
+    """Pick a deterministic minute within the upload window for one slot.
+    
+    Spreads multiple videos from the same channel across the window
+    (min 15 min apart). Returns (hour, minute).
+    """
+    ch_seed = _channel_seed(day_seed, channel_id) ^ (slot_pos * 0xCAFE)
+    window_minutes = (window_end - window_start) * 60
+    
+    if videos_per_day <= 1:
+        # Single video: random within window
+        offset = ch_seed % max(window_minutes - 1, 1)
+    else:
+        # Multiple videos: divide the window into N segments, then jitter
+        segment = window_minutes // videos_per_day
+        base = slot_pos * segment - segment // 2
+        jitter = (ch_seed % max(segment - 15, 1))
+        offset = max(0, min(window_minutes - 1, base + jitter))
+    
+    total_min = window_start * 60 + offset
+    return (total_min // 60, total_min % 60)
+
+
+def compute_horizon_slots(
+    channel_configs: list[dict],
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    db=None,
+) -> list[dict]:
+    """Core 3-phase planning: generate slots across N-day horizon with cross-day gen chaining.
+    
+    Algorithm:
+      1. For each day D in [today .. today+horizon_days):
+         - Compute target_public_at (peak publish) per channel using existing windows
+         - Compute target_upload_at (upload window) — deterministic minute within 
+           the channel's UPLOAD_WINDOW_START..END on day D
+      2. Sort ALL slots by target_upload_at (chronologically).
+      3. Chain generation starts BACKWARDS:
+         - Each generation must FINISH before its target_upload_at
+         - Each generation must not START more than lead_hours before target_public_at
+         - Generations are chained with GLOBAL_GAP_MINUTES gap
+         - Uses per-channel avg creation time (from timing_data) + BUFFER_PCT
+    
+    Returns:
+        Sorted list of slot dicts with: channel_id, date_key, scheduled_at,
+        target_upload_at, target_public_at, slot_position, channel_name, channel_slug,
+        source_mode, publish_mode.
+    """
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+    
+    today = _date.today()
+    all_raw_slots = []
+    
+    # ── 1. Collect all raw slots across the horizon ──────────────
+    for day_offset in range(horizon_days):
+        d = today + _td(days=day_offset)
+        date_str = d.isoformat()
+        
+        for ch in channel_configs:
+            if not ch.get("planning_enabled", True):
+                continue
+            n = _resolve_videos_per_day(ch, date_str)
+            if n <= 0:
+                continue
+            
+            is_scheduled = ch.get("publish_mode") == "scheduled"
+            ch_id = ch["channel_id"]
+            
+            # ── A. Compute target_public_at (peak publish time) ──
+            raw_peaks = _distribute_slots(
+                n, _day_seed(date_str), ch_id,
+                is_scheduled=is_scheduled,
+                scheduled_cfg=ch if is_scheduled else None,
+            )
+            
+            # ── B. Build source_mode sequence ──
+            viral_n = ch.get("viral_per_day", 0)
+            mode_sequence = _build_source_mode_sequence(n, viral_n) if n > 0 else ["original"] * n
+            
+            for pos, (peak_h, peak_m) in enumerate(raw_peaks, 1):
+                target_public_at = f"{date_str} {peak_h:02d}:{peak_m:02d}:00"
+                
+                # ── C. Compute target_upload_at (within upload window on pub day) ──
+                win_start = ch.get("upload_window_start", 9)
+                win_end = ch.get("upload_window_end", 11)
+                if not is_scheduled:
+                    # Immediate mode: upload = right after gen (use target_public_at as deadline)
+                    up_h, up_m = peak_h, peak_m
+                else:
+                    up_h, up_m = _pick_upload_minute(
+                        _day_seed(date_str), ch_id, pos,
+                        win_start, win_end, n,
+                    )
+                target_upload_at = f"{date_str} {up_h:02d}:{up_m:02d}:00"
+                
+                all_raw_slots.append({
+                    "channel_id": ch_id,
+                    "date_key": date_str,           # Publication day
+                    "target_public_at": target_public_at,
+                    "target_upload_at": target_upload_at,
+                    "slot_position": pos,
+                    "channel_name": ch.get("name", ""),
+                    "channel_slug": ch.get("slug", ""),
+                    "source_mode": mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original",
+                    "publish_mode": ch.get("publish_mode", "immediate"),
+                    "lead_hours": ch.get("generation_lead_hours", 36),
+                    "avg_duration_min": ch.get("avg_duration_min", ESTIMATED_PIPELINE_MINUTES),
+                })
+    
+    if not all_raw_slots:
+        return []
+    
+    # ── 2. Sort all slots by target_upload_at ───────────────────
+    all_raw_slots.sort(key=lambda s: s["target_upload_at"])
+    
+    # ── 3. Chain generation starts (walk BACKWARDS) ─────────────
+    # Walk from the latest slot to the earliest, chaining generation starts
+    # so each gen finishes before the NEXT slot's upload window.
+    
+    next_scheduled_at = None  # The next (later) slot's scheduled_at
+    
+    for i in range(len(all_raw_slots) - 1, -1, -1):
+        s = all_raw_slots[i]
+        ch_dur = s["avg_duration_min"]
+        lead_h = s["lead_hours"]
+        is_scheduled = s["publish_mode"] == "scheduled"
+        
+        # Parse target times
+        upload_dt = _dt.strptime(s["target_upload_at"], "%Y-%m-%d %H:%M:%S")
+        public_dt = _dt.strptime(s["target_public_at"], "%Y-%m-%d %H:%M:%S")
+        
+        # ── Latest allowed start: must finish before upload window ──
+        latest_start = upload_dt - _td(minutes=ch_dur)
+        
+        # ── Earliest allowed start: no more than lead_hours before public ──
+        earliest_start = public_dt - _td(hours=lead_h)
+        
+        if not is_scheduled:
+            # Immediate mode: same logic as before (back from public)
+            latest_start = public_dt - _td(minutes=ESTIMATED_PIPELINE_MINUTES)
+            earliest_start = latest_start  # No lead time for immediate
+        
+        # ── Chain constraint: must finish before next upload ──
+        if next_scheduled_at is not None:
+            chained_latest = next_scheduled_at - _td(minutes=GLOBAL_GAP_MINUTES) - _td(minutes=ch_dur)
+            latest_start = min(latest_start, chained_latest)
+        
+        # ── Pick the start time ──
+        if latest_start < earliest_start:
+            # Overcapacity warning — can't meet the deadline
+            logger.warning(
+                "Overcapacity: %s slot #%d (pub=%s) — "
+                "latest_start=%s < earliest_start=%s. Using earliest.",
+                s["channel_slug"], s["slot_position"],
+                s["target_public_at"],
+                latest_start.strftime("%m-%d %H:%M"),
+                earliest_start.strftime("%m-%d %H:%M"),
+            )
+            scheduled_dt = earliest_start
+        else:
+            # Start as EARLY as possible within the window (clear the queue quickly)
+            scheduled_dt = earliest_start
+        
+        s["scheduled_at"] = scheduled_dt.strftime("%Y-%m-%d %H:%M:%S")
+        next_scheduled_at = scheduled_dt
+    
+    # ── 4. Sort final output by scheduled_at ────────────────────
+    all_raw_slots.sort(key=lambda s: s["scheduled_at"])
+    
+    for pos, s in enumerate(all_raw_slots, 1):
+        s["slot_position"] = pos
+    
+    return all_raw_slots
+
+
 # ── Persistence layer ─────────────────────────────────────────
 
 def compute_and_store_slots(
     date_str: Optional[str] = None,
     db=None,
 ) -> dict:
-    """Compute slots for a date and store them in planned_slots.
+    """Compute slots for a single date and store them in planned_slots.
+    
+    Legacy single-day planning — for backward compatibility.
+    Prefer compute_and_store_horizon() for scheduled channels.
     
     Args:
         date_str: date to plan (defaults to today).
@@ -418,7 +602,7 @@ def compute_and_store_slots(
         ch_id = s["channel_id"]
         if ch_id not in slots_by_channel:
             slots_by_channel[ch_id] = []
-        slots_by_channel[ch_id].append(s["target_upload_at"][11:16])  # show upload times in log
+        slots_by_channel[ch_id].append(s.get("target_upload_at", "")[11:16])  # show upload times in log
     
     logger.info(
         "Planned %s: %d slots across %d channels → %s",
@@ -430,6 +614,139 @@ def compute_and_store_slots(
         "date": date_str,
         "total_slots": stored,
         "slots_by_channel": slots_by_channel,
+    }
+
+
+def _augment_channel_configs(db, channel_configs: list[dict]) -> list[dict]:
+    """Add per-channel avg_duration_min from historical timing data."""
+    from api.services.schedule_engine import get_avg_creation_minutes
+    
+    for cfg in channel_configs:
+        ch_id = cfg["channel_id"]
+        try:
+            avg = get_avg_creation_minutes(ch_id)
+            cfg["avg_duration_min"] = avg * (1 + BUFFER_PCT)  # buffered
+        except Exception:
+            cfg["avg_duration_min"] = ESTIMATED_PIPELINE_MINUTES
+    return channel_configs
+
+
+def compute_and_store_horizon(
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    db=None,
+    force_replan: bool = False,
+) -> dict:
+    """Plan and store all slots across the N-day horizon using 3-phase cross-day chaining.
+    
+    Replaces the old per-day planning loop. Drops and recreates ALL pending
+    slots across the horizon to ensure a fresh, coherent plan.
+    
+    Args:
+        horizon_days: days to plan (including today).
+        db: ExtendedDatabase instance.
+        force_replan: if True, also drop running slots (use with care).
+    
+    Returns:
+        dict with {total_slots, days_planned, slots_by_channel}.
+    """
+    from datetime import date as _date
+    
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    
+    # Get all active channels and their planning config
+    channels = db.get_channels(active_only=True)
+    channel_configs = []
+    for ch in channels:
+        cfg = db.get_channel_planning_config(ch["id"])
+        if cfg.get("planning_enabled", True) and cfg.get("videos_per_day", 0) > 0:
+            channel_configs.append(cfg)
+    
+    if not channel_configs:
+        logger.info("compute_and_store_horizon: no active planning channels")
+        return {"total_slots": 0, "days_planned": 0, "slots_by_channel": {}}
+    
+    # Augment with real durations
+    channel_configs = _augment_channel_configs(db, channel_configs)
+    
+    today = _date.today()
+    
+    # Delete existing PENDING slots across the horizon
+    with db._connect() as conn:
+        start_date = today.isoformat()
+        end_date = (today + timedelta(days=horizon_days)).isoformat()
+        deleted = conn.execute(
+            "DELETE FROM planned_slots WHERE date_key >= ? AND date_key < ? AND status = 'pending'",
+            (start_date, end_date),
+        ).rowcount
+        if force_replan:
+            # Also cancel running slots that are stale (no job)
+            conn.execute(
+                "UPDATE planned_slots SET status = 'cancelled' "
+                "WHERE date_key >= ? AND date_key < ? AND status = 'running' "
+                "AND job_id IS NULL",
+                (start_date, end_date),
+            )
+        conn.commit()
+        if deleted:
+            logger.info("Horizon replan: cleared %d pending slots", deleted)
+    
+    # Compute horizon slots
+    slots = compute_horizon_slots(channel_configs, horizon_days=horizon_days, db=db)
+    
+    if not slots:
+        logger.info("compute_and_store_horizon: no slots to plan")
+        return {"total_slots": 0, "days_planned": 0, "slots_by_channel": {}}
+    
+    # Store them
+    stored = db.create_planned_slots_batch(slots)
+    
+    # Collect stats
+    slots_by_channel = {}
+    days_used = set()
+    for s in slots:
+        ch_id = s["channel_id"]
+        if ch_id not in slots_by_channel:
+            slots_by_channel[ch_id] = []
+        slots_by_channel[ch_id].append({
+            "date": s["date_key"],
+            "gen": s["scheduled_at"][11:16],
+            "upload": s["target_upload_at"][11:16],
+            "public": s["target_public_at"][11:16],
+        })
+        days_used.add(s["date_key"])
+    
+    # Log summary
+    for ch_id, items in slots_by_channel.items():
+        slug = items[0] if items else "?"
+        logger.info(
+            "  %s: %d slots, gen starts: %s",
+            next(s["channel_slug"] for s in slots if s["channel_id"] == ch_id) if slots else "?",
+            len(items),
+            ", ".join(f"{i['date']}@{i['gen']}" for i in items),
+        )
+    
+    logger.info(
+        "Horizon planned: %d days, %d slots across %d channels",
+        len(days_used), stored, len(slots_by_channel),
+    )
+    
+    # ── Overcapacity check ──
+    total_gen_min = sum(s["avg_duration_min"] + GLOBAL_GAP_MINUTES for s in slots)
+    available_hours = horizon_days * 24
+    if total_gen_min > available_hours * 60 * 0.9:  # >90% capacity
+        logger.warning(
+            "⚠️  OVERCAPACITY RISK: %.0f h of generation needed for %d days "
+            "(%.1f%% of available time). Consider reducing videos_per_day or increasing lead_hours.",
+            total_gen_min / 60, horizon_days,
+            (total_gen_min / (available_hours * 60)) * 100,
+        )
+    
+    return {
+        "total_slots": stored,
+        "days_planned": len(days_used),
+        "slots_by_channel": {ch_id: len(items) for ch_id, items in slots_by_channel.items()},
     }
 
 
@@ -643,6 +960,11 @@ def process_planned_slots(db=None) -> dict | None:
     
     Called every 5 min by the API checker loop.
     
+    v9 3-phase model:
+      - Scheduled channels: dispatch with generate_only (F1), upload later (F2)
+      - Pull-forward: dispatch early if worker is idle and target_public_at 
+        is within the channel's lead window.
+    
     Returns:
         dict with dispatched slot info, or None if nothing to do.
     """
@@ -661,11 +983,11 @@ def process_planned_slots(db=None) -> dict | None:
     # 1. Reconcile mid-day changes
     sync_midday(db)
     
-    # 1b. Cancel stale pending slots (>3h past their scheduled time)
+    # 1b. Cancel stale pending slots (upload window already passed)
     _cancel_stale_slots(db)
     
-    # 2. Find the next pending slot whose time is due
-    next_slot = db.get_next_pending_slot()
+    # 2. Find the next pending slot — with pull-forward for scheduled channels
+    next_slot = db.get_next_available_slot(max_future_hours=36)
     if not next_slot:
         return None
     
@@ -695,8 +1017,10 @@ def process_planned_slots(db=None) -> dict | None:
     source_mode = next_slot.get("source_mode", "original")
     
     logger.info(
-        "Dispatching slot #%d: %s at %s",
-        slot_id, slug, next_slot["scheduled_at"],
+        "Dispatching slot #%d: %s (scheduled=%s, pub=%s)",
+        slot_id, slug,
+        (next_slot.get("scheduled_at") or "?")[11:16],
+        (next_slot.get("target_public_at") or "?")[11:16] if next_slot.get("target_public_at") else "?",
     )
     
     # 4. Mark slot as running
@@ -708,31 +1032,36 @@ def process_planned_slots(db=None) -> dict | None:
     # Get channel config to check publish mode
     ch_cfg = db.get_channel_planning_config(channel_id)
     publish_mode = ch_cfg.get("publish_mode", "immediate") if ch_cfg else "immediate"
+    is_scheduled = publish_mode == "scheduled"
+    
+    # ── Use the correct target_public_at (peak publish time) ──
+    target_public_at = next_slot.get("target_public_at")
     
     with db._connect() as conn:
         cursor = conn.execute(
             "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
             "publish_mode, target_public_at, created_at) "
             "VALUES (?, ?, '', 'generating', 0, ?, ?, CURRENT_TIMESTAMP)",
-            (slug, channel_id, publish_mode,
-             next_slot.get("target_upload_at") if publish_mode == "scheduled" else None),
+            (slug, channel_id, publish_mode, target_public_at),
         )
         conn.commit()
         video_id = cursor.lastrowid
     
-    # 6. Create job and mark it running IMMEDIATELY
-    # CRITICAL: must set status='running' BEFORE the fire-and-forget below,
-    # otherwise count_active_jobs() returns 0 and the global concurrency
-    # guard allows overlapping dispatches → ffmpeg resource contention → timeout.
-    # (schedule_engine.py does the same — db.update_job(id, status="running")
-    #  before asyncio.create_task.)
-    job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+    # 6. Determine action — scheduled channels use generate_only (F1 only)
+    if is_scheduled:
+        action = "generate_only"
+        # Don't pass upload=True — the worker will skip upload and keep mp4
+    else:
+        action = "generate_and_upload"
+    
+    # 7. Create job and mark it running IMMEDIATELY
+    job_id = db.create_job(channel_id, action, video_id)
     db.update_job(job_id, status="running")
     
-    # 7. Link job to slot
+    # 8. Link job to slot
     db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)
     
-    # 8. Fire and forget the generation
+    # 9. Fire and forget the generation
     import asyncio
     from api.services.generation_service import (
         start_generation_job,
@@ -746,7 +1075,7 @@ def process_planned_slots(db=None) -> dict | None:
                 job_id=job_id,
                 channel_id=channel_id,
                 video_id=video_id,
-                action="generate_and_upload",
+                action=action,
                 source_mode=source_mode,
             )
         )
@@ -756,7 +1085,7 @@ def process_planned_slots(db=None) -> dict | None:
                 job_id=job_id,
                 channel_id=channel_id,
                 video_id=video_id,
-                action="generate_and_upload",
+                action=action,
                 source_mode=source_mode,
             )
         )
@@ -766,6 +1095,7 @@ def process_planned_slots(db=None) -> dict | None:
         "job_id": job_id,
         "video_id": video_id,
         "channel_slug": slug,
+        "action": action,
     }
 
 
@@ -807,113 +1137,112 @@ def _sync_running_slots(db):
 
 
 def _readjust_pending_slots(db):
-    """Realign remaining pending slots after a job finishes.
-
-    When a generation job completes, the real finish time may differ from
-    the planned time.  This function recalculates the scheduled_at of all
-    pending slots for today starting from now + a small gap, so that
-    subsequent upload targets stay as close as possible to the planned
-    windows instead of drifting backwards in a cascade.
-
-    Only affects slots whose scheduled_at is in the future (or has passed
-    but wasn't dispatched yet).  Already-running slots are untouched.
+    """Realign remaining pending slots after a job finishes — cross-day aware.
     
-    Uses a 2-minute gap (vs planning's 90-min MIN_GAP_MINUTES) because the
-    global concurrency guard (count_active_jobs) already prevents overlapping
-    generations — slots should fire as soon as the active worker finishes.
+    When a generation job completes, pulls forward the next pending slot
+    regardless of its date_key. All pending slots across the horizon are
+    re-chained with per-channel durations and GLOBAL_GAP_MINUTES.
+    
+    target_upload_at and target_public_at are preserved — only scheduled_at
+    (generation start) is adjusted for the real timeline.
     """
-    POST_FINISH_GAP = 2  # minutes — global lock prevents concurrency
+    GAP = GLOBAL_GAP_MINUTES
     
+    # Get ALL pending slots across the horizon (not just today)
+    now = datetime.now()
     today = date.today().isoformat()
-    pending = db.get_planned_slots(date_key=today, status="pending")
+    horizon_end = (date.today() + timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    
+    all_pending = db.get_planned_slots_week(today, horizon_end)
+    pending = [s for s in all_pending if s["status"] == "pending"]
     if not pending:
         return
     
-    # Find the real finish time: now (the moment the last job ended).
-    # Use max(now, last_completed_slot's scheduled_at + buffer) as anchor.
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    now_h, now_m = map(int, now[11:16].split(":"))
-    now_total = now_h * 60 + now_m
+    # Sort by current scheduled_at
+    pending_sorted = sorted(pending, key=lambda s: s.get("scheduled_at", "9999"))
     
-    # Also check the last completed slot's scheduled_at + POST_FINISH_GAP
-    # as a lower bound
-    completed = db.get_planned_slots(date_key=today, status="completed")
-    if completed:
-        last_comp = sorted(completed, key=lambda s: s["scheduled_at"])[-1]
-        lh, lm = map(int, last_comp["scheduled_at"][11:16].split(":"))
-        anchor = max(now_total, lh * 60 + lm + POST_FINISH_GAP)
-    else:
-        anchor = now_total + POST_FINISH_GAP
-    
-    # Sort pending slots by current scheduled_at
-    pending_sorted = sorted(pending, key=lambda s: s["scheduled_at"])
+    # Anchor: now + gap (real time)
+    anchor = now + timedelta(minutes=GAP)
     
     logger.info(
-        "Reajustando %d slots pendientes desde anchor=%02d:%02d",
-        len(pending_sorted), anchor // 60, anchor % 60,
+        "Readjusting %d pending slots cross-day from anchor=%s",
+        len(pending_sorted), anchor.strftime("%m-%d %H:%M"),
     )
     
     next_start = anchor
     for slot in pending_sorted:
-        nh = next_start // 60
-        nm = next_start % 60
-        if nh >= 24:
-            nh = 23
-            nm = 59
+        # Get channel's avg duration
+        ch_dur = ESTIMATED_PIPELINE_MINUTES  # fallback
+        try:
+            from api.services.schedule_engine import get_avg_creation_minutes
+            ch_dur = get_avg_creation_minutes(slot["channel_id"]) * (1 + BUFFER_PCT)
+        except Exception:
+            pass
         
-        new_sched = f"{today} {nh:02d}:{nm:02d}:00"
-        up_total = nh * 60 + nm + ESTIMATED_PIPELINE_MINUTES
-        uh = min(up_total // 60, 23)
-        um = min(up_total % 60, 59)
-        new_upload = f"{today} {uh:02d}:{um:02d}:00"
+        old_sched = slot.get("scheduled_at", "?")[11:16] if slot.get("scheduled_at") else "?"
         
-        old_time = slot.get("scheduled_at", "?")[11:16] if slot.get("scheduled_at") else "?"
-        new_time = new_sched[11:16]
+        new_sched = next_start.strftime("%Y-%m-%d %H:%M:%S")
+        new_sched_short = next_start.strftime("%H:%M")
         
-        if old_time != new_time:
+        if old_sched != new_sched_short:
             logger.info(
-                "  Slot #%d (%s): %s → %s (gen), 📺 %s → 📺 %s",
+                "  Slot #%d (%s): gen %s → %s (pub=%s, upload=%s)",
                 slot["id"], slot.get("channel_slug", "?"),
-                old_time, new_time, 
+                old_sched, new_sched_short,
+                (slot.get("target_public_at") or "?")[11:16] if slot.get("target_public_at") else "?",
                 (slot.get("target_upload_at") or "?")[11:16] if slot.get("target_upload_at") else "?",
-                new_upload[11:16],
             )
         
         with db._connect() as conn:
             conn.execute(
-                "UPDATE planned_slots SET scheduled_at = ?, target_upload_at = ? WHERE id = ?",
-                (new_sched, new_upload, slot["id"]),
+                "UPDATE planned_slots SET scheduled_at = ? WHERE id = ?",
+                (new_sched, slot["id"]),
             )
             conn.commit()
         
-        next_start = nh * 60 + nm + POST_FINISH_GAP
+        next_start = next_start + timedelta(minutes=ch_dur + GAP)
 
 
 def _cancel_stale_slots(db):
-    """Cancel pending slots whose scheduled time passed more than 3 hours ago.
+    """Cancel pending slots whose upload window has already passed.
     
-    These are zombie slots — the dispatcher should have picked them up but
-    couldn't (e.g., server restart, checker loop crash).  Marking them as
-    cancelled prevents the dispatcher from acting on stale times.
+    In the 3-phase model, a slot is "stale" if its target_upload_at is in the past
+    (the upload window for that day has come and gone). These slots can never be
+    generated+uploaded in time.
+    
+    Also cancels slots whose scheduled_at is >6h in the past (server crash/restart
+    scenarios where the dispatcher never picked them up).
     
     Skips cancellation when an active generation is in progress — slots
-    blocked by the global concurrency guard are held intentionally, not abandoned.
+    blocked by the global concurrency guard are held intentionally.
     """
     # Don't cancel slots held back by an active generation
     if db.count_active_jobs() > 0:
         return
     
-    today = date.today().isoformat()
+    cancelled = 0
     with db._connect() as conn:
-        cancelled = conn.execute(
+        # Cancel slots whose upload window has passed
+        c1 = conn.execute(
             """UPDATE planned_slots SET status = 'cancelled'
-               WHERE status = 'pending' AND date_key = ?
-                 AND scheduled_at <= datetime('now', 'localtime', '-3 hours')""",
-            (today,),
+               WHERE status = 'pending'
+                 AND target_upload_at IS NOT NULL
+                 AND target_upload_at <= datetime('now', 'localtime', '-30 minutes')"""
         ).rowcount
+        
+        # Also cancel very old pending slots (>6h past scheduled_at)
+        c2 = conn.execute(
+            """UPDATE planned_slots SET status = 'cancelled'
+               WHERE status = 'pending'
+                 AND scheduled_at <= datetime('now', 'localtime', '-6 hours')"""
+        ).rowcount
+        
         conn.commit()
+        cancelled = c1 + c2
+    
     if cancelled:
-        logger.info("Cancelled %d stale pending slots (>3h overdue)", cancelled)
+        logger.info("Cancelled %d stale pending slots (upload window passed: %d, very old: %d)",
+                     cancelled, c1, c2)
 
 
 def _detect_manual_completions(db) -> bool:
@@ -945,7 +1274,10 @@ def _detect_manual_completions(db) -> bool:
 
 
 def ensure_today_planned(db=None):
-    """Ensure today has planned_slots. Called on API startup."""
+    """Ensure today has planned_slots. Called on API startup.
+    
+    Now uses horizon planning to rebuild the full week if empty.
+    """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -954,8 +1286,8 @@ def ensure_today_planned(db=None):
     existing = db.get_planned_slots(date_key=today)
     
     if not existing:
-        logger.info("No slots found for today (%s) — computing...", today)
-        compute_and_store_slots(today, db)
+        logger.info("No slots found for today (%s) — computing horizon...", today)
+        compute_and_store_horizon(horizon_days=7, db=db)
     else:
         # Quick sync in case config changed while API was down
         sync_midday(db)
