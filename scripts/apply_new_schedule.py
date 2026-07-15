@@ -9,7 +9,7 @@ New schedule:
   ├──────────┼───────────────┼───────────────────┼────────┼──────┤
   │ canal2   │ 2 (fixed)     │ —                 │ 3      │ 1    │
   │ canal3   │ 2/3 (altern)  │ [2,3] offset=0    │ 3      │ 2    │
-  │ canal4   │ 2/3 (altern)  │ [2,3] offset=1    │ 2      │ 2    │
+  │ canal4   │ 3 (fixed)     │ —                 │ 2      │ 2    │
   │ canal5   │ 2 (fixed)     │ —                 │ 2      │ 1    │
   └──────────┴───────────────┴───────────────────┴────────┴──────┘
 """
@@ -67,14 +67,14 @@ def main():
 
     # ── 4. Update long-form planning configs ─────────────────────
     planning_updates = [
-        # canal2: 2 videos/day fixed
-        (ch2["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0)),
-        # canal3: alternating 2/3, desfasado even=2 odd=3
-        (ch3["id"], dict(videos_per_day=2, alternate_pattern=[2, 3], alternate_offset=0)),
-        # canal4: alternating 2/3, desfasado even=3 odd=2
-        (ch4["id"], dict(videos_per_day=3, alternate_pattern=[2, 3], alternate_offset=1)),
-        # canal5: 2 videos/day fixed
-        (ch5["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0)),
+        # canal2: 2 videos/day fixed, all original
+        (ch2["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=0)),
+        # canal3: alternating 2/3, desfasado even=2 odd=3, all original
+        (ch3["id"], dict(videos_per_day=2, alternate_pattern=[2, 3], alternate_offset=0, viral_per_day=0)),
+        # canal4: 3 videos/day fixed, ALL VIRAL (mirror content)
+        (ch4["id"], dict(videos_per_day=3, alternate_pattern=None, alternate_offset=0, viral_per_day=3)),
+        # canal5: 2 videos/day fixed, all original
+        (ch5["id"], dict(videos_per_day=2, alternate_pattern=None, alternate_offset=0, viral_per_day=0)),
     ]
 
     for ch_id, upd in planning_updates:
@@ -84,10 +84,12 @@ def main():
             alternate_pattern=upd["alternate_pattern"],
             alternate_offset=upd["alternate_offset"],
             planning_enabled=True,
+            viral_per_day=upd.get("viral_per_day", 0),
         )
         logger.info(
-            "  Updated planning config for ch=%d: vpd=%s pattern=%s offset=%s",
+            "  Updated planning config for ch=%d: vpd=%s pattern=%s offset=%s viral=%s",
             ch_id, upd["videos_per_day"], upd["alternate_pattern"], upd["alternate_offset"],
+            upd.get("viral_per_day", 0),
         )
 
     # ── 5. Update shorts planning configs ────────────────────────

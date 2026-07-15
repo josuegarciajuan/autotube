@@ -2875,16 +2875,22 @@ class ExtendedDatabase(Database):
             "generation_lead_hours": config.get("GENERATION_LEAD_HOURS", 36),
         }
     
+    _UNSET = object()  # sentinel to distinguish "not passed" from "explicitly clear"
+
     def update_channel_planning_config(self, channel_id: int,
                                         videos_per_day: int = None,
                                         planning_enabled: bool = None,
-                                        alternate_pattern: list = None,
+                                        alternate_pattern: list = _UNSET,
                                         alternate_offset: int = None,
                                         viral_per_day: int = None,
                                         upload_window_start: int = None,
                                         upload_window_end: int = None,
                                         generation_lead_hours: int = None) -> bool:
-        """Update planning fields in channel config_json."""
+        """Update planning fields in channel config_json.
+
+        Pass alternate_pattern=None (the Python value) to explicitly clear it.
+        Omit the parameter (leaving it at sentinel _UNSET) to leave untouched.
+        """
         ch = self.get_channel(channel_id)
         if not ch:
             return False
@@ -2896,8 +2902,8 @@ class ExtendedDatabase(Database):
             config["videos_per_day"] = max(0, min(10, videos_per_day))
         if planning_enabled is not None:
             config["planning_enabled"] = planning_enabled
-        if alternate_pattern is not None:
-            config["alternate_pattern"] = alternate_pattern
+        if alternate_pattern is not self._UNSET:
+            config["alternate_pattern"] = alternate_pattern  # None → cleared
         if alternate_offset is not None:
             config["alternate_offset"] = alternate_offset
         if viral_per_day is not None:
