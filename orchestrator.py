@@ -1270,10 +1270,33 @@ class PipelineOrchestrator:
                         import pytz
                         local_tz = pytz.timezone(tz)
                         target_dt = local_tz.localize(target_dt).astimezone(_tz.utc)
-                    if target_dt < _dt.now(_tz.utc) + timedelta(minutes=warmup):
-                        logger.info("[%s] Planned public time too soon, using warmup end instead", self.canal)
-                        target_dt = _dt.now(_tz.utc) + timedelta(minutes=warmup)
-                    
+
+                    now_utc_dt = _dt.now(_tz.utc)
+
+                    # ── Publish immediately only if the planned time has ALREADY PASSED ──
+                    # (video generation took longer than expected and missed the window)
+                    if target_dt < now_utc_dt:
+                        logger.info(
+                            "[%s] Planned public time ALREADY PASSED (%s < now %s). "
+                            "Publishing as soon as warmup ends instead.",
+                            self.canal, target_dt.isoformat(), now_utc_dt.isoformat(),
+                        )
+                        target_dt = now_utc_dt + timedelta(minutes=warmup)
+                        was_already_past = True
+                    elif target_dt < now_utc_dt + timedelta(minutes=warmup):
+                        # Target is in the future but within the warmup window.
+                        # RESPECT the planned time — do NOT override it.
+                        # The lifecycle scheduler will execute go_public at target_dt.
+                        logger.info(
+                            "[%s] Planned public time is within warmup window (%s). "
+                            "Respecting planned target (no override).",
+                            self.canal, target_dt.isoformat(),
+                        )
+                        was_already_past = False
+                    else:
+                        # Target is far enough in the future — keep it as-is.
+                        was_already_past = False
+
                     publish_schedule_info = {
                         "target_public_at": target_dt.isoformat(),
                         "peak_hour_local": target_h or 0,
@@ -1282,7 +1305,8 @@ class PipelineOrchestrator:
                         "jitter_applied": 0,
                         "warmup_until": warmup_until,
                     }
-                    logger.info("[%s] Using planned public time: %s", self.canal, target_dt.isoformat())
+                    logger.info("[%s] Using planned public time: %s (already_past=%s)",
+                                self.canal, target_dt.isoformat(), was_already_past)
                 else:
                     publish_schedule_info = calculate_target_public_time(
                         slug=self.canal,

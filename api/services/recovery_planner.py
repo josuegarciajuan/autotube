@@ -299,13 +299,40 @@ def auto_recover_missing_publications(db=None) -> dict:
             # ── Build slot ──
             scheduled_h = chosen_time // 60
             scheduled_m = chosen_time % 60
-
-            # target_upload_at = scheduled_at + pipeline + warmup (if scheduled)
             is_scheduled = cfg.get("publish_mode") == "scheduled"
-            warmup = cfg.get("publish_warmup_min", 120) if is_scheduled else 0
-            up_minutes = chosen_time + ESTIMATED_PIPELINE_MINUTES + warmup
-            up_h = min(up_minutes // 60, 23)
-            up_m = min(up_minutes % 60, 59)
+
+            if is_scheduled:
+                # ── Scheduled mode: use the NEXT niche peak hour as target_upload_at ──
+                # Compute estimated pipeline completion time (local minute-of-day)
+                est_completion = chosen_time + ESTIMATED_PIPELINE_MINUTES
+                est_comp_hour = (est_completion // 60) % 24
+
+                # Get the niche peak hour (the best publishing time for this channel)
+                peak_h = peak_info.get("peak_hour", 20)
+
+                # Find the next occurrence of the peak hour after estimated completion
+                if peak_h > est_comp_hour:
+                    # Peak is later today — use it directly
+                    up_h, up_m = peak_h, 0
+                    logger.info(
+                        "[%s] Recovery slot target: peak %02d:00 > completion ~%02d:00 → using peak hour",
+                        slug, peak_h, est_comp_hour,
+                    )
+                else:
+                    # Peak already passed today — use it anyway.
+                    # The orchestrator will detect target_dt < now and publish
+                    # immediately after warmup (graceful degradation).
+                    up_h, up_m = peak_h, 0
+                    logger.info(
+                        "[%s] Recovery slot target: peak %02d:00 ≤ completion ~%02d:00 → "
+                        "peak passed, will publish immediately after generation",
+                        slug, peak_h, est_comp_hour,
+                    )
+            else:
+                # ── Immediate mode: use scheduled + pipeline (no peak targeting) ──
+                up_minutes = chosen_time + ESTIMATED_PIPELINE_MINUTES
+                up_h = min(up_minutes // 60, 23)
+                up_m = min(up_minutes % 60, 59)
 
             scheduled_str = f"{today} {scheduled_h:02d}:{scheduled_m:02d}:00"
             upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
