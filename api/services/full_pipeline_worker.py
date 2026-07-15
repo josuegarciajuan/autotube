@@ -739,7 +739,7 @@ def run_job(
             if video_record and video_record.get("publish_mode") == "scheduled":
                 planned_public_at = video_record.get("target_public_at")
                 if planned_public_at:
-                    logger.info("Using planned public time from slot: %s", planned_public_at)
+                    logger.info("📅 Publicación programada para: %s UTC", planned_public_at)
             
             yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,
                                              planned_public_at=planned_public_at)
@@ -750,6 +750,12 @@ def run_job(
                 worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url)
                 db.update_video(video_id, progress=100, status=worker_status)
+                
+                if pub_mode == "scheduled":
+                    tp = video_record.get("target_public_at", "?") if video_record else "?"
+                    logger.info("📤 SUBIDO (privado): %s | se hará público: %s UTC", yt_url, tp)
+                else:
+                    logger.info("📤 PUBLICADO: %s", yt_url)
                 
                 vp = video_data.get("video_path", "") if video_data else ""
                 if vp and Path(vp).exists():
@@ -788,7 +794,6 @@ def run_job(
                                              stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
                     except Exception:
                         pass
-                logger.info("UPLOADED: %s", yt_url)
             else:
                 logger.error("Upload failed — video saved locally")
                 db.update_video(video_id, progress=95, status="ready")

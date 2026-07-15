@@ -703,6 +703,17 @@ async def _process_lifecycle_actions():
         db = ExtendedDatabase()
         channels = db.get_channels(active_only=True)
         
+        # ── Pre-count: how many pending actions exist across all channels? ──
+        try:
+            all_due = db.get_due_lifecycle_actions()
+            total_pending = len(all_due)
+            # Count go_public actions specifically
+            go_public_pending = sum(1 for a in all_due if a.get("action_type") == "go_public")
+        except Exception:
+            total_pending, go_public_pending = 0, 0
+        
+        grand_total = {"processed": 0, "succeeded": 0, "failed": 0}
+        
         for ch in channels:
             slug = ch.get("slug")
             if not slug:
@@ -710,13 +721,32 @@ async def _process_lifecycle_actions():
             try:
                 mgr = VideoLifecycleManager(slug)
                 result = mgr.process_due_actions()
-                if result.get("processed", 0) > 0:
-                    logger.info(
-                        "Lifecycle [%s]: processed=%d succeeded=%d failed=%d",
-                        slug, result["processed"], result["succeeded"], result["failed"],
-                    )
+                grand_total["processed"] += result.get("processed", 0)
+                grand_total["succeeded"] += result.get("succeeded", 0)
+                grand_total["failed"] += result.get("failed", 0)
             except Exception as exc:
                 logger.warning("Lifecycle [%s] error: %s", slug, exc)
+        
+        # ── Heartbeat summary every cycle ──
+        if grand_total["processed"] > 0:
+            logger.info(
+                "🔄 Lifecycle checker: %d acciones procesadas (%d ok, %d fallos) "
+                "| %d pendientes totales (go_public=%d)",
+                grand_total["processed"], grand_total["succeeded"], grand_total["failed"],
+                total_pending, go_public_pending,
+            )
+        elif total_pending > 0:
+            logger.debug(
+                "🔄 Lifecycle checker: 0 vencidas ahora | %d pendientes futuras (go_public=%d)",
+                total_pending, go_public_pending,
+            )
+        else:
+            # Only log once every ~30 min to avoid noise
+            import time as _t
+            if not hasattr(_process_lifecycle_actions, "_last_empty_log") or \
+               _t.time() - _process_lifecycle_actions._last_empty_log > 1800:
+                logger.debug("🔄 Lifecycle checker: sin acciones pendientes")
+                _process_lifecycle_actions._last_empty_log = _t.time()
     except Exception as exc:
         logger.error("Lifecycle processor error: %s", exc)
 

@@ -1322,16 +1322,46 @@ class PipelineOrchestrator:
                         channel_id=channel_id,
                     )
                 upload_privacy = "private"
+                # ── Log resumido para el log principal ──
+                target_utc = publish_schedule_info["target_public_at"]
+                # Calculate local time equivalent
+                local_info = ""
+                try:
+                    import pytz
+                    from datetime import datetime as _dt2, timezone as _tz2
+                    local_tz = pytz.timezone(tz)
+                    target_local = _dt2.fromisoformat(target_utc.replace("Z", "+00:00")).astimezone(local_tz)
+                    local_info = f" ({target_local.strftime('%d/%m %H:%M')} {tz})"
+                except Exception:
+                    pass
                 logger.info(
-                    "[%s] SCHEDULED PUBLISH: peak=%d (source=%s), "
-                    "target=%s UTC, warmup_until=%s, jitter=%+dmin",
+                    "[%s] 📤 SUBIDO COMO PRIVADO | público programado: %s%s | "
+                    "peak=%d (src=%s) | warmup=%dmin | jitter=%+dmin",
                     self.canal,
+                    target_utc[:19], local_info,
                     publish_schedule_info["peak_hour_local"],
                     publish_schedule_info["peak_source"],
-                    publish_schedule_info["target_public_at"],
-                    publish_schedule_info["warmup_until"],
+                    warmup,
                     publish_schedule_info["jitter_applied"],
                 )
+                # ── Also log to dedicated scheduled_publish log ──
+                try:
+                    from api.services.scheduled_publish_logger import log_publish_event
+                    video_title = video_data.get("titulo", "?") if video_data else "?"
+                    log_publish_event(
+                        event="uploaded_private",
+                        slug=self.canal,
+                        video_title=video_title[:80],
+                        yt_video_id="(pending)",
+                        db_video_id=self.db_video_id,
+                        target_public_at=target_utc,
+                        peak_hour=publish_schedule_info["peak_hour_local"],
+                        peak_source=publish_schedule_info["peak_source"],
+                        warmup_min=warmup,
+                        jitter_min=publish_schedule_info["jitter_applied"],
+                    )
+                except Exception:
+                    pass
             else:
                 upload_privacy = self.config.YT_PRIVACY_STATUS
 

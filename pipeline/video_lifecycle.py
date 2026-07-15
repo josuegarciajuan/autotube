@@ -277,7 +277,10 @@ class VideoLifecycleManager:
             return {"processed": 0, "succeeded": 0, "failed": 0}
 
         processed, succeeded, failed = 0, 0, 0
+        by_type = {}  # action_type → {succeeded, failed}
         now_iso = datetime.now(timezone.utc).isoformat()
+
+        logger.info("[%s] 📋 Procesando %d acciones lifecycle pendientes", self.slug, len(due_actions))
 
         for action in due_actions:
             action_id = action["id"]
@@ -300,6 +303,8 @@ class VideoLifecycleManager:
                         action_id, "executed", executed_at=now_iso,
                     )
                     succeeded += 1
+                    by_type[action_type] = by_type.get(action_type, {"succeeded": 0, "failed": 0})
+                    by_type[action_type]["succeeded"] += 1
                 else:
                     # Handle retry
                     retry_count = action.get("retry_count", 0)
@@ -320,8 +325,12 @@ class VideoLifecycleManager:
                             error_message="Max retries exceeded",
                         )
                         failed += 1
+                        by_type[action_type] = by_type.get(action_type, {"succeeded": 0, "failed": 0})
+                        by_type[action_type]["failed"] += 1
             except Exception as exc:
                 logger.error("[%s] Action %d (%s) failed: %s", self.slug, action_id, action_type, exc)
+                by_type[action_type] = by_type.get(action_type, {"succeeded": 0, "failed": 0})
+                by_type[action_type]["failed"] += 1
                 self.db.update_lifecycle_action_status(
                     action_id, "failed",
                     executed_at=now_iso,
@@ -330,6 +339,28 @@ class VideoLifecycleManager:
                 failed += 1
 
             processed += 1
+
+        # ── Build summary string ──
+        summary_parts = []
+        for atype, counts in sorted(by_type.items()):
+            s = counts["succeeded"]
+            f = counts["failed"]
+            if s or f:
+                parts = []
+                if s:
+                    parts.append(f"✓{s}")
+                if f:
+                    parts.append(f"✗{f}")
+                summary_parts.append(f"{atype}={'+'.join(parts)}")
+        summary_str = ", ".join(summary_parts) if summary_parts else "ninguna"
+
+        if processed > 0:
+            logger.info(
+                "[%s] 📋 Lifecycle: %d procesadas (%d ok, %d fallos) — %s",
+                self.slug, processed, succeeded, failed, summary_str,
+            )
+        else:
+            logger.debug("[%s] 📋 Lifecycle: 0 acciones pendientes", self.slug)
 
         return {"processed": processed, "succeeded": succeeded, "failed": failed}
 
@@ -439,31 +470,77 @@ class VideoLifecycleManager:
         # Get channel slug for this video
         ch = self.db.get_video(db_video_id)
         slug = ch.get("canal") if ch else self.slug
+        title = ch.get("titulo_final", "?") if ch else "?"
+        uploaded_at = ch.get("created_at", "?") if ch else "?"
+        target_public = ch.get("target_public_at", "?") if ch else "?"
+
+        # ── Resolve local time for display ──
+        local_time_str = ""
+        try:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(slug)
+            tz_str = getattr(config, "PUBLISH_TIMEZONE", "Europe/Madrid")
+            import pytz
+            from datetime import datetime as _dt, timezone as _tz
+            tz = pytz.timezone(tz_str)
+            now_local = _dt.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+            local_time_str = f" ({now_local} {tz_str})"
+        except Exception:
+            pass
 
         uploader = YouTubeUploader(slug)
         if not uploader.authenticate():
-            logger.error("[%s] Cannot auth for go_public", self.slug)
+            logger.error("[%s] ❌ PUBLICAR: auth fallida para video %s — NO se pudo hacer público",
+                         self.slug, yt_video_id)
             return False
 
         try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
             result = uploader.set_privacy(yt_video_id, "public")
             if result.get("updated") or result.get("privacy") == "public":
                 # Update video status in DB
-                from datetime import datetime, timezone
                 self.db.update_video(
                     db_video_id,
                     status="published",
                     privacy_status="public",
-                    published_at=datetime.now(timezone.utc).isoformat(),
+                    published_at=now.isoformat(),
                 )
-                logger.info("[%s] Video %s set to PUBLIC (published at peak time)",
-                            self.slug, yt_video_id)
+                # ── Log detallado del evento de publicación ──
+                logger.info(
+                    "[%s] ✅ PUBLICADO: '%s' (yt=%s, id=%d) | "
+                    "subido=%s | target=%s | real=%s%s",
+                    self.slug, title, yt_video_id, db_video_id,
+                    uploaded_at, target_public, now.isoformat(), local_time_str,
+                )
+                # ── Also log to the dedicated scheduled_publish log ──
+                try:
+                    from api.services.scheduled_publish_logger import log_publish_event
+                    log_publish_event(
+                        event="go_public",
+                        slug=slug,
+                        video_title=title,
+                        yt_video_id=yt_video_id,
+                        db_video_id=db_video_id,
+                        uploaded_at=str(uploaded_at),
+                        target_public_at=str(target_public),
+                        actual_public_at=now.isoformat(),
+                        local_time=local_time_str,
+                    )
+                except Exception:
+                    pass
                 return True
             else:
-                logger.error("[%s] go_public failed: %s", self.slug, result)
+                logger.error(
+                    "[%s] ❌ PUBLICAR fallido: video %s ('%s') — respuesta: %s",
+                    self.slug, yt_video_id, title, result,
+                )
                 return False
         except Exception as e:
-            logger.error("[%s] go_public exception: %s", self.slug, e)
+            logger.error(
+                "[%s] ❌ PUBLICAR excepción: video %s ('%s') — %s",
+                self.slug, yt_video_id, title, e,
+            )
             return False
 
     def _handle_first_comment(self, yt_video_id: str, db_video_id: int,

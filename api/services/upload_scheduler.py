@@ -44,7 +44,8 @@ def dispatch_due_uploads(db=None) -> dict | None:
     # ── 1. Count active upload jobs ──
     active_uploads = db.count_active_upload_jobs()
     if active_uploads >= MAX_CONCURRENT_UPLOADS:
-        logger.debug("Upload deferred: %d active upload(s) running", active_uploads)
+        logger.info("📤 Upload scheduler: %d upload(s) activos (max=%d) — no se despachan más",
+                    active_uploads, MAX_CONCURRENT_UPLOADS)
         return None
 
     # ── 2. Find videos awaiting upload ──
@@ -96,8 +97,13 @@ def dispatch_due_uploads(db=None) -> dict | None:
             eligible.append(dict(row))
 
     if not eligible:
-        logger.debug("No eligible videos for upload (window %d-%d, %d awaiting total)",
-                     win_start, win_end, len(rows))
+        # ── Periodic heartbeat: log only once every ~15 min when idle ──
+        import time as _t
+        if not hasattr(dispatch_due_uploads, "_last_noop_log") or \
+           _t.time() - dispatch_due_uploads._last_noop_log > 900:
+            logger.info("📤 Upload scheduler: 0 vídeos en ventana (%d-%dh, %d esperando total)",
+                       win_start, win_end, len(rows))
+            dispatch_due_uploads._last_noop_log = _t.time()
         return None
 
     # ── 4. Dispatch the first eligible video ──
@@ -119,9 +125,22 @@ def dispatch_due_uploads(db=None) -> dict | None:
         db.update_video(video_id, status="error", progress_phase="upload")
         return None
 
-    logger.info("Dispatching upload: video #%d (%s), file=%s, pub=%s",
+    logger.info("📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",
                 video_id, slug, vp.name,
-                (video.get("target_public_at") or "?")[:16] if video.get("target_public_at") else "?")
+                (str(video.get("target_public_at") or "?")[:19] if video.get("target_public_at") else "INMEDIATA"))
+    
+    # ── Log to dedicated scheduled_publish log ──
+    try:
+        from api.services.scheduled_publish_logger import log_publish_event
+        log_publish_event(
+            event="upload_dispatched",
+            slug=slug,
+            video_id=video_id,
+            target_public_at=str(video.get("target_public_at", "") or "INMEDIATA")[:19],
+            job_id=job_id,
+        )
+    except Exception:
+        pass
 
     # ── 5. Create upload job and dispatch ──
     import asyncio
