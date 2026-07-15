@@ -811,6 +811,12 @@ def run_job(
         logger.error("Pipeline crashed: %s\n%s", exc, tb)
         db.update_job(job_id, status="failed", error_msg=error_msg[:500])
         db.update_video(video_id, status="error", progress_phase="error")
+        # ── Save timing even on crash ────────────────────────
+        try:
+            if orch is not None:
+                db.update_video(video_id, timing_data=orch.collect_timing_json())
+        except Exception:
+            pass
         success = False
 
     finally:

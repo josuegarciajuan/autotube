@@ -1605,6 +1605,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
 
 async def start_upload_job(job_id: int, video_id: int):
     """Upload only — for re-uploading existing videos."""
+    import json, time
+
     db = _get_db()
     v = db.get_video(video_id)
     if not v:
@@ -1636,7 +1638,8 @@ async def start_upload_job(job_id: int, video_id: int):
                                    video_id=video_id,
                                    detail="Transfiriendo archivo a YouTube (puede tardar)")
         
-        import json
+        upload_start = time.time()
+        
         tags_raw = v.get("tags_json", "[]")
         if isinstance(tags_raw, str):
             try:
@@ -1718,6 +1721,15 @@ async def start_upload_job(job_id: int, video_id: int):
         if video_yt_id:
             url = result.get("url", f"https://youtube.com/watch?v={video_yt_id}")
             db.mark_video_uploaded(video_id, video_yt_id, url)
+            # ── Save upload timing ───────────────────────────
+            try:
+                _upload_ms = int((time.time() - upload_start) * 1000)
+                db.update_video(video_id, timing_data=json.dumps({
+                    "phases": {"upload": _upload_ms},
+                    "total_duration_ms": _upload_ms,
+                }, ensure_ascii=False))
+            except Exception:
+                pass
             await _broadcast_progress(job_id, 100, "upload", f"Subido: {url}",
                                        "completed", video_id,
                                        detail="Video publicado en YouTube")
@@ -1806,6 +1818,9 @@ async def _do_reassembly(job_id: int, video_id: int):
     if not video:
         await _broadcast_progress(job_id, 0, "error", "Video no encontrado", "failed")
         return
+
+    # ── Track reassembly duration ───────────────────────────
+    reassembly_start = time.time()
 
     # ── Phase 1: Load data ──────────────────────────────────
     await _broadcast_progress(job_id, 5, "load", "Cargando datos del checkpoint...",
@@ -1928,6 +1943,15 @@ async def _do_reassembly(job_id: int, video_id: int):
                                     f"Error ensamblando video: {e}", "failed",
                                     video_id=video_id)
         db.update_video(video_id, status="error", progress_phase="video")
+        # ── Save timing even on failure ─────────────────────
+        try:
+            _failed_duration_ms = int((time.time() - reassembly_start) * 1000)
+            db.update_video(video_id, timing_data=json.dumps({
+                "phases": {"reassembly_failed": _failed_duration_ms},
+                "total_duration_ms": _failed_duration_ms,
+            }, ensure_ascii=False))
+        except Exception:
+            pass
         return
 
     # ── Phase 3: Thumbnail + metadata + upload ───────────────
@@ -1988,11 +2012,29 @@ async def _do_reassembly(job_id: int, video_id: int):
         await start_upload_job(job_id, video_id)
         # Mark reassembly job as completed after upload succeeds
         db.update_job(job_id, status="completed", progress=100, phase="done")
-        logger.info("Reassembly + upload completed for video %d (job %d)", video_id, job_id)
+        # ── Save reassembly timing ──────────────────────────
+        try:
+            _reassembly_duration_ms = int((time.time() - reassembly_start) * 1000)
+            db.update_video(video_id, timing_data=json.dumps({
+                "phases": {"reassembly": _reassembly_duration_ms},
+                "total_duration_ms": _reassembly_duration_ms,
+            }, ensure_ascii=False))
+        except Exception:
+            pass
+        logger.info("Reassembly + upload completed for video %d (job %d) in %d ms", video_id, job_id, _reassembly_duration_ms)
     except Exception as _ue:
         logger.exception("Reassembly upload failed for video %d: %s", video_id, _ue)
         db.update_video(video_id, status="ready", progress=100, progress_phase="upload_retry")
         db.update_job(job_id, status="completed", progress=100, phase="upload_failed")
+        # ── Save timing even on upload failure ──────────────
+        try:
+            _upload_fail_ms = int((time.time() - reassembly_start) * 1000)
+            db.update_video(video_id, timing_data=json.dumps({
+                "phases": {"reassembly": _upload_fail_ms},
+                "total_duration_ms": _upload_fail_ms,
+            }, ensure_ascii=False))
+        except Exception:
+            pass
         await _broadcast_progress(job_id, 100, "done",
                                    f"Video listo pero subida fallo: {titulo[:60]}", "completed",
                                    video_id=video_id,
