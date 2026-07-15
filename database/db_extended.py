@@ -3750,15 +3750,17 @@ class ExtendedDatabase(Database):
     def get_pipeline_status(self) -> dict:
         """Return full pipeline status for the visual scheduling view.
 
-        Returns 4 sections:
-        - planned:   video slots pending today (not dispatched yet)
-        - generating: long-form videos currently being generated
-        - warming:   videos uploaded as private waiting to go public
-        - shorts:   { pending: shorts slots not yet dispatched,
-                       generating: shorts slots currently running with job progress,
-                       completed: shorts slots completed today }
+        Returns 5 sections:
+        - planned:     video slots pending today (not dispatched yet)
+        - generating:  long-form videos currently being generated
+        - awaiting_upload: videos generated locally, waiting for F2 upload window
+        - warming:     videos uploaded as private waiting to go public
+        - shorts:      { pending, generating, completed }
         """
-        result = {"planned": [], "generating": [], "warming": [], "shorts": {"pending": [], "generating": [], "completed": []}}
+        result = {
+            "planned": [], "generating": [], "awaiting_upload": [], "warming": [],
+            "shorts": {"pending": [], "generating": [], "completed": []},
+        }
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
 
@@ -3769,6 +3771,10 @@ class ExtendedDatabase(Database):
                     ps.channel_id,
                     ps.scheduled_at,
                     ps.target_upload_at,
+                    ps.target_public_at,
+                    ps.date_key,
+                    ps.upload_window_start,
+                    ps.upload_window_end,
                     ps.slot_position,
                     ps.source_mode,
                     ch.name as channel_name,
@@ -3807,7 +3813,41 @@ class ExtendedDatabase(Database):
             ).fetchall()
             result["generating"] = [dict(r) for r in generating]
 
-            # ── 3. Warming (uploaded private, waiting for go_public) ──
+            # ── 3. Awaiting Upload (F1 complete, waiting for F2 upload window) ──
+            awaiting = conn.execute(
+                """SELECT
+                    v.id as video_id,
+                    v.channel_id,
+                    v.status,
+                    v.titulo_final,
+                    v.target_public_at,
+                    v.publish_mode,
+                    v.progress,
+                    v.progress_phase,
+                    v.created_at,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM videos v
+                   JOIN channels ch ON ch.id = v.channel_id
+                   WHERE v.status IN ('awaiting_upload', 'uploading')
+                     AND v.video_path IS NOT NULL
+                     AND v.video_path != ''
+                   ORDER BY v.created_at ASC""",
+            ).fetchall()
+            # Add derived target_upload_at from planned_slots if available
+            awaiting_list = []
+            for r in awaiting:
+                d = dict(r)
+                # Look up planned upload time
+                ps = conn.execute(
+                    "SELECT target_upload_at FROM planned_slots WHERE video_id = ? LIMIT 1",
+                    (d["video_id"],),
+                ).fetchone()
+                d["target_upload_at"] = ps["target_upload_at"] if ps else None
+                awaiting_list.append(d)
+            result["awaiting_upload"] = awaiting_list
+
+            # ── 4. Warming (uploaded private, waiting for go_public) ──
             warming = conn.execute(
                 """SELECT
                     v.id as video_id,
@@ -3835,7 +3875,7 @@ class ExtendedDatabase(Database):
             ).fetchall()
             result["warming"] = [dict(r) for r in warming]
 
-            # ── 4. Shorts pending (slots for today, not dispatched yet) ──
+            # ── 5. Shorts pending (slots for today, not dispatched yet) ──
             shorts_pending = conn.execute(
                 """SELECT
                     sps.id as slot_id,

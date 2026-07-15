@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { api, formatCountdown, PlannedSlot, GeneratingVideo, WarmingVideo, ShortsPipelineSlot } from '../lib/api'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors } from 'lucide-react'
+import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot } from '../lib/api'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive } from 'lucide-react'
 
 // ── Channel colors (same as Scheduling.tsx) ──────────────────
 const CHANNEL_COLORS: Record<string, { dot: string; text: string; bg: string; border: string; accent: string }> = {
@@ -46,39 +46,54 @@ function phaseLabel(phase: string): string {
   return map[phase] || phase || '...'
 }
 
-// ── Card: Planned slot ───────────────────────────────────────
+// ── Card: Planned slot (3-phase) ─────────────────────────────
 function PlannedCard({ slot }: { slot: PlannedSlot }) {
   const colors = CHANNEL_COLORS[slot.channel_slug] || CHANNEL_COLORS.canal2
+  const hasUpload = slot.target_upload_at && slot.target_upload_at !== slot.target_public_at
   return (
     <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} animate-fade-in`}>
       {/* Header */}
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[slot.channel_slug]} #{slot.slot_position + 1}
+          {CHANNEL_SHORT[slot.channel_slug]} #{slot.slot_position}
         </span>
         <span className="text-[10px] text-gray-500 font-mono ml-auto">
           {slot.source_mode === 'viral' ? ' Viral' : 'Original'}
         </span>
       </div>
 
-      {/* Timeline */}
-      <div className="flex items-center gap-2 text-xs">
-        <Play size={11} className="text-gray-500" />
-        <span className="text-gray-400">Inicio:</span>
-        <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
-      </div>
-      <div className="flex items-center gap-2 text-xs mt-1">
-        <ArrowRight size={11} className="text-gray-500" />
-        <span className="text-gray-400">Publicacion:</span>
-        <span className="text-white font-mono">{toLocalTime(slot.target_upload_at)}</span>
+      {/* 3-Phase timeline */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 text-xs">
+          <Play size={11} className="text-purple-400" />
+          <span className="text-gray-400">Gen:</span>
+          <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
+          {slot.date_key && slot.date_key !== slot.scheduled_at?.slice(0, 10) && (
+            <span className="text-[9px] text-purple-400/70 ml-1">{toLocalDate(slot.scheduled_at)}</span>
+          )}
+        </div>
+        {hasUpload && (
+          <div className="flex items-center gap-2 text-xs">
+            <Upload size={11} className="text-blue-400" />
+            <span className="text-gray-400">Subir:</span>
+            <span className="text-white font-mono">{toLocalTime(slot.target_upload_at!)}</span>
+          </div>
+        )}
+        {slot.target_public_at && (
+          <div className="flex items-center gap-2 text-xs">
+            <ArrowRight size={11} className="text-green-400" />
+            <span className="text-gray-400">Publico:</span>
+            <span className="text-white font-mono">{toLocalTime(slot.target_public_at)}</span>
+          </div>
+        )}
       </div>
 
       {/* Countdown */}
       <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
         <Clock size={11} className="text-amber-400" />
         <span className="text-[10px] text-amber-400 font-mono">
-          En {formatCountdown(slot.scheduled_at)}
+          Gen en {formatCountdown(slot.scheduled_at)}
         </span>
       </div>
     </div>
@@ -128,6 +143,55 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
           </span>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Card: Awaiting Upload (F1 done, waiting for F2 upload window) ──
+function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo; onUploadNow: (videoId: number) => void }) {
+  const colors = CHANNEL_COLORS[video.channel_slug] || CHANNEL_COLORS.canal2
+  const countdown = video.target_public_at ? formatCountdown(video.target_public_at) : '?'
+
+  return (
+    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} border-l-2 border-l-blue-400/50 animate-fade-in`}>
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
+        <span className={`text-xs font-semibold ${colors.text}`}>
+          {CHANNEL_SHORT[video.channel_slug]} #{video.video_id}
+        </span>
+        <span className="text-[10px] text-blue-400 font-mono ml-auto flex items-center gap-1">
+          <HardDrive size={10} />
+          Pendiente subida
+        </span>
+      </div>
+
+      {/* Info */}
+      <div className="space-y-1 mb-3">
+        {video.titulo_final && (
+          <p className="text-[10px] text-gray-400 truncate">{video.titulo_final}</p>
+        )}
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className="text-gray-500">Publicacion:</span>
+          <span className="text-gray-300 font-mono">
+            {video.target_public_at ? toLocalTime(video.target_public_at) : '--:--'}
+          </span>
+          <span className={`font-mono ml-auto ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
+            {countdown === 'Ahora' ? 'Puede subir' : `${countdown}`}
+          </span>
+        </div>
+      </div>
+
+      {/* Upload Now button */}
+      <button
+        onClick={() => onUploadNow(video.video_id)}
+        className="w-full flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 rounded-md
+                   bg-blue-400/10 text-blue-400 border border-blue-400/20
+                   hover:bg-blue-400/20 transition-colors"
+      >
+        <Upload size={10} />
+        Subir ahora
+      </button>
     </div>
   )
 }
@@ -388,6 +452,7 @@ function ColumnHeader({ icon: Icon, title, count, colorClass }: {
 export default function PipelineView() {
   const [planned, setPlanned] = useState<PlannedSlot[]>([])
   const [generating, setGenerating] = useState<GeneratingVideo[]>([])
+  const [awaitingUpload, setAwaitingUpload] = useState<AwaitingUploadVideo[]>([])
   const [warming, setWarming] = useState<WarmingVideo[]>([])
   const [shortsPending, setShortsPending] = useState<ShortsPipelineSlot[]>([])
   const [shortsGenerating, setShortsGenerating] = useState<ShortsPipelineSlot[]>([])
@@ -400,6 +465,7 @@ export default function PipelineView() {
       const data = await api.getPipelineStatus()
       setPlanned(data.planned || [])
       setGenerating(data.generating || [])
+      setAwaitingUpload(data.awaiting_upload || [])
       setWarming(data.warming || [])
       setShortsPending(data.shorts?.pending || [])
       setShortsGenerating(data.shorts?.generating || [])
@@ -427,7 +493,16 @@ export default function PipelineView() {
     }
   }
 
-  const totalItems = planned.length + generating.length + warming.length
+  async function handleUploadNow(videoId: number) {
+    try {
+      await api.uploadVideo(videoId)
+      load()
+    } catch (e: any) {
+      console.error('Upload now error:', e)
+    }
+  }
+
+  const totalItems = planned.length + generating.length + awaitingUpload.length + warming.length
     + shortsPending.length + shortsGenerating.length + shortsCompleted.length
 
   if (loading) {
@@ -521,7 +596,21 @@ export default function PipelineView() {
         )}
       </div>
 
-      {/* ── Column 3: Warming ─────────────────────────────── */}
+      {/* ── Column 3: Awaiting Upload ─────────────────────── */}
+      <div className="pipeline-column">
+        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={awaitingUpload.length} colorClass="text-blue-400" />
+        {awaitingUpload.length === 0 ? (
+          <p className="text-[10px] text-gray-600 text-center py-4">No hay videos esperando subida</p>
+        ) : (
+          <div className="space-y-3">
+            {awaitingUpload.map((video) => (
+              <AwaitingUploadCard key={`await-${video.video_id}`} video={video} onUploadNow={handleUploadNow} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Column 4: Warming ─────────────────────────────── */}
       <div className="pipeline-column">
         <ColumnHeader icon={Lock} title="En privado (calentando)" count={warming.length} colorClass="text-amber-400" />
         {warming.length === 0 ? (

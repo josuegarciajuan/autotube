@@ -102,6 +102,7 @@ export const api = {
   },
   getActiveJobs: () => request<any[]>('/jobs/active'),
   getJob: (id: number) => request<any>(`/jobs/${id}`),
+  cancelJob: (id: number) => request<any>(`/jobs/${id}/cancel`, { method: 'POST' }),
 
   // Stats
   getStats: () => request<any>('/stats'),
@@ -287,6 +288,7 @@ export const api = {
     request<{
       planned: PlannedSlot[];
       generating: GeneratingVideo[];
+      awaiting_upload: AwaitingUploadVideo[];
       warming: WarmingVideo[];
       shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[]; completed: ShortsPipelineSlot[] };
     }>('/planning/pipeline-status'),
@@ -323,7 +325,11 @@ export interface PlannedSlot {
   slot_id: number;
   channel_id: number;
   scheduled_at: string;
-  target_upload_at: string;
+  target_upload_at?: string;
+  target_public_at?: string;
+  upload_window_start?: number;
+  upload_window_end?: number;
+  date_key?: string;
   slot_position: number;
   source_mode: string;
   channel_name: string;
@@ -343,6 +349,21 @@ export interface GeneratingVideo {
   job_status: string | null;
   job_progress: number | null;
   job_phase: string | null;
+  channel_name: string;
+  channel_slug: string;
+}
+
+export interface AwaitingUploadVideo {
+  video_id: number;
+  channel_id: number;
+  status: string;           // 'awaiting_upload' | 'uploading'
+  titulo_final: string | null;
+  target_public_at: string | null;
+  target_upload_at: string | null;
+  publish_mode: string;
+  progress: number;
+  progress_phase: string | null;
+  created_at: string;
   channel_name: string;
   channel_slug: string;
 }
@@ -443,6 +464,8 @@ export function statusBadge(status: string): string {
     generating: 'badge-generating',
     reassembling: 'badge-reassembling',
     ready: 'badge-ready',
+    awaiting_upload: 'badge-awaiting',
+    uploading: 'badge-uploading',
     uploaded: 'badge-uploaded',
     error: 'badge-error',
     uploaded_private: 'badge-uploaded_private',
@@ -460,6 +483,8 @@ export function statusLabel(status: string): string {
     generating: 'Generando',
     reassembling: 'Re-ensamblando',
     ready: 'Listo',
+    awaiting_upload: 'Pendiente subida',
+    uploading: 'Subiendo...',
     uploaded: 'Subido',
     error: 'Error',
     uploaded_private: 'Subido (privado)',

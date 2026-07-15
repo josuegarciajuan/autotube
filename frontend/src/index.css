@@ -81,6 +81,8 @@
   .badge-generating { @apply bg-blue-900/50 text-blue-300 border border-blue-500/30; }
   .badge-reassembling { @apply bg-amber-900/50 text-amber-300 border border-amber-500/30; }
   .badge-ready { @apply bg-green-900/50 text-green-300 border border-green-500/30; }
+  .badge-awaiting { @apply bg-sky-900/50 text-sky-300 border border-sky-500/30; animation: awaiting-pulse 3s ease-in-out infinite; }
+  .badge-uploading { @apply bg-indigo-900/50 text-indigo-300 border border-indigo-500/30; animation: pulse 1.5s ease-in-out infinite; }
   .badge-uploaded { @apply bg-purple-900/50 text-purple-300 border border-purple-500/30; }
   .badge-error { @apply bg-red-900/50 text-red-300 border border-red-500/30; }
   /* Scheduled publishing badges */
@@ -99,14 +101,19 @@
     50% { opacity: 0.5; }
   }
 
+  @keyframes awaiting-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
   /* Safe area for iPhone notch */
   .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
-  /* ── Pipeline View (3-column scheduling) ────────────────── */
+  /* ── Pipeline View (4-column scheduling: plan → gen → awaiting upload → warming) ── */
   .pipeline-grid {
-    @apply grid grid-cols-1 lg:grid-cols-3 gap-4;
+    @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4;
   }
 
   .pipeline-column {
