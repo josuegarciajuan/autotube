@@ -2618,7 +2618,7 @@ class ExtendedDatabase(Database):
                            v.status, c.name as channel_name, c.slug as channel_slug
                     FROM videos v
                     JOIN channels c ON v.channel_id = c.id
-                    WHERE DATE(COALESCE(v.uploaded_at, v.created_at)) = DATE('now', 'localtime')
+                    WHERE COALESCE(v.uploaded_at, v.created_at) >= datetime('now', 'localtime', '-1 day')
                       {rec_where}
                     ORDER BY COALESCE(v.uploaded_at, v.created_at) DESC
                     LIMIT 10""",
@@ -2785,7 +2785,7 @@ class ExtendedDatabase(Database):
                    v.yt_video_id as yt_id
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
-            WHERE DATE(v.created_at) = DATE('now', 'localtime')
+            WHERE v.created_at >= datetime('now', 'localtime', '-1 day')
               {v_where.replace('v.channel_id', 'v.channel_id')}
 
             UNION ALL
@@ -2800,7 +2800,7 @@ class ExtendedDatabase(Database):
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
             WHERE v.uploaded_at IS NOT NULL
-              AND DATE(v.uploaded_at) = DATE('now', 'localtime')
+              AND v.uploaded_at >= datetime('now', 'localtime', '-1 day')
               {v_where.replace('v.channel_id', 'v.channel_id')}
 
             UNION ALL
@@ -2815,7 +2815,7 @@ class ExtendedDatabase(Database):
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
             WHERE v.published_at IS NOT NULL
-              AND DATE(v.published_at) = DATE('now', 'localtime')
+              AND v.published_at >= datetime('now', 'localtime', '-1 day')
               {v_where.replace('v.channel_id', 'v.channel_id')}
 
             UNION ALL
@@ -2829,7 +2829,7 @@ class ExtendedDatabase(Database):
                    s.youtube_id
             FROM shorts s
             JOIN channels c ON s.channel_id = c.id
-            WHERE DATE(s.created_at) = DATE('now', 'localtime')
+            WHERE s.created_at >= datetime('now', 'localtime', '-1 day')
               {s_where.replace('s.channel_id', 's.channel_id')}
 
             UNION ALL
@@ -2844,7 +2844,7 @@ class ExtendedDatabase(Database):
             FROM shorts s
             JOIN channels c ON s.channel_id = c.id
             WHERE s.published_at IS NOT NULL
-              AND DATE(s.published_at) = DATE('now', 'localtime')
+              AND s.published_at >= datetime('now', 'localtime', '-1 day')
               {s_where.replace('s.channel_id', 's.channel_id')}
 
             ORDER BY action_at DESC
