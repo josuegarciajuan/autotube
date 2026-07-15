@@ -484,6 +484,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v9: 3-phase pipeline (generate → upload → publish) ──
     _migrate_v9(conn, logger)
+
+    # ── v10: optimal publish slots (data-driven peak hour calculation) ──
+    _migrate_v10(conn, logger)
     
     conn.commit()
     conn.close()
@@ -707,7 +710,7 @@ def _migrate_v6(conn, logger):
         except sqlite3.OperationalError as e:
             logger.debug("v6 shorts_planned_slots.source_mode: %s", e)
 
-    # ── videos source_url (viral original video reference) ────
+    # ── videos source_url + source_mode (viral original video reference) ──
     existing_vid = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     if "source_url" not in existing_vid:
         try:
@@ -715,6 +718,20 @@ def _migrate_v6(conn, logger):
             logger.info("Migration v6: added source_url column to videos")
         except sqlite3.OperationalError as e:
             logger.debug("v6 videos.source_url: %s", e)
+    if "source_mode" not in existing_vid:
+        try:
+            conn.execute("ALTER TABLE videos ADD COLUMN source_mode TEXT DEFAULT 'original'")
+            logger.info("Migration v6: added source_mode column to videos")
+        except sqlite3.OperationalError as e:
+            logger.debug("v6 videos.source_mode: %s", e)
+    # Backfill source_mode from source_url for existing records
+    conn.execute(
+        "UPDATE videos SET source_mode = 'viral' WHERE source_url IS NOT NULL AND source_url != '' AND (source_mode IS NULL OR source_mode = '' OR source_mode = 'original')"
+    )
+    conn.execute(
+        "UPDATE videos SET source_mode = 'original' WHERE source_mode IS NULL OR source_mode = ''"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_source_mode ON videos(source_mode)")
 
     conn.commit()
 
@@ -817,6 +834,47 @@ def _migrate_v9(conn, logger):
     )
     conn.commit()
     logger.info("Migration v9: complete (added %d columns, seeded %d channels)", added, seeded)
+
+
+def _migrate_v10(conn, logger):
+    """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
+
+    Stores 3 optimal publish slots per channel per content type (long / short),
+    calculated daily from YouTube Analytics viewer activity by hour + historical
+    video performance data. Supports Spain + LATAM audience split detection.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS optimal_publish_slots (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            content_type        TEXT NOT NULL DEFAULT 'long',
+            slot_rank           INTEGER NOT NULL CHECK(slot_rank BETWEEN 1 AND 3),
+            target_hour         INTEGER NOT NULL,
+            target_minute       INTEGER NOT NULL DEFAULT 0,
+            timezone            TEXT NOT NULL,
+            score               REAL DEFAULT 0.0,
+            confidence          REAL DEFAULT 0.0,
+            audience_focus      TEXT DEFAULT 'blend',
+            metrics_snapshot    TEXT DEFAULT '{}',
+            data_sources        TEXT DEFAULT '{}',
+            audience_split      TEXT DEFAULT '{}',
+            calculated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            used_count          INTEGER DEFAULT 0,
+            total_views_result  INTEGER DEFAULT 0,
+            avg_views_result    REAL DEFAULT 0.0,
+            UNIQUE(channel_id, content_type, slot_rank)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_channel "
+        "ON optimal_publish_slots(channel_id, content_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_calculated "
+        "ON optimal_publish_slots(calculated_at)"
+    )
+    conn.commit()
+    logger.info("Migration v10: optimal_publish_slots table ensured")
 
 
 class ExtendedDatabase(Database):
@@ -926,7 +984,8 @@ class ExtendedDatabase(Database):
     # ── Videos (extended) ────────────────────────────────────
     
     def get_videos(self, channel_id: int = None, status: str = None, limit: int = 50,
-                    offset: int = 0, playlist_id: int = None) -> list[dict]:
+                    offset: int = 0, playlist_id: int = None,
+                    source_mode: str = None) -> list[dict]:
         with self._connect() as conn:
             q = ("SELECT v.*, c.name as channel_name, "
                  "yp.name as target_playlist_name "
@@ -941,6 +1000,9 @@ class ExtendedDatabase(Database):
             if playlist_id is not None:
                 q += " AND v.target_playlist_id = ?"
                 params.append(playlist_id)
+            if source_mode:
+                q += " AND v.source_mode = ?"
+                params.append(source_mode)
             if status:
                 q += " AND v.status = ?"
                 params.append(status)
@@ -992,7 +1054,7 @@ class ExtendedDatabase(Database):
                     "privacy_status", "status", "progress", "progress_phase",
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
                     "script_id", "channel_id", "checkpoint_data", "timing_data",
-                    "source_url",
+                    "source_url", "source_mode",
                     # ── Scheduled publishing ──
                     "publish_mode", "target_public_at", "published_at",
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
@@ -1889,6 +1951,143 @@ class ExtendedDatabase(Database):
                 (channel_id, f"-{days} days"),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Optimal Publish Slots (v10) ────────────────────────────
+
+    def upsert_optimal_slot(self, channel_id: int, content_type: str, slot_rank: int,
+                             target_hour: int, timezone: str, score: float = 0.0,
+                             confidence: float = 0.0, target_minute: int = 0,
+                             audience_focus: str = 'blend', metrics_snapshot: str = '{}',
+                             data_sources: str = '{}', audience_split: str = '{}') -> int | None:
+        """Insert or update a single optimal publish slot."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO optimal_publish_slots
+                   (channel_id, content_type, slot_rank, target_hour, target_minute, timezone,
+                    score, confidence, audience_focus, metrics_snapshot, data_sources,
+                    audience_split, calculated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(channel_id, content_type, slot_rank) DO UPDATE SET
+                    target_hour=excluded.target_hour,
+                    target_minute=excluded.target_minute,
+                    timezone=excluded.timezone,
+                    score=excluded.score,
+                    confidence=excluded.confidence,
+                    audience_focus=excluded.audience_focus,
+                    metrics_snapshot=excluded.metrics_snapshot,
+                    data_sources=excluded.data_sources,
+                    audience_split=excluded.audience_split,
+                    calculated_at=datetime('now')""",
+                (channel_id, content_type, slot_rank, target_hour, target_minute, timezone,
+                 score, confidence, audience_focus, metrics_snapshot, data_sources,
+                 audience_split),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_optimal_slots(self, channel_id: int, content_type: str = None) -> list[dict]:
+        """Get all optimal publish slots for a channel, optionally filtered by content_type.
+        
+        Returns slots ordered by slot_rank (1=best, 2, 3).
+        Only returns slots calculated within the last 48 hours.
+        """
+        with self._connect() as conn:
+            if content_type:
+                rows = conn.execute(
+                    """SELECT * FROM optimal_publish_slots
+                       WHERE channel_id = ? AND content_type = ?
+                         AND calculated_at >= datetime('now', '-48 hours')
+                       ORDER BY slot_rank ASC""",
+                    (channel_id, content_type),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM optimal_publish_slots
+                       WHERE channel_id = ?
+                         AND calculated_at >= datetime('now', '-48 hours')
+                       ORDER BY content_type, slot_rank ASC""",
+                    (channel_id,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_optimal_slot_assignment(self, channel_id: int, content_type: str) -> dict | None:
+        """Get the next optimal slot to use using epsilon-greedy strategy.
+        
+        70% of the time: round-robin (pick next least-used slot)
+        30% of the time: exploitation (pick slot with best avg_views_result)
+        Falls back to slot_rank=1 if no data.
+        
+        Returns the selected slot row or None.
+        """
+        import random
+        slots = self.get_optimal_slots(channel_id, content_type)
+        if not slots:
+            return None
+        
+        # Exploitation 30%: pick slot with best real performance
+        if random.random() < 0.3:
+            best = max(slots, key=lambda s: s.get("avg_views_result", 0) or 0)
+            if best.get("used_count", 0) > 0:
+                return best
+        
+        # Exploration 70%: round-robin (least-used among the 3)
+        return min(slots, key=lambda s: s.get("used_count", 0))
+
+    def record_slot_usage(self, channel_id: int, content_type: str, slot_rank: int) -> bool:
+        """Increment used_count for a slot. Called when a video/short is assigned to this slot."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE optimal_publish_slots
+                   SET used_count = used_count + 1
+                   WHERE channel_id = ? AND content_type = ? AND slot_rank = ?""",
+                (channel_id, content_type, slot_rank),
+            )
+            conn.commit()
+            return True
+
+    def record_slot_result(self, channel_id: int, content_type: str, slot_rank: int,
+                            video_views: int) -> bool:
+        """Record actual view results for a slot assignment.
+        
+        Updates total_views_result and recalculates moving average.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT used_count, total_views_result FROM optimal_publish_slots
+                   WHERE channel_id = ? AND content_type = ? AND slot_rank = ?""",
+                (channel_id, content_type, slot_rank),
+            ).fetchone()
+            if not row:
+                return False
+            used = (row["used_count"] or 0)
+            total = (row["total_views_result"] or 0) + video_views
+            avg = total / max(used, 1)
+            conn.execute(
+                """UPDATE optimal_publish_slots
+                   SET total_views_result = ?, avg_views_result = ?
+                   WHERE channel_id = ? AND content_type = ? AND slot_rank = ?""",
+                (total, avg, channel_id, content_type, slot_rank),
+            )
+            conn.commit()
+            return True
+
+    def clear_stale_optimal_slots(self, channel_id: int = None) -> int:
+        """Delete optimal slots older than 7 days. Returns count deleted."""
+        with self._connect() as conn:
+            if channel_id:
+                cursor = conn.execute(
+                    """DELETE FROM optimal_publish_slots
+                       WHERE channel_id = ?
+                         AND calculated_at < datetime('now', '-7 days')""",
+                    (channel_id,),
+                )
+            else:
+                cursor = conn.execute(
+                    """DELETE FROM optimal_publish_slots
+                       WHERE calculated_at < datetime('now', '-7 days')"""
+                )
+            conn.commit()
+            return cursor.rowcount
 
     def get_channel_latest_stats(self, channel_id: int) -> dict | None:
         """Get the most recent stats snapshot for a single channel."""

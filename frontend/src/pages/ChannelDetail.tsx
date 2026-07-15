@@ -1435,7 +1435,7 @@ export default function ChannelDetail() {
               const hasScheduledInfo = v.target_public_at && ['uploaded_private', 'warming', 'scheduled'].includes(v.status);
               const pendingManual = (v.manual_altered_content_done ? 0 : 1) + (v.manual_end_screens_done ? 0 : 1);
               return (
-              <div key={v.id} className="group cursor-pointer" onClick={() => navigate(`/videos/${v.id}/edit`)}>
+              <div key={v.id} className={`group cursor-pointer ${(v.source_mode === 'viral' || v.source_url) ? 'border-l-[3px] border-amber-500/70 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.15)]' : 'border-l-[3px] border-transparent'}`} onClick={() => navigate(`/videos/${v.id}/edit`)}>
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
                   {v.thumbnail_path ? (
                     <img src={apiUrl(`/thumbnail/${v.id}?v=${v.updated_at || v.id}`)} alt={v.titulo_final} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
@@ -1446,6 +1446,11 @@ export default function ChannelDetail() {
                   <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium badge ${statusBadge(displayStatus)}`}>
                     {statusLabel(displayStatus)}
                   </span>
+                  {(v.source_mode === 'viral' || v.source_url) && (
+                    <span className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded font-bold flex items-center gap-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 shadow-sm">
+                      <Zap size={10} className="text-amber-400" /> VIRAL
+                    </span>
+                  )}
                   <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
                     <div className="w-12 h-12 rounded-full bg-neon-red/90 flex items-center justify-center shadow-lg"><Play size={20} className="text-white ml-0.5" /></div>
                   </div>

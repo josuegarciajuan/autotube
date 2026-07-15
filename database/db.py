@@ -242,7 +242,7 @@ class Database:
                      audio_path=None, titulo_final=None, duracion_seg=None,
                      privacy_status="public", channel_id=None,
                      description=None, tags_json=None, title_options=None,
-                     timing_data=None, source_url=None):
+                     timing_data=None, source_url=None, source_mode=None):
         """Insert a video record. Returns row id.
         
         Args:
@@ -251,6 +251,7 @@ class Database:
             tags_json: Optional JSON string of tags array.
             title_options: Optional JSON string of title options array.
             source_url: Optional original source URL (viral mirror).
+            source_mode: Optional source mode ('original' or 'viral').
         """
         with self._connect() as conn:
             # Build dynamic INSERT to handle optional v2 columns
@@ -277,6 +278,9 @@ class Database:
             if source_url is not None:
                 columns.append("source_url")
                 values.append(source_url)
+            if source_mode is not None:
+                columns.append("source_mode")
+                values.append(source_mode)
             
             placeholders = ", ".join(["?"] * len(values))
             cols_str = ", ".join(columns)

@@ -1,6 +1,6 @@
 """Channel management router."""
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from api.deps import get_db
 from api.schemas.models import ChannelCreate, ChannelUpdate, ChannelResponse, ChannelConfigUpdate
@@ -273,13 +273,14 @@ def delete_channel(channel_id: int):
 
 @router.get("/{channel_id}/videos")
 def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, offset: int = 0,
-                        playlist_id: int = None):
+                        playlist_id: int = None, source_mode: str = None):
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
     videos = db.get_videos(channel_id=channel_id, status=status, limit=limit,
-                            offset=offset, playlist_id=playlist_id)
+                            offset=offset, playlist_id=playlist_id,
+                            source_mode=source_mode)
     for v in videos:
         for k in ("created_at", "uploaded_at"):
             if v.get(k):
@@ -587,4 +588,75 @@ def get_channel_peak_info(channel_id: int):
         "warmup_min": info["warmup_min"],
         "source": info["source"],
         "niche": info["niche"],
+    }
+
+
+# ── Optimal Publish Slots (v10) ─────────────────────────────────
+
+@router.get("/{channel_id}/optimal-slots")
+def get_optimal_slots(channel_id: int):
+    """Get the calculated optimal publish slots for a channel.
+
+    Returns 3 slots per content type (long-form / shorts) with:
+    - target hour/min, score, confidence
+    - audience focus (spain / latam / blend)
+    - data sources used for calculation
+    - usage stats (how many times used, avg result views)
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    long_slots = db.get_optimal_slots(channel_id, "long")
+    short_slots = db.get_optimal_slots(channel_id, "short")
+
+    def _format_slot(s):
+        return {
+            "rank": s["slot_rank"],
+            "target_hour": s["target_hour"],
+            "target_minute": s["target_minute"],
+            "timezone": s["timezone"],
+            "score": s["score"],
+            "confidence": s["confidence"],
+            "audience_focus": s["audience_focus"],
+            "calculated_at": s["calculated_at"],
+            "used_count": s["used_count"],
+            "avg_views_result": s["avg_views_result"],
+            "data_sources": json.loads(s.get("data_sources", "{}")),
+        }
+
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "channel_name": ch.get("name", ""),
+        "long": [_format_slot(s) for s in long_slots],
+        "shorts": [_format_slot(s) for s in short_slots],
+        "has_data": bool(long_slots or short_slots),
+    }
+
+
+@router.post("/{channel_id}/recalculate-slots")
+async def recalculate_slots(channel_id: int, background_tasks: BackgroundTasks):
+    """Force recalculate optimal publish slots for a channel now.
+    
+    Triggers the full calculation pipeline (YT Analytics + DB historical)
+    and replans pending slots if they changed. Runs async in background.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    async def _run():
+        from api.services.optimal_slots_calculator import OptimalSlotsCalculator
+        calc = OptimalSlotsCalculator(db)
+        result = calc.calculate_for_channel(channel_id, ch["slug"])
+        if result.get("long_changed") or result.get("shorts_changed"):
+            calc._replan_channel(channel_id, ch["slug"], result)
+
+    background_tasks.add_task(_run)
+    return {
+        "ok": True,
+        "message": f"Recalculation triggered for {ch['name']}. Check /optimal-slots for results.",
     }

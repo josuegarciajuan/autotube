@@ -1042,6 +1042,7 @@ class PipelineOrchestrator:
                     duracion_seg=duracion_seg,
                     channel_id=channel_id,
                     source_url=source_url,
+                    source_mode=self.source_mode,
                 )
                 video_id = self.db_video_id
             else:
@@ -1056,6 +1057,7 @@ class PipelineOrchestrator:
                     duracion_seg=duracion_seg,
                     channel_id=channel_id,
                     source_url=source_url,
+                    source_mode=self.source_mode,
                 )
 
             return {

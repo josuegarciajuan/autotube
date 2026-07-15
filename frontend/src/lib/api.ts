@@ -25,10 +25,11 @@ export const api = {
   collectChannelStats: (id: number) => request<any>(`/channels/${id}/collect-stats`, { method: 'POST' }),
   syncChannelConfig: (id: number) => request<any>(`/channels/${id}/sync-config`, { method: 'POST' }),
   deleteChannel: (id: number) => request<any>(`/channels/${id}`, { method: 'DELETE' }),
-  getChannelVideos: (id: number, status?: string, playlistId?: number) => {
+  getChannelVideos: (id: number, status?: string, playlistId?: number, sourceMode?: string) => {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (playlistId) params.set('playlist_id', String(playlistId));
+    if (sourceMode) params.set('source_mode', sourceMode);
     const qs = params.toString();
     return request<any[]>(`/channels/${id}/videos${qs ? `?${qs}` : ''}`);
   },
