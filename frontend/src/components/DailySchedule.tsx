@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { Clock, CheckCircle2, Loader2, Calendar, Play, XCircle, BarChart3, Smartphone, Scissors, Filter, X } from 'lucide-react'
+import { CHANNEL_SHORT, CHANNEL_DOT, CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface Slot {
   id: number
@@ -28,23 +29,6 @@ interface WeekDay {
   slots: Slot[]
   shorts_total?: number
   shorts_slots?: Slot[]
-}
-
-// ── Channel color maps ─────────────────────────────────
-const CHANNEL_COLORS: Record<string, string> = {
-  canal2: 'bg-neon-cyan/20 text-neon-cyan border-neon-cyan/30',
-  canal3: 'bg-amber-400/20 text-amber-400 border-amber-400/30',
-  canal4: 'bg-purple-400/20 text-purple-400 border-purple-400/30',
-}
-const CHANNEL_DOT: Record<string, string> = {
-  canal2: 'bg-neon-cyan',
-  canal3: 'bg-amber-400',
-  canal4: 'bg-purple-400',
-}
-const CHANNEL_SHORT: Record<string, string> = {
-  canal2: 'SIN',
-  canal3: 'CIV',
-  canal4: 'EXP',
 }
 
 // ── Shorts type colors ─────────────────────────────────
@@ -416,7 +400,7 @@ export default function DailySchedule() {
                 {/* Channel pill */}
                 <span
                   className={`px-2 py-0.5 rounded text-xs font-medium border ${
-                    CHANNEL_COLORS[s.channel_slug] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'
+                    CHANNEL_PILL[s.channel_slug] || DEFAULT_PILL
                   }`}
                 >
                   <span className={`inline-block w-2 h-2 rounded-full mr-1 ${
@@ -516,11 +500,11 @@ export default function DailySchedule() {
                         <div
                           key={s.id}
                           className={`text-xs px-2 py-1 rounded border flex items-center justify-between ${
-                            CHANNEL_COLORS[slug] || 'bg-gray-500/20 text-gray-400'
+                            CHANNEL_PILL[slug] || DEFAULT_PILL
                           }`}
                         >
                           <span className="truncate">
-                            {CHANNEL_SHORT[slug]}
+                            {CHANNEL_SHORT[slug] || slug}
                           </span>
                           <span className="font-mono opacity-80 tabular-nums">
                             {toLocalTime(s.target_upload_at)}

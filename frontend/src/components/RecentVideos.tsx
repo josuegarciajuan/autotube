@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Clock, ExternalLink, Play, Film, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
 import { formatDate } from '../lib/api'
+import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface RecentVideo {
   id: number
@@ -62,12 +63,6 @@ function statusBadge(status: string | null) {
   return null
 }
 
-const CHANNEL_COLORS: Record<string, string> = {
-  canal2: 'bg-neon-cyan/20 text-neon-cyan border-neon-cyan/30',
-  canal3: 'bg-amber-400/20 text-amber-400 border-amber-400/30',
-  canal4: 'bg-purple-400/20 text-purple-400 border-purple-400/30',
-}
-
 export default function RecentVideos({ videos }: RecentVideosProps) {
   return (
     <section className="glass rounded-xl p-5">
@@ -113,7 +108,7 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                 <div className="flex items-center gap-2 mt-0.5">
                   <span
                     className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
-                      CHANNEL_COLORS[v.channel_slug] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'
+                      CHANNEL_PILL[v.channel_slug] || DEFAULT_PILL
                     }`}
                   >
                     {v.channel_name}

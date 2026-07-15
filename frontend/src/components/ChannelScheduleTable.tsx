@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { Clock, Play, Smartphone, AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react'
+import { CHANNEL_SHORT, CHANNEL_TABLE_ROW, DEFAULT_TABLE_ROW } from '../lib/channelConfig'
 
 interface ChannelSummary {
   channel_id: number
@@ -25,15 +26,7 @@ interface ChannelSummary {
   has_overlap: boolean
 }
 
-const CHANNEL_COLORS: Record<string, { bg: string; text: string; border: string; dot: string }> = {
-  canal2: { bg: 'bg-neon-cyan/15', text: 'text-neon-cyan', border: 'border-neon-cyan/30', dot: 'bg-neon-cyan' },
-  canal3: { bg: 'bg-amber-400/15', text: 'text-amber-400', border: 'border-amber-400/30', dot: 'bg-amber-400' },
-  canal4: { bg: 'bg-purple-400/15', text: 'text-purple-400', border: 'border-purple-400/30', dot: 'bg-purple-400' },
-}
 
-const CHANNEL_SHORT: Record<string, string> = {
-  canal2: 'SIN', canal3: 'CIV', canal4: 'EXP',
-}
 
 function fmtTime(ts: string | null): string {
   if (!ts) return '—'
@@ -190,7 +183,7 @@ export default function ChannelScheduleTable() {
               <p className="text-white font-semibold text-sm">
                 {firstNext.next_slot_type === 'short' ? 'Short' : 'Video'}
                 {' · '}
-                <span className={CHANNEL_COLORS[firstNext.channel_slug]?.text}>
+                <span className={CHANNEL_TABLE_ROW[firstNext.channel_slug]?.text}>
                   {firstNext.channel_name}
                 </span>
                 {' · '}
@@ -229,7 +222,7 @@ export default function ChannelScheduleTable() {
             </thead>
             <tbody className="divide-y divide-surface-border/50">
               {channels.map((ch) => {
-                const colors = CHANNEL_COLORS[ch.channel_slug] || { bg: 'bg-gray-500/15', text: 'text-gray-400', border: 'border-gray-500/30', dot: 'bg-gray-400' }
+                const colors = CHANNEL_TABLE_ROW[ch.channel_slug] || DEFAULT_TABLE_ROW
                 const videoDone = ch.videos_completed
                 const videoTotal = ch.videos_completed + ch.videos_pending + ch.videos_running
                 const shortDone = ch.shorts_completed
@@ -242,7 +235,7 @@ export default function ChannelScheduleTable() {
                       <div className="flex items-center gap-2">
                         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
                         <span className="text-white font-medium text-xs">{ch.channel_name}</span>
-                        <span className="text-[10px] text-gray-600 font-mono">({CHANNEL_SHORT[ch.channel_slug]})</span>
+                        <span className="text-[10px] text-gray-600 font-mono">({CHANNEL_SHORT[ch.channel_slug] || ch.channel_slug})</span>
                       </div>
                     </td>
                     <td className="px-3 py-3 text-center">

@@ -5,6 +5,7 @@
 import { useState, useEffect } from 'react'
 import { Plus, Minus, Video, Play, Clock, Zap } from 'lucide-react'
 import { api } from '../lib/api'
+import { CHANNEL_DOT } from '../lib/channelConfig'
 
 interface ChannelConfig {
   channel_id: number
@@ -13,12 +14,6 @@ interface ChannelConfig {
   videos_per_day: number
   viral_per_day: number
   planning_enabled: boolean
-}
-
-const CHANNEL_COLORS: Record<string, { dot: string }> = {
-  canal2: { dot: 'bg-neon-cyan' },
-  canal3: { dot: 'bg-amber-400' },
-  canal4: { dot: 'bg-purple-400' },
 }
 
 export default function ChannelConfigCard({
@@ -30,7 +25,7 @@ export default function ChannelConfigCard({
 }) {
   const [saving, setSaving] = useState(false)
   const [peakInfo, setPeakInfo] = useState<any>(null)
-  const colors = CHANNEL_COLORS[config.channel_slug] || { dot: 'bg-gray-400' }
+  const dotClass = CHANNEL_DOT[config.channel_slug] || 'bg-gray-400'
 
   useEffect(() => {
     api.getChannelPeakInfo(config.channel_id).then(setPeakInfo).catch(() => {})
@@ -50,7 +45,7 @@ export default function ChannelConfigCard({
       {/* Header: channel name + toggle */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
+           <span className={`w-2.5 h-2.5 rounded-full ${dotClass}`} />
           <span className="text-sm font-medium text-white">{config.channel_name}</span>
         </div>
         <button

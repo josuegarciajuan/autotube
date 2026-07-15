@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { Clock, Play, Smartphone, Loader2, Filter } from 'lucide-react'
+import { CHANNEL_SHORT, CHANNEL_DOT, CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface Slot {
   id: number
@@ -43,19 +44,6 @@ function toLocalFull(ts: string): string {
 function fmtTime(ts: string): string {
   if (!ts) return '??:??'
   return toLocal(ts)
-}
-
-// ── Channel colors ───────────────────────────────────────
-const CHANNEL_COLORS: Record<string, string> = {
-  canal2: 'bg-neon-cyan/15 text-neon-cyan border-neon-cyan/30',
-  canal3: 'bg-amber-400/15 text-amber-400 border-amber-400/30',
-  canal4: 'bg-purple-400/15 text-purple-400 border-purple-400/30',
-}
-const CHANNEL_DOT: Record<string, string> = {
-  canal2: 'bg-neon-cyan', canal3: 'bg-amber-400', canal4: 'bg-purple-400',
-}
-const CHANNEL_SHORT: Record<string, string> = {
-  canal2: 'SIN', canal3: 'CIV', canal4: 'EXP',
 }
 
 export default function UpcomingExecutions() {
@@ -285,7 +273,7 @@ export default function UpcomingExecutions() {
                         </td>
                         <td className="px-3 py-2">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${
-                            CHANNEL_COLORS[s.channel_slug] || 'bg-gray-500/15 text-gray-400 border-gray-500/30'
+                            CHANNEL_PILL[s.channel_slug] || DEFAULT_PILL
                           }`}>
                             <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${
                               CHANNEL_DOT[s.channel_slug] || 'bg-gray-400'
