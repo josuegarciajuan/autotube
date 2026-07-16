@@ -5,19 +5,56 @@
 import { useState, useRef, useEffect } from 'react'
 import { useGeneration, type ActiveJob } from '../context/GenerationContext'
 import { useGenerationProgress, type ProgressData } from '../hooks/useWebSocket'
-import { X, ChevronDown, ChevronUp, Loader2, CheckCircle, AlertCircle, Wand2, Layers } from 'lucide-react'
+import { api } from '../lib/api'
+import { X, ChevronDown, ChevronUp, Loader2, CheckCircle, AlertCircle, Wand2, Layers, Ban, Upload, Globe } from 'lucide-react'
+
+/** Human-readable label for each job action type. */
+function actionLabel(action: string): string {
+  switch (action) {
+    case 'upload_only':       return 'Subir video'
+    case 'publish':           return 'Publicar video'
+    case 'generate_only':     return 'Generar (local)'
+    case 'generate_and_upload': return 'Generar y Subir'
+    case 'reassemble':        return 'Re-ensamblar'
+    case 'regenerate_media':  return 'Regenerar media'
+    case 'generate':          return 'Generar'
+    default:                  return action || 'Pipeline'
+  }
+}
+
+/** Icon component for each job action type. */
+function actionIcon(action: string, size: number, className: string) {
+  switch (action) {
+    case 'upload_only': return <Upload size={size} className={className} />
+    case 'publish':     return <Globe size={size} className={className} />
+    default:            return <Wand2 size={size} className={className} />
+  }
+}
 
 /** Individual progress bar for a single job.
  *  Must be a separate component so useGenerationProgress hook works per jobId. */
 function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => void }) {
   const [minimized, setMinimized] = useState(false)
   const [dismissed, setDismissed] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const { progress, connected } = useGenerationProgress(job.jobId)
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>()
 
   const isCompleted = progress?.status === 'completed'
   const isFailed = progress?.status === 'failed'
   const pct = progress?.progress ?? 0
+
+  // Cancel this job: sends cancel request to backend + cleans up
+  async function handleCancel() {
+    setCancelling(true)
+    try {
+      await api.cancelJob(job.jobId)
+    } catch {
+      // Even if the API call fails, dismiss the bar
+    }
+    // Auto-dismiss after brief delay to show "Cancelando..." feedback
+    setTimeout(() => onDismiss(), 2000)
+  }
 
   // Auto-dismiss after 3s when done (cleanly with cleanup)
   useEffect(() => {
@@ -54,8 +91,8 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
           }`} />
           <span className="text-[11px] sm:text-xs text-gray-400 font-medium truncate">
             {job.channelName} · {
-              isCompleted ? 'Completado' : isFailed ? 'Error'
-              : `${pct}% — ${progress?.phase || 'Iniciando...'}`
+              cancelling ? 'Cancelando...' : isCompleted ? 'Completado' : isFailed ? 'Error'
+              : `${actionLabel(job.action)} · ${pct}%`
             }
           </span>
           <span className="ml-auto text-[10px] text-gray-500 tabular-nums">{pct}%</span>
@@ -67,9 +104,9 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
           <div className="px-3 sm:px-4 py-2 sm:py-2.5">
             {/* Header row */}
             <div className="flex items-center gap-2 mb-1.5">
-              <Wand2 size={14} className={`shrink-0 ${
+              {actionIcon(job.action, 14, `shrink-0 ${
                 isCompleted ? 'text-green-400' : isFailed ? 'text-red-400' : 'text-neon-gold'
-              }`} />
+              }`)}
               <span className="text-xs font-semibold text-white truncate">
                 {job.channelName}
               </span>
@@ -78,11 +115,22 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
                   #{job.videoId}
                 </span>
               )}
-              <span className="text-[10px] text-gray-500 truncate">· Generar y Subir</span>
+              <span className="text-[10px] text-gray-500 truncate">· {actionLabel(job.action)}</span>
               <div className="flex items-center gap-1 ml-auto">
                 {isCompleted && <CheckCircle size={14} className="text-green-400 shrink-0" />}
                 {isFailed && <AlertCircle size={14} className="text-red-400 shrink-0" />}
-                {!isCompleted && !isFailed && <Loader2 size={12} className="text-neon-gold animate-spin shrink-0" />}
+                {!isCompleted && !isFailed && !cancelling && <Loader2 size={12} className="text-neon-gold animate-spin shrink-0" />}
+                {cancelling && <Loader2 size={12} className="text-yellow-400 animate-spin shrink-0" />}
+                {!isCompleted && !isFailed && (
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    title="Cancelar generación"
+                    className="p-0.5 text-gray-500 hover:text-red-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Ban size={14} />
+                  </button>
+                )}
                 <button onClick={() => setMinimized(true)}
                   className="p-0.5 text-gray-500 hover:text-white">
                   <ChevronDown size={14} />

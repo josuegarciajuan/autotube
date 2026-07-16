@@ -14,6 +14,7 @@ All actions are idempotent and non-critical — failures don't affect the main
 pipeline. The scheduler in api/main.py processes pending actions every 15 min.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -27,6 +28,32 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_broadcast_progress(job_id: int, progress: int, phase: str,
+                              message: str, video_id: int = None,
+                              status: str = "running"):
+    """Sync progress update (DB write) + best-effort async WebSocket broadcast.
+
+    Designed to be called from synchronous lifecycle handlers. Updates both
+    the generation_jobs and videos tables, then schedules a WebSocket broadcast
+    on the event loop if available. Falls back to frontend polling if the loop
+    is unavailable.
+    """
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    db.update_job(job_id, progress=progress, phase=phase, status=status)
+    if video_id:
+        db.update_video(video_id, progress=progress, progress_phase=phase)
+    # Best-effort WebSocket broadcast via running event loop
+    try:
+        from api.services.generation_service import _broadcast_progress as _async_broadcast
+        loop = asyncio.get_running_loop()
+        loop.create_task(_async_broadcast(
+            job_id, progress, phase, message, status, video_id,
+        ))
+    except (RuntimeError, ImportError):
+        pass  # no running loop or module unavailable — frontend polling handles it
 
 
 class VideoLifecycleManager:
@@ -464,7 +491,11 @@ class VideoLifecycleManager:
 
     def _handle_go_public(self, yt_video_id: str, db_video_id: int,
                            _action: dict) -> bool:
-        """Set a private/unlisted video to public at the scheduled peak time."""
+        """Set a private/unlisted video to public at the scheduled peak time.
+        
+        Creates a short-lived 'publish' job so the frontend progress bar shows
+        real-time feedback during the go-public phase.
+        """
         from pipeline.youtube_uploader import YouTubeUploader
 
         # Get channel slug for this video
@@ -473,6 +504,21 @@ class VideoLifecycleManager:
         title = ch.get("titulo_final", "?") if ch else "?"
         uploaded_at = ch.get("created_at", "?") if ch else "?"
         target_public = ch.get("target_public_at", "?") if ch else "?"
+        
+        # Get channel_id for job creation
+        ch_record = self.db.get_channel_by_slug(slug)
+        channel_id = ch_record["id"] if ch_record else None
+
+        # ── Create publish job for progress bar feedback ──
+        publish_job_id = None
+        if channel_id:
+            try:
+                publish_job_id = self.db.create_job(channel_id, "publish", db_video_id)
+                _sync_broadcast_progress(publish_job_id, 10, "publish",
+                                          f"Preparando publicación: {title[:50]}...",
+                                          video_id=db_video_id)
+            except Exception as exc:
+                logger.warning("[%s] Could not create publish job: %s", self.slug, exc)
 
         # ── Resolve local time for display ──
         local_time_str = ""
@@ -492,10 +538,20 @@ class VideoLifecycleManager:
         if not uploader.authenticate():
             logger.error("[%s] ❌ PUBLICAR: auth fallida para video %s — NO se pudo hacer público",
                          self.slug, yt_video_id)
+            if publish_job_id:
+                _sync_broadcast_progress(publish_job_id, 0, "publish",
+                                          "Error: autenticación fallida",
+                                          video_id=db_video_id, status="failed")
             return False
 
         try:
             from datetime import datetime, timezone
+            
+            if publish_job_id:
+                _sync_broadcast_progress(publish_job_id, 50, "publish",
+                                          "Haciendo público en YouTube...",
+                                          video_id=db_video_id)
+            
             now = datetime.now(timezone.utc)
             result = uploader.set_privacy(yt_video_id, "public")
             if result.get("updated") or result.get("privacy") == "public":
@@ -513,6 +569,11 @@ class VideoLifecycleManager:
                     self.slug, title, yt_video_id, db_video_id,
                     uploaded_at, target_public, now.isoformat(), local_time_str,
                 )
+                # ── Complete publish job ──
+                if publish_job_id:
+                    _sync_broadcast_progress(publish_job_id, 100, "publish",
+                                              f"Video publicado: {title[:50]}",
+                                              video_id=db_video_id, status="completed")
                 # ── Also log to the dedicated scheduled_publish log ──
                 try:
                     from api.services.scheduled_publish_logger import log_publish_event
@@ -535,12 +596,20 @@ class VideoLifecycleManager:
                     "[%s] ❌ PUBLICAR fallido: video %s ('%s') — respuesta: %s",
                     self.slug, yt_video_id, title, result,
                 )
+                if publish_job_id:
+                    _sync_broadcast_progress(publish_job_id, 0, "publish",
+                                              "Error: YouTube no confirmó la publicación",
+                                              video_id=db_video_id, status="failed")
                 return False
         except Exception as e:
             logger.error(
                 "[%s] ❌ PUBLICAR excepción: video %s ('%s') — %s",
                 self.slug, yt_video_id, title, e,
             )
+            if publish_job_id:
+                _sync_broadcast_progress(publish_job_id, 0, "publish",
+                                          f"Error: {str(e)[:100]}",
+                                          video_id=db_video_id, status="failed")
             return False
 
     def _handle_first_comment(self, yt_video_id: str, db_video_id: int,

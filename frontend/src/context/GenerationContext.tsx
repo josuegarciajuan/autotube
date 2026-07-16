@@ -146,7 +146,6 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
           }
 
           // 4. Remove completed/failed jobs (not in active list)
-          // This handles the case where a job completed but we didn't catch it
           if (!cancelled) {
             setActiveJobs(result)
             saveToStorage(result)
@@ -182,6 +181,53 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
 
     discoverAndVerify()
     return () => { cancelled = true }
+  }, [])
+
+  // Periodic polling: discover new jobs created by schedulers (upload, publish, etc.)
+  // Runs every 15 seconds so the bottom bar catches scheduled operations
+  useEffect(() => {
+    async function pollForNewJobs() {
+      try {
+        const jobsRes = await fetch('api/jobs/active')
+        if (!jobsRes.ok) return
+        const apiJobs = await jobsRes.json()
+        const apiJobIds = new Set<number>(apiJobs.map((j: any) => j.id))
+        
+        setActiveJobs(prev => {
+          let changed = false
+          
+          // Remove jobs that are no longer active (completed/failed)
+          const filtered = prev.filter(j => apiJobIds.has(j.jobId))
+          if (filtered.length !== prev.length) changed = true
+          
+          // Add new jobs discovered via API
+          const existingIds = new Set(filtered.map(j => j.jobId))
+          for (const j of apiJobs) {
+            if (!existingIds.has(j.id)) {
+              filtered.push({
+                jobId: j.id,
+                channelId: j.channel_id,
+                channelName: `Canal ${j.channel_id}`,  // placeholder, updated below
+                action: j.action || 'generate_and_upload',
+                videoId: j.video_id,
+              })
+              changed = true
+            }
+          }
+          
+          if (changed) {
+            saveToStorage(filtered)
+            return filtered
+          }
+          return prev
+        })
+      } catch {
+        // Silently fail — keep current jobs
+      }
+    }
+    
+    const interval = setInterval(pollForNewJobs, 15_000)
+    return () => clearInterval(interval)
   }, [])
 
   return (

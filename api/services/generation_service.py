@@ -1817,6 +1817,14 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                 db2 = _get_db()
                 db2.update_job(job_id, progress=our_pct, phase="upload")
                 db2.update_video(video_id, progress=our_pct, progress_phase="upload")
+                # Broadcast via WebSocket for real-time feedback in the progress bar
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_broadcast_progress(
+                        job_id, our_pct, "upload", f"Subiendo... {yt_pct}%", video_id=video_id
+                    ))
+                except RuntimeError:
+                    pass  # no running loop — polling fallback handles it
             except Exception:
                 pass
 
