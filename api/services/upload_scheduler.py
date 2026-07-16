@@ -82,18 +82,28 @@ def dispatch_due_uploads(db=None) -> dict | None:
         win_start = ch_cfg.get("UPLOAD_WINDOW_START", 9)
         win_end = ch_cfg.get("UPLOAD_WINDOW_END", 11)
 
-        # Check if we're within the upload window
-        if win_start <= current_hour < win_end:
-            # Also check if the video has a target_public_at that hasn't already passed
-            target_public = row["target_public_at"]
-            if target_public:
+        # Determine if this video is past-due (target_public_at already passed)
+        past_due = False
+        target_public = row["target_public_at"]
+        if target_public:
+            try:
+                pub_dt = datetime.strptime(str(target_public), "%Y-%m-%d %H:%M:%S")
+                if pub_dt < now:
+                    past_due = True
+                    logger.info("Video %d: public time already passed — uploading ASAP", row["id"])
+            except (ValueError, TypeError):
+                # Try ISO format too
                 try:
-                    pub_dt = datetime.strptime(str(target_public), "%Y-%m-%d %H:%M:%S")
-                    if pub_dt < now - timedelta(hours=2):
-                        # Public time passed >2h ago — this video is late but still upload
-                        logger.info("Video %d: public time already passed, uploading ASAP", row["id"])
+                    pub_dt = datetime.fromisoformat(str(target_public).replace("Z", "+00:00"))
+                    if pub_dt < now:
+                        past_due = True
+                        logger.info("Video %d: public time already passed — uploading ASAP", row["id"])
                 except (ValueError, TypeError):
                     pass
+
+        # Past-due videos: upload regardless of window (catch-up)
+        # Normal videos: only upload within the configured window
+        if past_due or (win_start <= current_hour < win_end):
             eligible.append(dict(row))
 
     if not eligible:
@@ -105,6 +115,21 @@ def dispatch_due_uploads(db=None) -> dict | None:
                        win_start, win_end, len(rows))
             dispatch_due_uploads._last_noop_log = _t.time()
         return None
+
+    # ── Sort: past-due videos first, then normal order ──
+    now_ts = now
+    def _is_past_due(vid: dict) -> bool:
+        tp = vid.get("target_public_at")
+        if not tp:
+            return False
+        try:
+            return datetime.strptime(str(tp), "%Y-%m-%d %H:%M:%S") < now_ts
+        except (ValueError, TypeError):
+            try:
+                return datetime.fromisoformat(str(tp).replace("Z", "+00:00")) < now_ts
+            except (ValueError, TypeError):
+                return False
+    eligible.sort(key=lambda v: (not _is_past_due(v), v.get("created_at", "")))
 
     # ── 4. Dispatch the first eligible video ──
     video = eligible[0]

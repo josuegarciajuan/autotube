@@ -756,6 +756,22 @@ def run_job(
                 if pub_mode == "scheduled":
                     tp = video_record.get("target_public_at", "?") if video_record else "?"
                     logger.info("📤 SUBIDO (privado): %s | se hará público: %s UTC", yt_url, tp)
+                    # ── Schedule lifecycle actions (go_public, playlist, comments) ──
+                    try:
+                        from pipeline.video_lifecycle import VideoLifecycleManager
+                        script_text = script.get("guion", "") if script else ""
+                        lifecycle = VideoLifecycleManager(canal)
+                        lifecycle.on_video_uploaded_scheduled(
+                            db_video_id=video_id,
+                            yt_video_id=yt_video_id,
+                            channel_id=channel_id,
+                            script_text=script_text,
+                            target_public_at=planned_public_at,
+                        )
+                        logger.info("[%s] Lifecycle actions scheduled for video %s (target: %s)",
+                                     canal, yt_video_id, planned_public_at)
+                    except Exception as lc_exc:
+                        logger.warning("[%s] Failed to schedule lifecycle actions: %s", canal, lc_exc)
                 else:
                     logger.info("📤 PUBLICADO: %s", yt_url)
                 

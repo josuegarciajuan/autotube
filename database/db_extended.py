@@ -2499,7 +2499,7 @@ class ExtendedDatabase(Database):
                           v.created_at, c.name as channel_name, c.slug as channel_slug
                    FROM videos v
                    JOIN channels c ON v.channel_id = c.id
-                   WHERE v.status IN ('generating', 'ready') {pipe_where.replace('v.channel_id', 'v.channel_id')}
+                   WHERE v.status IN ('generating', 'ready', 'reassembling') {pipe_where.replace('v.channel_id', 'v.channel_id')}
                    ORDER BY v.created_at DESC LIMIT 10""",
                 ch_params,
             ).fetchall()
