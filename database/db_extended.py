@@ -381,6 +381,20 @@ def migrate_v2(db_path: str = None):
             ("Expediciones sin retorno", "canal4", "{}", 1),
         )
 
+    # Seed yt_studio_url for existing channels (only if not yet set)
+    studio_urls = {
+        "canal2": "https://studio.youtube.com/channel/UC32VJJKqpbiEExfEHYGxdNw/editing/profile",
+        "canal3": "https://studio.youtube.com/channel/UCejkjoNtUs99-LPBEYC7rPQ/editing/profile",
+        "canal4": "https://studio.youtube.com/channel/UC9IOZKc0O4mBJ_Vb1x7czPg/editing/profile",
+        "canal5": "https://studio.youtube.com/channel/UCDZi5NrlYnncYVlnZ0O7wKA/editing/profile",
+    }
+    for slug, url in studio_urls.items():
+        conn.execute(
+            "UPDATE channels SET yt_studio_url = ? WHERE slug = ? AND yt_studio_url IS NULL",
+            (url, slug),
+        )
+    logger.info("Migration: seeded yt_studio_url for existing channels")
+
     # Check if canal2 needs profile seeding (new OR missing description)
     canal2_needs_profile = canal2_is_new
     if not canal2_is_new:
@@ -405,6 +419,14 @@ def migrate_v2(db_path: str = None):
                 logger.info("Migration: added %s column to channels", col_name)
             except sqlite3.OperationalError:
                 pass
+
+    # Add yt_studio_url column to channels (idempotent)
+    if "yt_studio_url" not in existing_ch:
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN yt_studio_url TEXT")
+            logger.info("Migration: added yt_studio_url column to channels")
+        except sqlite3.OperationalError:
+            pass
 
     # Add revenue columns to channel_stats_history (idempotent)
     csh_rev_columns = [

@@ -101,7 +101,7 @@ def update_channel(channel_id: int, data: ChannelUpdate):
     import sqlite3
     with db._connect() as conn:
         fields, values = [], []
-        for k in ("banner_url", "avatar_url", "description", "yt_channel_id", "yt_channel_url"):
+        for k in ("banner_url", "avatar_url", "description", "yt_channel_id", "yt_channel_url", "yt_studio_url"):
             v = getattr(data, k, None)
             if v is not None:
                 fields.append(f"{k} = ?")

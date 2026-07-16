@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
@@ -206,7 +206,7 @@ export default function ChannelDetail() {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
-  const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '' })
+  const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '', yt_studio_url: '' })
   const [saving, setSaving] = useState(false)
   const [videoStats, setVideoStats] = useState<Record<string, any>>({})
   const [shortStats, setShortStats] = useState<Record<string, any>>({})
@@ -268,6 +268,8 @@ export default function ChannelDetail() {
 
   // Scheduled publishing mode
   const [scheduledMode, setScheduledMode] = useState('immediate')
+  const [optimalSlots, setOptimalSlots] = useState<any>(null)
+  const [recalculatingSlots, setRecalculatingSlots] = useState(false)
 
   // Promotion tab state
   const [playlists, setPlaylists] = useState<any[]>([])
@@ -302,7 +304,13 @@ export default function ChannelDetail() {
           const cfg = typeof ch.config_json === 'string' ? JSON.parse(ch.config_json) : (ch.config_json || {})
           setScheduledMode(cfg.PUBLISH_MODE || 'immediate')
         } catch { setScheduledMode('immediate') }
-        setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '', google_account: ch.google_account || '' })
+        setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '', google_account: ch.google_account || '', yt_studio_url: ch.yt_studio_url || '' })
+
+        // Fetch optimal slots if in scheduled mode
+        const mode = (() => { try { const c = typeof ch.config_json === 'string' ? JSON.parse(ch.config_json) : (ch.config_json || {}); return c.PUBLISH_MODE || 'immediate' } catch { return 'immediate' } })()
+        if (mode === 'scheduled') {
+          api.getOptimalSlots(channelId).then(setOptimalSlots).catch(() => {})
+        }
       } catch (e) { console.error(e) }
       setLoading(false)
     }
@@ -568,6 +576,18 @@ export default function ChannelDetail() {
       setStatsRefreshMsg(`Error: ${e.message || 'desconocido'}`)
     } finally {
       setRefreshingStats(false)
+    }
+  }
+
+  async function handleRecalculateChannelSlots() {
+    setRecalculatingSlots(true)
+    try {
+      const res = await api.getOptimalSlots(channelId)
+      setOptimalSlots(res)
+    } catch (e: any) {
+      console.error('Recalculate slots failed', e)
+    } finally {
+      setRecalculatingSlots(false)
     }
   }
 
@@ -855,6 +875,12 @@ export default function ChannelDetail() {
                 <Youtube size={14} /> YouTube
               </a>
             )}
+            {channel.yt_studio_url && (
+              <a href={channel.yt_studio_url} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs font-medium hover:bg-neon-cyan/20 transition-colors">
+                <ExternalLink size={14} /> <span className="hidden sm:inline">YT Studio</span>
+              </a>
+            )}
             <button onClick={() => setEditingProfile(true)}
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-surface-border text-gray-300 rounded-full text-xs hover:bg-dark-600 transition-colors">
               <Edit3 size={12} /> <span className="hidden sm:inline">Editar perfil</span><span className="sm:hidden">Editar</span>
@@ -906,6 +932,72 @@ export default function ChannelDetail() {
           <ArrowLeft size={14} /> <span className="hidden sm:inline">Canales</span>
         </Link>
       </div>
+
+      {/* ── Optimal Publish Slots Section ──────────────────────── */}
+      {scheduledMode === 'scheduled' ? (
+        <div className="glass rounded-xl p-5 space-y-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <TrendingUp size={16} className="text-purple-400" />
+              <h3 className="text-sm font-semibold text-white">Franjas Óptimas de Publicación</h3>
+            </div>
+            <button
+              onClick={handleRecalculateChannelSlots}
+              disabled={recalculatingSlots}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-purple-500/20 bg-purple-500/5 text-purple-400 hover:bg-purple-500/10 transition-all text-[11px] font-medium disabled:opacity-50"
+            >
+              {recalculatingSlots ? <Loader2 size={11} className="animate-spin" /> : <Zap size={11} />}
+              <span>{recalculatingSlots ? 'Calculando...' : 'Recalcular'}</span>
+            </button>
+          </div>
+
+          {optimalSlots?.has_data ? (
+            <>
+              {optimalSlots.long?.[0]?.calculated_at && (
+                <div className="text-[11px] text-gray-500 flex items-center gap-3">
+                  <span>Calculado: {new Date(optimalSlots.long[0].calculated_at).toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}</span>
+                  {optimalSlots.long?.[0]?.audience_split && (() => {
+                    try {
+                      const s = typeof optimalSlots.long[0].audience_split === 'string' ? JSON.parse(optimalSlots.long[0].audience_split) : optimalSlots.long[0].audience_split;
+                      return s?.spain_pct ? (
+                        <span className="flex items-center gap-1"><MapPin size={10} />{Math.round(s.spain_pct * 100)}% 🇪🇸 · {Math.round(s.latam_pct * 100)}% 🌎</span>
+                      ) : null;
+                    } catch { return null; }
+                  })()}
+                </div>
+              )}
+
+              <div>
+                <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-2">Vídeos largos</div>
+                <div className="grid grid-cols-3 gap-3">
+                  {optimalSlots.long?.map((s: any) => <SlotBadge key={s.rank} slot={s} />)}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-2">Shorts</div>
+                <div className="grid grid-cols-3 gap-3">
+                  {optimalSlots.shorts?.map((s: any) => <SlotBadge key={s.rank} slot={s} />)}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="text-sm text-gray-500 py-3 text-center">
+              Sin datos aún. Las franjas se calculan automáticamente cada 24h.{' '}
+              <button onClick={handleRecalculateChannelSlots} className="text-purple-400 hover:underline">
+                Forzar primer cálculo
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="glass rounded-xl p-5 mb-6">
+          <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <Globe size={14} />
+            <span>Las franjas óptimas solo aplican en modo programado. Activa el modo programado para usar publicación en hora pico.</span>
+          </div>
+        </div>
+      )}
 
       {/* --- Generation Panel --- */}
       {videoTab !== 'live' && (
@@ -1571,6 +1663,9 @@ export default function ChannelDetail() {
               <div><label className="block text-xs text-gray-400 mb-1">Cuenta de Google</label>
                 <input type="text" value={profileForm.google_account || ''} onChange={e => setProfileForm({ ...profileForm, google_account: e.target.value })}
                   className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red" placeholder="email@gmail.com" /></div>
+              <div><label className="block text-xs text-gray-400 mb-1">URL de YouTube Studio</label>
+                <input type="text" value={profileForm.yt_studio_url || ''} onChange={e => setProfileForm({ ...profileForm, yt_studio_url: e.target.value })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red" placeholder="https://studio.youtube.com/channel/..." /></div>
               <div className="flex gap-2 pt-2">
                 <button onClick={handleSaveProfile} disabled={saving}
                   className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 bg-neon-red text-white rounded-lg font-bold text-sm hover:bg-neon-red/80 disabled:opacity-50">
@@ -1851,6 +1946,40 @@ export default function ChannelDetail() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+
+function SlotBadge({ slot }: { slot: any }) {
+  const rankColors: Record<number, string> = {
+    1: 'border-amber-500/30 bg-amber-500/5 text-amber-300',
+    2: 'border-slate-400/30 bg-slate-400/5 text-slate-300',
+    3: 'border-orange-700/30 bg-orange-700/5 text-orange-400',
+  }
+  const rankEmoji: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' }
+  const focusLabel: Record<string, string> = { spain: '🇪🇸 Spain', latam: '🌎 LATAM', blend: 'Blend' }
+  return (
+    <div className={`rounded-lg border p-3 ${rankColors[slot.rank] || rankColors[1]}`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[10px] font-bold">{rankEmoji[slot.rank]} #{slot.rank}</span>
+      </div>
+      <div className="text-lg font-mono font-bold tracking-tight">
+        {String(slot.target_hour).padStart(2, '0')}:{String(slot.target_minute).padStart(2, '0')}
+      </div>
+      <div className="flex items-center justify-between mt-1.5">
+        <div className="flex items-center gap-1">
+          <div className="w-10 h-1 rounded-full bg-white/10 overflow-hidden">
+            <div className="h-full rounded-full bg-current opacity-40" style={{ width: `${(slot.confidence || 0) * 100}%` }} />
+          </div>
+          <span className="text-[9px] opacity-60">{Math.round((slot.confidence || 0) * 100)}%</span>
+        </div>
+        <span className="text-[9px] opacity-70">{focusLabel[slot.audience_focus] || 'Blend'}</span>
+      </div>
+      <div className="text-[9px] opacity-40 mt-1">
+        score: {(slot.score || 0).toFixed(2)}
+        {slot.used_count > 0 && ` · ${slot.used_count} usos`}
+      </div>
     </div>
   )
 }

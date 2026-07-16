@@ -275,7 +275,7 @@ export default function Channels() {
               >
                 Gestionar Canal →
               </Link>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <Link
                   to="/scheduling"
                   className="text-center px-3 py-1.5 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs font-medium hover:bg-neon-gold/20 transition-colors flex items-center justify-center gap-1"
@@ -290,6 +290,16 @@ export default function Channels() {
                 ) : (
                   <span className="text-center px-3 py-1.5 text-gray-600 text-xs flex items-center justify-center gap-1 cursor-not-allowed">
                     <Youtube size={12} /> —
+                  </span>
+                )}
+                {ch.yt_studio_url ? (
+                  <a href={ch.yt_studio_url} target="_blank" rel="noopener noreferrer"
+                    className="text-center px-3 py-1.5 bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan rounded-lg text-xs font-medium hover:bg-neon-cyan/20 transition-colors flex items-center justify-center gap-1">
+                    <ExternalLink size={12} /> Studio
+                  </a>
+                ) : (
+                  <span className="text-center px-3 py-1.5 text-gray-600 text-xs flex items-center justify-center gap-1 cursor-not-allowed">
+                    <ExternalLink size={12} /> —
                   </span>
                 )}
               </div>

@@ -85,6 +85,7 @@ export interface Channel {
   yt_channel_id: string | null
   yt_channel_url: string | null
   google_account: string | null
+  yt_studio_url: string | null
   created_at: string
   updated_at: string
 }
