@@ -1152,7 +1152,7 @@ class PipelineOrchestrator:
                 try:
                     import json as _json_meta
                     keywords = []
-                    kw_raw = script.get("keywords") or script.get("keywords_json", "[]")
+                    kw_raw = (script.get("keywords") or script.get("keywords_json", "[]")) if script else "[]"
                     if isinstance(kw_raw, str):
                         try: keywords = _json_meta.loads(kw_raw)
                         except: pass
@@ -1383,8 +1383,8 @@ class PipelineOrchestrator:
                 else:
                     tags = kw_raw or []
                 
-                seo_desc = script.get("descripcion_seo", "")
-                chapters_raw = script.get("chapters", [])
+                seo_desc = script.get("descripcion_seo", "") if script else ""
+                chapters_raw = script.get("chapters", []) if script else []
                 if isinstance(chapters_raw, str):
                     chapters_raw = _json.loads(chapters_raw)
                 
@@ -1474,7 +1474,7 @@ class PipelineOrchestrator:
                 else:
                     # CLI standalone mode: insert + mark
                     db_video_id = self.db.insert_video(
-                        script_id=script.get("id"),
+                        script_id=script.get("id") if script else None,
                         canal=self.canal,
                         video_path=video_data["video_path"],
                         thumbnail_path=video_data["thumbnail_path"],
@@ -1501,7 +1501,7 @@ class PipelineOrchestrator:
             self._timing["phases"]["upload"] = duration_ms
             self.db.log_pipeline(self.canal, "upload", "success",
                                   f"YouTube ID: {video_id}",
-                                  content_id=script.get("id"),
+                                  content_id=script.get("id") if script else None,
                                   duration_ms=duration_ms)
 
             # ── Post-upload: real YouTube stats snapshot ──
@@ -1549,7 +1549,7 @@ class PipelineOrchestrator:
             try:
                 from pipeline.video_lifecycle import VideoLifecycleManager
                 lifecycle = VideoLifecycleManager(self.canal)
-                script_text = script.get("guion", "")
+                script_text = script.get("guion", "") if script else ""
                 db_vid_for_lifecycle = db_video_id or self.db_video_id
                 channel_id_for_lifecycle = self._get_channel_id()
                 
