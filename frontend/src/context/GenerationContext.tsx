@@ -3,7 +3,7 @@
  *  Persists to localStorage so progress survives page refreshes.
  */
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
 
 export interface ActiveJob {
   jobId: number
@@ -69,6 +69,7 @@ function saveToStorage(jobs: ActiveJob[]) {
 
 export function GenerationProvider({ children }: { children: ReactNode }) {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>(loadFromStorage)
+  const channelNamesRef = useRef<Map<number, string>>(new Map())
 
   const addJob = useCallback((job: ActiveJob) => {
     setActiveJobs(prev => {
@@ -106,14 +107,13 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
       const storedMap = new Map<number, ActiveJob>()
       for (const j of stored) storedMap.set(j.jobId, j)
 
-      // 2. Fetch channel names (needed for API-discovered jobs)
-      const channelNames = new Map<number, string>()
+      // 2. Fetch channel names (needed for API-discovered jobs + polling)
       try {
         const chRes = await fetch('api/channels')
         if (chRes.ok) {
           const channels = await chRes.json()
           for (const ch of channels) {
-            channelNames.set(ch.id, ch.name || ch.slug || `Canal ${ch.id}`)
+            channelNamesRef.current.set(ch.id, ch.name || ch.slug || `Canal ${ch.id}`)
           }
         }
       } catch {}
@@ -135,7 +135,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
             }
 
             // New job from API: build ActiveJob
-            const chName = channelNames.get(j.channel_id) || `Canal ${j.channel_id}`
+            const chName = channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`
             result.push({
               jobId,
               channelId: j.channel_id,
@@ -207,7 +207,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
               filtered.push({
                 jobId: j.id,
                 channelId: j.channel_id,
-                channelName: `Canal ${j.channel_id}`,  // placeholder, updated below
+                channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
                 action: j.action || 'generate_and_upload',
                 videoId: j.video_id,
               })
