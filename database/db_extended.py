@@ -119,6 +119,9 @@ def migrate_v2(db_path: str = None):
         ("target_playlist_slug", "TEXT"),
         ("manual_altered_content_done", "INTEGER DEFAULT 0"),
         ("manual_end_screens_done", "INTEGER DEFAULT 0"),
+        # ── Generation lifecycle timestamps ──
+        ("generation_started_at", "TIMESTAMP"),
+        ("generation_finished_at", "TIMESTAMP"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -1060,7 +1063,8 @@ class ExtendedDatabase(Database):
                     "publish_mode", "target_public_at", "published_at",
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
                     "target_playlist_id", "target_playlist_slug",
-                    "manual_altered_content_done", "manual_end_screens_done"]
+                    "manual_altered_content_done", "manual_end_screens_done",
+                    "generation_started_at", "generation_finished_at"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -4100,6 +4104,7 @@ class ExtendedDatabase(Database):
                     v.target_public_at,
                     v.publish_mode,
                     v.created_at,
+                    v.generation_started_at,
                     gj.id as job_id,
                     gj.status as job_status,
                     gj.progress as job_progress,
@@ -4126,6 +4131,7 @@ class ExtendedDatabase(Database):
                     v.progress,
                     v.progress_phase,
                     v.created_at,
+                    v.generation_finished_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM videos v

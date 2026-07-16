@@ -175,6 +175,12 @@ export const api = {
     request<any>(`/planning/shorts-config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   replanShorts: () => request<any>('/planning/shorts-replan', { method: 'POST' }),
 
+  // Optimal Publish Slots (v10)
+  getOptimalSlots: (channelId: number) =>
+    request<any>(`/channels/${channelId}/optimal-slots`),
+  recalculateOptimalSlotsAll: () =>
+    request<any>('/planning/recalculate-optimal-slots', { method: 'POST' }),
+
   // Shorts slots
   getShortsSlotsToday: () => request<any>('/planning/shorts-slots/today'),
   getShortsSlotsWeek: (channelId?: number) => {
@@ -346,6 +352,7 @@ export interface GeneratingVideo {
   target_public_at: string | null;
   publish_mode: string;
   created_at: string;
+  generation_started_at: string | null;
   job_id: number | null;
   job_status: string | null;
   job_progress: number | null;
@@ -365,6 +372,7 @@ export interface AwaitingUploadVideo {
   progress: number;
   progress_phase: string | null;
   created_at: string;
+  generation_finished_at: string | null;
   channel_name: string;
   channel_slug: string;
 }

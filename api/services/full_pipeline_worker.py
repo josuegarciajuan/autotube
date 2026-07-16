@@ -358,7 +358,8 @@ def run_job(
     # ── 5. Update job and video status ────────────────────────
     db.update_job(job_id, status="running", started_at=datetime.now(timezone.utc).isoformat())
     db.update_video(video_id, status="generating", progress=1 if start_idx == 0 else 2, 
-                    progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}")
+                    progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
+                    generation_started_at=datetime.now(timezone.utc).isoformat())
 
     # ── 6. Pre-flight cleanup (skip if resuming — don't delete downloaded clips) ──
     _kill_orphaned_ffmpeg()
@@ -727,7 +728,8 @@ def run_job(
             logger.info("Phase 6/6: %s — skipping upload (video stays local)", skip_reason)
             # ── generate_only: mark as awaiting_upload for later upload dispatch ──
             gen_status = "awaiting_upload" if action == "generate_only" else "ready"
-            db.update_video(video_id, progress=100, status=gen_status)
+            db.update_video(video_id, progress=100, status=gen_status,
+                            generation_finished_at=datetime.now(timezone.utc).isoformat())
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")

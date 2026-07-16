@@ -879,9 +879,10 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
     db.update_job(job_id, status="running", started_at=None)
+    db.update_video(video_id, generation_started_at=datetime.now(timezone.utc).isoformat())
     
     await _broadcast_progress(job_id, 1, "inicio", f"Iniciando generacion para {channel_name}...",
-                               video_id=video_id, detail="Preparando pipeline")
+                                video_id=video_id, detail="Preparando pipeline")
     
     checkpoint, last_phase, last_idx = _load_checkpoint(video_id)
     
@@ -1432,8 +1433,11 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             logger.error(f"Error saving scenes: {e}")
         
         await _broadcast_progress(job_id, 88, "thumbnail", "Miniatura generada",
-                                   video_id=video_id,
-                                   detail="Thumbnail lista para YouTube")
+                                    video_id=video_id,
+                                    detail="Thumbnail lista para YouTube")
+        
+        # ── Mark generation complete before upload phase ──
+        db.update_video(video_id, generation_finished_at=datetime.now(timezone.utc).isoformat())
         
         # ── Phase 6: Upload (skip in test mode or when upload=False) ──
         if test_mode or not upload:

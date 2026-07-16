@@ -113,6 +113,17 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
         </span>
       </div>
 
+      {/* Generation start time */}
+      {video.generation_started_at && (
+        <div className="flex items-center gap-2 mb-2 text-[10px]">
+          <Play size={11} className="text-purple-400" />
+          <span className="text-gray-400">Inicio:</span>
+          <span className="text-white font-mono">
+            {toLocalTime(video.generation_started_at)} {toLocalDate(video.generation_started_at)}
+          </span>
+        </div>
+      )}
+
       {/* Progress bar */}
       <div className="mb-2">
         <div className="flex justify-between text-[10px] mb-1">
@@ -159,20 +170,48 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
         </span>
       </div>
 
-      {/* Info */}
+      {/* Title */}
+      {video.titulo_final && (
+        <p className="text-[10px] text-gray-400 truncate mb-3">{video.titulo_final}</p>
+      )}
+
+      {/* Timeline: 3 lines */}
       <div className="space-y-1 mb-3">
-        {video.titulo_final && (
-          <p className="text-[10px] text-gray-400 truncate">{video.titulo_final}</p>
+        {video.generation_finished_at && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <CheckCircle2 size={11} className="text-green-400" />
+            <span className="text-gray-400">Fin gen:</span>
+            <span className="text-white font-mono">
+              {toLocalTime(video.generation_finished_at)} {toLocalDate(video.generation_finished_at)}
+            </span>
+          </div>
         )}
-        <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-gray-500">Publicacion:</span>
-          <span className="text-gray-300 font-mono">
-            {video.target_public_at ? toLocalTime(video.target_public_at) : '--:--'}
-          </span>
-          <span className={`font-mono ml-auto ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
-            {countdown === 'Ahora' ? 'Puede subir' : `${countdown}`}
-          </span>
-        </div>
+        {video.target_upload_at && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <Upload size={11} className="text-blue-400" />
+            <span className="text-gray-400">Subir:</span>
+            <span className="text-white font-mono">
+              {toLocalTime(video.target_upload_at)} {toLocalDate(video.target_upload_at)}
+            </span>
+          </div>
+        )}
+        {video.target_public_at && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <ArrowRight size={11} className="text-green-400" />
+            <span className="text-gray-400">Público:</span>
+            <span className="text-white font-mono">
+              {toLocalTime(video.target_public_at)} {toLocalDate(video.target_public_at)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Countdown */}
+      <div className="flex items-center gap-1.5 mb-3 pt-2 border-t border-white/5">
+        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'} />
+        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
+          {countdown === 'Ahora' ? 'Puede subir' : `${countdown}`}
+        </span>
       </div>
 
       {/* Upload Now button */}
@@ -239,11 +278,13 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
       <div className="grid grid-cols-2 gap-2 text-[10px] mb-3">
         <div>
           <span className="text-gray-500">Subido:</span><br />
-          <span className="text-gray-300 font-mono">{toLocalTime(video.uploaded_at)}</span>
+          <span className="text-gray-300 font-mono">{toLocalTime(video.uploaded_at)} {toLocalDate(video.uploaded_at)}</span>
         </div>
         <div>
           <span className="text-gray-500">Publico:</span><br />
-          <span className={`font-mono ${isDue ? 'text-neon-cyan' : 'text-gray-300'}`}>{toLocalTime(video.target_public_at)}</span>
+          <span className={`font-mono ${isDue ? 'text-neon-cyan' : 'text-gray-300'}`}>
+            {toLocalTime(video.target_public_at)} {toLocalDate(video.target_public_at)}
+          </span>
         </div>
       </div>
 
