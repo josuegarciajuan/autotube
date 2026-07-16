@@ -4114,7 +4114,7 @@ class ExtendedDatabase(Database):
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
                    LEFT JOIN generation_jobs gj ON gj.video_id = v.id AND gj.status = 'running'
-                   WHERE v.status = 'generating'
+                    WHERE v.status = 'generating' OR gj.id IS NOT NULL
                    ORDER BY v.created_at ASC""",
             ).fetchall()
             result["generating"] = [dict(r) for r in generating]
