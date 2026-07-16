@@ -19,6 +19,10 @@ from typing import Optional
 
 logger = logging.getLogger("autotube.planning")
 
+# ── Cooldown guard: prevent rapid successive replans ─────
+_last_horizon_replan_ts: Optional[datetime] = None
+_HORIZON_REPLAN_COOLDOWN_MIN = 5  # minimum minutes between replans
+
 # ── Constants ────────────────────────────────────────────────
 
 # Spain-optimal UPLOAD windows (CEST = UTC+2).  These are the target publish
@@ -648,6 +652,26 @@ def compute_and_store_horizon(
         dict with {total_slots, days_planned, slots_by_channel}.
     """
     from datetime import date as _date
+    
+    # ── Cooldown guard ──────────────────────────────────
+    global _last_horizon_replan_ts
+    now = datetime.now()
+    if _last_horizon_replan_ts is not None and not force_replan:
+        elapsed = (now - _last_horizon_replan_ts).total_seconds() / 60
+        if elapsed < _HORIZON_REPLAN_COOLDOWN_MIN:
+            logger.info(
+                "compute_and_store_horizon: skipped — last replan %.0f min ago (cooldown=%d min)",
+                elapsed, _HORIZON_REPLAN_COOLDOWN_MIN,
+            )
+            return {
+                "total_slots": 0,
+                "days_planned": 0,
+                "slots_by_channel": {},
+                "skipped": True,
+                "reason": f"cooldown ({_HORIZON_REPLAN_COOLDOWN_MIN} min)",
+            }
+    _last_horizon_replan_ts = now
+    # ────────────────────────────────────────────────────
     
     if db is None:
         from database.db_extended import ExtendedDatabase

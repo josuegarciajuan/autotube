@@ -1630,7 +1630,7 @@ async def start_upload_job(job_id: int, video_id: int):
                                    video_id=video_id, detail="Verificando credenciales OAuth")
         
         from orchestrator import PipelineOrchestrator
-        orch = PipelineOrchestrator(canal=canal)
+        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
         
         if not orch.uploader.authenticate():
             await _broadcast_progress(job_id, 20, "upload",
@@ -1781,7 +1781,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                                    video_id=video_id)
 
         from orchestrator import PipelineOrchestrator
-        orch = PipelineOrchestrator(canal=canal)
+        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
 
         if not orch.uploader.authenticate():
             db.update_job(job_id, status="failed", error_msg="YouTube auth failed")
