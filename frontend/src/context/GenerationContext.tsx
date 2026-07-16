@@ -128,9 +128,14 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
           for (const j of apiJobs) {
             const jobId = j.id
 
-            // Already in stored? Use stored version (has user-set channelName)
+            // Already in stored? Refresh channelName from API if available
             if (storedMap.has(jobId)) {
-              result.push(storedMap.get(jobId)!)
+              const storedJob = storedMap.get(jobId)!
+              const freshName = channelNamesRef.current.get(j.channel_id)
+              if (freshName) {
+                storedJob.channelName = freshName
+              }
+              result.push(storedJob)
               continue
             }
 
@@ -199,6 +204,15 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
           // Remove jobs that are no longer active (completed/failed)
           const filtered = prev.filter(j => apiJobIds.has(j.jobId))
           if (filtered.length !== prev.length) changed = true
+          
+          // Refresh channel names for existing jobs from the ref
+          for (const j of filtered) {
+            const freshName = channelNamesRef.current.get(j.channelId)
+            if (freshName && j.channelName !== freshName) {
+              j.channelName = freshName
+              changed = true
+            }
+          }
           
           // Add new jobs discovered via API
           const existingIds = new Set(filtered.map(j => j.jobId))
