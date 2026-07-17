@@ -164,6 +164,69 @@ class VideoLifecycleManager:
         now_iso = datetime.now(timezone.utc).isoformat()
         scheduled_count = 0
 
+        # ── v10.1: Collision guard — avoid same-channel same-hour go_public ──
+        SAME_CHANNEL_GAP_HOURS = 3
+        if target_public_at:
+            try:
+                from datetime import datetime as _dt2, timedelta as _td2
+                proposed_dt = _dt2.fromisoformat(
+                    target_public_at.replace("Z", "+00:00").replace(" ", "T")
+                )
+                if proposed_dt.tzinfo is None:
+                    proposed_dt = proposed_dt.replace(tzinfo=timezone.utc)
+
+                # Check for existing pending go_public actions for this channel
+                # using a direct query since get_due_lifecycle_actions doesn't filter
+                with self.db._connect() as conn:
+                    existing_rows = conn.execute(
+                        """SELECT vla.scheduled_for
+                           FROM video_lifecycle_actions vla
+                           WHERE vla.channel_id = ?
+                             AND vla.action_type = 'go_public'
+                             AND vla.status = 'pending'
+                           ORDER BY vla.scheduled_for DESC
+                           LIMIT 10""",
+                        (channel_id,),
+                    ).fetchall()
+
+                if existing_rows:
+                    # Find the latest go_public time for this channel
+                    latest_go_public = None
+                    for (sf,) in existing_rows:
+                        if sf:
+                            try:
+                                sf_dt = _dt2.fromisoformat(
+                                    sf.replace("Z", "+00:00")
+                                )
+                                if sf_dt.tzinfo is None:
+                                    sf_dt = sf_dt.replace(tzinfo=timezone.utc)
+                                if latest_go_public is None or sf_dt > latest_go_public:
+                                    latest_go_public = sf_dt
+                            except (ValueError, TypeError):
+                                pass
+
+                    if latest_go_public is not None:
+                        gap = proposed_dt - latest_go_public
+                        min_gap = _td2(hours=SAME_CHANNEL_GAP_HOURS)
+                        if abs(gap) < min_gap:
+                            # Collision! Push forward
+                            new_proposed = latest_go_public + min_gap
+                            # Also check against now + warmup
+                            warmup_dt = datetime.now(timezone.utc) + timedelta(minutes=120)
+                            new_proposed = max(new_proposed, warmup_dt)
+                            logger.warning(
+                                "[%s] COLLISION GUARD: proposed go_public %s is within %dh of "
+                                "existing go_public at %s. Pushing to %s.",
+                                self.slug,
+                                proposed_dt.strftime("%m-%d %H:%M"),
+                                SAME_CHANNEL_GAP_HOURS,
+                                latest_go_public.strftime("%m-%d %H:%M"),
+                                new_proposed.strftime("%m-%d %H:%M"),
+                            )
+                            target_public_at = new_proposed.isoformat()
+            except Exception as e:
+                logger.debug("[%s] Collision guard skipped: %s", self.slug, e)
+
         # ── 1. go_public: set video to public at target time ──
         if target_public_at:
             self.db.create_lifecycle_action(

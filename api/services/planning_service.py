@@ -38,6 +38,7 @@ SPAIN_FALLBACK_WINDOW = (8, 10, 0.5, "madrugada-overflow")
 ESTIMATED_PIPELINE_MINUTES = 180  # typical gen duration (~2-3h) + margin; used to calc scheduled_at
 MIN_GAP_MINUTES = 90               # minimum gap between generation START times
 GLOBAL_GAP_MINUTES = 5             # gap between consecutive generation jobs in the global queue (cross-day chaining)
+MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # minimum hours between publish times for same channel (v10.1 collision fix)
 BUFFER_PCT = 0.15                  # safety buffer on per-channel avg creation time
 DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
 
@@ -243,6 +244,37 @@ def _distribute_slots(
     
     # Sort slots by time within this channel
     slots.sort(key=lambda x: x[0] * 60 + x[1])
+    
+    # ── v10.1: Enforce minimum spread between same-channel publish times ──
+    # After sorting, ensure no two adjacent slots are closer than 
+    # MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS. Push later slots forward if needed.
+    if len(slots) >= 2:
+        min_gap_minutes = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+        spread_slots = [slots[0]]
+        for i in range(1, len(slots)):
+            prev_minutes = spread_slots[-1][0] * 60 + spread_slots[-1][1]
+            curr_minutes = slots[i][0] * 60 + slots[i][1]
+            if curr_minutes - prev_minutes < min_gap_minutes:
+                # Push this slot forward to maintain minimum gap
+                new_minutes = prev_minutes + min_gap_minutes
+                new_h = min(new_minutes // 60, 23)
+                new_m = new_minutes % 60
+                if new_h >= 23 and new_m > 50:
+                    # Overflow: wrap to next day (caller handles this)
+                    new_h = min(new_h, 23)
+                    new_m = min(new_m, 59)
+                spread_slots.append((new_h, new_m))
+                logger.debug("_distribute_slots: pushed slot %d from %02d:%02d → %02d:%02d "
+                             "(gap was %d min < %d min)",
+                             i + 1,
+                             slots[i][0], slots[i][1],
+                             new_h, new_m,
+                             curr_minutes - prev_minutes,
+                             min_gap_minutes)
+            else:
+                spread_slots.append(slots[i])
+        slots = spread_slots
+    
     return slots
 
 
@@ -353,6 +385,40 @@ def compute_daily_slots(
         resolved.append(slot)
     
     # Recalculate target_upload_at from scheduled_at after collision resolution
+    # ── v10.1: Also enforce same-channel publish spread for scheduled channels ──
+    # Group slots by channel to check intra-channel target_upload_at collisions
+    channel_slots = {}
+    for s in resolved:
+        ch_id = s["channel_id"]
+        if ch_id not in channel_slots:
+            channel_slots[ch_id] = []
+        channel_slots[ch_id].append(s)
+    
+    for ch_id, ch_slots in channel_slots.items():
+        # Sort by target_upload_at for this channel
+        ch_slots.sort(key=lambda s: s["target_upload_at"])
+        min_gap = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+        
+        for i in range(1, len(ch_slots)):
+            prev = ch_slots[i - 1]
+            curr = ch_slots[i]
+            
+            prev_h, prev_m = map(int, prev["target_upload_at"][11:16].split(":"))
+            curr_h, curr_m = map(int, curr["target_upload_at"][11:16].split(":"))
+            gap = (curr_h * 60 + curr_m) - (prev_h * 60 + prev_m)
+            
+            if gap < min_gap and curr.get("publish_mode") == "scheduled":
+                new_total = prev_h * 60 + prev_m + min_gap
+                nh = min(new_total // 60, 23)
+                nm = new_total % 60
+                curr["target_upload_at"] = f"{curr['date_key']} {nh:02d}:{nm:02d}:00"
+                logger.info(
+                    "compute_daily_slots: [%s] pushed slot #%d target from %02d:%02d → %02d:%02d "
+                    "(gap was %d min < %d min)",
+                    curr.get("channel_slug", "?"), curr["slot_position"],
+                    curr_h, curr_m, nh, nm, gap, min_gap,
+                )
+    
     for s in resolved:
         sched_h, sched_m = map(int, s["scheduled_at"][11:16].split(":"))
         up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES

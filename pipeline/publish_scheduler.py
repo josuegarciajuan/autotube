@@ -93,6 +93,7 @@ COUNTRY_UTC_OFFSETS = {
 # ── Variación permitida respecto al pico detectado por histórico ──
 HISTORY_SHIFT_MAX_HOURS = 2.5  # Máximo desplazamiento respecto a la heurística
 HISTORY_MIN_DATA_POINTS = 3    # Mínimos puntos de datos para confiar en histórico
+SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # v10.1: Mínimo de horas entre publicaciones del mismo canal
 
 
 def detect_niche(keywords: list[str]) -> str:
@@ -221,6 +222,132 @@ def get_peak_windows(config_or_dict, n: int = 1) -> list[tuple]:
     return windows
 
 
+def _avoid_channel_collision(
+    channel_id: int,
+    proposed_utc: datetime,
+    db=None,
+    slug: str = "",
+) -> datetime:
+    """Check and resolve same-channel publish time collisions.
+
+    Queries the DB for any pending or scheduled video from the same channel
+    whose target_public_at (or go_public lifecycle action) is within
+    SAME_CHANNEL_PUBLISH_GAP_HOURS of the proposed time.
+
+    If collision detected, shifts the proposed time forward to the next
+    available window (minimum gap enforced).
+
+    Returns:
+        Adjusted publish datetime (UTC), or the original if no collision.
+    """
+    if db is None or channel_id is None:
+        return proposed_utc
+
+    try:
+        import sqlite3
+        min_gap = timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)
+        conflict_found = True
+        adjusted = proposed_utc
+        max_iterations = 8  # safety: don't loop forever
+
+        for iteration in range(max_iterations):
+            # Query: find any video from this channel with target_public_at 
+            # within ±gap of the proposed time (excluding current video)
+            window_start = (adjusted - min_gap).strftime("%Y-%m-%d %H:%M:%S")
+            window_end = (adjusted + min_gap).strftime("%Y-%m-%d %H:%M:%S")
+
+            # Try videos table directly
+            collision_rows = None
+            conn = None
+            try:
+                if hasattr(db, '_connect'):
+                    conn = db._connect()
+                    collision_rows = conn.execute("""
+                        SELECT v.id, v.target_public_at, v.titulo_final
+                        FROM videos v
+                        WHERE v.channel_id = ?
+                          AND v.status IN ('uploaded_private', 'awaiting_upload', 'generating')
+                          AND v.target_public_at IS NOT NULL
+                          AND v.target_public_at >= ?
+                          AND v.target_public_at <= ?
+                        ORDER BY v.target_public_at
+                        LIMIT 5
+                    """, (channel_id, window_start, window_end)).fetchall()
+            except Exception:
+                pass
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            if not collision_rows:
+                # No collision — we're good
+                conflict_found = False
+                break
+
+            # Collision found: push proposed time forward
+            last_collision = collision_rows[-1]
+            last_target_str = last_collision["target_public_at"] if isinstance(last_collision, dict) else last_collision[1]
+            try:
+                if isinstance(last_target_str, str):
+                    last_dt = datetime.fromisoformat(last_target_str.replace("Z", "+00:00").replace(" ", "T"))
+                else:
+                    last_dt = last_target_str
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                last_dt = adjusted
+
+            adjusted = last_dt + min_gap
+
+            logger.info(
+                "[%s] Collision detected: proposed %s conflicts with video #%s (%s). "
+                "Pushing to %s.",
+                slug,
+                proposed_utc.strftime("%H:%M"),
+                last_collision["id"] if isinstance(last_collision, dict) else last_collision[0],
+                (last_collision["titulo_final"] or "?")[:40] if isinstance(last_collision, dict) else "",
+                adjusted.strftime("%H:%M"),
+            )
+
+        if conflict_found and iteration >= max_iterations - 1:
+            logger.warning(
+                "[%s] Max collision iterations reached — using last adjusted time.",
+                slug,
+            )
+
+        return adjusted
+
+    except Exception as e:
+        logger.debug("[%s] Collision check skipped: %s", slug, e)
+        return proposed_utc
+    """Pick the best optimal publish slot using epsilon-greedy strategy.
+
+    Returns:
+        dict with {slot_rank, target_hour, target_minute, confidence, audience_focus}
+        or None if no fresh optimal slots exist.
+
+    Uses get_optimal_slot_assignment from ExtendedDatabase which implements:
+    - 70% exploration (round-robin across 3 slots)
+    - 30% exploitation (best-performing slot by avg views)
+    """
+    try:
+        slot = db.get_optimal_slot_assignment(channel_id, "long")
+        if slot:
+            return {
+                "slot_rank": slot["slot_rank"],
+                "target_hour": slot["target_hour"],
+                "target_minute": slot.get("target_minute", 0),
+                "confidence": slot.get("confidence", 0.0),
+                "audience_focus": slot.get("audience_focus", "blend"),
+            }
+    except Exception:
+        pass
+    return None
+
+
 def calculate_target_public_time(
     slug: str,
     primary_keyword: str = "",
@@ -258,6 +385,75 @@ def calculate_target_public_time(
     all_keywords = [primary_keyword] if primary_keyword else []
     if secondary_keywords:
         all_keywords.extend(secondary_keywords)
+
+    # ── 0. Intentar usar franjas óptimas calculadas (v10) ──
+    if db is not None and channel_id is not None:
+        try:
+            optimal_slot = _pick_optimal_slot(db, channel_id, slug)
+            if optimal_slot is not None:
+                seed_hour = optimal_slot["target_hour"]
+                peak_source = "optimal_slots"
+                niche = "data_driven"
+                logger.info(
+                    "[%s] Using optimal slot #%d: %02d:%02d (confidence=%.2f, focus=%s)",
+                    slug, optimal_slot["slot_rank"], optimal_slot["target_hour"],
+                    optimal_slot.get("target_minute", 0),
+                    optimal_slot.get("confidence", 0),
+                    optimal_slot.get("audience_focus", "blend"),
+                )
+                # Record usage for epsilon-greedy strategy
+                try:
+                    db.record_slot_usage(
+                        channel_id, "long", optimal_slot["slot_rank"]
+                    )
+                except Exception:
+                    pass
+                # Skip niche/heuristic steps
+                jitter = random.randint(-jitter_min, jitter_min)
+                effective_hour = seed_hour + (jitter / 60.0)
+                try:
+                    tz = pytz.timezone(timezone_str)
+                except pytz.UnknownTimeZoneError:
+                    logger.warning("[%s] Unknown timezone '%s', falling back to UTC", slug, timezone_str)
+                    tz = pytz.UTC
+                now_utc = datetime.now(timezone.utc)
+                now_local = now_utc.astimezone(tz)
+                hour_int = int(effective_hour)
+                minute_int = int((effective_hour - hour_int) * 60)
+                target_local = now_local.replace(hour=hour_int, minute=minute_int, second=0, microsecond=0)
+                if target_local <= now_local:
+                    target_local += timedelta(days=1)
+                warmup_until_utc = now_utc + timedelta(minutes=warmup_min)
+                target_utc = target_local.astimezone(pytz.UTC)
+                if target_utc < warmup_until_utc:
+                    target_utc = warmup_until_utc
+
+                # ── v10.1: Avoid same-channel publish time collisions ──
+                original_utc = target_utc
+                target_utc = _avoid_channel_collision(
+                    channel_id, target_utc, db=db, slug=slug,
+                )
+                warmup_until_utc = max(warmup_until_utc, now_utc + timedelta(minutes=warmup_min))
+                if target_utc < warmup_until_utc:
+                    target_utc = warmup_until_utc
+
+                logger.info(
+                    "[%s] Scheduled publish via optimal slots: slot_rank=%d, "
+                    "peak=%02d:%02d (local), jitter=%+dmin, target=%s UTC",
+                    slug, optimal_slot["slot_rank"], hour_int, minute_int, jitter,
+                    target_utc.isoformat(),
+                )
+                return {
+                    "target_public_at": target_utc.isoformat(),
+                    "peak_hour_local": seed_hour,
+                    "peak_source": peak_source,
+                    "niche": niche,
+                    "jitter_applied": jitter,
+                    "warmup_until": warmup_until_utc.isoformat(),
+                    "optimal_slot_rank": optimal_slot["slot_rank"],
+                }
+        except Exception as e:
+            logger.debug("[%s] Optimal slots lookup skipped: %s", slug, e)
 
     # ── 1. Detectar nicho y obtener hora semilla ──
     niche = detect_niche(all_keywords)
@@ -324,6 +520,14 @@ def calculate_target_public_time(
             "Pushing to warmup end.",
             slug, target_utc.isoformat(), warmup_until_utc.isoformat(),
         )
+        target_utc = warmup_until_utc
+
+    # ── v10.1: Avoid same-channel publish time collisions ──
+    target_utc = _avoid_channel_collision(
+        channel_id, target_utc, db=db, slug=slug,
+    )
+    warmup_until_utc = max(warmup_until_utc, now_utc + timedelta(minutes=warmup_min))
+    if target_utc < warmup_until_utc:
         target_utc = warmup_until_utc
 
     logger.info(
