@@ -237,70 +237,31 @@ def navigate_studio(page, video_id: str, apply_mode: bool = False):
 
     # --- Step 8: Click "Sí" (or just find it in dry-run) ---
     step += 1
-    found, sel, _ = find_element(page, [
-        "text=Sí >> visible=true",
-        "text=Yes >> visible=true",
-        "label:has-text('Sí')",
-        "label:has-text('Yes')",
-    ], timeout=5000)
-    if found:
+    # Use exact name selector — more reliable than text-based
+    yes_sel = '[name="VIDEO_HAS_ALTERED_CONTENT_YES"]'
+    yes_radio = page.query_selector(yes_sel)
+    if yes_radio and yes_radio.is_visible():
+        sel = yes_sel
         if apply_mode:
             try:
-                # Approach: find actual radio inputs and interact with them natively
-                # YouTube Studio Polymer elements require click on the paper-radio-button
-                # Try clicking the parent paper-radio-button if it exists
-                radio_clicked = False
-                
-                for radio_sel in [
-                    "tp-yt-paper-radio-button:has-text('Sí')",
-                    "paper-radio-button:has-text('Sí')",
-                    "[role='radio'][aria-label*='Sí']",
-                ]:
-                    radio_el = page.query_selector(radio_sel)
-                    if radio_el and radio_el.is_visible():
-                        radio_el.click(timeout=3000)
-                        radio_clicked = True
-                        sel = radio_sel
-                        break
-
-                if not radio_clicked:
-                    # Fallback: JavaScript click on native radio input
-                    page.evaluate("""
-                        () => {
-                            const labels = document.querySelectorAll('label');
-                            for (const label of labels) {
-                                if (label.textContent.trim() === 'Sí') {
-                                    // Try to click the associated input or the label itself
-                                    const input = label.querySelector('input[type="radio"]');
-                                    if (input) { input.click(); input.dispatchEvent(new Event('change', {bubbles: true})); }
-                                    else { label.click(); }
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    """)
-                    page.wait_for_timeout(1000)
-                    radio_clicked = True
-                    sel = "JavaScript querySelector"
-
-                # Click in the title field to trigger blur/change detection
-                title_el = page.query_selector("[id='title-textarea']")
-                if title_el:
-                    title_el.click()
-                page.wait_for_timeout(1000)
-
-                log(step, "OK", f"CLICKED 'Sí' — altered content marked", selector=sel,
-                    screenshot=screenshot(page, "step08_clicked_si"))
+                yes_radio.click(timeout=5000)
+                page.wait_for_timeout(1500)
+                # Verify it changed
+                checked = yes_radio.get_attribute("aria-checked")
+                if checked == "true":
+                    log(step, "OK", f"CLICKED 'Sí' — aria-checked=true confirmed", selector=sel,
+                        screenshot=screenshot(page, "step08_clicked_si"))
+                else:
+                    log(step, "WARN", f"Clicked 'Sí' but aria-checked={checked}", selector=sel)
             except Exception as e:
                 log(step, "FAIL", f"Click 'Sí' failed: {e}", selector=sel,
                     screenshot=screenshot(page, "step08_click_fail"))
                 return
         else:
-            log(step, "OK", "Found 'Sí' / 'Yes' option (dry-run — not clicked)", selector=sel,
+            log(step, "OK", "Found 'Sí' radio (dry-run — not clicked)", selector=sel,
                 screenshot=screenshot(page, "step08_si_yes"))
     else:
-        log(step, "FAIL", "Could not find 'Sí' / 'Yes' option",
+        log(step, "FAIL", "Could not find 'Sí' radio button",
             screenshot=screenshot(page, "step08_no_si"))
         return
 
