@@ -26,6 +26,24 @@ from typing import Optional
 import config.settings as settings
 from database.db_extended import ExtendedDatabase
 
+# ── Auto-mark altered content helper ──────────────────────────
+
+def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video_id: int):
+    """Background thread: mark video as AI-generated via browser automation."""
+    try:
+        time.sleep(20)  # Wait for YouTube to finish processing upload
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+        success = browser.mark_altered_content(yt_video_id)
+        if success:
+            db = ExtendedDatabase()
+            db._execute("UPDATE videos SET manual_altered_content_done = 1 WHERE id = ?", (video_id,))
+            logger.info(f"[{canal}] Altered content marked for video {yt_video_id}")
+        else:
+            logger.warning(f"[{canal}] Failed to mark altered content for video {yt_video_id}")
+    except Exception as e:
+        logger.warning(f"[{canal}] Auto-mark IA error for {yt_video_id}: {e}")
+
 logger = logging.getLogger("autotube.generation")
 
 # ── Ffmpeg orphan killer ──────────────────────────────────────
@@ -1468,6 +1486,22 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             if video_yt_id:
                 yt_url = f"https://youtube.com/watch?v={video_yt_id}"
                 db.mark_video_uploaded(video_id, video_yt_id, yt_url)
+
+                # ── Auto-mark altered content (IA) via browser automation ──
+                try:
+                    channel_config = get_channel_config(canal) if 'get_channel_config' in dir() else {}
+                    if channel_config.get("AUTO_MARK_ALTERED_CONTENT"):
+                        from pipeline.youtube_browser import get_browser, get_account_for_channel
+                        import threading as _threading
+                        account = get_account_for_channel(canal)
+                        if account:
+                            _threading.Thread(
+                                target=_auto_mark_altered_content,
+                                args=(video_yt_id, canal, account, video_id),
+                                daemon=True
+                            ).start()
+                except Exception as e:
+                    logger.warning(f"[{canal}] Failed to trigger auto-mark IA: {e}")
 
                 # ── Post-upload: real YouTube stats snapshot ──
                 try:

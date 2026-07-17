@@ -662,9 +662,15 @@ LOGO_PATH = ""
 # ═══════════════════════════════════════════════════════════════════
 # YOUTUBE METADATA
 # ═══════════════════════════════════════════════════════════════════
-
 YT_CATEGORY_ID = "24"              # Entertainment
+
 YT_PRIVACY_STATUS = "public"
+
+# Auto-mark videos as AI-generated content after upload (browser automation)
+AUTO_MARK_ALTERED_CONTENT = True
+
+# Auto-mark videos as AI-generated content after upload (uses browser automation)
+AUTO_MARK_ALTERED_CONTENT = True
 
 # ── Scheduled Publishing ──────────────────────────────────────────
 # "immediate" = legacy (pública al subir)

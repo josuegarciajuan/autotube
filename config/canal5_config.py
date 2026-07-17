@@ -695,6 +695,9 @@ LOGO_PATH = ""
 YT_CATEGORY_ID = "27"              # Education
 YT_PRIVACY_STATUS = "public"
 
+# Auto-mark videos as AI-generated content after upload (browser automation)
+AUTO_MARK_ALTERED_CONTENT = True
+
 # ── Scheduled Publishing ──────────────────────────────────────────
 PUBLISH_MODE = "scheduled"
 PUBLISH_TIMEZONE = "Europe/Madrid"
