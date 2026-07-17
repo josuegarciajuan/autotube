@@ -58,7 +58,23 @@ echo ""
 echo "🧹 Cleaning up old processes..."
 pkill -f "uvicorn api.main" 2>/dev/null || true
 pkill -f "vite" 2>/dev/null || true
-sleep 1
+
+# Wait for port 8000 to be released BEFORE starting new uvicorn.
+# Without this, uvicorn crashes with [Errno 98] Address already in use,
+# which triggers StatReload to keep trying → restart storm → workers killed.
+echo "   Waiting for port 8000 to be released..."
+for i in $(seq 1 10); do
+    if ! ss -tlnp "sport = :8000" 2>/dev/null | grep -q ":8000"; then
+        echo "   ✅ Port 8000 released after ${i}s"
+        break
+    fi
+    sleep 1
+done
+if ss -tlnp "sport = :8000" 2>/dev/null | grep -q ":8000"; then
+    echo "   ⚠️  Port 8000 still in use after 10s — forcing with fuser"
+    fuser -k 8000/tcp 2>/dev/null || true
+    sleep 2
+fi
 
 # ── Ensure subprocess worker mode is ON ──
 # (Already default: USE_SUBPROCESS_WORKER = True in generation_service.py)

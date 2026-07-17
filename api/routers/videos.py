@@ -704,3 +704,63 @@ def cancel_scheduled_publish(video_id: int):
     db.update_video(video_id, status="uploaded_private", target_public_at=None,
                      peak_source=None, publish_mode="immediate")
     return {"ok": True, "cancelled": True, "video_id": video_id}
+
+
+@router.post("/{video_id}/force-retry")
+def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
+    """Force-recover a video stuck in 'bug_crash' / permanent error.
+    
+    Bypasses the MAX_RECOVERY_ATTEMPTS guard and creates a reassembly job.
+    Use when a video was marked bug_crash due to environmental failures
+    (server restart, signal kill, OOM) rather than a code defect.
+    """
+    db = get_db()
+    
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    
+    status = v.get("status", "")
+    phase = v.get("progress_phase", "")
+    
+    if status not in ("error",) and phase not in ("bug_crash", "error"):
+        raise HTTPException(
+            400, 
+            f"Video must be in 'error' or 'bug_crash' state. Current: status={status}, phase={phase}"
+        )
+    
+    # Guard: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(v.get("channel_id", 0))
+    if active:
+        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+    
+    # Check we have checkpoint data to reassemble
+    import json
+    cp = v.get("checkpoint_data", "{}")
+    try:
+        checkpoint = json.loads(cp) if isinstance(cp, str) else (cp or {})
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "Invalid checkpoint data")
+    
+    if not checkpoint.get("tts") or not checkpoint.get("media"):
+        raise HTTPException(400, "Checkpoint missing tts/media data — cannot reassemble")
+    
+    # Reset bug_crash flag to allow recovery
+    db.update_video(video_id, status="error", progress_phase="error")
+    
+    # Create job — bypass MAX_RECOVERY_ATTEMPTS by direct insert
+    job_id = db.create_job(v.get("channel_id", 0) or 1, "reassemble", video_id)
+    db.update_job(job_id, status="running",
+                  error_msg="Force-retry bypass (user-initiated)")
+    
+    background_tasks.add_task(
+        _run_reassembly_job,
+        job_id=job_id,
+        video_id=video_id,
+    )
+    
+    return {
+        "job_id": job_id,
+        "video_id": video_id,
+        "message": "Force-retry recovery started. Previous phase was '{}'".format(phase),
+    }

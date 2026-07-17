@@ -901,7 +901,7 @@ def _migrate_v10(conn, logger):
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id          INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
             content_type        TEXT NOT NULL DEFAULT 'long',
-            slot_rank           INTEGER NOT NULL CHECK(slot_rank BETWEEN 1 AND 3),
+            slot_rank           INTEGER NOT NULL CHECK(slot_rank BETWEEN 1 AND 5),
             target_hour         INTEGER NOT NULL,
             target_minute       INTEGER NOT NULL DEFAULT 0,
             timezone            TEXT NOT NULL,
@@ -2015,6 +2015,9 @@ class ExtendedDatabase(Database):
                              audience_focus: str = 'blend', metrics_snapshot: str = '{}',
                              data_sources: str = '{}', audience_split: str = '{}') -> int | None:
         """Insert or update a single optimal publish slot."""
+        # Clamp slot_rank to valid range [1, 5] — calculator may produce
+        # out-of-range values during migrations or edge cases
+        slot_rank = max(1, min(5, int(slot_rank)))
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO optimal_publish_slots

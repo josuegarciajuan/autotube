@@ -28,6 +28,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -109,6 +110,55 @@ def _setup_worker_logging(job_id: int):
                 "httpx", "httpcore", "openai", "moviepy"]:
         logging.getLogger(lib).setLevel(logging.WARNING)
     return logging.getLogger("autotube.worker")
+
+
+# ── Memory guard for video assembly ────────────────────────────
+
+def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0, max_wait_sec: int = 60):
+    """Wait for free memory before starting memory-intensive video assembly.
+    
+    ffmpeg xfade concat of many segments can consume several GB of RAM.
+    Running it while the system is near OOM triggers the kernel OOM killer
+    or crashes with memory errors — both of which lose the entire render.
+    """
+    try:
+        avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+    except Exception:
+        # psutil fallback
+        try:
+            import psutil
+            avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+        except ImportError:
+            return  # can't check — proceed
+    
+    if avail_gb >= min_free_gb:
+        logger.info("Memory OK: %.1f GB free (threshold: %.1f GB)", avail_gb, min_free_gb)
+        return
+    
+    logger.warning(
+        "⚠️  LOW MEMORY: only %.1f GB free (need %.1f GB). "
+        "Waiting up to %ds for memory to recover...",
+        avail_gb, min_free_gb, max_wait_sec,
+    )
+    waited = 0
+    while avail_gb < min_free_gb and waited < max_wait_sec:
+        time.sleep(5)
+        waited += 5
+        try:
+            avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+        except Exception:
+            try:
+                import psutil
+                avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            except ImportError:
+                break
+    if avail_gb >= min_free_gb:
+        logger.info("Memory recovered: %.1f GB free after %ds wait", avail_gb, waited)
+    else:
+        logger.warning(
+            "⚠️  Still only %.1f GB free after %ds — proceeding anyway (may OOM)",
+            avail_gb, waited,
+        )
 
 
 # ── FFmpeg orphan cleanup ────────────────────────────────────────
@@ -679,9 +729,28 @@ def run_job(
             db.update_video(video_id, progress=60, progress_phase="video")
             logger.info("Phase 4/6: Assembling video...")
             
-            video_data = orch.phase_video(script, audio_data, 
-                                          media_assets if isinstance(media_assets, list) else [],
-                                          job_id=job_id)
+            # ── Memory guard: wait if system is critically low on RAM ──
+            # ffmpeg xfade concat of 200+ segments with crossfades consumes
+            # GBs of memory. If we're already near OOM, the concat will crash
+            # or trigger the kernel OOM killer, killing other processes.
+            _check_memory_before_video(logger)
+            
+            # ── CRITICAL SECTION: block SIGTERM during video assembly ──
+            # ffmpeg xfade concat of 200+ segments can take 15+ minutes.
+            # A SIGTERM during this phase corrupts the render and causes
+            # permanent bug_crash after 3 auto-recovery retries.
+            _in_critical_phase.set()
+            try:
+                video_data = orch.phase_video(script, audio_data, 
+                                              media_assets if isinstance(media_assets, list) else [],
+                                              job_id=job_id)
+            finally:
+                _in_critical_phase.clear()
+                # If shutdown was requested during assembly, exit now
+                if _shutdown_requested.is_set():
+                    logger.warning("Shutdown deferred during video assembly — exiting gracefully")
+                    _kill_orphaned_ffmpeg()
+                    sys.exit(0)
             if not video_data:
                 error_msg = "Fallo el ensamblaje del video"
                 logger.error(error_msg)
@@ -977,11 +1046,28 @@ def main():
     logger.info("Worker started: job=%d channel=%d video=%d action=%s test_mode=%s",
                 args.job_id, args.channel_id, args.video_id, args.action, args.test_mode)
 
-    # Register signal handlers for graceful cleanup
+    # ── Graceful shutdown on SIGTERM ────────────────────────────
+    # Worker receives SIGTERM during API restarts / deploys / OOM.
+    # Immediate exit during critical phases (ffmpeg concat) corrupts
+    # the render and causes permanent bug_crash after 3 retries.
+    # We defer shutdown until a safe point:
+    #   - Non-critical phases: exit immediately
+    #   - Video assembly (phase 4): block the signal until ffmpeg finishes
+    _shutdown_requested = threading.Event()
+    _in_critical_phase = threading.Event()
+
     def _signal_handler(signum, frame):
-        logger.warning("Received signal %d — cleaning up...", signum)
-        _kill_orphaned_ffmpeg()
-        sys.exit(128 + signum)
+        if _in_critical_phase.is_set():
+            logger.warning(
+                "Received signal %d during CRITICAL phase — deferred shutdown. "
+                "Will exit after current operation completes (max 300s grace)",
+                signum,
+            )
+            _shutdown_requested.set()
+        else:
+            logger.warning("Received signal %d — cleaning up...", signum)
+            _kill_orphaned_ffmpeg()
+            sys.exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)

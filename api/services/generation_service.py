@@ -2393,7 +2393,7 @@ async def auto_recover_on_startup():
     """
     import json
     
-    MAX_RECOVERY_ATTEMPTS = 3
+    MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "5"))
 
     log = logging.getLogger("autotube.startup")
     db = _get_db()
@@ -2530,6 +2530,7 @@ async def auto_recover_on_startup():
     recovered = 0
     unrecoverable = 0
     processed_ids: set[int] = set()  # guard against re-processing the same video
+    _pending_recoveries: list[tuple[int, int]] = []  # (job_id, video_id) — deferred dispatch
 
     for row in rows:
         video_id = row["id"]
@@ -2568,9 +2569,19 @@ async def auto_recover_on_startup():
             continue
 
         # ── Max retry check: don't loop forever on broken videos ─
+        # Only count genuine code-bug failures toward the limit.
+        # External interruptions (server restart, signal kill, worker orphaned)
+        # should NOT consume recovery attempts because the video data is fine;
+        # the crash was environmental, not a content/code defect.
         failed_reassemblies = conn.execute(
             "SELECT COUNT(*) FROM generation_jobs "
-            "WHERE video_id=? AND action='reassemble' AND status='failed'",
+            "WHERE video_id=? AND action='reassemble' AND status='failed' "
+            "AND (error_msg IS NULL "
+            "     OR (error_msg NOT LIKE '%Server restarted%' "
+            "         AND error_msg NOT LIKE '%signal%' "
+            "         AND error_msg NOT LIKE '%interrupted%' "
+            "         AND error_msg NOT LIKE '%Worker exited%' "
+            "         AND error_msg NOT LIKE '%orphaned%'))",
             (video_id,),
         ).fetchone()[0]
         if failed_reassemblies >= MAX_RECOVERY_ATTEMPTS:
@@ -2625,10 +2636,12 @@ async def auto_recover_on_startup():
             job_id = cursor.lastrowid
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",
                      video_id, job_id, progress_phase)
-            # Launch as background task — do NOT await.
-            # The render semaphore serializes concurrent jobs automatically.
-            # If we awaited here, the API startup would block for 20–40 min.
-            asyncio.create_task(_run_reassembly_job(job_id, video_id))
+            # Collect for deferred dispatch — launching reassembly jobs
+            # immediately while startup writes are still happening causes
+            # SQLite lock contention (observed in production: server restart
+            # storm + concurrent startup writes + worker writes = DB locked).
+            # We defer dispatch until after all startup operations settle.
+            _pending_recoveries.append((job_id, video_id))
             recovered += 1
         except Exception as exc:
             log.warning("Video %d: recovery dispatch failed — %s", video_id, exc)
@@ -2636,6 +2649,22 @@ async def auto_recover_on_startup():
 
     log.info("Startup recovery complete: %d bug(s) skipped, %d dispatched, %d unrecoverable",
              bugs_skipped, recovered, unrecoverable)
+
+    # ── Deferred dispatch: launch recovery tasks AFTER all startup writes settle ──
+    # Workers launched immediately during startup recovery cause SQLite lock
+    # contention because they compete with the API server's own startup writes
+    # (slot planning, config sync, orphan cleanup). By sleeping a few seconds
+    # before dispatching, we give the API time to finish its DB-heavy startup.
+    if _pending_recoveries:
+        # Small delay to let startup writes flush
+        await asyncio.sleep(3)
+        for job_id, video_id in _pending_recoveries:
+            try:
+                asyncio.create_task(_run_reassembly_job(job_id, video_id))
+            except Exception as dispatch_exc:
+                log.warning("Deferred recovery dispatch failed for job %d: %s", job_id, dispatch_exc)
+        log.info("Deferred dispatch: %d recovery job(s) launched after startup settle",
+                 len(_pending_recoveries))
 
 
 # ── Subprocess-based generation (survives API restarts) ──────────

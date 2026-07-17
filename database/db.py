@@ -1,15 +1,57 @@
 """Database connection and helpers for Autotube.
-
+ 
 Provides a context manager for SQLite connections and convenience
 functions for CRUD operations on raw_content, scripts, and videos.
 """
-
+ 
 import json
 import sqlite3
 import os
+import time
+import functools
+import logging
 from pathlib import Path
-
+ 
 from config.settings import DATABASE_PATH
+
+_log = logging.getLogger("autotube.db")
+
+# ── Retry decorator for SQLite lock contention ──────────────
+# Wraps DB operations that can fail with "database is locked".
+# Uses exponential backoff: 0.5s → 1s → 2s → 4s → 8s (max 5 retries).
+# This prevents single-lock events from cascading into unrecoverable
+# failures where even the error handler can't write to the DB.
+
+DB_LOCK_RETRIES = int(os.getenv("DB_LOCK_RETRIES", "5"))
+DB_LOCK_BACKOFF_BASE = float(os.getenv("DB_LOCK_BACKOFF_BASE", "0.5"))
+
+
+def _with_db_lock_retry(func):
+    """Decorator: retry on sqlite3.OperationalError 'database is locked'."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exc = None
+        for attempt in range(DB_LOCK_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "database is locked" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                if attempt < DB_LOCK_RETRIES:
+                    wait = DB_LOCK_BACKOFF_BASE * (2 ** attempt)
+                    _log.warning(
+                        "DB locked (attempt %d/%d), retrying in %.1fs...",
+                        attempt + 1, DB_LOCK_RETRIES, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    _log.error(
+                        "DB locked after %d retries — giving up: %s",
+                        DB_LOCK_RETRIES, exc,
+                    )
+        raise last_exc
+    return wrapper
 
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -19,11 +61,11 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
     """Initialize the database with schema if not exists."""
     if db_path is None:
         db_path = str(DATABASE_PATH)
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA busy_timeout=45000")
+    conn.execute("PRAGMA wal_autocheckpoint=100")
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     if SCHEMA_PATH.exists():
         with open(SCHEMA_PATH) as f:
@@ -41,15 +83,25 @@ class Database:
             init_db(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(self.db_path, timeout=60)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")  # Better concurrent read/write
-        conn.execute("PRAGMA busy_timeout=30000")  # 30s wait on lock
+        conn.execute("PRAGMA busy_timeout=45000")  # 45s wait on lock
+        conn.execute("PRAGMA wal_autocheckpoint=100")  # Keep WAL file small
         return conn
+
+    @_with_db_lock_retry
+    def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Execute a write (INSERT/UPDATE/DELETE) with DB lock retry support."""
+        with self._connect() as conn:
+            cursor = conn.execute(sql, params)
+            conn.commit()
+            return cursor
 
     # ── raw_content ────────────────────────────────────────────
 
+    @_with_db_lock_retry
     def insert_raw_content(self, source, url, title, text,
                            subreddit=None, score=0, canal="canal2"):
         """Insert scraped content. Returns row id. Skips duplicates by URL."""
@@ -66,6 +118,7 @@ class Database:
             except sqlite3.IntegrityError:
                 return None
 
+    @_with_db_lock_retry
     def insert_raw_content_viral(self, source, url, title, text,
                                   subreddit=None, score=0, canal="canal2",
                                   source_mode="viral",
@@ -162,6 +215,7 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @_with_db_lock_retry
     def mark_content_used(self, content_id):
         """Mark scraped content as processed."""
         with self._connect() as conn:
@@ -182,6 +236,7 @@ class Database:
 
     # ── scripts ────────────────────────────────────────────────
 
+    @_with_db_lock_retry
     def insert_script(self, raw_content_id, canal, titulo_options,
                       guion, escenas, bloques=None, emociones=None, keywords=None,
                       duracion_estimada=None, token_count=0, cost_estimate=0.0):
@@ -218,6 +273,7 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @_with_db_lock_retry
     def mark_script_used(self, script_id):
         """Mark a script as processed."""
         with self._connect() as conn:
@@ -238,6 +294,7 @@ class Database:
 
     # ── videos ─────────────────────────────────────────────────
 
+    @_with_db_lock_retry
     def insert_video(self, script_id, canal, video_path, thumbnail_path=None,
                      audio_path=None, titulo_final=None, duracion_seg=None,
                      privacy_status="public", channel_id=None,
@@ -292,6 +349,7 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
+    @_with_db_lock_retry
     def mark_video_uploaded(self, video_id, yt_video_id, yt_url):
         """Record YouTube upload results."""
         with self._connect() as conn:
@@ -328,6 +386,7 @@ class Database:
 
     # ── pipeline_log ───────────────────────────────────────────
 
+    @_with_db_lock_retry
     def log_pipeline(self, canal, phase, status, message=None,
                      content_id=None, duration_ms=None):
         """Log a pipeline execution event."""

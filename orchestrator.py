@@ -39,6 +39,26 @@ logger = logging.getLogger(__name__)
 CHANNEL_CONFIGS: dict[str, object] = {}
 
 
+def _safe_log_error(db, canal: str, phase: str, error_msg: str):
+    """Log a pipeline error safely — if the DB is locked, fall back to stderr+file.
+    
+    Prevents the crash cascade where the error handler itself crashes because
+    the SQLite database is locked by another process.  Seen in the wild:
+    worker 661 (canal4) failed to INSERT into raw_content because canal2 was
+    writing — and then the error handler also failed to INSERT into pipeline_log
+    because the lock was STILL held.  This function isolates that failure so the
+    orchestrator can continue operating even when DB logging is unavailable.
+    """
+    try:
+        db.log_pipeline(canal, phase, "error", error_msg)
+    except Exception as log_exc:
+        fallback = f"[safe_log_error] DB locked — writing to stderr: [{canal}] {phase}: {error_msg}"
+        print(fallback, file=sys.stderr)
+        logging.getLogger("autotube.safe_log").warning(
+            "Failed to log pipeline error to DB (%s) — DB may be locked: %s", error_msg, log_exc
+        )
+
+
 class PipelineOrchestrator:
     """Master orchestrator for the Autotube content pipeline."""
 
@@ -251,10 +271,10 @@ class PipelineOrchestrator:
                 logger.info(f"[{self.canal}] {scraper_name}: {count} items scraped")
             except concurrent.futures.TimeoutError:
                 logger.error(f"[{self.canal}] {scraper_name} scrape timed out after {timeout}s")
-                self.db.log_pipeline(self.canal, "scrape", "error", f"timeout after {timeout}s")
+                _safe_log_error(self.db, self.canal, "scrape", f"timeout after {timeout}s")
             except Exception as e:
                 logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
-                self.db.log_pipeline(self.canal, "scrape", "error", str(e))
+                _safe_log_error(self.db, self.canal, "scrape", str(e))
 
         self._emit_progress(10, "scrape", f"Contenido obtenido: {added} fuentes")
         duration_ms = int((time.time() - start) * 1000)
@@ -294,9 +314,8 @@ class PipelineOrchestrator:
                                  content_id=result.get("id"),
                                  duration_ms=duration_ms)
         else:
-            self.db.log_pipeline(self.canal, "script", "error",
-                                 "Script generation failed",
-                                 duration_ms=duration_ms)
+            _safe_log_error(self.db, self.canal, "script", "Script generation failed")
+            # Note: duration_ms logging lost in error path, but safety-first
         return result
 
     def _get_viral_scraper(self):
@@ -583,9 +602,7 @@ class PipelineOrchestrator:
             if viral_content.get("id", 0) > 0:
                 self.db.mark_content_used(viral_content["id"])
         else:
-            self.db.log_pipeline(self.canal, "script", "error",
-                                  "Viral script generation failed",
-                                  duration_ms=duration_ms)
+            _safe_log_error(self.db, self.canal, "script", "Viral script generation failed")
         return result
 
     def _viral_fallback_to_original(self, start: float) -> Optional[dict]:
@@ -756,7 +773,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] TTS failed: {e}")
-            self.db.log_pipeline(self.canal, "tts", "error", str(e))
+            _safe_log_error(self.db, self.canal, "tts", str(e))
             return None
 
     def phase_media(self, script: dict, audio_data: Optional[dict] = None) -> Optional[list[dict]]:
@@ -837,7 +854,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] Media fetch failed: {e}")
-            self.db.log_pipeline(self.canal, "media", "error", str(e))
+            _safe_log_error(self.db, self.canal, "media", str(e))
             return None
 
     def _phase_images_legacy(self, script: dict) -> Optional[list]:
@@ -878,7 +895,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] Image pipeline (legacy) failed: {e}")
-            self.db.log_pipeline(self.canal, "images", "error", str(e))
+            _safe_log_error(self.db, self.canal, "images", str(e))
             return None
 
     def phase_video(self, script: dict, audio_data: dict,
@@ -1083,7 +1100,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] Video assembly failed: {e}")
-            self.db.log_pipeline(self.canal, "video", "error", str(e))
+            _safe_log_error(self.db, self.canal, "video", str(e))
             return None
 
     def _get_channel_id(self) -> int:
@@ -1218,7 +1235,7 @@ class PipelineOrchestrator:
             
         except Exception as e:
             logger.error(f"[{self.canal}] Metadata generation failed: {e}")
-            self.db.log_pipeline(self.canal, "metadata", "error", str(e))
+            _safe_log_error(self.db, self.canal, "metadata", str(e))
             
             # Fallback: return basic metadata so pipeline can continue
             return self.metadata_gen._fallback_metadata(script)
@@ -1250,8 +1267,7 @@ class PipelineOrchestrator:
             self._emit_progress(83, "upload", "Autenticando con YouTube...")
             if not self.uploader.authenticate():
                 logger.error(f"[{self.canal}] YouTube authentication failed")
-                self.db.log_pipeline(self.canal, "upload", "error",
-                                      "Auth failed")
+                _safe_log_error(self.db, self.canal, "upload", "Auth failed")
                 return None
 
             # ── Scheduled publishing: check if channel uses scheduled mode ──
@@ -1619,7 +1635,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] Upload failed: {e}")
-            self.db.log_pipeline(self.canal, "upload", "error", str(e))
+            _safe_log_error(self.db, self.canal, "upload", str(e))
             return None
         finally:
             # Restore uploader.db (was set to None in API mode to suppress duplicate DB records)
@@ -1863,7 +1879,7 @@ class PipelineOrchestrator:
             self.run_full_pipeline(skip_upload=False)
         except Exception as e:
             logger.exception(f"[{self.canal}] Scheduled run crashed: {e}")
-            self.db.log_pipeline(self.canal, "orchestrator", "error", str(e))
+            _safe_log_error(self.db, self.canal, "orchestrator", str(e))
 
     def start_scheduler(self):
         """Start APScheduler for continuous operation."""

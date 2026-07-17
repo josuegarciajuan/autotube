@@ -247,7 +247,7 @@ def _clean_uploaded_videos() -> tuple:
     try:
         db = get_db()
         # Get all uploaded video_record IDs
-        conn = sqlite3.connect(str(DB_PATH), timeout=10)
+        conn = sqlite3.connect(str(DB_PATH), timeout=60)
         c = conn.cursor()
         c.execute("SELECT id, video_path FROM videos WHERE status = 'uploaded' AND video_path IS NOT NULL AND video_path != ''")
         uploaded = c.fetchall()

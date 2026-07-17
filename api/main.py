@@ -55,24 +55,41 @@ async def lifespan(app: FastAPI):
     # uvicorn will crash with [Errno 98] AFTER the lifespan startup runs —
     # which would create orphan videos/jobs on every failed restart.
     # Abort BEFORE touching the DB so a doomed restart leaves no garbage.
+    #
+    # NEW: retry with backoff instead of immediate crash.  The old process may
+    # still be in TIME_WAIT (especially after SIGTERM).  Waiting avoids the
+    # StatReload crash loop where the reloader keeps detecting the same file
+    # change and spawning doomed instances.
     import os as _os
+    import time as _time
     import socket as _socket
     _bind_host = _os.getenv("API_HOST", "0.0.0.0")
     _bind_port = int(_os.getenv("API_PORT", "8000"))
     _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     _probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    try:
-        _probe.bind((_bind_host, _bind_port))
-    except OSError:
+    _bound = False
+    for _attempt in range(10):
+        try:
+            _probe.bind((_bind_host, _bind_port))
+            _bound = True
+            break
+        except OSError:
+            if _attempt < 9:
+                _wait = 0.5 * (2 ** _attempt)  # 0.5, 1, 2, 4, 8, 16, 32, 64, 128
+                logging.getLogger("autotube.startup").warning(
+                    "Port %s:%d still in use (attempt %d/10) — retrying in %.1fs...",
+                    _bind_host, _bind_port, _attempt + 1, _wait,
+                )
+                _time.sleep(_wait)
+    if not _bound:
         logging.getLogger("autotube.startup").critical(
-            "Port %s:%d already in use — another instance is running. "
+            "Port %s:%d still in use after 10 retries — another instance is running. "
             "Aborting startup BEFORE DB/slot init to avoid orphan jobs.",
             _bind_host, _bind_port,
         )
-        _probe.close()
+    _probe.close()
+    if not _bound:
         raise SystemExit(1)
-    finally:
-        _probe.close()
 
     # Startup
     init_db()

@@ -44,7 +44,7 @@ def get_best_longform_link(
     """
     import sqlite3
 
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
 
     try:
         # Priority 1: explicit source video
@@ -156,7 +156,7 @@ def get_source_video_info(source_video_id: int) -> dict | None:
     """
     import sqlite3
 
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
     try:
         row = conn.execute(
             """SELECT yt_video_id, titulo_final FROM videos

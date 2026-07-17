@@ -96,7 +96,15 @@ if ! systemctl restart autotube-panel 2>/dev/null; then
     OLD_PID=$(pgrep -f "uvicorn api.main:app" 2>/dev/null || true)
     if [ -n "$OLD_PID" ]; then
         kill $OLD_PID 2>/dev/null || true
-        sleep 2
+        # ── Wait for port release to prevent restart storm ──
+        echo "   Waiting for port 8000 to be released..."
+        for i in $(seq 1 15); do
+            if ! ss -tlnp "sport = :8000" 2>/dev/null | grep -q ":8000"; then
+                echo "   ✅ Port released after ${i}s"
+                break
+            fi
+            sleep 1
+        done
     fi
     systemctl start autotube-panel 2>/dev/null || true
 fi

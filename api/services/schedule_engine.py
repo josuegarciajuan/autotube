@@ -53,7 +53,7 @@ def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
     import sqlite3
     from config.settings import DATABASE_PATH
 
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
     conn.row_factory = sqlite3.Row
 
     rows = conn.execute(
