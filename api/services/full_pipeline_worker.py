@@ -41,6 +41,26 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 # ── Logging setup ──────────────────────────────────────────────────
 
+def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: int):
+    """Background thread: mark video as AI-generated after upload."""
+    wlog = logging.getLogger("autotube.worker")
+    try:
+        import time as _time
+        _time.sleep(20)
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+        success = browser.mark_altered_content(yt_video_id)
+        if success:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+            db._execute("UPDATE videos SET manual_altered_content_done = 1 WHERE id = ?", (video_id,))
+            wlog.info("[%s] Altered content marked for %s", canal, yt_video_id)
+        else:
+            wlog.warning("[%s] Failed to mark altered content for %s", canal, yt_video_id)
+    except Exception as e:
+        wlog.warning("[%s] Auto-mark IA error for %s: %s", canal, yt_video_id, e)
+
+
 def _setup_worker_logging(job_id: int):
     """Configure logging for the worker — writes to both stderr and a per-job log file."""
     LOG_DIR = _PROJECT_ROOT / "logs"
@@ -752,7 +772,22 @@ def run_job(
                 worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url)
                 db.update_video(video_id, progress=100, status=worker_status)
-                
+
+                # ── Auto-mark altered content (IA) via browser ──
+                try:
+                    if channel_config.get("AUTO_MARK_ALTERED_CONTENT"):
+                        from pipeline.youtube_browser import get_browser, get_account_for_channel
+                        account = get_account_for_channel(canal)
+                        if account:
+                            import threading as _thr
+                            _thr.Thread(
+                                target=_auto_mark_ia_worker,
+                                args=(yt_video_id, canal, account, video_id),
+                                daemon=True
+                            ).start()
+                except Exception as e:
+                    logger.warning("[%s] Failed to trigger auto-mark IA: %s", canal, e)
+
                 if pub_mode == "scheduled":
                     tp = video_record.get("target_public_at", "?") if video_record else "?"
                     logger.info("📤 SUBIDO (privado): %s | se hará público: %s UTC", yt_url, tp)
