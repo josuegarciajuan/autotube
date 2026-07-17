@@ -241,18 +241,24 @@ def migrate_v2(db_path: str = None):
             (ch["id"],),
         ).fetchone()
         if exists["c"] == 0:
-            # Load defaults from channel config
-            default_native = 3
-            default_clip = 2
-            if ch["slug"] == "canal4":
-                default_native = 2
-                default_clip = 1
+            # All channels: 3 native + 3 clips per long video (v12 dynamic scaling)
             conn.execute(
                 """INSERT INTO shorts_planning_config
-                   (channel_id, shorts_native_per_day, shorts_clip_per_day, shorts_enabled)
-                   VALUES (?, ?, ?, 1)""",
-                (ch["id"], default_native, default_clip),
+                   (channel_id, shorts_native_per_day, shorts_clip_per_day, shorts_clips_per_long, shorts_enabled)
+                   VALUES (?, 3, 2, 3, 1)""",
+                (ch["id"],),
             )
+    conn.commit()
+    
+    # ── v12 one-time: bump all active channels to 3 native + 3 clips_per_long ──
+    # Only updates if the old value was different (safe for first run after v12 deploy)
+    conn.execute("""
+        UPDATE shorts_planning_config
+        SET shorts_native_per_day = 3,
+            shorts_clips_per_long = COALESCE(shorts_clips_per_long, 3)
+        WHERE shorts_native_per_day < 3
+           OR shorts_clips_per_long IS NULL
+    """)
     conn.commit()
     
     # Add estimated_minutes_watched to channel_stats_history (idempotent)
@@ -545,6 +551,7 @@ def _migrate_shorts_planning_config(conn, logger):
     new_columns = [
         ("shorts_native_per_day", "INTEGER DEFAULT 3"),
         ("shorts_clip_per_day", "INTEGER DEFAULT 2"),
+        ("shorts_clips_per_long", "INTEGER DEFAULT 3"),
     ]
     had_old_column = "shorts_per_day" in existing
     columns_added = False
@@ -3843,13 +3850,14 @@ class ExtendedDatabase(Database):
                 "shorts_enabled": bool(r.get("shorts_enabled", 1)),
                 "shorts_native_per_day": r.get("shorts_native_per_day", 3),
                 "shorts_clip_per_day": r.get("shorts_clip_per_day", 2),
+                "shorts_clips_per_long": r.get("shorts_clips_per_long", 3),
             })
         return configs
 
     def update_shorts_planning_config(self, channel_id: int, data: dict) -> bool:
         """Update shorts planning config for one channel.
         
-        Accepted keys: shorts_enabled, shorts_native_per_day, shorts_clip_per_day.
+        Accepted keys: shorts_enabled, shorts_native_per_day, shorts_clip_per_day, shorts_clips_per_long.
         """
         with self._connect() as conn:
             columns = {r[1] for r in conn.execute("PRAGMA table_info(shorts_planning_config)").fetchall()}
@@ -3865,6 +3873,9 @@ class ExtendedDatabase(Database):
                     col = "shorts_native_per_day"
                 elif k == "shorts_clip_per_day":
                     col = "shorts_clip_per_day"
+                elif k == "shorts_clips_per_long":
+                    col = "shorts_clips_per_long"
+                    v = max(0, min(5, v))
                 if col and col in columns:
                     fields.append(f"{col} = ?")
                     values.append(v)

@@ -323,6 +323,7 @@ class ShortsConfigUpdate(BaseModel):
     shorts_enabled: Optional[bool] = None
     shorts_native_per_day: Optional[int] = None
     shorts_clip_per_day: Optional[int] = None
+    shorts_clips_per_long: Optional[int] = None
 
 
 @router.put("/shorts-config/{channel_id}")
@@ -344,6 +345,8 @@ def update_shorts_planning(channel_id: int, data: ShortsConfigUpdate):
         update_data["shorts_native_per_day"] = max(0, min(10, data.shorts_native_per_day))
     if data.shorts_clip_per_day is not None:
         update_data["shorts_clip_per_day"] = max(0, min(10, data.shorts_clip_per_day))
+    if data.shorts_clips_per_long is not None:
+        update_data["shorts_clips_per_long"] = max(0, min(5, data.shorts_clips_per_long))
 
     ok = db.update_shorts_planning_config(channel_id, update_data)
     if not ok:
@@ -486,3 +489,20 @@ def replan_shorts():
     from api.services.shorts_scheduler import generate_upcoming_shorts
     result = generate_upcoming_shorts(days=7)
     return {"ok": True, "message": "Shorts replan triggered", "result": result}
+
+
+# ── Optimal Publish Slots (v10) ─────────────────────────────────
+
+@router.post("/recalculate-optimal-slots")
+async def recalculate_optimal_slots_all():
+    """Force recalculation of optimal publish slots for all active channels.
+
+    Runs the full calculation pipeline: YouTube Analytics hourly activity,
+    audience country split, DB historical performance, top-3 peak detection.
+    If slots change significantly, triggers replanning of pending long-form
+    and shorts slots across the 7-day horizon.
+    """
+    from api.services.optimal_slots_calculator import calculate_and_replan_all
+    from database.db_extended import ExtendedDatabase
+    result = calculate_and_replan_all(ExtendedDatabase())
+    return {"ok": True, **result}

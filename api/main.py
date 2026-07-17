@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
             "Planning engine init skipped: %s", exc
         )
 
-    # ── Shorts scheduler: 5 shorts/day/channel (3 native + 2 clip) ──
+    # ── Shorts scheduler: dynamic clip scaling (3 clips/long + 3 native/day) ──
     try:
         from api.services.shorts_scheduler import generate_upcoming_shorts
         result = generate_upcoming_shorts(days=7)

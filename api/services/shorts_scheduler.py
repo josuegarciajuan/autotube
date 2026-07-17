@@ -1,17 +1,22 @@
 """
-Per-channel shorts scheduling engine.
+Per-channel shorts scheduling engine (v12 — dynamic clip scaling).
 Computes publish slots/day/channel based on per-channel
-shorts_planning_config (shorts_native_per_day + shorts_clip_per_day).
+shorts_planning_config (shorts_native_per_day + shorts_clips_per_long).
 
-Supports variable native/clip counts per channel with:
-- Native slots spread across fixed time windows
-- Clip slots linked to long-form video completion
+Key v12 changes:
+- Native shorts: always 3 per day (configurable per channel)
+- Clip shorts: shorts_clips_per_long × N_long_videos_planned_today (dynamic!)
+- Native slots: 3-of-4 optimal franjas (daily rotation), spread across day
+- Clip slots: anchored to their source long video's target_public_at,
+  spread evenly across the remaining day from (long_publish + 45min) to 23:45
+- Minimum 30 min spacing between any same-channel shorts
 - ±20 min deterministic jitter per channel
 - Fair daily rotation across channels
 """
 
 import hashlib
 import logging
+import random
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -22,6 +27,26 @@ logger = logging.getLogger("autotube.shorts_scheduler")
 CEST = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
 
+# ── Spacing constants ─────────────────────────────────────────
+MIN_SHORTS_GAP_MINUTES = 35    # Minimum gap between any same-channel shorts
+CLIP_DELAY_AFTER_LONG_MINUTES = 45  # Wait 45 min after long publish before clip
+CLIP_END_OF_DAY = 23           # Latest clip target hour (local)
+CLIP_END_MIN = 45              # Latest clip target minute
+DAY_START_MINUTES = 9 * 60     # 9:00 AM — earliest short
+
+JITTER_MINUTES = 20
+
+# ── Shorts cooldown: minimum minutes between same-channel shorts ──
+SHORTS_COOLDOWN_MINUTES = 30
+
+# ── Native fallback windows (used when no optimal slots available) ──
+NATIVE_WINDOWS = [
+    (9, 30),     # morning
+    (13, 0),     # midday
+    (18, 30),    # evening
+    (21, 0),     # prime time
+]
+
 
 def _cest_to_utc(date_str: str, hour: int, minute: int) -> str:
     """Convert a naive CEST datetime (YYYY-MM-DD HH:MM:SS) to UTC string."""
@@ -30,33 +55,6 @@ def _cest_to_utc(date_str: str, hour: int, minute: int) -> str:
     ).replace(tzinfo=CEST)
     dt_utc = dt_cest.astimezone(UTC)
     return dt_utc.strftime("%Y-%m-%d %H:%M:%S")
-
-
-# ── Per-type time windows (CEST, center of jitter range) ─────
-# Native slots: spread across the day in optimal engagement windows
-NATIVE_WINDOWS = [
-    (9, 30),     # morning
-    (12, 30),    # midday
-    (15, 0),     # early afternoon
-    (18, 30),    # evening
-    (21, 0),     # prime time
-    (23, 30),    # late night
-]
-
-# Clip slots: after long-form videos should have completed
-CLIP_WINDOWS = [
-    (17, 0),     # after first long video (~16:00)
-    (20, 30),    # after second long video (~19:30)
-    (23, 0),     # after third long video (~22:00)
-]
-
-JITTER_MINUTES = 20
-
-# ── Shorts cooldown: minimum minutes between same-channel shorts ──
-# Prevents back-to-back shorts from the same channel when many slots
-# are past-due (e.g. after a server restart). Ensures real spacing
-# between short publications throughout the day.
-SHORTS_COOLDOWN_MINUTES = 30
 
 
 def _day_seed(date_str: str, channel_slug: str, slot_idx: int) -> int:
@@ -71,103 +69,244 @@ def _jitter_minutes(date_str: str, channel_slug: str, slot_idx: int) -> int:
     return (seed % (2 * JITTER_MINUTES + 1)) - JITTER_MINUTES
 
 
-def _channel_rank(date_str: str, channel_slug: str, window_idx: int) -> float:
-    """Compute a deterministic rank for ordering channels within a time window.
-
-    Uses MD5 to get a fair rotation that changes daily.
-    Lower rank → scheduled earlier within the window.
-    """
-    seed = _day_seed(date_str, channel_slug, window_idx)
-    return (seed % 10000) / 10000.0  # 0.0 – 1.0
+def _minutes_to_utc_slot(date_str: str, total_min: int,
+                          channel_id: int, channel_slug: str,
+                          short_type: str, long_slot_position: int = None,
+                          slot_position: int = 0) -> dict:
+    """Convert a minute-of-day (CEST) to a slot dict with UTC timestamps."""
+    total_min = max(0, min(total_min, 24 * 60 - 1))
+    h, m = total_min // 60, total_min % 60
+    target_utc = _cest_to_utc(date_str, h, m)
+    sched_total = max(0, total_min - 3)
+    sh, sm = sched_total // 60, sched_total % 60
+    sched_utc = _cest_to_utc(date_str, sh, sm)
+    return {
+        "channel_id": channel_id,
+        "date_key": date_str,
+        "scheduled_at": sched_utc,
+        "target_upload_at": target_utc,
+        "short_type": short_type,
+        "long_slot_position": long_slot_position,
+        "slot_position": slot_position,
+        "channel_slug": channel_slug,
+    }
 
 
 def _build_shorts_slots_for_channel(
     ch: dict,
     date_str: str,
     native_count: int,
-    clip_count: int,
+    clips_per_long: int,
+    long_video_count: int,
+    long_target_hours: list[int],
     global_start_pos: int,
 ) -> tuple[list[dict], int]:
     """Generate shorts slots for ONE channel for a given date.
+
+    v12 dynamic clip scaling:
+    - clip_count = clips_per_long × long_video_count
+    - Clips anchored to their source long video's target publish hour
 
     Args:
         ch: channel dict with at least id, slug, name
         date_str: YYYY-MM-DD
         native_count: how many native shorts today
-        clip_count: how many clip shorts today
+        clips_per_long: multiplier (default 3)
+        long_video_count: how many long videos planned today
+        long_target_hours: target publish hours for those long videos (CEST)
         global_start_pos: starting slot_position for this channel
 
     Returns (slots_list, next_global_pos).
     """
     slug = ch["slug"]
-    slots = []
+    channel_id = ch["id"]
+    all_slots = []
     pos = global_start_pos
 
-    # ── Native slots ──────────────────────────────────────
+    clip_count = clips_per_long * long_video_count
+
+    # ── Load optimal publish slots for shorts (4 slots from v12) ──
+    optimal_hours = None
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        optimal_slots = _db.get_optimal_slots(channel_id, "short")
+        if optimal_slots and len(optimal_slots) >= 3:
+            optimal_hours = sorted([s["target_hour"] for s in optimal_slots])
+            logger.debug("Using %d optimal short slots for %s: %s",
+                         len(optimal_hours), slug, optimal_hours)
+    except Exception as exc:
+        logger.debug("Optimal shorts slots lookup skipped for %s: %s", slug, exc)
+
+    # ── 1. Native slots: 3 of 4 franjas (daily rotation) ──
+    # Which 3 franjas to use today: deterministic rotation
+    day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
+    if optimal_hours and len(optimal_hours) >= 4:
+        # Rotate: day N uses franjas [N%4 .. (N+2)%4]
+        working_hours = optimal_hours
+        start_idx = day_ordinal % len(working_hours)
+        # Pick 3 consecutive in the circular list (or all if < 3)
+        pick_count = min(3, len(working_hours))
+        franjas = [working_hours[(start_idx + i) % len(working_hours)]
+                    for i in range(pick_count)]
+        # Sort by hour to distribute through the day
+        franjas.sort()
+    else:
+        franjas = [window[0] for window in NATIVE_WINDOWS[:3]]
+
     for i in range(native_count):
-        # Pick window i (wrap if more native than windows)
-        win_idx = i % len(NATIVE_WINDOWS)
-        target_h, target_m = NATIVE_WINDOWS[win_idx]
-        jitter = _jitter_minutes(date_str, slug, win_idx)
-        total_min = target_h * 60 + target_m + jitter
-        total_min = max(0, min(total_min, 24 * 60 - 1))
-        h, m = total_min // 60, total_min % 60
+        franja_h = franjas[i % len(franjas)]
+        base_min = franja_h * 60 + 7  # start at :07 past the hour
+        jitter = _jitter_minutes(date_str, slug, i)
+        # Spread within ±25 min of the franja hour
+        total_min = base_min + jitter
+        total_min = max(DAY_START_MINUTES, min(total_min, 24 * 60 - 1))
+        total_min = int(total_min)
+        all_slots.append((total_min, "native", None))
 
-        target_utc = _cest_to_utc(date_str, h, m)
-        sched_total = max(0, total_min - 3)
-        sh, sm = sched_total // 60, sched_total % 60
-        sched_utc = _cest_to_utc(date_str, sh, sm)
+    # ── 2. Clip slots: anchored to source long videos ──
+    if clip_count > 0:
+        # Default long publish anchors if no real data
+        effective_long_hours = long_target_hours if long_target_hours else [16, 19, 22]
 
+        for long_idx in range(long_video_count):
+            # Get the expected publish hour for this long video
+            long_h = (
+                effective_long_hours[long_idx]
+                if long_idx < len(effective_long_hours)
+                else effective_long_hours[long_idx % len(effective_long_hours)]
+            )
+
+            # Clips start 45 min after long video publishes
+            clip_window_start = max(
+                (long_h + 1) * 60,
+                long_h * 60 + CLIP_DELAY_AFTER_LONG_MINUTES,
+            )
+            # Latest clip time: 23:45
+            clip_window_end = CLIP_END_OF_DAY * 60 + CLIP_END_MIN
+
+            if clip_window_start >= clip_window_end:
+                clip_window_start = max(DAY_START_MINUTES, clip_window_end - 90)
+
+            window_minutes = clip_window_end - clip_window_start
+            if window_minutes <= 0:
+                window_minutes = 60  # safety: at least 1h
+
+            # Spread the 3 clips for this long video evenly
+            for c in range(clips_per_long):
+                if clips_per_long > 1:
+                    offset = c * window_minutes // (clips_per_long - 1)
+                else:
+                    offset = window_minutes // 2
+
+                total_min_center = clip_window_start + offset
+                # Jitter: ±15 min around the spread point
+                seed = _day_seed(date_str, f"{slug}_clip_{long_idx}_{c}", long_idx * clips_per_long + c)
+                jitter = (seed % 31) - 15
+                total_min = total_min_center + jitter
+                total_min = max(clip_window_start + 5, min(total_min, clip_window_end - 5))
+
+                # long_slot_position: 1-indexed position of source long video
+                long_slot_pos = long_idx + 1
+
+                all_slots.append((int(total_min), "clip", long_slot_pos))
+
+    # ── 3. Sort all slots by time and resolve collisions ──
+    all_slots.sort(key=lambda x: x[0])
+
+    # Push forward any slots that are too close (min gap enforcement)
+    resolved = []
+    for total_min, slot_type, long_pos in all_slots:
+        # Push forward until minimum gap is satisfied
+        pushed_min = total_min
+        for prev_min, _, _ in reversed(resolved):
+            if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
+                pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
+                break
+        pushed_min = min(pushed_min, 24 * 60 - 1)
+        resolved.append((pushed_min, slot_type, long_pos))
+
+    # ── 4. Build slot dicts ──
+    slots = []
+    for total_min, slot_type, long_pos in resolved:
         pos += 1
-        slots.append({
-            "channel_id": ch["id"],
-            "date_key": date_str,
-            "scheduled_at": sched_utc,
-            "target_upload_at": target_utc,
-            "short_type": "native",
-            "long_slot_position": None,
-            "slot_position": pos,
-            "channel_name": ch.get("name", slug),
-            "channel_slug": slug,
-        })
+        slot = _minutes_to_utc_slot(
+            date_str, total_min, channel_id, slug,
+            short_type=slot_type,
+            long_slot_position=long_pos,
+            slot_position=pos,
+        )
+        slot["channel_name"] = ch.get("name", slug)
+        slots.append(slot)
 
-    # ── Clip slots ────────────────────────────────────────
-    for i in range(clip_count):
-        win_idx = i % len(CLIP_WINDOWS)
-        target_h, target_m = CLIP_WINDOWS[win_idx]
-        jitter = _jitter_minutes(date_str, slug, win_idx + 100)  # offset seed
-        total_min = target_h * 60 + target_m + jitter
-        total_min = max(0, min(total_min, 24 * 60 - 1))
-        h, m = total_min // 60, total_min % 60
-
-        target_utc = _cest_to_utc(date_str, h, m)
-        sched_total = max(0, total_min - 3)
-        sh, sm = sched_total // 60, sched_total % 60
-        sched_utc = _cest_to_utc(date_str, sh, sm)
-
-        long_slot_pos = i + 1  # clip #i depends on long-form slot #(i+1)
-
-        pos += 1
-        slots.append({
-            "channel_id": ch["id"],
-            "date_key": date_str,
-            "scheduled_at": sched_utc,
-            "target_upload_at": target_utc,
-            "short_type": "clip",
-            "long_slot_position": long_slot_pos,
-            "slot_position": pos,
-            "channel_name": ch.get("name", slug),
-            "channel_slug": slug,
-        })
+    logger.debug(
+        "[%s] Built %d shorts slots: %d native + %d clip "
+        "(longs=%d, clips_per_long=%d)",
+        slug, len(slots), native_count, clip_count,
+        long_video_count, clips_per_long,
+    )
 
     return slots, pos
+
+
+def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, list[int]]:
+    """Get how many long-form videos are planned today for a channel.
+
+    Returns (count, target_hours_cest_list).
+    Falls back to deterministic calculation if no planned_slots exist yet.
+    """
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        # Try planned_slots first (most accurate)
+        slots = db.get_planned_slots(date_key=date_str, channel_id=channel_id)
+        if slots:
+            # Count non-cancelled slots
+            active = [s for s in slots if s.get("status") != "cancelled"]
+            count = len(active)
+            # Extract target upload hours (CEST, parse from DB string)
+            hours = []
+            for s in active:
+                tu = s.get("target_upload_at") or s.get("target_public_at") or s.get("scheduled_at") or ""
+                try:
+                    parts = tu.replace("T", " ").strip().split(" ")[1].split(":")[:2]
+                    h = int(parts[0])
+                    hours.append(h)
+                except (ValueError, IndexError):
+                    pass
+            if count > 0:
+                logger.debug("Channel %d: %d planned longs today → %s", channel_id, count, hours)
+                return count, hours
+
+        # Fallback: compute deterministic videos_per_day from channel config
+        ch = db.get_channel(channel_id)
+        if not ch:
+            return 0, []
+        # Use planning_service._resolve_videos_per_day for alternate patterns
+        try:
+            import json as _json
+            config = _json.loads(ch.get("config_json", "{}"))
+            pattern = config.get("alternate_pattern")
+            if pattern and isinstance(pattern, list) and len(pattern) >= 2:
+                day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
+                offset = config.get("alternate_offset", 0)
+                idx = (day_ordinal + offset) % len(pattern)
+                count = pattern[idx]
+            else:
+                count = config.get("videos_per_day", 0)
+        except (ValueError, TypeError, KeyError):
+            count = 0
+
+        return max(0, count), []
+    except Exception as exc:
+        logger.debug("Long video count lookup failed for ch%d: %s", channel_id, exc)
+        return 0, []
 
 
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
-    Reads shorts_native_per_day and shorts_clip_per_day from
-    shorts_planning_config per channel. Windows are defined in CEST.
+    v12: clip count is dynamic — clips_per_long × long_videos_planned_today.
     Timestamps are converted to UTC for storage.
 
     Returns list of dicts sorted by scheduled_at.
@@ -185,7 +324,6 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         return []
 
     # Get per-channel shorts configs
-    slugs_to_ch = {ch["slug"]: ch for ch in channels}
     shorts_configs = db.get_shorts_planning_config()
     config_by_chid = {sc["channel_id"]: sc for sc in shorts_configs}
 
@@ -194,18 +332,25 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
     for ch in channels:
         ch_id = ch["id"]
+        slug = ch["slug"]
         sc = config_by_chid.get(ch_id, {})
         if not sc.get("shorts_enabled", True):
             continue
 
         native_count = sc.get("shorts_native_per_day", 3)
-        clip_count = sc.get("shorts_clip_per_day", 2)
+        clips_per_long = sc.get("shorts_clips_per_long", 3)
 
-        if native_count == 0 and clip_count == 0:
+        if native_count == 0 and clips_per_long == 0:
             continue
 
+        # Dynamic: how many long videos are planned today?
+        long_video_count, long_target_hours = _get_planned_long_video_count(
+            ch_id, date_str,
+        )
+
         channel_slots, global_pos = _build_shorts_slots_for_channel(
-            ch, date_str, native_count, clip_count, global_pos,
+            ch, date_str, native_count, clips_per_long,
+            long_video_count, long_target_hours, global_pos,
         )
         all_slots.extend(channel_slots)
 

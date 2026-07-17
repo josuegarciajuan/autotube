@@ -19,7 +19,7 @@ interface ShortsPlanningConfig {
   channel_id: number; name: string; slug: string
   shorts_enabled: boolean
   shorts_native_per_day: number
-  shorts_clip_per_day: number
+  shorts_clips_per_long: number
 }
 
 interface PlanningConfig {
@@ -65,13 +65,13 @@ function ShortsCard({ config, onUpdate }: { config: ShortsPlanningConfig; onUpda
           </div>
           <div className="flex items-center justify-between text-xs">
             <span className="text-gray-400 flex items-center gap-1.5">
-              <Scissors size={12} className="text-orange-400" /> Clips/dia
+              <Scissors size={12} className="text-orange-400" /> Clips × vídeo largo
             </span>
             <div className="flex items-center gap-2">
-              <button onClick={() => onUpdate({ shorts_clip_per_day: Math.max(0, config.shorts_clip_per_day - 1) })}
+              <button onClick={() => onUpdate({ shorts_clips_per_long: Math.max(0, (config.shorts_clips_per_long ?? 3) - 1) })}
                 className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Minus size={12} /></button>
-              <span className="text-white font-mono w-4 text-center">{config.shorts_clip_per_day}</span>
-              <button onClick={() => onUpdate({ shorts_clip_per_day: Math.min(3, config.shorts_clip_per_day + 1) })}
+              <span className="text-white font-mono w-4 text-center">{config.shorts_clips_per_long ?? 3}</span>
+              <button onClick={() => onUpdate({ shorts_clips_per_long: Math.min(5, (config.shorts_clips_per_long ?? 3) + 1) })}
                 className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Plus size={12} /></button>
             </div>
           </div>
