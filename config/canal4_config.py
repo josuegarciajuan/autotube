@@ -722,6 +722,9 @@ YT_PRIVACY_STATUS = "public"     # Public — upload directly visible
 # Auto-mark videos as AI-generated content after upload (browser automation)
 AUTO_MARK_ALTERED_CONTENT = True
 
+# Auto-configure end screens (Subscribe + Video recommendation) after IA mark
+AUTO_END_SCREENS = True
+
 # ── Scheduled Publishing ──────────────────────────────────────────
 PUBLISH_MODE = "scheduled"
 # ── 3-Phase Pipeline (v9) ─────────────────────────────────────────

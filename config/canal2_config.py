@@ -669,8 +669,8 @@ YT_PRIVACY_STATUS = "public"
 # Auto-mark videos as AI-generated content after upload (browser automation)
 AUTO_MARK_ALTERED_CONTENT = True
 
-# Auto-mark videos as AI-generated content after upload (uses browser automation)
-AUTO_MARK_ALTERED_CONTENT = True
+# Auto-configure end screens (Subscribe + Video recommendation) after IA mark
+AUTO_END_SCREENS = True
 
 # ── Scheduled Publishing ──────────────────────────────────────────
 # "immediate" = legacy (pública al subir)

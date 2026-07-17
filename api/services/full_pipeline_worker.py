@@ -42,21 +42,52 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ── Logging setup ──────────────────────────────────────────────────
 
 def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: int):
-    """Background thread: mark video as AI-generated after upload."""
+    """Background thread: mark video as AI-generated + configure end screens."""
     wlog = logging.getLogger("autotube.worker")
     try:
         import time as _time
-        _time.sleep(20)
+        import random
+        _time.sleep(20)  # Wait for YouTube to finish processing upload
+
         from pipeline.youtube_browser import get_browser
         browser = get_browser(account)
+
+        # ── Step 1: Mark AI-generated content ──
         success = browser.mark_altered_content(yt_video_id)
         if success:
             from database.db_extended import ExtendedDatabase
             db = ExtendedDatabase()
-            db._execute("UPDATE videos SET manual_altered_content_done = 1 WHERE id = ?", (video_id,))
+            db._execute(
+                "UPDATE videos SET manual_altered_content_done = 1 WHERE id = ?",
+                (video_id,),
+            )
             wlog.info("[%s] Altered content marked for %s", canal, yt_video_id)
         else:
             wlog.warning("[%s] Failed to mark altered content for %s", canal, yt_video_id)
+            return  # Don't proceed to end screens if IA mark failed
+
+        # ── Step 2: Configure end screens (same browser session!) ──
+        try:
+            from config.config_bridge import get_channel_config
+            channel_config = get_channel_config(canal)
+            if channel_config and channel_config.get("AUTO_END_SCREENS"):
+                # Natural human delay between actions (5-12s)
+                delay = random.uniform(5, 12)
+                wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
+                _time.sleep(delay)
+
+                success2 = browser.add_end_screens(yt_video_id)
+                if success2:
+                    db._execute(
+                        "UPDATE videos SET manual_end_screens_done = 1 WHERE id = ?",
+                        (video_id,),
+                    )
+                    wlog.info("[%s] End screens configured for %s", canal, yt_video_id)
+                else:
+                    wlog.warning("[%s] Failed to configure end screens for %s", canal, yt_video_id)
+        except Exception as e:
+            wlog.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
+
     except Exception as e:
         wlog.warning("[%s] Auto-mark IA error for %s: %s", canal, yt_video_id, e)
 

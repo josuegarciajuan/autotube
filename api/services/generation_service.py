@@ -29,11 +29,15 @@ from database.db_extended import ExtendedDatabase
 # ── Auto-mark altered content helper ──────────────────────────
 
 def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video_id: int):
-    """Background thread: mark video as AI-generated via browser automation."""
+    """Background thread: mark video as AI-generated + configure end screens."""
     try:
+        import random
         time.sleep(20)  # Wait for YouTube to finish processing upload
+
         from pipeline.youtube_browser import get_browser
         browser = get_browser(account)
+
+        # ── Step 1: Mark AI-generated content ──
         success = browser.mark_altered_content(yt_video_id)
         if success:
             db = ExtendedDatabase()
@@ -41,6 +45,30 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
             logger.info(f"[{canal}] Altered content marked for video {yt_video_id}")
         else:
             logger.warning(f"[{canal}] Failed to mark altered content for video {yt_video_id}")
+            return  # Don't proceed to end screens if IA mark failed
+
+        # ── Step 2: Configure end screens (same browser session!) ──
+        try:
+            from config.config_bridge import get_channel_config
+            channel_config = get_channel_config(canal)
+            if channel_config and channel_config.get("AUTO_END_SCREENS"):
+                # Natural human delay between actions (5-12s)
+                delay = random.uniform(5, 12)
+                logger.info(f"[{canal}] Waiting {delay:.1f}s before end screen config...")
+                time.sleep(delay)
+
+                success2 = browser.add_end_screens(yt_video_id)
+                if success2:
+                    db._execute(
+                        "UPDATE videos SET manual_end_screens_done = 1 WHERE id = ?",
+                        (video_id,),
+                    )
+                    logger.info(f"[{canal}] End screens configured for video {yt_video_id}")
+                else:
+                    logger.warning(f"[{canal}] Failed to configure end screens for video {yt_video_id}")
+        except Exception as e:
+            logger.warning(f"[{canal}] Auto end-screen error for {yt_video_id}: {e}")
+
     except Exception as e:
         logger.warning(f"[{canal}] Auto-mark IA error for {yt_video_id}: {e}")
 
