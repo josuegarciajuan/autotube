@@ -110,6 +110,7 @@ PROD_VIDEO_DURATION_MIN = 10
 PROD_VIDEO_DURATION_MAX = 15
 
 # ── Average video duration target (approx, in minutes) ──
+# @deprecated — use PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX instead.
 VIDEO_AVERAGE_DURATION_MIN = 12
 VIDEO_DURATION_DISCREPANCY_MIN = 3
 
@@ -594,6 +595,10 @@ FILM_GRAIN_FRAMES = 8
 KEN_BURNS_ZOOM_MIN = 4
 KEN_BURNS_ZOOM_MAX = 10
 
+# ── Scene pacing ────────────────────────────────────────────────
+SCENE_DURATION_MIN = 6.0             # default — keep scenes visually varied
+SCENE_DURATION_MAX = 15.0            # default — split long scenes for fresh media
+
 # ── Subtitle style ─────────────────────────────────────────────
 SUBTITLE_FONT_SIZE = 52
 SUBTITLE_SHADOW_WIDTH = 3
@@ -946,8 +951,6 @@ THUMBNAIL_TEMPLATES = {
 # ═══════════════════════════════════════════════════════════════════
 # VIDEO TIMING & MONETIZATION
 # ═══════════════════════════════════════════════════════════════════
-
-VIDEO_OPTIMAL_DURATION_MINUTES = 12
 
 VIDEO_MIDROLL_STRATEGY = (
     "Colocar mid-rolls en pausas naturales entre capítulos de la "

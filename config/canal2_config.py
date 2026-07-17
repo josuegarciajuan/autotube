@@ -111,6 +111,7 @@ PROD_VIDEO_DURATION_MAX = 14
 # Scenes shorter than MIN are merged with neighbors.
 # Scenes longer than MAX are split into sub-scenes (each with its own media asset).
 SCENE_DURATION_MIN = 4.0   # default 6.0 — shorter scenes force more visual changes
+SCENE_DURATION_MAX = 9.0   # derived: MIN + 5 = 9.0 — prevents excessively long scenes
 
 # ── Hard cap: maximum accumulated duration for any composited clip ──
 # When a clip has been extended (via scene merges) beyond this limit,
@@ -126,9 +127,8 @@ MAX_CLIP_EXTEND_SEC = 25.0
 # IMAGE_REUSE_MIN_GAP = 2
 
 # ── Average video duration target (approx, in minutes) ──
-# The pipeline picks a random duration between (mean - discrepancy) and (mean + discrepancy)
-# for each video generation, avoiding uniform durations.
-# Example: mean=15, discrepancy=3 → videos range 12–18 minutes.
+# @deprecated — use PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX instead.
+# These are kept as fallback only; the single source of truth is PROD_VIDEO_DURATION_*.
 VIDEO_AVERAGE_DURATION_MIN = 15
 VIDEO_DURATION_DISCREPANCY_MIN = 3
 
@@ -921,8 +921,6 @@ THUMBNAIL_TEMPLATES = {
 # ═══════════════════════════════════════════════════════════════════
 # VIDEO TIMING & MONETIZATION
 # ═══════════════════════════════════════════════════════════════════
-
-VIDEO_OPTIMAL_DURATION_MINUTES = 10
 
 VIDEO_MIDROLL_STRATEGY = (
     "Colocar mid-rolls en pausas naturales entre capítulos narrativos. "

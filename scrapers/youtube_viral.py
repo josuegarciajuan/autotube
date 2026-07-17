@@ -24,6 +24,7 @@ import requests
 from types import SimpleNamespace
 
 from scrapers.base import BaseScraper, register_scraper
+from config.voice_timing import duration_for_words
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +161,10 @@ class YouTubeViralScraper(BaseScraper):
             except ImportError:
                 self.keywords_eng = ["viral documentary"]
 
-        # Target video duration range (from channel config)
+        # Target video duration range (from channel config, DB-authoritative)
         if self.config:
-            self.target_duration_min = getattr(self.config, "video_average_duration_min", 10) - \
-                                       getattr(self.config, "video_duration_discrepancy_min", 3)
-            self.target_duration_max = getattr(self.config, "video_average_duration_min", 10) + \
-                                       getattr(self.config, "video_duration_discrepancy_min", 3)
+            self.target_duration_min = getattr(self.config, "prod_video_duration_min", 8)
+            self.target_duration_max = getattr(self.config, "prod_video_duration_max", 14)
         else:
             self.target_duration_min = 8
             self.target_duration_max = 14
@@ -1174,7 +1173,8 @@ class YouTubeViralScraper(BaseScraper):
             logger.warning("[%s] ✗ Candidate failed at ADAPT (duration gap too large)", self.canal)
             return None
         logger.info("[%s]   Adapted: %d words (~%.1f min)",
-                    self.canal, len(adapted_script.split()), len(adapted_script.split()) / 150)
+                    self.canal, len(adapted_script.split()),
+                    duration_for_words(self.config, len(adapted_script.split())))
 
         # Step 5: Build blocks
         blocks = self._build_script_blocks(adapted_script)
@@ -1191,7 +1191,9 @@ class YouTubeViralScraper(BaseScraper):
             "original_channel": candidate.get("channel_name", ""),
             "original_url": video_url,
             "word_count": len(adapted_script.split()),
-            "estimated_duration_min": round(len(adapted_script.split()) / 150, 1),
+            "estimated_duration_min": round(
+                duration_for_words(self.config, len(adapted_script.split())), 1
+            ),
         }
 
         # Cleanup audio
@@ -1328,12 +1330,18 @@ class YouTubeViralScraper(BaseScraper):
         return translated_script, translated_title, translated_description
 
     def _adapt_duration(self, script_es: str) -> str | None:
-        """Adapt the Spanish script to fit the channel's target video duration."""
+        """Adapt the Spanish script to fit the channel's target video duration.
+
+        Uses voice_timing.py (voice-rate-aware WPM) instead of a hardcoded
+        150 words/min assumption.  Single source of truth.
+        """
         if not script_es:
             return None
 
+        from config.voice_timing import words_per_minute_real, words_for_duration, duration_for_words
+
         word_count = len(script_es.split())
-        current_minutes = word_count / 150  # ~150 words/min for Spanish narration
+        current_minutes = duration_for_words(self.config, word_count)
         target_min = max(self.target_duration_min, 1)
         target_max = self.target_duration_max
 
@@ -1345,8 +1353,8 @@ class YouTubeViralScraper(BaseScraper):
 
         self._init_llm()
 
-        target_words_min = int(target_min * 150)
-        target_words_max = int(target_max * 150)
+        target_words_min = words_for_duration(self.config, target_min)
+        target_words_max = words_for_duration(self.config, target_max)
 
         system_prompt = _ADAPT_DURATION_SYSTEM_PROMPT.format(
             target_minutes=target_min,
@@ -1362,7 +1370,8 @@ class YouTubeViralScraper(BaseScraper):
         if adapted:
             new_words = len(adapted.split())
             logger.info("[%s] Duration adapted: %d → %d words (~%.1f → ~%.1f min)",
-                        self.canal, word_count, new_words, current_minutes, new_words / 150)
+                        self.canal, word_count, new_words, current_minutes,
+                        duration_for_words(self.config, new_words))
 
             # Validate: adapted script must reach at least 50% of target min words
             min_acceptable_words = int(target_words_min * 0.5)
@@ -1539,7 +1548,7 @@ class YouTubeViralScraper(BaseScraper):
             return items
         logger.info("[%s] Step 6 (adapt): done in %.1fs → %d words (~%.1f min)",
                     self.canal, time.time() - t6, len(adapted_script.split()),
-                    len(adapted_script.split()) / 150)
+                    duration_for_words(self.config, len(adapted_script.split())))
 
         # Step 7: Build block structure for TTS
         blocks = self._build_script_blocks(adapted_script)
@@ -1557,7 +1566,9 @@ class YouTubeViralScraper(BaseScraper):
             "original_channel": top["channel_name"],
             "original_url": video_url,
             "word_count": len(adapted_script.split()),
-            "estimated_duration_min": round(len(adapted_script.split()) / 150, 1),
+            "estimated_duration_min": round(
+                duration_for_words(self.config, len(adapted_script.split())), 1
+            ),
         }
 
         items.append({

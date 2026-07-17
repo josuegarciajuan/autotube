@@ -111,6 +111,7 @@ PROD_VIDEO_DURATION_MIN = 4
 PROD_VIDEO_DURATION_MAX = 7
 
 # ── Average video duration target (in minutes) ──
+# @deprecated — use PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX instead.
 VIDEO_AVERAGE_DURATION_MIN = 5
 VIDEO_DURATION_DISCREPANCY_MIN = 1
 
@@ -932,8 +933,6 @@ THUMBNAIL_TEMPLATES = {
 # ═══════════════════════════════════════════════════════════════════
 # VIDEO TIMING & MONETIZATION
 # ═══════════════════════════════════════════════════════════════════
-
-VIDEO_OPTIMAL_DURATION_MINUTES = 10
 
 VIDEO_MIDROLL_STRATEGY = (
     "Colocar mid-rolls en pausas naturales entre capitulos narrativos. "
