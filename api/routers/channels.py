@@ -200,31 +200,37 @@ def sync_youtube(channel_id: int):
 
 
 @router.post("/{channel_id}/collect-stats")
-def collect_channel_stats(channel_id: int):
+async def collect_channel_stats(channel_id: int, background_tasks: BackgroundTasks):
     """Recolecta stats de YouTube para un solo canal (videos, shorts, canal).
 
     Útil para refrescar stats de un canal específico sin ejecutar
     la recolección global de todos los canales.
+
+    Ahora asíncrono: lanza la recolección en background y devuelve inmediatamente.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
 
-    from pipeline.youtube_stats import YouTubeStatsFetcher
+    async def _run():
+        from pipeline.youtube_stats import YouTubeStatsFetcher
+        import logging
+        logger = logging.getLogger("autotube.stats")
+        fetcher = YouTubeStatsFetcher(ch["slug"])
+        result = fetcher.collect_and_store(db)
+        logger.info(
+            "Stats collected for %s: %s videos, %s shorts, channel=%s",
+            ch["slug"],
+            result.get("videos_updated", 0),
+            result.get("shorts_updated", 0),
+            result.get("channel_updated", False),
+        )
 
-    fetcher = YouTubeStatsFetcher(ch["slug"])
-    result = fetcher.collect_and_store(db)
-
-    if "error" in result:
-        raise HTTPException(502, result["error"])
-
+    background_tasks.add_task(_run)
     return {
         "ok": True,
-        "slug": ch["slug"],
-        "videos_updated": result.get("videos_updated", 0),
-        "shorts_updated": result.get("shorts_updated", 0),
-        "channel_updated": result.get("channel_updated", False),
+        "message": f"Recolección iniciada para {ch['name']} ({ch['slug']})",
     }
 
 

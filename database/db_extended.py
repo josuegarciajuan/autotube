@@ -345,6 +345,17 @@ def migrate_v2(db_path: str = None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sps_channel ON shorts_planned_slots(channel_id, date_key)")
     logger.info("Migration: shorts_planned_slots table ensured")
 
+    # ── system_state: simple key-value persistence for in-memory state ──
+    # Used by stats collector to survive API restarts (last_collection ts, collection state)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_state (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    logger.info("Migration: system_state table ensured")
+
     # Seed canal2 if channels table is empty
     row = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()
     if row["cnt"] == 0:
@@ -4336,3 +4347,26 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── system_state helpers ───────────────────────────────────
+
+    def get_system_state(self, key: str) -> str | None:
+        """Read a key from system_state. Returns None if not found."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM system_state WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_system_state(self, key: str, value: str) -> None:
+        """Upsert a key-value pair into system_state."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO system_state (key, value, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value,
+                     updated_at = excluded.updated_at""",
+                (key, value),
+            )
+            conn.commit()

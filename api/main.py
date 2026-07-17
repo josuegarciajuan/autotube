@@ -4,6 +4,7 @@ Serves the React SPA and REST API for the multi-channel video management panel.
 """
 import sys
 import json
+import time
 import asyncio
 import logging
 from pathlib import Path
@@ -41,9 +42,11 @@ async def lifespan(app: FastAPI):
                str(LOG_DIR / "api.log") in getattr(h, 'baseFilename', '')
                for h in root_logger.handlers):
         fh = logging.FileHandler(LOG_DIR / "api.log")
-        fh.setFormatter(logging.Formatter(
+        _formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-        ))
+        )
+        _formatter.converter = time.gmtime  # UTC — same as DB CURRENT_TIMESTAMP
+        fh.setFormatter(_formatter)
         root_logger.addHandler(fh)
     logging.getLogger("autotube").info("File logging enabled → logs/api.log")
     
@@ -74,6 +77,9 @@ async def lifespan(app: FastAPI):
     # Startup
     init_db()
     migrate_v2()
+
+    # Restore stats collection state from DB (survives server restarts)
+    _unpin_stats_state("stats_collection_state")
 
     # Auto-sync channel configs from Python modules → DB
     try:
@@ -249,7 +255,19 @@ async def _schedule_checker_loop():
     
     logger.info("Schedule checker loop started (checks every 5 min)")
     
+    # Restore last_stats_collection from DB to avoid immediate re-collection after restart
     last_stats_collection = 0
+    try:
+        from database.db_extended import ExtendedDatabase
+        _sched_db = ExtendedDatabase()
+        raw = _sched_db.get_system_state("last_stats_collection")
+        if raw:
+            last_stats_collection = float(raw)
+            logger.info("Restored last_stats_collection from DB: %.0f (age: %.0fh)",
+                        last_stats_collection, (time.time() - last_stats_collection) / 3600)
+    except Exception:
+        pass
+    
     last_lifecycle_check = time.time()
     last_midnight_check = time.time()
     last_recovery_check = 0
@@ -276,6 +294,11 @@ async def _schedule_checker_loop():
             if STATS_ENABLED and now - last_stats_collection > 21600:  # 6 hours
                 await _collect_youtube_stats()
                 last_stats_collection = now
+                # Persist so a restart doesn't trigger immediate re-collection
+                try:
+                    _sched_db.set_system_state("last_stats_collection", str(int(now)))
+                except Exception:
+                    pass
             
             # Process video lifecycle promotion actions every 15 minutes
             if now - last_lifecycle_check > 900:  # 15 minutes
@@ -753,8 +776,11 @@ async def _process_lifecycle_actions():
 
 import time as _time_module
 
+# ── Stats collection timeout watchdog ───────────────────────────
+_STATS_COLLECTION_TIMEOUT = 300  # seconds — auto-reset to error if stuck "running" > 5 min
+
 # Tracks the state of on-demand stats collection so the UI can show
-# real progress/result feedback (survives page reloads).
+# real progress/result feedback (survives page reloads + server restarts).
 STATS_COLLECTION_STATE = {
     "status": "idle",          # idle | running | success | error
     "started_at": None,        # epoch seconds
@@ -762,6 +788,61 @@ STATS_COLLECTION_STATE = {
     "channels": [],            # per-channel summaries
     "error": None,             # error message if status == error
 }
+
+
+def _pin_stats_state(key: str):
+    """Sync STATS_COLLECTION_STATE → system_state table so it survives restarts."""
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        import json as _json
+        _db.set_system_state(key, _json.dumps(STATS_COLLECTION_STATE, default=str))
+    except Exception:
+        pass
+
+
+def _unpin_stats_state(key: str):
+    """Restore STATS_COLLECTION_STATE from system_state table on startup."""
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        raw = _db.get_system_state(key)
+        if raw:
+            import json as _json
+            saved = _json.loads(raw)
+            if saved.get("status") == "running":
+                # Stuck "running" means the server crashed mid-collection — mark as error
+                STATS_COLLECTION_STATE.update({
+                    "status": "error",
+                    "started_at": saved.get("started_at"),
+                    "finished_at": _time_module.time(),
+                    "channels": saved.get("channels", []),
+                    "error": "Interrupted by server restart",
+                })
+            else:
+                STATS_COLLECTION_STATE.update(saved)
+    except Exception:
+        pass
+
+
+def _reset_stale_collection_state():
+    """If STATS_COLLECTION_STATE has been 'running' longer than the timeout,
+    auto-reset to error so the watchdog unlocks the dashboard button."""
+    if STATS_COLLECTION_STATE["status"] != "running":
+        return False
+    started = STATS_COLLECTION_STATE.get("started_at")
+    if not started:
+        return False
+    elapsed = _time_module.time() - started
+    if elapsed > _STATS_COLLECTION_TIMEOUT:
+        STATS_COLLECTION_STATE.update({
+            "status": "error",
+            "finished_at": _time_module.time(),
+            "error": f"Timed out after {elapsed:.0f}s",
+        })
+        _pin_stats_state("stats_collection_state")
+        return True
+    return False
 
 
 async def _collect_youtube_stats():
@@ -776,6 +857,7 @@ async def _collect_youtube_stats():
         "channels": [],
         "error": None,
     })
+    _pin_stats_state("stats_collection_state")
 
     try:
         from database.db_extended import ExtendedDatabase
@@ -884,6 +966,7 @@ async def _collect_youtube_stats():
             "status": "success",
             "finished_at": _time_module.time(),
         })
+        _pin_stats_state("stats_collection_state")
     except Exception as exc:
         logger.error("Stats collector error: %s", exc)
         STATS_COLLECTION_STATE.update({
@@ -891,6 +974,7 @@ async def _collect_youtube_stats():
             "finished_at": _time_module.time(),
             "error": str(exc),
         })
+        _pin_stats_state("stats_collection_state")
 
 
 # ── App ──────────────────────────────────────────────────────
@@ -1013,6 +1097,7 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks):
     Runs _collect_youtube_stats() as a background task and returns immediately.
     Poll GET /api/stats/collect/status to know when it finishes and its result.
     """
+    _reset_stale_collection_state()  # auto-recover from stuck "running"
     if STATS_COLLECTION_STATE["status"] == "running":
         return {
             "ok": False,
@@ -1030,6 +1115,7 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks):
 @app.get("/api/stats/collect/status")
 async def stats_collection_status():
     """Return current/last state of the on-demand stats collection."""
+    _reset_stale_collection_state()  # auto-recover from stuck "running"
     return STATS_COLLECTION_STATE
 
 
