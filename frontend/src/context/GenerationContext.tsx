@@ -11,10 +11,12 @@ export interface ActiveJob {
   channelName: string
   action: string
   videoId?: number
+  storedAt?: number // timestamp to detect stale/zombie jobs
 }
 
 const STORAGE_KEY = 'autotube_active_jobs_v2'
 const OLD_STORAGE_KEY = 'autotube_active_job'
+const MAX_JOB_AGE_MS = 30 * 60 * 1000 // 30 min — jobs older than this are stale zombies
 
 interface GenerationContextType {
   activeJobs: ActiveJob[]
@@ -34,12 +36,21 @@ const GenerationContext = createContext<GenerationContextType>({
 
 function loadFromStorage(): ActiveJob[] {
   try {
+    const now = Date.now()
     // Try new key first
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed)) {
-        return parsed.filter(j => j && typeof j.jobId === 'number')
+        const filtered = parsed.filter(
+          j => j && typeof j.jobId === 'number'
+            && (!j.storedAt || (now - j.storedAt) < MAX_JOB_AGE_MS)
+        )
+        // If we filtered out stale jobs, persist the cleaned list
+        if (filtered.length !== parsed.length) {
+          saveToStorage(filtered)
+        }
+        return filtered
       }
     }
     // Migrate from old key (single job → array)
@@ -48,10 +59,15 @@ function loadFromStorage(): ActiveJob[] {
       const parsed = JSON.parse(old)
       if (parsed && typeof parsed.jobId === 'number') {
         const migrated = [parsed as ActiveJob]
-        // Save to new key so next load uses it
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated))
-        return migrated
+        migrated[0].storedAt = now
+        // Only keep if not too old
+        if (!parsed.storedAt || (now - parsed.storedAt) < MAX_JOB_AGE_MS) {
+          saveToStorage(migrated)
+          return migrated
+        }
       }
+      // Old key had a stale job — clean it up
+      localStorage.removeItem(OLD_STORAGE_KEY)
     }
   } catch {}
   return []
@@ -74,7 +90,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
   const addJob = useCallback((job: ActiveJob) => {
     setActiveJobs(prev => {
       const filtered = prev.filter(j => j.jobId !== job.jobId)
-      const next = [...filtered, job]
+      const next = [...filtered, { ...job, storedAt: Date.now() }]
       saveToStorage(next)
       return next
     })
@@ -147,6 +163,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
               channelName: chName,
               action: j.action || 'generate_and_upload',
               videoId: j.video_id,
+              storedAt: Date.now(),
             })
           }
 
@@ -214,7 +231,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
             }
           }
           
-          // Add new jobs discovered via API
+           // Add new jobs discovered via API
           const existingIds = new Set(filtered.map(j => j.jobId))
           for (const j of apiJobs) {
             if (!existingIds.has(j.id)) {
@@ -224,6 +241,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
                 channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
                 action: j.action || 'generate_and_upload',
                 videoId: j.video_id,
+                storedAt: Date.now(),
               })
               changed = true
             }

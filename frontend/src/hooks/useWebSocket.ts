@@ -119,24 +119,42 @@ export function useGenerationProgress(jobId: number | null) {
   }, [jobId, connect]);
 
   // ── Polling fallback: always do an initial fetch, then poll every 3s when WS is disconnected ──
+  // v2.4.1: added max retries to prevent infinite polling on zombie jobs
   useEffect(() => {
     if (!jobId) return;
 
+    const safeJobId: number = jobId; // narrow after guard
     let active = true;
     let pollTimer: ReturnType<typeof setTimeout>;
+    let pollCount = 0;
+    const MAX_POLLS = 30; // ~90 seconds at 3s intervals (plus 1s initial = ~91s)
+    let lastNonZeroProgress = false;
 
     async function poll() {
       if (!active) return;
+      pollCount++;
       try {
-        const res = await fetch(`api/jobs/${jobId}`);
+        const res = await fetch(`api/jobs/${safeJobId}`);
         if (!res.ok) {
-          // Retry on error only if still disconnected
-          if (!connected) pollTimer = setTimeout(poll, 3000);
+          // If the job is 404, stop polling (job was deleted/cleaned up)
+          if (res.status === 404 && active) {
+            setProgress({
+              job_id: safeJobId,
+              status: 'completed',
+              progress: 100,
+              phase: '(auto-cleaned)',
+              message: 'Trabajo eliminado del servidor',
+            });
+            return;
+          }
+          if (!connected && pollCount < MAX_POLLS) {
+            pollTimer = setTimeout(poll, 3000);
+          }
           return;
         }
         const job = await res.json();
         const data: ProgressData = {
-          job_id: job.id ?? jobId,
+          job_id: job.id ?? safeJobId,
           status: job.status ?? 'running',
           progress: job.progress ?? 0,
           phase: job.phase ?? '',
@@ -149,14 +167,27 @@ export function useGenerationProgress(jobId: number | null) {
             return prev;
           });
         }
+        if (data.progress > 0) lastNonZeroProgress = true;
         if (data.status === 'completed' || data.status === 'failed') {
           return; // stop polling
         }
+        // Stale job detection: after max polls with 0% progress → auto-dismiss
+        if (!lastNonZeroProgress && pollCount >= MAX_POLLS && active) {
+          setProgress({
+            job_id: safeJobId,
+            status: 'completed',
+            progress: 100,
+            phase: '(timeout)',
+            message: 'Sin progreso en ~90s — auto-cerrando',
+          });
+          return;
+        }
       } catch {
-        // ignore network errors, retry only if disconnected
+        // ignore network errors, retry only if disconnected and not exhausted
+        if (!active || pollCount >= MAX_POLLS) return;
       }
-      // Only schedule next poll if WS is still disconnected
-      if (active && !connected) {
+      // Only schedule next poll if WS is still disconnected and we haven't hit max
+      if (active && !connected && pollCount < MAX_POLLS) {
         pollTimer = setTimeout(poll, 3000);
       }
     }

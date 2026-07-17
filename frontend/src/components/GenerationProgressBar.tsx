@@ -39,10 +39,35 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
   const [cancelling, setCancelling] = useState(false)
   const { progress, connected } = useGenerationProgress(job.jobId)
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const stuckTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const stuckDismissedRef = useRef(false)
 
   const isCompleted = progress?.status === 'completed'
   const isFailed = progress?.status === 'failed'
   const pct = progress?.progress ?? 0
+
+  // ── Stuck detection: if no progress after 45s disconnected, auto-dismiss ──
+  useEffect(() => {
+    const isStuck = !connected && pct === 0 && !isCompleted && !isFailed && !cancelling
+
+    if (isStuck && !stuckTimerRef.current && !stuckDismissedRef.current) {
+      stuckTimerRef.current = setTimeout(() => {
+        stuckDismissedRef.current = true
+        onDismiss() // zombie bar — kill it
+      }, 45_000) // 45 seconds of no activity = stale
+    } else if (!isStuck && stuckTimerRef.current) {
+      clearTimeout(stuckTimerRef.current)
+      stuckTimerRef.current = undefined
+    }
+
+    return () => {
+      if (stuckTimerRef.current) {
+        clearTimeout(stuckTimerRef.current)
+        stuckTimerRef.current = undefined
+      }
+    }
+  }, [connected, pct, isCompleted, isFailed, cancelling, onDismiss])
+
 
   // Cancel this job: sends cancel request to backend + cleans up
   async function handleCancel() {

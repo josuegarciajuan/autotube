@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../lib/api'
-import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward } from 'lucide-react'
+import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChannelFilter } from '../context/ChannelFilterContext'
 import { useEasterEgg } from '../context/EasterEggContext'
@@ -82,6 +82,11 @@ export default function Dashboard() {
   const [collectStatsState, setCollectStatsState] = useState<any>(null)
   const [collectStatsFinishedAt, setCollectStatsFinishedAt] = useState<string | null>(null)
 
+  // Optimal slots recalculation state
+  const [recalculatingSlots, setRecalculatingSlots] = useState(false)
+  const [recalcSlotsResult, setRecalcSlotsResult] = useState<any>(null)
+  const [recalcSlotsError, setRecalcSlotsError] = useState<string | null>(null)
+
   // Console events
   const [consoleEvents, setConsoleEvents] = useState<any[]>([])
 
@@ -133,15 +138,19 @@ export default function Dashboard() {
     return msg
   }
 
-  function applyStatsStatus(s: any) {
+  function applyStatsStatus(s: any, showBanner = true) {
     setCollectStatsState(s)
     if (s.status === 'success') {
       setCollectStatsError(false)
-      setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
+      if (showBanner) {
+        setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
+      }
       setCollectStatsFinishedAt(s.finished_at ? new Date(s.finished_at * 1000).toLocaleTimeString() : null)
     } else if (s.status === 'error') {
       setCollectStatsError(true)
-      setCollectStatsMsg(`Error: ${s.error || 'fallo en la recoleccion'}`)
+      if (showBanner) {
+        setCollectStatsMsg(`Error: ${s.error || 'fallo en la recoleccion'}`)
+      }
     } else if (s.status === 'running') {
       setCollectStatsError(false)
       setCollectStatsMsg('Recolectando stats de YouTube...')
@@ -172,7 +181,7 @@ export default function Dashboard() {
       try {
         const s = await api.getStatsCollectStatus()
         if (cancelled) return
-        applyStatsStatus(s)
+        applyStatsStatus(s, false) // no banner for historical results on mount
         if (s.status === 'running') {
           setCollectingStats(true)
           pollStatsStatus()
@@ -220,6 +229,21 @@ export default function Dashboard() {
       setCollectStatsError(true)
       setCollectStatsMsg(`Error: ${e.message || 'desconocido'}`)
       setCollectingStats(false)
+    }
+  }
+
+  async function handleRecalculateSlots() {
+    if (recalculatingSlots) return
+    setRecalculatingSlots(true)
+    setRecalcSlotsError(null)
+    setRecalcSlotsResult(null)
+    try {
+      const res = await api.recalculateOptimalSlotsAll()
+      setRecalcSlotsResult(res)
+    } catch (e: any) {
+      setRecalcSlotsError(e.message || 'Error al recalcular franjas')
+    } finally {
+      setRecalculatingSlots(false)
     }
   }
 
@@ -375,6 +399,15 @@ export default function Dashboard() {
           {stabilizing ? <Loader2 size={13} className="animate-spin" /> : <Wrench size={13} />}
           <span>{stabilizing ? 'Estabilizando...' : 'Estabilizar'}</span>
         </button>
+        <button
+          onClick={handleRecalculateSlots}
+          disabled={recalculatingSlots}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-500/20 bg-purple-500/5 text-purple-400 hover:bg-purple-500/10 hover:border-purple-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Recalcular franjas óptimas de publicación con datos de YouTube Analytics"
+        >
+          {recalculatingSlots ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
+          <span>{recalculatingSlots ? 'Calculando...' : 'Optimizar franjas'}</span>
+        </button>
       </div>
 
       {/* Stats collection feedback */}
@@ -435,6 +468,29 @@ export default function Dashboard() {
               <p className="text-xs text-gray-400 mt-1">{stabilizeError}</p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Optimal slots recalculation feedback */}
+      {recalcSlotsResult && !recalcSlotsError && (
+        <div className="glass p-4 rounded-xl border border-purple-500/20 space-y-2">
+          <div className="text-purple-400 text-sm font-medium flex items-center gap-2">
+            <Zap size={14} /> Franjas óptimas recalculadas
+          </div>
+          <div className="text-gray-400 text-xs space-y-1">
+            <div>{recalcSlotsResult.channels_processed} canales · {recalcSlotsResult.slots_calculated} franjas calculadas</div>
+            {recalcSlotsResult.channels_replanned > 0 && (
+              <div className="text-amber-400">
+                {recalcSlotsResult.channels_replanned} canales replanificados{' '}
+                ({recalcSlotsResult.long_replanned} largos, {recalcSlotsResult.shorts_replanned} shorts)
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {recalcSlotsError && (
+        <div className="glass p-4 rounded-xl border border-red-500/20">
+          <div className="text-red-400 text-sm">{recalcSlotsError}</div>
         </div>
       )}
 
