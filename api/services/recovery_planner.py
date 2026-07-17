@@ -355,6 +355,30 @@ def auto_recover_missing_publications(db=None) -> dict:
                 up_m = min(up_minutes % 60, 59)
 
             scheduled_str = f"{today} {scheduled_h:02d}:{scheduled_m:02d}:00"
+
+            # ── v11: Snap target_upload_at into nearest upload window ──
+            upload_windows = cfg.get("upload_windows")
+            if not upload_windows:
+                ws = cfg.get("upload_window_start", 9)
+                we = cfg.get("upload_window_end", 11)
+                upload_windows = [{"start": ws, "end": we}]
+            in_window = any(
+                w["start"] <= up_h < w["end"] for w in upload_windows
+            )
+            if not in_window:
+                # Find nearest window
+                best_w = upload_windows[0]
+                best_dist = 100
+                for w in upload_windows:
+                    dist = min(abs(up_h - w["start"]), abs(up_h - (w["end"] - 1)))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_w = w
+                up_h = best_w["start"]
+                logger.info(
+                    "[%s] Recovery slot: snapped upload to window %02d:00-%02d:00",
+                    slug, best_w["start"], best_w["end"],
+                )
             upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
 
             try:

@@ -482,7 +482,9 @@ def calculate_target_public_time(
         except Exception as e:
             logger.debug("[%s] History adjustment skipped: %s", slug, e)
 
-    # ── 3. Aplicar jitter aleatorio ──
+    # ── 3. Aplicar spread aleatorio dentro de la ventana de publicación ──
+    # PUBLISH_WINDOW_SPREAD_MIN define ±minutos alrededor del peak (ej. 90 min = ventana de 3h)
+    # jitter_min se usa como spread — el orchestrator pasa PUBLISH_WINDOW_SPREAD_MIN si existe
     jitter = random.randint(-jitter_min, jitter_min)
     effective_hour = seed_hour + (jitter / 60.0)  # hora decimal
 

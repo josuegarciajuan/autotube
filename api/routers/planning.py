@@ -14,6 +14,9 @@ class PlanningConfigUpdate(BaseModel):
     videos_per_day: Optional[int] = None
     planning_enabled: Optional[bool] = None
     viral_per_day: Optional[int] = None
+    # ── Multi-window upload (v11) ──
+    upload_windows: Optional[list] = None            # [{"start":10,"end":13},{"start":20,"end":22}]
+    publish_window_spread_min: Optional[int] = None   # ±minutes around peak (default 90)
 
 
 class PreviewOverrides(BaseModel):
@@ -57,6 +60,8 @@ def update_planning_config(channel_id: int, data: PlanningConfigUpdate):
         videos_per_day=data.videos_per_day,
         planning_enabled=data.planning_enabled,
         viral_per_day=data.viral_per_day,
+        upload_windows=data.upload_windows,
+        publish_window_spread_min=data.publish_window_spread_min,
     )
     if not ok:
         raise HTTPException(500, "Failed to update")

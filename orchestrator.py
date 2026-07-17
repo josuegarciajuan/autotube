@@ -1257,7 +1257,10 @@ class PipelineOrchestrator:
                 secondary_kws = getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])
                 tz = getattr(self.config, "PUBLISH_TIMEZONE", "Europe/Madrid")
                 target_h = getattr(self.config, "PUBLISH_TARGET_HOUR", None)
-                jitter = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
+                # PUBLISH_WINDOW_SPREAD_MIN (v11) → PUBLISH_JITTER_MIN (legacy fallback)
+                spread = getattr(self.config, "PUBLISH_WINDOW_SPREAD_MIN", None)
+                if spread is None:
+                    spread = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
                 warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 120)
                 channel_id = self._get_channel_id()
 
@@ -1316,7 +1319,7 @@ class PipelineOrchestrator:
                         secondary_keywords=secondary_kws,
                         timezone_str=tz,
                         target_hour=target_h,
-                        jitter_min=jitter,
+                        jitter_min=spread,
                         warmup_min=warmup,
                         db=self.db,
                         channel_id=channel_id,

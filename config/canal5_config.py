@@ -702,8 +702,12 @@ PUBLISH_WARMUP_MIN = 120
 
 # ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
 GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate (1.5 days)
-UPLOAD_WINDOW_START = 9       # Upload window: 9:00 AM
-UPLOAD_WINDOW_END = 11       # Upload window: 11:00 AM
+# Upload windows (franjas de subida): videos suben en estas franjas a horas random
+UPLOAD_WINDOWS = [
+    {"start": 10, "end": 13},   # Mañana: 10:00-13:00
+    {"start": 20, "end": 22},   # Tarde: 20:00-22:00
+]
+PUBLISH_WINDOW_SPREAD_MIN = 90     # ±90min alrededor del peak = ventana de publicación de 3h
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)

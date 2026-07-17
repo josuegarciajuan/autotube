@@ -439,16 +439,37 @@ def compute_daily_slots(
 # ── 3-Phase Horizon Planning (v9) ──────────────────────────────
 
 def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
-                         window_start: int, window_end: int,
-                         videos_per_day: int = 1) -> tuple:
-    """Pick a deterministic minute within the upload window for one slot.
-    
+                         window_start: int = None, window_end: int = None,
+                         videos_per_day: int = 1,
+                         windows: list = None) -> tuple:
+    """Pick a deterministic minute within the upload window(s) for one slot.
+
+    v11+: Accepts `windows` list of dicts [{"start":10,"end":13},...] with
+    round-robin distribution across windows. Falls back to single window_start/end
+    for backward compatibility.
+
     Spreads multiple videos from the same channel across the window
     (min 15 min apart). Returns (hour, minute).
     """
+    # ── v11: multi-window round-robin ──
+    if windows and isinstance(windows, list) and len(windows) > 0:
+        # Validate and pick window via round-robin
+        valid_windows = []
+        for w in windows:
+            if isinstance(w, dict) and "start" in w and "end" in w:
+                valid_windows.append(w)
+        if valid_windows:
+            rr_idx = (day_seed + slot_pos + channel_id) % len(valid_windows)
+            chosen = valid_windows[rr_idx]
+            window_start = chosen["start"]
+            window_end = chosen["end"]
+        # else: fall through to window_start/window_end
+    elif window_start is None or window_end is None:
+        window_start, window_end = 9, 11  # ultimate fallback
+
     ch_seed = _channel_seed(day_seed, channel_id) ^ (slot_pos * 0xCAFE)
     window_minutes = (window_end - window_start) * 60
-    
+
     if videos_per_day <= 1:
         # Single video: random within window
         offset = ch_seed % max(window_minutes - 1, 1)
@@ -458,7 +479,7 @@ def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
         base = slot_pos * segment - segment // 2
         jitter = (ch_seed % max(segment - 15, 1))
         offset = max(0, min(window_minutes - 1, base + jitter))
-    
+
     total_min = window_start * 60 + offset
     return (total_min // 60, total_min % 60)
 
@@ -522,6 +543,7 @@ def compute_horizon_slots(
                 target_public_at = f"{date_str} {peak_h:02d}:{peak_m:02d}:00"
                 
                 # ── C. Compute target_upload_at (within upload window on pub day) ──
+                upload_windows = ch.get("upload_windows")
                 win_start = ch.get("upload_window_start", 9)
                 win_end = ch.get("upload_window_end", 11)
                 if not is_scheduled:
@@ -530,7 +552,8 @@ def compute_horizon_slots(
                 else:
                     up_h, up_m = _pick_upload_minute(
                         _day_seed(date_str), ch_id, pos,
-                        win_start, win_end, n,
+                        window_start=win_start, window_end=win_end,
+                        videos_per_day=n, windows=upload_windows,
                     )
                 target_upload_at = f"{date_str} {up_h:02d}:{up_m:02d}:00"
                 

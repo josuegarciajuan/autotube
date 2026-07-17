@@ -122,6 +122,7 @@ def migrate_v2(db_path: str = None):
         # ── Generation lifecycle timestamps ──
         ("generation_started_at", "TIMESTAMP"),
         ("generation_finished_at", "TIMESTAMP"),
+        ("scheduled_upload_at", "TEXT"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -766,6 +767,14 @@ def _migrate_v6(conn, logger):
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_source_mode ON videos(source_mode)")
 
+    # ── v11: scheduled_upload_at for randomized upload dispatch ──
+    if "scheduled_upload_at" not in existing_vid:
+        try:
+            conn.execute("ALTER TABLE videos ADD COLUMN scheduled_upload_at TEXT")
+            logger.info("Migration v11: added scheduled_upload_at column to videos")
+        except sqlite3.OperationalError as e:
+            logger.debug("v11 videos.scheduled_upload_at: %s", e)
+
     conn.commit()
 
 
@@ -1093,7 +1102,8 @@ class ExtendedDatabase(Database):
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
                     "target_playlist_id", "target_playlist_slug",
                     "manual_altered_content_done", "manual_end_screens_done",
-                    "generation_started_at", "generation_finished_at"]
+                    "generation_started_at", "generation_finished_at",
+                    "scheduled_upload_at"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -3198,6 +3208,13 @@ class ExtendedDatabase(Database):
             "upload_window_start": config.get("UPLOAD_WINDOW_START", 9),
             "upload_window_end": config.get("UPLOAD_WINDOW_END", 11),
             "generation_lead_hours": config.get("GENERATION_LEAD_HOURS", 36),
+            # ── Multi-window upload (v11) ──
+            "upload_windows": config.get("UPLOAD_WINDOWS", [
+                {"start": config.get("UPLOAD_WINDOW_START", 9),
+                 "end": config.get("UPLOAD_WINDOW_END", 11)}
+            ]),
+            "publish_window_spread_min": config.get("PUBLISH_WINDOW_SPREAD_MIN",
+                                                     config.get("PUBLISH_JITTER_MIN", 20)),
         }
     
     _UNSET = object()  # sentinel to distinguish "not passed" from "explicitly clear"
@@ -3210,7 +3227,9 @@ class ExtendedDatabase(Database):
                                         viral_per_day: int = None,
                                         upload_window_start: int = None,
                                         upload_window_end: int = None,
-                                        generation_lead_hours: int = None) -> bool:
+                                        generation_lead_hours: int = None,
+                                        upload_windows: list = None,
+                                        publish_window_spread_min: int = None) -> bool:
         """Update planning fields in channel config_json.
 
         Pass alternate_pattern=None (the Python value) to explicitly clear it.
@@ -3241,6 +3260,16 @@ class ExtendedDatabase(Database):
             config["UPLOAD_WINDOW_END"] = max(0, min(23, upload_window_end))
         if generation_lead_hours is not None:
             config["GENERATION_LEAD_HOURS"] = max(1, min(72, generation_lead_hours))
+        if upload_windows is not None:
+            # Validate structure
+            valid = []
+            for w in upload_windows:
+                if isinstance(w, dict) and "start" in w and "end" in w:
+                    valid.append({"start": max(0, min(23, int(w["start"]))),
+                                  "end": max(0, min(23, int(w["end"])))})
+            config["UPLOAD_WINDOWS"] = valid if valid else [{"start": 9, "end": 11}]
+        if publish_window_spread_min is not None:
+            config["PUBLISH_WINDOW_SPREAD_MIN"] = max(10, min(180, publish_window_spread_min))
         return self.update_channel(channel_id, config=config)
     
     def get_active_job(self) -> dict | None:
