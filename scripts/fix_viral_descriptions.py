@@ -110,16 +110,18 @@ def sanitize_promo_content(text: str) -> str:
 def get_llm_client():
     """Get an OpenAI-compatible client for description generation."""
     try:
+        from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OPENAI_MODEL
         import openai
-        from config.config_bridge import get_channel_config
-        cfg = get_channel_config("canal2")
-        api_key = getattr(cfg, "LLM_API_KEY", None) or getattr(cfg, "API_KEY", None)
-        base_url = getattr(cfg, "LLM_BASE_URL", "https://api.deepseek.com")
-        model = getattr(cfg, "LLM_MODEL", "deepseek-chat")
+
+        api_key = LLM_API_KEY or OPENAI_API_KEY
+        base_url = LLM_BASE_URL
+        model = LLM_MODEL or OPENAI_MODEL or "deepseek-chat"
+
         if not api_key:
-            logger.error("No LLM API key found in config")
+            logger.error("No LLM API key found in config.settings (LLM_API_KEY or OPENAI_API_KEY)")
             return None, None
         client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        logger.info("LLM client: model=%s base_url=%s", model, base_url)
         return client, model
     except Exception as e:
         logger.error("Failed to init LLM client: %s", e)
