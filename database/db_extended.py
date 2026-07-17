@@ -1241,10 +1241,32 @@ class ExtendedDatabase(Database):
         return dict(row) if row else None
     
     def get_active_jobs(self) -> list[dict]:
+        """Return jobs with status 'queued' or 'running', excluding stale zombies.
+        
+        Safety filter: running jobs without a heartbeat for >60 min (or never emitted
+        one and started >60 min ago) are excluded to prevent zombie progress bars
+        from appearing in the UI before the orphan detector cleans them up.
+        Queued jobs are always returned (they haven't started yet).
+        """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM generation_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC"
-            ).fetchall()
+            rows = conn.execute("""
+                SELECT * FROM generation_jobs 
+                WHERE status = 'queued'
+                UNION ALL
+                SELECT * FROM generation_jobs 
+                WHERE status = 'running'
+                  AND (
+                      -- Heartbeat mode: last heartbeat within 60 min → still alive
+                      (last_heartbeat_at IS NOT NULL 
+                       AND (julianday('now') - julianday(last_heartbeat_at)) * 1440 <= 60)
+                      OR
+                      -- No heartbeat yet: only include if started <60 min ago
+                      (last_heartbeat_at IS NULL 
+                       AND started_at IS NOT NULL
+                       AND (julianday('now') - julianday(started_at)) * 1440 <= 60)
+                  )
+                ORDER BY created_at DESC
+            """).fetchall()
         return [dict(r) for r in rows]
     
     def update_heartbeat(self, job_id: int) -> None:
@@ -1355,15 +1377,15 @@ class ExtendedDatabase(Database):
     # to 120 min (2h) for all phases to prevent false-positive orphan detection
     # during long renders (50+ scene segments can take 40-90 min with MoviePy).
     HEARTBEAT_ORPHAN_TIMEOUT_MINUTES = int(
-        __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "120")
+        __import__("os").getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "60")
     )
     NONVIDEO_HEARTBEAT_ORPHAN_MIN = int(
-        __import__("os").getenv("NONVIDEO_HEARTBEAT_ORPHAN_MIN", "120")
+        __import__("os").getenv("NONVIDEO_HEARTBEAT_ORPHAN_MIN", "30")
     )
     
     # Legacy fallback: jobs without heartbeat support use started_at-based timeout
-    VIDEO_PHASE_TIMEOUT_MINUTES = 1440  # 24h — max ceiling for long renders
-    DEFAULT_ORPHAN_TIMEOUT_MINUTES = 180  # 3h — videos with no active job
+    VIDEO_PHASE_TIMEOUT_MINUTES = 120  # 2h — max ceiling for renders that never emitted heartbeat
+    DEFAULT_ORPHAN_TIMEOUT_MINUTES = 60  # 1h — general fallback timeout
 
     def cleanup_orphaned_jobs(self, timeout_minutes: int = None) -> dict:
         """Detect and clean up orphaned generation jobs and videos.
@@ -1441,10 +1463,10 @@ class ExtendedDatabase(Database):
                         (j.last_heartbeat_at IS NOT NULL
                          AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
                         OR
-                        -- Legacy fallback: no heartbeat ever + started >480 min (8h) ago
-                        -- 480 min is generous enough for a long upload after a long render
-                        (j.last_heartbeat_at IS NULL
-                         AND (julianday('now') - julianday(j.started_at)) * 1440 > 480)
+                         -- Legacy fallback: no heartbeat ever + started >120 min (2h) ago
+                         -- 2h is enough for upload + metadata after a long render
+                         (j.last_heartbeat_at IS NULL
+                          AND (julianday('now') - julianday(j.started_at)) * 1440 > 120)
                     )
             """, (self.NONVIDEO_HEARTBEAT_ORPHAN_MIN,)).fetchall()
             

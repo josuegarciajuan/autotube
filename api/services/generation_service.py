@@ -2523,6 +2523,7 @@ async def auto_recover_on_startup():
     rows = conn.execute(
         "SELECT * FROM videos WHERE status='error' "
         "AND checkpoint_data IS NOT NULL AND checkpoint_data != '{}' "
+        "AND (progress_phase IS NULL OR progress_phase NOT IN ('bug_crash','manual_review')) "
         "ORDER BY created_at DESC"
     ).fetchall()
 
@@ -2569,24 +2570,19 @@ async def auto_recover_on_startup():
             continue
 
         # ── Max retry check: don't loop forever on broken videos ─
-        # Only count genuine code-bug failures toward the limit.
-        # External interruptions (server restart, signal kill, worker orphaned)
-        # should NOT consume recovery attempts because the video data is fine;
-        # the crash was environmental, not a content/code defect.
+        # Count ALL failed reassembly attempts (including server-restart kills).
+        # Previously only counted "real" bugs, which meant server restarts
+        # created fresh recovery jobs every time without ever hitting the cap.
+        # Now we count total attempts: if a video has been reassembled 3+ times
+        # regardless of cause, stop trying — further attempts are unlikely to help.
         failed_reassemblies = conn.execute(
             "SELECT COUNT(*) FROM generation_jobs "
-            "WHERE video_id=? AND action='reassemble' AND status='failed' "
-            "AND (error_msg IS NULL "
-            "     OR (error_msg NOT LIKE '%Server restarted%' "
-            "         AND error_msg NOT LIKE '%signal%' "
-            "         AND error_msg NOT LIKE '%interrupted%' "
-            "         AND error_msg NOT LIKE '%Worker exited%' "
-            "         AND error_msg NOT LIKE '%orphaned%'))",
+            "WHERE video_id=? AND action='reassemble' AND status='failed'",
             (video_id,),
         ).fetchone()[0]
         if failed_reassemblies >= MAX_RECOVERY_ATTEMPTS:
             log.warning(
-                "Video %d: %d failed reassembly attempts (max=%d) — marking as bug_crash",
+                "Video %d: %d failed reassembly attempts (max=%d total) — marking as bug_crash",
                 video_id, failed_reassemblies, MAX_RECOVERY_ATTEMPTS,
             )
             conn.execute(

@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI):
 
 
 # ── Orphan detection config ─────────────────────────────────
-ORPHAN_TIMEOUT_MINUTES = 180  # Jobs older than this without progress are declared orphaned (3h)
+ORPHAN_TIMEOUT_MINUTES = 60  # Jobs stuck for >1h without heartbeat are declared orphaned
 
 
 async def _queue_consumer():

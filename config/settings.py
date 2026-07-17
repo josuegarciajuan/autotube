@@ -105,7 +105,7 @@ RENDER_TIMEOUT_MIN_SEC = int(os.getenv("RENDER_TIMEOUT_MIN_SEC", "7200"))  # 2h 
 RENDER_TIMEOUT_MAX_SEC = int(os.getenv("RENDER_TIMEOUT_MAX_SEC", "14400"))  # 4h ceiling — generous for complex videos
 
 # ── Orphan detection ───────────────────────────────────────────
-HEARTBEAT_ORPHAN_TIMEOUT_MIN = int(os.getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "120"))  # 2h — raised from 15
+HEARTBEAT_ORPHAN_TIMEOUT_MIN = int(os.getenv("HEARTBEAT_ORPHAN_TIMEOUT_MIN", "60"))  # 1h — heartbeat every ~30s, 120 missed = dead
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 # ── Shorts ─────────────────────────────────────────────────────
