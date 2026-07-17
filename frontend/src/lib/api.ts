@@ -181,6 +181,12 @@ export const api = {
   recalculateOptimalSlotsAll: () =>
     request<any>('/planning/recalculate-optimal-slots', { method: 'POST' }),
 
+  // Timing Dashboard (v11) — Horarios tab
+  getTimingDashboard: (channelId: number, days?: number) => {
+    const params = days ? `?days=${days}` : ''
+    return request<TimingDashboardResponse>(`/channels/${channelId}/timing-dashboard${params}`)
+  },
+
   // Shorts slots
   getShortsSlotsToday: () => request<any>('/planning/shorts-slots/today'),
   getShortsSlotsWeek: (channelId?: number) => {
@@ -594,4 +600,66 @@ export interface PendingManualSummary {
     total_pending: number;
     affected_videos: number;
   }>;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Timing Dashboard (v11)
+// ═══════════════════════════════════════════════════════════════
+
+export interface TimingDashboardResponse {
+  ok: boolean
+  channel_id: number
+  channel_name: string
+  config: TimingConfig
+  optimal_slots: {
+    long: OptimalSlot[]
+    shorts: OptimalSlot[]
+    has_data: boolean
+  }
+  execution_history: ExecutionEvent[]
+  stats: TimingStats
+}
+
+export interface TimingConfig {
+  publish_mode: string
+  publish_target_hour: number | null
+  publish_jitter_min: number
+  publish_warmup_min: number
+  publish_timezone: string
+  publish_window_spread_min: number
+  upload_windows: { start: number; end: number }[]
+  generation_lead_hours: number
+}
+
+export interface OptimalSlot {
+  rank: number
+  target_hour: number
+  target_minute: number
+  timezone: string
+  score: number
+  confidence: number
+  audience_focus: string
+  calculated_at: string | null
+  used_count: number
+  avg_views_result: number
+  data_sources: Record<string, boolean>
+}
+
+export interface ExecutionEvent {
+  video_id: number
+  titulo_final: string
+  is_short: boolean
+  status: string
+  uploaded_at: string | null
+  target_public_at: string | null
+  published_at: string | null
+  publish_mode: string
+  peak_source: string | null
+}
+
+export interface TimingStats {
+  total_published: number
+  total_scheduled: number
+  avg_warmup_actual_min: number | null
+  pct_within_window: number
 }

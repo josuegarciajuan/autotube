@@ -1,6 +1,7 @@
 """Channel management router."""
 import json
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.concurrency import run_in_threadpool
 from api.deps import get_db
 from api.schemas.models import ChannelCreate, ChannelUpdate, ChannelResponse, ChannelConfigUpdate
@@ -660,3 +661,179 @@ async def recalculate_slots(channel_id: int, background_tasks: BackgroundTasks):
         "ok": True,
         "message": f"Recalculation triggered for {ch['name']}. Check /optimal-slots for results.",
     }
+
+
+# ── Timing Dashboard (v11) ──────────────────────────────────────
+
+@router.get("/{channel_id}/timing-dashboard")
+def get_timing_dashboard(channel_id: int, days: int = Query(default=90, ge=7, le=365)):
+    """Aggregated timing dashboard for the Horarios tab.
+
+    Returns optimal slots, planning config, execution history,
+    and aggregate stats in a single call.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    # ── Planning config ──
+    cfg = db.get_channel_planning_config(channel_id)
+    if not cfg:
+        cfg = {}
+
+    config_out = {
+        "publish_mode": cfg.get("publish_mode", "immediate"),
+        "publish_target_hour": cfg.get("publish_target_hour"),
+        "publish_jitter_min": cfg.get("publish_jitter_min", 20),
+        "publish_warmup_min": cfg.get("publish_warmup_min", 120),
+        "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
+        "publish_window_spread_min": cfg.get("publish_window_spread_min",
+                                              cfg.get("publish_jitter_min", 20)),
+        "upload_windows": cfg.get("upload_windows", [
+            {"start": 9, "end": 11}
+        ]),
+        "generation_lead_hours": cfg.get("generation_lead_hours", 36),
+    }
+
+    # ── Optimal slots ──
+    long_slots_raw = db.get_optimal_slots(channel_id, "long")
+    short_slots_raw = db.get_optimal_slots(channel_id, "short")
+
+    def _fmt_slot(s):
+        return {
+            "rank": s["slot_rank"],
+            "target_hour": s["target_hour"],
+            "target_minute": s["target_minute"],
+            "timezone": s.get("timezone", config_out["publish_timezone"]),
+            "score": s["score"],
+            "confidence": s["confidence"],
+            "audience_focus": s.get("audience_focus", "blend"),
+            "calculated_at": s.get("calculated_at"),
+            "used_count": s.get("used_count", 0),
+            "avg_views_result": s.get("avg_views_result", 0),
+            "data_sources": json.loads(s.get("data_sources", "{}")),
+        }
+
+    optimal_slots = {
+        "long": [_fmt_slot(s) for s in long_slots_raw],
+        "shorts": [_fmt_slot(s) for s in short_slots_raw],
+        "has_data": bool(long_slots_raw or short_slots_raw),
+    }
+
+    # ── Execution history ──
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    all_videos = db.get_videos(channel_id=channel_id, limit=200)
+
+    execution_history = []
+    for v in all_videos:
+        is_short = v.get("status") == "short"
+        uploaded = v.get("uploaded_at")
+        published = v.get("published_at")
+        target_public = v.get("target_public_at")
+
+        # Only include videos with at least one timing event
+        if not (uploaded or published or target_public):
+            continue
+
+        # Filter by date range
+        latest_event = published or uploaded or target_public
+        if isinstance(latest_event, str) and latest_event < since:
+            continue
+
+        execution_history.append({
+            "video_id": v["id"],
+            "titulo_final": v.get("titulo_final", ""),
+            "is_short": is_short,
+            "status": v.get("status", ""),
+            "uploaded_at": _to_str(uploaded),
+            "target_public_at": _to_str(target_public),
+            "published_at": _to_str(published),
+            "publish_mode": v.get("publish_mode", "immediate"),
+            "peak_source": v.get("peak_source"),
+        })
+
+    # Sort by most recent event first
+    execution_history.sort(
+        key=lambda x: x["published_at"] or x["uploaded_at"] or x["target_public_at"] or "",
+        reverse=True,
+    )
+
+    # ── Aggregate stats ──
+    scheduled_videos = [e for e in execution_history
+                        if e["publish_mode"] == "scheduled" and e["published_at"]]
+    total_published = len([e for e in execution_history if e["published_at"]])
+    total_scheduled = len(scheduled_videos)
+
+    # % within target window (±jitter)
+    jitter_min = config_out["publish_jitter_min"]
+    target_hour = config_out.get("publish_target_hour")
+    warmup_min = config_out["publish_warmup_min"]
+
+    within_window = 0
+    total_warmups = 0
+    sum_warmup_min = 0.0
+
+    for e in execution_history:
+        if not e["published_at"] or not e["target_public_at"] or not target_hour:
+            continue
+        try:
+            pub_dt = _parse_dt(e["published_at"])
+            target_dt = _parse_dt(e["target_public_at"])
+            if pub_dt and target_dt:
+                diff_min = abs((pub_dt - target_dt).total_seconds()) / 60.0
+                if diff_min <= jitter_min:
+                    within_window += 1
+        except Exception:
+            pass
+
+        # Calculate real warmup = published_at - uploaded_at
+        if e["published_at"] and e["uploaded_at"]:
+            try:
+                pub_dt = _parse_dt(e["published_at"])
+                up_dt = _parse_dt(e["uploaded_at"])
+                if pub_dt and up_dt:
+                    wu_min = (pub_dt - up_dt).total_seconds() / 60.0
+                    if wu_min > 0 and wu_min < 10080:  # sanity check (< 1 week)
+                        total_warmups += 1
+                        sum_warmup_min += wu_min
+            except Exception:
+                pass
+
+    pct_within = round(within_window / max(total_scheduled, 1) * 100, 1)
+    avg_warmup = round(sum_warmup_min / max(total_warmups, 1), 1)
+
+    stats = {
+        "total_published": total_published,
+        "total_scheduled": total_scheduled,
+        "avg_warmup_actual_min": avg_warmup if total_warmups > 0 else None,
+        "pct_within_window": pct_within,
+    }
+
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "channel_name": ch.get("name", ""),
+        "config": config_out,
+        "optimal_slots": optimal_slots,
+        "execution_history": execution_history,
+        "stats": stats,
+    }
+
+
+def _to_str(val) -> str | None:
+    """Safely convert a datetime or string to ISO string."""
+    if val is None:
+        return None
+    return str(val) if isinstance(val, str) else val.isoformat()
+
+
+def _parse_dt(val) -> datetime | None:
+    """Parse an ISO timestamp string."""
+    if not val:
+        return None
+    try:
+        # Handle timezone offsets
+        return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None

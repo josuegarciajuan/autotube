@@ -8,6 +8,7 @@ import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
 import WatchTimeChart from '../components/WatchTimeChart'
+import HorariosTab from '../components/HorariosTab'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
 
 // ── PromotionTab (inline component) ─────────────────────────
@@ -253,8 +254,8 @@ export default function ChannelDetail() {
   const [generatingNativeShort, setGeneratingNativeShort] = useState(false)
   const [nativeShortResult, setNativeShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
   
-  // Tab state for Videos/Shorts/Live/Growth/Promotion
-  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion'>('videos')
+  // Tab state for Videos/Shorts/Live/Growth/Promotion/Slots
+  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion' | 'slots'>('videos')
   const [shorts, setShorts] = useState<any[]>([])
   const [loadingShorts, setLoadingShorts] = useState(false)
 
@@ -268,8 +269,6 @@ export default function ChannelDetail() {
 
   // Scheduled publishing mode
   const [scheduledMode, setScheduledMode] = useState('immediate')
-  const [optimalSlots, setOptimalSlots] = useState<any>(null)
-  const [recalculatingSlots, setRecalculatingSlots] = useState(false)
 
   // Promotion tab state
   const [playlists, setPlaylists] = useState<any[]>([])
@@ -305,12 +304,6 @@ export default function ChannelDetail() {
           setScheduledMode(cfg.PUBLISH_MODE || 'immediate')
         } catch { setScheduledMode('immediate') }
         setProfileForm({ name: ch.name || '', description: ch.description || '', banner_url: ch.banner_url || '', avatar_url: ch.avatar_url || '', yt_channel_url: ch.yt_channel_url || '', google_account: ch.google_account || '', yt_studio_url: ch.yt_studio_url || '' })
-
-        // Fetch optimal slots if in scheduled mode
-        const mode = (() => { try { const c = typeof ch.config_json === 'string' ? JSON.parse(ch.config_json) : (ch.config_json || {}); return c.PUBLISH_MODE || 'immediate' } catch { return 'immediate' } })()
-        if (mode === 'scheduled') {
-          api.getOptimalSlots(channelId).then(setOptimalSlots).catch(() => {})
-        }
       } catch (e) { console.error(e) }
       setLoading(false)
     }
@@ -576,18 +569,6 @@ export default function ChannelDetail() {
       setStatsRefreshMsg(`Error: ${e.message || 'desconocido'}`)
     } finally {
       setRefreshingStats(false)
-    }
-  }
-
-  async function handleRecalculateChannelSlots() {
-    setRecalculatingSlots(true)
-    try {
-      const res = await api.getOptimalSlots(channelId)
-      setOptimalSlots(res)
-    } catch (e: any) {
-      console.error('Recalculate slots failed', e)
-    } finally {
-      setRecalculatingSlots(false)
     }
   }
 
@@ -933,74 +914,8 @@ export default function ChannelDetail() {
         </Link>
       </div>
 
-      {/* ── Optimal Publish Slots Section ──────────────────────── */}
-      {scheduledMode === 'scheduled' ? (
-        <div className="glass rounded-xl p-5 space-y-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <TrendingUp size={16} className="text-purple-400" />
-              <h3 className="text-sm font-semibold text-white">Franjas Óptimas de Publicación</h3>
-            </div>
-            <button
-              onClick={handleRecalculateChannelSlots}
-              disabled={recalculatingSlots}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-purple-500/20 bg-purple-500/5 text-purple-400 hover:bg-purple-500/10 transition-all text-[11px] font-medium disabled:opacity-50"
-            >
-              {recalculatingSlots ? <Loader2 size={11} className="animate-spin" /> : <Zap size={11} />}
-              <span>{recalculatingSlots ? 'Calculando...' : 'Recalcular'}</span>
-            </button>
-          </div>
-
-          {optimalSlots?.has_data ? (
-            <>
-              {optimalSlots.long?.[0]?.calculated_at && (
-                <div className="text-[11px] text-gray-500 flex items-center gap-3">
-                  <span>Calculado: {new Date(optimalSlots.long[0].calculated_at).toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}</span>
-                  {optimalSlots.long?.[0]?.audience_split && (() => {
-                    try {
-                      const s = typeof optimalSlots.long[0].audience_split === 'string' ? JSON.parse(optimalSlots.long[0].audience_split) : optimalSlots.long[0].audience_split;
-                      return s?.spain_pct ? (
-                        <span className="flex items-center gap-1"><MapPin size={10} />{Math.round(s.spain_pct * 100)}% 🇪🇸 · {Math.round(s.latam_pct * 100)}% 🌎</span>
-                      ) : null;
-                    } catch { return null; }
-                  })()}
-                </div>
-              )}
-
-              <div>
-                <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-2">Vídeos largos</div>
-                <div className="grid grid-cols-3 gap-3">
-                  {optimalSlots.long?.map((s: any) => <SlotBadge key={s.rank} slot={s} />)}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-2">Shorts</div>
-                <div className="grid grid-cols-3 gap-3">
-                  {optimalSlots.shorts?.map((s: any) => <SlotBadge key={s.rank} slot={s} />)}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="text-sm text-gray-500 py-3 text-center">
-              Sin datos aún. Las franjas se calculan automáticamente cada 24h.{' '}
-              <button onClick={handleRecalculateChannelSlots} className="text-purple-400 hover:underline">
-                Forzar primer cálculo
-              </button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="glass rounded-xl p-5 mb-6">
-          <div className="flex items-center gap-2 text-gray-500 text-sm">
-            <Globe size={14} />
-            <span>Las franjas óptimas solo aplican en modo programado. Activa el modo programado para usar publicación en hora pico.</span>
-          </div>
-        </div>
-      )}
-
       {/* --- Generation Panel --- */}
-      {videoTab !== 'live' && (
+      {videoTab !== 'live' && videoTab !== 'slots' && (
       <div className="glass rounded-xl p-5 space-y-4 mb-6">
         <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
           <Wand2 size={20} className="text-neon-gold" /> {videoTab === 'shorts' ? 'Generar Short' : 'Generar Video'}
@@ -1147,6 +1062,12 @@ export default function ChannelDetail() {
             }`}
             onClick={() => setVideoTab('promotion')}
           ><Megaphone size={14} className="inline mr-1" />Promoción</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'slots' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('slots')}
+          ><Clock size={14} className="inline mr-1" />Horarios</button>
           
           {/* ── Playlist filter ── */}
           {videoTab === 'videos' && channelPlaylists.length > 0 && (
@@ -1405,6 +1326,8 @@ export default function ChannelDetail() {
             promoActionResult={promoActionResult}
             setPromoActionResult={setPromoActionResult}
           />
+        ) : videoTab === 'slots' ? (
+          <HorariosTab channelId={channelId} />
         ) : videoTab === 'shorts' ? (
           <div>
           {nativeShortResult && (
@@ -1946,40 +1869,6 @@ export default function ChannelDetail() {
           </div>
         </div>
       )}
-    </div>
-  )
-}
-
-
-function SlotBadge({ slot }: { slot: any }) {
-  const rankColors: Record<number, string> = {
-    1: 'border-amber-500/30 bg-amber-500/5 text-amber-300',
-    2: 'border-slate-400/30 bg-slate-400/5 text-slate-300',
-    3: 'border-orange-700/30 bg-orange-700/5 text-orange-400',
-  }
-  const rankEmoji: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' }
-  const focusLabel: Record<string, string> = { spain: '🇪🇸 Spain', latam: '🌎 LATAM', blend: 'Blend' }
-  return (
-    <div className={`rounded-lg border p-3 ${rankColors[slot.rank] || rankColors[1]}`}>
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-[10px] font-bold">{rankEmoji[slot.rank]} #{slot.rank}</span>
-      </div>
-      <div className="text-lg font-mono font-bold tracking-tight">
-        {String(slot.target_hour).padStart(2, '0')}:{String(slot.target_minute).padStart(2, '0')}
-      </div>
-      <div className="flex items-center justify-between mt-1.5">
-        <div className="flex items-center gap-1">
-          <div className="w-10 h-1 rounded-full bg-white/10 overflow-hidden">
-            <div className="h-full rounded-full bg-current opacity-40" style={{ width: `${(slot.confidence || 0) * 100}%` }} />
-          </div>
-          <span className="text-[9px] opacity-60">{Math.round((slot.confidence || 0) * 100)}%</span>
-        </div>
-        <span className="text-[9px] opacity-70">{focusLabel[slot.audience_focus] || 'Blend'}</span>
-      </div>
-      <div className="text-[9px] opacity-40 mt-1">
-        score: {(slot.score || 0).toFixed(2)}
-        {slot.used_count > 0 && ` · ${slot.used_count} usos`}
-      </div>
     </div>
   )
 }
