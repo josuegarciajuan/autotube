@@ -144,6 +144,81 @@ def _strip_host_names(title: str, original_channel: str = "") -> str:
     return cleaned
 
 
+# ── Duration claim patterns ──────────────────────────────────────
+# These are time claims that appear in viral video titles.
+# Our generated videos are 8-20 min — claiming hours of content
+# hurts viewer trust and CTR. Strip or replace these claims.
+_DURATION_CLAIM_PATTERNS = [
+    # English patterns
+    (r'\d+\+?\s*HOURS?\s*(?:OF|of)\s+', '', re.IGNORECASE),    # "4+ HOURS of "
+    (r'\d+\+?\s*[Hh]ours?\s*(?:of|of)\s+', '', 0),               # "4+ hours of "
+    (r'\d+\s*[Hh][rR]\s*(?:of|of)\s+', '', 0),                   # "4hr of "
+    # Spanish patterns
+    (r'\d+\+?\s*HORAS?\s*(?:DE|de)\s+', '', 0),                  # "4+ HORAS de "
+    (r'\d+\+?\s*[Hh]oras?\s*(?:DE|de)\s+', '', 0),               # "4+ horas de "
+    (r'\d+\s*[Hh]\s*(?:DE|de)\s+', '', 0),                       # "4h de "
+    # More Spanish variants
+    (r'\d+[+\s]*[Hh]oras?\s*(?:y\s+media)?\s*$', '', 0),        # "2 horas" at end
+    (r'\d+[+\s]*HORAS?\s*(?:y\s+media)?\s*$', '', 0),            # "2 HORAS" at end
+]
+
+_DURATION_CLAIM_MID_TITLE = [
+    # " - 4+ hours of content" type patterns
+    (r'\s*[-–—]\s*\d+\+?\s*[Hh]ours?\s*(?:of|de|del?)?\s*.*$', '', re.IGNORECASE),
+    (r'\s*[-–—]\s*\d+\+?\s*HORAS?\s*(?:of|de|del?)?\s*.*$', '', 0),
+    (r'\s*\|\s*\d+\+?\s*[Hh]ours?\s*(?:of|de|del?)?\s*.*$', '', re.IGNORECASE),
+    (r'\s*\|\s*\d+\+?\s*HORAS?\s*(?:of|de|del?)?\s*.*$', '', 0),
+]
+
+# Replacement words when a duration claim is removed and the title
+# becomes too bare (e.g., just a topic noun).
+_DURATION_REPLACEMENTS = [
+    "Documental de ",
+    "Historia completa de ",
+    "Todo sobre ",
+    "Lo que debes saber de ",
+]
+
+
+def _correct_duration_claims(title: str) -> str:
+    """Remove or replace duration claims in cloned video titles.
+
+    Original viral videos often claim "4+ HOURS of content" but our
+    generated videos are 8-20 minutes. Stripping these false claims
+    prevents viewer disappointment and improves CTR accuracy.
+    """
+    import re
+
+    original = title
+    cleaned = title.strip()
+
+    # Step 1: Apply mid-title duration patterns (remove suffix after separator)
+    for pattern, replacement, flags in _DURATION_CLAIM_MID_TITLE:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=flags)
+
+    # Step 2: Apply duration claim patterns (remove duration prefix)
+    for pattern, replacement, flags in _DURATION_CLAIM_PATTERNS:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=flags)
+
+    # Step 3: If we removed a duration prefix and the title is now too short,
+    # prepend a natural replacement phrase
+    if cleaned != original and len(cleaned) < 20:
+        # Pick a replacement that fits the channel tone
+        cleaned = _DURATION_REPLACEMENTS[0] + cleaned[0].upper() + cleaned[1:]
+
+    # Step 4: Clean up artifacts
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)     # double spaces
+    cleaned = cleaned.strip()
+
+    if cleaned != original and len(cleaned) > 0:
+        logger.info(
+            "_correct_duration_claims: '%s...' → '%s...'",
+            original[:60], cleaned[:60],
+        )
+
+    return cleaned or original  # never return empty
+
+
 def clone_title_description(
     viral_meta_json: str,
     channel_slug: str,
@@ -177,6 +252,13 @@ def clone_title_description(
     translated_desc = viral_meta.get("translated_description", "")
     original_channel = viral_meta.get("original_channel", "")
     block_texts = [b.get("text", "") for b in viral_meta.get("blocks", [])]
+
+    # ── Strip duration claims from title ─────────────────────
+    # Original viral videos are often 1-4h long, but our generated
+    # videos are 8-20min. A title claiming "4+ HORAS" is false advertising
+    # and hurts viewer trust + CTR. Strip or replace duration claims.
+    if translated_title:
+        translated_title = _correct_duration_claims(translated_title)
 
     # ── Strip host/creator names from title ──────────────────
     if translated_title:

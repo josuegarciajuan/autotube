@@ -828,19 +828,20 @@ class YouTubeUploader:
     def _log_to_db(
         self, video_path: Path, title: str, video_id: str, youtube_url: str
     ) -> None:
+        """Log upload event to the pipeline_log table ONLY.
+
+        IMPORTANT: Do NOT insert video records here — that is the
+        orchestrator's / API layer's responsibility. Inserting here
+        creates DB duplicates (1 per upload) because the orchestrator
+        or API layer already manages the video record.
+
+        This method exists for audit trail purposes (CLI standalone mode
+        still gets a pipeline_log entry for the upload event).
+        """
         if self.db is None:
             return
         try:
             canal_name = self._get_config_attr("CANAL_NAME", self.channel_slug or "unknown")
-            privacy_status = self._get_config_attr("YT_PRIVACY_STATUS", "public")
-            video_db_id = self.db.insert_video(
-                script_id=None,
-                canal=canal_name,
-                video_path=str(video_path),
-                titulo_final=title,
-                privacy_status=privacy_status,
-            )
-            self.db.mark_video_uploaded(video_db_id, video_id, youtube_url)
             self.db.log_pipeline(
                 canal=canal_name,
                 phase="upload",

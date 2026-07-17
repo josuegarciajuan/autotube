@@ -99,6 +99,39 @@ RULES:
 4. NEVER change factual accuracy. NEVER invent false claims.
 5. Output ONLY the adapted text — no explanations, no markers."""
 
+_TITLE_CREATION_SYSTEM_PROMPT = """You are a YouTube SEO expert who creates viral Spanish video titles.
+
+Your task: Given a viral English video title, create a COMPLETELY FRESH Spanish title that captures
+the SAME CORE TOPIC and CURIOSITY HOOK but uses DIFFERENT words, structure, and perspective.
+
+CRITICAL ANTI-COPYRIGHT RULES:
+- NEVER do a direct translation. You must create an ORIGINAL title.
+- Change at least 60% of the content words (nouns, verbs, adjectives).
+- Use a DIFFERENT sentence structure than the original (e.g., if original is a statement,
+  make yours a question or a mystery hook).
+- Remove ALL host/presenter/channel names. Keep only historical figures and subjects.
+- Remove ALL duration claims ("4+ HOURS", "3 horas", etc.). Our video is shorter.
+- Remove ALL season/episode markers (T01E06, Temporada 2, etc.).
+
+TITLE FORMULAS (pick the best one for this topic):
+1. QUESTION HOOK: "¿[Pregunta intrigante]?" — e.g., "¿Qué ocultan realmente las pirámides?"
+2. REVELATION: "Lo que [sujeto] no quiere que sepas sobre [tema]"
+3. MYSTERY: "El misterio de [tema] que la ciencia no puede explicar"
+4. SHOCKING FACT: "[Dato impactante] que cambia todo lo que sabías"
+5. JOURNEY: "[Tema]: La historia que nadie te contó"
+6. CONTROVERSY: "Por qué [tema establecido] podría ser mentira"
+7. LIST/COUNTDOWN: "[Número] [cosas/datos/misterios] sobre [tema] que te sorprenderán"
+
+TONE: Drama, misterio, curiosidad. Spanish for a Latin American / Spain audience.
+Keep it under 100 characters. Make it CLICKABLE.
+Output ONLY the final title — no explanations, no quotes, no prefixes."""
+
+_TITLE_ANTI_PLAGIARISM_RETRY_PROMPT = """Your previous title was too similar to the original. 
+Create a COMPLETELY DIFFERENT title using a different formula. Do NOT use any of the same key 
+phrases. Use different vocabulary. Make it shorter and punchier.
+
+Output ONLY the new title — no explanations."""
+
 
 @register_scraper("youtube_viral")
 class YouTubeViralScraper(BaseScraper):
@@ -325,6 +358,39 @@ class YouTubeViralScraper(BaseScraper):
         ]
         for pattern in _REJECT_PATTERNS:
             if re.search(pattern, title_lower):
+                return False
+
+        # ── Hard rejects: TV series / documentary episodes ──
+        # These are part of a longer series, not standalone content.
+        _SERIES_PATTERNS = [
+            # Explicit season/episode markers (English + Spanish)
+            r'\b[tT]\s*\d{1,2}\s*[eExX]\s*\d{1,2}\b',          # T01E06, T1 E6
+            r'\b[sS]\s*\d{1,2}\s*[eE]\s*\d{1,2}\b',             # S01E06
+            r'\b(season|temporada)\s+\d+\s*(episode|episodio|capitulo|capítulo)\s+\d+',
+            r'\b(episodio|episode)\s+\d+\b',                     # Episodio 6
+            r'\b(capitulo|capítulo|chapter)\s+\d+\b',            # Capítulo 12
+            # Multi-part episode markers
+            r'\bparte?\s+[ivxlcdm]+\b',                           # Parte IV
+            r'\bpart\s+\d+\b',                                    # Part 3 of 4
+        ]
+        for pattern in _SERIES_PATTERNS:
+            if re.search(pattern, title_lower):
+                logger.debug("[viral] Title rejected — series episode detected: '%s'", title[:80])
+                return False
+
+        # ── Numbered documentary series: "13. Los Asirios – El Imperio de Hierro" ──
+        # Titles starting with "N. " or "#N " that look like a chapter/series index.
+        # Listicle titles (e.g., "10 Cosas que..." / "5 Reasons...") are NOT rejected.
+        if re.match(r'^\d{1,2}[\.\):]\s+', title_lower):
+            # Check if it's a listicle — if so, let it through
+            _LISTICLE_KEYWORDS = [
+                r'\b(cosas|things|razones|reasons|tips|ways|maneras|formas|secretos|secrets|datos|facts|curiosidades|misterios|leyendas|datos que|trucos|consejos)\b',
+                r'\bque\s+(no\s+)?(sab[ií]as|conoc[ií]as|te\s+contaron|te\s+enseñaron)\b',
+                r'\b(most|top|mejores|peores)\b',
+            ]
+            is_listicle = any(re.search(p, title_lower) for p in _LISTICLE_KEYWORDS)
+            if not is_listicle:
+                logger.debug("[viral] Title rejected — numbered series format (not listicle): '%s'", title[:80])
                 return False
 
         # ── Host/presenter name patterns ──
@@ -1307,6 +1373,34 @@ class YouTubeViralScraper(BaseScraper):
 
     # ── Translation + Paraphrasing + Adaptation ─────────────────
 
+    @staticmethod
+    def _title_similarity(original_en: str, new_es: str) -> float:
+        """Calculate similarity between original English title and new Spanish title.
+        
+        Returns a float 0.0–1.0 where >0.5 means likely too similar (copyright risk).
+        Uses character-level difflib ratio which catches structural similarity
+        even across languages.
+        """
+        import difflib
+        if not original_en or not new_es:
+            return 0.0
+        # Normalize: lowercase both
+        a = original_en.lower()
+        b = new_es.lower()
+        return difflib.SequenceMatcher(None, a, b).ratio()
+
+    @staticmethod
+    def _strip_title_artifacts(title: str) -> str:
+        """Remove common LLM artifacts from generated titles."""
+        import re
+        title = title.strip().strip('"').strip("'").strip()
+        # Remove markdown-style formatting
+        title = re.sub(r'^\*\*|\*\*$', '', title)
+        title = re.sub(r'^#\s*', '', title)
+        # Remove "Título:" or "Title:" prefixes
+        title = re.sub(r'^[Tt]ítulo:?\s*', '', title)
+        return title.strip()
+
     def _translate_and_paraphrase(self, english_text: str, original_title: str) -> tuple[str | None, str | None, str | None]:
         """Translate + paraphrase the transcript, title, and description.
 
@@ -1323,11 +1417,53 @@ class YouTubeViralScraper(BaseScraper):
             user_msg = f"Translate and paraphrase this viral video transcript into Spanish:\n\n{english_text[:8000]}"
             translated_script = self._call_llm(_TRANSLATE_SYSTEM_PROMPT, user_msg, temperature=0.7)
 
-        # 2. Translate + paraphrase the title (using same system prompt, custom instruction)
+        # 2. Generate a FRESH Spanish title (NOT a translation of the original)
         if original_title:
-            title_msg = f"Translate and paraphrase this viral video TITLE into Spanish (keep it short and punchy, ~30% word changes):\n\n{original_title}"
-            title_system = _TRANSLATE_SYSTEM_PROMPT + "\nIMPORTANT: This is a TITLE. Keep it under 100 characters. Make it clickable."
-            translated_title = self._call_llm(title_system, title_msg, temperature=0.8)
+            # ── Step A: Generate title with creative formula ──
+            title_msg = (
+                f"Create a completely ORIGINAL Spanish YouTube title for a video about the topic:\n\n"
+                f"\"{original_title}\"\n\n"
+                f"REMEMBER: Do NOT translate this title. Create a fresh one with different words."
+            )
+            translated_title = self._call_llm(
+                _TITLE_CREATION_SYSTEM_PROMPT, title_msg, temperature=0.85
+            )
+
+            # ── Step B: Anti-plagiarism check — retry if too similar ──
+            if translated_title:
+                similarity = self._title_similarity(original_title.lower(), translated_title.lower())
+                retry_count = 0
+                while similarity > 0.45 and retry_count < 3:
+                    logger.warning(
+                        "[%s] Title too similar to original (%.0f%%). Retrying...",
+                        self.canal, similarity * 100,
+                    )
+                    retry_msg = (
+                        f"Original title: \"{original_title}\"\n"
+                        f"Your last attempt (too similar — {similarity:.0%}): \"{translated_title}\"\n\n"
+                        f"Create a COMPLETELY DIFFERENT title. Use different words and structure."
+                    )
+                    translated_title = self._call_llm(
+                        _TITLE_CREATION_SYSTEM_PROMPT + "\n" + _TITLE_ANTI_PLAGIARISM_RETRY_PROMPT,
+                        retry_msg, temperature=0.9,
+                    )
+                    if not translated_title:
+                        break
+                    similarity = self._title_similarity(original_title.lower(), translated_title.lower())
+                    retry_count += 1
+
+                if translated_title:
+                    translated_title = self._strip_title_artifacts(translated_title)
+                    if retry_count > 0:
+                        logger.info(
+                            "[%s] Title accepted after %d anti-plagiarism retries (%.0f%% similarity)",
+                            self.canal, retry_count, similarity * 100,
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Title accepted (%.0f%% similarity to original — OK)",
+                            self.canal, similarity * 100,
+                        )
 
         return translated_script, translated_title, translated_description
 

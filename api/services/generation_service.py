@@ -1872,7 +1872,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             # ── Schedule lifecycle actions (F3: go_public + playlists + comments) ──
             try:
                 script_text = None
-                lifecycle = VideoLifecycleManager(canal, db)
+                lifecycle = VideoLifecycleManager(canal)
                 lifecycle.on_video_uploaded_scheduled(
                     db_video_id=video_id,
                     yt_video_id=yt_video_id,
