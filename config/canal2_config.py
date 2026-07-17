@@ -127,8 +127,8 @@ MAX_CLIP_EXTEND_SEC = 25.0
 # IMAGE_REUSE_MIN_GAP = 2
 
 # ── Average video duration target (approx, in minutes) ──
-# @deprecated — use PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX instead.
-# These are kept as fallback only; the single source of truth is PROD_VIDEO_DURATION_*.
+# These are the single source of truth for production — read via the
+# panel "Duración — Objetivo" and used by _get_word_target().
 VIDEO_AVERAGE_DURATION_MIN = 15
 VIDEO_DURATION_DISCREPANCY_MIN = 3
 

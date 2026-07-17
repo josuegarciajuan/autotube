@@ -161,10 +161,12 @@ class YouTubeViralScraper(BaseScraper):
             except ImportError:
                 self.keywords_eng = ["viral documentary"]
 
-        # Target video duration range (from channel config, DB-authoritative)
+        # Target video duration range (from panel "Duración — Objetivo", DB-authoritative)
         if self.config:
-            self.target_duration_min = getattr(self.config, "prod_video_duration_min", 8)
-            self.target_duration_max = getattr(self.config, "prod_video_duration_max", 14)
+            self.target_duration_min = getattr(self.config, "video_average_duration_min", 10) - \
+                                       getattr(self.config, "video_duration_discrepancy_min", 3)
+            self.target_duration_max = getattr(self.config, "video_average_duration_min", 10) + \
+                                       getattr(self.config, "video_duration_discrepancy_min", 3)
         else:
             self.target_duration_min = 8
             self.target_duration_max = 14

@@ -1007,12 +1007,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         return result
 
     def _get_word_target(self) -> dict:
-        """Return word/block target using the channel's PROD video duration.
+        """Return word/block target using the channel's duration objective.
 
-        Reads PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX from the
-        channel config (DB-authoritative via config bridge). Uses
-        voice_timing.py for accurate word count based on the configured
-        TTS voice rate.
+        Reads VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN
+        from the channel config (DB-authoritative via config bridge, set via
+        the panel "Duración — Objetivo"). Uses voice_timing.py for accurate
+        word count based on the configured TTS voice rate.
         """
         cfg = self.canal_config
         test_mode = getattr(cfg, "TEST_MODE", False)
@@ -1020,9 +1020,11 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         if test_mode:
             duration_target = getattr(cfg, "TEST_VIDEO_DURATION_TARGET", 2)
         else:
-            dur_min = getattr(cfg, "PROD_VIDEO_DURATION_MIN", 8)
-            dur_max = getattr(cfg, "PROD_VIDEO_DURATION_MAX", 14)
-            duration_target = round(random.uniform(dur_min, dur_max), 1)
+            mean = getattr(cfg, "VIDEO_AVERAGE_DURATION_MIN", 15)
+            disc = getattr(cfg, "VIDEO_DURATION_DISCREPANCY_MIN", 3)
+            duration_target = round(
+                random.uniform(max(0.5, mean - disc), mean + disc), 1
+            )
 
         return self._compute_word_target(duration_target)
 

@@ -110,7 +110,8 @@ PROD_VIDEO_DURATION_MIN = 10
 PROD_VIDEO_DURATION_MAX = 15
 
 # ── Average video duration target (approx, in minutes) ──
-# @deprecated — use PROD_VIDEO_DURATION_MIN / PROD_VIDEO_DURATION_MAX instead.
+# These are the single source of truth for production — read via the
+# panel "Duración — Objetivo" and used by _get_word_target().
 VIDEO_AVERAGE_DURATION_MIN = 12
 VIDEO_DURATION_DISCREPANCY_MIN = 3
 
