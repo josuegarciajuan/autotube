@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """One-time login script to generate a persistent browser session for YouTube Studio.
 
-Run on a machine WITH a display. Opens Chromium, you log in manually, session gets saved.
+Opens Chromium, user logs in manually, session gets auto-saved when login detected.
 
 Usage:
-    python scripts/yt_browser_login.py --account tracatrack
-    python scripts/yt_browser_login.py --account burrianacasa2026
+    DISPLAY=:99 python3 scripts/yt_browser_login.py --account tracatrack
+    DISPLAY=:99 python3 scripts/yt_browser_login.py --account burrianacasa2026
 
 Output: tokens/{account}_browser_session.json
 """
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 TOKENS_DIR = Path(__file__).resolve().parent.parent / "tokens"
 
@@ -22,7 +23,8 @@ TOKENS_DIR = Path(__file__).resolve().parent.parent / "tokens"
 def main():
     parser = argparse.ArgumentParser(description="YouTube Studio browser login")
     parser.add_argument(
-        "--account", required=True, help="Account name (e.g., tracatrack, burrianacasa2026)"
+        "--account", required=True,
+        help="Account name (e.g., tracatrack, burrianacasa2026)"
     )
     args = parser.parse_args()
 
@@ -57,57 +59,55 @@ def main():
         try:
             page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
         except Exception as e:
-            print(f"⚠️  Network error reaching YouTube Studio: {e}")
-            print("   Make sure you have internet access and can reach studio.youtube.com")
+            print(f"⚠️  Network error: {e}")
             context.close()
             sys.exit(1)
 
         page.wait_for_timeout(3000)
 
-        print()
-        print(">>> A CHROMIUM WINDOW HAS OPENED <<<")
-        print()
-        print("  Step 1: Log in with your Google account")
-        print("          (email, password, 2FA if enabled)")
-        print()
-        print("  Step 2: Once you see the YouTube Studio DASHBOARD")
-        print("          (the page with 'Panel', 'Contenido', etc. on the left)")
-        print()
-        print("  Step 3: Come back to this terminal and press ENTER")
-        print()
+        print("\n>>> CHROME WINDOW OPENED <<<")
+        print("    Log in with your Google account (email, password, 2FA)")
+        print("    Script will auto-detect when you reach YouTube Studio dashboard...\n")
 
-        input("Press ENTER when you're fully logged into YouTube Studio... ")
+        # Auto-detect login: poll URL + dashboard element
+        print("Waiting for login... (max 10 minutes)")
+        logged_in = False
+        for i in range(300):  # 300 * 2s = 10 min
+            url = page.url
+            if "studio.youtube.com" in url and "accounts.google.com" not in url:
+                # Check for dashboard elements
+                for selector in [
+                    "text=Panel",
+                    "text=Contenido",
+                    "[id='menu-item']",
+                    "ytd-guide-entry-renderer",
+                ]:
+                    try:
+                        el = page.query_selector(selector)
+                        if el and el.is_visible():
+                            logged_in = True
+                            print(f"\n  ✅ Login detected (found: '{selector}')")
+                            break
+                    except Exception:
+                        continue
+                if logged_in:
+                    break
+            # Progress indicator every 15 seconds
+            if i % 15 == 0 and i > 0:
+                print(f"  ⏳ Still waiting... ({i * 2}s elapsed)")
+            time.sleep(2)
 
-        # Verify login by checking for key YouTube Studio elements
-        print("\nVerifying login state...")
-        verified = False
-        for selector in [
-            "text=Contenido >> visible=true",          # Left nav item
-            "tp-yt-paper-item >> text=Contenido",       # Polymer paper item
-            "[data-testid='menu-item']",                 # Generic menu item
-        ]:
-            try:
-                page.wait_for_selector(selector, timeout=5000)
-                verified = True
-                print(f"  ✅ Login confirmed (found: {selector})")
-                break
-            except Exception:
-                continue
+        if not logged_in:
+            print("\n⚠️  Auto-detection timed out (10 min). Saving session anyway...")
 
-        if not verified:
-            print("  ⚠️  Could not auto-verify login state.")
-            print("  If you're sure you're logged in, the session will still be saved.")
+        # Extra wait for page to fully render
+        page.wait_for_timeout(3000)
 
         # Save storage state (cookies + localStorage)
         context.storage_state(path=str(session_file))
         print(f"\n✅ Session saved: {session_file}")
-        print()
-        print("Next steps:")
-        print(f"  1. Copy this file to your server:")
-        print(f"     scp {session_file} your-server:/root/autotube/tokens/")
-        print()
-        print(f"  2. Run the dry-run test on the server:")
-        print(f"     python3 scripts/yt_dry_run.py --session {account} --video-id YOUR_VIDEO_ID")
+        print(f"\nNow run the dry-run test:")
+        print(f"  python3 scripts/yt_dry_run.py --session {account} --video-id YOUR_VIDEO_ID")
 
         context.close()
 
