@@ -132,6 +132,28 @@ phrases. Use different vocabulary. Make it shorter and punchier.
 
 Output ONLY the new title — no explanations."""
 
+_DESCRIPTION_CREATION_SYSTEM_PROMPT = """You are a YouTube SEO expert creating Spanish video descriptions.
+
+Your job: Write an ORIGINAL Spanish description for a video, using ONLY the provided translated
+script and topic. NEVER look at or translate the original English description.
+
+CRITICAL RULES:
+- Write entirely in Spanish for a Latin American/Spain audience.
+- Do NOT include any URLs, links, email addresses, or social media handles.
+- Do NOT include phrases like "Subscribe", "Join my Discord", "Follow me", "Like & Share",
+  "Activate the bell", "Business inquiries", or any calls to external platforms.
+- Do NOT mention the original creator, channel name, or host names.
+- Do NOT copy or translate the original description — this must be ORIGINAL text.
+
+STRUCTURE (in Spanish):
+1. HOOK (1-2 sentences): Pregunta impactante o dato intrigante del video.
+2. SUMMARY (3-5 sentences): De qué trata el video, los puntos más fascinantes.
+3. KEYWORDS / TOPICS (1 line): Menciona 3-5 temas clave sin hashtags.
+4. SOURCE NOTE (optional): "Basado en investigación y documentación histórica." or similar.
+
+LENGTH: 400-800 characters. Keep it scannable with short paragraphs.
+Output ONLY the description — no headers, no "Description:" prefixes, no quotes."""
+
 
 @register_scraper("youtube_viral")
 class YouTubeViralScraper(BaseScraper):
@@ -1253,7 +1275,7 @@ class YouTubeViralScraper(BaseScraper):
         viral_meta = {
             "original_title": candidate.get("title", ""),
             "translated_title": translated_title,
-            "translated_description": translated_desc or candidate.get("description", ""),
+            "translated_description": translated_desc or "",
             "blocks": blocks,
             "original_views": candidate.get("views", 0),
             "original_channel": candidate.get("channel_name", ""),
@@ -1401,7 +1423,8 @@ class YouTubeViralScraper(BaseScraper):
         title = re.sub(r'^[Tt]ítulo:?\s*', '', title)
         return title.strip()
 
-    def _translate_and_paraphrase(self, english_text: str, original_title: str) -> tuple[str | None, str | None, str | None]:
+    def _translate_and_paraphrase(self, english_text: str, original_title: str,
+                                    original_description: str = "") -> tuple[str | None, str | None, str | None]:
         """Translate + paraphrase the transcript, title, and description.
 
         Returns (translated_script, translated_title, translated_description) or None.
@@ -1464,6 +1487,31 @@ class YouTubeViralScraper(BaseScraper):
                             "[%s] Title accepted (%.0f%% similarity to original — OK)",
                             self.canal, similarity * 100,
                         )
+
+        # 3. Generate a FRESH Spanish description from the translated script + topic
+        if translated_script:
+            # Use the translated script as the source — NEVER the original description
+            # Only the topic from the original title is used for context
+            topic_hint = original_title[:200] if original_title else "contenido viral"
+            desc_msg = (
+                f"Write an ORIGINAL Spanish YouTube description for a video with this title:\n"
+                f"\"{translated_title or topic_hint}\"\n\n"
+                f"Here is the TRANSLATED SCRIPT (use this as your source material, NOT any "
+                f"English description):\n\n{translated_script[:4000]}\n\n"
+                f"IMPORTANT: Do NOT translate any English description. Create original text "
+                f"based on the Spanish script above."
+            )
+            translated_description = self._call_llm(
+                _DESCRIPTION_CREATION_SYSTEM_PROMPT, desc_msg, temperature=0.6
+            )
+            if translated_description:
+                translated_description = translated_description.strip()
+                logger.info(
+                    "[%s] Description generated: %d chars",
+                    self.canal, len(translated_description),
+                )
+            else:
+                logger.warning("[%s] Description generation returned empty", self.canal)
 
         return translated_script, translated_title, translated_description
 
@@ -1698,7 +1746,7 @@ class YouTubeViralScraper(BaseScraper):
         viral_meta = {
             "original_title": top["title"],
             "translated_title": translated_title,
-            "translated_description": translated_desc or top.get("description", ""),
+            "translated_description": translated_desc or "",
             "blocks": blocks,
             "original_views": top["views"],
             "original_channel": top["channel_name"],

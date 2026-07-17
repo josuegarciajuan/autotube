@@ -483,6 +483,13 @@ class PipelineOrchestrator:
         except (json.JSONDecodeError, TypeError):
             viral_meta = {}
 
+        # ── Inject original_description for leak detection in viral_cloner ──
+        if viral_content.get("viral_original_description"):
+            viral_meta["original_description"] = viral_content["viral_original_description"]
+        # ── Inject original_video_url for thumbnail fetching ──
+        if viral_content.get("viral_original_video_url"):
+            viral_meta.setdefault("original_url", viral_content["viral_original_video_url"])
+
         blocks = viral_meta.get("blocks", [])
 
         # If no blocks, build simple block structure from script text
@@ -557,7 +564,7 @@ class PipelineOrchestrator:
             "duracion_estimada": duracion_estimada,
             "canal": self.canal,
             "_viral_meta": viral_meta,
-            "_viral_meta_json": viral_meta_json,
+            "_viral_meta_json": json.dumps(viral_meta, ensure_ascii=False),
             "_viral_original_thumbnail": viral_content.get("viral_original_thumbnail_url", ""),
             "_viral_original_title": original_title,
             "_viral_original_video_url": viral_content.get("viral_original_video_url", ""),

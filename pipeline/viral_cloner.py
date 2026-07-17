@@ -219,6 +219,220 @@ def _correct_duration_claims(title: str) -> str:
     return cleaned or original  # never return empty
 
 
+# ── Promo content sanitizer ────────────────────────────────────────
+
+# Patterns that indicate the description "leaked" the original
+# creator's promo content (Discord, Patreon, social handles, etc.)
+_LEAK_INDICATORS = [
+    (r'https?://[^\s]+', 'URLs'),                     # any URL
+    (r'discord\.gg/[^\s]+', 'discord invite'),         # Discord invite
+    (r'(?:patreon|paypal|buymeacoffee)\.', 'payment link'),
+    (r'bit\.ly/[^\s]+', 'short link'),
+    (r'@[a-zA-Z0-9_]+', '@handle'),
+    (r'subscribe[^\n]{0,30}(?:now|today|here|below|and|activate)', 'subscribe CTA', re.IGNORECASE),
+    (r'(?:join|follow|find)\s+(?:me|us|my|our)\s+(?:on|at)', 'follow CTA', re.IGNORECASE),
+    (r'(?:activate|hit|press)\s+(?:the\s+)?(?:bell|notification)', 'bell CTA', re.IGNORECASE),
+    (r'(?:business|contact)\s*(?:inquir|mail|email)', 'business contact', re.IGNORECASE),
+    (r'like\s*(?:&|and|y)\s*(?:share|subscribe|comment)', 'like-share CTA', re.IGNORECASE),
+    (r'check\s+(?:out|my)\s+(?:my\s+)?(?:channel|video|link)', 'check my CTA', re.IGNORECASE),
+]
+
+# Lines to remove entirely (case-insensitive match at line level)
+_LEAK_LINE_PATTERNS = [
+    re.compile(r'^.*(?:subscribe|suscribete|suscríbete).*(?:$|\.|\!|\?)', re.IGNORECASE),
+    re.compile(r'^.*(?:join.+discord|discord.+join).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:follow|follow me|sígueme|sigueme).*(?:instagram|twitter|facebook|tiktok|social).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:support|patreon|paypal|donate).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:activate|hit|press).*(?:bell|notification).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:business|contact)\s*(?:inquir|mail|email).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:check out|watch)\s+(?:my|our|the)\s+(?:channel|video|other).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:like|share|comment).*(?:below|this video).*$', re.IGNORECASE),
+    re.compile(r'^.*(?:directed by|produced by|edited by)\s+@.*$', re.IGNORECASE),
+    re.compile(r'^.*@[a-zA-Z0-9_]{3,}.*$', re.IGNORECASE),  # lines with an @handle
+]
+
+
+def sanitize_promo_content(text: str) -> str:
+    """Remove promotional leaks from a cloned description.
+
+    Strips URLs, Discord invites, Patreon links, @handles, subscribe CTAs,
+    and other creator-specific promotional content that gets accidentally
+    carried over from the original video description.
+
+    Returns cleaned text. If the text is entirely promo junk, returns "".
+    """
+    if not text or len(text) < 10:
+        return text
+
+    import re
+    cleaned = text
+
+    # Step 1: Remove whole lines that are purely promo
+    lines = cleaned.split("\n")
+    kept_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            kept_lines.append("")  # preserve paragraph breaks
+            continue
+        # Check if this line matches any leak pattern
+        is_leak = False
+        for pattern in _LEAK_LINE_PATTERNS:
+            if pattern.match(stripped):
+                is_leak = True
+                break
+        if not is_leak:
+            kept_lines.append(stripped)
+
+    cleaned = "\n".join(kept_lines)
+
+    # Step 2: Remove URLs, emails from remaining lines
+    cleaned = re.sub(r'https?://[^\s\)\]>]+', '', cleaned)
+    cleaned = re.sub(r'[\w.-]+@[\w.-]+\.\w+', '', cleaned)  # emails
+    cleaned = re.sub(r'@[a-zA-Z0-9_]{3,}', '', cleaned)      # @handles
+    # Clean up Discord/Patreon mentions
+    cleaned = re.sub(r'(?:discord|patreon|paypal|buymeacoffee|bit\.ly)[^\s]*', '', cleaned, flags=re.IGNORECASE)
+
+    # Step 3: Collapse artifacts
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)      # triple+ newlines → double
+    cleaned = re.sub(r' +\n', '\n', cleaned)           # trailing spaces before newlines
+    cleaned = re.sub(r'\n +', '\n', cleaned)           # leading spaces after newlines
+    cleaned = re.sub(r'  +', ' ', cleaned)             # double spaces
+
+    # Step 4: If all that remains is < 30 chars of content, return empty
+    stripped = cleaned.strip()
+    if len(stripped) < 30:
+        logger.warning("sanitize_promo_content: after cleanup only %d chars remain — returning empty", len(stripped))
+        return ""
+
+    if stripped != text.strip():
+        logger.info("sanitize_promo_content: cleaned %d → %d chars", len(text.strip()), len(stripped))
+
+    return stripped
+
+
+def _is_description_leaked(desc: str, original_desc: str = "") -> bool:
+    """Check if a description is a copy/translation leak from the original.
+
+    Returns True if the description contains promo indicators or is too similar
+    to the original (structural plagiarism).
+    """
+    import re
+    import difflib
+
+    if not desc or len(desc) < 20:
+        return False  # too short to judge — let sanitize handle it
+
+    # Check 1: Promo indicators
+    for pattern, label in _LEAK_INDICATORS:
+        flags = pattern[2] if len(pattern) > 2 and isinstance(pattern[2], int) else 0
+        if isinstance(pattern, str):
+            if re.search(pattern, desc, flags=flags):
+                logger.info("_is_description_leaked: detected %s in description", label)
+                return True
+        elif isinstance(pattern, tuple):
+            if re.search(pattern[0], desc, flags=flags):
+                logger.info("_is_description_leaked: detected %s in description", label)
+                return True
+
+    # Check 2: Structural similarity to original (if available)
+    if original_desc and len(original_desc) > 30:
+        ratio = difflib.SequenceMatcher(
+            None, desc.lower(), original_desc.lower()
+        ).ratio()
+        if ratio > 0.5:
+            logger.info("_is_description_leaked: %.0f%% similarity to original description", ratio * 100)
+            return True
+
+    return False
+
+
+def _rebuild_description_from_blocks(blocks: list[dict], channel_config) -> str:
+    """Rebuild a Spanish description from script blocks.
+
+    Extracts key sentences from the translated blocks to form a coherent
+    description when the original translated_description is missing/leaked.
+    """
+    desc_lines = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        # Support both 'texto' (scraper output) and 'text' (legacy)
+        text = block.get("texto") or block.get("text", "")
+        if not text or len(text) < 30:
+            continue
+        # Take first 2 sentences of each block
+        sentences = text.split(".")
+        desc_lines.append(". ".join(sentences[:2]).strip() + ".")
+        if len(desc_lines) >= 4:
+            break
+    if not desc_lines:
+        return ""
+    return "\n\n".join(desc_lines)
+
+
+def _generate_description_via_llm(
+    title: str, block_texts: list[str], channel_config: SimpleNamespace
+) -> str:
+    """Generate a fresh Spanish description via LLM using script blocks.
+
+    Only called as a fallback when the translated description is leaked/missing
+    AND the module has an LLM client available.
+    """
+    try:
+        client = getattr(channel_config, "_llm_client", None)
+        model = getattr(channel_config, "_llm_model", "deepseek-chat")
+        if not client:
+            # Try creating one from config bridge
+            from config.config_bridge import get_llm_client as _get_llm
+            client = _get_llm()
+            if not client:
+                return ""
+
+        seo_hashtags = getattr(channel_config, "SEO_HASHTAGS", [])
+        hashtags_line = " ".join(seo_hashtags[:6]) if seo_hashtags else ""
+
+        script_excerpt = "\n".join(block_texts[:6])[:3000]
+
+        system = """You are a YouTube SEO expert. Write an original Spanish video description.
+
+CRITICAL: Do NOT include any URLs, @handles, Discord links, Patreon links,
+"subscribe", "follow me", "activate the bell", or any external platform calls.
+
+Write:
+1. A 1-2 sentence hook about the video topic.
+2. A 3-5 sentence summary of what the viewer will learn.
+3. 3-5 topic keywords (no hashtags).
+4. A generic note (like "Basado en investigación y documentación.").
+
+400-800 characters total. Output ONLY the description — no prefixes."""
+
+        user = (
+            f"Write a Spanish YouTube description for a video titled:\n"
+            f"\"{title}\"\n\n"
+            f"The video script contains these topics:\n{script_excerpt}\n\n"
+            f"Add these hashtags at the end if appropriate: {hashtags_line}"
+        )
+
+        import openai
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.6,
+            max_tokens=400,
+        )
+        result = response.choices[0].message.content
+        if result:
+            logger.info("_generate_description_via_llm: generated %d chars", len(result))
+            return result.strip()
+    except Exception as e:
+        logger.warning("_generate_description_via_llm: failed — %s", e)
+    return ""
+
+
 def clone_title_description(
     viral_meta_json: str,
     channel_slug: str,
@@ -251,7 +465,7 @@ def clone_title_description(
     translated_title = viral_meta.get("translated_title", "")
     translated_desc = viral_meta.get("translated_description", "")
     original_channel = viral_meta.get("original_channel", "")
-    block_texts = [b.get("text", "") for b in viral_meta.get("blocks", [])]
+    block_texts = [b.get("texto") or b.get("text", "") for b in viral_meta.get("blocks", [])]
 
     # ── Strip duration claims from title ─────────────────────
     # Original viral videos are often 1-4h long, but our generated
@@ -271,37 +485,43 @@ def clone_title_description(
         if len(first_sentence) > 20:
             translated_title = first_sentence
 
-    # ── Fix description: detect and replace English fragments ──
-    # The scraper may fall back to the original English description.
-    # We detect English content and rebuild from translated script blocks.
-    _ENGLISH_MARKERS = [
-        "from ", "into ", "through ", "with ", "the ", "and ", "that ",
-        "this ", "have ", "been ", "will ", "would ", "could ", "should ",
-        "discover", "uncover", "reveal", "ancient", "history",
-    ]
-    desc_is_english = (
-        translated_desc
-        and any(
-            translated_desc.lower().startswith(m) or m in translated_desc.lower()[:200]
-            for m in _ENGLISH_MARKERS[:5]
-        )
-    )
+    # ── Fix description: detect leaks, sanitize, rebuild if needed ──
+    # The original description may be in viral_meta (v2+) or empty (legacy)
+    original_desc = viral_meta.get("original_description", "")
+    desc_is_leaked = _is_description_leaked(translated_desc, original_desc)
 
-    if (not translated_desc or desc_is_english) and block_texts:
-        if desc_is_english:
-            logger.warning("[%s] clone_title_description: description appears to be in English — rebuilding from script blocks", channel_slug)
-        desc_lines = []
-        for block in viral_meta.get("blocks", []):
-            text = block.get("text", "") if isinstance(block, dict) else block
-            if text and len(text) > 30:
-                # Take first 2 sentences of each block
-                sentences = text.split(".")
-                desc_lines.append(". ".join(sentences[:2]) + ".")
-                if len(desc_lines) >= 4:
-                    break
-        if desc_lines:
-            translated_desc = "\n\n".join(desc_lines)
-            logger.info("[%s] Rebuilt description from %d blocks (%d chars)", channel_slug, len(desc_lines), len(translated_desc))
+    needs_rebuild = (not translated_desc or desc_is_leaked)
+
+    if needs_rebuild and block_texts:
+        logger.warning(
+            "[%s] clone_title_description: description leaked/missing — "
+            "attempting LLM regeneration", channel_slug,
+        )
+        # Try LLM regeneration first (produces best quality)
+        translated_desc = _generate_description_via_llm(
+            title=translated_title or channel_tagline,
+            block_texts=block_texts,
+            channel_config=channel_config,
+        )
+
+    if not translated_desc and block_texts:
+        # LLM failed — fallback to block-based rebuild
+        translated_desc = _rebuild_description_from_blocks(
+            viral_meta.get("blocks", []), channel_config,
+        )
+        if translated_desc:
+            logger.info("[%s] Rebuilt description from script blocks (%d chars)",
+                        channel_slug, len(translated_desc))
+
+    # ── Always sanitize: strip any residual promo leaks ──
+    if translated_desc:
+        translated_desc = sanitize_promo_content(translated_desc)
+
+    # ── Append channel hashtags (SEO enrichment) ──
+    if translated_desc and seo_hashtags:
+        hashtag_str = " ".join(seo_hashtags[:5])
+        if hashtag_str and hashtag_str not in translated_desc[-300:]:
+            translated_desc = translated_desc.strip() + "\n\n" + hashtag_str
 
     # Generate tags from keyword extraction
     tags = _extract_tags_from_script(block_texts, channel_config)
