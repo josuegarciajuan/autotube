@@ -206,7 +206,8 @@ def dispatch_due_uploads(db=None) -> dict | None:
         video_id = row["id"]
 
         # Check if scheduled_upload_at needs to be set (first time seeing this video)
-        sched_at_val = row.get("scheduled_upload_at")
+        # sqlite3.Row doesn't have .get() — use dict-style access with fallback
+        sched_at_val = row["scheduled_upload_at"] if "scheduled_upload_at" in row.keys() else None
         if sched_at_val is None:
             sched_time = _compute_random_upload_time(windows, now, channel_id)
             if sched_time is None:

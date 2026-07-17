@@ -364,7 +364,7 @@ def auto_recover_shorts(db=None) -> dict:
             slug,
             native_covered, native_target,
             clip_covered, clip_target,
-            clips_per_long, completed_longs,
+            clip_target, clips_per_long, completed_longs,
         )
 
         # ── NATIVE: excess → cancel, deficit → recover ──
