@@ -93,6 +93,14 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
         wlog.warning("[%s] Auto-mark IA error for %s: %s", canal, yt_video_id, e)
 
 
+# ── Shared state for graceful shutdown during critical phases ─────
+# These are module-level so both run_job() and main()/signal handler
+# can access them.  run_job() sets _in_critical_phase during ffmpeg
+# concat to defer SIGTERM until the render completes safely.
+_shutdown_requested = threading.Event()
+_in_critical_phase = threading.Event()
+
+
 def _setup_worker_logging(job_id: int):
     """Configure logging for the worker — writes to both stderr and a per-job log file."""
     LOG_DIR = _PROJECT_ROOT / "logs"
@@ -1051,12 +1059,9 @@ def main():
     # Worker receives SIGTERM during API restarts / deploys / OOM.
     # Immediate exit during critical phases (ffmpeg concat) corrupts
     # the render and causes permanent bug_crash after 3 retries.
-    # We defer shutdown until a safe point:
+    # We defer shutdown until a safe point (uses module-level Events):
     #   - Non-critical phases: exit immediately
     #   - Video assembly (phase 4): block the signal until ffmpeg finishes
-    _shutdown_requested = threading.Event()
-    _in_critical_phase = threading.Event()
-
     def _signal_handler(signum, frame):
         if _in_critical_phase.is_set():
             logger.warning(

@@ -996,6 +996,8 @@ class MediaFetcher:
         """Try Unsplash for an image, optionally skipping previously used URLs."""
         if not self._unsplash:
             return None
+        if not query or not query.strip():
+            return None  # empty query → no point searching
         if self._unsplash_disabled_until and time.time() < self._unsplash_disabled_until:
             return None  # provider is under cooldown
         result = self._fetch_image(self._unsplash, query, "unsplash", skip_urls=skip_urls)
@@ -1019,6 +1021,8 @@ class MediaFetcher:
         """Try Pexels for an image, optionally skipping previously used URLs."""
         if not self._pexels:
             return None
+        if not query or not query.strip():
+            return None  # empty query → Pexels returns 400, skip early
         if self._pexels_disabled_until and time.time() < self._pexels_disabled_until:
             return None  # provider is under cooldown
         result = self._fetch_image(self._pexels, query, "pexels_photo", skip_urls=skip_urls)
@@ -1042,6 +1046,8 @@ class MediaFetcher:
                      skip_urls: set[str] | None = None) -> dict | None:
         """Fetch one image from a provider, requesting extra results to
         skip duplicates when *skip_urls* is provided."""
+        if not query or not query.strip():
+            return None
         try:
             n_request = 15 if skip_urls else 1
             results = provider.search(query, n=n_request)
