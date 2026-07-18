@@ -178,6 +178,98 @@ def _kill_orphaned_ffmpeg():
         pass
 
 
+def _kill_orphaned_workers(logger) -> int:
+    """Kill full_pipeline_worker processes whose job is not 'running' in the DB.
+
+    Prevents zombie worker accumulation when orphan detection marks jobs as
+    failed in the DB but the OS process keeps running (tight retry loops,
+    stuck API calls, etc.).
+
+    Returns the number of workers killed.
+    """
+    killed = 0
+    try:
+        import sqlite3
+        # Get all running job IDs from the DB
+        from config.settings import DATABASE_PATH
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        running_jobs = set(
+            row["id"] for row in cur.execute(
+                "SELECT id FROM generation_jobs WHERE status='running'"
+            ).fetchall()
+        )
+        conn.close()
+    except Exception:
+        running_jobs = set()
+
+    if not running_jobs:
+        logger.debug("No running jobs in DB — will clean any stale worker processes")
+
+    # Find all worker processes
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,args", "--no-headers"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return 0
+
+    for line in result.stdout.strip().split("\n"):
+        if not line or "full_pipeline_worker.py" not in line:
+            continue
+        if "grep" in line:
+            continue
+
+        parts = line.strip().split()
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except (ValueError, IndexError):
+            continue
+
+        # Extract job-id from command line
+        import re
+        job_match = re.search(r"--job-id\s+(\d+)", line)
+        if not job_match:
+            logger.warning(
+                "Worker PID %d has no --job-id in args — killing as unidentifiable orphan",
+                pid,
+            )
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except OSError:
+                pass
+            continue
+
+        job_id = int(job_match.group(1))
+        if job_id not in running_jobs:
+            logger.warning(
+                "Killing orphaned worker PID=%d (job %d not in running set)",
+                pid, job_id,
+            )
+            try:
+                os.kill(pid, signal.SIGTERM)
+                import time as _time
+                _time.sleep(2)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                killed += 1
+            except OSError:
+                pass
+
+    if killed > 0:
+        logger.warning("Killed %d orphaned worker process(es)", killed)
+
+    return killed
+
+
 def _get_ffmpeg_pids() -> set[int]:
     """Return PIDs of all running ffmpeg processes right now."""
     try:
@@ -2758,6 +2850,12 @@ async def start_generation_job_subprocess(
     # ── Spawn worker ──────────────────────────────────────────
     log_path = settings.LOGS_DIR / f"worker_{job_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Pre-spawn zombie cleanup: kill orphaned worker processes ──
+    # Kill any full_pipeline_worker processes whose job is NOT in DB
+    # as 'running'. This prevents zombie accumulation when orphan detection
+    # marks jobs as failed but processes keep running.
+    _kill_orphaned_workers(logger)
 
     try:
         proc = subprocess.Popen(

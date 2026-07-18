@@ -225,6 +225,7 @@ def migrate_v2(db_path: str = None):
     gj_columns = [
         ("last_heartbeat_at", "TIMESTAMP"),
         ("retry_count", "INTEGER DEFAULT 0"),
+        ("worker_pid", "INTEGER"),
     ]
     for col_name, col_def in gj_columns:
         if col_name not in existing_gj:
@@ -1420,25 +1421,25 @@ class ExtendedDatabase(Database):
             #   (b) It has NEVER emitted a heartbeat AND started >480 min ago (legacy fallback)
             orphan_video_jobs = conn.execute("""
                 SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at,
-                       j.last_heartbeat_at,
+                       j.last_heartbeat_at, j.worker_pid,
                        cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
                        c.slug as channel_slug, v.status as video_status
-                 FROM generation_jobs j
-                 JOIN channels c ON j.channel_id = c.id
-                 LEFT JOIN videos v ON j.video_id = v.id
-                 WHERE j.status = 'running'
-                   AND j.finished_at IS NULL
-                   AND j.started_at IS NOT NULL
-                   AND j.phase = 'video'
-                    AND (
-                        -- Heartbeat mode: last heartbeat > configured timeout → truly dead
-                        (j.last_heartbeat_at IS NOT NULL
-                         AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
-                        OR
-                        -- Legacy fallback: no heartbeat ever + started >VIDEO_PHASE_TIMEOUT min ago
-                        (j.last_heartbeat_at IS NULL
-                         AND (julianday('now') - julianday(j.started_at)) * 1440 > ?)
-                    )
+                  FROM generation_jobs j
+                  JOIN channels c ON j.channel_id = c.id
+                  LEFT JOIN videos v ON j.video_id = v.id
+                  WHERE j.status = 'running'
+                    AND j.finished_at IS NULL
+                    AND j.started_at IS NOT NULL
+                    AND j.phase = 'video'
+                     AND (
+                         -- Heartbeat mode: last heartbeat > configured timeout → truly dead
+                         (j.last_heartbeat_at IS NOT NULL
+                          AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
+                         OR
+                         -- Legacy fallback: no heartbeat ever + started >VIDEO_PHASE_TIMEOUT min ago
+                         (j.last_heartbeat_at IS NULL
+                          AND (julianday('now') - julianday(j.started_at)) * 1440 > ?)
+                     )
             """, (self.HEARTBEAT_ORPHAN_TIMEOUT_MINUTES, self.VIDEO_PHASE_TIMEOUT_MINUTES,)).fetchall()
             
             # Type 1b: Non-video-phase jobs — heartbeat-aware when available,
@@ -1448,26 +1449,26 @@ class ExtendedDatabase(Database):
             # job-level started_at timeout.
             orphan_jobs = conn.execute("""
                 SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at,
-                       j.last_heartbeat_at,
+                       j.last_heartbeat_at, j.worker_pid,
                        cast((julianday('now') - julianday(j.started_at)) * 86400 as integer) as elapsed_sec,
                        c.slug as channel_slug, v.status as video_status
-                 FROM generation_jobs j
-                 JOIN channels c ON j.channel_id = c.id
-                 LEFT JOIN videos v ON j.video_id = v.id
-                 WHERE j.status = 'running'
-                   AND j.finished_at IS NULL
-                   AND j.started_at IS NOT NULL
-                    AND j.phase != 'video'
-                    AND (
-                        -- Heartbeat mode: last heartbeat > N min ago → truly dead
-                        (j.last_heartbeat_at IS NOT NULL
-                         AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
-                        OR
-                         -- Legacy fallback: no heartbeat ever + started >120 min (2h) ago
-                         -- 2h is enough for upload + metadata after a long render
-                         (j.last_heartbeat_at IS NULL
-                          AND (julianday('now') - julianday(j.started_at)) * 1440 > 120)
-                    )
+                  FROM generation_jobs j
+                  JOIN channels c ON j.channel_id = c.id
+                  LEFT JOIN videos v ON j.video_id = v.id
+                  WHERE j.status = 'running'
+                    AND j.finished_at IS NULL
+                    AND j.started_at IS NOT NULL
+                     AND j.phase != 'video'
+                     AND (
+                         -- Heartbeat mode: last heartbeat > N min ago → truly dead
+                         (j.last_heartbeat_at IS NOT NULL
+                          AND (julianday('now') - julianday(j.last_heartbeat_at)) * 1440 > ?)
+                         OR
+                          -- Legacy fallback: no heartbeat ever + started >120 min (2h) ago
+                          -- 2h is enough for upload + metadata after a long render
+                          (j.last_heartbeat_at IS NULL
+                           AND (julianday('now') - julianday(j.started_at)) * 1440 > 120)
+                     )
             """, (self.NONVIDEO_HEARTBEAT_ORPHAN_MIN,)).fetchall()
             
             # Combine video-phase and non-video orphans for processing
@@ -1476,8 +1477,9 @@ class ExtendedDatabase(Database):
             for row in all_orphan_jobs:
                 r = dict(row)
                 logger.warning(
-                    "Orphan job #%d (channel=%s, video=%s, phase=%s, elapsed=%ds): marking as failed",
-                    r["job_id"], r["channel_slug"], r["video_id"], r["phase"], r["elapsed_sec"]
+                    "Orphan job #%d (channel=%s, video=%s, phase=%s, elapsed=%ds, pid=%s): marking as failed",
+                    r["job_id"], r["channel_slug"], r["video_id"], r["phase"], r["elapsed_sec"],
+                    r.get("worker_pid", "?"),
                 )
                 
                 # Mark job as failed
@@ -1485,6 +1487,35 @@ class ExtendedDatabase(Database):
                     "UPDATE generation_jobs SET status='failed', error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
                     (f"Orphaned: process lost after {r['elapsed_sec']}s", r["job_id"]),
                 )
+                
+                # ── Kill the orphaned worker process if we have its PID ──
+                worker_pid = r.get("worker_pid")
+                if worker_pid:
+                    try:
+                        import os as _os
+                        import signal as _signal
+                        logger.warning(
+                            "Orphan job #%d: sending SIGTERM to worker PID %d",
+                            r["job_id"], worker_pid,
+                        )
+                        _os.kill(worker_pid, _signal.SIGTERM)
+                        # Give it 5 seconds to die gracefully, then SIGKILL
+                        import time as _time
+                        _time.sleep(2)
+                        try:
+                            _os.kill(worker_pid, 0)  # check if still alive
+                            logger.warning(
+                                "Orphan job #%d: worker PID %d still alive after SIGTERM — sending SIGKILL",
+                                r["job_id"], worker_pid,
+                            )
+                            _os.kill(worker_pid, _signal.SIGKILL)
+                        except OSError:
+                            pass  # process already dead
+                    except OSError as exc:
+                        logger.debug(
+                            "Orphan job #%d: could not kill PID %d: %s",
+                            r["job_id"], worker_pid, exc,
+                        )
                 
                 # Mark associated video as error if it's still 'generating'
                 if r["video_id"] and r["video_status"] == "generating":

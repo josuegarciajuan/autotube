@@ -92,6 +92,10 @@ class MediaFetcher:
         # ── Image providers (reuse from image_fetcher) ─────────
         self._unsplash: UnsplashProvider | None = None
         self._pexels: PexelsProvider | None = None
+        self._unsplash_consecutive_empty = 0
+        self._unsplash_disabled_until: float | None = None
+        self._pexels_consecutive_empty = 0
+        self._pexels_disabled_until: float | None = None
 
         if settings.UNSPLASH_ACCESS_KEY:
             self._unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
@@ -299,6 +303,12 @@ class MediaFetcher:
         self._used_asset_urls = set()
         self._used_image_urls = set()
 
+        # Reset provider cooldowns for a fresh script
+        self._unsplash_consecutive_empty = 0
+        self._unsplash_disabled_until = None
+        self._pexels_consecutive_empty = 0
+        self._pexels_disabled_until = None
+
         if not bloques:
             return []
 
@@ -392,6 +402,14 @@ class MediaFetcher:
         ai_max = self._media_strategy.get("ai_max_per_video", 2)
         ai_used = 0
         ai_enabled = self._media_strategy.get("ai_image_fallback", False)
+
+        # ── Circuit breaker: abort if all providers are exhausted ──
+        # When both Pexels (429) and Unsplash (403) fail repeatedly,
+        # abort the entire phase instead of retrying 38+ scenes.
+        _cb_consecutive_all_provider_failures = 0
+        _cb_max_consecutive_failures = 5  # abort after 5 consecutive all-provider failures
+        _cb_phase_start = time.time()
+        _cb_phase_timeout = 900  # 15 min hard timeout for the entire media phase
 
         # Track sub-scene sequence per asset_idx for query variation
         subscene_seq: dict[int, int] = {}
@@ -509,12 +527,36 @@ class MediaFetcher:
             atype = asset.get("type", "?")
             if atype == "video":
                 video_ok += 1
+                _cb_consecutive_all_provider_failures = 0  # reset circuit breaker
             elif atype == "image":
                 image_ok += 1
+                _cb_consecutive_all_provider_failures = 0  # reset circuit breaker
             else:
                 placeholder += 1
+                _cb_consecutive_all_provider_failures += 1
 
             results[i] = asset
+
+            # ── Circuit breaker: abort if ALL providers are exhausted ──
+            if _cb_consecutive_all_provider_failures >= _cb_max_consecutive_failures:
+                error_msg = (
+                    f"CRITICAL: All media providers exhausted after {_cb_max_consecutive_failures} "
+                    f"consecutive placeholder scenes. Pexels likely rate-limited (429), "
+                    f"Unsplash likely down (403/429). Aborting media phase."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            # ── Global timeout: abort if media phase takes too long ──
+            elapsed = time.time() - _cb_phase_start
+            if elapsed > _cb_phase_timeout:
+                error_msg = (
+                    f"CRITICAL: Media phase timeout after {elapsed:.0f}s "
+                    f"(limit={_cb_phase_timeout}s). Processed {i+1}/{n_scenes} scenes. "
+                    f"Aborting to prevent infinite retry loop."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
             # Rate limiting
             if i < n_scenes - 1:
@@ -954,13 +996,47 @@ class MediaFetcher:
         """Try Unsplash for an image, optionally skipping previously used URLs."""
         if not self._unsplash:
             return None
-        return self._fetch_image(self._unsplash, query, "unsplash", skip_urls=skip_urls)
+        if self._unsplash_disabled_until and time.time() < self._unsplash_disabled_until:
+            return None  # provider is under cooldown
+        result = self._fetch_image(self._unsplash, query, "unsplash", skip_urls=skip_urls)
+        if result is None:
+            self._unsplash_consecutive_empty += 1
+            if self._unsplash_consecutive_empty >= 3:
+                # After 3 consecutive empty results (likely 403/429), disable
+                # Unsplash for 30 minutes to stop wasting HTTP calls
+                self._unsplash_disabled_until = time.time() + 1800
+                logger.error(
+                    "Unsplash: %d consecutive empty results — provider DISABLED "
+                    "for 30 min (likely API key revoked or rate limited)",
+                    self._unsplash_consecutive_empty,
+                )
+        else:
+            self._unsplash_consecutive_empty = 0
+            self._unsplash_disabled_until = None
+        return result
 
     def _try_image_pexels(self, query: str, skip_urls: set[str] | None = None) -> dict | None:
         """Try Pexels for an image, optionally skipping previously used URLs."""
         if not self._pexels:
             return None
-        return self._fetch_image(self._pexels, query, "pexels_photo", skip_urls=skip_urls)
+        if self._pexels_disabled_until and time.time() < self._pexels_disabled_until:
+            return None  # provider is under cooldown
+        result = self._fetch_image(self._pexels, query, "pexels_photo", skip_urls=skip_urls)
+        if result is None:
+            self._pexels_consecutive_empty += 1
+            if self._pexels_consecutive_empty >= 5:
+                # After 5 consecutive empty results (likely 429 rate limit),
+                # disable Pexels for 10 min
+                self._pexels_disabled_until = time.time() + 600
+                logger.error(
+                    "Pexels: %d consecutive empty results — provider DISABLED "
+                    "for 10 min (likely rate limited 429)",
+                    self._pexels_consecutive_empty,
+                )
+        else:
+            self._pexels_consecutive_empty = 0
+            self._pexels_disabled_until = None
+        return result
 
     def _fetch_image(self, provider, query: str, source: str,
                      skip_urls: set[str] | None = None) -> dict | None:

@@ -457,7 +457,8 @@ def run_job(
             return False
 
     # ── 5. Update job and video status ────────────────────────
-    db.update_job(job_id, status="running", started_at=datetime.now(timezone.utc).isoformat())
+    db.update_job(job_id, status="running", started_at=datetime.now(timezone.utc).isoformat(),
+                  worker_pid=os.getpid())
     db.update_video(video_id, status="generating", progress=1 if start_idx == 0 else 2, 
                     progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
                     generation_started_at=datetime.now(timezone.utc).isoformat())
