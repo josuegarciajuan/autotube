@@ -286,12 +286,82 @@ class PexelsProvider(ImageProvider):
         return results
 
 
+class PixabayImageProvider(ImageProvider):
+    """Pixabay Photos API — image fallback. Uses same key as Pixabay videos.
+
+    Auth: key is passed as query parameter (?key=...).
+    Endpoint: https://pixabay.com/api/
+    Rate limit: 100 req/min (authenticated).
+    """
+
+    BASE_URL = "https://pixabay.com/api/"
+
+    def __init__(self, api_key: str) -> None:
+        if not api_key:
+            raise ValueError("Pixabay API key is required")
+        self._api_key = api_key
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        })
+        logger.info("PixabayImageProvider initialized")
+
+    def search(self, query: str, n: int = 1, style_modifiers: str = "",
+               orientation: str = "horizontal") -> list[dict]:
+        if n < 1:
+            return []
+
+        params: dict = {
+            "key": self._api_key,
+            "q": query,
+            "per_page": max(min(n, 200), 3),  # Pixabay requires 3-200
+            "image_type": "photo",
+            "orientation": orientation,
+        }
+
+        try:
+            resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After", "60")
+                logger.warning(
+                    "Pixabay rate limit hit (429). Retry-After=%s", retry_after
+                )
+                time.sleep(min(int(retry_after), 60))
+                resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Pixabay image search failed: %s", exc)
+            return []
+
+        data = resp.json()
+        results: list[dict] = []
+        for photo in data.get("hits", []):
+            # webformatURL is smaller but always accessible;
+            # largeImageURL may need Referer header on some CDN setups
+            results.append({
+                "id": str(photo.get("id", "")),
+                "url": photo.get("pageURL", ""),
+                "download_url": (
+                    photo.get("webformatURL", "")
+                    or photo.get("largeImageURL", "")
+                ),
+                "photographer": photo.get("user", "Unknown"),
+                "width": photo.get("webformatWidth", photo.get("imageWidth", 0)),
+                "height": photo.get("webformatHeight", photo.get("imageHeight", 0)),
+                "description": photo.get("tags", ""),
+            })
+
+        logger.info("Pixabay images returned %d results for query=%r",
+                     len(results), query)
+        return results
+
+
 class ImageFetcher:
     """Orchestrates image fetching with primary/fallback providers."""
 
     def __init__(self, config: SimpleNamespace | None = None) -> None:
         self.primary: UnsplashProvider | None = None
-        self.fallback: PexelsProvider | None = None
+        self.fallback: PixabayImageProvider | None = None
         self._config = config or _default_cfg
 
         if settings.UNSPLASH_ACCESS_KEY:
@@ -301,15 +371,15 @@ class ImageFetcher:
                 "UNSPLASH_ACCESS_KEY not set — primary provider disabled"
             )
 
-        if settings.PEXELS_API_KEY:
-            self.fallback = PexelsProvider(settings.PEXELS_API_KEY)
+        if settings.PIXABAY_API_KEY:
+            self.fallback = PixabayImageProvider(settings.PIXABAY_API_KEY)
         else:
             logger.warning(
-                "PEXELS_API_KEY not set — fallback provider disabled"
+                "PIXABAY_API_KEY not set — fallback provider disabled"
             )
 
         if self.primary is None and self.fallback is None:
-            logger.error("No image providers configured! Set UNSPLASH_ACCESS_KEY or PEXELS_API_KEY")
+            logger.error("No image providers configured! Set UNSPLASH_ACCESS_KEY or PIXABAY_API_KEY")
 
     def fetch_for_scene(self, scene_description: str, n: int = None) -> list[Path]:
         """Convert scene description to search query, fetch images, download locally.
@@ -337,7 +407,7 @@ class ImageFetcher:
             try:
                 results = self.fallback.search(query, n, self._config.IMAGE_STYLE_MODIFIERS)
             except Exception as exc:
-                logger.error("Fallback provider (Pexels) also failed: %s", exc)
+                logger.error("Fallback provider (Pixabay) also failed: %s", exc)
 
         if not results:
             logger.error("No images found for scene: %r", scene_description)

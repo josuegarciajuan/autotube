@@ -660,9 +660,8 @@ MEDIA_STRATEGY = {
     "video_max_duration": 20,
     "video_sources": ["pexels"],
     "video_providers": [
-        {"name": "pexels", "api_key_env": "PEXELS_API_KEY"},
         {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
-        {"name": "mixkit"},
+        {"name": "youtube_cc"},
     ],
     "fallback_query": "dramatic expedition landscape cinematic 16:9",
     "fallback_query_simple": "expedition wilderness dramatic nature",

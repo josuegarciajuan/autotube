@@ -21,7 +21,7 @@ import requests
 
 from config import canal2_config as _default_cfg
 from config import settings
-from pipeline.image_fetcher import UnsplashProvider, PexelsProvider
+from pipeline.image_fetcher import UnsplashProvider, PexelsProvider, PixabayImageProvider
 from pipeline.providers.pexels import PexelsVideoProvider
 from pipeline.providers.pixabay import PixabayVideoProvider
 from pipeline.providers.mixkit import MixkitVideoProvider
@@ -91,24 +91,25 @@ class MediaFetcher:
 
         # ── Image providers (reuse from image_fetcher) ─────────
         self._unsplash: UnsplashProvider | None = None
-        self._pexels: PexelsProvider | None = None
+        self._pixabay_img: PixabayImageProvider | None = None
+        self._pexels: PexelsProvider | None = None  # legacy — Pexels API is dead, kept for graceful fallback
         self._unsplash_consecutive_empty = 0
         self._unsplash_disabled_until: float | None = None
-        self._pexels_consecutive_empty = 0
-        self._pexels_disabled_until: float | None = None
+        self._pixabay_img_consecutive_empty = 0
+        self._pixabay_img_disabled_until: float | None = None
 
         if settings.UNSPLASH_ACCESS_KEY:
             self._unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
         else:
             logger.warning("UNSPLASH_ACCESS_KEY not set — Unsplash disabled")
 
-        if settings.PEXELS_API_KEY:
-            self._pexels = PexelsProvider(settings.PEXELS_API_KEY)
+        if settings.PIXABAY_API_KEY:
+            self._pixabay_img = PixabayImageProvider(settings.PIXABAY_API_KEY)
         else:
-            logger.warning("PEXELS_API_KEY not set — Pexels photos disabled")
+            logger.warning("PIXABAY_API_KEY not set — Pixabay images disabled")
 
-        if self._unsplash is None and self._pexels is None and not self.video_providers:
-            logger.error("No media providers configured! Set UNSPLASH_ACCESS_KEY or PEXELS_API_KEY")
+        if self._unsplash is None and self._pixabay_img is None and not self.video_providers:
+            logger.error("No media providers configured! Set UNSPLASH_ACCESS_KEY or PIXABAY_API_KEY")
 
         # ── Deduplication tracking ─────────────────────────────
         # Reset at the start of each fetch_for_script() call so the
@@ -235,8 +236,8 @@ class MediaFetcher:
             if result:
                 return result
 
-        # ── Step 2: Try Pexels image (200 req/h — primary) ──
-        result = self._try_image_pexels(query)
+        # ── Step 2: Try Pixabay image (100 req/min — primary) ──
+        result = self._try_image_pixabay(query)
         if result:
             return result
 
@@ -249,11 +250,11 @@ class MediaFetcher:
         # result = self._try_pollo_ai(query)
         # if result: return result
 
-        # ── Step 4: Retry with simplified query (Pexels + Unsplash) ──
+        # ── Step 4: Retry with simplified query (Pixabay + Unsplash) ──
         simple_query = self._simplify_query(query)
         if simple_query != query:
             logger.info("Retrying with simplified query: %r", simple_query)
-            result = self._try_image_pexels(simple_query) or \
+            result = self._try_image_pixabay(simple_query) or \
                      self._try_image_unsplash(simple_query)
             if result:
                 return result
@@ -306,8 +307,8 @@ class MediaFetcher:
         # Reset provider cooldowns for a fresh script
         self._unsplash_consecutive_empty = 0
         self._unsplash_disabled_until = None
-        self._pexels_consecutive_empty = 0
-        self._pexels_disabled_until = None
+        self._pixabay_img_consecutive_empty = 0
+        self._pixabay_img_disabled_until = None
 
         if not bloques:
             return []
@@ -469,8 +470,8 @@ class MediaFetcher:
             if asset is None:
                 # Build skip_urls from already-used image URLs
                 image_skip = self._used_image_urls.copy()
-                # Pexels primary (200 req/h), Unsplash fallback (50 req/h)
-                result = self._try_image_pexels(query, skip_urls=image_skip)
+                # Pixabay primary (100 req/min), Unsplash fallback (50 req/h)
+                result = self._try_image_pixabay(query, skip_urls=image_skip)
                 if result:
                     asset = result
                 else:
@@ -478,14 +479,14 @@ class MediaFetcher:
                     if result:
                         asset = result
 
-            # ── Fallback: simplified query (Pexels + Unsplash) ─
+            # ── Fallback: simplified query (Pixabay + Unsplash) ──
             if asset is None:
                 # Simplified query retry
                 simple_query = self._simplify_query(query)
                 if simple_query != query:
                     logger.info("Scene %d: retrying with simplified query: %r", i, simple_query)
                     image_skip = self._used_image_urls.copy()
-                    asset = self._try_image_pexels(simple_query, skip_urls=image_skip) or \
+                    asset = self._try_image_pixabay(simple_query, skip_urls=image_skip) or \
                              self._try_image_unsplash(simple_query, skip_urls=image_skip)
 
             # ── Hard fallback: generic queries that always find something ─
@@ -502,7 +503,7 @@ class MediaFetcher:
                 fb_query = _random.choice(generic_queries)
                 logger.info("Scene %d: trying hard fallback query: %r", i, fb_query)
                 image_skip = self._used_image_urls.copy()
-                asset = self._try_image_pexels(fb_query, skip_urls=image_skip) or \
+                asset = self._try_image_pixabay(fb_query, skip_urls=image_skip) or \
                         self._try_image_unsplash(fb_query, skip_urls=image_skip)
 
             # ── Pollo AI: rescate si stock falló completamente y hay cupo ─
@@ -1015,6 +1016,30 @@ class MediaFetcher:
         else:
             self._unsplash_consecutive_empty = 0
             self._unsplash_disabled_until = None
+        return result
+
+    def _try_image_pixabay(self, query: str, skip_urls: set[str] | None = None) -> dict | None:
+        """Try Pixabay Photos for an image, optionally skipping previously used URLs."""
+        if not self._pixabay_img:
+            return None
+        if not query or not query.strip():
+            return None
+        if self._pixabay_img_disabled_until and time.time() < self._pixabay_img_disabled_until:
+            return None  # provider is under cooldown
+        result = self._fetch_image(self._pixabay_img, query, "pixabay_photo", skip_urls=skip_urls)
+        if result is None:
+            self._pixabay_img_consecutive_empty += 1
+            if self._pixabay_img_consecutive_empty >= 10:
+                # Pixabay has 100 req/min — 10 consecutive empties = likely API issue
+                self._pixabay_img_disabled_until = time.time() + 600
+                logger.error(
+                    "Pixabay images: %d consecutive empty results — provider DISABLED "
+                    "for 10 min",
+                    self._pixabay_img_consecutive_empty,
+                )
+        else:
+            self._pixabay_img_consecutive_empty = 0
+            self._pixabay_img_disabled_until = None
         return result
 
     def _try_image_pexels(self, query: str, skip_urls: set[str] | None = None) -> dict | None:

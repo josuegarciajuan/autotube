@@ -625,10 +625,8 @@ MEDIA_STRATEGY = {
     "video_max_duration": 20,
     "video_sources": ["pexels"],
     "video_providers": [
-        {"name": "pexels", "api_key_env": "PEXELS_API_KEY"},
         {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
-        {"name": "mixkit"},
-        {"name": "youtube_cc"},            # last resort — no API key (uses yt-dlp)
+        {"name": "youtube_cc"},
     ],
     "fallback_query": "ancient ruins archaeological site cinematic 16:9",
     "fallback_query_simple": "ancient temple ruins stone architecture",

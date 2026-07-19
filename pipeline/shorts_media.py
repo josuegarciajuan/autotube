@@ -15,28 +15,28 @@ logger = logging.getLogger(__name__)
 # Singleton pattern ensures one instance per provider for the process lifetime.
 _providers_cache = {
     "unsplash": None,
-    "pexels": None,
+    "pixabay": None,
 }
 
 
 def _get_image_providers():
-    """Return (unsplash, pexels) provider instances, creating them once."""
+    """Return (unsplash, pixabay) image provider instances, creating them once."""
     from config import settings
 
     unsplash = _providers_cache["unsplash"]
-    pexels = _providers_cache["pexels"]
+    pixabay = _providers_cache["pixabay"]
 
     if unsplash is None and settings.UNSPLASH_ACCESS_KEY:
         from pipeline.image_fetcher import UnsplashProvider
         unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
         _providers_cache["unsplash"] = unsplash
 
-    if pexels is None and settings.PEXELS_API_KEY:
-        from pipeline.image_fetcher import PexelsProvider
-        pexels = PexelsProvider(settings.PEXELS_API_KEY)
-        _providers_cache["pexels"] = pexels
+    if pixabay is None and settings.PIXABAY_API_KEY:
+        from pipeline.image_fetcher import PixabayImageProvider
+        pixabay = PixabayImageProvider(settings.PIXABAY_API_KEY)
+        _providers_cache["pixabay"] = pixabay
 
-    return unsplash, pexels
+    return unsplash, pixabay
 
 
 def _esc_ffmpeg(t: str) -> str:
@@ -56,7 +56,7 @@ def fetch_portrait_images(
     ch_config,
     count: int = 4,
 ) -> list[Path]:
-    """Fetch portrait (vertical) images from Unsplash / Pexels for a Short.
+    """Fetch portrait (vertical) images from Unsplash / Pixabay for a Short.
 
     Args:
         queries: Text queries to search for (one per block of the script).
@@ -70,9 +70,9 @@ def fetch_portrait_images(
     from config import settings
     import requests, hashlib, re
 
-    unsplash, pexels = _get_image_providers()
+    unsplash, pixabay = _get_image_providers()
 
-    if unsplash is None and pexels is None:
+    if unsplash is None and pixabay is None:
         logger.warning("No image providers configured — Short will have solid background")
         return []
 
@@ -88,7 +88,7 @@ def fetch_portrait_images(
             continue
 
         results = []
-        for provider in (unsplash, pexels):
+        for provider in (unsplash, pixabay):
             if provider is None:
                 continue
             try:
