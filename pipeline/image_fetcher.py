@@ -287,11 +287,19 @@ class PexelsProvider(ImageProvider):
 
 
 class PixabayImageProvider(ImageProvider):
-    """Pixabay Photos API — image fallback. Uses same key as Pixabay videos.
+    """Pixabay Photos API — image provider. Uses same key as Pixabay videos.
 
     Auth: key is passed as query parameter (?key=...).
     Endpoint: https://pixabay.com/api/
     Rate limit: 100 req/min (authenticated).
+
+    Image resolution strategy:
+    - largeImageURL (up to 6000x4000) is the primary download_url —
+      needed for high-quality Ken Burns pan/zoom at 1080p output.
+    - webformatURL (640px) is kept as fallback_download_url in case
+      largeImageURL CDN requires a Referer header and the download fails.
+    - Uses imageWidth/imageHeight (full-resolution dimensions) for
+      accurate reporting, falling back to webformatWidth/Height.
     """
 
     BASE_URL = "https://pixabay.com/api/"
@@ -304,7 +312,7 @@ class PixabayImageProvider(ImageProvider):
         self._session.headers.update({
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
         })
-        logger.info("PixabayImageProvider initialized")
+        logger.info("PixabayImageProvider initialized (largeImageURL preferred)")
 
     def search(self, query: str, n: int = 1, style_modifiers: str = "",
                orientation: str = "horizontal") -> list[dict]:
@@ -336,18 +344,29 @@ class PixabayImageProvider(ImageProvider):
         data = resp.json()
         results: list[dict] = []
         for photo in data.get("hits", []):
-            # webformatURL is smaller but always accessible;
-            # largeImageURL may need Referer header on some CDN setups
+            large_url = photo.get("largeImageURL", "")
+            web_url = photo.get("webformatURL", "")
+
+            # Prefer largeImageURL for high-resolution Ken Burns zoom.
+            # Fall back to webformatURL if largeImageURL is unavailable.
+            download_url = large_url or web_url
+            fallback_download_url = web_url if large_url and web_url else None
+
+            # Use imageWidth/imageHeight for full-resolution dimensions
+            img_w = photo.get("imageWidth", 0)
+            img_h = photo.get("imageHeight", 0)
+            if not img_w or not img_h:
+                img_w = photo.get("webformatWidth", 0)
+                img_h = photo.get("webformatHeight", 0)
+
             results.append({
                 "id": str(photo.get("id", "")),
                 "url": photo.get("pageURL", ""),
-                "download_url": (
-                    photo.get("webformatURL", "")
-                    or photo.get("largeImageURL", "")
-                ),
+                "download_url": download_url,
+                "fallback_download_url": fallback_download_url,
                 "photographer": photo.get("user", "Unknown"),
-                "width": photo.get("webformatWidth", photo.get("imageWidth", 0)),
-                "height": photo.get("webformatHeight", photo.get("imageHeight", 0)),
+                "width": img_w,
+                "height": img_h,
                 "description": photo.get("tags", ""),
             })
 

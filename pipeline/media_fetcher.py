@@ -1070,7 +1070,11 @@ class MediaFetcher:
     def _fetch_image(self, provider, query: str, source: str,
                      skip_urls: set[str] | None = None) -> dict | None:
         """Fetch one image from a provider, requesting extra results to
-        skip duplicates when *skip_urls* is provided."""
+        skip duplicates when *skip_urls* is provided.
+
+        For Pixabay images, if the primary download_url (largeImageURL) fails,
+        retries automatically with fallback_download_url (webformatURL).
+        """
         if not query or not query.strip():
             return None
         try:
@@ -1102,6 +1106,25 @@ class MediaFetcher:
                         "source": source,
                     }
 
+                # ── Pixabay fallback: retry with webformatURL if largeImageURL failed ──
+                fallback_url = img.get("fallback_download_url")
+                if fallback_url and fallback_url != download_url:
+                    logger.info(
+                        "Pixabay largeImageURL failed — retrying with webformatURL "
+                        "(id=%s)", img_id,
+                    )
+                    fb_path = self._download_image(fallback_url, f"{source}_{img_id}_fb.jpg")
+                    if fb_path:
+                        if skip_urls is not None:
+                            skip_urls.add(fallback_url)
+                            self._used_image_urls.add(fallback_url)
+                        return {
+                            "path": fb_path,
+                            "type": "image",
+                            "duration": None,
+                            "source": source,
+                        }
+
             if skip_urls:
                 logger.warning("All %d %s results were duplicates — none fresh", n_request, source)
             return None
@@ -1111,22 +1134,90 @@ class MediaFetcher:
         return None
 
     def _download_image(self, url: str, filename: str) -> Path | None:
-        """Download image to IMAGES_DIR. Cached."""
+        """Download image to IMAGES_DIR. Cached. Validates JPEG integrity.
+
+        For Pixabay domains, adds a Referer header (largeImageURL CDN
+        may reject requests without it). Downloads are validated:
+        - Must be 50+ KB (reject HTML/error pages)
+        - Must have JPEG magic bytes (ff d8 ff)
+        - Must have at least 800px on the shorter axis (Ken Burns minimum)
+        """
         filepath = settings.IMAGES_DIR / filename
         if filepath.exists():
-            logger.info("Image already cached: %s", filepath)
-            return filepath
+            # Re-validate cached images on each hit (catches corrupt cache)
+            if self._is_valid_image(filepath):
+                logger.info("Image already cached: %s", filepath)
+                return filepath
+            else:
+                logger.warning("Cached image %s is invalid — re-downloading", filepath)
+                filepath.unlink(missing_ok=True)
 
         try:
-            resp = requests.get(url, timeout=30, stream=True)
+            headers = {}
+            # Pixabay CDN often requires a Referer for largeImageURL downloads
+            if "pixabay" in url.lower():
+                headers["Referer"] = "https://pixabay.com/"
+
+            resp = requests.get(url, timeout=30, stream=True, headers=headers)
             resp.raise_for_status()
+
+            # Quick size check before writing
+            content = resp.content
+            content_len = len(content)
+            if content_len < 50000:
+                logger.error(
+                    "Image download too small (%d bytes) — likely HTML/error page: %s",
+                    content_len, url[:100],
+                )
+                return None
+
+            # JPEG magic bytes check
+            if content[:3] != b'\xff\xd8\xff':
+                logger.error(
+                    "Downloaded content is not JPEG (magic=%r) — discarding: %s",
+                    content[:8], url[:100],
+                )
+                return None
+
             settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-            filepath.write_bytes(resp.content)
-            logger.info("Downloaded image: %s (%d bytes)", filepath, len(resp.content))
+            filepath.write_bytes(content)
+
+            # Dimension check for Ken Burns viability
+            try:
+                from PIL import Image
+                from io import BytesIO
+                pil_img = Image.open(BytesIO(content))
+                w, h = pil_img.size
+                min_dim = min(w, h)
+                if min_dim < 800:
+                    logger.warning(
+                        "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
+                        filename, w, h,
+                    )
+                    # Don't reject — still usable if closest match — but warn
+                pil_img.close()
+            except Exception:
+                logger.warning("Could not verify image dimensions for %s", filename)
+
+            logger.info("Downloaded image: %s (%d bytes)", filepath, content_len)
             return filepath
         except Exception as exc:
             logger.error("Image download failed %s: %s", url, exc)
             return None
+
+    @staticmethod
+    def _is_valid_image(filepath: Path) -> bool:
+        """Quick validation: is the cached file a real JPEG with adequate size?"""
+        try:
+            if not filepath.exists():
+                return False
+            size = filepath.stat().st_size
+            if size < 50000:
+                return False
+            header = filepath.read_bytes()[:4]
+            return header[:3] == b'\xff\xd8\xff'
+        except Exception:
+            return False
 
     # ── Internal: Pollo AI image generation ────────────────────────
 

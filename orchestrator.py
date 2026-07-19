@@ -102,6 +102,10 @@ class PipelineOrchestrator:
         # Inter-phase state (computed once, used in subsequent phases)
         self._last_scene_ranges: list[dict] | None = None
 
+        # Theme extraction (lazy-loaded, shared across phases)
+        self._theme_extractor = None
+        self._theme_context = None
+
     @property
     def scraper(self):
         if self._scraper is None:
@@ -187,6 +191,61 @@ class PipelineOrchestrator:
                 channel_slug=self.canal,
             )
         return self._uploader
+
+    @property
+    def theme_extractor(self):
+        """Lazy-loaded ThemeExtractor — extracts visual keywords for content coherence."""
+        if self._theme_extractor is None:
+            from pipeline.theme_extractor import ThemeExtractor
+            self._theme_extractor = ThemeExtractor(config=self.config)
+        return self._theme_extractor
+
+    def _extract_and_set_theme(self, content_text: str, content_title: str = "") -> None:
+        """Extract visual theme from content and inject into script gen + media fetcher.
+
+        This ensures the LLM generates search queries with thematic coherence,
+        and the media fetcher enriches stock searches with theme keywords.
+
+        Safe to call multiple times — only re-extracts if theme_context is None.
+        """
+        if self._theme_context is not None:
+            return  # already extracted for this pipeline run
+
+        if not content_text or len(content_text.strip()) < 100:
+            logger.warning(
+                "[%s] Content too short for theme extraction (%d chars) — skipping",
+                self.canal, len(content_text.strip()),
+            )
+            return
+
+        try:
+            channel_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.canal)
+            channel_theme = getattr(self.config, "CANAL_TAGLINE", "")
+
+            self._theme_context = self.theme_extractor.extract(
+                content_text=content_text[:4000],
+                channel_name=channel_name,
+                channel_theme=channel_theme,
+            )
+
+            if self._theme_context and self._theme_context.theme_keywords_en:
+                logger.info(
+                    "[%s] Theme extracted: genre=%s era=%s keywords=%s",
+                    self.canal,
+                    self._theme_context.genre,
+                    self._theme_context.era,
+                    self._theme_context.theme_keywords_en,
+                )
+
+                # Inject into downstream components
+                self.script_gen.set_theme_context(self._theme_context)
+                self.media_fetcher.set_theme_context(self._theme_context)
+            else:
+                logger.warning("[%s] Theme extraction returned empty keywords", self.canal)
+                self._theme_context = None
+        except Exception as exc:
+            logger.warning("[%s] Theme extraction failed (non-fatal): %s", self.canal, exc)
+            self._theme_context = None
 
     def cleanup(self):
         """Release heavy resources (Kokoro pipeline) to free RAM between phases.
@@ -301,8 +360,15 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
+        content_item = content_items[0]
+
+        # ── Extract visual theme BEFORE script generation (Bug fix: ThemeExtractor was dead code) ──
+        content_text = content_item.get("text", "")
+        content_title = content_item.get("title", "")
+        self._extract_and_set_theme(content_text, content_title)
+
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
-        result = self.script_gen.generate(content_items[0])
+        result = self.script_gen.generate(content_item)
         duration_ms = int((time.time() - start) * 1000)
 
         self._timing["phases"]["script"] = duration_ms
@@ -495,6 +561,9 @@ class PipelineOrchestrator:
         if not script_es:
             logger.error("[%s] Viral candidate has no script (viral_script_es empty)", self.canal)
             return self._viral_fallback_to_original(start)
+
+        # ── Extract visual theme from viral script (Bug fix: ThemeExtractor was dead code) ──
+        self._extract_and_set_theme(script_es, original_title)
 
         # Parse viral metadata
         try:
@@ -1654,6 +1723,9 @@ class PipelineOrchestrator:
         if self.source_mode == "viral" and self.viral_candidate_id:
             logger.info(f"[{self.canal}] Viral candidate ID: {self.viral_candidate_id}")
         logger.info(f"{'='*60}")
+
+        # Reset per-run state
+        self._theme_context = None
 
         # ── Disk cleanup before pipeline (moved from phase_media) ──
         import shutil
