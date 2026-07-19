@@ -127,15 +127,25 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Orphan cleanup skipped: %s", exc)
 
-    # Auto-recover failed/interrupted videos from previous run
+    # ── PAUSE GATE: skip all auto-planning/dispatch when operator paused scheduling ──
+    _scheduler_paused = False
     try:
-        from api.services.generation_service import auto_recover_on_startup
-        await auto_recover_on_startup()
-        logging.getLogger("autotube.startup").info("Auto-recovery completed")
-    except Exception as exc:
-        logging.getLogger("autotube.startup").warning(
-            "Auto-recovery skipped: %s", exc
-        )
+        from database.db_extended import ExtendedDatabase
+        _paused_db = ExtendedDatabase()
+        _scheduler_paused = _paused_db.get_system_state("scheduler_paused") == "true"
+    except Exception:
+        pass
+
+    if not _scheduler_paused:
+        # Auto-recover failed/interrupted videos from previous run
+        try:
+            from api.services.generation_service import auto_recover_on_startup
+            await auto_recover_on_startup()
+            logging.getLogger("autotube.startup").info("Auto-recovery completed")
+        except Exception as exc:
+            logging.getLogger("autotube.startup").warning(
+                "Auto-recovery skipped: %s", exc
+            )
 
     # Reconnect to running worker subprocesses that survived an API restart
     try:
@@ -146,32 +156,37 @@ async def lifespan(app: FastAPI):
             "Worker reconnection skipped: %s", exc
         )
     
-    # ── Dynamic daily schedule generation (planning_service) ──
-    # 3-phase horizon planning: generates slots for all days at once,
-    # with cross-day generation chaining and per-channel durations.
-    try:
-        from api.services.planning_service import compute_and_store_horizon
-        from database.db_extended import ExtendedDatabase
-        _db = ExtendedDatabase()
-        result = compute_and_store_horizon(horizon_days=7, db=_db)
-        logger = logging.getLogger("autotube.startup")
-        logger.info("Planning engine: 7-day horizon planned (%d slots, %d days)",
-                     result.get("total_slots", 0), result.get("days_planned", 0))
-    except Exception as exc:
-        logging.getLogger("autotube.startup").warning(
-            "Planning engine init skipped: %s", exc
-        )
+    if not _scheduler_paused:
+        # ── Dynamic daily schedule generation (planning_service) ──
+        # 3-phase horizon planning: generates slots for all days at once,
+        # with cross-day generation chaining and per-channel durations.
+        try:
+            from api.services.planning_service import compute_and_store_horizon
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            result = compute_and_store_horizon(horizon_days=7, db=_db)
+            logger = logging.getLogger("autotube.startup")
+            logger.info("Planning engine: 7-day horizon planned (%d slots, %d days)",
+                         result.get("total_slots", 0), result.get("days_planned", 0))
+        except Exception as exc:
+            logging.getLogger("autotube.startup").warning(
+                "Planning engine init skipped: %s", exc
+            )
 
-    # ── Shorts scheduler: dynamic clip scaling (3 clips/long + 3 native/day) ──
-    try:
-        from api.services.shorts_scheduler import generate_upcoming_shorts
-        result = generate_upcoming_shorts(days=7)
-        logger = logging.getLogger("autotube.startup")
-        total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
-        logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
-    except Exception as exc:
+        # ── Shorts scheduler: dynamic clip scaling (3 clips/long + 3 native/day) ──
+        try:
+            from api.services.shorts_scheduler import generate_upcoming_shorts
+            result = generate_upcoming_shorts(days=7)
+            logger = logging.getLogger("autotube.startup")
+            total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
+            logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
+        except Exception as exc:
+            logging.getLogger("autotube.startup").warning(
+                "Shorts scheduler init skipped: %s", exc
+            )
+    else:
         logging.getLogger("autotube.startup").warning(
-            "Shorts scheduler init skipped: %s", exc
+            "SCHEDULER PAUSED — auto-recovery, planning, and shorts scheduling skipped"
         )
     
     # Launch schedule checker in background
@@ -299,11 +314,19 @@ async def _schedule_checker_loop():
             else:
                 await asyncio.sleep(300)  # Check every 5 minutes after first run
 
-            await _process_due_schedules()
-            await _process_shorts_slots()     # Shorts first: faster generation, tighter publish windows
-            await _process_upload_slots()     # F2: Upload scheduler (awaiting_upload → private)
-            await _process_planned_slots()    # F1: Dynamic planning engine (long-form videos)
-            await _queue_consumer()           # Process queued generation jobs sequentially
+            # ── Pause gate: skip all dispatching when operator paused ──
+            _paused = False
+            try:
+                _paused = _sched_db.get_system_state("scheduler_paused") == "true"
+            except Exception:
+                pass
+
+            if not _paused:
+                await _process_due_schedules()
+                await _process_shorts_slots()     # Shorts first: faster generation, tighter publish windows
+                await _process_upload_slots()     # F2: Upload scheduler (awaiting_upload → private)
+                await _process_planned_slots()    # F1: Dynamic planning engine (long-form videos)
+                await _queue_consumer()           # Process queued generation jobs sequentially
             await _detect_and_clean_orphans()
             
             # Collect YouTube stats every 6 hours
@@ -370,6 +393,13 @@ async def _process_planned_slots():
     """Process due planned_slots using the dynamic planning engine."""
     import logging
     logger = logging.getLogger("autotube.planner")
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        if _db.get_system_state("scheduler_paused") == "true":
+            return  # Operator paused scheduling — skip dispatch
+    except Exception:
+        pass
     try:
         from api.services.planning_service import process_planned_slots as dispatch
         result = dispatch()
@@ -482,6 +512,13 @@ async def _process_shorts_slots():
     """
     import logging
     logger = logging.getLogger("autotube.shorts_scheduler")
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        if _db.get_system_state("scheduler_paused") == "true":
+            return  # Operator paused scheduling — skip dispatch
+    except Exception:
+        pass
     try:
         from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
         result = dispatch_next_due_shorts_slot()
