@@ -314,19 +314,57 @@ async def _schedule_checker_loop():
             else:
                 await asyncio.sleep(300)  # Check every 5 minutes after first run
 
-            # ── Pause gate: skip all dispatching when operator paused ──
+            # ── Pause gate: skip ALL scheduling when operator paused ──
             _paused = False
             try:
                 _paused = _sched_db.get_system_state("scheduler_paused") == "true"
             except Exception:
                 pass
 
+            now = time.time()
+
             if not _paused:
                 await _process_due_schedules()
-                await _process_shorts_slots()     # Shorts first: faster generation, tighter publish windows
-                await _process_upload_slots()     # F2: Upload scheduler (awaiting_upload → private)
-                await _process_planned_slots()    # F1: Dynamic planning engine (long-form videos)
-                await _queue_consumer()           # Process queued generation jobs sequentially
+                await _process_shorts_slots()
+                await _process_upload_slots()
+                await _process_planned_slots()
+                await _queue_consumer()
+
+                # Process video lifecycle promotion actions every 15 minutes
+                if now - last_lifecycle_check > 900:
+                    await _process_lifecycle_actions()
+                    last_lifecycle_check = now
+
+                # Auto-recovery: replan missing publications every 60 minutes
+                if now - last_recovery_check > 3600:
+                    await _process_recovery_planner()
+                    last_recovery_check = now
+
+                # Shorts auto-recovery: rebalance shorts every 60 minutes
+                if now - last_shorts_recovery_check > 3600:
+                    await _process_shorts_recovery_planner()
+                    last_shorts_recovery_check = now
+
+                # ── Optimal publish slots: calculate once per day ──
+                if now - last_slot_calculation > 86400:
+                    await _calculate_optimal_slots()
+                    last_slot_calculation = now
+
+                # Regenerate the schedule forecast at midnight (daily)
+                if now - last_midnight_check > 3600:
+                    try:
+                        from database.db_extended import ExtendedDatabase
+                        _mid_db = ExtendedDatabase()
+                        from api.services.planning_service import compute_and_store_horizon
+                        result = compute_and_store_horizon(horizon_days=7, db=_mid_db)
+                        logger.info("Midnight horizon replan: %d slots, %d days",
+                                     result.get("total_slots", 0), result.get("days_planned", 0))
+                        from api.services.shorts_scheduler import ensure_today_shorts_scheduled
+                        ensure_today_shorts_scheduled()
+                        last_midnight_check = now
+                    except Exception as exc:
+                        logger.debug("Midnight schedule refresh: %s", exc)
+
             await _detect_and_clean_orphans()
             
             # Collect YouTube stats every 6 hours
@@ -339,48 +377,6 @@ async def _schedule_checker_loop():
                     _sched_db.set_system_state("last_stats_collection", str(int(now)))
                 except Exception:
                     pass
-            
-            # Process video lifecycle promotion actions every 15 minutes
-            if now - last_lifecycle_check > 900:  # 15 minutes
-                await _process_lifecycle_actions()
-                last_lifecycle_check = now
-            
-            # Auto-recovery: replan missing publications every 60 minutes
-            if now - last_recovery_check > 3600:  # 60 minutes
-                await _process_recovery_planner()
-                last_recovery_check = now
-            
-            # Shorts auto-recovery: rebalance shorts every 60 minutes
-            if now - last_shorts_recovery_check > 3600:  # 60 minutes
-                await _process_shorts_recovery_planner()
-                last_shorts_recovery_check = now
-            
-            # ── Optimal publish slots: calculate once per day ──
-            if now - last_slot_calculation > 86400:  # 24 hours
-                await _calculate_optimal_slots()
-                last_slot_calculation = now
-
-            # Regenerate the schedule forecast at midnight (daily)
-            if now - last_midnight_check > 3600:  # Check once per hour
-                from datetime import date as _date
-                import logging as _logging
-                _logger = _logging.getLogger("autotube.midnight")
-                today = _date.today().isoformat()
-                try:
-                    from database.db_extended import ExtendedDatabase
-                    _mid_db = ExtendedDatabase()
-                    from api.services.planning_service import compute_and_store_horizon
-                    # Horizon replan: rebuild the full 7-day window
-                    # (won't touch completed/running slots — only pending)
-                    result = compute_and_store_horizon(horizon_days=7, db=_mid_db)
-                    _logger.info("Midnight horizon replan: %d slots, %d days",
-                                 result.get("total_slots", 0), result.get("days_planned", 0))
-                    # Also ensure today has shorts slots
-                    from api.services.shorts_scheduler import ensure_today_shorts_scheduled
-                    ensure_today_shorts_scheduled()
-                    last_midnight_check = now
-                except Exception as exc:
-                    logger.debug("Midnight schedule refresh: %s", exc)
                 
         except asyncio.CancelledError:
             raise
