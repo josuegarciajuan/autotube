@@ -77,6 +77,10 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
         py_upper: dict[str, str] = {k.upper(): k for k in merged}
 
         for db_key, db_value in db_config.items():
+            # MEDIA_STRATEGY is authoritative from Python — never overridden
+            # from DB, to prevent dead providers (e.g. Pexels) from reactivating.
+            if db_key.upper() == "MEDIA_STRATEGY":
+                continue
             upper_key = db_key.upper()
             # Try exact match first, then case-insensitive
             if db_key in merged:
@@ -202,6 +206,10 @@ def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
             for key, value in safe.items():
                 if key not in existing_db:
                     merged[key] = value
+            # Always override MEDIA_STRATEGY from Python — provider config
+            # is authoritative from code, not from DB edits.
+            if "MEDIA_STRATEGY" in safe:
+                merged["MEDIA_STRATEGY"] = safe["MEDIA_STRATEGY"]
             # Preserve DB-only planning keys
             for key in ("videos_per_day", "planning_enabled"):
                 if key in existing_db and key not in merged:
