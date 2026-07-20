@@ -2779,6 +2779,9 @@ async def auto_recover_on_startup():
                     )
                     db.update_job(job_id, status="queued",
                                   error_msg="Deferred by concurrency guard")
+                    # Reset video to 'error' so dashboard doesn't falsely show
+                    # it as generating when nothing is actually processing it.
+                    db.update_video(video_id, status="error")
                     continue
                 asyncio.create_task(_run_reassembly_job(job_id, video_id))
             except Exception as dispatch_exc:
