@@ -96,10 +96,14 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
     if not ch:
         raise HTTPException(404, "Channel not found")
     
-    # Guard: don't start if this channel already has an active job
-    active = db.get_active_job_for_channel(data.channel_id)
+    # Guard 1: don't start if this channel already has an active job
+    active = db.get_active_job_for_channel(v.get("channel_id", 0))
     if active:
         raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+    
+    # Guard 2: don't start if ANY generation is running globally
+    if db.count_active_jobs() > 0:
+        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
     
     import sqlite3
     with db._connect() as conn:
@@ -729,10 +733,14 @@ def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
             f"Video must be in 'error' or 'bug_crash' state. Current: status={status}, phase={phase}"
         )
     
-    # Guard: don't start if this channel already has an active job
+    # Guard 1: don't start if this channel already has an active job
     active = db.get_active_job_for_channel(v.get("channel_id", 0))
     if active:
         raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+    
+    # Guard 2: don't start if ANY generation is running globally
+    if db.count_active_jobs() > 0:
+        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
     
     # Check we have checkpoint data to reassemble
     import json

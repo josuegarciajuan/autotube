@@ -2119,6 +2119,26 @@ async def _run_reassembly_job(job_id: int, video_id: int):
     Broadcasts progress via WebSocket so the frontend global progress bar
     stays live.
     """
+    # ── Global concurrency guard: only ONE generation at a time across ALL channels ──
+    # Prevents reassembly + normal generation from running simultaneously,
+    # which causes ffmpeg resource contention and OOM crashes.
+    db_guard = _get_db()
+    active_count = db_guard.count_active_jobs()
+    if active_count > 1:
+        logger.warning(
+            "Reassembly job %d blocked: %d active job(s) running globally",
+            job_id, active_count,
+        )
+        await _broadcast_progress(
+            job_id, 0, "blocked",
+            f"Ya hay {active_count} generacion(es) en curso. Reassembly bloqueado.",
+            "failed", video_id,
+            detail="Solo se permite una generacion simultanea para evitar conflictos de recursos",
+        )
+        db_guard.update_job(job_id, status="failed",
+                            error_msg=f"Global concurrency guard: {active_count} active job(s)")
+        return
+
     # ── Pre-flight: kill lingering ffmpegs from prior failed attempts ──
     _kill_orphaned_ffmpeg()
     
@@ -2748,6 +2768,18 @@ async def auto_recover_on_startup():
         await asyncio.sleep(3)
         for job_id, video_id in _pending_recoveries:
             try:
+                # ── Global concurrency guard: don't launch recovery if another
+                # generation (e.g. a subprocess worker that survived the restart)
+                # is already running.
+                active_now = db.count_active_jobs()
+                if active_now > 1:
+                    log.warning(
+                        "Recovery job %d deferred: %d active job(s) — will retry next cycle",
+                        job_id, active_now,
+                    )
+                    db.update_job(job_id, status="queued",
+                                  error_msg="Deferred by concurrency guard")
+                    continue
                 asyncio.create_task(_run_reassembly_job(job_id, video_id))
             except Exception as dispatch_exc:
                 log.warning("Deferred recovery dispatch failed for job %d: %s", job_id, dispatch_exc)
