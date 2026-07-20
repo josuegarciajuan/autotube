@@ -212,18 +212,18 @@ class MediaFetcher:
         Returns:
             Asset info dict: {path, type, duration, source}.
         """
-        query = block.get("search_query_en", "")
+        block_query = block.get("search_query_en", "")
         media_tipo = block.get("media_tipo", "imagen")
         target_dur = target_duration or block.get("media_duracion", 5)
         block_tipo = block.get("tipo", "desarrollo")
 
-        # Enrich query with theme keywords if available (P3)
+        # Build query: scene topic + video-level theme context, fitting Pixabay's 100-char limit
         ctx = theme_context or self._theme_context
-        if ctx and ctx.theme_keywords_en:
-            theme_kw = " ".join(ctx.theme_keywords_en[:3])
-            enriched_query = f"{query} {theme_kw}"
-            logger.info("Enriched query with theme: %r", enriched_query[:100])
-            query = enriched_query
+        query = self._build_search_query(
+            query=block_query,
+            theme_keywords=ctx.theme_keywords_en if ctx else None,
+        )
+        logger.info("Built search query: %r (%d chars)", query, len(query))
 
         prefer_video = self._media_strategy.get("prefer_video", True) and media_tipo == "video"
 
@@ -432,6 +432,7 @@ class MediaFetcher:
             is_sub = scene.get("is_subscene", False)
             seq = subscene_seq.get(asset_idx, 0)
             subscene_seq[asset_idx] = seq + 1
+            variation = None
             if is_sub and seq > 0:
                 variations = [
                     "wide shot establishing",
@@ -440,17 +441,21 @@ class MediaFetcher:
                     "low angle dramatic",
                     "distant view atmospheric",
                 ]
-                var = variations[(seq - 1) % len(variations)]
-                query = f"{query}, {var}" if query else var
+                variation = variations[(seq - 1) % len(variations)]
 
-            # Enrich query with theme keywords if available
-            if ctx and ctx.theme_keywords_en:
-                theme_kw = " ".join(ctx.theme_keywords_en[:3])
-                query = f"{query} {theme_kw}"
+            # Build search query: balances scene-specific topic keywords,
+            # sub-scene variation, and video-level theme context within
+            # Pixabay's 100-char limit. Ensures both paragraph relevance
+            # AND global video context are represented.
+            query = self._build_search_query(
+                query=query,
+                variation=variation,
+                theme_keywords=ctx.theme_keywords_en if ctx else None,
+            )
 
             logger.info(
-                "Scene %d/%d [%s]: want_video=%s query=%r dur=%.1fs",
-                i + 1, n_scenes, scene_tipo, want_video, query[:80], target_dur,
+                "Scene %d/%d [%s]: want_video=%s query=%r (%d chars) dur=%.1fs",
+                i + 1, n_scenes, scene_tipo, want_video, query[:80], len(query), target_dur,
             )
 
             asset = None
@@ -1268,3 +1273,111 @@ class MediaFetcher:
         }
         keywords = [w for w in words if w.lower() not in style_words]
         return " ".join(keywords[:4])
+
+    # ── Internal: smart query builder ────────────────────────────
+    _STYLE_WORDS: set[str] = {
+        "cinematic", "photography", "dramatic", "lighting", "atmospheric",
+        "16:9", "moody", "high", "contrast", "professional", "dark",
+        "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
+        "overhead", "style", "film", "video", "stock", "vertical",
+        "establishing", "angle", "footage", "composition", "documentary",
+        "historical", "depth", "field", "color", "grading", "grade",
+    }
+
+    @staticmethod
+    def _build_search_query(
+        query: str,
+        variation: str | None = None,
+        theme_keywords: list[str] | None = None,
+        max_len: int = 100,
+    ) -> str:
+        """Build a search query that balances scene-specific content with video-level context.
+
+        Strategy:
+        1. Extract scene topic keywords from the LLM query (strip visual-stylistic fluff)
+        2. Add sub-scene variation for visual diversity (lowest priority)
+        3. Add theme keywords for video-level context (keeps results thematically relevant)
+        4. Fit all within ``max_len`` chars, trimming variation first, then theme, then scene.
+
+        This ensures both the paragraph-specific content AND the video-wide theme are
+        represented in the search query, unlike naive truncation which would lose meaning.
+        """
+        # 1. Extract scene topic keywords (strip style words, keep content nouns)
+        words = query.split()
+        scene_keywords = [w for w in words if w.lower() not in MediaFetcher._STYLE_WORDS]
+        if not scene_keywords:
+            scene_keywords = [w for w in words]  # fallback: all words
+
+        # If both query and theme are empty, return the original query as-is
+        if not scene_keywords and not theme_keywords:
+            return query.strip()[:max_len]
+
+        # 2. Allocate character budget proportionally
+        #    scene: ~60% (topic keywords — must match the paragraph)
+        #    theme: ~25% (video-level context)
+        #    variation: ~15% (visual diversity — lowest priority, dropped first)
+        variation_budget = 18 if variation else 0
+        theme_budget = min(28, max_len - variation_budget)
+        scene_budget = max_len - variation_budget - theme_budget
+
+        # 3. Build scene topic part (fit within scene_budget chars)
+        scene_part = ""
+        for w in scene_keywords:
+            candidate = f"{scene_part} {w}".strip()
+            if len(candidate) <= scene_budget:
+                scene_part = candidate
+            else:
+                break  # budget exhausted
+        if not scene_part:
+            if scene_keywords:
+                scene_part = scene_keywords[0][:scene_budget]  # first word, truncated
+            elif theme_keywords:
+                # No scene keywords — build from theme keywords instead
+                scene_budget = max_len - (len(variation) + 1 if variation else 0)
+                for kw in theme_keywords[:3]:
+                    candidate = f"{scene_part} {kw}".strip()
+                    if len(candidate) <= scene_budget:
+                        scene_part = candidate
+                    else:
+                        break
+                theme_keywords = None  # already consumed, skip step 4
+
+        # 4. Build theme context part (fit within remaining space after scene)
+        theme_part = ""
+        if theme_keywords:
+            remaining = max_len - len(scene_part)
+            if variation:
+                remaining -= (len(variation) + 1)  # space + variation
+            for kw in theme_keywords[:3]:
+                candidate = f"{theme_part} {kw}".strip()
+                if len(candidate) <= max(remaining, 10):
+                    theme_part = candidate
+                else:
+                    break
+
+        # 5. Assemble: scene + variation + theme
+        parts = [scene_part]
+        if variation:
+            parts.append(variation)
+        if theme_part:
+            parts.append(theme_part)
+
+        result = " ".join(parts)
+
+        # 6. Final safety: if still over budget, trim from right at last complete word
+        if len(result) > max_len:
+            result = result[:max_len].rsplit(" ", 1)[0]
+
+        return result
+
+    # ── Internal: Pixabay safety truncation ─────────────────────
+    @staticmethod
+    def _sanitize_for_pixabay(query: str, max_len: int = 100) -> str:
+        """Truncate a query to Pixabay's 100-char limit at the last complete word.
+        
+        This is a safety net — ``_build_search_query`` should normally produce
+        queries that fit, but this catches any edge cases.
+        """
+        if len(query) <= max_len:
+            return query
+        return query[:max_len].rsplit(" ", 1)[0]

@@ -321,7 +321,7 @@ class PixabayImageProvider(ImageProvider):
 
         params: dict = {
             "key": self._api_key,
-            "q": query,
+            "q": query[:100],  # Pixabay 100-char limit — safety net
             "per_page": max(min(n, 200), 3),  # Pixabay requires 3-200
             "image_type": "photo",
             "orientation": orientation,

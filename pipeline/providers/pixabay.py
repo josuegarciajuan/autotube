@@ -67,7 +67,7 @@ class PixabayVideoProvider(BaseVideoProvider):
         target_w, target_h = resolution
         params: dict = {
             "key": self._api_key,
-            "q": query,
+            "q": query[:100],  # Pixabay 100-char limit — safety net
             "per_page": 20,
             "min_width": target_w,
             "min_height": target_h,
