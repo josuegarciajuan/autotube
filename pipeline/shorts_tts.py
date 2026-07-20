@@ -345,6 +345,9 @@ def synthesize_shorts_blocks(
     for i, block in enumerate(valid):
         block_type = block.get("tipo", "desarrollo")
         block_text = block.get("texto", "").strip()
+        # Normalize numbers for natural TTS pronunciation
+        from pipeline.text_normalizer import normalize_numbers
+        block_text = normalize_numbers(block_text)
         rate, pitch = _block_voice_params(block_type, ch_config)
 
         logger.info("  [%d/%d] %s | rate=%s pitch=%s | %d chars",

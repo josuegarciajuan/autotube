@@ -168,7 +168,7 @@ class TTSEngine:
         return ''.join(result)
 
     def _clean_guion(self, text: str) -> str:
-        """Strip structural markers from guion text."""
+        """Strip structural markers from guion text and normalize numbers."""
         cleaned = self._remove_bracketed_marker(text, "ESCENA")
         cleaned = self._remove_bracketed_marker(cleaned, "PAUSA")
         cleaned = re.sub(r'\bNarrador\s*:\s*', '', cleaned, flags=re.IGNORECASE)
@@ -176,6 +176,10 @@ class TTSEngine:
         cleaned = re.sub(r'\bESCENA\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\bPAUSA\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        # Normalize numbers to spoken words for natural TTS pronunciation
+        # (e.g. "5.000" → "cinco mil", "42%" → "cuarenta y dos por ciento")
+        from pipeline.text_normalizer import normalize_numbers
+        cleaned = normalize_numbers(cleaned)
         return cleaned
 
     # ── Legacy: single-segment synthesis ────────────────────

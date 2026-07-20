@@ -159,6 +159,9 @@ class KokoroTTSEngine:
         cleaned = re.sub(r'\bESCENA\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\bPAUSA\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        # Normalize numbers to spoken words for natural TTS pronunciation
+        from pipeline.text_normalizer import normalize_numbers
+        cleaned = normalize_numbers(cleaned)
         return cleaned
 
     # ── Timestamp estimation ─────────────────────────────────
