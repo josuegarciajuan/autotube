@@ -97,7 +97,7 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
         raise HTTPException(404, "Channel not found")
     
     # Guard 1: don't start if this channel already has an active job
-    active = db.get_active_job_for_channel(v.get("channel_id", 0))
+    active = db.get_active_job_for_channel(data.channel_id)
     if active:
         raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
