@@ -95,6 +95,14 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
             f"forcing MAX={scene_min + 5}"
         )
         config["SCENE_DURATION_MAX"] = scene_min + 5
+    elif scene_max < 12:
+        # Enforce floor: max < 12s produces too many sub-scenes per TTS block,
+        # which causes media fetch timeouts when providers have limited unique assets.
+        warnings.append(
+            f"[{slug}] SCENE_DURATION_MAX ({scene_max}) is too low — "
+            f"forcing MAX=20 to avoid excessive scene splitting"
+        )
+        config["SCENE_DURATION_MAX"] = 20
 
     # ── Color palette: prevent solid-black vignette ────────────
     color_pal = config.get("COLOR_PALETTE")

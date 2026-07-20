@@ -98,6 +98,13 @@ class MediaFetcher:
         self._pixabay_img_consecutive_empty = 0
         self._pixabay_img_disabled_until: float | None = None
 
+        # ── Video provider circuit breaker ───────────────────
+        # Tracks consecutive failures per provider. After 3 consecutive
+        # failures in a single _try_all_video_providers pass, the
+        # provider is disabled for the remainder of the phase.
+        self._vp_fail_streak: dict[str, int] = {}
+        self._vp_disabled: set[str] = set()
+
         if settings.UNSPLASH_ACCESS_KEY:
             self._unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
         else:
@@ -411,6 +418,10 @@ class MediaFetcher:
         _cb_max_consecutive_failures = 5  # abort after 5 consecutive all-provider failures
         _cb_phase_start = time.time()
         _cb_phase_timeout = 900  # 15 min hard timeout for the entire media phase
+
+        # ── Reset video provider circuit breaker for this job ──
+        self._vp_fail_streak.clear()
+        self._vp_disabled.clear()
 
         # Track sub-scene sequence per asset_idx for query variation
         subscene_seq: dict[int, int] = {}
@@ -764,9 +775,70 @@ class MediaFetcher:
         Args:
             skip_urls: Set of asset URLs to skip for deduplication.
                        Pass ``None`` to disable dedup entirely (sub-scene fallback).
+                       
+        Circuit breaker: any provider failing 3 consecutive times across
+        calls within this phase is disabled for the remainder of the job.
         """
         if not query or not self.video_providers:
             return None
+
+        all_used = True  # Track if every provider returned an already-used asset
+        
+        for provider in self.video_providers:
+            pname = getattr(provider, "name", str(provider))
+            
+            # ── Circuit breaker: skip disabled providers ──
+            if pname in self._vp_disabled:
+                continue
+                
+            try:
+                # Use strict CC for normal searches (not liberal)
+                asset = provider.search(query, min_dur, max_dur)
+                if asset is None:
+                    self._vp_fail_streak[pname] = self._vp_fail_streak.get(pname, 0) + 1
+                    if self._vp_fail_streak[pname] >= 3:
+                        self._vp_disabled.add(pname)
+                        logger.warning(
+                            "Circuit breaker: %s failed 3 times — disabled for this phase", pname)
+                    continue
+                
+                # Reset streak on any successful find
+                self._vp_fail_streak[pname] = 0
+
+                # ── Deduplication check ─────────────────────────
+                if skip_urls is not None and asset.url in skip_urls:
+                    logger.info("Asset URL already used this script, skipping: %s", asset.url[:80])
+                    all_used = True  # At least one provider found a result (even if duplicate)
+                    continue
+                if skip_urls is not None:
+                    skip_urls.add(asset.url)
+                self._used_asset_urls.add(asset.url)
+
+                logger.info("Video found via %s: dur=%.1fs url=%s",
+                             provider.name, asset.duration, asset.url[:80])
+
+                # ── Download the video clip ──────────────────────
+                path = self._download_video_asset(asset, provider)
+                if path:
+                    return {
+                        "path": path,
+                        "type": "video",
+                        "duration": asset.duration,
+                        "source": f"{provider.name}_video",
+                    }
+
+                logger.warning("Provider %s: found video but download failed", provider.name)
+
+            except Exception as exc:
+                self._vp_fail_streak[pname] = self._vp_fail_streak.get(pname, 0) + 1
+                logger.warning("Provider %s failed: %s", provider.name, exc)
+                if self._vp_fail_streak[pname] >= 3:
+                    self._vp_disabled.add(pname)
+                    logger.warning(
+                        "Circuit breaker: %s failed 3 times — disabled for this phase", pname)
+                continue
+
+        return None
 
         for provider in self.video_providers:
             try:

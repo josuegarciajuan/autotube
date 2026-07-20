@@ -94,7 +94,11 @@ class MixkitVideoProvider(BaseVideoProvider):
         for card in video_cards:
             dur = self._parse_duration(card.get("duration_text", ""))
             if dur is None:
-                continue
+                # Duration couldn't be parsed — assume typical stock video
+                # length (15s) so the video isn't silently skipped.  Mixkit
+                # changed their HTML layout several times, so a missing
+                # duration selector should be treated leniently here.
+                dur = 15.0
             if dur < min_duration or dur > max_duration:
                 continue
 

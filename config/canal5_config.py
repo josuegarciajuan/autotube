@@ -578,7 +578,7 @@ KEN_BURNS_ZOOM_MAX = 10
 
 # ── Scene pacing ────────────────────────────────────────────────
 SCENE_DURATION_MIN = 8
-SCENE_DURATION_MAX = 12
+SCENE_DURATION_MAX = 20  # Fewer sub-scenes = less media asset pressure
 
 # ── Render resolution ──────────────────────────────────────────
 VIDEO_RESOLUTION = (1280, 720)

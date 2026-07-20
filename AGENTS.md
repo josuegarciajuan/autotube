@@ -117,6 +117,14 @@ porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto
 | GET | `/api/channels/{id}/youtube-stats` | Stats en tiempo real del canal |
 | GET | `/api/videos/{id}/stats-history` | Histórico de stats del video |
 
+### 🎬 Invariante de escenas — NO repetir jamás
+**Un video generado NUNCA repetirá escenas visuales.** Cada escena debe tener un asset visual único (video o imagen distinta).
+
+- Si un provider de video devuelve una URL ya usada en este mismo video, se descarta y se busca otra.
+- Si no hay más videos únicos disponibles para un topic, se usan imágenes alternativas (Pixabay tiene cientos de imágenes por query).
+- El dedup se aplica tanto a URLs de video/imagen como a `pixabay_photo image id` para evitar imágenes duplicadas.
+- **Si se agotan TODOS los assets únicos → placeholder o fallback genérico, pero nunca repetir un asset ya usado.**
+
 ## Proxy residencial (implementado, desactivado)
 ```env
 PROXY_ENABLED=false           # true = activar

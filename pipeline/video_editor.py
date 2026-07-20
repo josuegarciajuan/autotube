@@ -210,7 +210,7 @@ class VideoEditor:
     INTRO_DURATION: float = 3.0
     OUTRO_DURATION: float = 5.0
     SCENE_DURATION_MIN: float = 6.0   # Enforced — scenes shorter than this are merged
-    SCENE_DURATION_MAX: float = 15.0  # Enforced — dynamic pacing for documentary content
+    SCENE_DURATION_MAX: float = 25.0  # Enforced — fewer sub-scenes = fewer unique media assets needed
     # Legacy aliases kept for backward compatibility
     MIN_SCENE_DURATION: float = SCENE_DURATION_MIN
     MAX_SCENE_DURATION: float = SCENE_DURATION_MAX
