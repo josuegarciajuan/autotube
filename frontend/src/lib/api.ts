@@ -469,7 +469,7 @@ export function formatShortNumber(num: string | number): string {
   if (isNaN(n)) return '0';
   if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1).replace('.0', '') + 'K';
-  return n.toString();
+  return parseFloat(n.toFixed(2)).toString();
 }
 
 /** Get status badge class */
