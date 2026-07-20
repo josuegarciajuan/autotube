@@ -3072,6 +3072,12 @@ class ExtendedDatabase(Database):
         
         Unlike get_next_pending_slot(), this does NOT require scheduled_at <= now,
         allowing generation to start early when the worker is idle.
+        
+        IMPORTANT: excludes slots where date_key is in the past (yesterday or
+        earlier). Past-date slots have missed their upload window entirely and
+        should be cancelled, not dispatched. Without this guard, the priority
+        dispatcher would eagerly pick up stale slots from previous days and
+        give them inflated priority scores due to extreme lateness.
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -3079,6 +3085,7 @@ class ExtendedDatabase(Database):
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
                    WHERE ps.status = 'pending'
+                      AND ps.date_key >= date('now', 'localtime')
                       AND (
                           -- Due slot: scheduled_at has passed
                           ps.scheduled_at <= datetime('now', 'localtime')
@@ -4064,13 +4071,18 @@ class ExtendedDatabase(Database):
 
     def get_next_pending_shorts_slot(self) -> dict | None:
         """Get the next pending short slot that is due (scheduled_at <= now),
-        ordered by scheduled_at. Returns None if none."""
+        ordered by scheduled_at. Returns None if none.
+        
+        Excludes past-date slots (date_key < today) to prevent obsolete
+        slots from previous days from blocking the dispatch queue.
+        """
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT sps.*, c.name as channel_name, c.slug as channel_slug
                    FROM shorts_planned_slots sps
                    JOIN channels c ON sps.channel_id = c.id
                    WHERE sps.status = 'pending'
+                      AND sps.date_key >= date('now', 'localtime')
                       AND sps.scheduled_at <= datetime('now', 'localtime')
                    ORDER BY sps.scheduled_at ASC LIMIT 1"""
             ).fetchone()

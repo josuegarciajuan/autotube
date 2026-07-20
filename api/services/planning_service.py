@@ -1214,13 +1214,16 @@ def process_planned_slots(db=None) -> dict | None:
 
 
 def _sync_running_slots(db):
-    """Check running slots: if their job is done, mark the slot accordingly.
+    """Check ALL running slots: if their job is done, mark the slot accordingly.
+    
+    Scans every slot with status='running' across ALL dates, not just today.
+    This prevents orphaned running slots from accumulating when jobs are
+    dispatched from future date_keys and subsequently fail.
     
     Also triggers _readjust_pending_slots() when a job completes, to
     realign the remaining slots and avoid cascading time drift.
     """
-    today = date.today().isoformat()
-    running_slots = db.get_planned_slots(date_key=today, status="running")
+    running_slots = db.get_planned_slots(status="running")
     any_completed = False
     
     for s in running_slots:
