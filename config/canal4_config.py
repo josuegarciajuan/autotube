@@ -1,3 +1,5 @@
+from config.settings import DEFAULT_VIDEO_PROVIDERS, DEFAULT_VIDEO_FALLBACK_QUERIES
+
 """Configuration for Canal 4: Expediciones sin Retorno.
 
 Meta-niche: "historias reales de expediciones que terminaron catastróficamente mal
@@ -659,10 +661,8 @@ MEDIA_STRATEGY = {
     "video_min_duration": 4,
     "video_max_duration": 20,
     "video_sources": ["pexels"],
-    "video_providers": [
-        {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
-        {"name": "youtube_cc"},
-    ],
+    "video_providers": DEFAULT_VIDEO_PROVIDERS,
+    "video_fallback_queries": DEFAULT_VIDEO_FALLBACK_QUERIES,
     "fallback_query": "dramatic expedition landscape cinematic 16:9",
     "fallback_query_simple": "expedition wilderness dramatic nature",
     "ken_burns_zoom_min": 10,

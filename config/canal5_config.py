@@ -1,3 +1,5 @@
+from config.settings import DEFAULT_VIDEO_PROVIDERS, DEFAULT_VIDEO_FALLBACK_QUERIES
+
 """Configuration for Canal 5: Anomalias Medicas.
 
 Meta-niche: "casos clinicos reales que la ciencia no puede explicar
@@ -638,10 +640,8 @@ MEDIA_STRATEGY = {
     "video_min_duration": 4,
     "video_max_duration": 20,
     "video_sources": ["pexels"],
-    "video_providers": [
-        {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
-        {"name": "youtube_cc"},
-    ],
+    "video_providers": DEFAULT_VIDEO_PROVIDERS,
+    "video_fallback_queries": DEFAULT_VIDEO_FALLBACK_QUERIES,
     "fallback_query": "medical hospital laboratory clinical scientific 16:9",
     "fallback_query_simple": "medical science hospital laboratory clinical",
     "ken_burns_zoom_min": 4,

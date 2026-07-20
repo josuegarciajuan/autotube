@@ -1,3 +1,5 @@
+from config.settings import DEFAULT_VIDEO_PROVIDERS
+
 """Configuration for Canal 3: Civilizaciones Olvidadas.
 
 Meta-niche: "las civilizaciones que la historia enterró durante siglos,
@@ -624,10 +626,7 @@ MEDIA_STRATEGY = {
     "video_min_duration": 4,
     "video_max_duration": 20,
     "video_sources": ["pexels"],
-    "video_providers": [
-        {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
-        {"name": "youtube_cc"},
-    ],
+    "video_providers": DEFAULT_VIDEO_PROVIDERS,
     "fallback_query": "ancient ruins archaeological site cinematic 16:9",
     "fallback_query_simple": "ancient temple ruins stone architecture",
     # ── Video rescue: generic queries when specific ones fail ─────

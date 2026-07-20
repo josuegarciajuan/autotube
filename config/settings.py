@@ -126,6 +126,27 @@ SHORTS_NATIVE_SCHEDULE = [
 SHORTS_NATIVE_MAX_DAILY = 4
 
 
+# ── Global media provider configuration ──────────────────────
+# Shared by all channels. Each channel's MEDIA_STRATEGY should reference
+# this list via `DEFAULT_VIDEO_PROVIDERS` rather than duplicating.
+DEFAULT_VIDEO_PROVIDERS = [
+    {"name": "pexels", "api_key_env": "PEXELS_API_KEY"},
+    {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
+    {"name": "mixkit"},
+    {"name": "coverr"},
+    {"name": "youtube_cc"},
+]
+
+# Global fallback queries for generic scenes — shared across channels
+DEFAULT_FALLBACK_QUERY = "cinematic atmosphere light rays nature 16:9"
+DEFAULT_FALLBACK_QUERY_SIMPLE = "cinematic nature atmospheric hopeful"
+
+DEFAULT_VIDEO_FALLBACK_QUERIES = [
+    "drone aerial landscape nature cinematic 4k",
+    "cinematic documentary b-roll atmospheric lighting",
+    "slow motion nature water clouds sky dramatic",
+]
+
 # ── Pollo AI (image generation for thumbnails) ─────────────────
 # Session cookie (tRPC web endpoint, bypasses Cloudflare via curl_cffi).
 # Override with POLLO_SESSION_COOKIE env var, otherwise reads from
