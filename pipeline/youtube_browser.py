@@ -63,6 +63,7 @@ def _ensure_xvfb():
             ["xdpyinfo", "-display", _xvfb_display], capture_output=True, timeout=3
         )
         if result.returncode == 0:
+            os.environ["DISPLAY"] = _xvfb_display
             return
     except Exception:
         pass

@@ -76,7 +76,7 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
         try:
             from config.config_bridge import get_channel_config
             channel_config = get_channel_config(canal)
-            if channel_config and channel_config.get("AUTO_END_SCREENS"):
+            if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
                 # Natural human delay between actions (5-12s)
                 delay = random.uniform(5, 12)
                 wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
@@ -889,7 +889,7 @@ def run_job(
 
                 # ── Auto-mark altered content (IA) via browser ──
                 try:
-                    if channel_config.get("AUTO_MARK_ALTERED_CONTENT"):
+                    if getattr(config, "AUTO_MARK_ALTERED_CONTENT", False):
                         from pipeline.youtube_browser import get_browser, get_account_for_channel
                         account = get_account_for_channel(canal)
                         if account:

@@ -26,6 +26,7 @@ from typing import Optional
 from api.utils import db_now
 import config.settings as settings
 from database.db_extended import ExtendedDatabase
+from config.config_bridge import get_channel_config
 
 # ── Auto-mark altered content helper ──────────────────────────
 
@@ -52,7 +53,7 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
         try:
             from config.config_bridge import get_channel_config
             channel_config = get_channel_config(canal)
-            if channel_config and channel_config.get("AUTO_END_SCREENS"):
+            if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
                 # Natural human delay between actions (5-12s)
                 delay = random.uniform(5, 12)
                 logger.info(f"[{canal}] Waiting {delay:.1f}s before end screen config...")
@@ -1666,8 +1667,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
 
                 # ── Auto-mark altered content (IA) via browser automation ──
                 try:
-                    channel_config = get_channel_config(canal) if 'get_channel_config' in dir() else {}
-                    if channel_config.get("AUTO_MARK_ALTERED_CONTENT"):
+                    channel_config = get_channel_config(canal)
+                    if getattr(channel_config, "AUTO_MARK_ALTERED_CONTENT", False):
                         from pipeline.youtube_browser import get_browser, get_account_for_channel
                         import threading as _threading
                         account = get_account_for_channel(canal)
