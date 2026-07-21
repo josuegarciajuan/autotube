@@ -3428,6 +3428,20 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
     
+    def count_past_due_slots(self) -> int:
+        """Count pending planned_slots whose scheduled_at is in the past.
+        
+        Used by the scheduler loop to determine catch-up mode and adaptive
+        sleep interval.  More past-due slots = faster tick = faster recovery.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots "
+                "WHERE status = 'pending' "
+                "AND scheduled_at <= datetime('now', 'localtime')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
     def get_active_upload_job_for_channel(self, channel_id: int) -> dict | None:
         """Check if a channel already has an active upload_only job."""
         with self._connect() as conn:

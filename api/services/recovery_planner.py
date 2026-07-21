@@ -162,7 +162,16 @@ def auto_recover_missing_publications(db=None) -> dict:
     now_minute_of_day = now_local.hour * 60 + now_local.minute
 
     # ── Window guard: only run during active hours ──
-    if now_hour < RECOVERY_START_HOUR or now_hour >= RECOVERY_END_HOUR:
+    # Exception: in catch-up mode (past-due slots exist), run 24/7
+    catchup_mode = False
+    past_due = 0
+    try:
+        past_due = db.count_past_due_slots()
+        catchup_mode = past_due > 2
+    except Exception:
+        pass
+
+    if not catchup_mode and (now_hour < RECOVERY_START_HOUR or now_hour >= RECOVERY_END_HOUR):
         return {
             "recovered_count": 0,
             "skipped": True,
@@ -170,8 +179,12 @@ def auto_recover_missing_publications(db=None) -> dict:
             "now_hour": now_hour,
         }
 
+    if catchup_mode:
+        logger.info("Catch-up mode active: %d past-due slots — recovery running 24/7", past_due)
+
     today = date.today().isoformat()
-    min_ahead = MIN_HOUR_AHEAD * 60  # 120 minutes
+    # In catch-up mode, reduce min_ahead to dispatch sooner
+    min_ahead = (MIN_HOUR_AHEAD // 2) * 60 if catchup_mode else MIN_HOUR_AHEAD * 60  # 1h vs 2h
 
     result = {
         "date": today,
@@ -286,28 +299,35 @@ def auto_recover_missing_publications(db=None) -> dict:
             chosen_time = None
             source = None
 
-            # Priority 1: low-audience hour
-            for t in low_aud:
-                if not _collides(t, existing_times):
-                    chosen_time = t
-                    source = "low_audience"
-                    assigned = True
-                    break
-
-            # Priority 2: secondary peak hour
-            if not assigned:
-                for t in sec_peaks:
+            if catchup_mode:
+                # In catch-up mode, skip priority bucketing and go straight
+                # to first available time for maximum recovery speed.
+                chosen_time = _find_first_available(now_minute_of_day, existing_times)
+                source = "catchup"
+                assigned = True
+            else:
+                # Priority 1: low-audience hour
+                for t in low_aud:
                     if not _collides(t, existing_times):
                         chosen_time = t
-                        source = "secondary_peak"
+                        source = "low_audience"
                         assigned = True
                         break
 
-            # Fallback: any available time
-            if not assigned:
-                chosen_time = _find_first_available(now_minute_of_day, existing_times)
-                source = "fallback"
-                assigned = True
+                # Priority 2: secondary peak hour
+                if not assigned:
+                    for t in sec_peaks:
+                        if not _collides(t, existing_times):
+                            chosen_time = t
+                            source = "secondary_peak"
+                            assigned = True
+                            break
+
+                # Fallback: any available time
+                if not assigned:
+                    chosen_time = _find_first_available(now_minute_of_day, existing_times)
+                    source = "fallback"
+                    assigned = True
 
             if chosen_time is None:
                 logger.warning(

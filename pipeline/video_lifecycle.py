@@ -618,6 +618,21 @@ class VideoLifecycleManager:
                                           video_id=db_video_id)
             
             now = datetime.now()
+            # ── Past-due catch-up log ──
+            if target_public and target_public != "?":
+                try:
+                    from datetime import timezone as _tz
+                    target_dt = datetime.fromisoformat(str(target_public).replace("Z", "+00:00"))
+                    if target_dt < now.replace(tzinfo=_tz.utc):
+                        logger.info(
+                            "[%s] ⚠️ PAST-DUE go_public: video %s was scheduled for %s "
+                            "(%.1fh ago) — publishing NOW as catch-up",
+                            self.slug, yt_video_id,
+                            target_dt.strftime("%m-%d %H:%M"),
+                            (now.replace(tzinfo=_tz.utc) - target_dt).total_seconds() / 3600,
+                        )
+                except Exception:
+                    pass
             result = uploader.set_privacy(yt_video_id, "public")
             if result.get("updated") or result.get("privacy") == "public":
                 # Update video status in DB

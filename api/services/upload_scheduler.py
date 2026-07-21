@@ -184,7 +184,7 @@ def dispatch_due_uploads(db=None) -> dict | None:
                  AND v.video_path IS NOT NULL
                  AND v.video_path != ''
                  AND (v.scheduled_upload_at IS NULL
-                      OR v.scheduled_upload_at <= datetime('now', 'localtime'))
+                      OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now', 'localtime'))
                ORDER BY v.scheduled_upload_at ASC, v.created_at ASC
                LIMIT 20"""
         ).fetchall()
@@ -215,7 +215,7 @@ def dispatch_due_uploads(db=None) -> dict | None:
                 continue
             # Store in DB for future cycles
             try:
-                db.update_video(video_id, scheduled_upload_at=sched_time.isoformat())
+                db.update_video(video_id, scheduled_upload_at=sched_time.strftime('%Y-%m-%d %H:%M:%S'))
             except Exception:
                 pass
             if sched_time > now:

@@ -311,8 +311,21 @@ async def _schedule_checker_loop():
         try:
             if first_run:
                 first_run = False
+                sleep_sec = 0  # immediate first run
             else:
-                await asyncio.sleep(300)  # Check every 5 minutes after first run
+                # ── Adaptive sleep: faster tick when behind schedule ──
+                import time as _t_sleep
+                try:
+                    past_due = int(_sched_db.get_system_state("past_due_slots") or "0")
+                except Exception:
+                    past_due = 0
+                if past_due >= 3:
+                    sleep_sec = 60   # urgent catch-up: 1 min
+                elif past_due >= 1:
+                    sleep_sec = 120  # catch-up: 2 min
+                else:
+                    sleep_sec = 300  # normal: 5 min
+                await asyncio.sleep(sleep_sec)
 
             # ── Pause gate: skip ALL scheduling when operator paused ──
             _paused = False
@@ -329,6 +342,13 @@ async def _schedule_checker_loop():
                 await _process_upload_slots()
                 await _process_planned_slots()
                 await _queue_consumer()
+
+                # ── Update catch-up state for adaptive sleep ──
+                try:
+                    past_due = _sched_db.count_past_due_slots()
+                    _sched_db.set_system_state("past_due_slots", str(past_due))
+                except Exception:
+                    pass
 
                 # Process video lifecycle promotion actions every 15 minutes
                 if now - last_lifecycle_check > 900:

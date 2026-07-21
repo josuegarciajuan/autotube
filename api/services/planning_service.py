@@ -592,6 +592,21 @@ def compute_horizon_slots(
         lead_h = s["lead_hours"]
         is_scheduled = s["publish_mode"] == "scheduled"
         
+        # ── Adaptive lead time: increase buffer when behind schedule ──
+        # If past-due slots exist for this channel, boost lead_hours so
+        # future slots are planned with much more margin, building a
+        # pre-generated buffer that prevents future delays.
+        if is_scheduled:
+            try:
+                from database.db_extended import ExtendedDatabase
+                _adap_db = ExtendedDatabase()
+                past_due = _adap_db.count_past_due_slots()
+                if past_due > 0:
+                    # Boost: base lead + extra per past-due slot (max 72h)
+                    lead_h = min(lead_h + past_due * 2, 72)
+            except Exception:
+                pass
+        
         # Parse target times
         upload_dt = _dt.strptime(s["target_upload_at"], "%Y-%m-%d %H:%M:%S")
         public_dt = _dt.strptime(s["target_public_at"], "%Y-%m-%d %H:%M:%S")

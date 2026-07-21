@@ -34,12 +34,15 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from api.utils import db_now
-
-# Ensure the project root is on sys.path
+# ── Ensure the project root is on sys.path BEFORE any project imports ──
+# When invoked as a script (python3 api/services/full_pipeline_worker.py),
+# Python places the script's directory on sys.path[0], NOT the CWD.
+# The project root (autotube/) must be added so `from api.utils import ...` works.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+from api.utils import db_now
 
 
 # ── Logging setup ──────────────────────────────────────────────────
