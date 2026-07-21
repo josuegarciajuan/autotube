@@ -2642,6 +2642,20 @@ async def auto_recover_on_startup():
         log.info("Cleaned up %d orphaned shorts slot(s) (job died on restart)", orphaned_slots)
 
     # ── Step 3: Auto-recover recoverable videos ───────────────
+    # ── Concurrency guard: skip recovery if a long-form generation is already
+    # running. Creating reassemble jobs while a worker is active would block
+    # all dispatches (count_active_jobs > 0 → everything defers).
+    # Recovery will retry on the next restart when the system is idle.
+    active_gen_count = db.count_active_jobs()
+    if active_gen_count > 0:
+        log.info(
+            "Skipping auto-recovery: %d active job(s) running — "
+            "creating reassemble jobs now would block the dispatcher. "
+            "Will retry on next idle restart.",
+            active_gen_count,
+        )
+        conn.close()
+        return
     rows = conn.execute(
         "SELECT * FROM videos WHERE status='error' "
         "AND checkpoint_data IS NOT NULL AND checkpoint_data != '{}' "
