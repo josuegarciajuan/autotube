@@ -264,6 +264,52 @@ def _kill_orphaned_workers(logger) -> int:
             except OSError:
                 pass
 
+            # ── Clean up DB state for this orphaned worker ──
+            # The worker was killed but the job/video may still be
+            # marked as 'running'/'generating'.  Fix both so the UI
+            # doesn't show phantom active generations.
+            try:
+                import sqlite3 as _sql3
+                _conn2 = _sql3.connect(DATABASE_PATH)
+                _conn2.row_factory = _sql3.Row
+                _cur2 = _conn2.cursor()
+                _job_row = _cur2.execute(
+                    "SELECT id, status, video_id FROM generation_jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if _job_row:
+                    _job_status = _job_row["status"]
+                    _video_id = _job_row["video_id"]
+                    if _job_status not in ("completed", "failed", "cancelled"):
+                        _cur2.execute(
+                            "UPDATE generation_jobs SET status='failed', "
+                            "error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                            ("Orphaned: worker killed by pre-spawn cleanup", job_id),
+                        )
+                    if _video_id:
+                        _vid = _cur2.execute(
+                            "SELECT status FROM videos WHERE id=?", (_video_id,),
+                        ).fetchone()
+                        if _vid and _vid["status"] == "generating":
+                            _yt = _cur2.execute(
+                                "SELECT yt_video_id FROM videos WHERE id=?", (_video_id,),
+                            ).fetchone()
+                            if not (_yt and _yt[0]):
+                                _cur2.execute(
+                                    "UPDATE videos SET status='error', "
+                                    "progress_phase='orphaned' WHERE id=?",
+                                    (_video_id,),
+                                )
+                                logger.warning(
+                                    "Orphan cleanup: video #%d reset to error/orphaned "
+                                    "(job #%d worker killed)",
+                                    _video_id, job_id,
+                                )
+                _conn2.commit()
+                _conn2.close()
+            except Exception:
+                pass
+
     if killed > 0:
         logger.warning("Killed %d orphaned worker process(es)", killed)
 
