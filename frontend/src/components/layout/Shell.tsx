@@ -14,14 +14,11 @@ export default function Shell() {
     const checkSessions = async () => {
       try {
         const data = await api.getBrowserSessionStatus()
-        if (data.any_invalid) {
-          const invalid = data.accounts
-            .filter((a: any) => !a.valid)
-            .map((a: any) => ({ account: a.account, channels: a.channels }))
-          setSessionWarnings(invalid)
-        } else {
-          setSessionWarnings([])
-        }
+        // Only show warning for truly expired sessions — not "in_use" or transient errors
+        const expired = data.accounts
+          .filter((a: any) => a.status === 'expired')
+          .map((a: any) => ({ account: a.account, channels: a.channels }))
+        setSessionWarnings(expired)
       } catch {
         // Silently ignore — server might be restarting
       } finally {

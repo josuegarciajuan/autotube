@@ -118,19 +118,23 @@ def auth_status(channel_id: int):
 # ── Browser session status ─────────────────────────────────────
 
 @router.get("/browser-sessions/status")
-def browser_session_status():
+async def browser_session_status():
     """Check if Playwright browser sessions are valid for all accounts.
     
-    Returns per-account status: profile exists, session valid, channels mapped.
-    The frontend uses this to show a persistent warning bar when sessions expire.
+    Returns per-account status with status field:
+        "valid" — session is authenticated
+        "expired" — session needs re-login
+        "in_use" — profile is currently in use by another process (NOT expired)
+        "error" — couldn't verify (transient)
+        "missing_profile" — profile doesn't exist (never logged in)
     """
     try:
         from pipeline.youtube_browser import get_all_browser_session_status
-        accounts = get_all_browser_session_status()
+        accounts = await get_all_browser_session_status()
         return {
             "accounts": accounts,
-            "all_valid": all(a["valid"] for a in accounts),
-            "any_invalid": any(not a["valid"] for a in accounts),
+            "all_valid": all(a["status"] == "valid" for a in accounts),
+            "any_invalid": any(a["status"] not in ("valid", "in_use") for a in accounts),
         }
     except Exception as e:
         logger.error("Failed to check browser session status: %s", e)

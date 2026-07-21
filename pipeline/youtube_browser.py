@@ -557,38 +557,68 @@ def get_account_for_channel(channel_slug: str) -> Optional[str]:
 
 # ── Session health check ───────────────────────────────────────
 
-_session_check_cache: dict = {}  # {account: (timestamp, valid_bool)}
+_session_check_cache: dict = {}  # {account: (timestamp, status_dict)}
 
 
-def check_session_valid(account: str, cache_seconds: int = 300) -> bool:
-    """Quick check if a browser session is still authenticated.
+async def check_session_valid(account: str, cache_seconds: int = 300) -> dict:
+    """Check if a browser session is still authenticated.
     
     Launches a temporary browser with the persistent profile, navigates
     to YouTube Studio, and checks we aren't redirected to login.
     Results are cached for `cache_seconds` (default 5 min).
     
-    Returns True if the session appears valid, False otherwise.
+    Returns a dict with keys:
+        status: "valid" | "expired" | "in_use" | "error" | "missing_profile"
+        detail: human-readable explanation
     """
     import time as _time
     now = _time.time()
     if account in _session_check_cache:
-        ts, val = _session_check_cache[account]
+        ts, cached = _session_check_cache[account]
         if now - ts < cache_seconds:
-            return val
+            return cached
 
     from pathlib import Path as _Path
     user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
     if not user_data_dir.exists():
-        _session_check_cache[account] = (now, False)
+        result = {"status": "missing_profile", "detail": f"Browser profile not found at {user_data_dir}"}
+        _session_check_cache[account] = (now, result)
         logger.warning("Browser profile missing for %s: %s", account, user_data_dir)
-        return False
+        return result
 
-    valid = False
+    # ── Check if profile is already in use by a running Chromium ──
+    lock_file = user_data_dir / "SingletonLock"
+    if lock_file.exists():
+        try:
+            lock_content = lock_file.read_text().strip()
+            if lock_content:
+                lock_pid = lock_content.split(":")[-1]
+                try:
+                    os.kill(int(lock_pid), 0)  # signal 0 = check existence
+                    result = {
+                        "status": "in_use",
+                        "detail": f"Browser profile is currently in use by PID {lock_pid}"
+                    }
+                    _session_check_cache[account] = (now, result)
+                    logger.debug("Session check skipped for %s — profile in use by PID %s", account, lock_pid)
+                    return result
+                except (OSError, ValueError):
+                    # PID is dead — clean stale locks
+                    for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                        fpath = user_data_dir / fname
+                        if fpath.exists():
+                            fpath.unlink()
+                    logger.info("Cleaned stale browser locks for %s", account)
+        except Exception:
+            pass  # lock file corrupted/unreadable, proceed to launch
+
+    status = "error"
+    detail = ""
     try:
         _ensure_xvfb()
-        from playwright.sync_api import sync_playwright as _sync_pw
-        pw = _sync_pw().start()
-        ctx = pw.chromium.launch_persistent_context(
+        from playwright.async_api import async_playwright as _async_pw
+        pw = await _async_pw().start()
+        ctx = await pw.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=False,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
@@ -597,31 +627,44 @@ def check_session_valid(account: str, cache_seconds: int = 300) -> bool:
             timezone_id="Europe/Madrid",
         )
         try:
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
-            _time.sleep(3)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
+            import asyncio as _asyncio
+            await _asyncio.sleep(3)
             current_url = page.url
             if "studio.youtube.com" in current_url and "accounts.google.com" not in current_url:
-                valid = True
+                status = "valid"
+                detail = "Session is authenticated"
                 logger.debug("Session valid for %s (url: %s)", account, current_url[:80])
             else:
+                status = "expired"
+                detail = "Redirected to login — re-authentication required"
                 logger.warning("Session EXPIRED for %s (redirected to: %s)", account, current_url[:120])
         finally:
-            try: ctx.close()
+            try: await ctx.close()
             except Exception: pass
-            try: pw.stop()
+            try: await pw.stop()
             except Exception: pass
     except Exception as e:
+        error_msg = str(e)
+        # Detect profile-in-use by Chromium's error message (fallback if SingletonLock check missed it)
+        if "already in use" in error_msg.lower() or "singletonlock" in error_msg.lower():
+            status = "in_use"
+            detail = f"Browser profile is currently in use by another process"
+        else:
+            status = "error"
+            detail = f"Could not verify session: {error_msg[:200]}"
         logger.warning("check_session_valid error for %s: %s", account, e)
 
-    _session_check_cache[account] = (now, valid)
-    return valid
+    result = {"status": status, "detail": detail}
+    _session_check_cache[account] = (now, result)
+    return result
 
 
-def get_all_browser_session_status() -> list:
+async def get_all_browser_session_status() -> list:
     """Return status for all configured browser accounts.
     
-    Returns: list of dicts with keys: account, valid, channels, profile_exists
+    Returns: list of dicts with keys: account, valid, status, detail, channels, profile_exists
     """
     from pathlib import Path as _Path
     result = []
@@ -636,10 +679,15 @@ def get_all_browser_session_status() -> list:
             continue
         seen_accounts.add(account)
         profile_exists = (TOKENS_DIR / f"{account}_browser_profile").exists()
-        valid = check_session_valid(account) if profile_exists else False
+        if profile_exists:
+            status_dict = await check_session_valid(account)
+        else:
+            status_dict = {"status": "missing_profile", "detail": "Browser profile not found"}
         result.append({
             "account": account,
-            "valid": valid,
+            "valid": status_dict["status"] == "valid",  # backward compat
+            "status": status_dict["status"],
+            "detail": status_dict["detail"],
             "profile_exists": profile_exists,
             "channels": [slug],
         })
