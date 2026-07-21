@@ -1557,6 +1557,26 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     ch_config = get_channel_config(channel_slug)
     hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
 
+    # Fetch recent topics to avoid repetition
+    from database.db_extended import ExtendedDatabase
+    dbx = ExtendedDatabase(str(DATABASE_PATH))
+    recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    topic_warning = ""
+    if recent_topics:
+        topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
+        topic_warning = (
+            f"\n\n⚠️ IMPORTANTE: NO repitas NINGUNO de estos temas ya publicados "
+            f"recientemente en este canal:\n{topic_list}\n\n"
+            f"Elige un tema COMPLETAMENTE DIFERENTE y fresco. "
+            f"Incluye en el JSON un campo \"tema\" con una frase corta (max 80 chars) "
+            f"que identifique claramente de qué trata este Short.\n"
+        )
+    else:
+        topic_warning = (
+            f"\n\nIncluye en el JSON un campo \"tema\" con una frase corta (max 80 chars) "
+            f"que identifique claramente de qué trata este Short.\n"
+        )
+
     # 1. Script via LLM
     from openai import OpenAI
     client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
@@ -1566,7 +1586,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
 
     response = client.chat.completions.create(
         model=LLM_MODEL,
-        messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}. Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
+        messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}.{topic_warning}Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"tema\": \"frase corta que identifica el tema (max 80 chars)\", \"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
         temperature=0.9, max_tokens=1200,
     )
     content = response.choices[0].message.content
@@ -1585,6 +1605,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     title = (script.get("titulo") or script.get("title") or "Short")[:100]
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
+    topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
     # 2. Segmented TTS (block-by-block, no mid-phrase truncation)
     output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -1688,7 +1709,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, str(video_path), yt_id, result.get("url", "")))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at) VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", "")))
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()

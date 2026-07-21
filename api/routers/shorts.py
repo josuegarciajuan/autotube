@@ -743,6 +743,19 @@ async def generate_native(channel_id: int):
     bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
     hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
 
+    # 1b. Fetch recent topics to avoid repetition
+    from database.db_extended import ExtendedDatabase
+    dbx = ExtendedDatabase(str(DATABASE_PATH))
+    recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    topic_warning = ""
+    if recent_topics:
+        topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
+        topic_warning = (
+            f"\n\n⚠️ IMPORTANTE: NO repitas NINGUNO de estos temas ya publicados "
+            f"recientemente en este canal:\n{topic_list}\n\n"
+            f"Elige un tema COMPLETAMENTE DIFERENTE y fresco.\n"
+        )
+
     # 2. Generate script via LLM
     from openai import OpenAI
     client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
@@ -751,10 +764,10 @@ async def generate_native(channel_id: int):
 
 Canal: {display_name} — {niche}
 Tagline: {tagline}
-
+{topic_warning}
 Genera un Short viral de ~40-45 segundos de narración (~70-90 palabras en español). USA 5 BLOQUES, cada uno con 1-2 frases concisas. El JSON EXACTO es:
 
-{{"titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "theme_keywords_en": ["global", "theme", "keywords", "visual", "context"], "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente.", "search_query_en": "5-8 english keywords describing exact scene visuals for stock image search. Be VERY concrete: include topic details, lighting, shot type, atmosphere. NO spanish."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato. Añade detalles concretos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Profundiza en la revelación. Usa comparaciones o datos numéricos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver. Qué significa este dato. Por qué debería importarnos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto, deja una reflexión, e invita a suscribirse.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
+{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "theme_keywords_en": ["global", "theme", "keywords", "visual", "context"], "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente.", "search_query_en": "5-8 english keywords describing exact scene visuals for stock image search. Be VERY concrete: include topic details, lighting, shot type, atmosphere. NO spanish."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato. Añade detalles concretos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Profundiza en la revelación. Usa comparaciones o datos numéricos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver. Qué significa este dato. Por qué debería importarnos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto, deja una reflexión, e invita a suscribirse.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
 
 RESPONDE SOLO CON EL JSON. NADA MÁS."""
 
@@ -793,6 +806,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     title = (script.get("titulo") or script.get("title") or "Short")[:100]
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
+    topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
     # 3. Segmented TTS (block-by-block, no mid-phrase truncation)
     output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -920,10 +934,10 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     cursor = conn.execute(
         """INSERT INTO shorts
-           (channel_id, type, title, hook_title, hook_text,
+           (channel_id, type, title, hook_title, hook_text, topic,
             status, file_path, youtube_id, youtube_url, published_at)
-           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
-        (channel_id, title, title[:60], hook_text,
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
+        (channel_id, title, title[:60], hook_text, topic,
          str(video_path), yt_id, result.get("url", "")),
     )
     short_id = cursor.lastrowid

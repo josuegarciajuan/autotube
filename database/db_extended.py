@@ -263,6 +263,15 @@ def migrate_v2(db_path: str = None):
     """)
     conn.commit()
     
+    # Add topic column to shorts for native short topic deduplication (idempotent)
+    existing_shorts = {row[1] for row in conn.execute("PRAGMA table_info(shorts)").fetchall()}
+    if "topic" not in existing_shorts:
+        try:
+            conn.execute("ALTER TABLE shorts ADD COLUMN topic TEXT")
+            logger.info("Migration: added topic column to shorts")
+        except sqlite3.OperationalError:
+            pass
+
     # Add estimated_minutes_watched to channel_stats_history (idempotent)
     existing_csh = {row[1] for row in conn.execute("PRAGMA table_info(channel_stats_history)").fetchall()}
     if "estimated_minutes_watched" not in existing_csh:
@@ -3567,6 +3576,22 @@ class ExtendedDatabase(Database):
             q += " ORDER BY s.ranking ASC"
             rows = conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
+
+    def get_recent_short_topics(self, channel_id: int, limit: int = 15) -> list[str]:
+        """Get recently published native short topics for a channel.
+
+        Returns a de-duplicated list of topic strings ordered most-recent-first.
+        Used to avoid repeating themes across successive native shorts.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT topic FROM shorts
+                   WHERE channel_id = ? AND type = 'native' AND topic IS NOT NULL AND topic != ''
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (channel_id, limit),
+            ).fetchall()
+        return [r["topic"] for r in rows]
 
     def get_shorts_stats(self) -> dict:
         """Get aggregate shorts statistics including YouTube metrics."""

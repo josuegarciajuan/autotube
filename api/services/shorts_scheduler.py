@@ -716,6 +716,26 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     display_name = getattr(ch_config, "CANAL_DISPLAY_NAME", channel_slug)
     tagline = getattr(ch_config, "CANAL_TAGLINE", "")
 
+    # 0. Fetch recent topics to avoid repetition
+    from database.db_extended import ExtendedDatabase
+    dbx = ExtendedDatabase(str(DATABASE_PATH))
+    recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    topic_warning = ""
+    if recent_topics:
+        topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
+        topic_warning = (
+            f"\n\n⚠️ IMPORTANTE: NO repitas NINGUNO de estos temas ya publicados recientemente "
+            f"en este canal:\n{topic_list}\n\n"
+            f"Elige un tema COMPLETAMENTE DIFERENTE y fresco. "
+            f"Incluye en el JSON un campo \"tema\" con una frase corta (max 80 chars) que "
+            f"identifique claramente de qué trata este Short.\n"
+        )
+    else:
+        topic_warning = (
+            f"\n\nIncluye en el JSON un campo \"tema\" con una frase corta (max 80 chars) "
+            f"que identifique claramente de qué trata este Short.\n"
+        )
+
     # 1. Script via LLM
     from openai import OpenAI
     client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
@@ -724,7 +744,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
         model=LLM_MODEL,
         messages=[{"role": "user", "content": (
             f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). "
-            f"Canal: {display_name} — {niche}. Tagline: {tagline}. "
+            f"Canal: {display_name} — {niche}. Tagline: {tagline}."
+            f"{topic_warning}"
             f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). "
             f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
             f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
@@ -736,7 +757,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
             f"Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL "
             f"del short para mantener coherencia entre escenas. "
             f"Devuelve SOLO JSON: "
-            f'{{"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
+            f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
+            f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
             f'"theme_keywords_en": ["global", "theme", "keywords"], '
             f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
             f'"search_query_en": "english keywords for stock search"}}, '
@@ -771,6 +793,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     title = (script.get("titulo") or script.get("title") or "Short")[:100]
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
+    topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
     # 2. Segmented TTS
     output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -904,10 +927,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     cursor = conn.execute(
         """INSERT INTO shorts
-           (channel_id, type, title, hook_title, hook_text,
+           (channel_id, type, title, hook_title, hook_text, topic,
             status, file_path, youtube_id, youtube_url, published_at)
-           VALUES (?, 'native', ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
-        (channel_id, title, title[:60], hook_text,
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
+        (channel_id, title, title[:60], hook_text, topic,
          str(video_path), yt_id, result.get("url", "")),
     )
     short_id = cursor.lastrowid

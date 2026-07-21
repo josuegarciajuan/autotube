@@ -95,7 +95,10 @@ class NativeShortsPipeline:
         return random.choice(items)
 
     def _generate_topic_idea(self) -> list[dict]:
-        """Use LLM to generate a viral short-form topic in the channel's niche."""
+        """Use LLM to generate a viral short-form topic in the channel's niche.
+
+        Fetches recently published native short topics and instructs the LLM to avoid them.
+        """
         try:
             from openai import OpenAI
             from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
@@ -104,6 +107,19 @@ class NativeShortsPipeline:
             display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
             tagline = getattr(self.config, "CANAL_TAGLINE", "")
 
+            # Fetch recent topics to avoid repetition
+            channel_id = self.db.get_channel_by_slug(self.channel_slug)
+            channel_id = channel_id.get("id") if channel_id else None
+            topic_warning = ""
+            if channel_id:
+                recent_topics = self.db.get_recent_short_topics(channel_id, limit=15)
+                if recent_topics:
+                    topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
+                    topic_warning = (
+                        f"\n\n⚠️ EVITA estos temas ya publicados recientemente:\n"
+                        f"{topic_list}\n\nElige temas COMPLETAMENTE DIFERENTES.\n"
+                    )
+
             client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
             prompt = f"""Genera 3 ideas virales para un YouTube Short (30-90 segundos) en español.
@@ -111,12 +127,12 @@ class NativeShortsPipeline:
 CANAL: {display_name}
 ESTILO: {niche}
 DESCRIPCIÓN: {tagline}
-
+{topic_warning}
 Cada idea debe ser un tema sorprendente, polémico o curioso que funcione bien en formato corto vertical.
 Formato: datos impactantes, cliffhangers, o revelaciones que enganchen en los primeros 3 segundos.
 
-Devuelve SOLO un array JSON con 3 objetos, cada uno con campo "title":
-[{{"title": "..."}}, {{"title": "..."}}, {{"title": "..."}}]"""
+Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
+[{{"title": "...", "tema": "frase corta que identifica el tema (max 80 chars)"}}, ...]"""
 
             response = client.chat.completions.create(
                 model=LLM_MODEL,
@@ -174,7 +190,7 @@ IMPORTANTE — BÚSQUEDA DE IMÁGENES:
   mantener coherencia visual entre escenas.
 
 Devuelve SOLO JSON:
-{{"titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
+{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
 
         try:
             response = client.chat.completions.create(
