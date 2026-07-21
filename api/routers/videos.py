@@ -332,9 +332,11 @@ def set_video_privacy(video_id: int, data: dict):
     if privacy_new not in ("public", "unlisted", "private"):
         raise HTTPException(400, "privacy_status must be 'public', 'unlisted', or 'private'")
     
-    channel_id = v.get("channel_id") or 1
-    ch = db.get_channel(channel_id)
-    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    channel_id = v.get("channel_id")
+    ch = db.get_channel(channel_id) if channel_id else None
+    canal = ch["slug"] if ch else v.get("canal")
+    if not canal:
+        raise HTTPException(400, "Video has no channel assigned")
     
     from orchestrator import PipelineOrchestrator
     orch = PipelineOrchestrator(canal=canal)
@@ -692,7 +694,9 @@ def publish_video_now(video_id: int):
 
     from orchestrator import PipelineOrchestrator
     ch = db.get_channel(v["channel_id"]) if v.get("channel_id") else None
-    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    canal = ch["slug"] if ch else v.get("canal")
+    if not canal:
+        raise HTTPException(400, "Video has no channel assigned")
     orch = PipelineOrchestrator(canal=canal)
     if not orch.uploader.authenticate():
         raise HTTPException(500, "Failed to authenticate")
@@ -763,7 +767,10 @@ def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
     db.update_video(video_id, status="error", progress_phase="error")
     
     # Create job — bypass MAX_RECOVERY_ATTEMPTS by direct insert
-    job_id = db.create_job(v.get("channel_id", 0) or 1, "reassemble", video_id)
+    channel_id = v.get("channel_id")
+    if not channel_id:
+        raise HTTPException(400, "Video has no channel assigned")
+    job_id = db.create_job(channel_id, "reassemble", video_id)
     db.update_job(job_id, status="running",
                   error_msg="Force-retry bypass (user-initiated)")
     

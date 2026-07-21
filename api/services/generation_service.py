@@ -1830,9 +1830,12 @@ async def start_upload_job(job_id: int, video_id: int):
         return
     
     db.update_job(job_id, status="running")
-    channel_id = v.get("channel_id") or 1
-    ch = db.get_channel(channel_id)
-    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    channel_id = v.get("channel_id")
+    ch = db.get_channel(channel_id) if channel_id else None
+    canal = ch["slug"] if ch else v.get("canal")
+    if not canal:
+        await _broadcast_progress(job_id, 0, "upload", "Error: Canal no identificado", "failed")
+        return
     
     await _broadcast_progress(job_id, 5, "upload", "Preparando subida...",
                                video_id=video_id, detail="Cargando datos del video")
@@ -1983,7 +1986,9 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
 
     db.update_job(job_id, status="running")
     ch = db.get_channel(channel_id)
-    canal = ch["slug"] if ch else v.get("canal", "canal2")
+    canal = ch["slug"] if ch else v.get("canal")
+    if not canal:
+        db.update_job(job_id, status="failed", error_msg="Channel not resolved")
 
     await _broadcast_progress(job_id, 5, "upload", "F2: Preparando subida programada...",
                                video_id=video_id)
@@ -2285,8 +2290,10 @@ async def _do_reassembly(job_id: int, video_id: int):
                                        "No hay assets en el checkpoint", "failed")
             return
 
-        # Channel config / slug
-        canal = video.get("canal", "canal2")
+        # Channel config / slug — resolve from video's channel_id
+        channel_id = video.get("channel_id")
+        ch = db.get_channel(channel_id) if channel_id else None
+        canal = ch["slug"] if ch else video.get("canal")
     except Exception as e:
         logger.exception("Reassembly data load failed")
         await _broadcast_progress(job_id, 0, "error", f"Error cargando datos: {e}", "failed")
@@ -2788,7 +2795,11 @@ async def auto_recover_on_startup():
             continue
 
         # ── Recover ────────────────────────────────────────────
-        channel_id = video_dict.get("channel_id") or 3
+        channel_id = video_dict.get("channel_id")
+        if not channel_id:
+            log.warning("Video %d: no channel_id — skipping auto-recovery", video_id)
+            skipped += 1
+            continue
 
         # Guard: don't create duplicate reassembly jobs
         existing = conn.execute(
@@ -3294,7 +3305,7 @@ async def reconnect_active_workers():
                     _active_workers[job_id] = proc
 
                     # Get channel name
-                    ch = db.get_channel(job.get("channel_id") or 1)
+                    ch = db.get_channel(job.get("channel_id")) if job.get("channel_id") else None
                     channel_name = ch.get("name", "?") if ch else "?"
 
                     # Re-spawn the progress monitor

@@ -250,7 +250,7 @@ class ContentCreate(BaseModel):
     title: str = Field(..., min_length=1)
     text: str = Field(..., min_length=10)
     source: str = "manual"
-    canal: str = "canal2"
+    canal: Optional[str] = None
     subreddit: Optional[str] = None
     url: Optional[str] = None
     score: int = 0

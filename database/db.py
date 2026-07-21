@@ -99,13 +99,21 @@ class Database:
             conn.commit()
             return cursor
 
+    @staticmethod
+    def _resolve_canal(canal: str | None = None) -> str:
+        """Resolve canal slug from explicit parameter or fallback to first active channel."""
+        if canal:
+            return canal
+        from config.settings import ACTIVE_CHANNELS
+        return ACTIVE_CHANNELS[0] if ACTIVE_CHANNELS else "unknown"
+
     # ── raw_content ────────────────────────────────────────────
 
     @_with_db_lock_retry
     def insert_raw_content(self, source, url, title, text,
-                           subreddit=None, score=0, canal="canal2"):
+                           subreddit=None, score=0, canal=None):
         """Insert scraped content. Returns row id. Skips duplicates by URL."""
-        with self._connect() as conn:
+        canal = self._resolve_canal(canal)        with self._connect() as conn:
             try:
                 cursor = conn.execute(
                     """INSERT INTO raw_content
@@ -120,7 +128,7 @@ class Database:
 
     @_with_db_lock_retry
     def insert_raw_content_viral(self, source, url, title, text,
-                                  subreddit=None, score=0, canal="canal2",
+                                  subreddit=None, score=0, canal=None,
                                   source_mode="viral",
                                   viral_original_title=None,
                                   viral_original_description=None,
@@ -134,6 +142,7 @@ class Database:
                                   viral_script_es=None,
                                   viral_meta_json=None):
         """Insert viral content with all viral metadata columns. Returns row id. Skips duplicates by URL."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             try:
                 cursor = conn.execute(
@@ -155,8 +164,9 @@ class Database:
             except sqlite3.IntegrityError:
                 return None
 
-    def get_viral_candidates(self, canal="canal2", min_score=0.0, limit=20):
+    def get_viral_candidates(self, canal=None, min_score=0.0, limit=20):
         """Fetch viral candidates ordered by viral_score (highest first)."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM raw_content
@@ -167,8 +177,9 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_content_by_url(self, url, canal="canal2"):
+    def get_content_by_url(self, url, canal=None):
         """Check if a URL already exists in raw_content for deduplication."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM raw_content WHERE url = ? AND canal = ?",
@@ -185,7 +196,7 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def get_unused_content(self, canal="canal2", limit=10, strategy: str = "best_first"):
+    def get_unused_content(self, canal=None, limit=10, strategy: str = "best_first"):
         """Fetch unused scraped content.
 
         Args:
@@ -197,6 +208,7 @@ class Database:
                 - "oldest_first": Oldest first (legacy).
                 - "highest_score": Highest Reddit score first.
         """
+        canal = self._resolve_canal(canal)
         if strategy == "newest_first":
             order_clause = "ORDER BY scraped_at DESC"
         elif strategy == "oldest_first":
@@ -225,8 +237,9 @@ class Database:
             )
             conn.commit()
 
-    def get_unused_count(self, canal="canal2"):
+    def get_unused_count(self, canal=None):
         """Return count of unused content items."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM raw_content WHERE canal = ? AND used = 0",
@@ -262,8 +275,9 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
-    def get_unused_scripts(self, canal="canal2", limit=5):
+    def get_unused_scripts(self, canal=None, limit=5):
         """Fetch unused scripts sorted by creation time."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM scripts
@@ -361,8 +375,9 @@ class Database:
             )
             conn.commit()
 
-    def get_unuploaded_videos(self, canal="canal2", limit=5):
+    def get_unuploaded_videos(self, canal=None, limit=5):
         """Fetch videos not yet uploaded to YouTube."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM videos
@@ -372,8 +387,9 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_videos_today(self, canal="canal2"):
+    def get_videos_today(self, canal=None):
         """Count videos uploaded today for a channel."""
+        canal = self._resolve_canal(canal)
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM videos
