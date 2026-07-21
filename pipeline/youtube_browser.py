@@ -26,8 +26,17 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOKENS_DIR = PROJECT_ROOT / "tokens"
 
-# -- Selectors (confirmed working 2026-07-17) --
+# -- Selectors (confirmed working 2026-07-17, updated 2026-07-21) --
 SEL_MOSTRAR_MAS = "text=Mostrar más"
+# Fallback selectors for "Mostrar más" (YouTube changes locales/classes often)
+_MOSTRAR_MAS_FALLBACKS = [
+    "text=Mostrar más",
+    "text=Show more",
+    "button:has-text('Mostrar más')",
+    "button:has-text('Show more')",
+    "[aria-label='Mostrar más']",
+    "[aria-label='Show more']",
+]
 SEL_RADIO_YES = '[name="VIDEO_HAS_ALTERED_CONTENT_YES"]'
 SEL_GUARDAR_ENABLED = "button:has-text('Guardar'):not([disabled])"
 SEL_SAVE_CONFIRM = "text=Guardado"
@@ -113,6 +122,47 @@ class YouTubeBrowser:
         )
         logger.info("Browser ready for account: %s", self.account)
 
+    def _scroll_page_to_bottom(self, page):
+        """Scroll YouTube Studio's inner scrollable containers to the bottom.
+
+        YouTube Studio renders content inside nested scrollable divs — not just
+        the outer window. window.scrollTo() alone doesn't work.
+        This scrolls ALL inner containers that have overflow:auto/scroll,
+        plus the outer window as fallback.
+        """
+        page.evaluate("""() => {
+            const all = document.querySelectorAll('*');
+            for (const el of all) {
+                try {
+                    const style = getComputedStyle(el);
+                    if ((style.overflowY === 'auto' || style.overflowY === 'scroll')
+                        && el.scrollHeight > el.clientHeight + 5) {
+                        el.scrollTop = el.scrollHeight;
+                    }
+                } catch (_) {}
+            }
+            window.scrollTo(0, document.body.scrollHeight);
+        }""")
+
+    def _find_and_click_mostrar_mas(self, page) -> bool:
+        """Try multiple selectors to find and click 'Mostrar más' button.
+
+        YouTube changes DOM classes/locales frequently — this tries 6 variants.
+        Returns True if found and clicked, False otherwise.
+        """
+        for sel in _MOSTRAR_MAS_FALLBACKS:
+            try:
+                el = page.wait_for_selector(sel, timeout=5000, state="visible")
+                if el:
+                    logger.debug("'Mostrar más' found via: %s", sel)
+                    el.click()
+                    return True
+            except PlaywrightTimeout:
+                continue
+        logger.warning("'Mostrar más' not found with any of %d selectors",
+                       len(_MOSTRAR_MAS_FALLBACKS))
+        return False
+
     def close(self):
         with self._lock:
             try:
@@ -136,7 +186,7 @@ class YouTubeBrowser:
         try:
             human_delay(1.0, 3.0, "initial")
             edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
-            page.goto(edit_url, wait_until="commit", timeout=60000)
+            page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
             human_delay(4.0, 8.0, "page load")
             if "/video/" not in page.url or "/edit" not in page.url:
                 logger.error("Navigation failed: %s", page.url[:120])
@@ -149,15 +199,20 @@ class YouTubeBrowser:
                 logger.warning("Title field not found, continuing")
             human_delay(2.0, 4.0, "editor settle")
 
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            # Scroll inner containers (not just window) to reveal "Mostrar más" button
+            self._scroll_page_to_bottom(page)
             human_delay(1.0, 2.0, "post-scroll")
 
-            mostrar_el = page.wait_for_selector(SEL_MOSTRAR_MAS, timeout=15000, state="visible")
-            human_delay(0.5, 1.5, "find mostrar")
-            mostrar_el.click()
-            human_delay(1.5, 3.0, "expand")
+            # Try multiple selectors for "Mostrar más" with fallbacks
+            found_mostrar = self._find_and_click_mostrar_mas(page)
+            if found_mostrar:
+                human_delay(1.5, 3.0, "expand")
+            else:
+                # Section may already be expanded, continue
+                human_delay(0.5, 1.0, "no expand needed")
 
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            # Scroll again to reveal radio buttons after expansion
+            self._scroll_page_to_bottom(page)
             human_delay(1.0, 2.0, "post-expand scroll")
 
             yes_radio = page.wait_for_selector(SEL_RADIO_YES, timeout=8000, state="visible")
