@@ -117,6 +117,18 @@ porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto
 | GET | `/api/channels/{id}/youtube-stats` | Stats en tiempo real del canal |
 | GET | `/api/videos/{id}/stats-history` | Histórico de stats del video |
 
+### 🔒 Invariante de concurrencia — SOLO UNA generación a la vez
+**NUNCA debe haber más de una generación de video larga (long-form) ejecutándose simultáneamente.**
+
+- La concurrencia de renders de ffmpeg causa contención de RAM que puede matar decoders y producir videos corruptos o incompletos.
+- **Mecanismo de enforcement:**
+  - `_DISPATCH_LOCK` (`threading.Lock` en `api/services/generation_service.py`) — serializa todos los puntos de entrada de dispatch.
+  - `count_active_jobs()` en `database/db_extended.py` — guardia global.
+  - Guardia secundario en `start_generation_job_subprocess()` — cierra ventana TOCTOU residual.
+- **Si un segundo dispatch pasa los guards por error**, el guardia secundario lo bloquea y limpia los registros huérfanos (video → `error`, planned_slot → `pending`, job → `failed`).
+- Los shorts (generate_native_short, generate_clip_short) y uploads F2 están **excluidos** de este límite (pueden correr en paralelo con una generación long-form).
+- Los reassemble también están limitados: solo uno a la vez.
+
 ### 🎬 Invariante de escenas — NO repetir jamás
 **Un video generado NUNCA repetirá escenas visuales.** Cada escena debe tener un asset visual único (video o imagen distinta).
 

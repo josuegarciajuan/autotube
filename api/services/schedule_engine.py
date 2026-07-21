@@ -16,6 +16,9 @@ from typing import Optional
 
 logger = logging.getLogger("autotube.schedule_engine")
 
+# ── Dispatch lock (serializes all generation dispatches) ────────
+from api.services.generation_service import _DISPATCH_LOCK
+
 # ── Target windows (Europe/Madrid local time) ──────────────
 TARGET_WINDOWS = [
     (16, 0),    # afternoon slot (target ~16:00)
@@ -419,40 +422,48 @@ def dispatch_next_due_slot(db=None) -> dict | None:
                     active_count)
         return None
 
-    slot_id = next_slot["id"]
-    channel_id = next_slot["channel_id"]
-    slug = next_slot.get("channel_slug", "")
-    scheduled = next_slot.get("scheduled_at", "?")
+    # ── Enter dispatch critical section ──────────────────────────
+    with _DISPATCH_LOCK:
+        # Re-check global guard under lock (belts-and-suspenders)
+        if db.count_active_jobs() > 0:
+            logger.info("Smart dispatch deferred (under lock): active job detected")
+            return None
 
-    logger.info(
-        "Dispatching slot #%d: %s (scheduled %s, now %s late)",
-        slot_id, slug, scheduled,
-        f"{_time_since(scheduled):.0f} min" if _time_since(scheduled) else "on time",
-    )
+        slot_id = next_slot["id"]
+        channel_id = next_slot["channel_id"]
+        slug = next_slot.get("channel_slug", "")
+        scheduled = next_slot.get("scheduled_at", "?")
 
-    # 6. Mark slot as running
-    db.update_slot_status(slot_id, "running")
+        logger.info(
+            "Dispatching slot #%d: %s (scheduled %s, now %s late)",
+            slot_id, slug, scheduled,
+            f"{_time_since(scheduled):.0f} min" if _time_since(scheduled) else "on time",
+        )
 
-    # 7. Create video record
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-    cursor = conn.execute(
-        "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) "
-        "VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
-        (slug, channel_id),
-    )
-    conn.commit()
-    video_id = cursor.lastrowid
-    conn.close()
+        # 6. Mark slot as running
+        db.update_slot_status(slot_id, "running")
 
-    # 8. Create job
-    job_id = db.create_job(channel_id, "generate_and_upload", video_id)
-    
-    # 9. Mark job as running IMMEDIATELY to prevent _queue_consumer from 
-    #    picking it up (race condition in the checker loop).
-    db.update_job(job_id, status="running")
+        # 7. Create video record
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+        cursor = conn.execute(
+            "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) "
+            "VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
+            (slug, channel_id),
+        )
+        conn.commit()
+        video_id = cursor.lastrowid
+        conn.close()
 
-    # 10. Link job to slot
-    db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)
+        # 8. Create job
+        job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+        
+        # 9. Mark job as running IMMEDIATELY to prevent _queue_consumer from 
+        #    picking it up (race condition in the checker loop).
+        db.update_job(job_id, status="running")
+
+        # 10. Link job to slot
+        db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)
+    # ── End dispatch critical section ────────────────────────────
 
     # 11. Fire and forget the generation
     from api.services.generation_service import (

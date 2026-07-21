@@ -642,43 +642,62 @@ async def _process_due_schedules():
             continue
         
         try:
-            # Launch the generation job
-            from database.db_extended import ExtendedDatabase
-            db = ExtendedDatabase()
+            # ── Enter dispatch critical section ──────────────────
+            from api.services.generation_service import _DISPATCH_LOCK
             
-            # Create a video record
-            cursor = conn.execute(
-                "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
-                (s["channel_slug"], s["channel_id"]),
-            )
-            conn.commit()
-            video_id = cursor.lastrowid
-            
-            # Create job record — mark running IMMEDIATELY (close TOCTOU race)
-            job_id = db.create_job(s["channel_id"], s["action"], video_id)
-            db.update_job(job_id, status="running")
-            
-            # Update schedule: calculate next run
-            if s["schedule_type"] == "recurring":
-                # Sanitize interval_h (must be a positive integer) to prevent SQL injection
-                try:
-                    interval_h = int(s["interval_h"])
-                    if interval_h <= 0:
+            with _DISPATCH_LOCK:
+                # Re-check global guard under lock (belts-and-suspenders)
+                from database.db_extended import ExtendedDatabase
+                _db2 = ExtendedDatabase()
+                if _db2.count_active_jobs() > 0:
+                    logger.debug("Schedule #%d deferred (under lock): active job detected", s["id"])
+                    try:
+                        conn.execute(
+                            "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
+                            "WHERE id = ?", (s["id"],)
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+                    continue
+                
+                # Launch the generation job
+                db2 = ExtendedDatabase()
+                
+                # Create a video record
+                cursor = conn.execute(
+                    "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
+                    (s["channel_slug"], s["channel_id"]),
+                )
+                conn.commit()
+                video_id = cursor.lastrowid
+                
+                # Create job record — mark running IMMEDIATELY (close TOCTOU race)
+                job_id = db2.create_job(s["channel_id"], s["action"], video_id)
+                db2.update_job(job_id, status="running")
+                
+                # Update schedule: calculate next run
+                if s["schedule_type"] == "recurring":
+                    # Sanitize interval_h (must be a positive integer) to prevent SQL injection
+                    try:
+                        interval_h = int(s["interval_h"])
+                        if interval_h <= 0:
+                            interval_h = 1
+                    except (ValueError, TypeError):
                         interval_h = 1
-                except (ValueError, TypeError):
-                    interval_h = 1
-                conn.execute(
-                    "UPDATE content_schedules SET last_run_at = ?, "
-                    "next_run_at = datetime('now', 'localtime', '+' || ? || ' hours'), video_id = ? WHERE id = ?",
-                    (now, str(interval_h), video_id, s["id"]),
-                )
-            else:
-                # One-time: deactivate after run
-                conn.execute(
-                    "UPDATE content_schedules SET last_run_at = ?, active = 0, video_id = ? WHERE id = ?",
-                    (now, video_id, s["id"]),
-                )
-            conn.commit()
+                    conn.execute(
+                        "UPDATE content_schedules SET last_run_at = ?, "
+                        "next_run_at = datetime('now', 'localtime', '+' || ? || ' hours'), video_id = ? WHERE id = ?",
+                        (now, str(interval_h), video_id, s["id"]),
+                    )
+                else:
+                    # One-time: deactivate after run
+                    conn.execute(
+                        "UPDATE content_schedules SET last_run_at = ?, active = 0, video_id = ? WHERE id = ?",
+                        (now, video_id, s["id"]),
+                    )
+                conn.commit()
+            # ── End dispatch critical section ────────────────────
             
             # Fire and forget the generation (don't await)
             import asyncio

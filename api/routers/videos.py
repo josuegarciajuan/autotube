@@ -11,7 +11,7 @@ from api.schemas.models import (
     ScriptGenerateRequest, ScriptResponse, ContentResponse,
 )
 from api.services.generation_service import start_generation_job, _run_reassembly_job, start_upload_job
-from api.services.generation_service import start_generation_job_subprocess, USE_SUBPROCESS_WORKER
+from api.services.generation_service import start_generation_job_subprocess, USE_SUBPROCESS_WORKER, _DISPATCH_LOCK
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -96,27 +96,31 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
     if not ch:
         raise HTTPException(404, "Channel not found")
     
-    # Guard 1: don't start if this channel already has an active job
-    active = db.get_active_job_for_channel(data.channel_id)
-    if active:
-        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
-    
-    # Guard 2: don't start if ANY generation is running globally
-    if db.count_active_jobs() > 0:
-        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
-    
-    import sqlite3
-    with db._connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO videos (canal, channel_id, status, progress, created_at, video_path) "
-            "VALUES (?, ?, 'generating', 0, CURRENT_TIMESTAMP, 'pending')",
-            (ch["slug"], data.channel_id),
-        )
-        conn.commit()
-        video_id = cursor.lastrowid
-    
-    job_id = db.create_job(data.channel_id, data.action, video_id)
-    db.update_job(job_id, status="running")  # close TOCTOU race window
+    # ── Global dispatch lock: serialize all generation dispatches ──
+    # Prevents TOCTOU race where two concurrent requests both pass
+    # the guard checks before either creates a job.
+    with _DISPATCH_LOCK:
+        # Guard 1: don't start if this channel already has an active job
+        active = db.get_active_job_for_channel(data.channel_id)
+        if active:
+            raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+        
+        # Guard 2: don't start if ANY generation is running globally
+        if db.count_active_jobs() > 0:
+            raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
+        
+        import sqlite3
+        with db._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO videos (canal, channel_id, status, progress, created_at, video_path) "
+                "VALUES (?, ?, 'generating', 0, CURRENT_TIMESTAMP, 'pending')",
+                (ch["slug"], data.channel_id),
+            )
+            conn.commit()
+            video_id = cursor.lastrowid
+        
+        job_id = db.create_job(data.channel_id, data.action, video_id)
+        db.update_job(job_id, status="running")  # close TOCTOU race window
     
     if USE_SUBPROCESS_WORKER:
         # Spawn independent worker subprocess (survives API restarts)

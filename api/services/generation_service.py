@@ -376,6 +376,16 @@ PHASE_TIMEOUTS = {
 # renders could still exceed total system memory.
 _RENDER_SEMAPHORE = asyncio.Semaphore(1)
 
+# ── Global dispatch lock (prevents TOCTOU race) ─────────────────
+# v5 (Jul 2026): All dispatch entry points (manual click, planned slots,
+# due schedules, priority dispatcher) must acquire this lock BEFORE
+# checking count_active_jobs() and creating the job. This closes the
+# TOCTOU window where two dispatchers pass the guard simultaneously.
+# Uses threading.Lock() because dispatch callers include both sync
+# (process_planned_slots) and async (generate_video) functions.
+import threading
+_DISPATCH_LOCK = threading.Lock()
+
 # Phase order for resume logic (must match execution order)
 _PHASE_ORDER = ["scrape", "script", "tts", "media", "video", "metadata", "upload"]
 
@@ -2845,6 +2855,23 @@ async def start_generation_job_subprocess(
         )
         db.update_job(job_id, status="failed",
                       error_msg=f"Global concurrency guard: {active_count} active job(s)")
+        # ── Cleanup orphaned records ────────────────────────────
+        # The job was created but blocked. Reset video and planned_slot
+        # so they don't stay stuck in 'generating'/'running'.
+        try:
+            with db._connect() as _conn:
+                _conn.execute(
+                    "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
+                    (video_id,),
+                )
+                _conn.execute(
+                    "UPDATE planned_slots SET status = 'pending', job_id = NULL "
+                    "WHERE job_id = ? AND status = 'running'",
+                    (job_id,),
+                )
+                _conn.commit()
+        except Exception:
+            pass
         return None
 
     # ── Guard: don't spawn if a job is already running for THIS channel ──
@@ -2862,6 +2889,21 @@ async def start_generation_job_subprocess(
         )
         db.update_job(job_id, status="failed",
                       error_msg="Active job already running for this channel")
+        # ── Cleanup orphaned records ────────────────────────────
+        try:
+            with db._connect() as _conn:
+                _conn.execute(
+                    "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
+                    (video_id,),
+                )
+                _conn.execute(
+                    "UPDATE planned_slots SET status = 'pending', job_id = NULL "
+                    "WHERE job_id = ? AND status = 'running'",
+                    (job_id,),
+                )
+                _conn.commit()
+        except Exception:
+            pass
         return None
 
     # ── Build command ─────────────────────────────────────────

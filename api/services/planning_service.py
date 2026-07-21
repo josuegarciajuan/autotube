@@ -19,6 +19,9 @@ from typing import Optional
 
 logger = logging.getLogger("autotube.planning")
 
+# ── Dispatch lock (serializes all generation dispatches) ────────
+from api.services.generation_service import _DISPATCH_LOCK
+
 # ── Cooldown guard: prevent rapid successive replans ─────
 _last_horizon_replan_ts: Optional[datetime] = None
 _HORIZON_REPLAN_COOLDOWN_MIN = 5  # minimum minutes between replans
@@ -1125,55 +1128,66 @@ def process_planned_slots(db=None) -> dict | None:
         logger.warning("Low memory — delaying planned slot dispatch")
         return None
     
-    slot_id = next_slot["id"]
-    channel_id = next_slot["channel_id"]
-    slug = next_slot.get("channel_slug", "")
-    source_mode = next_slot.get("source_mode", "original")
-    
-    logger.info(
-        "Dispatching slot #%d: %s (scheduled=%s, pub=%s)",
-        slot_id, slug,
-        (next_slot.get("scheduled_at") or "?")[11:16],
-        (next_slot.get("target_public_at") or "?")[11:16] if next_slot.get("target_public_at") else "?",
-    )
-    
-    # 4. Mark slot as running
-    db.update_slot_status(slot_id, "running")
-    
-    # 5. Create the video record
-    from database.db_extended import ExtendedDatabase
-    
-    # Get channel config to check publish mode
-    ch_cfg = db.get_channel_planning_config(channel_id)
-    publish_mode = ch_cfg.get("publish_mode", "immediate") if ch_cfg else "immediate"
-    is_scheduled = publish_mode == "scheduled"
-    
-    # ── Use the correct target_public_at (peak publish time) ──
-    target_public_at = next_slot.get("target_public_at")
-    
-    with db._connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
-            "publish_mode, target_public_at, created_at) "
-            "VALUES (?, ?, '', 'generating', 0, ?, ?, CURRENT_TIMESTAMP)",
-            (slug, channel_id, publish_mode, target_public_at),
+    # ── Enter dispatch critical section ──────────────────────────
+    # Acquire global lock before atomically creating the job.
+    # The lock + guards together prevent TOCTOU races with other
+    # dispatch entry points (manual click, due schedules, priority).
+    with _DISPATCH_LOCK:
+        # Re-check global guard under lock (belts-and-suspenders)
+        if db.count_active_jobs() > 0:
+            logger.info("Planned slot deferred (under lock): active job detected")
+            return None
+        
+        slot_id = next_slot["id"]
+        channel_id = next_slot["channel_id"]
+        slug = next_slot.get("channel_slug", "")
+        source_mode = next_slot.get("source_mode", "original")
+        
+        logger.info(
+            "Dispatching slot #%d: %s (scheduled=%s, pub=%s)",
+            slot_id, slug,
+            (next_slot.get("scheduled_at") or "?")[11:16],
+            (next_slot.get("target_public_at") or "?")[11:16] if next_slot.get("target_public_at") else "?",
         )
-        conn.commit()
-        video_id = cursor.lastrowid
-    
-    # 6. Determine action — scheduled channels use generate_only (F1 only)
-    if is_scheduled:
-        action = "generate_only"
-        # Don't pass upload=True — the worker will skip upload and keep mp4
-    else:
-        action = "generate_and_upload"
-    
-    # 7. Create job and mark it running IMMEDIATELY
-    job_id = db.create_job(channel_id, action, video_id)
-    db.update_job(job_id, status="running")
-    
-    # 8. Link job to slot
-    db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)
+        
+        # 4. Mark slot as running
+        db.update_slot_status(slot_id, "running")
+        
+        # 5. Create the video record
+        from database.db_extended import ExtendedDatabase
+        
+        # Get channel config to check publish mode
+        ch_cfg = db.get_channel_planning_config(channel_id)
+        publish_mode = ch_cfg.get("publish_mode", "immediate") if ch_cfg else "immediate"
+        is_scheduled = publish_mode == "scheduled"
+        
+        # ── Use the correct target_public_at (peak publish time) ──
+        target_public_at = next_slot.get("target_public_at")
+        
+        with db._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
+                "publish_mode, target_public_at, created_at) "
+                "VALUES (?, ?, '', 'generating', 0, ?, ?, CURRENT_TIMESTAMP)",
+                (slug, channel_id, publish_mode, target_public_at),
+            )
+            conn.commit()
+            video_id = cursor.lastrowid
+        
+        # 6. Determine action — scheduled channels use generate_only (F1 only)
+        if is_scheduled:
+            action = "generate_only"
+            # Don't pass upload=True — the worker will skip upload and keep mp4
+        else:
+            action = "generate_and_upload"
+        
+        # 7. Create job and mark it running IMMEDIATELY
+        job_id = db.create_job(channel_id, action, video_id)
+        db.update_job(job_id, status="running")
+        
+        # 8. Link job to slot
+        db.update_slot_status(slot_id, "running", job_id=job_id, video_id=video_id)
+    # ── End dispatch critical section ────────────────────────────
     
     # 9. Fire and forget the generation
     import asyncio
