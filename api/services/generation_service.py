@@ -2737,9 +2737,14 @@ async def auto_recover_on_startup():
         try:
             # Use the same conn for INSERT to avoid SQLite lock contention
             # (db.create_job opens a NEW connection which conflicts with conn).
+            # ── Create as 'queued' NOT 'running' ──────────────────
+            # The deferred dispatcher below will promote to 'running' only if
+            # the global concurrency guard allows it (count_active_jobs <= 1).
+            # Creating as 'running' bypasses the guard and causes count_active_jobs()
+            # to block all dispatches until the next restart.
             cursor = conn.execute(
                 "INSERT INTO generation_jobs (channel_id, action, video_id, status, created_at) "
-                "VALUES (?, 'reassemble', ?, 'running', datetime('now', 'localtime'))",
+                "VALUES (?, 'reassemble', ?, 'queued', datetime('now', 'localtime'))",
                 (channel_id, video_id),
             )
             # Update video to 'reassembling' in the same transaction so the
