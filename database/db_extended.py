@@ -4,6 +4,7 @@ Adds channel management, video scene tracking, and generation jobs
 on top of the existing Database class.
 """
 
+import importlib
 import json
 import logging
 import sqlite3
@@ -366,48 +367,38 @@ def migrate_v2(db_path: str = None):
     """)
     logger.info("Migration: system_state table ensured")
 
-    # Seed canal2 if channels table is empty
-    row = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()
-    if row["cnt"] == 0:
+    # Seed channels from active channel configs (idempotent — only inserts missing slugs)
+    from config.settings import ACTIVE_CHANNELS
+    channel_seeds = {}
+    for slug in ACTIVE_CHANNELS:
+        try:
+            mod = importlib.import_module(f"config.{slug}_config")
+            name = getattr(mod, "CANAL_DISPLAY_NAME", slug.capitalize())
+            channel_seeds[slug] = name
+        except ImportError:
+            logger.warning("No config module for slug=%s, skipping seed", slug)
+    
+    # Insert any missing channels
+    for slug, name in channel_seeds.items():
+        exists = conn.execute(
+            "SELECT COUNT(*) as cnt FROM channels WHERE slug = ?", (slug,)
+        ).fetchone()
+        if exists["cnt"] == 0:
+            conn.execute(
+                "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
+                (name, slug, "{}", 1),
+            )
+            logger.info("Migration: seeded channel %s (%s)", slug, name)
+    
+    # Fallback: if channels table is still empty, seed at least one from settings
+    row_empty = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()
+    if row_empty["cnt"] == 0 and ACTIVE_CHANNELS:
         conn.execute(
             "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
-            ("Sincronías", "canal2", "{}", 1),
+            (ACTIVE_CHANNELS[0].capitalize(), ACTIVE_CHANNELS[0], "{}", 1),
         )
-        # Link existing videos to channel 1
         conn.execute("UPDATE videos SET channel_id = 1 WHERE channel_id IS NULL")
-
-    # Seed canal2 if it doesn't exist yet
-    row2 = conn.execute(
-        "SELECT COUNT(*) as cnt FROM channels WHERE slug = 'canal2'"
-    ).fetchone()
-    canal2_is_new = row2["cnt"] == 0
-    if canal2_is_new:
-        conn.execute(
-            "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
-            ("Sincronías", "canal2", "{}", 1),
-        )
-
-    # Seed canal3 if it doesn't exist yet
-    row3 = conn.execute(
-        "SELECT COUNT(*) as cnt FROM channels WHERE slug = 'canal3'"
-    ).fetchone()
-    canal3_is_new = row3["cnt"] == 0
-    if canal3_is_new:
-        conn.execute(
-            "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
-            ("Civilizaciones Olvidadas", "canal3", "{}", 1),
-        )
-
-    # Seed canal4 if it doesn't exist yet
-    row4 = conn.execute(
-        "SELECT COUNT(*) as cnt FROM channels WHERE slug = 'canal4'"
-    ).fetchone()
-    canal4_is_new = row4["cnt"] == 0
-    if canal4_is_new:
-        conn.execute(
-            "INSERT INTO channels (name, slug, config_json, active) VALUES (?, ?, ?, ?)",
-            ("Expediciones sin retorno", "canal4", "{}", 1),
-        )
+        logger.warning("Migration: channels table empty — bootstrapped with %s", ACTIVE_CHANNELS[0])
 
     # Seed yt_studio_url for existing channels (only if not yet set)
     studio_urls = {
@@ -423,14 +414,14 @@ def migrate_v2(db_path: str = None):
         )
     logger.info("Migration: seeded yt_studio_url for existing channels")
 
-    # Check if canal2 needs profile seeding (new OR missing description)
-    canal2_needs_profile = canal2_is_new
-    if not canal2_is_new:
-        prof = conn.execute(
-            "SELECT description, banner_url, avatar_url FROM channels WHERE slug = 'canal2'"
-        ).fetchone()
-        if prof and not any([prof["description"], prof["banner_url"], prof["avatar_url"]]):
-            canal2_needs_profile = True
+    # Check which channels need profile seeding (missing description, banner, or avatar)
+    channels_needing_profile: list[str] = []
+    all_channels = conn.execute("SELECT slug, description, banner_url, avatar_url FROM channels").fetchall()
+    for ch in all_channels:
+        if not any([ch["description"], ch["banner_url"], ch["avatar_url"]]):
+            channels_needing_profile.append(ch["slug"])
+    if channels_needing_profile:
+        logger.info("Channels needing profile seeding: %s", channels_needing_profile)
 
     # ── v6: Monetization + Milestones + Analytics columns & tables ──
     # Add monetization columns to channels (idempotent)
@@ -545,9 +536,10 @@ def migrate_v2(db_path: str = None):
     conn.commit()
     conn.close()
     
-    # Generate channel profile (description, banner, avatar) for canal2 if needed
-    if canal2_needs_profile:
-        _seed_canal2_profile()
+    # Generate channel profiles (description, banner, avatar) for any channel lacking them
+    if channels_needing_profile:
+        for slug in channels_needing_profile:
+            _seed_channel_profile(slug)
 
     # Ensure content_schedules table exists (idempotent — adds video_id column if missing)
     _migrate_content_schedules(db_path)
@@ -615,8 +607,8 @@ def _migrate_shorts_planning_config(conn, logger):
             )
 
 
-def _seed_canal2_profile():
-    """Generate banner, avatar, and description for canal2 on first creation."""
+def _seed_channel_profile(slug: str):
+    """Generate banner, avatar, and description for a channel on first creation."""
     import logging
     _log = logging.getLogger(__name__)
 
@@ -625,8 +617,8 @@ def _seed_canal2_profile():
         from config.settings import DATABASE_PATH
         import sqlite3
 
-        _log.info("Generating channel profile for canal2...")
-        profile = generate_channel_profile("canal2")
+        _log.info("Generating channel profile for %s...", slug)
+        profile = generate_channel_profile(slug)
 
         conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout=30000")
@@ -636,21 +628,22 @@ def _seed_canal2_profile():
                    banner_url = ?,
                    avatar_url = ?,
                    updated_at = CURRENT_TIMESTAMP
-               WHERE slug = 'canal2'""",
-            (profile["description"], profile["banner_url"], profile["avatar_url"]),
+               WHERE slug = ?""",
+            (profile["description"], profile["banner_url"], profile["avatar_url"], slug),
         )
         conn.commit()
         conn.close()
 
         _log.info(
-            "canal2 profile seeded: desc=%d chars, banner=%s, avatar=%s",
+            "%s profile seeded: desc=%d chars, banner=%s, avatar=%s",
+            slug,
             len(profile["description"]),
             profile["banner_url"][-40:] if profile["banner_url"] else "(none)",
             profile["avatar_url"][-40:] if profile["avatar_url"] else "(none)",
         )
 
     except Exception as exc:
-        _log.warning("Failed to seed canal2 profile: %s", exc)
+        _log.warning("Failed to seed %s profile: %s", slug, exc)
 
 
 def _migrate_content_schedules(db_path: str = None):
@@ -1357,11 +1350,17 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             if channel_id:
                 canal = self.get_channel(channel_id)
-                canal_name = canal["slug"] if canal else "canal2"
-                rows = conn.execute(
-                    "SELECT * FROM pipeline_log WHERE canal = ? ORDER BY created_at DESC LIMIT ?",
-                    (canal_name, limit),
-                ).fetchall()
+                canal_name = canal["slug"] if canal else None
+                if canal_name:
+                    rows = conn.execute(
+                        "SELECT * FROM pipeline_log WHERE canal = ? ORDER BY created_at DESC LIMIT ?",
+                        (canal_name, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM pipeline_log ORDER BY created_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT * FROM pipeline_log ORDER BY created_at DESC LIMIT ?",
