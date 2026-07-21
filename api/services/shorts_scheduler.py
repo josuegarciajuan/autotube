@@ -23,6 +23,35 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
+# ── Auto-mark altered content helper (shorts) ─────────────────
+
+def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_id: int):
+    """Background thread: mark short as AI-generated content.
+    
+    No end screens — YouTube doesn't support them on Shorts.
+    """
+    import time as _time
+    try:
+        _time.sleep(20)  # Wait for YouTube to finish processing
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+        success = browser.mark_altered_content(yt_id)
+        if success:
+            import sqlite3
+            from config.settings import DATABASE_PATH
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+            conn.execute(
+                "UPDATE shorts SET manual_altered_content_done = 1 WHERE id = ?",
+                (short_id,),
+            )
+            conn.commit()
+            conn.close()
+            logger.info("[%s] Altered content marked for short %s", channel_slug, yt_id)
+        else:
+            logger.warning("[%s] Failed to mark altered content for short %s", channel_slug, yt_id)
+    except Exception as e:
+        logger.warning("[%s] Auto-mark IA error for short %s: %s", channel_slug, yt_id, e)
+
 # ── Timezone constants ────────────────────────────────────────
 CEST = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -937,6 +966,21 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     conn.commit()
     conn.close()
 
+    # Auto-mark altered content (IA) via browser
+    try:
+        if getattr(ch_config, "AUTO_MARK_ALTERED_CONTENT", False):
+            from pipeline.youtube_browser import get_account_for_channel
+            account = get_account_for_channel(channel_slug)
+            if account:
+                import threading
+                threading.Thread(
+                    target=_auto_mark_ia_for_short,
+                    args=(yt_id, channel_slug, account, short_id),
+                    daemon=True
+                ).start()
+    except Exception as e:
+        logger.warning("[%s] Failed to trigger auto-mark IA for short: %s", channel_slug, e)
+
     # Post-publish cross-promotion
     run_post_publish_promotion(
         channel_slug=channel_slug,
@@ -1148,6 +1192,21 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         short_id = cursor.lastrowid
         conn2.commit()
         conn2.close()
+
+        # Auto-mark altered content (IA) via browser
+        try:
+            if getattr(ch_config, "AUTO_MARK_ALTERED_CONTENT", False):
+                from pipeline.youtube_browser import get_account_for_channel
+                account = get_account_for_channel(channel_slug)
+                if account:
+                    import threading
+                    threading.Thread(
+                        target=_auto_mark_ia_for_short,
+                        args=(yt_id, channel_slug, account, short_id),
+                        daemon=True
+                    ).start()
+        except Exception as e:
+            logger.warning("[%s] Failed to trigger auto-mark IA for short: %s", channel_slug, e)
 
         run_post_publish_promotion(
             channel_slug=channel_slug,
