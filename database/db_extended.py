@@ -4220,15 +4220,17 @@ class ExtendedDatabase(Database):
     def get_pipeline_status(self) -> dict:
         """Return full pipeline status for the visual scheduling view.
 
-        Returns 5 sections:
-        - planned:     video slots pending today (not dispatched yet)
-        - generating:  long-form videos currently being generated
+        Returns 7 sections:
+        - planned:        video slots pending today (not dispatched yet)
+        - generating:     long-form videos currently being generated
         - awaiting_upload: videos generated locally, waiting for F2 upload window
-        - warming:     videos uploaded as private waiting to go public
-        - shorts:      { pending, generating, completed }
+        - warming:        videos uploaded as private waiting to go public
+        - published_24h:  videos & shorts published (public) in the last 24 hours
+        - shorts:         { pending, generating, completed }
         """
         result = {
             "planned": [], "generating": [], "awaiting_upload": [], "warming": [],
+            "published_24h": [],
             "shorts": {"pending": [], "generating": [], "completed": []},
         }
         with self._connect() as conn:
@@ -4413,16 +4415,52 @@ class ExtendedDatabase(Database):
                     sps.source_video_id,
                     sps.status,
                     sps.short_id,
+                    s.published_at as actual_completed_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM shorts_planned_slots sps
                    JOIN channels ch ON ch.id = sps.channel_id
+                   LEFT JOIN shorts s ON s.id = sps.short_id
                     WHERE sps.date_key >= date('now', 'localtime')
                       AND sps.date_key <= date('now', 'localtime', '+1 day')
                       AND sps.status = 'completed'
                    ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
             result["shorts"]["completed"] = [dict(r) for r in shorts_completed]
+
+            # ── 7. Published in last 24h (both long-form videos & shorts) ──
+            published = conn.execute(
+                """SELECT id, channel_id, channel_name, channel_slug,
+                          title, youtube_id, published_at, content_type
+                   FROM (
+                       -- Long-form videos
+                       SELECT v.id, v.channel_id,
+                              ch.name AS channel_name, ch.slug AS channel_slug,
+                              v.titulo_final AS title, v.yt_video_id AS youtube_id,
+                              v.published_at, 'video' AS content_type
+                         FROM videos v
+                         JOIN channels ch ON ch.id = v.channel_id
+                        WHERE v.privacy_status = 'public'
+                          AND v.published_at IS NOT NULL
+                          AND v.published_at >= datetime('now', 'localtime', '-1 day')
+
+                        UNION ALL
+
+                       -- Shorts
+                       SELECT s.id, s.channel_id,
+                              ch2.name, ch2.slug,
+                              s.title, s.youtube_id,
+                              s.published_at,
+                              CASE s.type WHEN 'native' THEN 'native' ELSE 'clip' END
+                         FROM shorts s
+                         JOIN channels ch2 ON ch2.id = s.channel_id
+                        WHERE s.status = 'published'
+                          AND s.published_at IS NOT NULL
+                          AND s.published_at >= datetime('now', 'localtime', '-1 day')
+                   )
+                   ORDER BY published_at DESC""",
+            ).fetchall()
+            result["published_24h"] = [dict(r) for r in published]
 
         return result
 

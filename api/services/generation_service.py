@@ -20,9 +20,10 @@ import asyncio
 import concurrent.futures
 import glob as _glob
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from api.utils import db_now
 import config.settings as settings
 from database.db_extended import ExtendedDatabase
 
@@ -1073,7 +1074,7 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
     db.update_job(job_id, status="running", started_at=None)
-    db.update_video(video_id, generation_started_at=datetime.now(timezone.utc).isoformat())
+    db.update_video(video_id, generation_started_at=db_now())
     
     await _broadcast_progress(job_id, 1, "inicio", f"Iniciando generacion para {channel_name}...",
                                 video_id=video_id, detail="Preparando pipeline")
@@ -1631,7 +1632,7 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                     detail="Thumbnail lista para YouTube")
         
         # ── Mark generation complete before upload phase ──
-        db.update_video(video_id, generation_finished_at=datetime.now(timezone.utc).isoformat())
+        db.update_video(video_id, generation_finished_at=db_now())
         
         # ── Phase 6: Upload (skip in test mode or when upload=False) ──
         if test_mode or not upload:
@@ -3025,7 +3026,7 @@ async def start_generation_job_subprocess(
 
     # ── Update job status ─────────────────────────────────────
     db.update_job(job_id, status="running",
-                  started_at=datetime.now(timezone.utc).isoformat())
+                  started_at=db_now())
 
     await _broadcast_progress(
         job_id, 1, "inicio",

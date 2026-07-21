@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot } from '../lib/api'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive } from 'lucide-react'
+import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -39,6 +39,30 @@ function phaseLabel(phase: string): string {
   return map[phase] || phase || '...'
 }
 
+// ── Badge: content type (reusable) ──────────────────────────
+function ContentTypeBadge({ type }: { type: 'video' | 'native' | 'clip' }) {
+  if (type === 'video') {
+    return (
+      <span className="text-[10px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-400/10 text-purple-400 border border-purple-400/30">
+        <Film size={10} />
+        Video
+      </span>
+    )
+  }
+  const isNative = type === 'native'
+  const typeColor = isNative ? 'text-emerald-400' : 'text-orange-400'
+  const typeBg = isNative ? 'bg-emerald-400/10' : 'bg-orange-400/10'
+  const typeBorder = isNative ? 'border-emerald-400/30' : 'border-orange-400/30'
+  const TypeIcon = isNative ? Smartphone : Scissors
+  const typeLabel = isNative ? 'Short · Nativo' : 'Short · Clip'
+  return (
+    <span className={`text-[10px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor} border ${typeBorder}`}>
+      <TypeIcon size={10} />
+      {typeLabel}
+    </span>
+  )
+}
+
 // ── Card: Planned slot (3-phase) ─────────────────────────────
 function PlannedCard({ slot }: { slot: PlannedSlot }) {
   const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
@@ -51,6 +75,7 @@ function PlannedCard({ slot }: { slot: PlannedSlot }) {
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name} #{slot.slot_position}
         </span>
+        <ContentTypeBadge type="video" />
         <span className="text-[10px] text-gray-500 font-mono ml-auto">
           {slot.source_mode === 'viral' ? ' Viral' : 'Original'}
         </span>
@@ -107,6 +132,7 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
         </span>
+        <ContentTypeBadge type="video" />
         <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
           Generando
@@ -164,6 +190,7 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
         </span>
+        <ContentTypeBadge type="video" />
         <span className="text-[10px] text-blue-400 font-mono ml-auto flex items-center gap-1">
           <HardDrive size={10} />
           Pendiente subida
@@ -254,6 +281,7 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
         </span>
+        <ContentTypeBadge type="video" />
         <span className="text-[10px] text-amber-400 font-mono ml-auto flex items-center gap-1">
           <Lock size={10} />
           Calentando
@@ -333,11 +361,7 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
 function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
   const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
   const isNative = slot.short_type === 'native'
-  const typeColor = isNative ? 'text-emerald-400' : 'text-orange-400'
-  const typeBg = isNative ? 'bg-emerald-400/10' : 'bg-orange-400/10'
   const typeBorder = isNative ? 'border-emerald-400/30' : 'border-orange-400/30'
-  const TypeIcon = isNative ? Smartphone : Scissors
-  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
   const countdown = formatCountdown(slot.scheduled_at)
 
   return (
@@ -348,10 +372,7 @@ function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
         </span>
-        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
-          <TypeIcon size={10} />
-          {typeLabel}
-        </span>
+        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
       </div>
 
       {/* Timeline */}
@@ -383,10 +404,6 @@ function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
 function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
   const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
   const isNative = slot.short_type === 'native'
-  const typeColor = isNative ? 'text-emerald-400' : 'text-orange-400'
-  const typeBg = isNative ? 'bg-emerald-400/10' : 'bg-orange-400/10'
-  const TypeIcon = isNative ? Smartphone : Scissors
-  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
   const pct = slot.job_progress || 0
   const phase = slot.job_phase || 'inicio'
 
@@ -398,11 +415,8 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
         </span>
-        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
-          <TypeIcon size={10} />
-          {typeLabel}
-        </span>
-        <span className="text-[10px] text-neon-cyan font-mono flex items-center gap-1">
+        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
+        <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
           Generando
         </span>
@@ -439,10 +453,7 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
 function ShortsCompletedCard({ slot }: { slot: ShortsPipelineSlot }) {
   const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
   const isNative = slot.short_type === 'native'
-  const typeColor = isNative ? 'text-emerald-400/60' : 'text-orange-400/60'
-  const typeBg = isNative ? 'bg-emerald-400/5' : 'bg-orange-400/5'
-  const TypeIcon = isNative ? Smartphone : Scissors
-  const typeLabel = isNative ? 'Short \u00B7 Nativo' : 'Short \u00B7 Clip'
+  const actualTime = slot.actual_completed_at || slot.scheduled_at
 
   return (
     <div className="pipeline-card rounded-xl p-3 border bg-dark-800/40 border-l-2 border-l-green-500/30 opacity-60 hover:opacity-80 transition-opacity">
@@ -451,19 +462,58 @@ function ShortsCompletedCard({ slot }: { slot: ShortsPipelineSlot }) {
         <span className={`text-xs font-semibold ${colors.text} opacity-70`}>
           {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
         </span>
-        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor}`}>
-          <TypeIcon size={9} />
-          {typeLabel}
-        </span>
-        <span className="text-[10px] text-green-400 font-mono flex items-center gap-1">
+        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
+        <span className="text-[10px] text-green-400 font-mono ml-auto flex items-center gap-1">
           <CheckCircle2 size={10} />
           Completado
         </span>
       </div>
       <div className="flex items-center gap-2 text-[10px] mt-1.5">
         <Smartphone size={10} className="text-gray-500" />
-        <span className="text-gray-500">Inicio:</span>
-        <span className="text-gray-400 font-mono">{toLocalTime(slot.scheduled_at)}</span>
+        <span className="text-gray-500">Publicado:</span>
+        <span className="text-gray-400 font-mono">
+          {toLocalTime(actualTime)} {toLocalDate(actualTime)}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── Card: Published in last 24h ──────────────────────────────
+function PublishedCard({ item }: { item: PublishedItem }) {
+  const colors = CHANNEL_STYLES[item.channel_slug] || DEFAULT_STYLE
+  const ytUrl = item.youtube_id ? `https://youtube.com/watch?v=${item.youtube_id}` : null
+
+  return (
+    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/40 border-l-2 border-l-green-500/30 hover:opacity-80 transition-opacity animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
+        <span className={`text-xs font-semibold ${colors.text}`}>
+          {CHANNEL_SHORT[item.channel_slug] || item.channel_name}
+        </span>
+        <ContentTypeBadge type={item.content_type} />
+        {ytUrl && (
+          <a href={ytUrl} target="_blank" rel="noopener noreferrer"
+             className="text-[10px] text-green-400 hover:text-green-300 font-mono ml-auto flex items-center gap-1">
+            <ExternalLink size={10} />
+            Ver
+          </a>
+        )}
+      </div>
+
+      {/* Title */}
+      {item.title && (
+        <p className="text-[10px] text-gray-400 truncate mb-2">{item.title}</p>
+      )}
+
+      {/* Published time */}
+      <div className="flex items-center gap-2 text-[10px]">
+        <CheckCircle2 size={11} className="text-green-400" />
+        <span className="text-gray-400">Publicado:</span>
+        <span className="text-white font-mono">
+          {toLocalTime(item.published_at)} {toLocalDate(item.published_at)}
+        </span>
       </div>
     </div>
   )
@@ -488,6 +538,7 @@ export default function PipelineView() {
   const [generating, setGenerating] = useState<GeneratingVideo[]>([])
   const [awaitingUpload, setAwaitingUpload] = useState<AwaitingUploadVideo[]>([])
   const [warming, setWarming] = useState<WarmingVideo[]>([])
+  const [published24h, setPublished24h] = useState<PublishedItem[]>([])
   const [shortsPending, setShortsPending] = useState<ShortsPipelineSlot[]>([])
   const [shortsGenerating, setShortsGenerating] = useState<ShortsPipelineSlot[]>([])
   const [shortsCompleted, setShortsCompleted] = useState<ShortsPipelineSlot[]>([])
@@ -501,6 +552,7 @@ export default function PipelineView() {
       setGenerating(data.generating || [])
       setAwaitingUpload(data.awaiting_upload || [])
       setWarming(data.warming || [])
+      setPublished24h(data.published_24h || [])
       setShortsPending(data.shorts?.pending || [])
       setShortsGenerating(data.shorts?.generating || [])
       setShortsCompleted(data.shorts?.completed || [])
@@ -537,7 +589,7 @@ export default function PipelineView() {
   }
 
   const totalItems = planned.length + generating.length + awaitingUpload.length + warming.length
-    + shortsPending.length + shortsGenerating.length + shortsCompleted.length
+    + published24h.length + shortsPending.length + shortsGenerating.length + shortsCompleted.length
 
   if (loading) {
     return (
@@ -653,6 +705,20 @@ export default function PipelineView() {
           <div className="space-y-3">
             {warming.map((video) => (
               <WarmingCard key={video.video_id} video={video} onManualToggle={handleManualToggle} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Column 5: Published 24h ──────────────────────────── */}
+      <div className="pipeline-column">
+        <ColumnHeader icon={CheckCircle2} title="Publicados (24h)" count={published24h.length} colorClass="text-green-400" />
+        {published24h.length === 0 ? (
+          <p className="text-[10px] text-gray-600 text-center py-4">No hay publicados recientes</p>
+        ) : (
+          <div className="space-y-3">
+            {published24h.map((item, idx) => (
+              <PublishedCard key={`pub-${item.content_type}-${item.id}-${idx}`} item={item} />
             ))}
           </div>
         )}

@@ -19,6 +19,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from api.utils import db_now
+
 from config.settings import (
     LIFECYCLE_DEFAULT_TIMELINE,
     LIFECYCLE_ENABLED,
@@ -615,7 +617,7 @@ class VideoLifecycleManager:
                                           "Haciendo público en YouTube...",
                                           video_id=db_video_id)
             
-            now = datetime.now(timezone.utc)
+            now = datetime.now()
             result = uploader.set_privacy(yt_video_id, "public")
             if result.get("updated") or result.get("privacy") == "public":
                 # Update video status in DB
@@ -623,7 +625,7 @@ class VideoLifecycleManager:
                     db_video_id,
                     status="published",
                     privacy_status="public",
-                    published_at=now.isoformat(),
+                    published_at=db_now(),
                 )
                 # ── Log detallado del evento de publicación ──
                 logger.info(

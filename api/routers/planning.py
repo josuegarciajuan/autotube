@@ -461,19 +461,21 @@ def get_week_shorts_slots(
 def get_pipeline_status():
     """Get full pipeline status for the visual scheduling view.
 
-    Returns: planned, generating, awaiting_upload, warming, shorts.
+    Returns: planned, generating, awaiting_upload, warming, published_24h, shorts.
     - planned:          video slots pending today (not yet dispatched)
     - generating:       long-form videos currently being generated with progress
     - awaiting_upload:  videos generated locally, waiting for F2 upload window
     - warming:          videos uploaded as private waiting to go public
+    - published_24h:    videos & shorts published in the last 24 hours
     - shorts.pending:   shorts slots not yet dispatched
     - shorts.generating:shorts slots running with job progress
+    - shorts.completed: shorts slots completed today
     """
     db = get_db()
     data = db.get_pipeline_status()
 
     # Convert any non-serializable datetime objects to strings
-    for section in ("planned", "generating", "awaiting_upload", "warming"):
+    for section in ("planned", "generating", "awaiting_upload", "warming", "published_24h"):
         for item in data[section]:
             for key, val in list(item.items()):
                 if hasattr(val, "strftime"):

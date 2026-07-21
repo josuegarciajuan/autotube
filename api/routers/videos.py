@@ -2,8 +2,9 @@
 import json
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from api.utils import db_now
 from api.deps import get_db
 from api.progress import get_progress_manager
 from api.schemas.models import (
@@ -697,7 +698,7 @@ def publish_video_now(video_id: int):
 
     result = orch.uploader.set_privacy(v["yt_video_id"], "public")
     db.update_video(video_id, status="published", privacy_status="public",
-                     published_at=datetime.now(timezone.utc).isoformat())
+                     published_at=db_now())
     return {"ok": True, "published": True, "video_id": video_id}
 
 

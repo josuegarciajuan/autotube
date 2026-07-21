@@ -31,8 +31,10 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+
+from api.utils import db_now
 
 # Ensure the project root is on sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -465,11 +467,11 @@ def run_job(
             return False
 
     # ── 5. Update job and video status ────────────────────────
-    db.update_job(job_id, status="running", started_at=datetime.now(timezone.utc).isoformat(),
+    db.update_job(job_id, status="running", started_at=db_now(),
                   worker_pid=os.getpid())
     db.update_video(video_id, status="generating", progress=1 if start_idx == 0 else 2, 
                     progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
-                    generation_started_at=datetime.now(timezone.utc).isoformat())
+                    generation_started_at=db_now())
 
     # ── 6. Pre-flight cleanup (skip if resuming — don't delete downloaded clips) ──
     _kill_orphaned_ffmpeg()
@@ -858,7 +860,7 @@ def run_job(
             # ── generate_only: mark as awaiting_upload for later upload dispatch ──
             gen_status = "awaiting_upload" if action == "generate_only" else "ready"
             db.update_video(video_id, progress=100, status=gen_status,
-                            generation_finished_at=datetime.now(timezone.utc).isoformat())
+                            generation_finished_at=db_now())
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")

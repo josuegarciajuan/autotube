@@ -303,6 +303,7 @@ export const api = {
       generating: GeneratingVideo[];
       awaiting_upload: AwaitingUploadVideo[];
       warming: WarmingVideo[];
+      published_24h: PublishedItem[];
       shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[]; completed: ShortsPipelineSlot[] };
     }>('/planning/pipeline-status'),
 
@@ -417,8 +418,20 @@ export interface ShortsPipelineSlot {
   job_status: string | null;
   job_progress: number | null;
   job_phase: string | null;
+  actual_completed_at: string | null;  // Real publish time (from shorts table)
   channel_name: string;
   channel_slug: string;
+}
+
+export interface PublishedItem {
+  id: number;
+  channel_id: number;
+  channel_name: string;
+  channel_slug: string;
+  title: string | null;
+  youtube_id: string | null;
+  published_at: string;
+  content_type: 'video' | 'native' | 'clip';
 }
 
 /** Format seconds to mm:ss */
