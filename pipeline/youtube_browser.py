@@ -112,6 +112,10 @@ class YouTubeBrowser:
             return
         _ensure_xvfb()
         self._playwright = sync_playwright().start()
+
+        # Clean up stale Chromium singleton locks from killed/interrupted sessions
+        self._cleanup_stale_locks()
+
         self._context = self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
             headless=False,
@@ -121,6 +125,33 @@ class YouTubeBrowser:
             timezone_id="Europe/Madrid",
         )
         logger.info("Browser ready for account: %s", self.account)
+
+    def _cleanup_stale_locks(self):
+        """Remove Chromium singleton locks left by killed/interrupted sessions.
+
+        Chromium writes hostname:PID to SingletonLock. If that PID is dead,
+        we clean all three singleton files so launch_persistent_context works.
+        The browser profile (cookies, logins) is preserved.
+        """
+        lock_file = self.user_data_dir / "SingletonLock"
+        if not lock_file.exists():
+            return
+        try:
+            lock_content = lock_file.read_text().strip()
+            if lock_content:
+                lock_pid = lock_content.split(":")[-1]
+                try:
+                    os.kill(int(lock_pid), 0)  # signal 0 = check existence only
+                    logger.warning("Profile in use by PID %s, attempt launch anyway",
+                                   lock_pid)
+                except (OSError, ValueError):
+                    for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                        fpath = self.user_data_dir / fname
+                        if fpath.exists():
+                            fpath.unlink()
+                    logger.info("Cleaned stale browser locks for %s", self.account)
+        except Exception as e:
+            logger.debug("Lock check skipped: %s", e)
 
     def _scroll_page_to_bottom(self, page):
         """Scroll YouTube Studio's inner scrollable containers to the bottom.
