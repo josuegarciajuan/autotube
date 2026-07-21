@@ -88,28 +88,26 @@ class YouTubeBrowser:
     def __init__(self, account: str):
         self.account = account
         self.session_file = TOKENS_DIR / f"{account}_browser_session.json"
+        self.user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
         self._playwright = None
-        self._browser = None
         self._context = None
         self._lock = threading.Lock()
-        if not self.session_file.exists():
+        if not self.user_data_dir.exists():
             raise FileNotFoundError(
-                f"Browser session not found: {self.session_file}\n"
+                f"Browser profile not found: {self.user_data_dir}\n"
                 f"Run: python3 scripts/yt_browser_login.py --account {account}"
             )
 
     def _ensure_browser(self):
-        if self._browser is not None:
+        if self._context is not None:
             return
         _ensure_xvfb()
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
+        self._context = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(self.user_data_dir),
             headless=False,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
-        )
-        self._context = self._browser.new_context(
             viewport={"width": 1280, "height": 900},
-            storage_state=str(self.session_file),
             locale="es-ES",
             timezone_id="Europe/Madrid",
         )
@@ -120,12 +118,9 @@ class YouTubeBrowser:
             try:
                 if self._context:
                     self._context.close()
-                if self._browser:
-                    self._browser.close()
             except Exception:
                 pass
             self._context = None
-            self._browser = None
 
     def mark_altered_content(self, youtube_video_id: str) -> bool:
         with self._lock:
@@ -472,6 +467,97 @@ def close_all_browsers():
 
 def get_account_for_channel(channel_slug: str) -> Optional[str]:
     return CHANNEL_ACCOUNT_MAP.get(channel_slug)
+
+
+# ── Session health check ───────────────────────────────────────
+
+_session_check_cache: dict = {}  # {account: (timestamp, valid_bool)}
+
+
+def check_session_valid(account: str, cache_seconds: int = 300) -> bool:
+    """Quick check if a browser session is still authenticated.
+    
+    Launches a temporary browser with the persistent profile, navigates
+    to YouTube Studio, and checks we aren't redirected to login.
+    Results are cached for `cache_seconds` (default 5 min).
+    
+    Returns True if the session appears valid, False otherwise.
+    """
+    import time as _time
+    now = _time.time()
+    if account in _session_check_cache:
+        ts, val = _session_check_cache[account]
+        if now - ts < cache_seconds:
+            return val
+
+    from pathlib import Path as _Path
+    user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
+    if not user_data_dir.exists():
+        _session_check_cache[account] = (now, False)
+        logger.warning("Browser profile missing for %s: %s", account, user_data_dir)
+        return False
+
+    valid = False
+    try:
+        _ensure_xvfb()
+        from playwright.sync_api import sync_playwright as _sync_pw
+        pw = _sync_pw().start()
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
+            viewport={"width": 1280, "height": 900},
+            locale="es-ES",
+            timezone_id="Europe/Madrid",
+        )
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
+            _time.sleep(3)
+            current_url = page.url
+            if "studio.youtube.com" in current_url and "accounts.google.com" not in current_url:
+                valid = True
+                logger.debug("Session valid for %s (url: %s)", account, current_url[:80])
+            else:
+                logger.warning("Session EXPIRED for %s (redirected to: %s)", account, current_url[:120])
+        finally:
+            try: ctx.close()
+            except Exception: pass
+            try: pw.stop()
+            except Exception: pass
+    except Exception as e:
+        logger.warning("check_session_valid error for %s: %s", account, e)
+
+    _session_check_cache[account] = (now, valid)
+    return valid
+
+
+def get_all_browser_session_status() -> list:
+    """Return status for all configured browser accounts.
+    
+    Returns: list of dicts with keys: account, valid, channels, profile_exists
+    """
+    from pathlib import Path as _Path
+    result = []
+    seen_accounts = set()
+    for slug, account in CHANNEL_ACCOUNT_MAP.items():
+        if account in seen_accounts:
+            # Append channel to existing entry
+            for r in result:
+                if r["account"] == account:
+                    r["channels"].append(slug)
+                    break
+            continue
+        seen_accounts.add(account)
+        profile_exists = (TOKENS_DIR / f"{account}_browser_profile").exists()
+        valid = check_session_valid(account) if profile_exists else False
+        result.append({
+            "account": account,
+            "valid": valid,
+            "profile_exists": profile_exists,
+            "channels": [slug],
+        })
+    return result
 
 
 if __name__ == "__main__":

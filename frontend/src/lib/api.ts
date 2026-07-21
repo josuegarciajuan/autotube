@@ -50,6 +50,7 @@ export const api = {
   startAuth: (channelId: number) => request<any>(`/channels/${channelId}/auth-start`, { method: 'POST' }),
   submitAuthCode: (channelId: number, code: string) => request<any>(`/channels/${channelId}/auth-code`, { method: 'POST', body: JSON.stringify({ code }) }),
   getAuthStatus: (channelId: number) => request<any>(`/channels/${channelId}/auth-status`),
+  getBrowserSessionStatus: () => request<{accounts: any[]; all_valid: boolean; any_invalid: boolean}>('/browser-sessions/status'),
 
   // Voices
   getVoices: () => request<any>('/voices'),

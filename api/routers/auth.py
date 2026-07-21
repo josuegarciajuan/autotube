@@ -113,3 +113,30 @@ def auth_status(channel_id: int):
 
     uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
     return uploader.check_auth_status()
+
+
+# ── Browser session status ─────────────────────────────────────
+
+@router.get("/browser-sessions/status")
+def browser_session_status():
+    """Check if Playwright browser sessions are valid for all accounts.
+    
+    Returns per-account status: profile exists, session valid, channels mapped.
+    The frontend uses this to show a persistent warning bar when sessions expire.
+    """
+    try:
+        from pipeline.youtube_browser import get_all_browser_session_status
+        accounts = get_all_browser_session_status()
+        return {
+            "accounts": accounts,
+            "all_valid": all(a["valid"] for a in accounts),
+            "any_invalid": any(not a["valid"] for a in accounts),
+        }
+    except Exception as e:
+        logger.error("Failed to check browser session status: %s", e)
+        return {
+            "accounts": [],
+            "all_valid": False,
+            "any_invalid": True,
+            "error": str(e),
+        }
