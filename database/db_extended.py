@@ -3076,17 +3076,21 @@ class ExtendedDatabase(Database):
         return dict(row) if row else None
     
     def get_next_available_slot(self, max_future_hours: int = 36) -> dict | None:
-        """Get the first pending slot (by scheduled_at) whose target_public_at
-        is within max_future_hours from now. Supports pull-forward dispatch.
+        """Get the first pending slot whose target_public_at is within
+        max_future_hours from now. Supports pull-forward dispatch.
         
         Unlike get_next_pending_slot(), this does NOT require scheduled_at <= now,
         allowing generation to start early when the worker is idle.
         
+        ORDERING: Past-due slots (scheduled_at <= now) come first, sorted by
+        target_public_at ASC (earliest upload date = most urgent). Pull-forward
+        slots (future scheduled_at within lead window) come after, also sorted
+        by target_public_at ASC. This ensures the video that should have been
+        published earliest gets generated first.
+        
         IMPORTANT: excludes slots where date_key is in the past (yesterday or
         earlier). Past-date slots have missed their upload window entirely and
-        should be cancelled, not dispatched. Without this guard, the priority
-        dispatcher would eagerly pick up stale slots from previous days and
-        give them inflated priority scores due to extreme lateness.
+        should be cancelled, not dispatched.
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -3103,7 +3107,10 @@ class ExtendedDatabase(Database):
                           (ps.target_public_at IS NOT NULL
                            AND ps.target_public_at <= datetime('now', 'localtime', ? || ' hours'))
                       )
-                   ORDER BY ps.scheduled_at ASC LIMIT 1""",
+                   ORDER BY
+                      CASE WHEN ps.scheduled_at <= datetime('now', 'localtime') THEN 0 ELSE 1 END,
+                      COALESCE(ps.target_public_at, ps.target_upload_at) ASC
+                   LIMIT 1""",
                 (f"+{max_future_hours}",),
             ).fetchone()
         return dict(row) if row else None
@@ -4110,7 +4117,12 @@ class ExtendedDatabase(Database):
 
     def get_next_pending_shorts_slot(self) -> dict | None:
         """Get the next pending short slot that is due (scheduled_at <= now),
-        ordered by scheduled_at. Returns None if none.
+        ordered by target_upload_at ASC (nearest upload date first). Returns
+        None if none.
+        
+        Shorts with the closest target_upload_at are generated first, ensuring
+        that the most time-sensitive shorts are interleaved between long-form
+        videos without missing their publish window.
         
         Excludes past-date slots (date_key < today) to prevent obsolete
         slots from previous days from blocking the dispatch queue.
@@ -4123,7 +4135,7 @@ class ExtendedDatabase(Database):
                    WHERE sps.status = 'pending'
                       AND sps.date_key >= date('now', 'localtime')
                       AND sps.scheduled_at <= datetime('now', 'localtime')
-                   ORDER BY sps.scheduled_at ASC LIMIT 1"""
+                    ORDER BY COALESCE(sps.target_upload_at, sps.scheduled_at) ASC LIMIT 1"""
             ).fetchone()
         return dict(row) if row else None
 

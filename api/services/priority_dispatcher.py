@@ -2,85 +2,41 @@
 Unified priority-aware dispatch for shorts and long-form video generation.
 
 When a worker completes (monitor detects terminal status), this module
-decides what to generate next based on urgency and estimated duration.
+decides what to generate next using a deterministic interleaving strategy:
 
-Priority formula:
-    urgency = minutes_overdue × 2.0 + 720 / max(1, minutes_until_target)
-    priority = urgency / estimated_duration_minutes
+    1. Past-due long-form slots: ordered by target_public_at ASC
+       → the video that should have been published earliest is generated first.
+    2. Past-due shorts slots: ordered by target_upload_at ASC
+       → the short with the nearest upload date is generated first.
+    3. Interleaving: shorts are ALWAYS tried before long-form.
+       Since shorts generate fast (~10 min) and long-form takes ~45 min,
+       this naturally intersperses shorts between long-form videos without
+       starving either queue.
 
-    • minutes_overdue = how long the slot has been past its scheduled_at
-    • deadline_proximity = 720 / minutes_until_target — spikes near deadline
-      (e.g. 30 min before target = 24 pts, 5 min before = 144 pts)
-    • estimated_duration = 10 min for shorts, 45 min for long-form
-
-This gives shorts a natural ~4.5× boost because they generate faster,
-but a critically overdue long-form video can still out-prioritize
-a non-urgent short when its deadline is imminent.
+The actual sort order is enforced at the DB query level
+(get_next_available_slot and get_next_pending_shorts_slot).
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger("autotube.priority_dispatch")
 
-# ── Constants ──────────────────────────────────────────────────
-SHORT_ESTIMATED_MINUTES = 10
-LONG_ESTIMATED_MINUTES = 45
-DEADLINE_BASE = 720.0  # 12h baseline for deadline proximity
 
-
-def _calc_priority(slot: dict[str, Any], is_short: bool, now: datetime) -> float:
-    """Calculate a numeric priority score for a slot.
-
-    Higher score == more urgent. The score is dimensionless; only
-    relative ordering matters.
-    """
-    scheduled_at = slot.get("scheduled_at")
-    # shorts table uses target_upload_at, long-form uses target_public_at
-    target_at = slot.get("target_public_at") or slot.get("target_upload_at")
-
-    minutes_overdue: float = 0.0
-    if scheduled_at:
-        try:
-            s_dt = datetime.fromisoformat(str(scheduled_at))
-            minutes_overdue = max(0.0, (now - s_dt).total_seconds() / 60)
-        except (ValueError, TypeError, OSError):
-            pass
-
-    deadline_proximity: float = 0.0
-    if target_at:
-        try:
-            t_dt = datetime.fromisoformat(str(target_at))
-            minutes_until = max(1.0, (t_dt - now).total_seconds() / 60)
-            deadline_proximity = DEADLINE_BASE / minutes_until
-        except (ValueError, TypeError, OSError):
-            pass
-
-    urgency = minutes_overdue * 2.0 + deadline_proximity
-    estimated_minutes = SHORT_ESTIMATED_MINUTES if is_short else LONG_ESTIMATED_MINUTES
-    priority = urgency / estimated_minutes
-
-    logger.debug(
-        "Priority calc: slot=%d type=%s overdue=%.0f deadline=%.1f → %.2f",
-        slot["id"],
-        "short" if is_short else "long",
-        minutes_overdue,
-        deadline_proximity,
-        priority,
-    )
-    return priority
-
+# ── Interleaving dispatch ───────────────────────────────────────
 
 def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
-    """Dispatch the most urgent pending slot (short or long-form).
+    """Dispatch the most urgent pending slot (short preferred over long-form).
 
-    Finds the next pending short and long-form candidate, scores each
-    by priority, then dispatches the highest-scoring one. Falls back
-    to the next candidate if the top one is blocked by concurrency
-    or memory guards.
+    Collects the next pending short and long-form candidates. Shorts are
+    always tried first because they are fast to generate and have tight
+    publish windows. Falls back to long-form if no short is ready.
+
+    Both candidates are already sorted correctly by the DB queries:
+      - Shorts: target_upload_at ASC (nearest upload date first)
+      - Long-form: past-due first, then target_public_at ASC
 
     Returns:
         Dispatch result dict (slot_id, job_id, channel_slug, …),
@@ -90,68 +46,51 @@ def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
         from database.db_extended import ExtendedDatabase  # noqa: F811
         db = ExtendedDatabase()
 
-    now = datetime.now()
-
     # ── Collect candidates ──────────────────────────────────────
-    candidates: list[dict[str, Any]] = []
-
     short_candidate = db.get_next_pending_shorts_slot()
-    if short_candidate:
-        candidates.append(
-            {
-                "type": "short",
-                "candidate": short_candidate,
-                "priority": _calc_priority(short_candidate, is_short=True, now=now),
-            }
-        )
-
     long_candidate = db.get_next_available_slot(max_future_hours=36)
-    if long_candidate:
-        candidates.append(
-            {
-                "type": "long",
-                "candidate": long_candidate,
-                "priority": _calc_priority(long_candidate, is_short=False, now=now),
-            }
-        )
 
-    if not candidates:
-        logger.debug("No pending slots (shorts or long-form) due for dispatch")
-        return None
-
-    # ── Sort by priority descending ─────────────────────────────
-    candidates.sort(key=lambda c: c["priority"], reverse=True)
-
-    for entry in candidates:
-        slot_type: str = entry["type"]
-        slot: dict[str, Any] = entry["candidate"]
-        pri: float = entry["priority"]
+    # ── Shorts first (interleaving strategy) ────────────────────
+    if short_candidate:
+        slot_id = short_candidate["id"]
+        slug = short_candidate.get("channel_slug", "?")
+        scheduled = (str(short_candidate.get("scheduled_at")) or "?")[:16]
+        target_upload = (str(short_candidate.get("target_upload_at")) or "?")[:16]
 
         logger.info(
-            "Priority dispatch: trying %s slot #%d "
-            "(channel=%s, priority=%.2f, scheduled=%s)",
-            slot_type,
-            slot["id"],
-            slot.get("channel_slug", "?"),
-            pri,
-            (str(slot.get("scheduled_at")) or "?")[:16],
+            "Priority dispatch: trying short slot #%d (channel=%s, upload=%s, scheduled=%s)",
+            slot_id, slug, target_upload, scheduled,
         )
 
-        if slot_type == "short":
-            from api.services.shorts_scheduler import dispatch_next_due_shorts_slot  # noqa: F811
-            result = dispatch_next_due_shorts_slot(db=db)
-        else:
-            from api.services.planning_service import process_planned_slots  # noqa: F811
-            result = process_planned_slots(db=db)
-
+        from api.services.shorts_scheduler import dispatch_next_due_shorts_slot  # noqa: F811
+        result = dispatch_next_due_shorts_slot(db=db)
         if result:
             logger.info(
-                "Priority dispatch: %s slot #%d dispatched (priority=%.2f)",
-                slot_type,
-                slot["id"],
-                pri,
+                "Priority dispatch: short slot #%d dispatched (channel=%s, type=%s)",
+                slot_id, slug, result.get("short_type", "?"),
             )
             return result
 
-    logger.debug("Priority dispatch: all candidates blocked by concurrency/memory guards")
+    # ── Fallback to long-form ───────────────────────────────────
+    if long_candidate:
+        slot_id = long_candidate["id"]
+        slug = long_candidate.get("channel_slug", "?")
+        pub_at = (str(long_candidate.get("target_public_at")) or "?")[:16]
+        scheduled = (str(long_candidate.get("scheduled_at")) or "?")[:16]
+
+        logger.info(
+            "Priority dispatch: trying long-form slot #%d (channel=%s, pub=%s, scheduled=%s)",
+            slot_id, slug, pub_at, scheduled,
+        )
+
+        from api.services.planning_service import process_planned_slots  # noqa: F811
+        result = process_planned_slots(db=db)
+        if result:
+            logger.info(
+                "Priority dispatch: long-form slot #%d dispatched (channel=%s)",
+                slot_id, slug,
+            )
+            return result
+
+    logger.debug("Priority dispatch: no dispatchable slots (all candidates blocked or absent)")
     return None

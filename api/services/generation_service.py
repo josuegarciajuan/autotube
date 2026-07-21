@@ -3161,7 +3161,7 @@ async def _monitor_worker_progress(
                 # ── Trigger immediate dispatch of next pending slot ──────
                 # Bypasses the 5-min checker loop tick so queued slots
                 # fire as soon as the active worker releases resources.
-                # Uses priority-aware dispatch: shorts get natural boost
+                # Uses deterministic interleaving: shorts always tried first
                 # because they generate faster (~10 min vs ~45 min).
                 try:
                     from api.services.priority_dispatcher import dispatch_next_priority_slot
