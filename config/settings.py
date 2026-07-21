@@ -130,13 +130,14 @@ SHORTS_NATIVE_MAX_DAILY = 4
 # Shared by all channels. Each channel's MEDIA_STRATEGY should reference
 # this list via `DEFAULT_VIDEO_PROVIDERS` rather than duplicating.
 # ── Video providers in priority order ──────────────────────────
-# coverr removed 2026-07-20: completely broken — both search (404)
-# and all fallback download URLs return 404.  Re-enable after
-# verifying the site API/CDN is operational again.
+# Providers are ALGORITHM-LEVEL, not per-channel. All channels share
+# this list via DEFAULT_VIDEO_PROVIDERS reference (see per-channel configs).
+# coverr re-enabled 2026-07-21: search URL fixed (/search → /s)
 DEFAULT_VIDEO_PROVIDERS = [
     {"name": "pexels", "api_key_env": "PEXELS_API_KEY"},
     {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
     {"name": "mixkit"},
+    {"name": "coverr"},
     {"name": "youtube_cc"},
 ]
 

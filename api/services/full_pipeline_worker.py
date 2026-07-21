@@ -1045,7 +1045,37 @@ def main():
                         help="raw_content.id for the viral candidate to use")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
-    args = parser.parse_args()
+
+    # ── Graceful handling of invalid actions ─────────────────
+    # Catch argparse SystemExit on invalid choices and write a
+    # clear error to the generation_jobs table before exiting,
+    # so the UI shows a meaningful message instead of a raw crash.
+    try:
+        args = parser.parse_args()
+    except SystemExit as exc:
+        # Extract job_id if possible from raw argv for DB error logging
+        import re as _re
+        job_id = 0
+        for i, arg in enumerate(sys.argv):
+            if arg == "--job-id" and i + 1 < len(sys.argv):
+                try:
+                    job_id = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+                break
+        if job_id:
+            try:
+                db = get_db("generation_service")
+                action_arg = next(
+                    (sys.argv[i+1] for i, a in enumerate(sys.argv)
+                     if a == "--action" and i+1 < len(sys.argv)), "unknown")
+                db.execute(
+                    "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id=?",
+                    (f"Invalid action: '{action_arg}'. Valid: generate_and_upload, "
+                     f"generate_only, upload_only", job_id))
+            except Exception:
+                pass
+        sys.exit(exc.code if exc.code else 2)
 
     # Setup logging
     logger = _setup_worker_logging(args.job_id)

@@ -98,12 +98,16 @@ class MediaFetcher:
         self._pixabay_img_consecutive_empty = 0
         self._pixabay_img_disabled_until: float | None = None
 
-        # ── Video provider circuit breaker ───────────────────
-        # Tracks consecutive failures per provider. After 3 consecutive
-        # failures in a single _try_all_video_providers pass, the
-        # provider is disabled for the remainder of the phase.
-        self._vp_fail_streak: dict[str, int] = {}
-        self._vp_disabled: set[str] = set()
+        # ── Video provider circuit breaker (2-tier) ─────────────
+        # Tier 1 — Hard failures: network errors, 404, DNS failures
+        #   → provider disabled IMMEDIATELY for entire phase (no retries).
+        # Tier 2 — Soft failures: search() returns None (no results)
+        #   → per-scene: don't retry provider within same scene
+        #   → global: after 5 distinct-scene failures, disable for phase.
+        self._vp_hard_fail: set[str] = set()          # network/404 → instant disable
+        self._vp_soft_fail_scenes: dict[str, int] = {}  # distinct scenes failed
+        self._vp_disabled: set[str] = set()            # union of hard_fail + soft threshold
+        self._scene_tried_providers: set[str] = set()   # reset per scene
 
         if settings.UNSPLASH_ACCESS_KEY:
             self._unsplash = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)
@@ -417,16 +421,21 @@ class MediaFetcher:
         _cb_consecutive_all_provider_failures = 0
         _cb_max_consecutive_failures = 5  # abort after 5 consecutive all-provider failures
         _cb_phase_start = time.time()
-        _cb_phase_timeout = 900  # 15 min hard timeout for the entire media phase
+        _cb_phase_timeout = 1200  # 20 min hard timeout for the entire media phase
 
         # ── Reset video provider circuit breaker for this job ──
-        self._vp_fail_streak.clear()
+        self._vp_hard_fail.clear()
+        self._vp_soft_fail_scenes.clear()
         self._vp_disabled.clear()
+        self._scene_tried_providers.clear()
 
         # Track sub-scene sequence per asset_idx for query variation
         subscene_seq: dict[int, int] = {}
 
         for i, scene in enumerate(scenes):
+            # ── Reset per-scene provider tracking ──────────
+            self._scene_tried_providers.clear()
+            
             want_video = i in video_assigned
             target_dur = scene.get("duration", 5)
             query = scene.get("search_query_en", "")
@@ -739,27 +748,34 @@ class MediaFetcher:
         # As absolute last resort, relax the CC requirement and
         # search YouTube broadly (no "creative commons" filter).
         for provider in self.video_providers:
-            if getattr(provider, "name", "") == "youtube_cc":
-                try:
-                    asset = provider.search(query, min_dur, max_dur, liberal_license=True)
-                    if asset is None:
-                        continue
-                    if skip_urls is not None and asset.url in skip_urls:
-                        continue
-                    if skip_urls is not None:
-                        skip_urls.add(asset.url)
-                    self._used_asset_urls.add(asset.url)
-                    logger.info("Video found via youtube_cc (liberal): dur=%.1fs", asset.duration)
-                    path = self._download_video_asset(asset, provider)
-                    if path:
-                        return {
-                            "path": path,
-                            "type": "video",
-                            "duration": asset.duration,
-                            "source": "youtube_cc_liberal",
-                        }
-                except Exception as exc:
-                    logger.warning("youtube_cc liberal search failed: %s", exc)
+            pname = getattr(provider, "name", "")
+            if pname != "youtube_cc":
+                continue
+            if pname in self._vp_disabled or pname in self._scene_tried_providers:
+                continue
+            try:
+                asset = provider.search(query, min_dur, max_dur, liberal_license=True)
+                if asset is None:
+                    continue
+                if skip_urls is not None and asset.url in skip_urls:
+                    continue
+                if skip_urls is not None:
+                    skip_urls.add(asset.url)
+                self._used_asset_urls.add(asset.url)
+                logger.info("Video found via youtube_cc (liberal): dur=%.1fs", asset.duration)
+                path = self._download_video_asset(asset, provider)
+                if path:
+                    return {
+                        "path": path,
+                        "type": "video",
+                        "duration": asset.duration,
+                        "source": "youtube_cc_liberal",
+                    }
+            except Exception as exc:
+                self._vp_hard_fail.add(pname)
+                self._vp_disabled.add(pname)
+                logger.warning(
+                    "Circuit breaker [hard]: youtube_cc disabled — %s", exc)
 
         return None
 
@@ -775,12 +791,85 @@ class MediaFetcher:
         Args:
             skip_urls: Set of asset URLs to skip for deduplication.
                        Pass ``None`` to disable dedup entirely (sub-scene fallback).
-                       
-        Circuit breaker: any provider failing 3 consecutive times across
-        calls within this phase is disabled for the remainder of the job.
+
+        Circuit breaker (2-tier):
+            Tier 1 — Hard failures (network errors, 404, DNS failures): provider
+                     disabled IMMEDIATELY for entire phase with no retries.
+            Tier 2 — Soft failures (search returns None / no results): provider
+                     skipped for THIS scene only (won't retry on subsequent
+                     query levels). After 5 distinct-scene soft failures,
+                     provider gets globally disabled for the phase.
         """
         if not query or not self.video_providers:
             return None
+
+        for provider in self.video_providers:
+            pname = getattr(provider, "name", str(provider))
+
+            # ── Skip if disabled or already tried for this scene ──
+            if pname in self._vp_disabled:
+                continue
+            if pname in self._scene_tried_providers:
+                continue
+
+            try:
+                asset = provider.search(query, min_dur, max_dur)
+                if asset is None:
+                    # ── Soft failure: no results ──────────────
+                    logger.debug("Provider %s: no results for query %r", pname, query[:60])
+                    self._scene_tried_providers.add(pname)
+                    continue
+
+                # ── Deduplication check ─────────────────────
+                if skip_urls is not None and asset.url in skip_urls:
+                    logger.debug("Asset URL already used, skipping: %s", asset.url[:80])
+                    self._scene_tried_providers.add(pname)
+                    continue
+                if skip_urls is not None:
+                    skip_urls.add(asset.url)
+                self._used_asset_urls.add(asset.url)
+
+                logger.info("Video found via %s: dur=%.1fs url=%s",
+                             provider.name, asset.duration, asset.url[:80])
+
+                # ── Download the video clip ──────────────────
+                path = self._download_video_asset(asset, provider)
+                if path:
+                    return {
+                        "path": path,
+                        "type": "video",
+                        "duration": asset.duration,
+                        "source": f"{provider.name}_video",
+                    }
+
+                # Download failed: treat as soft failure for this scene
+                logger.warning("Provider %s: found video but download failed", provider.name)
+                self._scene_tried_providers.add(pname)
+
+            except Exception as exc:
+                # ── Hard failure: network/404/DNS → instant global disable ──
+                self._vp_hard_fail.add(pname)
+                self._vp_disabled.add(pname)
+                logger.warning(
+                    "Circuit breaker [hard]: %s disabled for phase — %s: %s",
+                    pname, type(exc).__name__, exc)
+
+        # ── After loop: escalate soft failures to global if threshold hit ──
+        # Track distinct-scene soft failures for each provider that was tried
+        # and failed this round (added to _scene_tried_providers).
+        # This runs once per _try_all_video_providers call, not per provider,
+        # to avoid over-counting from the same scene.
+        newly_failed = self._scene_tried_providers - self._vp_disabled
+        for pname in newly_failed:
+            count = self._vp_soft_fail_scenes.get(pname, 0) + 1
+            self._vp_soft_fail_scenes[pname] = count
+            if count >= 5:
+                self._vp_disabled.add(pname)
+                logger.warning(
+                    "Circuit breaker [soft]: %s failed 5 distinct scenes — "
+                    "disabled for remaining phase", pname)
+
+        return None
 
         all_used = True  # Track if every provider returned an already-used asset
         

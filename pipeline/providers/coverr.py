@@ -22,7 +22,7 @@ from pipeline.providers.base import BaseVideoProvider, VideoAsset
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://coverr.co"
-SEARCH_URL = f"{BASE_URL}/search"
+SEARCH_URL = f"{BASE_URL}/s"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
