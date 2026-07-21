@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
 """Generate the Autotube web dashboard page."""
-import sys, json, sqlite3, shutil
+import sys, json, sqlite3, shutil, argparse
 sys.path.insert(0, '/root/autotube')
 from pathlib import Path
 from datetime import datetime
-from config.settings import DATABASE_PATH, OUTPUT_DIR
+from config.settings import DATABASE_PATH, OUTPUT_DIR, ACTIVE_CHANNELS
+
+# ── Parse args ──────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="Generate dashboard page for a channel")
+parser.add_argument("--canal", default=ACTIVE_CHANNELS[0] if ACTIVE_CHANNELS else None,
+                    help=f"Channel slug (default: {ACTIVE_CHANNELS[0] if ACTIVE_CHANNELS else 'none'})")
+args = parser.parse_args()
+canal_slug = args.canal
+if not canal_slug:
+    print("ERROR: No active channels configured")
+    sys.exit(1)
+
+# Resolve display name from DB
+conn_temp = sqlite3.connect(str(DATABASE_PATH))
+conn_temp.row_factory = sqlite3.Row
+ch_row = conn_temp.execute("SELECT name, slug FROM channels WHERE slug=?", (canal_slug,)).fetchone()
+canal_display = ch_row["name"] if ch_row else canal_slug.capitalize()
+conn_temp.close()
 
 WEB_DIR = Path('/var/www/html/atupuerta/autotube')
 VIDEO_WEB_DIR = WEB_DIR / 'videos'
@@ -24,12 +41,12 @@ bg_status = bg_log.read_text()[-500:] if bg_log.exists() else "Waiting..."
 conn = sqlite3.connect(str(DATABASE_PATH))
 conn.row_factory = sqlite3.Row
 
-total_content = conn.execute("SELECT COUNT(*) as c FROM raw_content WHERE canal='canal2'").fetchone()['c']
-total_scripts = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal2'").fetchone()['c']
-total_used = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal='canal2' AND used=1").fetchone()['c']
+total_content = conn.execute("SELECT COUNT(*) as c FROM raw_content WHERE canal=?", (canal_slug,)).fetchone()['c']
+total_scripts = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal=?", (canal_slug,)).fetchone()['c']
+total_used = conn.execute("SELECT COUNT(*) as c FROM scripts WHERE canal=? AND used=1", (canal_slug,)).fetchone()['c']
 
 # Latest script
-latest = conn.execute("SELECT * FROM scripts WHERE canal='canal2' ORDER BY created_at DESC LIMIT 1").fetchone()
+latest = conn.execute("SELECT * FROM scripts WHERE canal=? ORDER BY created_at DESC LIMIT 1", (canal_slug,)).fetchone()
 latest_dict = dict(latest) if latest else None
 if latest_dict:
     titles = json.loads(latest_dict['titulo_options'])
@@ -38,12 +55,12 @@ if latest_dict:
 
 # Pipeline log
 logs = conn.execute(
-    "SELECT * FROM pipeline_log WHERE canal='canal2' ORDER BY created_at DESC LIMIT 20"
+    "SELECT * FROM pipeline_log WHERE canal=? ORDER BY created_at DESC LIMIT 20", (canal_slug,)
 ).fetchall()
 
 # Source content
 sources = conn.execute(
-    "SELECT * FROM raw_content WHERE canal='canal2' ORDER BY scraped_at DESC LIMIT 5"
+    "SELECT * FROM raw_content WHERE canal=? ORDER BY scraped_at DESC LIMIT 5", (canal_slug,)
 ).fetchall()
 
 conn.close()
@@ -60,7 +77,7 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Autotube — Sincronías</title>
+<title>Autotube — {esc(canal_display)}</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d0d0d;color:#e0e0e0;line-height:1.6}}
@@ -97,7 +114,7 @@ footer{{text-align:center;padding:2rem;color:#555;font-size:.8rem}}
 </head>
 <body>
 <header>
-<h1>🎬 Autotube — Canal 1</h1>
+<h1>🎬 Autotube — {esc(canal_display)}</h1>
 <p>Historias Impactantes Reales · Pipeline Automatizado · {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
 </header>
 
