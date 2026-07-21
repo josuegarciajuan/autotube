@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import requests
 
-from config import canal2_config as _default_cfg
 from config import settings
 from pipeline.rate_limiter import TokenBucketRateLimiter
 
@@ -381,7 +380,10 @@ class ImageFetcher:
     def __init__(self, config: SimpleNamespace | None = None) -> None:
         self.primary: UnsplashProvider | None = None
         self.fallback: PixabayImageProvider | None = None
-        self._config = config or _default_cfg
+        if config is None:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(settings.ACTIVE_CHANNELS[0])
+        self._config = config
 
         if settings.UNSPLASH_ACCESS_KEY:
             self.primary = UnsplashProvider(settings.UNSPLASH_ACCESS_KEY)

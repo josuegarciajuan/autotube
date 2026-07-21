@@ -2147,13 +2147,18 @@ async def regenerate_scene_audio_task(scene_id: int, canal: str):
         logger.error(f"Scene audio regeneration failed: {e}")
 
 
-async def replace_scene_image_task(scene_id: int, description: str):
+async def replace_scene_image_task(scene_id: int, description: str, canal: str = None):
     """Replace image for a single scene."""
     db = _get_db()
     try:
         from pipeline.image_fetcher import ImageFetcher
         from pipeline.image_processor import ImageProcessor
-        from config import canal2_config as cfg
+        from config.config_bridge import get_channel_config
+        
+        if canal is None:
+            from config import settings
+            canal = settings.ACTIVE_CHANNELS[0]
+        cfg = get_channel_config(canal)
         
         fetcher = ImageFetcher()
         processor = ImageProcessor(cfg)

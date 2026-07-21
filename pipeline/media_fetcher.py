@@ -19,7 +19,6 @@ from pathlib import Path
 
 import requests
 
-from config import canal2_config as _default_cfg
 from config import settings
 from pipeline.image_fetcher import UnsplashProvider, PexelsProvider, PixabayImageProvider
 from pipeline.providers.pexels import PexelsVideoProvider
@@ -79,7 +78,10 @@ class MediaFetcher:
     }
 
     def __init__(self, config=None) -> None:
-        self._config = config or _default_cfg
+        if config is None:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(settings.ACTIVE_CHANNELS[0])
+        self._config = config
         self._media_strategy = getattr(self._config, "MEDIA_STRATEGY", {})
 
         # P3: Theme context for enriched search queries

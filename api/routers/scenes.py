@@ -69,6 +69,6 @@ def replace_scene_image(scene_id: int, background_tasks: BackgroundTasks):
         raise HTTPException(400, "Scene has no description for image search")
     
     from api.services.generation_service import replace_scene_image_task
-    background_tasks.add_task(replace_scene_image_task, scene_id, scene["description"])
+    background_tasks.add_task(replace_scene_image_task, scene_id, scene["description"], scene.get("canal"))
     
     return {"message": "Image replacement started"}

@@ -16,15 +16,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
-from config.canal2_config import (
-    CANAL_DISPLAY_NAME,
-    COLOR_PALETTE,
-    THUMBNAIL_BORDER_WIDTH,
-    THUMBNAIL_HEIGHT,
-    THUMBNAIL_WIDTH,
-    THUMBNAIL_FONT_SIZE,
-)
 from config.settings import THUMBNAILS_DIR
+
+# ── Default thumbnail dimensions (overridable per channel via config_bridge) ──
+THUMBNAIL_WIDTH = 1280
+THUMBNAIL_HEIGHT = 720
+THUMBNAIL_FONT_SIZE = 56
+THUMBNAIL_BORDER_WIDTH = 5
+CANAL_DISPLAY_NAME = "Autotube"
+COLOR_PALETTE: dict = {"primary": (180, 30, 30)}
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +95,9 @@ class ThumbnailMaker:
 
     def __init__(self, config=None):
         if config is None:
-            from config import canal2_config
-
-            config = canal2_config
+            from config.config_bridge import get_channel_config
+            from config import settings
+            config = get_channel_config(settings.ACTIVE_CHANNELS[0])
         self.width = getattr(config, "THUMBNAIL_WIDTH", THUMBNAIL_WIDTH)
         self.height = getattr(config, "THUMBNAIL_HEIGHT", THUMBNAIL_HEIGHT)
         self.font_size = getattr(config, "THUMBNAIL_FONT_SIZE", THUMBNAIL_FONT_SIZE)

@@ -382,7 +382,8 @@ def generate_script(data: ScriptGenerateRequest, background_tasks: BackgroundTas
         raise HTTPException(404, "Channel not found")
     
     from pipeline.script_generator import ScriptGenerator
-    from config import canal2_config as cfg
+    from config.config_bridge import get_channel_config
+    cfg = get_channel_config(ch["slug"])
     
     # Use existing script generator
     content = db.get_script(data.content_id)  # reuse get_script to fetch content

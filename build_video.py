@@ -8,13 +8,22 @@ logging.basicConfig(level=logging.WARNING, format='%(message)s')
 
 from database.db import Database
 from database.db_extended import migrate_v2
-from config import canal2_config as cfg
+from config.config_bridge import get_channel_config
+from config import settings
 from pipeline.tts_engine import TTSEngine
 from pipeline.video_editor import VideoEditor
 from pipeline.thumbnail_maker import ThumbnailMaker
 
 db = Database()
 migrate_v2()
+
+# Use first active channel config (override with --canal arg if needed)
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--canal", default=settings.ACTIVE_CHANNELS[0])
+_args, _ = _parser.parse_known_args()
+cfg = get_channel_config(_args.canal)
+
 script = db.get_script(8)
 
 # Parse scenes

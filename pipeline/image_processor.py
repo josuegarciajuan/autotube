@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 
-from config import canal2_config as cfg
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,10 @@ class ImageProcessor:
     """
 
     def __init__(self, style_config=None) -> None:
-        self.config = style_config or cfg
+        if style_config is None:
+            from config.config_bridge import get_channel_config
+            style_config = get_channel_config(settings.ACTIVE_CHANNELS[0])
+        self.config = style_config
         logger.info("ImageProcessor initialized with palette=%s", self.config.COLOR_PALETTE)
 
     def process(self, image_path: Path, output_path: Path | None = None) -> Path:
