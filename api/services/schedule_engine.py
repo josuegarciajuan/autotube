@@ -25,27 +25,45 @@ TARGET_WINDOWS = [
     (21, 30),   # prime time slot (target ~21:30)
 ]
 
-# ── Rotation: 6-day cycle, ensures each channel gets each position ──
-# Each entry: (slot_a_order, slot_b_order) where slot_b is reverse of slot_a
-# Orders are [first_to_start, middle, last_to_finish].
-# The LAST one finishes at target time (0 deviation).
-ROTATION = [
-    # Day 0 — canal3 anchors A, canal2 anchors B
-    (["canal4", "canal2", "canal3"], ["canal3", "canal2", "canal4"]),
-    # Day 1 — canal2 anchors A, canal4 anchors B
-    (["canal3", "canal4", "canal2"], ["canal2", "canal4", "canal3"]),
-    # Day 2 — canal4 anchors A, canal3 anchors B
-    (["canal2", "canal3", "canal4"], ["canal4", "canal3", "canal2"]),
-    # Day 3 — canal2 anchors A, canal3 anchors B
-    (["canal4", "canal3", "canal2"], ["canal2", "canal3", "canal4"]),
-    # Day 4 — canal4 anchors A, canal2 anchors B
-    (["canal3", "canal2", "canal4"], ["canal4", "canal2", "canal3"]),
-    # Day 5 — canal3 anchors A, canal4 anchors B
-    (["canal2", "canal4", "canal3"], ["canal3", "canal4", "canal2"]),
-]
-
 BUFFER_PCT = 0.15       # 15% safety margin on avg creation time
 JITTER_MINUTES = 15     # ±15 min deterministic jitter on target publish time
+
+
+def _build_rotation(day_index: int, active_slugs: list[str]) -> tuple[list[str], list[str]]:
+    """Dynamically generate a fair rotation of channels for the given day.
+    
+    Generates all permutations of active slugs, sorted deterministically,
+    and cycles through them. Slot B is the reverse of Slot A to ensure
+    no channel always gets the same position.
+    
+    Args:
+        day_index: Day ordinal or index used to select the permutation.
+        active_slugs: List of active channel slugs sorted alphabetically.
+    
+    Returns:
+        (slot_a_order, slot_b_order) where slot_b is the reverse of slot_a.
+    """
+    import itertools
+    
+    slugs = sorted(active_slugs)
+    n = len(slugs)
+    
+    if n == 0:
+        return ([], [])
+    if n == 1:
+        return (slugs, slugs)
+    
+    # Generate all permutations of N slugs (N! total)
+    all_perms = list(itertools.permutations(slugs))
+    # Deterministic ordering
+    all_perms.sort()
+    
+    # Pick permutation for this day
+    perm_idx = day_index % len(all_perms)
+    slot_a = list(all_perms[perm_idx])
+    slot_b = list(reversed(slot_a))
+    
+    return (slot_a, slot_b)
 
 
 def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
@@ -140,23 +158,19 @@ def compute_daily_schedule(date_str: str, db=None) -> list[dict]:
 
     ch_info = _channel_avg_for_scheduling(db, channels)
 
-    # Determine rotation index for this date (epoch days mod 6)
+    # Build active slugs list (deterministically sorted)
+    active_slugs = sorted(ch["slug"] for ch in channels)
+
+    # Determine rotation index for this date
     d = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
-    rotation_idx = d % 6
-    slot_a_order, slot_b_order = ROTATION[rotation_idx]
-
-    # Filter orders to only include channels that actually exist
-    active_slugs = {ch["slug"] for ch in channels}
-    slot_a_order = [s for s in slot_a_order if s in active_slugs]
-    slot_b_order = [s for s in slot_b_order if s in active_slugs]
-
+    slot_a_order, slot_b_order = _build_rotation(d, active_slugs)
     if not slot_a_order or not slot_b_order:
         logger.warning("No active channels match rotation slugs")
         return []
 
     logger.info(
-        "Day %s (rotation %d): A=%s  B=%s",
-        date_str, rotation_idx,
+        "Day %s: A=%s  B=%s",
+        date_str,
         "→".join(slot_a_order), "→".join(slot_b_order),
     )
 
