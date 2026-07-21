@@ -113,7 +113,8 @@ class Database:
     def insert_raw_content(self, source, url, title, text,
                            subreddit=None, score=0, canal=None):
         """Insert scraped content. Returns row id. Skips duplicates by URL."""
-        canal = self._resolve_canal(canal)        with self._connect() as conn:
+        canal = self._resolve_canal(canal)
+        with self._connect() as conn:
             try:
                 cursor = conn.execute(
                     """INSERT INTO raw_content
