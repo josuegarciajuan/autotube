@@ -729,13 +729,25 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
             f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
             f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
             f"El total debe superar 50 palabras. "
+            f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
+            f"imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + "
+            f"detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español "
+            f"(las APIs de stock no lo entienden). "
+            f"Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL "
+            f"del short para mantener coherencia entre escenas. "
             f"Devuelve SOLO JSON: "
             f'{{"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
-            f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases"}}, '
-            f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle"}}, '
-            f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico"}}, '
-            f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion"}}, '
-            f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete"}}]}}. '
+            f'"theme_keywords_en": ["global", "theme", "keywords"], '
+            f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
+            f'"search_query_en": "english keywords for stock search"}}, '
+            f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
+            f'"search_query_en": "english keywords"}}, '
+            f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
+            f'"search_query_en": "english keywords"}}, '
+            f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
+            f'"search_query_en": "english keywords"}}, '
+            f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
+            f'"search_query_en": "english keywords"}}]}}. '
             f"NADA MAS fuera del JSON."
         )}],
         temperature=0.9, max_tokens=1200,
@@ -780,13 +792,24 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
         logger.error("Short TTS failed for %s: %s", channel_slug, e)
         return None
 
-    # 3. Fetch portrait images
-    portrait_queries = [b.get("texto", "")[:80] for b in bloques]
-    portrait_queries = [q for q in portrait_queries if q.strip()]
+    # 3. Fetch portrait images — build theme-aware English queries
+    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images, _build_portrait_query
+    theme_kw = script.get("theme_keywords_en", [])
+    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
+
+    portrait_queries = []
+    for b in bloques:
+        search_en = b.get("search_query_en", "")
+        if search_en and search_en.strip():
+            portrait_queries.append(_build_portrait_query(search_en, theme_kw, style_mod))
+        else:
+            # Fallback for legacy scripts without search_query_en
+            texto = b.get("texto", "")
+            if texto.strip():
+                portrait_queries.append(texto[:80])
+
     if not portrait_queries:
         portrait_queries = [hook_text[:80]]
-
-    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images
     image_paths = []
     try:
         image_paths = fetch_portrait_images(portrait_queries, ch_config, count=4)

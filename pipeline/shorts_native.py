@@ -164,8 +164,17 @@ Estructura en bloques:
 - bloque_desarrollo: texto principal (2-3 frases)
 - bloque_cierre: llamado a la acción (1-2 frases)
 
+IMPORTANTE — BÚSQUEDA DE IMÁGENES:
+- Para CADA bloque, genera "search_query_en" con 5-8 keywords EN INGLÉS que describan
+  la escena visual exacta de ese bloque. Usa solo inglés (las APIs de stock no entienden español).
+  Incluye: tema concreto + detalles visuales (iluminación, tipo de plano, atmósfera, época).
+  NO uses adjetivos abstractos ("beautiful", "amazing"). Sé MUY concreto.
+- Además, genera "theme_keywords_en" a nivel del short: 5-8 keywords EN INGLÉS que capturen
+  el tema visual GLOBAL del short. Estas keywords se mezclarán en todas las búsquedas para
+  mantener coherencia visual entre escenas.
+
 Devuelve SOLO JSON:
-{{"titulo": "título corto y viral", "bloques": [{{"tipo": "hook", "texto": "..."}}, {{"tipo": "desarrollo", "texto": "..."}}, {{"tipo": "cierre", "texto": "..."}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
+{{"titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
 
         try:
             response = client.chat.completions.create(
@@ -229,11 +238,30 @@ Devuelve SOLO JSON:
             return None
 
     def _phase_media_short(self, script: dict) -> Optional[list]:
-        """Fetch vertical-oriented media for the short."""
-        from pipeline.shorts_media import fetch_portrait_images
+        """Fetch vertical-oriented media for the short.
 
-        queries = [b.get("texto", "")[:80] for b in script.get("bloques", [])]
-        queries = [q for q in queries if q.strip()]
+        Builds English search queries from LLM-generated ``search_query_en`` keywords
+        combined with theme keywords and channel style modifiers for thematic coherence.
+        Falls back to raw ``texto`` snippets if ``search_query_en`` is missing.
+        """
+        from pipeline.shorts_media import fetch_portrait_images, _build_portrait_query
+
+        theme_kw = script.get("theme_keywords_en", [])
+        style_mod = getattr(self.config, "IMAGE_STYLE_MODIFIERS", "")
+
+        queries = []
+        for b in script.get("bloques", []):
+            search_en = b.get("search_query_en", "")
+            if search_en and search_en.strip():
+                # Build composite query: scene keywords + theme context + style modifiers
+                q = _build_portrait_query(search_en, theme_kw, style_mod)
+                queries.append(q)
+            else:
+                # Fallback for legacy scripts: use raw Spanish text (poor results)
+                texto = b.get("texto", "")
+                if texto.strip():
+                    queries.append(texto[:80])
+
         if not queries:
             return []
 

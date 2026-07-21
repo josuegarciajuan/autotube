@@ -1566,7 +1566,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
 
     response = client.chat.completions.create(
         model=LLM_MODEL,
-        messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}. Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. Devuelve SOLO JSON: {{\"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\"}}]}}. NADA MAS fuera del JSON."}],
+        messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}. Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
         temperature=0.9, max_tokens=1200,
     )
     content = response.choices[0].message.content
@@ -1606,13 +1606,23 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         logger.error("Short TTS failed for %s: %s", channel_slug, e)
         return
 
-    # 3. Fetch portrait images for the Short
-    portrait_queries = [b.get("texto", "")[:80] for b in bloques]
-    portrait_queries = [q for q in portrait_queries if q.strip()]
+    # 3. Fetch portrait images — build theme-aware English queries
+    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images, _build_portrait_query
+    theme_kw = script.get("theme_keywords_en", [])
+    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
+
+    portrait_queries = []
+    for b in bloques:
+        search_en = b.get("search_query_en", "")
+        if search_en and search_en.strip():
+            portrait_queries.append(_build_portrait_query(search_en, theme_kw, style_mod))
+        else:
+            texto = b.get("texto", "")
+            if texto.strip():
+                portrait_queries.append(texto[:80])
+
     if not portrait_queries:
         portrait_queries = [hook_text[:80]]
-
-    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images
     image_paths = fetch_portrait_images(portrait_queries, ch_config, count=4)
 
     # 4. Render (slideshow of images + text + audio)

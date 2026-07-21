@@ -51,6 +51,98 @@ def _esc_ffmpeg(t: str) -> str:
 # ─── image fetching ──────────────────────────────────────────────────────
 
 
+# Style words to strip from raw queries (same approach as media_fetcher._STYLE_WORDS)
+_STYLE_WORDS = {
+    "cinematic", "photography", "dramatic", "lighting", "atmospheric",
+    "portrait", "moody", "high", "contrast", "professional", "dark",
+    "atmosphere", "style", "film", "stock", "vertical", "vertical",
+    "composition", "documentary", "historical", "depth", "field",
+    "color", "grading", "grade", "beautiful", "amazing", "stunning",
+}
+
+
+def _build_portrait_query(
+    search_query_en: str,
+    theme_keywords: list[str] | None = None,
+    style_modifiers: str = "",
+    max_len: int = 100,
+) -> str:
+    """Build a short-focused search query combining scene keywords, theme context,
+    and channel style modifiers.
+
+    Strategy:
+    1. Scene topic keywords from ``search_query_en`` (LLM-generated) — highest priority (~60%)
+    2. Theme keywords for global visual context (~25%)
+    3. Channel style modifiers for aesthetic consistency (~15%)
+    4. Fit within ``max_len`` chars (Pixabay limit: 100).
+
+    This is a simplified version of ``MediaFetcher._build_search_query()``
+    adapted for portrait shorts — no sub-scene variations.
+    """
+    # 1. Strip style fluff from the LLM query
+    words = search_query_en.split()
+    scene_keywords = [w for w in words if w.lower() not in _STYLE_WORDS]
+    if not scene_keywords:
+        scene_keywords = [w for w in words]
+
+    if not scene_keywords and not theme_keywords:
+        return search_query_en.strip()[:max_len]
+
+    # 2. Allocate character budget: scene ~60%, theme ~25%, style ~15%
+    style_budget = min(len(style_modifiers) + 1, 18) if style_modifiers else 0
+    theme_budget = min(28, max_len - style_budget)
+    scene_budget = max_len - style_budget - theme_budget
+
+    # 3. Build scene topic part
+    scene_part = ""
+    for w in scene_keywords:
+        candidate = f"{scene_part} {w}".strip()
+        if len(candidate) <= scene_budget:
+            scene_part = candidate
+        else:
+            break
+    if not scene_part and scene_keywords:
+        scene_part = scene_keywords[0][:scene_budget]
+    elif not scene_part and theme_keywords:
+        scene_budget = max_len - style_budget
+        for kw in theme_keywords[:3]:
+            candidate = f"{scene_part} {kw}".strip()
+            if len(candidate) <= scene_budget:
+                scene_part = candidate
+            else:
+                break
+        theme_keywords = None
+
+    # 4. Build theme context part
+    theme_part = ""
+    if theme_keywords:
+        remaining = max_len - len(scene_part) - style_budget
+        for kw in theme_keywords[:3]:
+            candidate = f"{theme_part} {kw}".strip()
+            if len(candidate) <= max(remaining, 10):
+                theme_part = candidate
+            else:
+                break
+
+    # 5. Add style modifiers
+    style_part = style_modifiers if style_modifiers else ""
+
+    # 6. Assemble: scene + style + theme
+    parts = [scene_part]
+    if style_part:
+        parts.append(style_part)
+    if theme_part:
+        parts.append(theme_part)
+
+    result = " ".join(parts)
+
+    # 7. Final safety: truncate at last complete word
+    if len(result) > max_len:
+        result = result[:max_len].rsplit(" ", 1)[0]
+
+    return result
+
+
 def fetch_portrait_images(
     queries: list[str],
     ch_config,
@@ -59,7 +151,8 @@ def fetch_portrait_images(
     """Fetch portrait (vertical) images from Unsplash / Pixabay for a Short.
 
     Args:
-        queries: Text queries to search for (one per block of the script).
+        queries: Search queries — should be English keywords (5-8 words) for
+                 stock API compatibility. NOT raw Spanish narration text.
         ch_config: Channel config module (has IMAGE_STYLE_MODIFIERS etc.).
         count: Max number of images to download.
 
@@ -71,6 +164,7 @@ def fetch_portrait_images(
     import requests, hashlib, re
 
     unsplash, pixabay = _get_image_providers()
+    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
 
     if unsplash is None and pixabay is None:
         logger.warning("No image providers configured — Short will have solid background")
@@ -80,6 +174,7 @@ def fetch_portrait_images(
     images_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[Path] = []
+    _used_urls: set[str] = set()  # dedup across all queries
 
     for query in queries[:count + 2]:  # slight overfetch
         if len(downloaded) >= count:
@@ -88,21 +183,42 @@ def fetch_portrait_images(
             continue
 
         results = []
+        # Try with full query first
         for provider in (unsplash, pixabay):
             if provider is None:
                 continue
             try:
-                results = provider.search(query, n=2, orientation="portrait")
+                results = provider.search(query, n=2, style_modifiers="", orientation="portrait")
             except Exception as exc:
                 logger.debug("Provider search failed for %r: %s", query[:40], exc)
             if results:
                 break
+
+        # Fallback: simplified query (first 3-4 keywords only)
+        if not results and len(query.split()) > 3:
+            simple_query = " ".join(query.split()[:4])
+            if simple_query != query:
+                logger.debug("Retrying with simplified query: %r → %r", query[:40], simple_query)
+                for provider in (unsplash, pixabay):
+                    if provider is None:
+                        continue
+                    try:
+                        results = provider.search(simple_query, n=2, style_modifiers="", orientation="portrait")
+                    except Exception as exc:
+                        logger.debug("Simplified retry failed: %s", exc)
+                    if results:
+                        break
+
         if not results:
             continue
 
         for photo in results:
             download_url = photo.get("download_url", "")
             if not download_url:
+                continue
+            # Dedup: skip URLs already used in this short
+            if download_url in _used_urls:
+                logger.debug("Skipping duplicate image URL: %s", download_url[:60])
                 continue
             try:
                 resp = requests.get(download_url, timeout=30)
@@ -111,6 +227,7 @@ def fetch_portrait_images(
                 logger.debug("Download failed: %s", exc)
                 continue
 
+            _used_urls.add(download_url)
             url_hash = hashlib.md5(download_url.encode()).hexdigest()[:12]
             safe_query = re.sub(r"[^a-zA-Z0-9_]", "_", query[:30])
             filename = f"short_portrait_{safe_query}_{url_hash}.jpg"

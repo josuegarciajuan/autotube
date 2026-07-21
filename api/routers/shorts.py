@@ -754,7 +754,7 @@ Tagline: {tagline}
 
 Genera un Short viral de ~40-45 segundos de narración (~70-90 palabras en español). USA 5 BLOQUES, cada uno con 1-2 frases concisas. El JSON EXACTO es:
 
-{{"titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato. Añade detalles concretos."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Profundiza en la revelación. Usa comparaciones o datos numéricos."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver. Qué significa este dato. Por qué debería importarnos."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto, deja una reflexión, e invita a suscribirse."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
+{{"titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "theme_keywords_en": ["global", "theme", "keywords", "visual", "context"], "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente.", "search_query_en": "5-8 english keywords describing exact scene visuals for stock image search. Be VERY concrete: include topic details, lighting, shot type, atmosphere. NO spanish."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato. Añade detalles concretos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Profundiza en la revelación. Usa comparaciones o datos numéricos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver. Qué significa este dato. Por qué debería importarnos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto, deja una reflexión, e invita a suscribirse.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
 
 RESPONDE SOLO CON EL JSON. NADA MÁS."""
 
@@ -816,13 +816,23 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     except Exception as e:
         raise HTTPException(500, f"TTS failed: {str(e)[:200]}")
 
-    # 3b. Fetch portrait images
-    portrait_queries = [b.get("texto", "")[:80] for b in bloques]
-    portrait_queries = [q for q in portrait_queries if q.strip()]
+    # 3b. Fetch portrait images — build theme-aware English queries
+    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images, _build_portrait_query
+    theme_kw = script.get("theme_keywords_en", [])
+    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
+
+    portrait_queries = []
+    for b in bloques:
+        search_en = b.get("search_query_en", "")
+        if search_en and search_en.strip():
+            portrait_queries.append(_build_portrait_query(search_en, theme_kw, style_mod))
+        else:
+            texto = b.get("texto", "")
+            if texto.strip():
+                portrait_queries.append(texto[:80])
+
     if not portrait_queries:
         portrait_queries = [hook_text[:80]]
-
-    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images
 
     image_paths = []
     try:
