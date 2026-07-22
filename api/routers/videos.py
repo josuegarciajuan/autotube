@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# Heavy columns excluded from list responses to keep payloads small.
+# checkpoint_data can be 50-150KB per video — unnecessary for list views.
+_LIST_EXCLUDE_COLUMNS = {"checkpoint_data", "timing_data"}
+
 @router.get("")
 def list_videos(channel_id: int = None, status: str = None, limit: int = 50, offset: int = 0,
                 playlist_id: int = None):
@@ -28,12 +32,9 @@ def list_videos(channel_id: int = None, status: str = None, limit: int = 50, off
         for k in ("created_at", "uploaded_at"):
             if v.get(k):
                 v[k] = str(v[k])
-        # Deserialize timing_data from JSON string
-        if v.get("timing_data") and isinstance(v["timing_data"], str):
-            try:
-                v["timing_data"] = json.loads(v["timing_data"])
-            except (json.JSONDecodeError, TypeError):
-                v["timing_data"] = None
+        # Drop heavy internal columns not needed for list rendering
+        for col in _LIST_EXCLUDE_COLUMNS:
+            v.pop(col, None)
     return videos
 
 
