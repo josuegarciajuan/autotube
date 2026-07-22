@@ -929,6 +929,7 @@ def run_job(
             gen_status = "awaiting_upload" if action == "generate_only" else "ready"
             # ── Seed scheduled_upload_at from planned slot's target_upload_at ──
             seed_upload_at = None
+            stale_public_at = False
             if action == "generate_only":
                 try:
                     slot = db.get_planned_slot_for_video(video_id)
@@ -936,11 +937,21 @@ def run_job(
                         seed_upload_at = str(slot["target_upload_at"])
                         logger.info("[%s] Seeded scheduled_upload_at=%s from planned slot #%s",
                                      canal, seed_upload_at, slot.get("id"))
+                    # Check if target_public_at is stale (before scheduled_upload_at)
+                    vr = db.get_video(video_id)
+                    tpa = vr.get("target_public_at") if vr else None
+                    if tpa and seed_upload_at and str(tpa) < seed_upload_at:
+                        stale_public_at = True
+                        logger.info("[%s] Nullifying stale target_public_at=%s (before upload=%s)",
+                                     canal, tpa, seed_upload_at)
                 except Exception as e:
                     logger.debug("[%s] Could not seed scheduled_upload_at: %s", canal, e)
-            db.update_video(video_id, progress=100, status=gen_status,
-                            generation_finished_at=db_now(),
-                            scheduled_upload_at=seed_upload_at)
+            update_kwargs = dict(progress=100, status=gen_status,
+                                 generation_finished_at=db_now(),
+                                 scheduled_upload_at=seed_upload_at)
+            if stale_public_at:
+                update_kwargs["target_public_at"] = None
+            db.update_video(video_id, **update_kwargs)
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")
