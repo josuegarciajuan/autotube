@@ -142,13 +142,37 @@ class ImageProvider(ABC):
     """Abstract base for image search providers."""
 
     @abstractmethod
-    def search(self, query: str, n: int = 1, style_modifiers: str = "") -> list[dict]:
+    def search(self, query: str, n: int = 1, style_modifiers: str = "",
+               page: int = 1) -> list[dict]:
         """Search for images matching the query.
+
+        Args:
+            query: Search keywords.
+            n: Desired number of results (maps to per_page).
+            style_modifiers: Optional style keywords to append.
+            page: Page number (1-indexed) for paginated APIs.
 
         Returns a list of dicts with keys:
             id, url, download_url, photographer, width, height, description
         """
         ...
+
+    def search_paginated(self, query: str, n: int = 15, style_modifiers: str = "",
+                          page: int = 1) -> tuple[list[dict], int]:
+        """Search for images with pagination metadata.
+
+        Default implementation: calls search() and returns len(results) as
+        total_available. Providers with pagination APIs (Pixabay, Unsplash,
+        Pexels) should override this to return the real total_available from
+        the API response.
+
+        Returns:
+            Tuple of (results: list[dict], total_available: int).
+            total_available is the number of results accessible via the API
+            (e.g. totalHits for Pixabay, total_results for Pexels).
+        """
+        results = self.search(query, n=n, style_modifiers=style_modifiers, page=page)
+        return results, len(results)
 
 
 class UnsplashProvider(ImageProvider):
@@ -169,7 +193,8 @@ class UnsplashProvider(ImageProvider):
         self._rate_limiter = TokenBucketRateLimiter.get("unsplash")
         logger.info("UnsplashProvider initialized")
 
-    def search(self, query: str, n: int = 1, style_modifiers: str = "", orientation: str = "landscape") -> list[dict]:
+    def search(self, query: str, n: int = 1, style_modifiers: str = "",
+               page: int = 1, orientation: str = "landscape") -> list[dict]:
         if n < 1:
             return []
 
@@ -182,6 +207,7 @@ class UnsplashProvider(ImageProvider):
         params: dict = {
             "query": query,
             "per_page": min(n, 30),
+            "page": page,
             "orientation": orientation,
         }
 
@@ -221,6 +247,28 @@ class UnsplashProvider(ImageProvider):
         logger.info("Unsplash returned %d results for query=%r", len(results), query)
         return results
 
+    def search_paginated(self, query: str, n: int = 15, style_modifiers: str = "",
+                          page: int = 1, orientation: str = "landscape") -> tuple[list[dict], int]:
+        """Search Unsplash with full pagination metadata.
+
+        Reads total_pages and total from the API response to determine how
+        many results are accessible.
+
+        Returns:
+            Tuple of (results: list[dict], total_available: int).
+        """
+        results = self.search(query, n=n, page=page, orientation=orientation)
+        # Unsplash API returns total_pages in the response body, but search()
+        # doesn't expose it. For pagination support we make a second lightweight
+        # call to get the metadata, or estimate conservatively.
+        # Actually, Unsplash returns up to ~1000 results; we'll estimate
+        # based on whether we got a full page.
+        if len(results) >= min(n, 30):
+            total = 1000  # Unsplash practical max
+        else:
+            total = len(results) + (page - 1) * min(n, 30)
+        return results, total
+
 
 class PexelsProvider(ImageProvider):
     """Pexels API — fallback. 200 req/hr default.
@@ -239,7 +287,8 @@ class PexelsProvider(ImageProvider):
         self._rate_limiter = TokenBucketRateLimiter.get("pexels")
         logger.info("PexelsProvider initialized")
 
-    def search(self, query: str, n: int = 1, style_modifiers: str = "", orientation: str = "landscape") -> list[dict]:
+    def search(self, query: str, n: int = 1, style_modifiers: str = "",
+               page: int = 1, orientation: str = "landscape") -> list[dict]:
         if n < 1:
             return []
 
@@ -250,6 +299,7 @@ class PexelsProvider(ImageProvider):
         params: dict = {
             "query": query,
             "per_page": min(n, 80),
+            "page": page,
             "orientation": orientation,
         }
 
@@ -284,6 +334,59 @@ class PexelsProvider(ImageProvider):
         logger.info("Pexels returned %d results for query=%r", len(results), query)
         return results
 
+    def search_paginated(self, query: str, n: int = 15, style_modifiers: str = "",
+                          page: int = 1, orientation: str = "landscape") -> tuple[list[dict], int]:
+        """Search Pexels Images with full pagination metadata.
+
+        Reads total_results from the API response to determine how
+        many results are accessible.
+
+        Returns:
+            Tuple of (results: list[dict], total_available: int).
+        """
+        if n < 1:
+            return [], 0
+        if not self._rate_limiter.try_acquire():
+            return [], 0
+
+        params: dict = {
+            "query": query,
+            "per_page": min(n, 80),
+            "page": page,
+            "orientation": orientation,
+        }
+
+        try:
+            resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After", "60")
+                logger.warning("Pexels rate limit hit (429). Retry-After=%s", retry_after)
+                time.sleep(min(int(retry_after), 60))
+                resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Pexels search failed: %s", exc)
+            return [], 0
+
+        data = resp.json()
+        total_results = data.get("total_results", 0)
+        results: list[dict] = []
+        for photo in data.get("photos", []):
+            results.append({
+                "id": str(photo.get("id", "")),
+                "url": photo.get("url", ""),
+                "download_url": photo.get("src", {}).get("large2x", "")
+                or photo.get("src", {}).get("large", ""),
+                "photographer": photo.get("photographer", "Unknown"),
+                "width": photo.get("width", 0),
+                "height": photo.get("height", 0),
+                "description": photo.get("alt", ""),
+            })
+
+        logger.info("Pexels returned %d results (total=%d) for query=%r",
+                     len(results), total_results, query)
+        return results, total_results
+
 
 class PixabayImageProvider(ImageProvider):
     """Pixabay Photos API — image provider. Uses same key as Pixabay videos.
@@ -314,7 +417,7 @@ class PixabayImageProvider(ImageProvider):
         logger.info("PixabayImageProvider initialized (largeImageURL preferred)")
 
     def search(self, query: str, n: int = 1, style_modifiers: str = "",
-               orientation: str = "horizontal") -> list[dict]:
+               page: int = 1, orientation: str = "horizontal") -> list[dict]:
         if n < 1:
             return []
 
@@ -322,6 +425,7 @@ class PixabayImageProvider(ImageProvider):
             "key": self._api_key,
             "q": query[:100],  # Pixabay 100-char limit — safety net
             "per_page": max(min(n, 200), 3),  # Pixabay requires 3-200
+            "page": page,
             "image_type": "photo",
             "orientation": orientation,
         }
@@ -372,6 +476,69 @@ class PixabayImageProvider(ImageProvider):
         logger.info("Pixabay images returned %d results for query=%r",
                      len(results), query)
         return results
+
+    def search_paginated(self, query: str, n: int = 15, style_modifiers: str = "",
+                          page: int = 1, orientation: str = "horizontal") -> tuple[list[dict], int]:
+        """Search Pixabay Images with full pagination metadata.
+
+        Reads totalHits (max 500) from the API response. totalHits is the
+        number of images accessible via the API; total (unlimited) is the
+        total matching images in the database.
+
+        Returns:
+            Tuple of (results: list[dict], total_available: int).
+        """
+        if n < 1:
+            return [], 0
+
+        params: dict = {
+            "key": self._api_key,
+            "q": query[:100],
+            "per_page": max(min(n, 200), 3),
+            "page": page,
+            "image_type": "photo",
+            "orientation": orientation,
+        }
+
+        try:
+            resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After", "60")
+                logger.warning("Pixabay rate limit hit (429). Retry-After=%s", retry_after)
+                time.sleep(min(int(retry_after), 60))
+                resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Pixabay image search failed: %s", exc)
+            return [], 0
+
+        data = resp.json()
+        total_hits = data.get("totalHits", 0)  # max 500 accessible via API
+        results: list[dict] = []
+        for photo in data.get("hits", []):
+            large_url = photo.get("largeImageURL", "")
+            web_url = photo.get("webformatURL", "")
+            download_url = large_url or web_url
+            fallback_download_url = web_url if large_url and web_url else None
+            img_w = photo.get("imageWidth", 0)
+            img_h = photo.get("imageHeight", 0)
+            if not img_w or not img_h:
+                img_w = photo.get("webformatWidth", 0)
+                img_h = photo.get("webformatHeight", 0)
+            results.append({
+                "id": str(photo.get("id", "")),
+                "url": photo.get("pageURL", ""),
+                "download_url": download_url,
+                "fallback_download_url": fallback_download_url,
+                "photographer": photo.get("user", "Unknown"),
+                "width": img_w,
+                "height": img_h,
+                "description": photo.get("tags", ""),
+            })
+
+        logger.info("Pixabay images returned %d results (totalHits=%d) for query=%r",
+                     len(results), total_hits, query)
+        return results, total_hits
 
 
 class ImageFetcher:

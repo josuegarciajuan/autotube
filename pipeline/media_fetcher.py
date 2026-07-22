@@ -131,6 +131,13 @@ class MediaFetcher:
         self._used_asset_urls: set[str] = set()
         # Image-specific dedup tracking (URLs + content hashes)
         self._used_image_urls: set[str] = set()
+        # Enhanced dedup (v10): track by filename (e.g. pixabay_photo_6841384.jpg)
+        # and by img_id (the provider's native ID). This catches duplicates
+        # that have different CDN URLs but refer to the same image.
+        self._used_filenames: set[str] = set()
+        self._used_img_ids: set[str] = set()
+        # Content hashes for true image dedup (bit-exact duplicate detection)
+        self._used_content_hashes: set[str] = set()
 
         # ── Cross-video dedup (v9): filenames used in ANY previous video ─
         # Loaded at the start of each fetch_for_script() call from
@@ -503,11 +510,7 @@ class MediaFetcher:
         ai_used = 0
         ai_enabled = self._media_strategy.get("ai_image_fallback", False)
 
-        # ── Circuit breaker: abort if all providers are exhausted ──
-        # When both Pexels (429) and Unsplash (403) fail repeatedly,
-        # abort the entire phase instead of retrying 38+ scenes.
-        _cb_consecutive_all_provider_failures = 0
-        _cb_max_consecutive_failures = 5  # abort after 5 consecutive all-provider failures
+        # ── Phase timeout guard ───────────────────────────────────
         _cb_phase_start = time.time()
         _cb_phase_timeout = 1200  # 20 min hard timeout for the entire media phase
 
@@ -517,16 +520,21 @@ class MediaFetcher:
         self._vp_disabled.clear()
         self._scene_tried_providers.clear()
 
-        # Track sub-scene sequence per asset_idx for query variation
+        # Track sub-scene sequence per asset_idx (preserved for backward compat)
         subscene_seq: dict[int, int] = {}
 
+        # ── v10: reset enhanced dedup tracking ─────────────────
+        self._used_filenames.clear()
+        self._used_img_ids.clear()
+        self._used_content_hashes.clear()
+
+        # ── Hard abort counter: consecutive black/placeholder scenes ──
+        _consecutive_black = 0
+        _MAX_CONSECUTIVE_BLACK = 3
+
         for i, scene in enumerate(scenes):
-            # ── Reset per-scene provider tracking ──────────
-            self._scene_tried_providers.clear()
-            
             want_video = i in video_assigned
             target_dur = scene.get("duration", 5)
-            query = scene.get("search_query_en", "")
             scene_tipo = scene.get("tipo", "desarrollo")
             is_hook = (scene_tipo == "hook")
 
@@ -534,173 +542,81 @@ class MediaFetcher:
             if scene.get("is_transition"):
                 want_video = False
 
-            # Sub-scene query variation: for split scenes, vary the search query
-            # so each sub-scene gets a visually distinct result.
-            asset_idx = scene.get("asset_idx", i)
-            is_sub = scene.get("is_subscene", False)
-            seq = subscene_seq.get(asset_idx, 0)
-            subscene_seq[asset_idx] = seq + 1
-            variation = None
-            if is_sub and seq > 0:
-                variations = [
-                    "wide shot establishing",
-                    "close-up detail",
-                    "alternative angle composition",
-                    "low angle dramatic",
-                    "distant view atmospheric",
-                ]
-                variation = variations[(seq - 1) % len(variations)]
-
-            # Build search query: balances scene-specific topic keywords,
-            # sub-scene variation, and video-level theme context within
-            # Pixabay's 100-char limit. Ensures both paragraph relevance
-            # AND global video context are represented.
-            query = self._build_search_query(
-                query=query,
-                variation=variation,
-                theme_keywords=ctx.theme_keywords_en if ctx else None,
-            )
-
             logger.info(
-                "Scene %d/%d [%s]: want_video=%s query=%r (%d chars) dur=%.1fs",
-                i + 1, n_scenes, scene_tipo, want_video, query[:80], len(query), target_dur,
+                "Scene %d/%d [%s]: want_video=%s dur=%.1fs",
+                i + 1, n_scenes, scene_tipo, want_video, target_dur,
             )
 
             asset = None
 
             # ── Pollo AI: hook siempre (si está activo y bajo cap) ─
             if is_hook and ai_enabled and ai_used < ai_max:
+                query = scene.get("search_query_en", "")
                 logger.info("Scene %d [HOOK]: using Pollo AI (%d/%d)", i + 1, ai_used + 1, ai_max)
                 asset = self._try_pollo_scene(query, scene_tipo, ctx)
                 if asset:
                     ai_used += 1
 
-            # ── Try video if assigned (skip if Pollo already gave us an asset) ─
-            if asset is None and want_video and self.video_providers:
-                asset = self._try_video_providers(query, target_dur)
-
-            # ── Try image (dedup-aware) if no video yet ───────
+            # ── v10: Exhaustive search with cross-rotation + pagination ─
             if asset is None:
-                # Build skip_urls from already-used image URLs
-                image_skip = self._used_image_urls.copy()
-                # Pixabay primary (100 req/min), Unsplash fallback (50 req/h)
-                result = self._try_image_pixabay(query, skip_urls=image_skip)
-                if result:
-                    asset = result
-                else:
-                    result = self._try_image_unsplash(query, skip_urls=image_skip)
-                    if result:
-                        asset = result
-
-                # ── v9: retry with query variation if all assets were deduped ─
-                if asset is None:
-                    for var_attempt in range(3):
-                        var_query = self._query_variation(query, var_attempt)
-                        if var_query == query:
-                            continue
-                        logger.info(
-                            "Scene %d: dedup exhausted — retrying with varied query: %r",
-                            i, var_query[:80],
-                        )
-                        image_skip = self._used_image_urls.copy()
-                        result = self._try_image_pixabay(var_query, skip_urls=image_skip) or \
-                                 self._try_image_unsplash(var_query, skip_urls=image_skip)
-                        if result:
-                            asset = result
-                            break
-
-            # ── Fallback: simplified query (Pixabay + Unsplash) ──
-            if asset is None:
-                # Simplified query retry
-                simple_query = self._simplify_query(query)
-                if simple_query != query:
-                    logger.info("Scene %d: retrying with simplified query: %r", i, simple_query)
-                    image_skip = self._used_image_urls.copy()
-                    asset = self._try_image_pixabay(simple_query, skip_urls=image_skip) or \
-                             self._try_image_unsplash(simple_query, skip_urls=image_skip)
-
-            # ── v6: retry with original query WITHOUT theme keywords ──
-            # Theme keywords can poison Pixabay/Unsplash searches when
-            # the extracted theme is off-niche. Retry with the LLM's
-            # original query stripped of theme injection.
-            if asset is None and ctx and ctx.theme_keywords_en:
-                clean_query = _strip_theme_keywords(
-                    query, ctx.theme_keywords_en,
+                query_pool = self._build_query_pool(scene, ctx)
+                logger.info(
+                    "Scene %d [%s]: %d query variations → exhaustive search",
+                    i + 1, scene_tipo, len(query_pool),
                 )
-                if clean_query and clean_query != query:
-                    logger.info(
-                        "Scene %d: retrying WITHOUT theme keywords: %r",
-                        i, clean_query[:80],
-                    )
-                    image_skip = self._used_image_urls.copy()
-                    asset = self._try_image_pixabay(clean_query, skip_urls=image_skip) or \
-                            self._try_image_unsplash(clean_query, skip_urls=image_skip)
-                    # Also try video providers with clean query
-                    if asset is None and self.video_providers:
-                        asset = self._try_video_providers(clean_query, target_dur)
+                asset = self._fetch_asset_exhaustive(
+                    scene, query_pool, want_video, target_dur, ctx,
+                )
 
-            # ── Hard fallback: generic queries that always find something ─
-            if asset is None:
-                generic_queries = self._media_strategy.get("fallback_queries", [
-                    "historical documentary archival photography cinematic 16:9",
-                    "ancient history artifacts museum exhibition documentary",
-                    "nature landscape exploration discovery documentary cinematic",
-                    "dramatic wilderness storm ocean survival documentary",
-                    "old architecture cathedral historical building documentary",
-                    "dark mystery abandoned exploration atmosphere cinematic",
-                ])
-                import random as _random
-                fb_query = _random.choice(generic_queries)
-                logger.info("Scene %d: trying hard fallback query: %r", i, fb_query)
-                image_skip = self._used_image_urls.copy()
-                asset = self._try_image_pixabay(fb_query, skip_urls=image_skip) or \
-                        self._try_image_unsplash(fb_query, skip_urls=image_skip)
-
-            # ── Pollo AI: rescate si stock falló completamente y hay cupo ─
+            # ── Pollo AI: rescate si el stock falló y hay cupo ─
             if asset is None and ai_enabled and ai_used < ai_max:
+                rescue_query = scene.get("search_query_en", "") or scene_tipo
                 logger.info("Scene %d [%s]: stock exhausted — Pollo AI rescue (%d/%d)",
                             i + 1, scene_tipo, ai_used + 1, ai_max)
-                asset = self._try_pollo_scene(query, scene_tipo, ctx)
+                asset = self._try_pollo_scene(rescue_query, scene_tipo, ctx)
                 if asset:
                     ai_used += 1
 
             # ── Placeholder (absolutely nothing found) ────────
             if asset is None:
-                logger.warning("Scene %d [%s]: ALL providers exhausted — placeholder", i, scene_tipo)
+                _consecutive_black += 1
+                logger.warning(
+                    "Scene %d [%s]: ALL providers + all pages + all queries exhausted — "
+                    "placeholder (%d/%d consecutive)",
+                    i, scene_tipo, _consecutive_black, _MAX_CONSECUTIVE_BLACK,
+                )
+
+                # ── HARD ABORT: if 3+ consecutive black scenes, the video is invalid ──
+                if _consecutive_black >= _MAX_CONSECUTIVE_BLACK:
+                    error_msg = (
+                        f"CRITICAL: {_consecutive_black} consecutive scenes with NO media. "
+                        f"All providers, all pages, and all query variations exhausted "
+                        f"at scene {i+1}/{n_scenes}. Aborting to prevent black/blank video."
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+
                 asset = {
                     "path": None,
                     "type": "placeholder",
                     "duration": None,
                     "source": "placeholder",
                 }
+            else:
+                _consecutive_black = 0  # reset counter on success
+                # Record for cross-video dedup
+                self._record_asset_for_history(asset)
 
             # ── Count for stats ───────────────────────────────
             atype = asset.get("type", "?")
             if atype == "video":
                 video_ok += 1
-                _cb_consecutive_all_provider_failures = 0  # reset circuit breaker
             elif atype == "image":
                 image_ok += 1
-                _cb_consecutive_all_provider_failures = 0  # reset circuit breaker
             else:
                 placeholder += 1
-                _cb_consecutive_all_provider_failures += 1
 
             results[i] = asset
-
-            # ── Record for cross-video dedup (v9) ──────────────
-            if asset and asset.get("path") and asset.get("type") != "placeholder":
-                self._record_asset_for_history(asset)
-
-            # ── Circuit breaker: abort if ALL providers are exhausted ──
-            if _cb_consecutive_all_provider_failures >= _cb_max_consecutive_failures:
-                error_msg = (
-                    f"CRITICAL: All media providers exhausted after {_cb_max_consecutive_failures} "
-                    f"consecutive placeholder scenes. Pexels likely rate-limited (429), "
-                    f"Unsplash likely down (403/429). Aborting media phase."
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
 
             # ── Global timeout: abort if media phase takes too long ──
             elapsed = time.time() - _cb_phase_start
@@ -1309,6 +1225,381 @@ class MediaFetcher:
         except Exception as exc:
             logger.error("Video download failed %s: %s", url, exc)
             return None
+
+    # ── Enhanced dedup & exhaustive search (v10) ─────────────────
+
+    def _is_asset_duplicate(self, asset_info: dict) -> bool:
+        """Check if an asset (image or video) is a duplicate.
+
+        Checks by: download URL, predicted filename, img_id, and content hash.
+        Returns True if this asset has already been used in the current video.
+        """
+        url = asset_info.get("url", "") or asset_info.get("download_url", "")
+        if url and url in self._used_asset_urls:
+            return True
+        if url and url in self._used_image_urls:
+            return True
+
+        img_id = str(asset_info.get("id", ""))
+        source = asset_info.get("source", "") or asset_info.get("provider", "")
+        if img_id and f"{source}_{img_id}" in self._used_img_ids:
+            return True
+
+        # Predict filename as it would be saved on disk
+        predicted_fn = self._predict_filename(asset_info)
+        if predicted_fn and predicted_fn in self._used_filenames:
+            return True
+        if predicted_fn and predicted_fn in self._cross_video_used_filenames:
+            return True
+
+        content_hash = asset_info.get("content_hash", "")
+        if content_hash and content_hash in self._used_content_hashes:
+            return True
+
+        return False
+
+    def _record_asset_used(self, asset_info: dict) -> None:
+        """Record an asset in all dedup tracking sets."""
+        url = asset_info.get("url", "") or asset_info.get("download_url", "")
+        if url:
+            self._used_asset_urls.add(url)
+            self._used_image_urls.add(url)
+
+        img_id = str(asset_info.get("id", ""))
+        source = asset_info.get("source", "") or asset_info.get("provider", "")
+        if img_id:
+            self._used_img_ids.add(f"{source}_{img_id}")
+
+        predicted_fn = self._predict_filename(asset_info)
+        if predicted_fn:
+            self._used_filenames.add(predicted_fn)
+
+        content_hash = asset_info.get("content_hash", "")
+        if content_hash:
+            self._used_content_hashes.add(content_hash)
+
+    def _predict_filename(self, asset_info: dict) -> str:
+        """Predict the filename this asset would have on disk after download."""
+        url = asset_info.get("url", "") or asset_info.get("download_url", "")
+        source = asset_info.get("source", "") or asset_info.get("provider", "")
+        img_id = str(asset_info.get("id", ""))
+        atype = asset_info.get("type", "image")
+
+        if atype == "video":
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:12] if url else ""
+            return f"output/video_clips/{source}_{url_hash}.mp4" if url_hash else ""
+        else:
+            # image
+            if img_id:
+                return f"output/images/{source}_{img_id}.jpg"
+            elif url:
+                url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+                return f"output/images/{source}_{url_hash}.jpg"
+        return ""
+
+    # ── Query pool builder ──────────────────────────────────────
+
+    def _build_query_pool(self, scene: dict, ctx) -> list[str]:
+        """Build an ordered list of query variations for a scene.
+
+        Starts with the most specific and ends with generic fallbacks.
+        Each variation is a fresh attempt — if the first queries return
+        only duplicates, later queries with different wording should
+        produce different results from the providers.
+
+        Returns deduplicated list of non-empty queries (~11 variants).
+        """
+        base = scene.get("search_query_en", "")
+
+        pool = []
+        if base and base.strip():
+            pool.append(base.strip())
+
+        scene_tipo = scene.get("tipo", "desarrollo")
+
+        # 3 directional variations for the same topic
+        if base:
+            for suffix in [
+                "wide shot establishing",
+                "close-up detail",
+                "alternative angle composition",
+                "low angle dramatic",
+                "distant view atmospheric",
+            ]:
+                v = f"{base} {suffix}"
+                if len(v) <= 100:  # Pixabay 100-char limit
+                    pool.append(v)
+
+        # Simplified: just the key nouns (3-4 words, no style modifiers)
+        simple = self._simplify_query(base) if base else ""
+        if simple and simple != base and simple.strip():
+            pool.append(simple)
+
+        # Without theme keywords (v6) — theme injection can poison queries
+        if ctx and ctx.theme_keywords_en and base:
+            clean = _strip_theme_keywords(base, ctx.theme_keywords_en)
+            if clean and clean != base and clean.strip():
+                pool.append(clean)
+
+        # Type-specific fallback queries
+        type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
+        if type_fb and type_fb not in pool:
+            pool.append(type_fb)
+
+        # Channel-configured fallback queries
+        fallbacks = self._media_strategy.get("fallback_queries", [
+            "historical documentary archival photography cinematic 16:9",
+            "ancient history artifacts museum exhibition documentary",
+            "nature landscape exploration discovery documentary cinematic",
+            "dramatic wilderness storm ocean survival documentary",
+            "old architecture cathedral historical building documentary",
+            "dark mystery abandoned exploration atmosphere cinematic",
+        ])
+        for fb in fallbacks:
+            if fb and fb.strip() and fb not in pool:
+                pool.append(fb.strip())
+
+        # Remove empty/whitespace and deduplicate while preserving order
+        seen = set()
+        result = []
+        for q in pool:
+            qs = q.strip()
+            if qs and qs not in seen:
+                seen.add(qs)
+                result.append(qs)
+
+        return result
+
+    # ── Exhaustive asset search with cross-rotation + pagination ─
+
+    def _fetch_asset_exhaustive(
+        self, scene: dict, query_pool: list[str],
+        want_video: bool, target_dur: float, ctx,
+    ) -> dict | None:
+        """Search exhaustively for a non-duplicate asset.
+
+        Algorithm:
+          1. For each query in the pool (specific → generic):
+             a. Interleave providers (image+video or video+image based on want_video)
+             b. For each provider, paginate through ALL available pages
+             c. For each result, check dedup → first fresh one wins
+             d. If all pages exhausted → next provider
+             e. If all providers exhausted → next query
+          2. If absolutely nothing found after all queries → return None
+
+        This guarantees that we only give up after exhausting:
+          ~11 queries × ~6 providers × ~10 pages each ≈ 660 candidate evaluations
+        """
+        providers = self._interleaved_providers(want_video, scene)
+
+        for query in query_pool:
+            if not query or not query.strip():
+                continue
+
+            for provider in providers:
+                page = 1
+                while True:
+                    asset_candidates = self._search_provider_page(
+                        provider, query, target_dur, page, want_video,
+                    )
+
+                    if not asset_candidates:
+                        break  # no more results from this provider
+
+                    for candidate in asset_candidates:
+                        if not self._is_asset_duplicate(candidate):
+                            # Download the asset
+                            downloaded = self._download_candidate(provider, candidate)
+                            if downloaded and downloaded.get("path"):
+                                self._record_asset_used(candidate)
+                                self._record_asset_for_history(downloaded)
+                                return downloaded
+
+                    # Check if there are more pages
+                    total = asset_candidates[0].get("_total_available", 0)
+                    per_page = asset_candidates[0].get("_per_page", 20)
+                    if total <= 0 or page * per_page >= total:
+                        break
+                    page += 1
+                    time.sleep(0.15)
+
+        return None
+
+    def _interleaved_providers(self, want_video: bool, scene: dict) -> list:
+        """Return providers in interleaved order: preferred type first, then the other.
+
+        This ensures that even when a scene wants an image, video providers are
+        tried after image providers are exhausted (cross-rotation).
+        """
+        is_transition = scene.get("is_transition", False)
+        if is_transition:
+            # Transitions always use images (Ken Burns)
+            return self._get_all_image_providers()
+
+        video_providers_list = list(self.video_providers) if self.video_providers else []
+        image_providers_list = self._get_all_image_providers()
+
+        if want_video:
+            return video_providers_list + image_providers_list
+        else:
+            return image_providers_list + video_providers_list
+
+    def _get_all_image_providers(self) -> list:
+        """Return all active image providers as a list for iteration."""
+        providers = []
+        if self._pixabay_img:
+            providers.append(self._pixabay_img)
+        if self._unsplash:
+            providers.append(self._unsplash)
+        return providers
+
+    def _search_provider_page(
+        self, provider, query: str, target_dur: float,
+        page: int, want_video: bool,
+    ) -> list[dict]:
+        """Search a single provider on a single page.
+
+        Returns a list of candidate asset dicts with dedup metadata.
+        Each dict includes: _total_available, _per_page for pagination control.
+        """
+        candidates: list[dict] = []
+
+        # Detect provider type
+        from pipeline.providers.base import BaseVideoProvider
+        from pipeline.image_fetcher import ImageProvider
+
+        if isinstance(provider, BaseVideoProvider):
+            candidates = self._search_video_provider_page(
+                provider, query, target_dur, page,
+            )
+        elif isinstance(provider, ImageProvider):
+            candidates = self._search_image_provider_page(
+                provider, query, page,
+            )
+
+        return candidates
+
+    def _search_video_provider_page(
+        self, provider, query: str, target_dur: float, page: int,
+    ) -> list[dict]:
+        """Search a video provider on one page using search_page()."""
+        pname = getattr(provider, "name", str(provider))
+
+        # Skip disabled providers
+        if pname in self._vp_disabled:
+            return []
+
+        min_dur = max(target_dur * 0.8, 1.0)
+        max_dur = target_dur * 4.0
+
+        try:
+            sp = provider.search_page(query, min_dur, max_dur, page=page, per_page=50)
+            if not sp or not sp.assets:
+                return []
+
+            candidates = []
+            for asset in sp.assets:
+                candidates.append({
+                    "id": "",  # video providers use URL as key
+                    "url": asset.url,
+                    "type": "video",
+                    "duration": asset.duration,
+                    "source": f"{pname}_video",
+                    "provider": pname,
+                    "_total_available": sp.total_available,
+                    "_per_page": sp.per_page,
+                })
+            return candidates
+        except Exception as exc:
+            logger.debug("Video provider %s page %d failed: %s", pname, page, exc)
+            return []
+
+    def _search_image_provider_page(
+        self, provider, query: str, page: int,
+    ) -> list[dict]:
+        """Search an image provider on one page using search_paginated()."""
+        pname = provider.__class__.__name__.lower()
+
+        try:
+            results, total_available = provider.search_paginated(
+                query, n=50, page=page,
+            )
+            if not results:
+                return []
+
+            candidates = []
+            for img in results:
+                candidates.append({
+                    "id": str(img.get("id", "")),
+                    "url": img.get("download_url", ""),
+                    "type": "image",
+                    "source": "pixabay_photo" if "pixabay" in pname else
+                             "unsplash" if "unsplash" in pname else
+                             "pexels_photo",
+                    "provider": pname,
+                    "download_url": img.get("download_url", ""),
+                    "fallback_download_url": img.get("fallback_download_url"),
+                    "_total_available": total_available,
+                    "_per_page": 50,
+                })
+            return candidates
+        except Exception as exc:
+            logger.debug("Image provider %s page %d failed: %s", pname, page, exc)
+            return []
+
+    def _download_candidate(self, provider, candidate: dict) -> dict | None:
+        """Download a candidate asset and return the asset dict with path."""
+        atype = candidate.get("type", "image")
+        source = candidate.get("source", "")
+
+        if atype == "video":
+            url = candidate.get("url", "")
+            if not url:
+                return None
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+            filename = f"{source}_{url_hash}.mp4"
+            from pipeline.providers.base import VideoAsset
+            asset = VideoAsset(
+                url=url, file_path=Path(), duration=candidate.get("duration", 5),
+                resolution=(1920, 1080), provider=source,
+            )
+            path = self._download_video_asset(asset, provider)
+            if path:
+                return {
+                    "path": str(path), "type": "video",
+                    "duration": candidate.get("duration"),
+                    "source": source,
+                }
+
+        elif atype == "image":
+            download_url = candidate.get("download_url", "") or candidate.get("url", "")
+            if not download_url:
+                return None
+            img_id = candidate.get("id", "")
+            if img_id:
+                filename = f"{source}_{img_id}.jpg"
+            else:
+                url_hash = hashlib.md5(download_url.encode()).hexdigest()[:12]
+                filename = f"{source}_{url_hash}.jpg"
+
+            path = self._download_image(download_url, filename)
+            if path:
+                return {
+                    "path": str(path), "type": "image",
+                    "duration": None, "source": source,
+                }
+            # Pixabay fallback: retry with webformatURL
+            fb_url = candidate.get("fallback_download_url")
+            if fb_url and fb_url != download_url:
+                fb_filename = f"{source}_{img_id}_fb.jpg" if img_id else filename
+                path = self._download_image(fb_url, fb_filename)
+                if path:
+                    return {
+                        "path": str(path), "type": "image",
+                        "duration": None, "source": source,
+                    }
+
+        return None
 
     # ── Internal: images ──────────────────────────────────────────
 

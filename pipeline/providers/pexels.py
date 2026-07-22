@@ -49,6 +49,8 @@ class PexelsVideoProvider(BaseVideoProvider):
         min_duration: float,
         max_duration: float,
         resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
     ) -> Optional[VideoAsset]:
         """Search Pexels Videos API for the first clip matching all criteria.
 
@@ -57,6 +59,8 @@ class PexelsVideoProvider(BaseVideoProvider):
             min_duration: Minimum acceptable duration in seconds.
             max_duration: Maximum acceptable duration in seconds.
             resolution: Preferred resolution (width, height).
+            page: Page number (1-indexed).
+            per_page: Results per page (max 80).
 
         Returns:
             VideoAsset with file_path set to Path() (placeholder — set by
@@ -68,7 +72,8 @@ class PexelsVideoProvider(BaseVideoProvider):
 
         params: dict = {
             "query": query,
-            "per_page": 20,
+            "per_page": min(per_page, 80),
+            "page": page,
             "orientation": "landscape",
             "size": "medium",
         }
@@ -95,14 +100,8 @@ class PexelsVideoProvider(BaseVideoProvider):
                 "Pexels: found video id=%s dur=%.1fs res=%dx%d for query=%r",
                 video_id, dur, best.get("width", 0), best.get("height", 0), query,
             )
-            # ALWAYS use the direct CDN download link, never the page URL.
-            # Pexels' video["url"] is the HTML page (pexels.com/video/.../),
-            # which returns 403 when fetched as a binary download stream.
-            # video_files[<best>]["link"] is the direct .mp4 CDN URL.
             download_url = best.get("link", "")
             if not download_url:
-                # Absolute last resort: the Pexels page URL (used as fallback
-                # only when the provider download method scrapes the page).
                 download_url = video.get("url", "")
                 logger.warning(
                     "Pexels: no direct link for video id=%s — using page URL "
@@ -111,7 +110,7 @@ class PexelsVideoProvider(BaseVideoProvider):
                 )
             return VideoAsset(
                 url=download_url,
-                file_path=Path(),  # placeholder — set after download
+                file_path=Path(),
                 duration=dur,
                 resolution=(best.get("width", 0), best.get("height", 0)),
                 provider=self.name,
@@ -119,6 +118,70 @@ class PexelsVideoProvider(BaseVideoProvider):
 
         logger.info("Pexels: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
         return None
+
+    def search_page(
+        self,
+        query: str,
+        min_duration: float,
+        max_duration: float,
+        resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
+    ) -> "SearchPage":
+        """Search Pexels Videos for ALL matching clips on a page (paginated).
+
+        Reads total_results from the API response and returns all candidates
+        that match the duration window.
+
+        Returns:
+            SearchPage with all matching VideoAsset candidates and pagination metadata.
+        """
+        from pipeline.providers.base import SearchPage
+
+        if not self._api_key:
+            logger.error("Cannot search Pexels without an API key")
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        params: dict = {
+            "query": query,
+            "per_page": min(per_page, 80),
+            "page": page,
+            "orientation": "landscape",
+            "size": "medium",
+        }
+
+        resp = self._request_with_retry(params)
+        if resp is None:
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        data = resp.json()
+        total_results = data.get("total_results", 0)
+        videos = data.get("videos", [])
+        assets: list[VideoAsset] = []
+
+        for video in videos:
+            dur = video.get("duration", 0)
+            if dur < min_duration or dur > max_duration:
+                continue
+            video_files = video.get("video_files", [])
+            best = self._pick_best_quality(video_files, resolution)
+            if not best:
+                continue
+            download_url = best.get("link", "") or video.get("url", "")
+            assets.append(VideoAsset(
+                url=download_url,
+                file_path=Path(),
+                duration=dur,
+                resolution=(best.get("width", 0), best.get("height", 0)),
+                provider=self.name,
+            ))
+
+        # total_results includes all pages; per_page * max_accessible_pages
+        # could be capped. Use the API's total_results directly.
+        return SearchPage(
+            assets=assets, page=page, per_page=min(per_page, 80),
+            total_available=total_results,
+        )
 
     def download(self, asset: VideoAsset, output_dir: Path) -> Path:
         """Download the video clip from the Pexels CDN.

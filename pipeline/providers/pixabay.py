@@ -52,6 +52,8 @@ class PixabayVideoProvider(BaseVideoProvider):
         min_duration: float,
         max_duration: float,
         resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
     ) -> Optional[VideoAsset]:
         """Search Pixabay for the first clip matching all criteria.
 
@@ -60,6 +62,8 @@ class PixabayVideoProvider(BaseVideoProvider):
             min_duration: Minimum acceptable duration in seconds.
             max_duration: Maximum acceptable duration in seconds.
             resolution: Preferred resolution (width, height).
+            page: Page number (1-indexed).
+            per_page: Results per page (max 200).
 
         Returns:
             VideoAsset or None.
@@ -68,7 +72,8 @@ class PixabayVideoProvider(BaseVideoProvider):
         params: dict = {
             "key": self._api_key,
             "q": query[:100],  # Pixabay 100-char limit — safety net
-            "per_page": 20,
+            "per_page": min(per_page, 200),
+            "page": page,
             "min_width": target_w,
             "min_height": target_h,
         }
@@ -103,7 +108,7 @@ class PixabayVideoProvider(BaseVideoProvider):
             )
             return VideoAsset(
                 url=download_url,
-                file_path=Path(),  # placeholder
+                file_path=Path(),
                 duration=dur,
                 resolution=(actual_w, actual_h),
                 provider=self.name,
@@ -111,6 +116,68 @@ class PixabayVideoProvider(BaseVideoProvider):
 
         logger.info("Pixabay: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
         return None
+
+    def search_page(
+        self,
+        query: str,
+        min_duration: float,
+        max_duration: float,
+        resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
+    ) -> "SearchPage":
+        """Search Pixabay Videos for ALL matching clips on a page (paginated).
+
+        Reads totalHits from the API response (capped at 500) and returns all
+        candidates that match the duration window.
+
+        Returns:
+            SearchPage with all matching VideoAsset candidates and pagination metadata.
+        """
+        from pipeline.providers.base import SearchPage
+
+        target_w, target_h = resolution
+        params: dict = {
+            "key": self._api_key,
+            "q": query[:100],
+            "per_page": min(per_page, 200),
+            "page": page,
+            "min_width": target_w,
+            "min_height": target_h,
+        }
+
+        resp = self._request_with_retry(params)
+        if resp is None:
+            return SearchPage(assets=[], page=page, per_page=min(per_page, 200), total_available=0)
+
+        data = resp.json()
+        total_hits = data.get("totalHits", 0)
+        hits = data.get("hits", [])
+        assets: list[VideoAsset] = []
+
+        for hit in hits:
+            dur = hit.get("duration", 0)
+            if dur < min_duration or dur > max_duration:
+                continue
+            videos = hit.get("videos", {})
+            best = self._pick_best_quality(videos, resolution)
+            if not best:
+                continue
+            download_url = best.get("url", "")
+            if not download_url:
+                continue
+            assets.append(VideoAsset(
+                url=download_url,
+                file_path=Path(),
+                duration=dur,
+                resolution=(best.get("width", 0), best.get("height", 0)),
+                provider=self.name,
+            ))
+
+        return SearchPage(
+            assets=assets, page=page, per_page=min(per_page, 200),
+            total_available=total_hits,
+        )
 
     def download(self, asset: VideoAsset, output_dir: Path) -> Path:
         """Download the video clip from Pixabay's CDN.
