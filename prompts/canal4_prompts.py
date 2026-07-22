@@ -56,9 +56,28 @@ def _build_block_rules(cfg, theme_context=None, word_target=None) -> str:
     if theme_context and getattr(theme_context, "theme_keywords_en", None):
         theme_kw_str = ", ".join(theme_context.theme_keywords_en[:5])
         theme_rules = f"""
-REGLAS DE COHERENCIA VISUAL:
-- Cada search_query_en DEBE incluir al menos una de estas keywords tematicas: {theme_kw_str}
-- Las escenas consecutivas deben tener progresion visual coherente (plano general → primer plano → detalle → plano de situacion). No pueden saltar bruscamente de una epoca/tema a otro.
+REGLAS DE COHERENCIA VISUAL (¡OBLIGATORIO!):
+- CADA search_query_en debe ser una FUSIÓN de DOS partes (ambas obligatorias, en este orden):
+  (1) SUJETO NARRATIVO (VA PRIMERO, ~60% de la query): 2-3 keywords que describen
+      EXACTAMENTE lo que se narra en ESTE bloque — la expedición, lugar, desastre,
+      explorador o evento mencionado en la narración. Esto es el sujeto principal.
+  (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS, ~40% de la query): 1-2 keywords de época/ambiente
+      extraídas de: {theme_kw_str}. Esto ancla la escena en la geografía/era correcta.
+  ✅ BUENO: "franklin expedition ship trapped arctic ice cinematic"
+          → narra el barco atrapado → anclado en expedición ártica
+  ❌ MALO: "arctic expedition ice snow documentary"
+          → solo tema genérico, NO refleja lo que se narra
+  ❌ MALO: "cruise ship tropical ocean vacation"
+          → describe la acción pero FUERA de contexto geográfico/época
+- LO QUE VES = LO QUE OYES: la query debe traducir visualmente lo que el locutor
+  está narrando en este momento exacto. Si la narración dice "los exploradores
+  cruzaron el desierto sin agua durante días", la query debe ser sobre "explorers
+  crossing desert heat survival" — NO sobre "desert landscape" genérico.
+- PROHIBIDO que dos escenas consecutivas usen la MISMA keyword de anclaje temático.
+  Rota entre las keywords disponibles: {theme_kw_str}
+- Las escenas consecutivas deben compartir al menos UN elemento visual (color, luz,
+  paisaje, clima, textura del terreno) para crear un HILO VISUAL que una todo el video.
+  No pueden saltar bruscamente entre geografías o épocas.
 - search_query_en DEBE incluir era/period keywords del contexto visual. Ej: si es expedicion artica → 'arctic', 'frozen', 'ice', '19th century', 'expedition'; si es desierto → 'desert', 'sand', 'hot', 'sun', 'survival'; si es selva → 'jungle', 'rainforest', 'expedition', 'green'. Adapta el ambiente al tema REAL, NO impongas frio/nieve si la expedicion no es polar.
 - PROHIBIDO mostrar elementos de: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}"""
 
@@ -69,15 +88,21 @@ El guion debe organizarse en bloques semanticos cohesivos agrupados en parrafos 
 - "emocion": la emocion dominante del bloque
 - "texto": el texto exacto que narra el locutor en este bloque
 - "escena_descripcion": descripcion cinematografica DETALLADA de que se ve en pantalla
-- "search_query_en": 4-7 keywords en INGLES para buscar en Unsplash/Pexels. REGLAS ESTRICTAS:
-  * FORMATO OBLIGATORIO: [keywords del TEMA historico] + [keywords visuales]. AMBAS partes necesarias.
-  * ANCLAJE TEMATICO: incluye 1-2 keywords del CONTENIDO del bloque (expedicion, epoca, lugar mencionado).
-  * Ej: "egypt desert expedition sand cinematic", "amazon jungle river documentary style", "franklin expedition arctic ship ice cinematic", "donner party snow pioneer wagon documentary style", "ocean storm survival ship cinematic"
+- "search_query_en": 5-8 keywords en INGLES para buscar en Unsplash/Pexels. REGLAS ESTRICTAS:
+  * FORMATO OBLIGATORIO DE DOS PARTES (ambas necesarias, en este orden):
+    (1) [SUJETO NARRATIVO]: 2-4 keywords del contenido EXACTO del bloque
+        (expedición, lugar, desastre, explorador mencionado en la narración)
+    (2) [ANCLAJE ÉPOCA/GEOGRAFÍA]: 1-2 keywords de ambientación temática del video
+  * LO QUE VES = LO QUE OYES: la query debe traducir visualmente lo que el locutor
+    está narrando en este momento exacto, anclado en la geografía/época del video.
+  * Ej: "franklin expedition ship trapped arctic ice cinematic" (narra barco atrapado en Ártico)
+  * Ej: "donner party snow pioneer wagon documentary style" (narra caravana en nieve)
+  * Ej: "egypt desert expedition sand cinematic" (narra expedición en desierto egipcio)
   * SOLO terminos que EXISTAN en bancos de stock gratuitos (Unsplash, Pexels, Pixabay)
   * Equilibra especificidad con disponibilidad: "arctic exploration 19th century" (OK) vs "HMS Erebus trapped in ice 1846" (demasiado especifico)
-  * Si el concepto es muy especifico, MANTEN el tema pero simplifica: "Franklin Expedition" → "arctic exploration ship ice", NO lo conviertas en algo generico sin tema
+  * Si el concepto es muy especifico, MANTEN el sujeto narrativo pero simplifica la locación: "Franklin Expedition" → "arctic exploration ship ice", NO lo conviertas en algo generico sin tema
   * Incluye UN modificador de estilo: "cinematic", "hot atmosphere", "dramatic lighting", "documentary style", "wilderness", "expedition"
-  * Para video, usa queries de 3-5 palabras con tema + visual: "frozen ocean cinematic", "desert sandstorm aerial", "jungle river expedition", "storm clouds time lapse", "arctic expedition ship"
+  * Para video, usa queries de 4-7 palabras con sujeto narrativo + geografía + visual: "frozen ocean ship expedition cinematic", "desert sandstorm survival aerial", "jungle river expedition canopy", "storm clouds survival time lapse"
   * Para video, añade "slow motion" o "aerial" o "time lapse" SOLO si realmente aplica — no fuerces estos terminos si no corresponden
 - "media_tipo": Decide si este bloque se vera mejor con un minivideo o una imagen fija:
   * "video" si el plano tiene movimiento natural: paisajes, tormentas, oceano, nubes, time-lapses, olas, dunas de arena, niebla, cascadas, animales en movimiento, caminata en desierto o selva, paneos sobre paisajes
@@ -373,16 +398,33 @@ def build_system_prompt(config=None, word_count_emphasis: float = 1.0, chunk_con
     # ── Theme context injection ───────────────────────────────
     theme_banner = ""
     if theme_context:
+        mood_str = f"\n- Estado de animo: {theme_context.mood}" if theme_context.mood else ""
+        light_str = f"\n- Iluminacion preferida: {theme_context.lighting}" if theme_context.lighting else ""
+        comp_str = f"\n- Tipo de encuadre: {theme_context.composition}" if theme_context.composition else ""
+        palette_str = ""
+        if theme_context.color_palette:
+            p = theme_context.color_palette
+            palette_str = f"\n- Paleta de colores: primario={p.get('primary','?')}, secundario={p.get('secondary','?')}, acento={p.get('accent','?')}"
         theme_banner = (
-            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO:\n"
+            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO — EL MUNDO DONDE TODO OCURRE:\n"
             f"- Genero/Ambientacion: {theme_context.genre}\n"
             f"- Epoca: {theme_context.era}\n"
             f"- Estilo visual predominante: {theme_context.visual_style}\n"
-            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}\n"
+            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}"
+            f"{mood_str}{light_str}{comp_str}{palette_str}\n"
             f"- PROHIBIDO mostrar: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}\n"
             f"- Keywords tematicas en ingles: {', '.join(theme_context.theme_keywords_en[:8])}\n\n"
-            f"TODAS las search_query_en de TODOS los bloques DEBEN incluir al menos una de estas keywords tematicas.\n"
-            f"TODAS las escena_descripcion deben ser coherentes con este contexto visual (misma epoca, mismo estilo).\n"
+            f"REGLA DE FUSION NARRATIVA + TEMATICA (¡OBLIGATORIO!):\n"
+            f"Cada search_query_en debe ser UNA SOLA FRASE que fusione DOS conceptos:\n"
+            f"  1. El SUJETO NARRATIVO — lo que se esta contando en ESTE BLOQUE concreto (la expedicion, el desastre, el explorador)\n"
+            f"  2. La AMBIENTACION TEMATICA — {theme_context.genre}, {theme_context.era}\n"
+            f"El sujeto narrativo SIEMPRE va primero (es el sujeto visual principal).\n"
+            f"La ambientacion va despues (es el filtro de geografia/epoca).\n\n"
+            f"CADA escena_descripcion debe:\n"
+            f"- Describir EXACTAMENTE que se ve mientras se narra este bloque\n"
+            f"- Estar ambientada en {theme_context.era} (misma epoca, misma geografia)\n"
+            f"- Compartir al menos UN elemento visual (luz, paisaje, clima, textura del\n"
+            f"  terreno) con la escena ANTERIOR para crear un HILO VISUAL CONTINUO\n"
         )
 
     # ── Build the full prompt ────────────────────────────────

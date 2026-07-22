@@ -89,10 +89,28 @@ def _build_block_rules(cfg, theme_context=None, word_target=None) -> str:
     if theme_context and theme_context.theme_keywords_en:
         theme_kw_str = ", ".join(theme_context.theme_keywords_en[:5])
         theme_rules = f"""
-REGLAS DE COHERENCIA VISUAL:
-- Cada search_query_en DEBE incluir al menos una de estas keywords temáticas: {theme_kw_str}
-- Las escenas consecutivas deben tener progresión visual coherente (plano general → primer plano → detalle → plano de situación). No pueden saltar bruscamente de una época/tema a otro.
-- search_query_en DEBE incluir era/period keywords del contexto visual. Ej: si es edad media → 'medieval', 'ancient', 'historical'.
+REGLAS DE COHERENCIA VISUAL (¡OBLIGATORIO!):
+- CADA search_query_en debe ser una FUSIÓN de DOS partes (ambas obligatorias, en este orden):
+  (1) SUJETO NARRATIVO (VA PRIMERO, ~60% de la query): 2-3 keywords que describen
+      EXACTAMENTE lo que se narra en ESTE bloque — la persona, acción, lugar u objeto
+      mencionado en la narración. Esto es el sujeto principal de la búsqueda.
+  (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS, ~40% de la query): 1-2 keywords de época/ambiente
+      extraídas de: {theme_kw_str}. Esto ancla la escena en el mundo del video.
+  ✅ BUENO: "royal physician examining patient medieval castle torchlight"
+          → narra al médico medieval → anclado en castillo medieval
+  ❌ MALO: "medieval castle ancient history dark atmosphere"
+          → solo tema genérico, NO refleja lo que se narra
+  ❌ MALO: "doctor medical examination hospital modern"
+          → describe la acción pero FUERA de época (rompe el contexto)
+- LO QUE VES = LO QUE OYES: la query debe traducir visualmente lo que el locutor
+  está narrando en este momento exacto. Si la narración dice "el rey desenvainó
+  su espada", la query debe ser sobre una espada siendo desenvainada en un castillo
+  medieval — NO sobre "rey medieval genérico".
+- PROHIBIDO que dos escenas consecutivas usen la MISMA keyword de anclaje temático.
+  Rota entre las keywords disponibles: {theme_kw_str}
+- Las escenas consecutivas deben compartir al menos UN elemento visual (color,
+  iluminación, material arquitectónico, tipo de locación) para crear un HILO VISUAL
+  que una todo el video. No pueden saltar bruscamente.
 - PROHIBIDO mostrar elementos de: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}"""
 
     return f"""ESTRUCTURA DE BLOQUES NARRATIVOS:
@@ -107,10 +125,15 @@ El guion debe organizarse en bloques semánticos cohesivos. Cada bloque es un p�
 - "media_duracion": duración ideal del clip en segundos (entre {video_min} y {video_max} si es video; mismo valor que la duración estimada si es imagen)
 
 REGLAS PARA search_query_en:
-- ANCLAJE TEMÁTICO OBLIGATORIO: CADA query debe tener DOS PARTES:
-  (1) 1-3 keywords del TEMA del bloque (persona histórica, lugar, evento, época)
-  (2) 2-5 keywords visuales/estilísticas (tipo de plano, iluminación, atmósfera)
-  AMBAS partes son obligatorias. Ej: "french revolution guillotine dramatic lighting historical painting"
+- FORMATO OBLIGATORIO DE DOS PARTES (ambas necesarias, en este orden):
+  (1) [SUJETO NARRATIVO]: 2-4 keywords del contenido EXACTO del bloque
+      (persona, acción, lugar, objeto mencionado en la narración)
+  (2) [ANCLAJE ÉPOCA/ESTILO]: 1-2 keywords de ambientación temática del video
+  Ej correcto: "sword drawn betrayal medieval castle" (narra la espada → anclado en castillo)
+  Ej INCORRECTO: "medieval king sword ancient history" (solo keywords temáticas, NO refleja lo que se narra)
+- LO QUE VES = LO QUE OYES: si el bloque narra "el médico examinó al paciente
+  con instrumentos rudimentarios", la query debe ser sobre "physician examining patient
+  medieval instruments", NO sobre "medieval medicine history".
 - SIEMPRE en inglés (las APIs de stock funcionan mejor en inglés)
 - Equilibra especificidad con disponibilidad: "18th century French revolution" (OK) vs "Robespierre guillotining Danton 1794" (demasiado específico)
 - Keywords concretas: "sunlight through window", "old photograph", "golden field", "person looking at sky"
@@ -473,16 +496,34 @@ def build_system_prompt(config=None, word_count_emphasis: float = 1.0, chunk_con
     # ── Theme context injection (P3: narration-visual coherence) ─
     theme_banner = ""
     if theme_context:
+        # Build rich theme descriptor from all available fields
+        mood_str = f"\n- Estado de ánimo: {theme_context.mood}" if theme_context.mood else ""
+        light_str = f"\n- Iluminación preferida: {theme_context.lighting}" if theme_context.lighting else ""
+        comp_str = f"\n- Tipo de encuadre: {theme_context.composition}" if theme_context.composition else ""
+        palette_str = ""
+        if theme_context.color_palette:
+            p = theme_context.color_palette
+            palette_str = f"\n- Paleta de colores: primario={p.get('primary','?')}, secundario={p.get('secondary','?')}, acento={p.get('accent','?')}"
         theme_banner = (
-            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO:\n"
+            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO — EL MUNDO DONDE TODO OCURRE:\n"
             f"- Género/Ambientación: {theme_context.genre}\n"
             f"- Época: {theme_context.era}\n"
             f"- Estilo visual predominante: {theme_context.visual_style}\n"
-            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}\n"
+            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}"
+            f"{mood_str}{light_str}{comp_str}{palette_str}\n"
             f"- PROHIBIDO mostrar: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}\n"
             f"- Keywords temáticas en inglés: {', '.join(theme_context.theme_keywords_en[:8])}\n\n"
-            f"TODAS las search_query_en de TODOS los bloques DEBEN incluir al menos una de estas keywords temáticas.\n"
-            f"TODAS las escena_descripcion deben ser coherentes con este contexto visual (misma época, mismo estilo).\n"
+            f"REGLA DE FUSIÓN NARRATIVA + TEMÁTICA (¡OBLIGATORIO!):\n"
+            f"Cada search_query_en debe ser UNA SOLA FRASE que fusione DOS conceptos:\n"
+            f"  1. El SUJETO NARRATIVO — lo que se está contando en ESTE BLOQUE concreto\n"
+            f"  2. La AMBIENTACIÓN TEMÁTICA — {theme_context.genre}, {theme_context.era}\n"
+            f"El sujeto narrativo SIEMPRE va primero (es el sujeto visual principal).\n"
+            f"La ambientación va después (es el filtro de época/estilo).\n\n"
+            f"CADA escena_descripcion debe:\n"
+            f"- Describir EXACTAMENTE qué se ve mientras se narra este bloque\n"
+            f"- Estar ambientada en {theme_context.era} (misma época, mismo mundo)\n"
+            f"- Compartir al menos UN elemento visual (color, luz, material, objeto)\n"
+            f"  con la escena ANTERIOR para crear un HILO VISUAL CONTINUO\n"
         )
 
     # ── Build the full prompt ────────────────────────────────

@@ -1615,16 +1615,17 @@ class MediaFetcher:
         theme_keywords: list[str] | None = None,
         max_len: int = 100,
     ) -> str:
-        """Build a search query that balances scene-specific content with video-level context.
+        """Build a search query that fuses scene-specific narrative content with
+        video-level theme context.
 
-        Strategy:
-        1. Extract scene topic keywords from the LLM query (strip visual-stylistic fluff)
+        Strategy (v7 — narrative-first fusion):
+        1. Extract scene narrative keywords from the LLM query (primary subject)
         2. Add sub-scene variation for visual diversity (lowest priority)
-        3. Add theme keywords for video-level context (keeps results thematically relevant)
+        3. Add 1-2 theme keywords as era/style anchors (not duplicate subjects)
         4. Fit all within ``max_len`` chars, trimming variation first, then theme, then scene.
 
-        This ensures both the paragraph-specific content AND the video-wide theme are
-        represented in the search query, unlike naive truncation which would lose meaning.
+        The scene narrative content always leads the query so stock APIs weight it
+        higher. Theme keywords serve as contextual anchors appended at the end.
         """
         # 1. Extract scene topic keywords (strip style words, keep content nouns)
         words = query.split()
@@ -1636,15 +1637,15 @@ class MediaFetcher:
         if not scene_keywords and not theme_keywords:
             return query.strip()[:max_len]
 
-        # 2. Allocate character budget proportionally
-        #    scene: ~60% (topic keywords — must match the paragraph)
-        #    theme: ~25% (video-level context)
+        # 2. Allocate character budget: scene leads, theme anchors, variation optional
+        #    scene: ~75% (narrative subject — the scene's primary visual content)
+        #    theme: ~20% (era/style anchor — max 1-2 keywords appended at end)
         #    variation: ~15% (visual diversity — lowest priority, dropped first)
-        variation_budget = 18 if variation else 0
-        theme_budget = min(28, max_len - variation_budget)
+        variation_budget = 14 if variation else 0
+        theme_budget = min(20, max_len - variation_budget)
         scene_budget = max_len - variation_budget - theme_budget
 
-        # 3. Build scene topic part (fit within scene_budget chars)
+        # 3. Build scene narrative part (fit within scene_budget chars)
         scene_part = ""
         for w in scene_keywords:
             candidate = f"{scene_part} {w}".strip()
@@ -1658,7 +1659,7 @@ class MediaFetcher:
             elif theme_keywords:
                 # No scene keywords — build from theme keywords instead
                 scene_budget = max_len - (len(variation) + 1 if variation else 0)
-                for kw in theme_keywords[:3]:
+                for kw in theme_keywords[:2]:
                     candidate = f"{scene_part} {kw}".strip()
                     if len(candidate) <= scene_budget:
                         scene_part = candidate
@@ -1666,20 +1667,26 @@ class MediaFetcher:
                         break
                 theme_keywords = None  # already consumed, skip step 4
 
-        # 4. Build theme context part (fit within remaining space after scene)
+        # 4. Build theme context part (era/style anchor at end, max 2 keywords, dedup)
         theme_part = ""
         if theme_keywords:
+            scene_lower = scene_part.lower()
+            # Only add theme keywords NOT already present in scene part
+            fresh_keywords = [
+                kw for kw in theme_keywords[:2]
+                if kw.lower() not in scene_lower
+            ]
             remaining = max_len - len(scene_part)
             if variation:
                 remaining -= (len(variation) + 1)  # space + variation
-            for kw in theme_keywords[:3]:
+            for kw in fresh_keywords:
                 candidate = f"{theme_part} {kw}".strip()
                 if len(candidate) <= max(remaining, 10):
                     theme_part = candidate
                 else:
                     break
 
-        # 5. Assemble: scene + variation + theme
+        # 5. Assemble: scene (primary) + variation (diversity) + theme (anchor)
         parts = [scene_part]
         if variation:
             parts.append(variation)

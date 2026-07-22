@@ -67,17 +67,15 @@ def _build_portrait_query(
     style_modifiers: str = "",
     max_len: int = 100,
 ) -> str:
-    """Build a short-focused search query combining scene keywords, theme context,
-    and channel style modifiers.
+    """Build a short-focused search query fusing scene narrative with theme context.
 
-    Strategy:
-    1. Scene topic keywords from ``search_query_en`` (LLM-generated) — highest priority (~60%)
-    2. Theme keywords for global visual context (~25%)
+    Strategy (v7 — narrative-first fusion):
+    1. Scene narrative keywords from ``search_query_en`` — primary subject (~75%)
+    2. Theme keywords as era/style anchors (~20%)
     3. Channel style modifiers for aesthetic consistency (~15%)
     4. Fit within ``max_len`` chars (Pixabay limit: 100).
 
-    This is a simplified version of ``MediaFetcher._build_search_query()``
-    adapted for portrait shorts — no sub-scene variations.
+    This mirrors ``MediaFetcher._build_search_query()`` adapted for portrait shorts.
     """
     # 1. Strip style fluff from the LLM query
     words = search_query_en.split()
@@ -88,12 +86,12 @@ def _build_portrait_query(
     if not scene_keywords and not theme_keywords:
         return search_query_en.strip()[:max_len]
 
-    # 2. Allocate character budget: scene ~60%, theme ~25%, style ~15%
-    style_budget = min(len(style_modifiers) + 1, 18) if style_modifiers else 0
-    theme_budget = min(28, max_len - style_budget)
+    # 2. Allocate character budget: scene ~75%, theme ~20%, style ~15%
+    style_budget = min(len(style_modifiers) + 1, 14) if style_modifiers else 0
+    theme_budget = min(20, max_len - style_budget)
     scene_budget = max_len - style_budget - theme_budget
 
-    # 3. Build scene topic part
+    # 3. Build scene narrative part (primary subject)
     scene_part = ""
     for w in scene_keywords:
         candidate = f"{scene_part} {w}".strip()
@@ -105,7 +103,7 @@ def _build_portrait_query(
         scene_part = scene_keywords[0][:scene_budget]
     elif not scene_part and theme_keywords:
         scene_budget = max_len - style_budget
-        for kw in theme_keywords[:3]:
+        for kw in theme_keywords[:2]:
             candidate = f"{scene_part} {kw}".strip()
             if len(candidate) <= scene_budget:
                 scene_part = candidate
@@ -113,11 +111,16 @@ def _build_portrait_query(
                 break
         theme_keywords = None
 
-    # 4. Build theme context part
+    # 4. Build theme context part (max 2 keywords, dedup with scene)
     theme_part = ""
     if theme_keywords:
+        scene_lower = scene_part.lower()
+        fresh_keywords = [
+            kw for kw in theme_keywords[:2]
+            if kw.lower() not in scene_lower
+        ]
         remaining = max_len - len(scene_part) - style_budget
-        for kw in theme_keywords[:3]:
+        for kw in fresh_keywords:
             candidate = f"{theme_part} {kw}".strip()
             if len(candidate) <= max(remaining, 10):
                 theme_part = candidate
@@ -127,7 +130,7 @@ def _build_portrait_query(
     # 5. Add style modifiers
     style_part = style_modifiers if style_modifiers else ""
 
-    # 6. Assemble: scene + style + theme
+    # 6. Assemble: scene (primary) + style (diversity) + theme (anchor)
     parts = [scene_part]
     if style_part:
         parts.append(style_part)

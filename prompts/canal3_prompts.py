@@ -85,11 +85,28 @@ def _build_block_rules(cfg, theme_context=None, word_target=None) -> str:
     if theme_context and theme_context.theme_keywords_en:
         theme_kw_str = ", ".join(theme_context.theme_keywords_en[:5])
         theme_rules = f"""
-REGLAS DE COHERENCIA VISUAL:
-- Cada search_query_en DEBE incluir al menos una de estas keywords temáticas: {theme_kw_str}
-- Las escenas consecutivas deben tener progresión visual coherente (plano general de ruinas → primeros planos de piedras y jeroglíficos → planos de situación con contexto geográfico → detalle de artefactos). No pueden saltar bruscamente entre épocas o civilizaciones.
-- search_query_en DEBE incluir keywords de era/período del contexto. Ej: 'ancient ruins', 'archaeological site', 'mesopotamian', 'mayan temple', 'roman empire'.
-- PROHIBIDO mostrar elementos modernos, tecnología actual, o edificios contemporáneos.
+REGLAS DE COHERENCIA VISUAL (¡OBLIGATORIO!):
+- CADA search_query_en debe ser una FUSIÓN de DOS partes (ambas obligatorias, en este orden):
+  (1) SUJETO NARRATIVO (VA PRIMERO, ~60% de la query): 2-3 keywords que describen
+      EXACTAMENTE lo que se narra en ESTE bloque — la civilización, lugar, artefacto,
+      construcción o descubrimiento mencionado en la narración. Esto es el sujeto principal.
+  (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS, ~40% de la query): 1-2 keywords de época/ambiente
+      extraídas de: {theme_kw_str}. Esto ancla la escena en la civilización/era correcta.
+  ✅ BUENO: "stone carvings close up ancient temple mayan ruins golden hour"
+          → narra las tallas de piedra → anclado en ruinas mayas
+  ❌ MALO: "ancient ruins historical civilization mystery"
+          → solo tema genérico, NO refleja lo que se narra
+  ❌ MALO: "modern architecture glass building"
+          → describe la acción pero FUERA de época (rompe el contexto)
+- LO QUE VES = LO QUE OYES: la query debe traducir visualmente lo que el locutor
+  está narrando en este momento exacto. Si la narración dice "los arqueólogos encontraron
+  jeroglíficos en la cámara funeraria", la query debe ser sobre "hieroglyphics burial
+  chamber ancient temple" — NO sobre "ancient egypt archaeology" genérico.
+- PROHIBIDO que dos escenas consecutivas usen la MISMA keyword de anclaje temático.
+  Rota entre las keywords disponibles: {theme_kw_str}
+- Las escenas consecutivas deben compartir al menos UN elemento visual (color, luz,
+  textura de piedra, tipo de ruina, luz de antorcha) para crear un HILO VISUAL
+  que una todo el video. No pueden saltar bruscamente entre civilizaciones.
 - PROHIBIDO: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'elementos modernos, edificios actuales, tecnología, personas con ropa contemporánea, vehículos'}"""
 
     return f"""ESTRUCTURA DE BLOQUES NARRATIVOS:
@@ -104,10 +121,15 @@ El guion debe organizarse en bloques semánticos cohesivos. Cada bloque es un p�
 - "media_duracion": duración ideal del clip en segundos (entre {video_min} y {video_max} si es video; mismo valor que la duración estimada si es imagen)
 
 REGLAS PARA search_query_en:
-- ANCLAJE TEMÁTICO OBLIGATORIO: CADA query debe tener DOS PARTES:
-  (1) 1-3 keywords del TEMA del bloque (civilización, lugar, artefacto, período)
-  (2) 2-5 keywords visuales/estilísticas (tipo de plano, iluminación, atmósfera)
-  AMBAS partes son obligatorias. Ej: "mayan temple chichen itza drone shot ancient ruins golden hour"
+- FORMATO OBLIGATORIO DE DOS PARTES (ambas necesarias, en este orden):
+  (1) [SUJETO NARRATIVO]: 2-4 keywords del contenido EXACTO del bloque
+      (civilización, lugar, artefacto, descubrimiento mencionado en la narración)
+  (2) [ANCLAJE ÉPOCA/ESTILO]: 1-2 keywords de ambientación temática del video
+  Ej correcto: "hieroglyphics burial chamber ancient egyptian temple golden hour"
+  Ej INCORRECTO: "ancient egypt pharaoh pyramid history" (solo keywords temáticas, NO refleja lo que se narra)
+- LO QUE VES = LO QUE OYES: si el bloque narra "los arqueólogos descubrieron una
+  cámara oculta bajo la pirámide", la query debe ser sobre "hidden chamber beneath
+  pyramid archaeological discovery", NO sobre "egyptian pyramids ancient history".
 - SIEMPRE en inglés (las APIs de stock funcionan mejor en inglés)
 - Equilibra especificidad con disponibilidad: "roman colosseum ancient architecture" (OK) vs "Colosseum Rome Italy 80 AD" (demasiado específico)
 - Keywords concretas: "ancient temple ruins golden hour", "stone carvings close-up", "drone shot archaeological site", "dust particles in sunbeams"
@@ -352,16 +374,33 @@ def build_system_prompt(config=None, word_count_emphasis: float = 1.0, chunk_con
     # ── Theme context injection ──────────────────────────────
     theme_banner = ""
     if theme_context:
+        mood_str = f"\n- Estado de ánimo: {theme_context.mood}" if theme_context.mood else ""
+        light_str = f"\n- Iluminación preferida: {theme_context.lighting}" if theme_context.lighting else ""
+        comp_str = f"\n- Tipo de encuadre: {theme_context.composition}" if theme_context.composition else ""
+        palette_str = ""
+        if theme_context.color_palette:
+            p = theme_context.color_palette
+            palette_str = f"\n- Paleta de colores: primario={p.get('primary','?')}, secundario={p.get('secondary','?')}, acento={p.get('accent','?')}"
         theme_banner = (
-            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO:\n"
+            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO — EL MUNDO DONDE TODO OCURRE:\n"
             f"- Género/Ambientación: {theme_context.genre}\n"
             f"- Época: {theme_context.era}\n"
             f"- Estilo visual predominante: {theme_context.visual_style}\n"
-            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}\n"
+            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}"
+            f"{mood_str}{light_str}{comp_str}{palette_str}\n"
             f"- PROHIBIDO mostrar: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'elementos modernos, tecnología actual, ropa contemporánea, vehículos'}\n"
             f"- Keywords temáticas en inglés: {', '.join(theme_context.theme_keywords_en[:8])}\n\n"
-            f"TODAS las search_query_en de TODOS los bloques DEBEN incluir al menos una de estas keywords temáticas.\n"
-            f"TODAS las escena_descripcion deben ser coherentes con este contexto visual (misma época, mismo estilo).\n"
+            f"REGLA DE FUSIÓN NARRATIVA + TEMÁTICA (¡OBLIGATORIO!):\n"
+            f"Cada search_query_en debe ser UNA SOLA FRASE que fusione DOS conceptos:\n"
+            f"  1. El SUJETO NARRATIVO — lo que se está contando en ESTE BLOQUE concreto (el artefacto, la ruina, el descubrimiento)\n"
+            f"  2. La AMBIENTACIÓN TEMÁTICA — {theme_context.genre}, {theme_context.era}\n"
+            f"El sujeto narrativo SIEMPRE va primero (es el sujeto visual principal).\n"
+            f"La ambientación va después (es el filtro de civilización/era).\n\n"
+            f"CADA escena_descripcion debe:\n"
+            f"- Describir EXACTAMENTE qué se ve mientras se narra este bloque\n"
+            f"- Estar ambientada en {theme_context.era} (misma civilización, misma época)\n"
+            f"- Compartir al menos UN elemento visual (luz, textura de piedra, color tierra,\n"
+            f"  tipo de ruina) con la escena ANTERIOR para crear un HILO VISUAL CONTINUO\n"
         )
 
     # ── Build the full prompt ────────────────────────────────
