@@ -147,8 +147,11 @@ class YouTubeBrowser:
     def _cleanup_stale_locks(self):
         """Remove Chromium singleton locks left by killed/interrupted sessions.
 
-        Chromium writes hostname:PID to SingletonLock. If that PID is dead,
-        we clean all three singleton files so launch_persistent_context works.
+        Chromium writes hostname:PID to SingletonLock. If this method is called
+        when we don't own a browser yet, ANY Chrome process using this profile
+        is an orphan (from a crashed run or a transient check_session_valid call)
+        and must be killed before we can launch our own.
+
         The browser profile (cookies, logins) is preserved.
         """
         lock_file = self.user_data_dir / "SingletonLock"
@@ -156,20 +159,62 @@ class YouTubeBrowser:
             return
         try:
             lock_content = lock_file.read_text().strip()
-            if lock_content:
-                lock_pid = lock_content.split(":")[-1]
+            if not lock_content:
+                return
+            lock_pid = lock_content.split(":")[-1]
+            pid = int(lock_pid)
+            # Check if the PID is alive
+            try:
+                os.kill(pid, 0)
+            except (OSError, ValueError):
+                # PID is dead — just clean the stale lock files
+                self._remove_singleton_files()
+                logger.info("Cleaned stale browser locks (dead PID %s) for %s", pid, self.account)
+                return
+
+            # PID is alive. If this process is NOT the one we own,
+            # it's an orphan from a previous crashed run or a transient
+            # session check. Wait briefly for it to die, then force-kill.
+            logger.warning("Profile in use by PID %s for %s — waiting for release...",
+                           pid, self.account)
+            for attempt in range(15):  # 15 × 2s = 30s max wait
+                time.sleep(2)
                 try:
-                    os.kill(int(lock_pid), 0)  # signal 0 = check existence only
-                    logger.warning("Profile in use by PID %s, attempt launch anyway",
-                                   lock_pid)
-                except (OSError, ValueError):
-                    for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                        fpath = self.user_data_dir / fname
-                        if fpath.exists():
-                            fpath.unlink()
-                    logger.info("Cleaned stale browser locks for %s", self.account)
+                    os.kill(pid, 0)
+                except OSError:
+                    # PID died while we waited
+                    self._remove_singleton_files()
+                    logger.info("Lock released after %.0fs for %s", (attempt + 1) * 2, self.account)
+                    return
+            # Still alive after 30s — kill everything using this profile
+            logger.warning("Force-killing stale Chrome PID %s for %s", pid, self.account)
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            # Also kill any other Chrome processes using this profile
+            import subprocess
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-f", str(self.user_data_dir)],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+            time.sleep(1)
+            self._remove_singleton_files()
         except Exception as e:
             logger.debug("Lock check skipped: %s", e)
+
+    def _remove_singleton_files(self):
+        """Delete Chromium singleton lock files for this account's profile."""
+        for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            fpath = self.user_data_dir / fname
+            if fpath.exists():
+                try:
+                    fpath.unlink()
+                except OSError:
+                    pass
 
     def _scroll_page_to_bottom(self, page):
         """Scroll YouTube Studio's inner scrollable containers to the bottom.
