@@ -932,6 +932,13 @@ def run_job(
                         logger.info("Deleted local mp4: %s", vp)
                     except Exception:
                         pass
+
+                # ── Clean up residual files (v9): audio + scene assets ──
+                try:
+                    from pipeline.cleanup_utils import cleanup_video_residuals
+                    cleanup_video_residuals(db, video_id, audio_data=audio_data, log=logger)
+                except Exception:
+                    pass
                 
                 # ── Post-upload: real YouTube stats snapshot ──
                 try:

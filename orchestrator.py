@@ -1155,6 +1155,13 @@ class PipelineOrchestrator:
                     source_mode=self.source_mode,
                 )
 
+            # ── Flush cross-video dedup history (v9) ──────────
+            try:
+                self.media_fetcher.flush_asset_history(self.db, video_id)
+            except Exception as exc:
+                logger.debug("[%s] flush_asset_history failed (non-critical): %s",
+                             self.canal, exc)
+
             return {
                 "video_path": str(video_path),
                 "thumbnail_path": str(thumbnail_path),

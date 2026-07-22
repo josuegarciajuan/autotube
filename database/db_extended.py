@@ -193,6 +193,13 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v8 schema applied")
 
+    # Run v9 schema (video_asset_history cross-video dedup)
+    schema_v9 = Path(__file__).parent / "schema_v9.sql"
+    if schema_v9.exists():
+        with open(schema_v9) as f:
+            conn.executescript(f.read())
+        logger.info("Migration: v9 schema applied")
+
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
     # which would cause RTF degradation and 600s timeouts.
@@ -4526,3 +4533,35 @@ class ExtendedDatabase(Database):
                 (key, value),
             )
             conn.commit()
+
+    # ── video_asset_history helpers (v9 cross-video dedup) ─────
+
+    def insert_asset_history(self, video_id: int, file_path: str,
+                             source: str, asset_url: str = "") -> None:
+        """Record an asset as used for cross-video deduplication."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO video_asset_history
+                   (video_id, file_path, source, asset_url)
+                   VALUES (?, ?, ?, ?)""",
+                (video_id, file_path, source, asset_url),
+            )
+            conn.commit()
+
+    def get_all_used_filenames(self) -> set[str]:
+        """Return all filenames ever used (for dedup at fetch time)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM video_asset_history"
+            ).fetchall()
+        return {r["file_path"] for r in rows if r["file_path"]}
+
+    def delete_video_asset_history(self, video_id: int) -> int:
+        """Delete all history rows for a video. Returns count deleted."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM video_asset_history WHERE video_id = ?",
+                (video_id,),
+            )
+            conn.commit()
+            return cursor.rowcount

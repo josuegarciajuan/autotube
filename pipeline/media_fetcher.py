@@ -132,11 +132,93 @@ class MediaFetcher:
         # Image-specific dedup tracking (URLs + content hashes)
         self._used_image_urls: set[str] = set()
 
+        # ── Cross-video dedup (v9): filenames used in ANY previous video ─
+        # Loaded at the start of each fetch_for_script() call from
+        # the video_asset_history DB table. Empty at init time.
+        self._cross_video_used_filenames: set[str] = set()
+
+        # ── Pending asset records for flush_asset_history() ────────
+        # Accumulated during fetch_for_script(); flushed by the
+        # orchestrator/service after video_id is assigned.
+        self._pending_asset_records: list[dict] = []
+
         # ── Pollo AI scene generator (lazy, avoids ~7 min per image unless absolutely needed) ─
         self._pollo_scene_gen = None
         self._ai_fallback_enabled = self._media_strategy.get("ai_image_fallback", False)
 
-    # ── Pollo lazy init ──────────────────────────────────────────
+    def _load_cross_video_filenames(self) -> None:
+        """Refresh the cross-video dedup set from the DB history table.
+
+        Called at the start of each fetch_for_script() to ensure the set
+        includes all assets from recently completed videos.
+        Non-blocking: degrades gracefully to intra-video-only dedup.
+        """
+        try:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+            self._cross_video_used_filenames = db.get_all_used_filenames()
+            if self._cross_video_used_filenames:
+                logger.debug(
+                    "Loaded %d cross-video used filenames for dedup",
+                    len(self._cross_video_used_filenames),
+                )
+        except Exception:
+            self._cross_video_used_filenames = set()
+
+    @staticmethod
+    def _query_variation(query: str, attempt: int = 0) -> str:
+        """Modify a search query slightly to find different assets.
+
+        Used when all assets returned by a provider are already used
+        (cross-video dedup) — avoids placeholder fallbacks by trying
+        different angles on the same topic.
+        """
+        variations = [
+            "cinematic dramatic",
+            "atmospheric detailed",
+            "historic ancient",
+            "wide establishing shot",
+            "mysterious dark mood",
+            "epic grand scale",
+            "documentary archival",
+        ]
+        suffix = variations[attempt % len(variations)]
+        return f"{query} {suffix}"
+
+    def _record_asset_for_history(self, asset: dict) -> None:
+        """Accumulate asset info for later flush to video_asset_history.
+
+        Called automatically after every successful media download in
+        fetch_for_script(). The caller (orchestrator) must invoke
+        flush_asset_history() after video_id is assigned.
+        """
+        if asset and asset.get("path"):
+            self._pending_asset_records.append({
+                "path": asset.get("path", ""),
+                "source": asset.get("source", ""),
+                "url": asset.get("url", "") or asset.get("download_url", ""),
+            })
+
+    def flush_asset_history(self, db, video_id: int) -> int:
+        """Record all pending assets for this video in the history table.
+
+        Must be called after video_id is assigned (post phase_video).
+
+        Returns number of records inserted.
+        """
+        count = 0
+        try:
+            from pipeline.cleanup_utils import record_asset_in_history
+            for rec in self._pending_asset_records:
+                record_asset_in_history(db, video_id, rec)
+                count += 1
+        except Exception as exc:
+            logger.warning("flush_asset_history: error for video %d: %s", video_id, exc)
+        finally:
+            self._pending_asset_records.clear()
+        if count:
+            logger.info("Recorded %d assets for cross-video dedup (video %d)", count, video_id)
+        return count
 
     def _get_pollo_scene_gen(self):
         """Return a SceneImageGenerator, creating it only on first access."""
@@ -316,6 +398,10 @@ class MediaFetcher:
         # Reset dedup tracking for this script
         self._used_asset_urls = set()
         self._used_image_urls = set()
+
+        # Refresh cross-video dedup set from DB (includes assets from
+        # recently completed/uploaded videos)
+        self._load_cross_video_filenames()
 
         # Reset provider cooldowns for a fresh script
         self._unsplash_consecutive_empty = 0
@@ -506,6 +592,23 @@ class MediaFetcher:
                     if result:
                         asset = result
 
+                # ── v9: retry with query variation if all assets were deduped ─
+                if asset is None:
+                    for var_attempt in range(3):
+                        var_query = self._query_variation(query, var_attempt)
+                        if var_query == query:
+                            continue
+                        logger.info(
+                            "Scene %d: dedup exhausted — retrying with varied query: %r",
+                            i, var_query[:80],
+                        )
+                        image_skip = self._used_image_urls.copy()
+                        result = self._try_image_pixabay(var_query, skip_urls=image_skip) or \
+                                 self._try_image_unsplash(var_query, skip_urls=image_skip)
+                        if result:
+                            asset = result
+                            break
+
             # ── Fallback: simplified query (Pixabay + Unsplash) ──
             if asset is None:
                 # Simplified query retry
@@ -584,6 +687,10 @@ class MediaFetcher:
                 _cb_consecutive_all_provider_failures += 1
 
             results[i] = asset
+
+            # ── Record for cross-video dedup (v9) ──────────────
+            if asset and asset.get("path") and asset.get("type") != "placeholder":
+                self._record_asset_for_history(asset)
 
             # ── Circuit breaker: abort if ALL providers are exhausted ──
             if _cb_consecutive_all_provider_failures >= _cb_max_consecutive_failures:
@@ -750,6 +857,16 @@ class MediaFetcher:
         if result:
             return result
 
+        # ── v9: retry with query variation if all videos were deduped ─
+        for var_attempt in range(2):
+            var_query = self._query_variation(query, var_attempt)
+            if var_query == query:
+                continue
+            logger.info("Video fallback: dedup exhausted — varied query %r", var_query[:80])
+            result = self._try_all_video_providers(var_query, min_dur, max_dur, skip_urls=skip_urls)
+            if result:
+                return result
+
         # ── Attempt 2: simplified query ──────────────────────
         simple_query = self._simplify_query(query)
         if simple_query and simple_query != query:
@@ -847,6 +964,20 @@ class MediaFetcher:
                     logger.debug("Asset URL already used, skipping: %s", asset.url[:80])
                     self._scene_tried_providers.add(pname)
                     continue
+
+                # ── Cross-video dedup check (v9) ────────────
+                # Compute the filename this asset would produce and
+                # skip if it was used by ANY previous video.
+                url_hash = hashlib.md5(asset.url.encode()).hexdigest()[:12]
+                predicted_filename = f"output/video_clips/{pname}_{url_hash}.mp4"
+                if predicted_filename in self._cross_video_used_filenames:
+                    logger.info(
+                        "Video %s_%s: already used in previous video — skipping",
+                        pname, url_hash,
+                    )
+                    self._scene_tried_providers.add(pname)
+                    continue
+
                 if skip_urls is not None:
                     skip_urls.add(asset.url)
                 self._used_asset_urls.add(asset.url)
@@ -1282,6 +1413,16 @@ class MediaFetcher:
                     continue
 
                 img_id = str(img.get("id", hashlib.md5(download_url.encode()).hexdigest()[:12]))
+
+                # ── Cross-video dedup check (v9) ────────────
+                predicted_filename = f"output/images/{source}_{img_id}.jpg"
+                if predicted_filename in self._cross_video_used_filenames:
+                    logger.info(
+                        "Image %s: already used in previous video — skipping %s",
+                        source, img_id,
+                    )
+                    continue
+
                 path = self._download_image(download_url, f"{source}_{img_id}.jpg")
                 if path:
                     if skip_urls is not None:

@@ -1742,6 +1742,13 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                         db.update_video(video_id, video_path="")
                     except Exception as e:
                         logger.warning(f"Could not delete mp4 {video_path}: {e}")
+
+                # ── Clean up residual files (v9): audio + scene assets ──
+                try:
+                    from pipeline.cleanup_utils import cleanup_video_residuals
+                    cleanup_video_residuals(db, video_id, audio_data=audio_data, log=logger)
+                except Exception as e:
+                    logger.warning(f"Residual cleanup failed (non-critical): {e}")
             
                 await _broadcast_progress(job_id, 98, "upload",
                     "Subida completada. Finalizando...",
@@ -2085,6 +2092,13 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                     logger.info("[%s] Deleted local mp4 after scheduled upload: %s", canal, vp)
                 except Exception:
                     pass
+
+            # ── Clean up residual files (v9): audio + scene assets ──
+            try:
+                from pipeline.cleanup_utils import cleanup_video_residuals
+                cleanup_video_residuals(db, video_id, audio_data=None, log=logger)
+            except Exception:
+                pass
 
             # ── Schedule lifecycle actions (F3: go_public + playlists + comments) ──
             try:
