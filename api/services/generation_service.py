@@ -2201,12 +2201,15 @@ async def _run_reassembly_job(job_id: int, video_id: int):
     Broadcasts progress via WebSocket so the frontend global progress bar
     stays live.
     """
-    # ── Global concurrency guard: only ONE generation at a time across ALL channels ──
+    # ── Global concurrency guard: at most TWO generations at a time ──
     # Prevents reassembly + normal generation from running simultaneously,
     # which causes ffmpeg resource contention and OOM crashes.
+    # Phase pipelining allows 1 render + 1 prep, so threshold is > 2.
+    # Reassembly itself is counted as a running job, so:
+    # count=1 = only self = ok; count=2 = pipelining = ok; count=3 = blocked.
     db_guard = _get_db()
     active_count = db_guard.count_active_jobs()
-    if active_count > 1:
+    if active_count > 2:
         logger.warning(
             "Reassembly job %d blocked: %d active job(s) running globally",
             job_id, active_count,
@@ -2933,13 +2936,15 @@ async def start_generation_job_subprocess(
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
 
-    # ── Global guard: only ONE long-form generation at a time across ALL channels ──
+    # ── Global guard: at most TWO long-form generations at a time ──
     # Prevents ffmpeg resource contention (concurrent renders cause timeouts).
-    # Since process_planned_slots() now sets status='running' BEFORE dispatching
-    # this async task, the current job is already counted. Threshold is > 1,
-    # NOT > 0, to allow the job itself through (count=1 = only self = ok).
+    # Phase pipelining allows 1 render + 1 prep worker concurrently, so
+    # the threshold is > 2 (MAX_TOTAL_JOBS), NOT > 1.
+    # Since process_planned_slots() sets status='running' BEFORE dispatching
+    # this async task, the current job is already counted.
+    # count=1 = only self = ok; count=2 = pipelining = ok; count=3 = blocked.
     active_count = db.count_active_jobs()
-    if active_count > 1:
+    if active_count > 2:
         logger.warning(
             "Subprocess spawn blocked: %d active job(s) running globally",
             active_count,
