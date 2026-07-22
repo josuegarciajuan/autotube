@@ -38,9 +38,11 @@ SPAIN_UPLOAD_WINDOWS = [
 ]
 SPAIN_FALLBACK_WINDOW = (8, 10, 0.5, "madrugada-overflow")
 
-ESTIMATED_PIPELINE_MINUTES = 180  # typical gen duration (~2-3h) + margin; used to calc scheduled_at
-MIN_GAP_MINUTES = 90               # minimum gap between generation START times
-GLOBAL_GAP_MINUTES = 5             # gap between consecutive generation jobs in the global queue (cross-day chaining)
+ESTIMATED_PIPELINE_MINUTES = 120  # fallback gen duration when per-channel data unavailable
+MIN_GAP_MINUTES = 90               # minimum gap between generation START times (same-channel collision)
+# v2 smart scheduling: realistic gap between completion of one job and start of next.
+# Previously 5 min (unrealistic). Now 30 min buffer, chained as: spacing = ch_dur + GAP.
+GLOBAL_GAP_MINUTES = 30            # buffer minutes between consecutive generation jobs
 MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # minimum hours between publish times for same channel (v10.1 collision fix)
 BUFFER_PCT = 0.15                  # safety buffer on per-channel avg creation time
 DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
@@ -629,16 +631,22 @@ def compute_horizon_slots(
         
         # ── Pick the start time ──
         if latest_start < earliest_start:
-            # Overcapacity warning — can't meet the deadline
+            # Overcapacity: can't fit in lead window. Respect chain constraint
+            # anyway to maintain realistic gaps between consecutive generations.
+            # Violates lead_hours but prevents impossible 5-minute gaps.
+            if next_scheduled_at is not None:
+                scheduled_dt = next_scheduled_at - _td(minutes=GLOBAL_GAP_MINUTES) - _td(minutes=ch_dur)
+            else:
+                scheduled_dt = latest_start  # no chain constraint to respect
             logger.warning(
                 "Overcapacity: %s slot #%d (pub=%s) — "
-                "latest_start=%s < earliest_start=%s. Using earliest.",
+                "latest_start=%s < earliest_start=%s. Chaining with gap=%dmin.",
                 s["channel_slug"], s["slot_position"],
                 s["target_public_at"],
                 latest_start.strftime("%m-%d %H:%M"),
                 earliest_start.strftime("%m-%d %H:%M"),
+                GLOBAL_GAP_MINUTES,
             )
-            scheduled_dt = earliest_start
         else:
             # Start as EARLY as possible within the window (clear the queue quickly)
             scheduled_dt = earliest_start

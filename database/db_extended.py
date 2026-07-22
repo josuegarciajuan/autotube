@@ -200,6 +200,41 @@ def migrate_v2(db_path: str = None):
             conn.executescript(f.read())
         logger.info("Migration: v9 schema applied")
 
+    # Run v10 schema (Smart Scheduling v2: pipeline_phase + peak_ram_mb)
+    # Idempotent column additions (ALTER TABLE in SQLite is not idempotent)
+    existing_gj_v10 = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
+    v10_gj_columns = [
+        ("pipeline_phase", "TEXT DEFAULT NULL"),
+    ]
+    for col_name, col_def in v10_gj_columns:
+        if col_name not in existing_gj_v10:
+            try:
+                conn.execute(f"ALTER TABLE generation_jobs ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration v10: added %s column to generation_jobs", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    existing_v_v10 = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
+    v10_v_columns = [
+        ("peak_ram_mb", "INTEGER DEFAULT NULL"),
+    ]
+    for col_name, col_def in v10_v_columns:
+        if col_name not in existing_v_v10:
+            try:
+                conn.execute(f"ALTER TABLE videos ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration v10: added %s column to videos", col_name)
+            except sqlite3.OperationalError:
+                pass
+
+    # Index for pipeline_phase lookups (idempotent via IF NOT EXISTS)
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_pipeline_phase "
+            "ON generation_jobs(pipeline_phase, status)"
+        )
+    except Exception:
+        pass
+
     # ── channel_tts_lock: cross-process mutex for Kokoro TTS ──
     # Prevents concurrent Kokoro TTS workers on the same channel,
     # which would cause RTF degradation and 600s timeouts.
@@ -3427,6 +3462,24 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def count_render_phase_jobs(self) -> int:
+        """Count long-form generation jobs currently in the render phase.
+        
+        The render phase (pipeline_phase='render') is the most RAM-intensive
+        part of generation. Phase pipelining allows ONE job in render while
+        another job runs prep phases (scrape→script→TTS→media).
+        
+        Returns count of running long-form jobs with pipeline_phase='render'.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status IN ('running', 'queued') "
+                "AND pipeline_phase = 'render' "
                 "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
