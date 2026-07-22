@@ -1095,17 +1095,28 @@ def preview_week(overrides: dict = None, db=None) -> dict:
 
 # ── Smart replanning (v2) ─────────────────────────────────────
 
+# Never drop below this many pending slots across all channels.
+# If below threshold, auto-trigger a full horizon replan.
+MIN_PENDING_SLOTS = 3
+
+# Days ahead to check for empty coverage (no slots at all for that day)
+EMPTY_DAY_CHECK_DAYS = 3
+
+
 def smart_replan(db=None) -> dict:
     """Periodic intelligent replan: cancel fulfilled quotas, detect config changes,
-    cancel stale slots, warn on overcapacity.
+    cancel stale slots, fill empty days, warn on overcapacity.
     
     Called every ~30 min during active hours (10:00-23:00) by the checker loop.
-    Lightweight — only modifies slots, does not regenerate the horizon.
+    Automatically triggers full horizon replan if:
+      - Pending slots drop below MIN_PENDING_SLOTS
+      - Any of the next EMPTY_DAY_CHECK_DAYS has zero slots
+      - Channel config (videos_per_day) changed
     
-    Returns dict with: {cancelled_count, channels_adjusted, overcapacity_warn}
+    Returns dict with: {cancelled_count, horiz_replan, channels_adjusted, overcapacity_warn}
     """
     import json as _json
-    from datetime import date as _date, datetime as _dt
+    from datetime import date as _date, datetime as _dt, timedelta as _td
     
     if db is None:
         from database.db_extended import ExtendedDatabase
@@ -1116,11 +1127,71 @@ def smart_replan(db=None) -> dict:
     cancelled_total = 0
     channels_adjusted = []
     overcapacity_warn = False
+    horizon_replanned = False
+    
+    # ── 0. Count total pending slots ──
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
+        ).fetchone()
+        total_pending = row["cnt"] if row else 0
+    
+    # ── 0a. Auto-replan if pipeline is running dry ──
+    if total_pending < MIN_PENDING_SLOTS:
+        logger.warning(
+            "Pipeline running DRY: %d pending slots (min=%d). "
+            "Triggering full horizon replan.",
+            total_pending, MIN_PENDING_SLOTS,
+        )
+        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        horizon_replanned = True
+        logger.info(
+            "Auto-replan complete: %d slots across %d days",
+            result.get("total_slots", 0), result.get("days_planned", 0),
+        )
+        # Refresh pending count
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
+            ).fetchone()
+            total_pending = row["cnt"] if row else 0
+    
+    # ── 0b. Detect empty days in the horizon ──
+    need_replan = False
+    for day_offset in range(EMPTY_DAY_CHECK_DAYS):
+        check_day = (_date.today() + _td(days=day_offset)).isoformat()
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE date_key=? AND status='pending'",
+                (check_day,),
+            ).fetchone()
+            day_count = row["cnt"] if row else 0
+        if day_count == 0:
+            logger.warning(
+                "Empty day detected: %s has 0 pending slots. Triggering horizon replan.",
+                check_day,
+            )
+            need_replan = True
+            break
+    
+    if need_replan and not horizon_replanned:
+        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        horizon_replanned = True
+        logger.info(
+            "Empty-day replan complete: %d slots across %d days",
+            result.get("total_slots", 0), result.get("days_planned", 0),
+        )
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
+            ).fetchone()
+            total_pending = row["cnt"] if row else 0
     
     # ── 1. Load all active channels ──
     channels = db.get_channels(active_only=True)
     if not channels:
-        return {"cancelled_count": 0, "channels_adjusted": [], "overcapacity_warn": False}
+        return {"cancelled_count": 0, "horiz_replan": horizon_replanned,
+                "channels_adjusted": [], "overcapacity_warn": False}
     
     for ch in channels:
         ch_id = ch.id if hasattr(ch, 'id') else ch.get("id", 0)
@@ -1135,7 +1206,6 @@ def smart_replan(db=None) -> dict:
         planning_enabled = cfg.get("planning_enabled", True)
         
         if not planning_enabled:
-            # Cancel ALL pending slots for this channel
             with db._connect() as conn:
                 cnt = conn.execute(
                     "UPDATE planned_slots SET status='cancelled' WHERE channel_id=? AND status='pending'",
@@ -1151,15 +1221,14 @@ def smart_replan(db=None) -> dict:
         # ── 2a. Count videos done today ──
         generated_today = db.count_videos_generated_today(ch_id)
         
-        # ── 2b. Count pending today slots ──
+        # ── 2b. Cancel today's slots if quota met ──
         with db._connect() as conn:
-            today_slots = conn.execute(
+            today_cnt = conn.execute(
                 "SELECT COUNT(*) as cnt FROM planned_slots WHERE channel_id=? AND date_key=? AND status='pending'",
                 (ch_id, today),
             ).fetchone()
-            today_pending = today_slots["cnt"] if today_slots else 0
+            today_pending = today_cnt["cnt"] if today_cnt else 0
         
-        # ── 2c. Cancel today's slots if quota met ──
         if generated_today >= vpd and today_pending > 0:
             with db._connect() as conn:
                 cnt = conn.execute(
@@ -1174,45 +1243,70 @@ def smart_replan(db=None) -> dict:
             cancelled_total += cnt
             channels_adjusted.append(slug)
         
-        # ── 2d. Cancel stale slots (scheduled_at > 6h ago) ──
-        if _dt.now() - now < _dt.now() - now:  # always true, just a scope
-            pass
+        # ── 2c. Detect config change vs tomorrow's slots ──
+        if not horizon_replanned:
+            tomorrow_str = (_date.today() + _td(days=1)).isoformat()
+            with db._connect() as conn:
+                tomorrow_cnt = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM planned_slots WHERE channel_id=? AND date_key=? AND status='pending'",
+                    (ch_id, tomorrow_str),
+                ).fetchone()
+                tcnt = tomorrow_cnt["cnt"] if tomorrow_cnt else 0
+            if tcnt > 0 and tcnt != vpd:
+                logger.warning(
+                    "Config mismatch for %s: tomorrow has %d slots but videos_per_day=%d. "
+                    "Triggering horizon replan.",
+                    slug, tcnt, vpd,
+                )
+                if not horizon_replanned:
+                    result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+                    horizon_replanned = True
+                    logger.info(
+                        "Config-change replan complete: %d slots",
+                        result.get("total_slots", 0),
+                    )
+        
+        # ── 2d. Cancel stale slots — only for today/past dates.
+        #     Future-date slots with old scheduled_at are pre-generated
+        #     buffer slots and should NOT be cancelled.
         with db._connect() as conn:
             stale_cnt = conn.execute(
                 """UPDATE planned_slots SET status='cancelled'
                    WHERE channel_id=? AND status='pending'
+                     AND date_key <= date('now', 'localtime')
                      AND scheduled_at <= datetime('now', 'localtime', '-6 hours')""",
                 (ch_id,),
             ).rowcount
             conn.commit()
         if stale_cnt > 0:
-            logger.info("Smart replan: cancelled %d stale slots for %s", stale_cnt, slug)
+            logger.info("Smart replan: cancelled %d stale slots for %s (today/past only)", stale_cnt, slug)
             cancelled_total += stale_cnt
     
     # ── 3. Overcapacity check ──
-    with db._connect() as conn:
-        total_pending = conn.execute(
-            "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
-        ).fetchone()
-        total = total_pending["cnt"] if total_pending else 0
+    daily_capacity = 8  # with pipelining
+    max_realistic = daily_capacity * 2  # 2 days worth
     
-    # Rough capacity: ~8 videos/day with pipelining, ~6 without
-    daily_capacity = 8 if True else 6  # tiered later based on config
-    max_realistic = daily_capacity * 2  # 2 days worth of slots
+    # Refresh count if replan happened
+    if not horizon_replanned:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
+            ).fetchone()
+            total_pending = row["cnt"] if row else 0
     
-    if total > max_realistic:
+    if total_pending > max_realistic:
         logger.warning(
-            "Smart replan: overcapacity — %d pending slots vs ~%d realistic (2 days). "
-            "Consider reducing videos_per_day or extending horizon.",
-            total, max_realistic,
+            "Smart replan: overcapacity — %d pending slots vs ~%d realistic (2 days).",
+            total_pending, max_realistic,
         )
         overcapacity_warn = True
     
     return {
         "cancelled_count": cancelled_total,
+        "horiz_replan": horizon_replanned,
         "channels_adjusted": list(set(channels_adjusted)),
         "overcapacity_warn": overcapacity_warn,
-        "pending_total": total,
+        "pending_total": total_pending,
     }
 
 
@@ -1528,6 +1622,34 @@ def process_planned_slots(db=None) -> dict | None:
     }
 
 
+def _ensure_never_dry(db) -> bool:
+    """Fallback: if no slot could be dispatched, check if the pipeline is empty
+    and auto-replan the horizon to keep generation flowing.
+    
+    Returns True if a replan was triggered.
+    """
+    # Check if there's at least one pending slot in the next 72h
+    candidates = db.get_priority_slot_candidates(max_future_hours=72, limit=1)
+    if candidates:
+        return False  # slots exist, just not dispatchable right now
+    
+    # No slots in the next 3 days — pipeline is empty!
+    logger.warning(
+        "Pipeline EMPTY: no dispatchable slots in next 72h. "
+        "Triggering emergency horizon replan."
+    )
+    try:
+        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        logger.info(
+            "Emergency replan complete: %d slots across %d days",
+            result.get("total_slots", 0), result.get("days_planned", 0),
+        )
+        return True
+    except Exception as exc:
+        logger.error("Emergency replan failed: %s", exc)
+        return False
+
+
 def _sync_running_slots(db):
     """Check ALL running slots: if their job is done, mark the slot accordingly.
     
@@ -1685,11 +1807,13 @@ def _cancel_stale_slots(db):
                  AND target_upload_at <= datetime('now', 'localtime', '-30 minutes')"""
         ).rowcount
 
-        # Also cancel very old pending slots (>6h past scheduled_at)
-        # Same viral protection applies.
+        # Also cancel very old pending slots (>6h past scheduled_at).
+        # Only for today/past dates — future-date slots with old scheduled_at
+        # are pre-generated buffer slots and should NOT be cancelled.
         c2 = conn.execute(
             f"""UPDATE planned_slots SET status = 'cancelled'
                WHERE status = 'pending'
+                 AND date_key <= date('now', 'localtime')
                  AND (
                      source_mode != 'viral'
                      OR channel_id IN ({channels_with_viral_today})

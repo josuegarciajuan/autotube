@@ -348,6 +348,14 @@ async def _schedule_checker_loop():
                 #     the gap. Shorts run independently and don't compete for RAM.
                 if not long_dispatched:
                     await _process_shorts_slots()
+                    # ── Never-dry guard: if still no dispatch and pipeline
+                    #     is running empty, force horizon replan.
+                    try:
+                        from api.services.planning_service import _ensure_never_dry
+                        if _ensure_never_dry(_sched_db):
+                            logger.info("Never-dry: emergency replan triggered")
+                    except Exception as exc:
+                        logger.debug("Never-dry check: %s", exc)
                 
                 await _queue_consumer()
 
