@@ -304,6 +304,7 @@ async def _schedule_checker_loop():
     last_midnight_check = time.time()
     last_recovery_check = 0
     last_shorts_recovery_check = 0
+    last_smart_replan = 0
     last_slot_calculation = 0
     first_run = True
 
@@ -340,7 +341,14 @@ async def _schedule_checker_loop():
                 await _process_due_schedules()
                 await _process_shorts_slots()
                 await _process_upload_slots()
-                await _process_planned_slots()
+                long_dispatched = await _process_planned_slots()
+                
+                # ── Shorts interleaving: when long-form is blocked (pipelining
+                #     guard or no slots), try an extra shorts dispatch to fill
+                #     the gap. Shorts run independently and don't compete for RAM.
+                if not long_dispatched:
+                    await _process_shorts_slots()
+                
                 await _queue_consumer()
 
                 # ── Update catch-up state for adaptive sleep ──
@@ -359,6 +367,24 @@ async def _schedule_checker_loop():
                 if now - last_recovery_check > 3600:
                     await _process_recovery_planner()
                     last_recovery_check = now
+                
+                # Smart replan: every 30 min during active hours (10:00-23:00)
+                local_hour = time.localtime().tm_hour
+                if 10 <= local_hour <= 23 and now - last_smart_replan > 1800:
+                    try:
+                        from api.services.planning_service import smart_replan
+                        result = await asyncio.to_thread(smart_replan, db=_sched_db)
+                        if result and (result.get("cancelled_count", 0) > 0 or result.get("overcapacity_warn")):
+                            logger.info(
+                                "Smart replan: cancelled=%d, channels=%s, overcapacity=%s, pending=%d",
+                                result.get("cancelled_count", 0),
+                                result.get("channels_adjusted", []),
+                                result.get("overcapacity_warn", False),
+                                result.get("pending_total", 0),
+                            )
+                    except Exception as exc:
+                        logger.debug("Smart replan: %s", exc)
+                    last_smart_replan = now
 
                 # Shorts auto-recovery: rebalance shorts every 60 minutes
                 if now - last_shorts_recovery_check > 3600:
@@ -406,14 +432,17 @@ async def _schedule_checker_loop():
 
 
 async def _process_planned_slots():
-    """Process due planned_slots using the dynamic planning engine."""
+    """Process due planned_slots using the dynamic planning engine.
+    
+    Returns True if a slot was dispatched, False otherwise (blocked/idle).
+    """
     import logging
     logger = logging.getLogger("autotube.planner")
     try:
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
         if _db.get_system_state("scheduler_paused") == "true":
-            return  # Operator paused scheduling — skip dispatch
+            return False  # Operator paused scheduling — skip dispatch
     except Exception:
         pass
     try:
@@ -424,8 +453,11 @@ async def _process_planned_slots():
                 "Planning dispatched: slot=%d job=%d video=%d channel=%s",
                 result["slot_id"], result["job_id"], result["video_id"], result["channel_slug"],
             )
+            return True
+        return False
     except Exception as e:
         logger.error("Planning dispatch error: %s", e)
+        return False
 
 
 async def _process_upload_slots():

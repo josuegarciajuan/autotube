@@ -1093,6 +1093,129 @@ def preview_week(overrides: dict = None, db=None) -> dict:
     return {"days": days, "overrides_applied": bool(overrides)}
 
 
+# ── Smart replanning (v2) ─────────────────────────────────────
+
+def smart_replan(db=None) -> dict:
+    """Periodic intelligent replan: cancel fulfilled quotas, detect config changes,
+    cancel stale slots, warn on overcapacity.
+    
+    Called every ~30 min during active hours (10:00-23:00) by the checker loop.
+    Lightweight — only modifies slots, does not regenerate the horizon.
+    
+    Returns dict with: {cancelled_count, channels_adjusted, overcapacity_warn}
+    """
+    import json as _json
+    from datetime import date as _date, datetime as _dt
+    
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    
+    today = _date.today().isoformat()
+    now = _dt.now()
+    cancelled_total = 0
+    channels_adjusted = []
+    overcapacity_warn = False
+    
+    # ── 1. Load all active channels ──
+    channels = db.get_channels(active_only=True)
+    if not channels:
+        return {"cancelled_count": 0, "channels_adjusted": [], "overcapacity_warn": False}
+    
+    for ch in channels:
+        ch_id = ch.id if hasattr(ch, 'id') else ch.get("id", 0)
+        slug = ch.slug if hasattr(ch, 'slug') else ch.get("slug", "?")
+        cfg_raw = ch.config_json if hasattr(ch, 'config_json') else ch.get("config_json", "{}")
+        try:
+            cfg = _json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+        except (_json.JSONDecodeError, TypeError):
+            cfg = {}
+        
+        vpd = int(cfg.get("videos_per_day", 1) or 1)
+        planning_enabled = cfg.get("planning_enabled", True)
+        
+        if not planning_enabled:
+            # Cancel ALL pending slots for this channel
+            with db._connect() as conn:
+                cnt = conn.execute(
+                    "UPDATE planned_slots SET status='cancelled' WHERE channel_id=? AND status='pending'",
+                    (ch_id,),
+                ).rowcount
+                conn.commit()
+            if cnt > 0:
+                logger.info("Smart replan: cancelled %d slots for %s (planning disabled)", cnt, slug)
+                cancelled_total += cnt
+                channels_adjusted.append(slug)
+            continue
+        
+        # ── 2a. Count videos done today ──
+        generated_today = db.count_videos_generated_today(ch_id)
+        
+        # ── 2b. Count pending today slots ──
+        with db._connect() as conn:
+            today_slots = conn.execute(
+                "SELECT COUNT(*) as cnt FROM planned_slots WHERE channel_id=? AND date_key=? AND status='pending'",
+                (ch_id, today),
+            ).fetchone()
+            today_pending = today_slots["cnt"] if today_slots else 0
+        
+        # ── 2c. Cancel today's slots if quota met ──
+        if generated_today >= vpd and today_pending > 0:
+            with db._connect() as conn:
+                cnt = conn.execute(
+                    "UPDATE planned_slots SET status='cancelled' WHERE channel_id=? AND date_key=? AND status='pending'",
+                    (ch_id, today),
+                ).rowcount
+                conn.commit()
+            logger.info(
+                "Smart replan: cancelled %d today-slots for %s (quota met: %d/%d)",
+                cnt, slug, generated_today, vpd,
+            )
+            cancelled_total += cnt
+            channels_adjusted.append(slug)
+        
+        # ── 2d. Cancel stale slots (scheduled_at > 6h ago) ──
+        if _dt.now() - now < _dt.now() - now:  # always true, just a scope
+            pass
+        with db._connect() as conn:
+            stale_cnt = conn.execute(
+                """UPDATE planned_slots SET status='cancelled'
+                   WHERE channel_id=? AND status='pending'
+                     AND scheduled_at <= datetime('now', 'localtime', '-6 hours')""",
+                (ch_id,),
+            ).rowcount
+            conn.commit()
+        if stale_cnt > 0:
+            logger.info("Smart replan: cancelled %d stale slots for %s", stale_cnt, slug)
+            cancelled_total += stale_cnt
+    
+    # ── 3. Overcapacity check ──
+    with db._connect() as conn:
+        total_pending = conn.execute(
+            "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
+        ).fetchone()
+        total = total_pending["cnt"] if total_pending else 0
+    
+    # Rough capacity: ~8 videos/day with pipelining, ~6 without
+    daily_capacity = 8 if True else 6  # tiered later based on config
+    max_realistic = daily_capacity * 2  # 2 days worth of slots
+    
+    if total > max_realistic:
+        logger.warning(
+            "Smart replan: overcapacity — %d pending slots vs ~%d realistic (2 days). "
+            "Consider reducing videos_per_day or extending horizon.",
+            total, max_realistic,
+        )
+        overcapacity_warn = True
+    
+    return {
+        "cancelled_count": cancelled_total,
+        "channels_adjusted": list(set(channels_adjusted)),
+        "overcapacity_warn": overcapacity_warn,
+        "pending_total": total,
+    }
+
+
 # ── Scheduler integration ─────────────────────────────────────
 
 def _score_priority_slot(slot: dict, db, today_str: str) -> int:
@@ -1102,13 +1225,28 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
       - date_key proximity: today=100, tomorrow=70, +2=40, +3+=10
       - deadline urgency: past-due but still viable → +50
       - channel fairness: no video generated today → +30
-      - buffer pressure: too many awaiting_upload → -30
+      - buffer pressure: exceeding max_awaiting_upload → -30
+      - priority_weight: per-channel multiplier (from config_json, default 1.0)
     """
     from datetime import date, datetime
     
     score = 0
     slot_date = slot["date_key"]
     ch_id = slot["channel_id"]
+    
+    # ── Load channel config overrides ──
+    cfg_json = slot.get("config_json", "{}")
+    if isinstance(cfg_json, str):
+        import json as _j
+        try:
+            cfg_json = _j.loads(cfg_json)
+        except Exception:
+            cfg_json = {}
+    elif cfg_json is None:
+        cfg_json = {}
+    
+    max_awaiting = int(cfg_json.get("max_awaiting_upload", 3) or 3)
+    priority_weight = float(cfg_json.get("priority_weight", 1.0) or 1.0)
     
     # ── 1. Date proximity ──
     days_ahead = (datetime.strptime(slot_date, "%Y-%m-%d").date() - date.today()).days
@@ -1135,13 +1273,6 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     try:
         generated_today = db.count_videos_generated_today(ch_id)
         if generated_today == 0:
-            cfg_json = slot.get("config_json", "{}")
-            if isinstance(cfg_json, str):
-                import json as _j
-                try:
-                    cfg_json = _j.loads(cfg_json)
-                except Exception:
-                    cfg_json = {}
             vpd = int(cfg_json.get("videos_per_day", 1) or 1)
             if vpd > 0:
                 score += 30  # channel needs content today
@@ -1151,10 +1282,14 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     # ── 4. Buffer pressure: too many awaiting → lower priority ──
     try:
         awaiting = db.count_awaiting_upload(ch_id)
-        if awaiting >= 3:
+        if awaiting >= max_awaiting:
             score -= 30
     except Exception:
         pass
+    
+    # ── 5. Apply channel priority weight ──
+    if priority_weight != 1.0:
+        score = int(score * priority_weight)
     
     return score
 
@@ -1245,6 +1380,24 @@ def process_planned_slots(db=None) -> dict | None:
         return None
     
     if render_count >= MAX_RENDER_JOBS:
+        # A render is active. Check if this channel allows pipelining.
+        ch_cfg = {}
+        try:
+            cfg_raw = next_slot.get("config_json", "{}")
+            if isinstance(cfg_raw, str):
+                import json as _j2
+                ch_cfg = _j2.loads(cfg_raw) if cfg_raw else {}
+            elif cfg_raw:
+                ch_cfg = cfg_raw
+        except Exception:
+            pass
+        if ch_cfg.get("pipeline_enabled", True) is False:
+            logger.info(
+                "Planned slot deferred: render active + pipeline disabled for %s",
+                slug_preview,
+            )
+            return None
+        
         # A render is active. Only allow dispatch if there's room for a prep worker.
         if active_count >= MAX_TOTAL_JOBS:
             logger.info(
