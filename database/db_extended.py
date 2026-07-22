@@ -1256,7 +1256,8 @@ class ExtendedDatabase(Database):
             return cursor.lastrowid
     
     def update_job(self, job_id: int, **kwargs) -> bool:
-        allowed = ["status", "progress", "phase", "error_msg", "video_id"]
+        allowed = ["status", "progress", "phase", "error_msg", "video_id",
+                   "pipeline_phase", "last_heartbeat_at", "retry_count", "worker_pid"]
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
@@ -3155,6 +3156,59 @@ class ExtendedDatabase(Database):
                 (f"+{max_future_hours}",),
             ).fetchone()
         return dict(row) if row else None
+    
+    def get_priority_slot_candidates(self, max_future_hours: int = 36,
+                                     limit: int = 20) -> list[dict]:
+        """Get pending slots due or within pull-forward window, for priority scoring.
+        
+        Returns ALL matching slots (not just one) so the dispatcher can score
+        them and pick the best one. Includes channel slug and extra metadata.
+        
+        ORDERED by target_public_at ASC so the scorer can prioritize by date urgency.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT ps.*, c.name as channel_name, c.slug as channel_slug,
+                          c.config_json
+                   FROM planned_slots ps
+                   JOIN channels c ON ps.channel_id = c.id
+                   WHERE ps.status = 'pending'
+                     AND ps.date_key >= date('now', 'localtime')
+                     AND (
+                         ps.scheduled_at <= datetime('now', 'localtime')
+                         OR
+                         (ps.target_public_at IS NOT NULL
+                          AND ps.target_public_at <= datetime('now', 'localtime', ? || ' hours'))
+                     )
+                   ORDER BY
+                     CASE WHEN ps.scheduled_at <= datetime('now', 'localtime') THEN 0 ELSE 1 END,
+                     COALESCE(ps.target_public_at, ps.target_upload_at) ASC
+                   LIMIT ?""",
+                (f"+{max_future_hours}", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    
+    def count_videos_generated_today(self, channel_id: int) -> int:
+        """Count videos generated, uploading, or uploaded today for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos
+                   WHERE channel_id = ?
+                     AND date(created_at) = date('now', 'localtime')
+                     AND status IN ('generating', 'awaiting_upload', 'uploading',
+                                    'uploaded', 'uploaded_private', 'published')""",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def count_awaiting_upload(self, channel_id: int) -> int:
+        """Count videos in awaiting_upload status for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos WHERE channel_id=? AND status='awaiting_upload'",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
     
     def count_slots_by_status(self, date_key: str, status: str) -> int:
         """Count slots by status for a specific date."""

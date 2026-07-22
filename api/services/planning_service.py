@@ -1095,6 +1095,70 @@ def preview_week(overrides: dict = None, db=None) -> dict:
 
 # ── Scheduler integration ─────────────────────────────────────
 
+def _score_priority_slot(slot: dict, db, today_str: str) -> int:
+    """Score a slot for priority dispatch. Higher = dispatch first.
+    
+    Factors:
+      - date_key proximity: today=100, tomorrow=70, +2=40, +3+=10
+      - deadline urgency: past-due but still viable → +50
+      - channel fairness: no video generated today → +30
+      - buffer pressure: too many awaiting_upload → -30
+    """
+    from datetime import date, datetime
+    
+    score = 0
+    slot_date = slot["date_key"]
+    ch_id = slot["channel_id"]
+    
+    # ── 1. Date proximity ──
+    days_ahead = (datetime.strptime(slot_date, "%Y-%m-%d").date() - date.today()).days
+    if days_ahead == 0:
+        score += 100
+    elif days_ahead == 1:
+        score += 70
+    elif days_ahead == 2:
+        score += 40
+    else:
+        score += max(5, 30 - days_ahead * 5)
+    
+    # ── 2. Deadline urgency ──
+    upload_at = slot.get("target_upload_at")
+    if upload_at:
+        try:
+            upload_dt = datetime.strptime(str(upload_at)[:19], "%Y-%m-%d %H:%M:%S")
+            if upload_dt < datetime.now():
+                score += 50  # catch-up bonus: this is late but still viable
+        except (ValueError, TypeError):
+            pass
+    
+    # ── 3. Channel fairness: channel with nothing generated today gets priority ──
+    try:
+        generated_today = db.count_videos_generated_today(ch_id)
+        if generated_today == 0:
+            cfg_json = slot.get("config_json", "{}")
+            if isinstance(cfg_json, str):
+                import json as _j
+                try:
+                    cfg_json = _j.loads(cfg_json)
+                except Exception:
+                    cfg_json = {}
+            vpd = int(cfg_json.get("videos_per_day", 1) or 1)
+            if vpd > 0:
+                score += 30  # channel needs content today
+    except Exception:
+        pass
+    
+    # ── 4. Buffer pressure: too many awaiting → lower priority ──
+    try:
+        awaiting = db.count_awaiting_upload(ch_id)
+        if awaiting >= 3:
+            score -= 30
+    except Exception:
+        pass
+    
+    return score
+
+
 def process_planned_slots(db=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
@@ -1126,10 +1190,36 @@ def process_planned_slots(db=None) -> dict | None:
     # 1b. Cancel stale pending slots (upload window already passed)
     _cancel_stale_slots(db)
     
-    # 2. Find the next pending slot — with pull-forward for scheduled channels
-    next_slot = db.get_next_available_slot(max_future_hours=36)
-    if not next_slot:
+    # 2. Find candidate slots and pick the best one by priority score
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    candidates = db.get_priority_slot_candidates(max_future_hours=36, limit=20)
+    if not candidates:
         return None
+    
+    # Score each candidate and sort by priority (highest first)
+    for c in candidates:
+        c["_priority_score"] = _score_priority_slot(c, db, today_str)
+    candidates.sort(key=lambda c: c["_priority_score"], reverse=True)
+    
+    # Pick the highest-scoring candidate
+    next_slot = candidates[0]
+    best_score = next_slot.get("_priority_score", 0)
+    slug_preview = next_slot.get("channel_slug", "?")
+    if len(candidates) > 1:
+        runner_up = candidates[1]
+        logger.info(
+            "Priority dispatch: %d candidates → selected %s (score=%d, pub=%s) "
+            "over %s (score=%d)",
+            len(candidates), slug_preview, best_score,
+            (next_slot.get("target_public_at") or "?")[:16],
+            runner_up.get("channel_slug", "?"), runner_up.get("_priority_score", 0),
+        )
+    else:
+        logger.info(
+            "Priority dispatch: 1 candidate → %s (score=%d)",
+            slug_preview, best_score,
+        )
     
     # 2b. Is there already an active job for this channel?
     active = db.get_active_job_for_channel(next_slot["channel_id"])
@@ -1138,27 +1228,62 @@ def process_planned_slots(db=None) -> dict | None:
                      next_slot["channel_id"], active["id"])
         return None
     
-    # 2c. Global guard: defer dispatch if ANY generation is running
-    # (only one worker at a time — prevents ffmpeg contention)
+    # 2c. Phase-pipelining guard: allow up to 1 render + 1 prep concurrently.
+    #     - If no render is active → dispatch any job (it will claim render slot).
+    #     - If 1 render is active → allow dispatching 1 PREP worker (2 total).
+    #     - If 2 jobs already active → defer dispatch.
     active_count = db.count_active_jobs()
-    if active_count > 0:
-        logger.info("Planned slot deferred: %d active job(s) running globally — retrying next tick",
-                    active_count)
+    render_count = db.count_render_phase_jobs()
+    MAX_TOTAL_JOBS = 2
+    MAX_RENDER_JOBS = 1
+    
+    if active_count >= MAX_TOTAL_JOBS:
+        logger.info(
+            "Planned slot deferred: %d/%d active jobs (render=%d) — at capacity",
+            active_count, MAX_TOTAL_JOBS, render_count,
+        )
         return None
     
-    # 3b. Memory guard: skip dispatch if RAM is critically low
-    if not _memory_ok():
-        logger.warning("Low memory — delaying planned slot dispatch")
-        return None
+    if render_count >= MAX_RENDER_JOBS:
+        # A render is active. Only allow dispatch if there's room for a prep worker.
+        if active_count >= MAX_TOTAL_JOBS:
+            logger.info(
+                "Planned slot deferred: render active + %d total jobs = at capacity",
+                active_count,
+            )
+            return None
+        logger.info(
+            "Phase pipelining: render active (%d), dispatching prep worker "
+            "(total active: %d → %d)",
+            render_count, active_count, active_count + 1,
+        )
+    
+    # 3b. Memory guard: different threshold for prep vs render dispatch.
+    #     Prep phases (scrape→media) need ~1.5 GB. Render needs ~4 GB.
+    if render_count > 0:
+        # Dispatching a prep worker while a render is active
+        if not _memory_ok(min_free_gb=1.5):
+            logger.warning("Low memory (prep) — delaying planned slot dispatch")
+            return None
+    else:
+        if not _memory_ok(min_free_gb=4.0):
+            logger.warning("Low memory (render) — delaying planned slot dispatch")
+            return None
     
     # ── Enter dispatch critical section ──────────────────────────
     # Acquire global lock before atomically creating the job.
     # The lock + guards together prevent TOCTOU races with other
     # dispatch entry points (manual click, due schedules, priority).
     with _DISPATCH_LOCK:
-        # Re-check global guard under lock (belts-and-suspenders)
-        if db.count_active_jobs() > 0:
-            logger.info("Planned slot deferred (under lock): active job detected")
+        # Re-check guard under lock (belts-and-suspenders for TOCTOU)
+        active_under = db.count_active_jobs()
+        render_under = db.count_render_phase_jobs()
+        if active_under >= MAX_TOTAL_JOBS:
+            logger.info("Planned slot deferred (under lock): %d/%d jobs active",
+                        active_under, MAX_TOTAL_JOBS)
+            return None
+        if render_under >= MAX_RENDER_JOBS and active_under >= MAX_TOTAL_JOBS:
+            logger.info("Planned slot deferred (under lock): render active + at capacity")
             return None
         
         slot_id = next_slot["id"]

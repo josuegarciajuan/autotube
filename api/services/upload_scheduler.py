@@ -272,8 +272,54 @@ def dispatch_due_uploads(db=None) -> dict | None:
     # ── Sort: past-due videos first, then by created_at ──
     eligible.sort(key=lambda v: (not v["past_due"], v["row"].get("created_at", "")))
 
-    # ── 4. Dispatch the first eligible video ──
-    entry = eligible[0]
+    # ── 3b. Daily upload limit: skip channels that already hit their quota today ──
+    today_uploads = {}  # channel_id → count of uploads today
+    for entry in eligible:
+        ch_id = entry["row"]["channel_id"]
+        if ch_id not in today_uploads:
+            with db._connect() as conn:
+                row = conn.execute(
+                    """SELECT COUNT(*) as cnt FROM videos
+                       WHERE channel_id = ?
+                         AND date(uploaded_at) = date('now', 'localtime')
+                         AND status IN ('uploaded', 'uploaded_private', 'published')""",
+                    (ch_id,),
+                ).fetchone()
+            today_uploads[ch_id] = row["cnt"] if row else 0
+
+    # Resolve videos_per_day per channel from config_json
+    ch_vpd = {}  # channel_id → videos_per_day
+    for entry in eligible:
+        ch_id = entry["row"]["channel_id"]
+        if ch_id not in ch_vpd:
+            try:
+                cfg = json.loads(entry["row"].get("config_json") or "{}")
+                vpd = cfg.get("videos_per_day", 1)
+                ch_vpd[ch_id] = max(vpd, 1)  # at least 1
+            except Exception:
+                ch_vpd[ch_id] = 1
+
+    # Pick first eligible video whose channel hasn't hit daily quota
+    selected = None
+    for entry in eligible:
+        ch_id = entry["row"]["channel_id"]
+        uploaded_today = today_uploads.get(ch_id, 0)
+        max_allowed = ch_vpd.get(ch_id, 1)
+        if uploaded_today >= max_allowed:
+            slug = entry["row"].get("channel_slug", "?")
+            logger.info(
+                "📤 Upload skipped for %s: daily quota met (%d/%d)",
+                slug, uploaded_today, max_allowed,
+            )
+            continue
+        selected = entry
+        break
+
+    if not selected:
+        logger.debug("📤 Upload scheduler: all eligible channels at daily quota")
+        return None
+
+    entry = selected
     video = entry["row"]
     video_id = video["id"]
     channel_id = video["channel_id"]

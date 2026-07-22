@@ -312,6 +312,60 @@ def _check_ram_gate(logger, timeout_sec: int = 600) -> bool:
     return False
 
 
+# ── Phase pipelining: DB-based render slot (macro-fase B) ────────
+
+def _acquire_render_slot(job_id: int, db, timeout_sec: int = 7200) -> bool:
+    """Acquire exclusive render access via a DB-based lock.
+    
+    Used for phase pipelining: worker B does prep phases while worker A 
+    renders. Before entering the video (render) phase, the worker must 
+    acquire this slot to ensure only ONE render runs at a time.
+    
+    The lock is implemented as a simple atomic check: count other jobs
+    in 'render' phase, and if zero, update this job's pipeline_phase to 
+    'render'. The UPDATE + check happens in the same transaction for 
+    atomicity.
+    
+    Returns True if acquired, False on timeout.
+    """
+    import time as _time
+    logger = logging.getLogger("autotube.worker")
+    deadline = _time.time() + timeout_sec
+    
+    while _time.time() < deadline:
+        with db._connect() as conn:
+            # Atomic check-and-claim: count other active renders
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM generation_jobs
+                   WHERE status IN ('running', 'queued')
+                     AND pipeline_phase = 'render'
+                     AND id != ?""",
+                (job_id,),
+            ).fetchone()
+            active_renders = row["cnt"] if row else 0
+            
+            if active_renders == 0:
+                # No other render active — claim the slot
+                conn.execute(
+                    "UPDATE generation_jobs SET pipeline_phase='render' WHERE id=?",
+                    (job_id,),
+                )
+                conn.commit()
+                logger.info("Render slot acquired for job #%d", job_id)
+                return True
+        
+        logger.info(
+            "Waiting for render slot (job #%d) — %d active render(s)",
+            job_id, active_renders,
+        )
+        _time.sleep(30)
+    
+    logger.error(
+        "Render slot timeout for job #%d after %ds", job_id, timeout_sec,
+    )
+    return False
+
+
 # ── Pre-flight cleanup ────────────────────────────────────────────
 
 def _preflight_cleanup(logger):
@@ -471,7 +525,7 @@ def run_job(
 
     # ── 5. Update job and video status ────────────────────────
     db.update_job(job_id, status="running", started_at=db_now(),
-                  worker_pid=os.getpid())
+                  worker_pid=os.getpid(), pipeline_phase="prep")
     db.update_video(video_id, status="generating", progress=1 if start_idx == 0 else 2, 
                     progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
                     generation_started_at=db_now())
@@ -739,7 +793,17 @@ def run_job(
             logger.info("Skipping video (loaded from checkpoint: %s)", 
                        video_data.get("video_path", "?") if video_data else "?")
             db.update_video(video_id, progress=75, progress_phase="video")
+            db.update_job(job_id, pipeline_phase="post")
         else:
+            # ── Phase pipelining: acquire exclusive render slot ──
+            # Wait until no other job is in the render phase. This allows
+            # another worker to do prep phases (scrape→media) while we wait.
+            if not _acquire_render_slot(job_id, db, timeout_sec=7200):
+                db.update_job(job_id, status="failed",
+                              error_msg="Render slot timeout — otro render activo >2h")
+                db.update_video(video_id, status="error", progress_phase="video")
+                return False
+            
             db.update_video(video_id, progress=60, progress_phase="video")
             logger.info("Phase 4/6: Assembling video...")
             
@@ -773,6 +837,7 @@ def run_job(
                 return False
             
             db.update_video(video_id, progress=75, progress_phase="video", status="ready")
+            db.update_job(job_id, pipeline_phase="post")  # render done, now metadata+upload
             _save_checkpoint(video_id, "video", {
                 "video_path": str(video_data.get("video_path", "")),
                 "thumbnail_path": str(video_data.get("thumbnail_path", "")),
