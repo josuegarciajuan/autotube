@@ -600,7 +600,7 @@ KEN_BURNS_ZOOM_MAX = 10
 
 # ── Scene pacing ────────────────────────────────────────────────
 SCENE_DURATION_MIN = 6.0             # default — keep scenes visually varied
-SCENE_DURATION_MAX = 15.0            # default — split long scenes for fresh media
+SCENE_DURATION_MAX = 20.0            # increased from 15 → 20 (Jul 2026): fewer sub-scenes = less media pressure + ffmpeg concat overhead
 
 # ── Subtitle style ─────────────────────────────────────────────
 SUBTITLE_FONT_SIZE = 52

@@ -113,7 +113,7 @@ PROD_VIDEO_DURATION_MAX = 14
 # Scenes shorter than MIN are merged with neighbors.
 # Scenes longer than MAX are split into sub-scenes (each with its own media asset).
 SCENE_DURATION_MIN = 4.0   # default 6.0 — shorter scenes force more visual changes
-SCENE_DURATION_MAX = 9.0   # derived: MIN + 5 = 9.0 — prevents excessively long scenes
+SCENE_DURATION_MAX = 15.0   # increased from 9 → 15 (Jul 2026): fewer sub-scenes = less media pressure + ffmpeg concat overhead
 
 # ── Hard cap: maximum accumulated duration for any composited clip ──
 # When a clip has been extended (via scene merges) beyond this limit,

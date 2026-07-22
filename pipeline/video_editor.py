@@ -592,6 +592,16 @@ class VideoEditor:
             sum(1 for a in media_assets if a.get("type") == "video"),
         )
 
+        # ── v6: merge consecutive black placeholders ──────────
+        # When many consecutive scenes fail to get media (e.g. due to
+        # off-niche theme poisoning), the concat gets overloaded with
+        # black placeholder segments that add no visual value but consume
+        # ffmpeg xfade processing. Merging them reduces segment count
+        # dramatically and prevents xfade concat timeouts.
+        segment_paths, block_ranges = _merge_consecutive_placeholders(
+            segment_paths, block_ranges, seg_dir, self.logger,
+        )
+
         # ── Concat segments with crossfades (+ grain + vignette) ──
         self.logger.info("Step 3/6: Concatenating %d segments with xfade…", len(segment_paths))
         body_path = seg_dir / "body.mp4"
@@ -3073,7 +3083,13 @@ class VideoEditor:
         )
 
         try:
-            result = subprocess.run(ff_args, capture_output=True, text=True, timeout=900)
+            # v6: timeout scales with segment count (each xfade is expensive)
+            scaled_timeout = max(900, n * 15)
+            self.logger.info(
+                "Concat %d segments + xfade(%.1fs) + overlays → %s (timeout=%ds)",
+                n, crossfade_duration, output_path.name, scaled_timeout,
+            )
+            result = subprocess.run(ff_args, capture_output=True, text=True, timeout=scaled_timeout)
             if result.returncode != 0:
                 stderr_tail = result.stderr.strip()[-500:] if result.stderr else ""
                 raise RuntimeError(
@@ -3082,9 +3098,134 @@ class VideoEditor:
             if not output_path.exists() or output_path.stat().st_size == 0:
                 raise RuntimeError("ffmpeg xfade concat produced empty output")
         except subprocess.TimeoutExpired:
-            raise RuntimeError("ffmpeg xfade concat timed out after 15 min")
+            raise RuntimeError(
+                f"ffmpeg xfade concat timed out after {scaled_timeout}s ({n} segments)"
+            )
 
         return str(output_path)
+
+
+def _merge_consecutive_placeholders(
+    segment_paths: list[str],
+    block_ranges: list[dict],
+    seg_dir: Path,
+    logger,
+) -> tuple[list[str], list[dict]]:
+    """Merge consecutive black placeholder segments into fewer, longer clips.
+
+    When many consecutive scenes fail to get media assets (e.g. due to
+    off-niche theme poisoning or provider circuit breakers), the concat
+    gets overloaded with black placeholder segments that add no visual
+    value but consume ffmpeg xfade processing time per segment.
+
+    This function identifies runs of consecutive ``_black.mp4`` segments,
+    concatenates them into a single longer placeholder using ffmpeg
+    stream concat (fast, no re-encode), and merges their block ranges.
+
+    Returns:
+        (merged_paths, merged_ranges) — reduced lists with placeholder
+        runs collapsed into single entries.
+    """
+    if not segment_paths:
+        return segment_paths, block_ranges
+
+    merged_paths: list[str] = []
+    merged_ranges: list[dict] = []
+    run_indices: list[int] = []
+
+    for i, sp in enumerate(segment_paths):
+        is_black = "_black" in Path(sp).stem
+
+        if is_black:
+            run_indices.append(i)
+        else:
+            # Flush any pending black run
+            if run_indices:
+                _flush_black_run(
+                    run_indices, segment_paths, block_ranges,
+                    seg_dir, merged_paths, merged_ranges, logger,
+                )
+                run_indices = []
+            merged_paths.append(sp)
+            merged_ranges.append(block_ranges[i])
+
+    # Flush trailing black run
+    if run_indices:
+        _flush_black_run(
+            run_indices, segment_paths, block_ranges,
+            seg_dir, merged_paths, merged_ranges, logger,
+        )
+
+    if len(merged_paths) < len(segment_paths):
+        logger.info(
+            "Merged %d consecutive placeholder runs → reduced %d segments to %d",
+            len(segment_paths) - len(merged_paths),
+            len(segment_paths), len(merged_paths),
+        )
+
+    return merged_paths, merged_ranges
+
+
+def _flush_black_run(
+    indices: list[int],
+    segment_paths: list[str],
+    block_ranges: list[dict],
+    seg_dir: Path,
+    merged_paths: list[str],
+    merged_ranges: list[dict],
+    logger,
+) -> None:
+    """Concatenate a run of consecutive black placeholders into one segment."""
+    if len(indices) == 1:
+        # Single black segment — no merge needed
+        merged_paths.append(segment_paths[indices[0]])
+        merged_ranges.append(block_ranges[indices[0]])
+        return
+
+    first, last = indices[0], indices[-1]
+
+    # Build merged block range with combined duration
+    merged_range = dict(block_ranges[first])
+    merged_range["duration"] = sum(
+        block_ranges[j]["duration"] for j in indices
+    )
+
+    # Use ffmpeg concat demuxer (fast, no re-encode) to merge black clips
+    merged_path = seg_dir / f"scene_{first:04d}_merged_black_{len(indices)}.mp4"
+    if not merged_path.exists():
+        concat_list = seg_dir / f"_blist_{first}.txt"
+        with open(concat_list, "w") as f:
+            for j in indices:
+                f.write(f"file '{Path(segment_paths[j]).resolve()}'\n")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list),
+                    "-c", "copy",
+                    str(merged_path),
+                ],
+                capture_output=True, timeout=60,
+                check=True,
+            )
+            logger.debug(
+                "Merged %d black placeholders (indices %d..%d) → %s",
+                len(indices), first, last, merged_path.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not merge %d black placeholders: %s — using first one",
+                len(indices), exc,
+            )
+            merged_paths.append(segment_paths[first])
+            merged_ranges.append(block_ranges[first])
+            return
+        finally:
+            concat_list.unlink(missing_ok=True)
+
+    merged_paths.append(str(merged_path.resolve()))
+    merged_ranges.append(merged_range)
 
 
 # ── Module-level helpers ────────────────────────────────────────

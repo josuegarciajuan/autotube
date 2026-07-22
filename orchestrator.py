@@ -221,11 +221,13 @@ class PipelineOrchestrator:
         try:
             channel_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.canal)
             channel_theme = getattr(self.config, "CANAL_TAGLINE", "")
+            niche_keywords = getattr(self.config, "NICHE_KEYWORDS_ENG", None)
 
             self._theme_context = self.theme_extractor.extract(
                 content_text=content_text[:4000],
                 channel_name=channel_name,
                 channel_theme=channel_theme,
+                niche_keywords=niche_keywords,
             )
 
             if self._theme_context and self._theme_context.theme_keywords_en:

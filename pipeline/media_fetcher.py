@@ -516,6 +516,26 @@ class MediaFetcher:
                     asset = self._try_image_pixabay(simple_query, skip_urls=image_skip) or \
                              self._try_image_unsplash(simple_query, skip_urls=image_skip)
 
+            # ── v6: retry with original query WITHOUT theme keywords ──
+            # Theme keywords can poison Pixabay/Unsplash searches when
+            # the extracted theme is off-niche. Retry with the LLM's
+            # original query stripped of theme injection.
+            if asset is None and ctx and ctx.theme_keywords_en:
+                clean_query = _strip_theme_keywords(
+                    query, ctx.theme_keywords_en,
+                )
+                if clean_query and clean_query != query:
+                    logger.info(
+                        "Scene %d: retrying WITHOUT theme keywords: %r",
+                        i, clean_query[:80],
+                    )
+                    image_skip = self._used_image_urls.copy()
+                    asset = self._try_image_pixabay(clean_query, skip_urls=image_skip) or \
+                            self._try_image_unsplash(clean_query, skip_urls=image_skip)
+                    # Also try video providers with clean query
+                    if asset is None and self.video_providers:
+                        asset = self._try_video_providers(clean_query, target_dur)
+
             # ── Hard fallback: generic queries that always find something ─
             if asset is None:
                 generic_queries = self._media_strategy.get("fallback_queries", [
@@ -1544,3 +1564,26 @@ class MediaFetcher:
         if len(query) <= max_len:
             return query
         return query[:max_len].rsplit(" ", 1)[0]
+
+
+def _strip_theme_keywords(query: str, theme_keywords: list[str]) -> str:
+    """Remove theme keywords from a search query.
+
+    Used as a retry fallback when theme-injected queries return no results.
+    The original LLM-generated query keywords are preserved; only the theme
+    keywords that were injected by ``_build_search_query`` are stripped.
+
+    Args:
+        query: The full query (potentially including theme keywords).
+        theme_keywords: The theme keywords to remove.
+
+    Returns:
+        A cleaned query with theme keywords removed.
+    """
+    if not theme_keywords or not query:
+        return query
+
+    theme_lower = set(kw.lower().strip() for kw in theme_keywords if kw.strip())
+    words = query.split()
+    cleaned = [w for w in words if w.lower().strip() not in theme_lower]
+    return " ".join(cleaned) if cleaned else query

@@ -104,18 +104,48 @@ class ThemeExtractor:
     def __init__(self, config=None):
         self._config = config
 
-    def extract(self, content_text: str, channel_name: str = "", channel_theme: str = "") -> ThemeContext:
-        """Analyze content and return a ThemeContext for visual coherence."""
+    def extract(
+        self,
+        content_text: str,
+        channel_name: str = "",
+        channel_theme: str = "",
+        niche_keywords: list[str] | None = None,
+    ) -> ThemeContext:
+        """Analyze content and return a ThemeContext for visual coherence.
+
+        Args:
+            content_text: Scraped content to extract visual theme from.
+            channel_name: Display name of the channel (for prompt context).
+            channel_theme: Channel tagline (for prompt context).
+            niche_keywords: Optional list of channel-niche keywords (English).
+                            Used as a guardrail — if the LLM returns theme keywords
+                            with zero overlap against these, the theme is rejected
+                            to prevent off-niche content from poisoning media queries.
+        """
         from openai import OpenAI
         from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
         client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
+
+        # ── Build niche guardrail context for the prompt ──────────
+        niche_banner = ""
+        if niche_keywords:
+            niche_banner = (
+                f"\nNICHO DEL CANAL: {channel_name}\n"
+                f"Keywords del nicho (EN INGLÉS): {', '.join(niche_keywords[:8])}\n"
+                f"⚠️ CRÍTICO: Las theme_keywords_en DEBEN pertenecer al nicho del canal. "
+                f"Si el contenido scrapeado NO coincide con el nicho (ej: contenido sobre "
+                f"internet, tecnología moderna, psicología o una época no relacionada), "
+                f"IGNORA el contenido scrapeado y genera keywords GENÉRICAS del nicho."
+            )
 
         user_prompt = THEME_EXTRACTOR_PROMPT.format(
             content_text=content_text[:3000],
             channel_name=channel_name[:80],
             channel_theme=channel_theme[:200],
         )
+        if niche_banner:
+            user_prompt += niche_banner
 
         try:
             response = client.chat.completions.create(
@@ -146,6 +176,32 @@ class ThemeExtractor:
                 composition=data.get("composition", "primeros planos"),
                 era_decade=data.get("era_decade", ""),
             )
+
+            # ── Niche guardrail validation ────────────────────
+            if niche_keywords and ctx.theme_keywords_en:
+                ok = _validate_theme_against_niche(ctx.theme_keywords_en, niche_keywords)
+                if not ok:
+                    logger.warning(
+                        "Theme keywords %r have ZERO overlap with niche keywords "
+                        "%r — rejecting theme (off-niche content)",
+                        ctx.theme_keywords_en,
+                        niche_keywords[:8],
+                    )
+                    # Return a generic/default context instead of poisoned one
+                    return ThemeContext(
+                        genre="documental",
+                        era="atemporal",
+                        visual_style="oscuro_documental",
+                        key_motifs=[],
+                        forbidden_elements=[],
+                        theme_keywords_en=[],
+                        primary_subject="",
+                        mood="misterioso",
+                        lighting="claroscuro",
+                        composition="primeros planos",
+                        era_decade="",
+                    )
+
             logger.info(
                 "Theme extracted: genre=%s era=%s motifs=%s mood=%s lighting=%s",
                 ctx.genre, ctx.era, ctx.key_motifs, ctx.mood, ctx.lighting,
@@ -166,3 +222,67 @@ class ThemeExtractor:
                 composition="primeros planos",
                 era_decade="",
             )
+
+
+def _validate_theme_against_niche(
+    theme_keywords: list[str],
+    niche_keywords: list[str],
+    min_matches: int = 1,
+) -> bool:
+    """Check whether extracted theme keywords overlap with the channel's niche.
+
+    For each extracted theme keyword, checks if any niche keyword phrase
+    contains it (word-level match). This prevents off-niche scraped content
+    from poisoning media queries with irrelevant keywords.
+
+    Example:
+        theme_keywords = ["1960s", "retro", "celebration", "internet", "digital"]
+        niche_keywords = ["lost civilizations", "ancient ruins", "archaeology"]
+        → returns False (zero overlap — theme is off-niche)
+
+        theme_keywords = ["ancient", "temple", "ruins", "mysterious"]
+        niche_keywords = ["lost civilizations", "ancient ruins", "archaeology"]
+        → returns True (multiple matches)
+
+    Args:
+        theme_keywords: Keywords extracted by the LLM from scraped content.
+        niche_keywords: Channel-niche keyword phrases (e.g. from NICHE_KEYWORDS_ENG).
+        min_matches: Minimum number of matching keywords required (default 1).
+
+    Returns:
+        True if at least min_matches keywords overlap, False otherwise.
+    """
+    if not theme_keywords or not niche_keywords:
+        return True  # Can't validate without data — let it through
+
+    # Normalize: lowercase both sides
+    tkw = set(kw.lower().strip() for kw in theme_keywords if kw.strip())
+    nkw_lower = [kw.lower().strip() for kw in niche_keywords if kw.strip()]
+
+    matches = 0
+    for tw in tkw:
+        # Check if this theme keyword appears as a word or substring
+        # in any niche keyword phrase
+        for nw in nkw_lower:
+            if tw in nw or nw in tw:
+                matches += 1
+                break
+            # Also check individual words within the niche phrase
+            nw_words = set(nw.split())
+            if tw in nw_words:
+                matches += 1
+                break
+
+    if matches < min_matches:
+        logger.warning(
+            "Niche guardrail: theme keywords %r matched only %d niche keywords "
+            "(needed %d) — rejecting theme",
+            theme_keywords, matches, min_matches,
+        )
+        return False
+
+    logger.debug(
+        "Niche guardrail: theme keywords %r matched %d niche keywords — OK",
+        theme_keywords, matches,
+    )
+    return True
