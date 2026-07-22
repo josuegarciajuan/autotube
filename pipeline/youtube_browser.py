@@ -111,6 +111,18 @@ class YouTubeBrowser:
         if self._context is not None:
             return
         _ensure_xvfb()
+
+        # Handle asyncio loop from previous browser instances (multi-account)
+        # A prior sync_playwright().start() may leave a running loop;
+        # replacing it before launching the next browser avoids:
+        #   "It looks like you are using Playwright Sync API inside the asyncio loop."
+        import asyncio as _asyncio
+        try:
+            _asyncio.get_running_loop()
+            _asyncio.set_event_loop(_asyncio.new_event_loop())
+        except RuntimeError:
+            pass
+
         self._playwright = sync_playwright().start()
 
         # Clean up stale Chromium singleton locks from killed/interrupted sessions
