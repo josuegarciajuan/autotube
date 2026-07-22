@@ -180,7 +180,7 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
 // ── Card: Awaiting Upload (F1 done, waiting for F2 upload window) ──
 function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo; onUploadNow: (videoId: number) => void }) {
   const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
-  const countdown = video.target_public_at ? formatCountdown(video.target_public_at) : '?'
+  const countdown = video.target_upload_at ? formatCountdown(video.target_upload_at) : (video.target_public_at ? formatCountdown(video.target_public_at) : '?')
 
   return (
     <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} border-l-2 border-l-blue-400/50 animate-fade-in`}>

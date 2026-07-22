@@ -256,9 +256,12 @@ def compute_daily_schedule(date_str: str, db=None) -> list[dict]:
                 "date_key": date_str,
                 "scheduled_at": start.strftime("%Y-%m-%d %H:%M:%S"),
                 "target_upload_at": finish.strftime("%Y-%m-%d %H:%M:%S"),
+                "target_public_at": finish.strftime("%Y-%m-%d %H:%M:%S"),
                 "slot_position": global_slot_pos,
                 "channel_name": ch_info[slug]["name"],
                 "channel_slug": slug,
+                "upload_window_start": 9,
+                "upload_window_end": 11,
             })
 
     # Sort all slots by scheduled_at

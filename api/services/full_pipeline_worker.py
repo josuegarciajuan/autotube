@@ -927,8 +927,20 @@ def run_job(
             logger.info("Phase 6/6: %s — skipping upload (video stays local)", skip_reason)
             # ── generate_only: mark as awaiting_upload for later upload dispatch ──
             gen_status = "awaiting_upload" if action == "generate_only" else "ready"
+            # ── Seed scheduled_upload_at from planned slot's target_upload_at ──
+            seed_upload_at = None
+            if action == "generate_only":
+                try:
+                    slot = db.get_planned_slot_for_video(video_id)
+                    if slot and slot.get("target_upload_at"):
+                        seed_upload_at = str(slot["target_upload_at"])
+                        logger.info("[%s] Seeded scheduled_upload_at=%s from planned slot #%s",
+                                     canal, seed_upload_at, slot.get("id"))
+                except Exception as e:
+                    logger.debug("[%s] Could not seed scheduled_upload_at: %s", canal, e)
             db.update_video(video_id, progress=100, status=gen_status,
-                            generation_finished_at=db_now())
+                            generation_finished_at=db_now(),
+                            scheduled_upload_at=seed_upload_at)
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")

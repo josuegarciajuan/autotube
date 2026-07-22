@@ -385,6 +385,9 @@ def auto_recover_missing_publications(db=None) -> dict:
             in_window = any(
                 w["start"] <= up_h < w["end"] for w in upload_windows
             )
+            # Capture chosen window for planned_slot storage
+            chosen_ws = upload_windows[0]["start"] if upload_windows else 9
+            chosen_we = upload_windows[0]["end"] if upload_windows else 11
             if not in_window:
                 # Find nearest window
                 best_w = upload_windows[0]
@@ -395,15 +398,26 @@ def auto_recover_missing_publications(db=None) -> dict:
                         best_dist = dist
                         best_w = w
                 up_h = best_w["start"]
+                chosen_ws = best_w["start"]
+                chosen_we = best_w["end"]
                 logger.info(
                     "[%s] Recovery slot: snapped upload to window %02d:00-%02d:00",
                     slug, best_w["start"], best_w["end"],
                 )
+            else:
+                # Find which window up_h falls into
+                for w in upload_windows:
+                    if w["start"] <= up_h < w["end"]:
+                        chosen_ws = w["start"]
+                        chosen_we = w["end"]
+                        break
             upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
 
             try:
                 # Determine source_mode for this recovery slot
                 slot_mode = recovery_modes[i] if i < len(recovery_modes) else "original"
+                # Compute target_public_at: use peak info for scheduled channels
+                tp_at = f"{today} {up_h:02d}:{up_m:02d}:00" if is_scheduled else None
                 slot_id = db.create_planned_slot(
                     channel_id=channel_id,
                     date_key=today,
@@ -411,6 +425,9 @@ def auto_recover_missing_publications(db=None) -> dict:
                     target_upload_at=upload_str,
                     slot_position=active_count + i + 1,
                     source_mode=slot_mode,
+                    target_public_at=tp_at,
+                    upload_window_start=chosen_ws,
+                    upload_window_end=chosen_we,
                 )
 
                 existing_times.append(chosen_time)

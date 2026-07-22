@@ -356,11 +356,14 @@ def compute_daily_slots(
                 # For scheduled: target_upload_at is the PUBLIC peak time
                 # For immediate: target_upload_at is the upload time (unchanged)
                 "target_upload_at": target_str,
+                "target_public_at": target_str if is_scheduled else None,
                 "slot_position": pos,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
                 "source_mode": slot_mode,
                 "publish_mode": ch.get("publish_mode", "immediate"),
+                "upload_window_start": ch.get("upload_window_start", 9),
+                "upload_window_end": ch.get("upload_window_end", 11),
             })
     
     # Sort all slots chronologically by generation START time
@@ -454,7 +457,7 @@ def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
     for backward compatibility.
 
     Spreads multiple videos from the same channel across the window
-    (min 15 min apart). Returns (hour, minute).
+    (min 15 min apart). Returns (hour, minute, window_start, window_end).
     """
     # ── v11: multi-window round-robin ──
     if windows and isinstance(windows, list) and len(windows) > 0:
@@ -486,7 +489,7 @@ def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
         offset = max(0, min(window_minutes - 1, base + jitter))
 
     total_min = window_start * 60 + offset
-    return (total_min // 60, total_min % 60)
+    return (total_min // 60, total_min % 60, window_start, window_end)
 
 
 def compute_horizon_slots(
@@ -555,7 +558,7 @@ def compute_horizon_slots(
                     # Immediate mode: upload = right after gen (use target_public_at as deadline)
                     up_h, up_m = peak_h, peak_m
                 else:
-                    up_h, up_m = _pick_upload_minute(
+                    up_h, up_m, ws_start, ws_end = _pick_upload_minute(
                         _day_seed(date_str), ch_id, pos,
                         window_start=win_start, window_end=win_end,
                         videos_per_day=n, windows=upload_windows,
@@ -574,6 +577,8 @@ def compute_horizon_slots(
                     "publish_mode": ch.get("publish_mode", "immediate"),
                     "lead_hours": ch.get("generation_lead_hours", 36),
                     "avg_duration_min": ch.get("avg_duration_min", ESTIMATED_PIPELINE_MINUTES),
+                    "upload_window_start": ws_start,
+                    "upload_window_end": ws_end,
                 })
     
     if not all_raw_slots:

@@ -3036,15 +3036,20 @@ class ExtendedDatabase(Database):
     
     def create_planned_slot(self, channel_id: int, date_key: str, scheduled_at: str,
                             target_upload_at: str = None, slot_position: int = 0,
-                            source_mode: str = "original") -> int:
+                            source_mode: str = "original",
+                            target_public_at: str = None,
+                            upload_window_start: int = 9,
+                            upload_window_end: int = 11) -> int:
         """Create a planned slot. Returns slot id."""
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                   target_upload_at, slot_position, source_mode)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (channel_id, date_key, scheduled_at, target_upload_at, slot_position,
-                 source_mode),
+                   target_upload_at, target_public_at, upload_window_start, upload_window_end,
+                   slot_position, source_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (channel_id, date_key, scheduled_at, target_upload_at,
+                 target_public_at, upload_window_start, upload_window_end,
+                 slot_position, source_mode),
             )
             conn.commit()
             return cursor.lastrowid
@@ -3087,6 +3092,18 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             rows = conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
+    
+    def get_planned_slot_for_video(self, video_id: int) -> dict | None:
+        """Get the planned_slot linked to a video via generation_jobs."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT ps.* FROM planned_slots ps
+                   JOIN generation_jobs gj ON ps.job_id = gj.id
+                   WHERE gj.video_id = ?
+                   ORDER BY ps.id DESC LIMIT 1""",
+                (video_id,),
+            ).fetchone()
+        return dict(row) if row else None
     
     def get_planned_slots_week(self, start_date: str, end_date: str,
                                 channel_id: int = None) -> list[dict]:
@@ -4434,6 +4451,7 @@ class ExtendedDatabase(Database):
                     v.status,
                     v.titulo_final,
                     v.target_public_at,
+                    v.scheduled_upload_at,
                     v.publish_mode,
                     v.progress,
                     v.progress_phase,
@@ -4452,12 +4470,15 @@ class ExtendedDatabase(Database):
             awaiting_list = []
             for r in awaiting:
                 d = dict(r)
-                # Look up planned upload time
-                ps = conn.execute(
-                    "SELECT target_upload_at FROM planned_slots WHERE video_id = ? LIMIT 1",
-                    (d["video_id"],),
-                ).fetchone()
-                d["target_upload_at"] = ps["target_upload_at"] if ps else None
+                # Prefer scheduled_upload_at (set by upload_scheduler), fallback to planned_slot
+                if not d.get("scheduled_upload_at"):
+                    ps = conn.execute(
+                        "SELECT target_upload_at FROM planned_slots WHERE video_id = ? LIMIT 1",
+                        (d["video_id"],),
+                    ).fetchone()
+                    d["target_upload_at"] = ps["target_upload_at"] if ps else None
+                else:
+                    d["target_upload_at"] = d["scheduled_upload_at"]
                 awaiting_list.append(d)
             result["awaiting_upload"] = awaiting_list
 

@@ -375,6 +375,7 @@ export interface AwaitingUploadVideo {
   status: string;           // 'awaiting_upload' | 'uploading'
   titulo_final: string | null;
   target_public_at: string | null;
+  scheduled_upload_at: string | null;
   target_upload_at: string | null;
   publish_mode: string;
   progress: number;
