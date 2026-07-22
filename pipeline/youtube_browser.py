@@ -64,6 +64,23 @@ _browser_lock = threading.Lock()
 _xvfb_display = ":99"
 _xvfb_proc = None
 
+# Shared Playwright instance — only ONE sync_playwright().start() ever.
+# Creating multiple starts() causes "Playwright Sync API inside the asyncio loop"
+# errors because each call leaves a running event loop behind.
+_shared_playwright = None
+_playwright_lock = threading.Lock()
+
+
+def _get_or_create_playwright():
+    """Return the singleton Playwright instance, creating it if needed."""
+    global _shared_playwright
+    with _playwright_lock:
+        if _shared_playwright is None:
+            _ensure_xvfb()
+            _shared_playwright = sync_playwright().start()
+            logger.debug("Shared Playwright instance started")
+        return _shared_playwright
+
 
 def _ensure_xvfb():
     global _xvfb_proc
@@ -110,20 +127,9 @@ class YouTubeBrowser:
     def _ensure_browser(self):
         if self._context is not None:
             return
-        _ensure_xvfb()
-
-        # Handle asyncio loop from previous browser instances (multi-account)
-        # A prior sync_playwright().start() may leave a running loop;
-        # replacing it before launching the next browser avoids:
-        #   "It looks like you are using Playwright Sync API inside the asyncio loop."
-        import asyncio as _asyncio
-        try:
-            _asyncio.get_running_loop()
-            _asyncio.set_event_loop(_asyncio.new_event_loop())
-        except RuntimeError:
-            pass
-
-        self._playwright = sync_playwright().start()
+        # Use the shared Playwright singleton — creating multiple
+        # sync_playwright().start() instances causes asyncio loop conflicts.
+        self._playwright = _get_or_create_playwright()
 
         # Clean up stale Chromium singleton locks from killed/interrupted sessions
         self._cleanup_stale_locks()
@@ -556,11 +562,17 @@ def get_browser(account: str) -> YouTubeBrowser:
 
 
 def close_all_browsers():
+    global _shared_playwright
     with _browser_lock:
         for b in _browser_instances.values():
             try: b.close()
             except Exception: pass
         _browser_instances.clear()
+    with _playwright_lock:
+        if _shared_playwright:
+            try: _shared_playwright.stop()
+            except Exception: pass
+        _shared_playwright = None
 
 
 def get_account_for_channel(channel_slug: str) -> Optional[str]:
