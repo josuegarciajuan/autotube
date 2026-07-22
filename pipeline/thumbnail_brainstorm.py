@@ -24,6 +24,12 @@ class ThumbnailBrief:
     emotion_target: str = "curiosidad"
     curiosity_gap: str = ""
     text_overlay: str = ""
+    # ── v2: multi-text overlay ──
+    text_gancho: str = ""          # L1: palabra-gancho (max 12 chars, UPPERCASE)
+    text_complemento: str = ""     # L2: complemento (max 24 chars)
+    badge_text: str = ""           # L3: sello de confianza
+    # ── v2: secondary inset scene ──
+    secondary_scene: str = ""      # Description of secondary image for inset recuadro
     text_color_hex: str = "#F5F0E8"
     composition_notes: str = "texto abajo, imagen arriba"
     layout: str = "dark_reveal"
@@ -92,12 +98,13 @@ INSTRUCCIONES:
 1. Identifica la emoción dominante que maximizará el CTR.
    {face_directive}
 2. Define un curiosity gap específico (algo que la imagen insinúe pero no revele).
-3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica.
+3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica para la imagen PRINCIPAL.
 4. Indica qué NO debe mostrar la miniatura.
 5. IMPORTANTE: Evalúa el NIVEL DE IMPACTO VISUAL necesario (1-10). Para contenido de psicología/documental oscuro, el impacto debe ser 8+. Sugiere TÉCNICAS ESPECÍFICAS: iluminación dramática, primer plano extremo, contraste máximo, colores vibrantes contra fondos oscuros, composición asimétrica.
+6. Describe UNA ESCENA SECUNDARIA que complemente la imagen principal sin repetirla — será un recuadro pequeño en la composición final (por ejemplo: un documento, una fotografía antigua, un objeto simbólico, una silueta).
 
 Responde SOLO con JSON:
-{{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "avoid_showing": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
+{{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "avoid_showing": "...", "secondary_scene": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
 
 
 MARKETING_AGENT_SYSTEM = """Eres un estratega de marketing digital especializado en YouTube. 
@@ -105,15 +112,17 @@ Has analizado miles de miniaturas virales y sabes exactamente qué combinación
 de imagen + texto maximiza el Click-Through Rate (CTR).
 
 Tu expertise:
-- Texto overlay: 2-4 palabras de altísimo impacto, MAYÚSCULAS, alto contraste, bajo de la imagen
-- Formatos de texto probados: pregunta intrigante ("¿QUÉ OCULTARON?"), cifra impactante ("3 MINUTOS"), palabra-gancho ("NADIE LO VIO", "PROHIBIDO"), afirmación extrema ("CAMBIÓ TODO")
-- Hasta ~24 caracteres para frases-gancho potentes, siempre con máxima legibilidad en miniatura
+- Texto overlay de DOS LÍNEAS (NO una sola):
+  • LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máx 12 chars.
+    Formatos: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO", "3 MINUTOS", "5 MÉDICOS"
+  • LÍNEA 2 (complemento, texto MEDIANO): 2-4 palabras. Máx 24 chars. Complementa L1 y título.
+    Formatos: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
+- BADGE/SELLO en esquina superior: texto de confianza (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE). Máx 15 chars.
 - Psicología del color en thumbnails
 - Formatos de composición probados (split_face, dark_reveal, classified_document, shock_closeup)
-- Reglas de oro: nunca repetir el título, siempre generar curiosidad — el texto de imagen añade la pieza de intriga que el título no revela
-- Badges y sellos que aumentan CTR: "4K", "NUEVO", "EXCLUSIVO", "CLASIFICADO"
-- Pattern interrupt: the thumbnail must VISUALLY INTERRUPT the viewer's scanning pattern. Use unexpected element placement, color contrast, or surreal juxtaposition.
+- Reglas de oro: NUNCA repetir el título, SIEMPRE generar curiosidad — el texto de imagen añade la pieza de intriga que el título no revela
 - Text readability: text must be readable at 100px wide on mobile. Use thick outlines (3-4px minimum), high contrast, and blocky fonts.
+- Pattern interrupt: the thumbnail must VISUALLY INTERRUPT the viewer's scanning pattern.
 
 {face_directive}
 
@@ -128,14 +137,19 @@ ESTILO VISUAL: {visual_style}
 PALETA DE COLORES: {color_palette}
 
 REQUISITOS:
-1. Crea 3 variantes de texto overlay (2-4 palabras cada una, hasta ~24 caracteres, MAYÚSCULAS). Formatos: pregunta intrigante, cifra impactante, palabra-gancho con signos. El texto debe hacer que el espectador NECESITE hacer clic.
-2. Elige la MEJOR (la que genere más curiosidad sin ser clickbait barato)
+1. Crea DOS líneas de texto overlay:
+   - LÍNEA 1 (text_gancho): 1-2 palabras en MAYÚSCULAS. Máx 12 caracteres. Palabra-gancho que DETIENE el scroll.
+   - LÍNEA 2 (text_complemento): 2-4 palabras. Máx 24 caracteres. Complementa L1 y título sin repetirlos.
+   - Regla: L1 + L2 + título deben contar una mini-historia de 3 actos.
+   - Formatos para L1: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO", "3 MINUTOS", "5 MÉDICOS", "FUE REAL"
+   - Formatos para L2: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
+2. Define el BADGE/SELLO de confianza (badge_text): DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío.
 3. Define la composición (dónde va el texto, dónde el foco visual). {face_directive}
 4. Sugiere qué layout usar: shock_closeup, dark_reveal, split_face, incomplete_puzzle
-5. El texto NO debe repetir las primeras palabras del título — debe complementarlo, añadiendo la pieza de intriga que falta
+5. Crea 3 variantes de texto completas para A/B testing futuro (campo text_variants legacy)
 
 Responde SOLO con JSON:
-{{"text_variants": ["...", "...", "..."], "best_text": "...", "text_color_hex": "#...", "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""
+{{"text_gancho": "...", "text_complemento": "...", "badge_text": "...", "best_text": "...", "text_variants": ["...", "...", "..."], "text_color_hex": "#...", "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""
 
 
 class ThumbnailBrainstorm:
@@ -304,12 +318,23 @@ class ThumbnailBrainstorm:
 
     def _merge(self, psych: dict, marketing: dict, style: dict) -> ThumbnailBrief:
         """Merge psychology + marketing agent outputs into a ThumbnailBrief."""
+        # Best text for compatibility: L1 | L2 or single line
+        best_text = marketing.get("best_text", "")
+        if not best_text:
+            gancho = marketing.get("text_gancho", "")
+            complemento = marketing.get("text_complemento", "")
+            best_text = f"{gancho} | {complemento}" if gancho and complemento else "¿QUÉ PASÓ?"
+        
         return ThumbnailBrief(
             image_concept=psych.get("visual_concept", ""),
             visual_focus=psych.get("visual_concept", "")[:80],
             emotion_target=psych.get("emotion_target", "curiosidad"),
             curiosity_gap=psych.get("curiosity_gap", ""),
-            text_overlay=marketing.get("best_text", marketing.get("text_variants", [""])[0] if marketing.get("text_variants") else ""),
+            text_overlay=best_text,
+            text_gancho=marketing.get("text_gancho", ""),
+            text_complemento=marketing.get("text_complemento", ""),
+            badge_text=marketing.get("badge_text", ""),
+            secondary_scene=psych.get("secondary_scene", ""),
             text_color_hex=marketing.get("text_color_hex", style.get("color_palette", {}).get("text", "#F5F0E8")),
             composition_notes=marketing.get("composition_notes", "texto abajo, imagen arriba"),
             layout=marketing.get("layout", style.get("base_composition", "dark_reveal")),
@@ -332,7 +357,11 @@ class ThumbnailBrainstorm:
                 visual_focus="anatomical or scientific detail with dramatic clinical lighting",
                 emotion_target="curiosidad clínica",
                 curiosity_gap="¿Qué anomalía se oculta en este diagnóstico?",
-                text_overlay="DIAGNÓSTICO",
+                text_overlay="¿QUÉ PASÓ? | El diagnóstico oculto",
+                text_gancho="¿QUÉ PASÓ?",
+                text_complemento="El diagnóstico oculto",
+                badge_text="DOCUMENTAL",
+                secondary_scene="medical report with redacted text, classified stamp",
                 text_color_hex="#FFFFFF",
                 composition_notes="texto GRANDE abajo con outline grueso, imagen clínica dramática arriba ocupando 70%",
                 layout=style.get("base_composition", "dark_reveal"),
@@ -346,7 +375,11 @@ class ThumbnailBrainstorm:
             visual_focus="central dramatic element with strong contrast",
             emotion_target="shock",
             curiosity_gap="¿Qué secreto se oculta?",
-            text_overlay="IMPACTANTE",
+            text_overlay="¿QUÉ PASÓ? | La verdad oculta",
+            text_gancho="¿QUÉ PASÓ?",
+            text_complemento="La verdad oculta",
+            badge_text="DOCUMENTAL",
+            secondary_scene="classified document with redacted text",
             text_color_hex="#FFFFFF",
             composition_notes="texto GRANDE abajo con outline grueso, imagen dramática arriba ocupando 70%",
             layout=style.get("base_composition", "shock_closeup"),

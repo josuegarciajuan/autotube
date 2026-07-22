@@ -431,12 +431,64 @@ REGLAS INQUEBRANTABLES:
 {structure_text}
 {retention_text}
 
+⚠️ ZONA GANCHO BLINDADA — primeros 120-180 segundos (¡LA PARTE MÁS IMPORTANTE DEL GUION!):
+El espectador decide en los primeros 30 segundos si se queda o se va. No puedes fallar aquí.
+Estructura obligatoria de 4 micro-fases:
+
+FASE 1 — EL GOLPE (0:00-0:15):
+  - UNA sola frase de IMPACTO PURO. Sin contexto. Sin presentación.
+  - NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a", "Les voy a contar".
+  - SIEMPRE: un DATO DEMOLEDOR, un HECHO CONCRETO con FECHA y NÚMERO, o un CLIFFHANGER.
+  - Si el contenido lo permite, incluye un número exacto: "En 1922, un arqueólogo encontró algo que no debía existir..."
+  - Esta frase es lo ÚNICO que muchos espectadores leerán/oirán antes de decidir.
+
+FASE 2 — LA PROMESA (0:15-0:45):
+  - Enumera EXPLÍCITAMENTE lo que el espectador va a descubrir si se queda.
+  - Crea un "contrato narrativo" en 3 puntos.
+  - El espectador YA sabe lo que gana. Esto dispara el Zeigarnik Effect: ahora NECESITA completar.
+
+FASE 3 — PRIMERA REVELACIÓN (0:45-1:30):
+  - Suelta YA información fascinante y CONCRETA. No te la guardes para el final.
+  - Entrega: un dato verificable, un documento citado, una fecha exacta, una cita textual.
+  - El espectador se queda porque YA le has dado valor, no por una promesa vacía.
+
+FASE 4 — PRIMER CLIFFHANGER + LANZAMIENTO DE SUBTRAMAS (1:30-3:00):
+  - Deja la PRIMERA pregunta sin responder. Planta la semilla de la intriga.
+  - "Pero esto no es lo más asombroso. Porque a 3000 km de distancia, otro equipo..."
+  - PRESENTA las subtramas (ver estructura de subtramas más abajo).
+
+📺 ESTRUCTURA DE SUBTRAMAS PARALELAS (como serie documental de Netflix):
+El video debe funcionar como una serie con múltiples hilos narrativos, NO como un ensayo lineal.
+
+REGLAS:
+1. IDENTIFICA 3-4 SUBTRAMAS que se presentan en los primeros 3 minutos.
+2. AVANZA cada subtrama en RONDAS como capítulos de serie.
+3. REGLA DE ALTERNANCIA: NUNCA dediques más de 2 bloques SEGUIDOS a la misma subtrama.
+4. Usa transiciones naturales: "Mientras esto ocurría en Egipto...", "Pero volvamos a la tumba..."
+
+⚡ PATTERN INTERRUPTS — cada 2-3 minutos debes ROMPER el ritmo:
+  • [TEXTO_PANTALLA: "5000 años bajo tierra. Nadie lo sabía."]
+  • PREGUNTA RETÓRICA + PAUSA 2s — "¿Cómo una civilización entera pudo desaparecer sin dejar rastro?"
+  • DATO NUMÉRICO aislado — "34 cámaras. 3 sarcófagos. Una tumba que no debería existir."
+  • TESTIMONIO de un arqueólogo o explorador
+
+🔗 MICRO-CLIFFHANGERS — al final de CADA capítulo/sección:
+  "Pero lo que encontraron en la cámara sellada cambió todo..."
+  "La pregunta que los arqueólogos siguen sin responder es..."
+  "Y entonces, en 2018, un satélite reveló algo que nadie esperaba..."
+
+📊 DATOS EN PANTALLA [TEXTO_PANTALLA: "..."]:
+Cada 2-3 minutos, inserta UN dato textual para quemar en pantalla:
+- Formato: [TEXTO_PANTALLA: "frase de máximo 12 palabras"] dentro del texto del bloque.
+- Función: reforzar datos clave, sorprender, dar momentos compartibles.
+
 REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRÍTICO para retención!):
 Los primeros minutos son los que deciden si el espectador se queda hasta el final. Debes:
 - Abrir con un misterio arqueológico, dato impactante o pregunta que el espectador NECESITE ver resuelta.
 - Crear una "promesa narrativa": el espectador debe intuir que si se queda, descubrirá algo fascinante sobre una civilización perdida.
 - NUNCA empezar con frases como "En este video vamos a hablar de...", "Hoy exploraremos..." o "Bienvenidos a...".
 - La primera oración del guion debe ser IMPACTANTE. Entra directo al descubrimiento más asombroso.
+- APLICA la ZONA GANCHO BLINDADA descrita arriba en los primeros bloques del guion.
 
 REGLA ANTI-REPETICIÓN TEMÁTICA (¡OBLIGATORIO!):
 Cada párrafo debe aportar una idea GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:

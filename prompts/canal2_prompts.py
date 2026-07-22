@@ -554,12 +554,95 @@ REGLAS INQUEBRANTABLES:
 {structure_text}
 {retention_text}
 
+⚠️ ZONA GANCHO BLINDADA — primeros 120-180 segundos (¡LA PARTE MÁS IMPORTANTE DEL GUION!):
+El espectador decide en los primeros 30 segundos si se queda o se va. No puedes fallar aquí.
+Estructura obligatoria de 4 micro-fases:
+
+FASE 1 — EL GOLPE (0:00-0:15):
+  - UNA sola frase de IMPACTO PURO. Sin contexto. Sin presentación.
+  - NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a", "Les voy a contar".
+  - SIEMPRE: un DATO DEMOLEDOR, un HECHO CONCRETO con FECHA y NÚMERO, o un CLIFFHANGER.
+  - Si el contenido lo permite, incluye un número exacto: "El 14 de enero de 1998, 3 médicos..."
+  - Esta frase es lo ÚNICO que muchos espectadores leerán/oirán antes de decidir.
+
+FASE 2 — LA PROMESA (0:15-0:45):
+  - Enumera EXPLÍCITAMENTE lo que el espectador va a descubrir si se queda.
+  - Crea un "contrato narrativo" en 3 puntos:
+    "En los próximos minutos vas a descubrir: 
+    [1] quién era realmente este paciente, 
+    [2] qué mostraban los monitores que ningún médico se atrevió a documentar, y 
+    [3] por qué el informe final fue clasificado."
+  - El espectador YA sabe lo que gana. Esto dispara el Zeigarnik Effect: ahora NECESITA completar.
+
+FASE 3 — PRIMERA REVELACIÓN (0:45-1:30):
+  - Suelta YA información fascinante y CONCRETA. No te la guardes para el final.
+  - Entrega: un dato verificable, un documento citado, una fecha exacta, una cita textual.
+  - El espectador se queda porque YA le has dado valor, no por una promesa vacía.
+
+FASE 4 — PRIMER CLIFFHANGER + LANZAMIENTO DE SUBTRAMAS (1:30-3:00):
+  - Deja la PRIMERA pregunta sin responder. Planta la semilla de la intriga.
+  - "Pero esto no es lo más inquietante. Porque mientras esto ocurría..."
+  - PRESENTA las subtramas (ver estructura de subtramas más abajo).
+
+📺 ESTRUCTURA DE SUBTRAMAS PARALELAS (como serie documental de Netflix):
+El video debe funcionar como una serie con múltiples hilos narrativos, NO como un ensayo lineal de un solo tema.
+
+REGLAS:
+1. IDENTIFICA 3-4 SUBTRAMAS que se presentan en los primeros 3 minutos.
+   Ejemplo para un milagro documentado:
+   - Subtrama A: El suceso inexplicable (cronología detallada paso a paso)
+   - Subtrama B: El contexto humano — quiénes son, por qué importa, sus vidas antes
+   - Subtrama C: Las consecuencias — cómo cambió todo, qué pasó después
+   - (Opcional) D: La explicación científica / los escépticos / lo que dice la ciencia
+
+2. AVANZA cada subtrama en RONDAS, como capítulos de serie:
+   - Ronda 1 (0-25% del video): Presentación de cada subtrama — el espectador conoce los hilos
+   - Ronda 2 (25-50%): Desarrollo — cada subtrama recibe un bloque o párrafo
+   - Ronda 3 (50-75%): Conexiones y giros — cómo se relacionan, revelaciones cruzadas
+   - Ronda 4 (75-100%): Convergencia y resolución — los hilos se unen, conclusión
+
+3. REGLA DE ALTERNANCIA: NUNCA dediques más de 2 bloques SEGUIDOS a la misma subtrama.
+   Alterna: Subtrama A → B → A → C → B → C → convergencia.
+   Esto mantiene al espectador: "me interesa cómo sigue B, no me voy todavía."
+
+4. Nombra las subtramas implícitamente en la narración (sin decir "subtrama A"):
+   "Mientras esto ocurría en el hospital..." (cambio a subtrama B)
+   "Pero volvamos al paciente..." (retorno a subtrama A)
+   "Lo que nadie esperaba era la reacción de los medios..." (subtrama C)
+
+⚡ PATTERN INTERRUPTS — cada 2-3 minutos debes ROMPER el ritmo:
+La atención humana decae cada 2-3 minutos. Debes reiniciarla con un interruptor de patrón.
+Técnicas (alterna entre ellas, NO uses la misma dos veces seguidas):
+  • [TEXTO_PANTALLA: "17 personas lo vieron. Ninguna habló."] — dato textual sobreimpreso
+  • PREGUNTA RETÓRICA + PAUSA 2s — "¿Por qué nadie investigó esto? [PAUSA: 2 segundos]"
+  • CAMBIO DE TONO brusco — de asombro a intriga, de reflexión a urgencia
+  • DATO NUMÉRICO aislado — "3 días. Ese fue el tiempo que tardó en desaparecer todo registro."
+  • TESTIMONIO en primera persona — cita textual de un testigo o protagonista
+
+🔗 MICRO-CLIFFHANGERS — al final de CADA capítulo/sección:
+Cada vez que cierres un tema o sección, deja UNA pregunta abierta:
+  "Pero lo que este testigo dijo después lo cambió todo..."
+  "La pregunta que nadie se hizo fue: ¿dónde estaba el cuarto médico?"
+  "Y entonces alguien miró las grabaciones de seguridad..."
+  "Pero en 1998, un periodista encontró algo que los informes no mencionaban..."
+
+📊 DATOS EN PANTALLA [TEXTO_PANTALLA: "..."]:
+Cada 2-3 minutos, inserta UN dato textual para quemar en pantalla:
+- Formato: [TEXTO_PANTALLA: "frase de máximo 12 palabras"] dentro del texto del bloque.
+- El texto en pantalla NO es parte de la narración — es un dato VISUAL que APARECE mientras el narrador habla de OTRA cosa relacionada.
+- Función: dar "momentos compartibles", reforzar puntos clave, sorprender con datos.
+- Ejemplos: 
+  [TEXTO_PANTALLA: "1 entre 12 millones de probabilidades"]
+  [TEXTO_PANTALLA: "14 médicos de 3 países. Ninguna explicación."]
+  [TEXTO_PANTALLA: "El informe fue clasificado 37 años."]
+
 REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRÍTICO para retención!):
 Los primeros minutos son los que deciden si el espectador se queda hasta el final. Debes:
 - Abrir con un misterio, dato impactante o pregunta que el espectador NECESITE ver resuelta.
 - Crear una "promesa narrativa": el espectador debe intuir que si se queda, descubrirá algo que no sabía.
 - NUNCA empezar con frases como "En este video vamos a hablar de...", "Hoy exploraremos..." o "Bienvenidos a...".
 - La primera oración del guion debe ser IMPACTANTE. Entra directo al fenómeno más fascinante.
+- APLICA la ZONA GANCHO BLINDADA descrita arriba en los primeros bloques del guion.
 
 REGLA ANTI-REPETICIÓN TEMÁTICA (¡OBLIGATORIO!):
 Cada párrafo debe aportar una idea GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:

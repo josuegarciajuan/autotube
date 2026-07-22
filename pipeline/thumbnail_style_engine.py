@@ -358,10 +358,8 @@ def build_pollo_prompt(image_concept: str, style_profile: dict) -> str:
     suffix = style_profile.get("pollo_prompt_suffix", "")
 
     quality_suffix = (
-        "high contrast, cinematic lighting, dramatic shadows, ultra-detailed, "
-        "photorealistic, vivid colors, eye-catching YouTube thumbnail composition, "
-        "viral YouTube aesthetic, 8K resolution, shallow depth of field, "
-        "professional studio lighting, award-winning composition"
+        "high contrast, cinematic lighting, photorealistic, vivid colors, "
+        "viral YouTube thumbnail, 8K, dramatic composition, professional"
     )
 
     negative_prompt = (

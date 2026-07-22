@@ -228,13 +228,15 @@ REQUISITOS:
 2. La imagen debe representar un MOMENTO o SÍMBOLO clave del video, no una escena cualquiera
 3. Usa disparadores psicológicos: curiosity gap, miedo, shock, exclusividad
 4. La imagen debe ser conceptual/simbólica — no literal
-5. Incluye sugerencia de composición (dónde va el elemento principal, dónde el texto)
+5. La composición debe reservar el TERCIO INFERIOR como espacio negativo para texto overlay y recuadros inset (mini-imágenes secundarias)
 6. Describe el ESTADO EMOCIONAL que debe transmitir la imagen
+7. Incluye una descripción para UNA ESCENA SECUNDARIA que irá en un recuadro pequeño (ej: documento, fotografía antigua, objeto simbólico)
 
 Responde SOLO con JSON:
 {
   "concept": "Descripción detallada de la imagen conceptual para la miniatura (1-2 frases)",
-  "visual_element": "El elemento visual PRINCIPAL que ocupará el 60% del frame",
+  "visual_element": "El elemento visual PRINCIPAL que ocupará el 50-60% del frame",
+  "secondary_scene": "Escena complementaria para recuadro inset (documento, foto, objeto)",
   "emotion": "La emoción dominante que debe transmitir (shock, miedo, curiosidad, asombro)",
   "layout": "split_face | classified_document | dark_reveal | shock_closeup | incomplete_puzzle",
   "search_query": "5-8 palabras en inglés para buscar esta imagen en Unsplash"

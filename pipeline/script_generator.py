@@ -399,6 +399,43 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         }
         return data
 
+    def _extract_onscreen_text(self, data: dict) -> dict:
+        """Extract [TEXTO_PANTALLA: "..."] tags from block text into onscreen_text field.
+
+        Scans all bloques for embedded onscreen text directives, extracts them,
+        removes the tag from the narration text, and stores them in a dedicated
+        'onscreen_text' field on each block.
+        """
+        import re
+        pattern = re.compile(r'\[TEXTO_PANTALLA:\s*"([^"]+)"\s*\]')
+
+        bloques = data.get("bloques", [])
+        if not bloques:
+            return data
+
+        for block in bloques:
+            texto = block.get("texto", "")
+            match = pattern.search(texto)
+            if match:
+                block["onscreen_text"] = match.group(1).strip()
+                # Remove the tag from narration text
+                block["texto"] = pattern.sub("", texto).strip()
+                # Clean up double spaces / leading punctuation
+                block["texto"] = re.sub(r'\s{2,}', ' ', block["texto"]).strip()
+
+        # Also remove tags from the full guion
+        guion = data.get("guion", "")
+        if guion:
+            data["guion"] = pattern.sub("", guion)
+            data["guion"] = re.sub(r'\s{2,}', ' ', data["guion"]).strip()
+
+        # Count how many onscreen texts were extracted
+        onscreen_count = sum(1 for b in bloques if b.get("onscreen_text"))
+        if onscreen_count > 0:
+            logger.info("_extract_onscreen_text: extracted %d onscreen texts", onscreen_count)
+
+        return data
+
     # ────────────────────────────────────────────────────────────
     # Phase 1: iterative block field enrichment
     # ────────────────────────────────────────────────────────────
@@ -989,6 +1026,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     "proceeding with original script",
                     exc,
                 )
+
+        # Step 3.6: Extract onscreen text tags from blocks
+        if enriched and enriched.get("bloques"):
+            enriched = self._extract_onscreen_text(enriched)
 
         # Step 4: Save to DB
         if hasattr(self, '_progress_cb') and self._progress_cb:

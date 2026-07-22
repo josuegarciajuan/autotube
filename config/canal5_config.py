@@ -183,18 +183,26 @@ TITLE_FORMULAS = [
 ]
 
 TITLE_POWER_WORDS = [
-    # Mystery / Awe
-    "inexplicable", "imposible", "increible", "asombroso", "misterioso",
-    "desconcertante", "fascinante", "unico",
-    # Medical / Clinical
-    "sindrome", "enfermedad", "diagnostico", "caso", "paciente",
-    "curacion", "tratamiento", "pronostico",
+    # ⚡ URGENCIA / EXCLUSIVIDAD
+    "revelado", "filtrado", "censurado", "inédito", "clasificado",
+    "confidencial", "prohibido", "archivado",
+    # 💥 IMPACTO EMOCIONAL
+    "escalofriante", "desgarrador", "inexplicable", "demoledor",
+    "sobrecogedor", "estremecedor", "alucinante", "aterrador",
+    "asombroso", "desconcertante", "fascinante",
+    # 🔍 CURIOSIDAD / MISTERIO
+    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
+    "impactante", "increíble", "insólito", "misterioso", "único",
+    # Medical / Clinical (canal5 specific)
+    "síndrome", "enfermedad", "diagnóstico", "caso", "paciente",
+    "curación", "tratamiento", "pronóstico",
     # Authority / Verification
     "documentado", "real", "verificado", "confirmado", "demostrado",
-    # Scale / Numbers
-    "rara", "unica", "primera", "ultima", "ningun",
-    # Survival / Hope
-    "sobrevivio", "vencio", "supero", "desafio", "contradijo",
+    # Scale / Numbers (canal5 specific)
+    "rara", "única", "primera", "última", "ningún",
+    # Survival / Hope (canal5 specific)
+    "sobrevivió", "venció", "superó", "desafió", "contradijo",
+    "imposible", "increíble",
 ]
 
 TITLE_MAX_CHARS = 65

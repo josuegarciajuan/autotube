@@ -199,17 +199,24 @@ TITLE_FORMULAS = [
 ]
 
 TITLE_POWER_WORDS = [
-    # Wonder / Awe
-    "inexplicable", "imposible", "increíble", "alucinante", "sorprendente",
-    "extraordinario", "asombroso", "fascinante", "sobrecogedor",
-    # Authority / Verification
+    # ⚡ URGENCIA / EXCLUSIVIDAD
+    "revelado", "filtrado", "censurado", "inédito", "clasificado",
+    "confidencial", "prohibido", "exclusiva",
+    # 💥 IMPACTO EMOCIONAL
+    "escalofriante", "desgarrador", "inexplicable", "demoledor",
+    "sobrecogedor", "estremecedor", "alucinante", "aterrador",
+    "conmovedor", "inspirador", "revelador", "imposible",
+    "extraordinario", "asombroso", "fascinante",
+    # 🔍 CURIOSIDAD / MISTERIO
+    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
+    "impactante", "increíble", "insólito",
+    # Authority / Verification (canal2 specific)
     "demostrado", "documentado", "real", "comprobado", "verificado",
-    # Spiritual / Destiny
+    # Spiritual / Destiny (canal2 specific)
     "milagro", "destino", "sincronía", "casualidad", "profecía",
-    # Survival / Hope
     "sobrevivió", "regresó", "salvó", "predijo", "anticipó",
-    # Emotional
-    "conmovedor", "inspirador", "estremecedor", "revelador",
+    # Legacy compat
+    "sorprendente",
 ]
 
 TITLE_MAX_CHARS = 65

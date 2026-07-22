@@ -41,17 +41,21 @@ Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y
 ═══ REGLAS DE ORO ═══
 
 📝 TÍTULO VIRAL (1 ÚNICO título optimizado):
-- Máximo 100 caracteres (límite YouTube).
-- La keyword principal al frente (primeras 3 palabras).
-- USA PATRONES DE ALTO CTR que están científicamente probados:
-  • "El X que [verbo impactante]" — ej: "El experimento que destrozó la psicología"
-  • Números impares + adjetivo extremo — ej: "3 secretos perturbadores de..."
-  • Pregunta retórica que genera necesidad de respuesta — ej: "¿Qué pasó realmente en...?"
-  • Revelación exclusiva — ej: "Lo que NADIE te contó sobre..."
-  • Contraste emocional extremo — ej: "Prometió curarlos. Los destruyó a todos."
-- Power words de alto engagement: impactante, increíble, secreto, oculto, perturbador, prohibido, aterrador, desgarrador, inexplicable, demoledor, estremecedor, alucinante, sobrecogedor, siniestro.
+- LONGITUD OBJETIVO: 40-65 caracteres (rango de máximo CTR comprobado). MÁXIMO ABSOLUTO: 100 caracteres.
+- La keyword principal al frente (primeras 3 palabras). NO empieces con artículos débiles ("El", "La", "Un", "Una", "Los", "Las") a menos que formen parte de una frase de impacto deliberada. Mejor empieza con el número, la keyword o "Este/Esta" si necesitas un determinante.
+- USA PATRONES DE ALTO CTR científicamente probados:
+  • Número impar + adjetivo extremo — ej: "3 médicos vieron esto y NO pudieron explicarlo"
+  • Pregunta retórica que genera necesidad de respuesta — ej: "¿Qué filmó esta cámara a 11.000 metros?"
+  • Revelación exclusiva — ej: "Lo que NADIE te contó sobre [tema]"
+  • Contraste emocional extremo — ej: "Entró al quirófano riendo. Salió sin poder hablar."
+  • Paréntesis informativo al final para añadir credibilidad — ej: "(REAL)", "(Documental)", "(2026)"
+- POWER WORDS por categoría (usa al menos 1 de cada categoría a lo largo de los metadatos, no solo en el título):
+  ⚡ URGENCIA / EXCLUSIVIDAD: REVELADO, FILTRADO, CENSURADO, INÉDITO, CLASIFICADO, CONFIDENCIAL, PROHIBIDO, EXCLUSIVA
+  💥 IMPACTO EMOCIONAL: ESCALOFRIANTE, DESGARRADOR, INEXPLICABLE, DEMOLEDOR, SOBRECOGEDOR, ESTREMECEDOR, ALUCINANTE, ATERRADOR
+  🔍 CURIOSIDAD / MISTERIO: OCULTO, SECRETO, PERTURBADOR, SINIESTRO, ENIGMÁTICO, IMPACTANTE, INCREÍBLE, INSÓLITO
 - Clickbait ÉTICO: el título promete algo que el video REALMENTE entrega.
 - CAPITALIZACIÓN: escribe el título como una frase normal en español — SOLO la primera letra en mayúscula y los nombres propios. NUNCA pongas cada palabra en mayúscula (Title Case). Puedes poner UNA palabra clave en MAYÚSCULAS para destacar (máximo 1 por título).
+- AÑADE un sufijo entre paréntesis SIEMPRE que aporte credibilidad: (REAL), (CASO REAL), (DOCUMENTAL), (ARCHIVOS CIA), (2026), (EXPEDIENTE). El sufijo va al final del título, después de un espacio, y no cuenta para los 40-65 chars objetivo.
 - El título debe crear una sensación de "TENGO que ver esto" al hacer scroll.
 
 🧠 PSICOLOGÍA DEL CLICK (APLICADA AL TÍTULO):
@@ -59,12 +63,15 @@ Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y
 - Zeigarnik Effect: información incompleta → ansiedad → necesidad de cerrar el ciclo.
 - Emotional Arousal (high-arousal words): sorpresa, ira, miedo, asombro → comparten más.
 - Von Restorff Effect: el título debe destacar entre los demás resultados de búsqueda.
-- Números impares: 20% más CTR que los pares. Usa 3, 5, 7.
+- Números impares: 20% más CTR que los pares. Usa 3, 5, 7, 9, 11.
+- Credibilidad por señal: un sufijo entre paréntesis (REAL, DOCUMENTAL) actúa como señal de confianza → reduce el escepticismo del clickbait y aumenta CTR en nichos de curiosidad/misterio.
 
 Ejemplos de buena capitalización:
-  CORRECTO: "El milagro que dejó SIN PALABRAS a 5 médicos"
-  CORRECTO: "Nadie creyó su predicción. 3 días después ocurrió"
+  CORRECTO: "Nadie creyó su predicción. 3 días después ocurrió (REAL)"
+  CORRECTO: "5 médicos vieron esto y NO pudieron explicarlo (Documental)"
+  CORRECTO: "El experimento que volvió LOCOS a 5 personas (ARCHIVOS CIA)"
   INCORRECTO: "El Milagro Que Dejó Sin Palabras A 5 Médicos"
+  INCORRECTO (empieza con artículo débil sin impacto): "La historia que nadie te contó sobre..."
 
 📄 DESCRIPCIÓN (SEO completa):
 - PRIMERAS 2-3 LÍNEAS: un resumen envolvente que explique de qué va el vídeo a alguien que NO lo ha visto. Incluye la keyword principal de forma natural. Debe ser la respuesta a "¿de qué trata este vídeo?" en 2-3 frases.
@@ -92,29 +99,32 @@ Ejemplos de buena capitalización:
   • Temas relacionados y long-tail keywords.
 - Máximo 500 caracteres en total para todos los tags juntos.
 
-🖼️ TEXTO MINIATURA (OVERLAY):
-- Máximo 24 caracteres (2-4 palabras de altísimo impacto visual).
-- DEBE ser intrigante y complementario al título (no repetir sus primeras palabras — añade el gancho que falta).
-- Formatos de alto CTR probados:
-  • Pregunta corta que genera curiosidad: "¿QUÉ OCULTARON?", "¿CÓMO SOBREVIVIÓ?"
-  • Cifra impactante: "3 MINUTOS", "NINGUNO SALIÓ"
-  • Palabra-gancho con signos: "NADIE LO VIO", "PROHIBIDO", "SECRETO"
-  • Afirmación extrema: "CAMBIÓ TODO", "FUE REAL"
-- USA MAYÚSCULAS (más legible en miniatura).
-- El texto debe hacer que el espectador NECESITE hacer clic para resolver la intriga.
+🖼️ TEXTO MINIATURA (DOS LÍNEAS DE OVERLAY):
+Ahora la miniatura tiene DOS líneas de texto en vez de una:
+- LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máximo 12 caracteres. Debe ser la palabra o frase más impactante que haga DETENER el scroll. Formatos probados:
+  • Palabra-gancho con signos: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO"
+  • Cifra impactante: "3 MINUTOS", "NINGUNO SALIÓ", "5 MÉDICOS"
+  • Afirmación extrema: "FUE REAL", "CAMBIÓ TODO"
+- LÍNEA 2 (complemento, texto MEDIANO debajo de L1): 2-4 palabras. Máximo 24 caracteres. Complementa a L1 y al título sin repetirlos. Añade la pieza de intriga que falta. Formatos probados:
+  • "Nadie lo explicó", "Lo que ocultaron", "La verdad sale"
+  • "El informe secreto", "Dijeron que era imposible"
+- Regla de oro: L1 + L2 + título deben contar una mini-historia de 3 frases que obligue a hacer clic. NINGUNA línea repite a las otras ni al título.
 
-═══ COHERENCIA TÍTULO ↔ IMAGEN ═══
-El título y el texto de la miniatura deben trabajar JUNTOS, sin repetirse:
-- TÍTULO: promete el tema principal + el gancho ("El experimento que volvió locos a 5 personas").
-- THUMBNAIL_TEXT: añade la pieza de intriga que falta ("¿QUÉ LES HICIERON?").
-- Juntos deben contar una mini-historia de 2 frases que obligue a hacer clic.
+═══ COHERENCIA TÍTULO ↔ MINIATURA ═══
+El título, L1 y L2 deben trabajar JUNTOS, sin repetirse:
+- TÍTULO: promete el tema principal + el gancho ("5 médicos vieron esto y NO pudieron explicarlo (REAL)").
+- L1 (thumbnail): palabra-gancho visual ("¿QUÉ PASÓ?").
+- L2 (thumbnail): el complemento intrigante ("El informe secreto").
+- Juntos deben contar una mini-historia de 3 actos que obligue a hacer clic.
 
 Responde SIEMPRE en formato JSON con exactamente estas claves:
 {
-  "title": "Título viral en español (max 100 chars, solo primera letra mayúscula + 1 palabra en CAPS)",
+  "title": "Título viral en español (40-65 chars ideal, max 100, solo primera letra mayúscula + 1 palabra en CAPS + sufijo entre paréntesis)",
+  "title_suffix": "REAL | DOCUMENTAL | CASO REAL | ARCHIVOS CIA | 2026 | EXPEDIENTE | '' si no aplica",
   "description": "2-3 líneas de resumen + desarrollo + chapters + CTAs + 3-5 hashtags al final",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "thumbnail_text": "TEXTO INTRIGANTE MAX 24 CHARS"
+  "thumbnail_text": "LÍNEA1 IMPACTO MAX 12 CHARS | línea2 complemento max 24 chars (separadas por |)",
+  "badge_text": "DOCUMENTAL | CASO REAL | REAL | ARCHIVO | EXPEDIENTE | '' (texto para el sello/badge en la esquina de la miniatura)"
 }"""
 
 
@@ -249,10 +259,12 @@ ESCENAS DEL VIDEO:
 {scenes_text}
 
 INSTRUCCIONES:
-1. Genera 1 ÚNICO título viral optimizado: keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll.
-2. Crea una descripción SEO completa con chapters, emojis estratégicos y hashtags, hook irresistible en las primeras 125 chars.
-3. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
-4. Crea un texto de miniatura INTRIGANTE Y COMPLEMENTARIO (máx 24 caracteres, 2-4 palabras, MAYÚSCULAS). No repitas el título. Añade la pieza de curiosidad que falta. Formatos probados: pregunta corta, cifra impactante, palabra-gancho extrema.
+1. Genera 1 ÚNICO título viral optimizado (40-65 chars): keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll. Añade sufijo entre paréntesis si aporta credibilidad: (REAL), (DOCUMENTAL), etc.
+2. Si el título lleva sufijo parentético, sepáralo en el campo "title_suffix". Si no, déjalo vacío.
+3. Crea una descripción SEO completa con chapters, emojis estratégicos y hashtags, hook irresistible en las primeras 125 chars.
+4. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
+5. Crea DOS LÍNEAS de texto para la miniatura separadas por | : L1 (máx 12 chars, palabra-gancho en MAYÚSCULAS) | L2 (máx 24 chars, complemento intrigante). No repitas el título.
+6. Define el texto para el badge/sello de la miniatura (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío).
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
@@ -284,8 +296,23 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             if not title or not isinstance(title, str):
                 title = self._fallback_titles(script)[0]
             
-            # Ensure title ≤ 100 chars
-            title = title[:100]
+            # Extract title suffix if present (LLM may or may not include it in title)
+            title_suffix = result.get("title_suffix", "").strip().upper()
+            if title_suffix:
+                # Remove suffix symbols the LLM might wrap it in
+                title_suffix = title_suffix.strip("()（）[]")
+                # If title doesn't already end with the suffix, append it
+                suffix_formatted = f" ({title_suffix})"
+                if not title.rstrip().endswith(suffix_formatted):
+                    title = title.rstrip() + suffix_formatted
+            
+            # Ensure title ≤ 100 chars (trim suffix if needed)
+            if len(title) > 100:
+                # Try to fit by trimming suffix first, then title
+                suffix_formatted = f" ({title_suffix})" if title_suffix else ""
+                max_title_body = 100 - len(suffix_formatted)
+                title = title[:max_title_body].rstrip() + suffix_formatted
+                title = title[:100]  # final safety
             
             description = result.get("description", "")
             # Truncate description to 5000 bytes
@@ -298,11 +325,17 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             # Validate total tags chars ≤ 500
             tags_validated = self._validate_tags(tags[:10])
             
-            thumbnail_text = result.get("thumbnail_text", "")
-            if thumbnail_text:
-                thumbnail_text = _smart_overlay_text(thumbnail_text).upper()
+            # Parse thumbnail text — new format: "L1 | L2" or legacy single line
+            thumbnail_text_raw = result.get("thumbnail_text", "")
+            if thumbnail_text_raw:
+                thumbnail_text = _smart_overlay_text(thumbnail_text_raw).upper()
             else:
-                thumbnail_text = _smart_overlay_text(title).upper() if title else "¿QUÉ OCULTAN?"
+                thumbnail_text = _smart_overlay_text(title).upper() if title else "¿QUÉ PASÓ?"
+            
+            # Parse badge text for thumbnail seal
+            badge_text = result.get("badge_text", "").strip().upper()
+            if badge_text:
+                badge_text = badge_text.strip("()（）[]")
             
             # Track token usage
             usage = response.usage
@@ -316,8 +349,8 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             
             elapsed = time.time() - start
             logger.info(
-                "Metadata generated in %.1fs: title='%s', %d tags, %d tokens ($%.4f)",
-                elapsed, title[:60], len(tags_validated), token_count, cost_estimate,
+                "Metadata generated in %.1fs: title='%s', tags=%d, badge='%s', %d tokens ($%.4f)",
+                elapsed, title[:60], len(tags_validated), badge_text, token_count, cost_estimate,
             )
             
             return {
@@ -326,6 +359,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 "description": description,
                 "tags": tags_validated,
                 "thumbnail_text": thumbnail_text,
+                "badge_text": badge_text,
                 "category_id": self.yt_category_id,
                 "token_count": token_count,
                 "cost_estimate": cost_estimate,
@@ -414,7 +448,8 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             "selected_title": title,
             "description": description[:5000],
             "tags": self._validate_tags(tags),
-            "thumbnail_text": "LO INCREÍBLE",
+            "thumbnail_text": "¿QUÉ PASÓ? | La verdad detrás",
+            "badge_text": "DOCUMENTAL",
             "category_id": self.yt_category_id,
             "token_count": 0,
             "cost_estimate": 0.0,

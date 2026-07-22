@@ -286,6 +286,12 @@ class ThumbnailMaker:
 
         # Use provided overlay_text or the one from brainstorming
         final_overlay = overlay_text.strip() if overlay_text else brief.text_overlay
+        
+        # ── v2: extract multi-text fields from brief ────────────
+        text_gancho = brief.text_gancho if hasattr(brief, 'text_gancho') and brief.text_gancho else ""
+        text_complemento = brief.text_complemento if hasattr(brief, 'text_complemento') and brief.text_complemento else ""
+        badge_text = brief.badge_text if hasattr(brief, 'badge_text') and brief.badge_text else ""
+        secondary_scene = brief.secondary_scene if hasattr(brief, 'secondary_scene') and brief.secondary_scene else ""
 
         # ── F3: Image Generation + QC ──────────────────────────
         if base_image_path and Path(base_image_path).exists():
@@ -312,6 +318,10 @@ class ThumbnailMaker:
             title=title,
             canal_slug=slug,
             video_id=video_id,
+            text_gancho=text_gancho,
+            text_complemento=text_complemento,
+            badge_text=badge_text,
+            secondary_scene=secondary_scene,
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
@@ -667,16 +677,20 @@ class ThumbnailMaker:
         title: str,
         canal_slug: str = "",
         video_id: int = 0,
+        text_gancho: str = "",
+        text_complemento: str = "",
+        badge_text: str = "",
+        secondary_scene: str = "",
     ) -> Path:
-        """Apply channel-style composition to the base image.
+        """Apply channel-style mosaic composition to the base image.
 
         Layers applied:
         1. Color grading (contrast + saturation per style)
         2. Dark gradient overlay (bottom 50%)
-        3. Marketing text overlay (UPPERCASE, bold, thick shadow)
-        4. 4K badge (top-right corner)
-        5. Accent border
-        6. Classified stamp (if applicable)
+        3. Inset recuadros (2 styled boxes with labels)
+        4. Marketing text overlay (2 lines: L1 gancho + L2 complemento)
+        5. Badge stamp (top-right corner)
+        6. Accent border
         """
         # Load and resize
         img = Image.open(base_image).convert("RGB")
@@ -714,56 +728,135 @@ class ThumbnailMaker:
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # ── Marketing text overlay ───────────────────────────
-        text_for_visual = overlay_text.strip() if overlay_text else brief.text_overlay
+        # ── v2: Inset recuadros (styled boxes for mosaic effect) ──
+        inset_draw = ImageDraw.Draw(img)
+        color_palette = style.get("color_palette", {})
+        accent_rgb = self._hex_to_rgb(color_palette.get("accent", "#CC3333"))
         
-        # Validate overlay text for thumbnail readability:
-        # - Truncate to max 60 chars (too long = illegible on 1280x720)
-        # - Remove pipe separators "|" (YouTube title convention, not thumbnail)
-        # - Strip trailing punctuation that looks bad UPPERCASE
-        if len(text_for_visual) > 60:
-            # Truncate at word boundary
-            truncated = text_for_visual[:57].rsplit(" ", 1)[0]
-            text_for_visual = truncated
-            logger.info("_compose_final: truncated overlay text from %d → %d chars",
-                        len(overlay_text) if overlay_text else len(brief.text_overlay),
-                        len(text_for_visual))
+        # Inset A: bottom-left recuadro (20% of canvas, semi-transparent dark bg)
+        inset_w, inset_h = int(self.width * 0.22), int(self.height * 0.20)
+        inset_x, inset_y = 15, self.height - inset_h - 15
+        inset_bg = (15, 15, 20, 180)
+        inset_overlay_a = Image.new("RGBA", (inset_w, inset_h), inset_bg)
+        # Draw accent border on overlay
+        inset_draw_a = ImageDraw.Draw(inset_overlay_a)
+        inset_draw_a.rounded_rectangle(
+            [2, 2, inset_w - 2, inset_h - 2], radius=8,
+            outline=accent_rgb + (220,), width=3
+        )
+        # Label for inset A
+        if secondary_scene:
+            label_a = secondary_scene[:30].upper()
+        else:
+            label_a = "DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA"
+        inset_font_sm = _find_font(max(14, int(inset_h * 0.18)), bold=True, font_name=self.font_family)
+        if inset_font_sm:
+            bbox_a = inset_draw_a.textbbox((0, 0), label_a, font=inset_font_sm)
+            tw, th = bbox_a[2] - bbox_a[0], bbox_a[3] - bbox_a[1]
+            tx = (inset_w - tw) // 2
+            ty = (inset_h - th) // 2
+            inset_draw_a.text((tx, ty), label_a, fill=(200, 200, 200, 255), font=inset_font_sm)
+        img.paste(inset_overlay_a, (inset_x, inset_y), inset_overlay_a)
         
-        # Clean pipe separators (used in YouTube titles, not visual overlays)
-        if "|" in text_for_visual:
-            text_for_visual = text_for_visual.split("|")[0].strip()
+        # Inset B: bottom-right recuadro (15% of canvas)
+        inset_w2, inset_h2 = int(self.width * 0.16), int(self.height * 0.18)
+        inset_x2 = self.width - inset_w2 - 15
+        inset_y2 = self.height - inset_h2 - 15
+        inset_overlay_b = Image.new("RGBA", (inset_w2, inset_h2), (15, 15, 25, 160))
+        inset_draw_b = ImageDraw.Draw(inset_overlay_b)
+        inset_draw_b.rounded_rectangle(
+            [2, 2, inset_w2 - 2, inset_h2 - 2], radius=8,
+            outline=accent_rgb + (180,), width=2
+        )
+        # Label for inset B — use badge_text or derive from content
+        label_b = badge_text if badge_text else "DOCUMENTAL"
+        if len(label_b) > 14:
+            label_b = label_b[:12] + ".."
+        inset_font_xs = _find_font(max(12, int(inset_h2 * 0.2)), bold=True, font_name=self.font_family)
+        if inset_font_xs:
+            bbox_b = inset_draw_b.textbbox((0, 0), label_b, font=inset_font_xs)
+            tw2, th2 = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
+            tx2 = (inset_w2 - tw2) // 2
+            ty2 = (inset_h2 - th2) // 2
+            inset_draw_b.text((tx2, ty2), label_b, fill=(200, 200, 200, 255), font=inset_font_xs)
+        img.paste(inset_overlay_b, (inset_x2, inset_y2), inset_overlay_b)
         
-        # Strip trailing punctuation that looks odd in uppercase thumbnails
-        text_for_visual = text_for_visual.rstrip(".,;:-")
+        # ── v2: Two-line marketing text overlay ──────────────────
+        text_gancho_v = text_gancho.strip() if text_gancho else ""
+        text_complemento_v = text_complemento.strip() if text_complemento else ""
         
+        # Fallback: parse from legacy overlay_text (format: "L1 | L2")
+        if not text_gancho_v and overlay_text.strip():
+            parts = overlay_text.strip().split("|")
+            if len(parts) >= 2:
+                text_gancho_v = parts[0].strip()
+                text_complemento_v = parts[1].strip()
+            else:
+                text_gancho_v = overlay_text.strip()
+        
+        # If still nothing, derive from brief.text_overlay
+        if not text_gancho_v and brief.text_overlay:
+            parts = brief.text_overlay.split("|")
+            if len(parts) >= 2:
+                text_gancho_v = parts[0].strip()
+                text_complemento_v = parts[1].strip()
+            else:
+                text_gancho_v = brief.text_overlay[:12]
+        
+        # Determine font sizes
         text_style = style.get("text_style", {})
         use_uppercase = text_style.get("uppercase", True)
+        
+        # L1: big gancho font (72-96px)
+        gancho_font_size = max(62, int(self.height * 0.13))
+        gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
+        # L2: medium complemento font (38-52px)
+        comp_font_size = max(32, int(self.height * 0.07))
+        comp_font = _find_font(comp_font_size, bold=True, font_name=self.font_family)
+        
         if use_uppercase:
-            text_for_visual = text_for_visual.upper()
-
-        # Use channel color palette for text
-        color_palette = style.get("color_palette", {})
+            text_gancho_v = text_gancho_v.upper()
+            text_complemento_v = text_complemento_v.upper()
+        
+        # Truncate
+        text_gancho_v = text_gancho_v[:14]
+        text_complemento_v = text_complemento_v[:28]
+        
         text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
         shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
-
-        viral_font_size = int(self.font_size * 1.3)
-        viral_font = _find_font(viral_font_size, bold=True,
-                                font_name=self.font_family)
-
-        if text_for_visual:
-            lines = self._wrap_text_viral(
-                draw, text_for_visual,
-                max_width=int(self.width * 0.88),
-                font=viral_font,
-            )
-            self._draw_viral_text_with_palette(
-                draw, lines, viral_font, text_color, shadow_color,
-                stroke_width=self.text_stroke_width,
-                stroke_color=self.text_stroke_color,
-            )
-
-        # ── 4K Badge (per-channel configurable) ────────────────
-        if self.show_4k_badge:
+        stroke_w = max(3, self.text_stroke_width + 2)
+        
+        # Draw L1 (gancho) — centered, lower-third
+        if text_gancho_v and gancho_font:
+            bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
+            l1_w = bbox_l1[2] - bbox_l1[0]
+            l1_h = bbox_l1[3] - bbox_l1[1]
+            l1_x = (self.width - l1_w) // 2
+            l1_y = int(self.height * 0.52)  # lower half
+            
+            # Shadow
+            for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                           (-stroke_w, -stroke_w), (stroke_w, stroke_w), (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
+                draw.text((l1_x + sx, l1_y + sy), text_gancho_v, fill=shadow_color, font=gancho_font)
+            draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font)
+        
+        # Draw L2 (complemento) — centered, below L1
+        if text_complemento_v and comp_font:
+            bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
+            l2_w = bbox_l2[2] - bbox_l2[0]
+            l2_x = (self.width - l2_w) // 2
+            l2_y = l1_y + l1_h + 12  # 12px gap
+            
+            for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                           (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
+                draw.text((l2_x + sx, l2_y + sy), text_complemento_v, fill=shadow_color, font=comp_font)
+            draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font)
+        
+        # ── Badge stamp (top-right corner, replaces old 4K badge position) ──
+        badge_text_v = badge_text if badge_text else ""
+        if badge_text_v:
+            self._draw_badge_stamp(draw, badge_text_v, accent_rgb)
+        elif self.show_4k_badge:
             self._draw_4k_badge(draw)
 
         # ── Border (per-channel configurable color) ─────────────
@@ -778,7 +871,7 @@ class ThumbnailMaker:
         layout = brief.layout or style.get("base_composition", "dark_reveal")
         if layout == "classified_document":
             self._add_classified_overlay(draw, {
-                "accent": accent,
+                "accent": accent_rgb,
                 "text_primary": text_color,
                 "text_shadow": shadow_color,
             })
@@ -839,6 +932,32 @@ class ThumbnailMaker:
         tx = x + (badge_w - tw) // 2
         ty = y + (badge_h - th) // 2 - 2
         draw.text((tx, ty), text, font=badge_font, fill=(255, 255, 255))
+
+    def _draw_badge_stamp(self, draw: ImageDraw.ImageDraw, text: str, accent_rgb: tuple) -> None:
+        """Draw a confidence badge/stamp in the top-right corner (replaces/extends 4K)."""
+        badge_font = _find_font(26, bold=True, font_name=self.font_family)
+        if not badge_font:
+            return
+        
+        # Measure text
+        bbox = draw.textbbox((0, 0), text.upper(), font=badge_font)
+        tw = bbox[2] - bbox[0] + 30
+        th = bbox[3] - bbox[1] + 16
+        x = self.width - tw - 15
+        y = 15
+        
+        # Semi-transparent dark background
+        draw.rounded_rectangle(
+            [x, y, x + tw, y + th],
+            radius=10,
+            fill=(10, 10, 12),
+            outline=accent_rgb,
+            width=3,
+        )
+        # Text
+        tx = x + (tw - (bbox[2] - bbox[0])) // 2
+        ty = y + (th - (bbox[3] - bbox[1])) // 2
+        draw.text((tx, ty), text.upper(), font=badge_font, fill=(255, 255, 240))
 
     # ── Focus vignette (radial darkening → eye drawn to centre) ──
 

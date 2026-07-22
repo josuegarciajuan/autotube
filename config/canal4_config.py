@@ -179,16 +179,26 @@ TITLE_FORMULAS = [
 ]
 
 TITLE_POWER_WORDS = [
-    # Danger / Death
-    "desaparecio", "nunca regreso", "atrapados", "perdidos", "abandonados",
-    "muertos", "devorados", "congelados", "hundidos", "sepultados",
-    # Survival / Rescue
-    "sobrevivio", "rescatado", "encontrado", "escapo", "volvio",
+    # ⚡ URGENCIA / EXCLUSIVIDAD
+    "revelado", "filtrado", "censurado", "inédito", "clasificado",
+    "confidencial", "prohibido", "archivado",
+    # 💥 IMPACTO EMOCIONAL
+    "escalofriante", "desgarrador", "inexplicable", "demoledor",
+    "sobrecogedor", "estremecedor", "alucinante", "aterrador",
+    "implacable", "extremo",
+    # 🔍 CURIOSIDAD / MISTERIO
+    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
+    "impactante", "increíble", "insólito",
+    # Danger / Death (canal4 specific)
+    "desapareció", "nunca regresó", "atrapados", "perdidos", "abandonados",
+    "muertos", "congelados", "hundidos", "sepultados",
+    # Survival / Rescue (canal4 specific)
+    "sobrevivió", "rescatado", "encontrado", "escapó", "volvió",
     # Authority / Reality
     "real", "documentado", "verificado", "demostrado", "confirmado",
-    # Environment / Scale
-    "hielo", "nieve", "tormenta", "oceano", "desierto", "montaña",
-    "selva", "abisal", "extremadamente", "implacable",
+    # Environment / Scale (canal4 specific)
+    "hielo", "nieve", "tormenta", "océano", "desierto", "montaña",
+    "selva", "abisal",
 ]
 
 TITLE_MAX_CHARS = 65

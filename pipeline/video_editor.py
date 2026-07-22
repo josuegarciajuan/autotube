@@ -629,6 +629,14 @@ class VideoEditor:
         else:
             self.logger.info("  Subtitles disabled (SUBTITLES_ENABLED=False)")
 
+        # ── Onscreen text overlays (from [TEXTO_PANTALLA] in script) ──
+        onscreen_clips = self._build_onscreen_text_overlays(block_ranges, self.video_size)
+        if onscreen_clips:
+            body_video = CompositeVideoClip(
+                [body_video] + onscreen_clips, size=self.video_size,
+            )
+            self.logger.info("  Added %d onscreen text overlays", len(onscreen_clips))
+
         # ── CTA audio: load first to determine duration ────────
         # The CTA voice-over can be 10+ seconds (full SCRIPT_END_HOOK),
         # so we measure it before building the visual clip. This prevents:
@@ -1130,6 +1138,7 @@ class VideoEditor:
                     "duration": end_time - start_time,
                     "tipo": bloque.get("tipo", "desarrollo"),
                     "texto": bloque.get("texto", ""),
+                    "onscreen_text": bloque.get("onscreen_text", ""),
                     "media_tipo": bloque.get("media_tipo", "imagen"),
                     "media_duracion": bloque.get("media_duracion", 5),
                     "search_query_en": bloque.get("search_query_en", ""),
@@ -1158,6 +1167,7 @@ class VideoEditor:
                 "duration": dur,
                 "tipo": bloque.get("tipo", "desarrollo"),
                 "texto": bloque.get("texto", ""),
+                "onscreen_text": bloque.get("onscreen_text", ""),
                 "media_tipo": bloque.get("media_tipo", "imagen"),
                 "media_duracion": bloque.get("media_duracion", 5),
                 "search_query_en": bloque.get("search_query_en", ""),
@@ -2145,6 +2155,66 @@ class VideoEditor:
                 self.logger.exception("Skipping subtitle phrase at %.1f s", phrase["start"])
 
         return subtitle_clips
+
+    def _build_onscreen_text_overlays(
+        self, block_ranges: list[dict], video_size: tuple[int, int],
+    ) -> list[VideoClip]:
+        """Create onscreen text overlay clips for blocks with onscreen_text field.
+
+        Each overlay is a semi-transparent dark box with white bold text,
+        appearing at the block's start time for its duration.
+        """
+        clips: list[VideoClip] = []
+        from pipeline.thumbnail_maker import _find_font
+
+        for br in block_ranges:
+            text = (br.get("onscreen_text") or "").strip()
+            if not text:
+                continue
+
+            start = br.get("start", 0)
+            dur = br.get("duration", 5.0)
+            if dur <= 0:
+                continue
+
+            try:
+                w, h = video_size
+
+                # Semi-transparent dark background bar
+                bar_height = 80
+                bar_y = int(h * 0.82)
+                overlay_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                draw_img = ImageDraw.Draw(overlay_img)
+                draw_img.rectangle(
+                    [(0, bar_y), (w, bar_y + bar_height)],
+                    fill=(0, 0, 0, 150),
+                )
+
+                # White bold text, centered
+                text_color = (255, 255, 255, 255)
+                truncated = text[:50]
+                font = _find_font(36, bold=True)
+                if font:
+                    bbox = draw_img.textbbox((0, 0), truncated, font=font)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                    tx = (w - tw) // 2
+                    ty = bar_y + (bar_height - th) // 2
+                    # Shadow
+                    draw_img.text((tx + 2, ty + 2), truncated, fill=(0, 0, 0, 200), font=font)
+                    draw_img.text((tx, ty), truncated, fill=text_color, font=font)
+
+                overlay_array = np.array(overlay_img)
+                clip = ImageClip(overlay_array, duration=dur)
+                clip = clip.with_start(start)
+                clips.append(clip)
+
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to create onscreen text overlay: %s", exc
+                )
+
+        return clips
 
     def _make_text_clip(
         self,

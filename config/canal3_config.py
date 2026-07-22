@@ -185,19 +185,24 @@ TITLE_FORMULAS = [
 ]
 
 TITLE_POWER_WORDS = [
-    # Discovery / Revelation
-    "descubrieron", "encontraron", "revelado", "oculto", "secreto",
-    "olvidado", "prohibido", "censurado", "enterrado",
-    # Mystery / Awe
-    "misterio", "enigma", "inexplicable", "imposible", "asombroso",
-    "desconcertante", "fascinante", "alucinante",
-    # Ancient / Lost
+    # ⚡ URGENCIA / EXCLUSIVIDAD
+    "revelado", "filtrado", "censurado", "inédito", "clasificado",
+    "confidencial", "prohibido", "enterrado", "sellado",
+    # 💥 IMPACTO EMOCIONAL
+    "escalofriante", "desgarrador", "inexplicable", "demoledor",
+    "sobrecogedor", "estremecedor", "alucinante", "aterrador",
+    "asombroso", "desconcertante", "fascinante",
+    # 🔍 CURIOSIDAD / MISTERIO
+    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
+    "impactante", "increíble", "insólito", "misterio", "enigma",
+    # Ancient / Lost (canal3 specific)
     "perdida", "milenaria", "ancestral", "desaparecida", "sumergida",
-    "maldita", "sagrada", "prohibida",
+    "maldita", "sagrada", "olvidado",
+    # Discovery / Revelation (canal3 specific)
+    "descubrieron", "encontraron", "reescribió", "cambió", "revolucionó",
     # Authority / Science
     "demostrado", "confirmado", "verificado", "documentado",
-    # Scale / Impact
-    "reescribió", "cambió", "revolucionó", "sacudió",
+    "imposible", "sacudió",
 ]
 
 TITLE_MAX_CHARS = 65

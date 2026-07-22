@@ -454,12 +454,58 @@ NO incluyas llamadas a la accion (suscribete, like, campana, comparte, etc.).
 Las llamadas a la accion se añaden automaticamente en una seccion separada DESPUES de que termine el video.
 El cierre debe sentirse como un final narrativo completo, no como un anuncio.
 
+⚠️ ZONA GANCHO BLINDADA — primeros 120-180 segundos (¡LA PARTE MAS IMPORTANTE DEL GUION!):
+El espectador decide en los primeros 30 segundos si se queda o se va. No puedes fallar aqui.
+Estructura obligatoria de 4 micro-fases:
+
+FASE 1 — EL GOLPE (0:00-0:15):
+  - UNA sola frase de IMPACTO PURO. Sin contexto. Sin presentacion.
+  - NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a", "Les voy a contar".
+  - SIEMPRE: un DATO DEMOLEDOR, un HECHO CONCRETO con FECHA y NUMERO, o un CLIFFHANGER.
+  - Ej: "El 19 de mayo de 1845, 129 hombres zarparon hacia el Artico. Ninguno volvio."
+
+FASE 2 — LA PROMESA (0:15-0:45):
+  - Enumera EXPLICITAMENTE lo que el espectador va a descubrir si se queda.
+  - Crea un "contrato narrativo" en 3 puntos.
+
+FASE 3 — PRIMERA REVELACION (0:45-1:30):
+  - Suelta YA informacion fascinante y CONCRETA. No te la guardes para el final.
+  - El espectador se queda porque YA le has dado valor.
+
+FASE 4 — PRIMER CLIFFHANGER + LANZAMIENTO DE SUBTRAMAS (1:30-3:00):
+  - Deja la PRIMERA pregunta sin responder.
+  - PRESENTA las subtramas (ver estructura de subtramas mas abajo).
+
+📺 ESTRUCTURA DE SUBTRAMAS PARALELAS (como serie documental de Netflix):
+El video debe funcionar como una serie con multiples hilos narrativos, NO como un ensayo lineal.
+
+REGLAS:
+1. IDENTIFICA 3-4 SUBTRAMAS que se presentan en los primeros 3 minutos.
+2. AVANZA cada subtrama en RONDAS como capitulos de serie.
+3. REGLA DE ALTERNANCIA: NUNCA dediques mas de 2 bloques SEGUIDOS a la misma subtrama.
+
+⚡ PATTERN INTERRUPTS — cada 2-3 minutos debes ROMPER el ritmo:
+  • [TEXTO_PANTALLA: "129 hombres. 0 supervivientes."]
+  • PREGUNTA RETORICA + PAUSA 2s
+  • DATO NUMERICO aislado
+  • TESTIMONIO de un superviviente o testigo
+
+🔗 MICRO-CLIFFHANGERS — al final de CADA capitulo/seccion:
+  "Pero lo que encontraron en el diario del capitan..."
+  "La pregunta que los investigadores siguen sin responder..."
+  "Y entonces, un satelite capto algo en el hielo..."
+
+📊 DATOS EN PANTALLA [TEXTO_PANTALLA: "..."]:
+Cada 2-3 minutos, inserta UN dato textual para quemar en pantalla:
+- Formato: [TEXTO_PANTALLA: "frase de maximo 12 palabras"] dentro del texto del bloque.
+
 REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRITICO para retencion!):
 Los primeros minutos deciden si el espectador se queda hasta el final. Debes:
 - Abrir con un momento de tension extrema, un dato tragico impactante o una pregunta que el espectador NECESITE ver respondida.
 - Crear una "promesa narrativa": el espectador debe intuir que si se queda, conocera el desenlace de una expedicion tragica.
 - NUNCA empezar con frases como "En este video vamos a...", "Hoy conoceremos..." o "Bienvenidos a...".
 - La primera oracion del guion debe ser IMPACTANTE. Entra directo al momento mas dramatico.
+- APLICA la ZONA GANCHO BLINDADA descrita arriba en los primeros bloques del guion.
 
 REGLA ANTI-REPETICION TEMATICA (¡OBLIGATORIO!):
 Cada seccion de la expedicion debe aportar informacion GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:
