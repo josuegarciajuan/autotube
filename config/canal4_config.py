@@ -669,6 +669,9 @@ MEDIA_STRATEGY = {
     "ken_burns_zoom_max": 18,
     "crossfade_min": 0.3,
     "crossfade_max": 0.7,
+    # ── Pollo AI fallback ─────────────────────────────────────────
+    "ai_image_fallback": True,           # enable Pollo AI when stock fails
+    "ai_max_per_video": 5,               # hard cap: max 5 Pollo gen/video
 }
 
 SUBTITLES_ENABLED = False

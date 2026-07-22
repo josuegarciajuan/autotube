@@ -644,7 +644,7 @@ MEDIA_STRATEGY = {
     "crossfade_max": 0.8,
     # ── Pollo AI fallback ─────────────────────────────────────────
     "ai_image_fallback": True,           # enable Pollo AI when stock fails
-    "ai_max_per_video": 2,               # hard cap: max 2 Pollo gen/video
+    "ai_max_per_video": 5,               # hard cap: max 5 Pollo gen/video
 }
 
 SUBTITLES_ENABLED = False
