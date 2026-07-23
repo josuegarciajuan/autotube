@@ -1384,10 +1384,27 @@ class PipelineOrchestrator:
                     if target_dt < now_utc_dt:
                         logger.info(
                             "[%s] Planned public time ALREADY PASSED (%s < now %s). "
-                            "Publishing as soon as warmup ends instead.",
+                            "Recalculating next peak to avoid same-time collision.",
                             self.canal, target_dt.isoformat(), now_utc_dt.isoformat(),
                         )
-                        target_dt = now_utc_dt + timedelta(minutes=warmup)
+                        try:
+                            fallback_info = calculate_target_public_time(
+                                slug=self.canal,
+                                primary_keyword=primary_kw,
+                                secondary_keywords=secondary_kws,
+                                timezone_str=tz,
+                                target_hour=target_h,
+                                jitter_min=spread,
+                                warmup_min=warmup,
+                                db=self.db,
+                                channel_id=channel_id,
+                            )
+                            fallback_str = fallback_info["target_public_at"]
+                            target_dt = _dt.fromisoformat(fallback_str.replace("Z", "+00:00"))
+                            if target_dt.tzinfo is None:
+                                target_dt = target_dt.replace(tzinfo=_tz.utc)
+                        except Exception:
+                            target_dt = now_utc_dt + timedelta(minutes=warmup)
                         was_already_past = True
                     elif target_dt < now_utc_dt + timedelta(minutes=warmup):
                         # Target is in the future but within the warmup window.

@@ -205,10 +205,16 @@ def _distribute_slots(
     if videos_per_day <= 0:
         return []
     
-    # Sort windows by weight (descending) as default preference
-    # But rotate which window is "first" based on the day
-    day_window_offset = day_seed % len(windows)
-    rotated = windows[day_window_offset:] + windows[:day_window_offset]
+    # For scheduled channels: the primary peak (highest-weight window) MUST
+    # always be one of the assigned slots. Only secondary peaks rotate by day.
+    if is_scheduled and len(windows) > 1:
+        primary = windows[0]
+        secondary_wins = windows[1:]
+        day_window_offset = day_seed % len(secondary_wins)
+        rotated = [primary] + (secondary_wins[day_window_offset:] + secondary_wins[:day_window_offset])
+    else:
+        day_window_offset = day_seed % len(windows)
+        rotated = windows[day_window_offset:] + windows[:day_window_offset]
     
     slots = []
     
