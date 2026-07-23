@@ -127,26 +127,28 @@ def _setup_worker_logging(job_id: int):
 
 # ── Memory guard for video assembly ────────────────────────────
 
-def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0, max_wait_sec: int = 60):
+def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.5, max_wait_sec: int = 120) -> bool:
     """Wait for free memory before starting memory-intensive video assembly.
     
     ffmpeg xfade concat of many segments can consume several GB of RAM.
     Running it while the system is near OOM triggers the kernel OOM killer
     or crashes with memory errors — both of which lose the entire render.
+    
+    Returns True if memory is sufficient, False if critically low even
+    after waiting (caller should fail the job gracefully).
     """
     try:
         avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
     except Exception:
-        # psutil fallback
         try:
             import psutil
             avail_gb = psutil.virtual_memory().available / (1024 ** 3)
         except ImportError:
-            return  # can't check — proceed
+            return True  # can't check — allow proceeding
     
     if avail_gb >= min_free_gb:
         logger.info("Memory OK: %.1f GB free (threshold: %.1f GB)", avail_gb, min_free_gb)
-        return
+        return True
     
     logger.warning(
         "⚠️  LOW MEMORY: only %.1f GB free (need %.1f GB). "
@@ -167,11 +169,14 @@ def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0,
                 break
     if avail_gb >= min_free_gb:
         logger.info("Memory recovered: %.1f GB free after %ds wait", avail_gb, waited)
+        return True
     else:
-        logger.warning(
-            "⚠️  Still only %.1f GB free after %ds — proceeding anyway (may OOM)",
+        logger.error(
+            "❌ CRITICAL: only %.1f GB free after %ds — aborting to prevent OOM kill. "
+            "Job will be marked as failed with RAM shortage.",
             avail_gb, waited,
         )
+        return False
 
 
 # ── FFmpeg orphan cleanup ────────────────────────────────────────
@@ -550,6 +555,22 @@ def run_job(
     if start_idx == 0:
         _preflight_cleanup(logger)
 
+    # ── 6b. Global heartbeat daemon — pulses every 30s for the entire
+    # pipeline lifetime so orphan detection doesn't rely solely on phase-
+    # specific heartbeat emitters (TTS, render, upload). If the worker
+    # crashes (OOM, segfault), the heartbeat stops and the orphan detector
+    # in the API can declare the job dead within 60 min.
+    _heartbeat_stop = threading.Event()
+    def _global_heartbeat():
+        while not _heartbeat_stop.is_set():
+            try:
+                db.update_heartbeat(job_id)
+            except Exception:
+                pass  # heartbeat is best-effort; never crash the worker
+            _heartbeat_stop.wait(30)
+    _heartbeat_thread = threading.Thread(target=_global_heartbeat, daemon=True)
+    _heartbeat_thread.start()
+
     # ── 7. Set up progress callback ───────────────────────────
     def _progress_to_db(percent: int, phase: str, message: str, **kwargs):
         try:
@@ -826,7 +847,12 @@ def run_job(
             # ffmpeg xfade concat of 200+ segments with crossfades consumes
             # GBs of memory. If we're already near OOM, the concat will crash
             # or trigger the kernel OOM killer, killing other processes.
-            _check_memory_before_video(logger)
+            if not _check_memory_before_video(logger):
+                error_msg = "RAM insuficiente para ensamblaje de video — se aborta para prevenir OOM kill"
+                logger.error(error_msg)
+                db.update_job(job_id, status="failed", error_msg=error_msg, phase="video")
+                db.update_video(video_id, status="error", progress_phase="video")
+                return False
             
             # ── CRITICAL SECTION: block SIGTERM during video assembly ──
             # ffmpeg xfade concat of 200+ segments can take 15+ minutes.
@@ -845,7 +871,25 @@ def run_job(
                     _kill_orphaned_ffmpeg()
                     sys.exit(0)
             if not video_data:
-                error_msg = "Fallo el ensamblaje del video"
+                # ── Diagnóstico: recolectar métricas del sistema ──
+                diag = []
+                try:
+                    import shutil
+                    disk = shutil.disk_usage("/root/autotube/output")
+                    diag.append(f"disk free={disk.free / (1024**3):.1f}GB")
+                except Exception:
+                    pass
+                try:
+                    import psutil
+                    mem = psutil.virtual_memory()
+                    diag.append(f"RAM avail={mem.available / (1024**3):.1f}GB used={mem.percent}%")
+                except ImportError:
+                    pass
+                diag_str = ", ".join(diag) if diag else ""
+                error_msg = (
+                    f"Fallo el ensamblaje del video. "
+                    f"({diag_str})" if diag_str else "Fallo el ensamblaje del video"
+                )
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="video")
@@ -1105,12 +1149,19 @@ def run_job(
         success = False
 
     finally:
-        db.update_job(
-            job_id,
-            status="completed" if success else "failed",
-            error_msg=error_msg[:500] if error_msg else None,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-        )
+        # ── Stop global heartbeat ───────────────────────────
+        _heartbeat_stop.set()
+        # ── Final DB update (wrapped in try/except so DB failure
+        # doesn't crash the finally block itself) ──────────────
+        try:
+            db.update_job(
+                job_id,
+                status="completed" if success else "failed",
+                error_msg=error_msg[:500] if error_msg else None,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as _dbe:
+            logger.critical("CRITICAL: could not update final job status: %s", _dbe)
         # ── Release media file locks so future cleanups can reclaim stale files ──
         try:
             db.unlock_media_files(job_id)

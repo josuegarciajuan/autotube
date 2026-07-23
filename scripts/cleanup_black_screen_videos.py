@@ -61,6 +61,9 @@ UNLIST_VIDEOS = [
     (914, "s7AiA4RkXeI", "canal5"),
     (917, "KoqaSkRdfY8", "canal4"),
     (920, "s1CdW1auYWA", "canal2"),
+    (928, "4Njhw9wk6E4", "canal4"),
+    (930, "xBcVZI96XLE", "canal2"),
+    (932, "38oinPgXlAQ", "canal5"),
 ]
 
 # ── Videos to DELETE (not yet published or already failed) ──

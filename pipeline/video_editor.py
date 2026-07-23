@@ -418,25 +418,25 @@ class VideoEditor:
         # ── Render checkpoint: scan for already-completed segments ──
         # Segments persist on disk after a failed render.  On reassembly,
         # skip re-rendering segments that already have a valid primary
-        # output file (scene_NNNN.mp4, not _fb.mp4 or _black.mp4).
+        # output file (scene_NNNN.mp4, not _fb.mp4 or _placeholder.mp4).
         completed_scenes: set[int] = set()
         _stale_fb = 0
-        _stale_black = 0
+        _stale_placeholder = 0
         if seg_dir.exists():
             for f in seg_dir.glob("scene_*.mp4"):
                 _stem = f.stem
-                # Only accept primary renders (not fallback _fb or placeholder _black)
-                if "_fb" in _stem or "_black" in _stem:
+                # Only accept primary renders (not fallback _fb or placeholder _black / _placeholder)
+                if "_fb" in _stem or "_black" in _stem or "_placeholder" in _stem:
                     if "_fb" in _stem:
                         try:
                             f.unlink(missing_ok=True)
                             _stale_fb += 1
                         except OSError:
                             pass
-                    elif "_black" in _stem:
+                    elif "_black" in _stem or "_placeholder" in _stem:
                         try:
                             f.unlink(missing_ok=True)
-                            _stale_black += 1
+                            _stale_placeholder += 1
                         except OSError:
                             pass
                     continue
@@ -445,10 +445,12 @@ class VideoEditor:
                     _idx = int(_stem.split("_")[1])
                 except (IndexError, ValueError):
                     continue
-                if f.stat().st_size > 0:
+                # Accept if file is non-empty AND above minimum viable size
+                # (prevents OOM-truncated files from being treated as valid checkpoints)
+                if f.stat().st_size > 1024:
                     completed_scenes.add(_idx)
                 else:
-                    # Corrupt/empty file — delete so it gets re-rendered
+                    # Corrupt/empty/truncated file — delete so it gets re-rendered
                     try:
                         f.unlink(missing_ok=True)
                     except OSError:
@@ -456,9 +458,9 @@ class VideoEditor:
         if completed_scenes:
             self.logger.info(
                 "Resuming from checkpoint: %d/%d scenes already rendered "
-                "(%d stale _fb, %d stale _black cleaned)",
+                "(%d stale _fb, %d stale placeholder cleaned)",
                 len(completed_scenes), len(block_ranges),
-                _stale_fb, _stale_black,
+                _stale_fb, _stale_placeholder,
             )
 
         segment_paths: list[str] = []
@@ -532,10 +534,10 @@ class VideoEditor:
                         )
                 if result_path is None:
                     self.logger.warning(
-                        "  Scene %d [%s]: ULTIMATE FALLBACK — using black placeholder",
+                        "  Scene %d [%s]: ULTIMATE FALLBACK — using gradient placeholder",
                         i + 1, br.get("tipo", "?"),
                     )
-                    result_path = self._render_black_segment(br, seg_dir / f"scene_{i:04d}_black.mp4")
+                    result_path = self._render_placeholder_segment(br, seg_dir / f"scene_{i:04d}_placeholder.mp4")
                     n_fallback += 1
                 else:
                     n_fallback += 1
@@ -543,7 +545,7 @@ class VideoEditor:
             if result_path:
                 segment_paths.append(result_path)
             else:
-                # Last resort — can't happen with _render_black_segment, but be safe
+                # Last resort — can't happen with _render_placeholder_segment, but be safe
                 self.logger.error("  Scene %d: CRITICAL — could not render placeholder", i)
                 segment_paths.append("")  # placeholder; will be caught by concat
 
@@ -592,10 +594,10 @@ class VideoEditor:
             sum(1 for a in media_assets if a.get("type") == "video"),
         )
 
-        # ── v6: merge consecutive black placeholders ──────────
+        # ── v6: merge consecutive gradient placeholders ──────────
         # When many consecutive scenes fail to get media (e.g. due to
         # off-niche theme poisoning), the concat gets overloaded with
-        # black placeholder segments that add no visual value but consume
+        # placeholder segments that add no visual value but consume
         # ffmpeg xfade processing. Merging them reduces segment count
         # dramatically and prevents xfade concat timeouts.
         segment_paths, block_ranges = _merge_consecutive_placeholders(
@@ -1684,9 +1686,60 @@ class VideoEditor:
         return VideoClip(make_frame, duration=duration)
 
     def _placeholder_clip(self, duration: float) -> VideoClip:
-        """Return a plain black ImageClip for missing images."""
-        img = Image.new("RGB", self.video_size, (0, 0, 0))
-        arr = np.array(img)
+        """Return a gradient background clip for missing images.
+
+        Uses the channel's color palette to generate a professional-looking
+        radial gradient with film grain, replacing the old solid-black fallback
+        that caused black-screen segments in published videos.
+
+        Falls back to dark muted tones if no palette is configured.
+        """
+        w, h = self.video_size
+        palette = self.canal.get("color_palette", {}) if self.canal else {}
+
+        def _parse(hex_str: str) -> tuple[int, int, int]:
+            hx = hex_str.lstrip("#")
+            return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+
+        primary = _parse(palette.get("primary", "#1a1a2e"))
+        accent = _parse(palette.get("accent", "#3a3a5c"))
+        shadow = _parse(palette.get("shadow", "#0a0a0f"))
+        secondary = _parse(palette.get("secondary", palette.get("text", "#2a2a3e")))
+
+        # Build a radial gradient focused at upper-left (visual interest)
+        img = Image.new("RGB", (w, h))
+        pixels = img.load()
+        cx, cy = w * 0.35, h * 0.35
+        for y in range(h):
+            for x in range(w):
+                dx = (x - cx) / w
+                dy = (y - cy) / h
+                dist = (dx**2 + dy**2) ** 0.5
+                diagonal = (x / w + y / h) * 0.5
+                t_accent = max(0, 1 - dist * 2.5)
+                t_primary = max(0, 1 - abs(dist - 0.35) * 3)
+                t_shadow = min(1, dist * 1.3 + diagonal * 0.3)
+                t_secondary = max(0, 1 - abs(dist - 0.6) * 4)
+                r = int(accent[0] * t_accent + primary[0] * t_primary
+                        + shadow[0] * t_shadow + secondary[0] * t_secondary)
+                g = int(accent[1] * t_accent + primary[1] * t_primary
+                        + shadow[1] * t_shadow + secondary[1] * t_secondary)
+                b = int(accent[2] * t_accent + primary[2] * t_primary
+                        + shadow[2] * t_shadow + secondary[2] * t_secondary)
+                pixels[x, y] = (
+                    max(0, min(255, r)),
+                    max(0, min(255, g)),
+                    max(0, min(255, b)),
+                )
+
+        # Smooth banding
+        img = img.filter(ImageFilter.GaussianBlur(radius=20))
+
+        # Subtle film grain
+        grain = np.random.randint(-8, 9, (h, w, 3), dtype=np.int16)
+        base_arr = np.array(img, dtype=np.int16)
+        grain_arr = np.clip(base_arr + grain, 0, 255).astype(np.uint8)
+        arr = np.array(grain_arr)
 
         def make_frame(t: float) -> np.ndarray:
             return arr
@@ -3012,13 +3065,13 @@ class VideoEditor:
                 except Exception:
                     pass
 
-    def _render_black_segment(
+    def _render_placeholder_segment(
         self, block_range: dict, seg_path: str | Path,
     ) -> str:
-        """Render a black placeholder segment for scenes with no media at all.
+        """Render a gradient placeholder segment for scenes with no media at all.
 
-        Last-resort fallback — uses PIL to generate a black frame and MoviePy
-        to render it as a video segment matching the block's duration.
+        Last-resort fallback — uses the channel's color palette to generate a
+        professional-looking gradient background instead of a black frame.
         """
         seg_path = Path(seg_path)
         seg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3039,7 +3092,7 @@ class VideoEditor:
             clip.close()
             return str(seg_path)
         except Exception as exc:
-            self.logger.warning("Black placeholder render failed: %s", exc)
+            self.logger.warning("Placeholder segment render failed: %s", exc)
             return ""
 
     def _concat_body_with_crossfades(
@@ -3181,14 +3234,14 @@ def _merge_consecutive_placeholders(
     seg_dir: Path,
     logger,
 ) -> tuple[list[str], list[dict]]:
-    """Merge consecutive black placeholder segments into fewer, longer clips.
+    """Merge consecutive placeholder segments into fewer, longer clips.
 
     When many consecutive scenes fail to get media assets (e.g. due to
     off-niche theme poisoning or provider circuit breakers), the concat
-    gets overloaded with black placeholder segments that add no visual
+    gets overloaded with placeholder segments that add no visual
     value but consume ffmpeg xfade processing time per segment.
 
-    This function identifies runs of consecutive ``_black.mp4`` segments,
+    This function identifies runs of consecutive ``_placeholder.mp4`` segments,
     concatenates them into a single longer placeholder using ffmpeg
     stream concat (fast, no re-encode), and merges their block ranges.
 
@@ -3204,9 +3257,9 @@ def _merge_consecutive_placeholders(
     run_indices: list[int] = []
 
     for i, sp in enumerate(segment_paths):
-        is_black = "_black" in Path(sp).stem
+        is_placeholder = "_black" in Path(sp).stem or "_placeholder" in Path(sp).stem
 
-        if is_black:
+        if is_placeholder:
             run_indices.append(i)
         else:
             # Flush any pending black run
@@ -3245,7 +3298,7 @@ def _flush_black_run(
     merged_ranges: list[dict],
     logger,
 ) -> None:
-    """Concatenate a run of consecutive black placeholders into one segment."""
+    """Concatenate a run of consecutive placeholders into one segment."""
     if len(indices) == 1:
         # Single black segment — no merge needed
         merged_paths.append(segment_paths[indices[0]])
@@ -3261,7 +3314,7 @@ def _flush_black_run(
     )
 
     # Use ffmpeg concat demuxer (fast, no re-encode) to merge black clips
-    merged_path = seg_dir / f"scene_{first:04d}_merged_black_{len(indices)}.mp4"
+    merged_path = seg_dir / f"scene_{first:04d}_merged_placeholder_{len(indices)}.mp4"
     if not merged_path.exists():
         concat_list = seg_dir / f"_blist_{first}.txt"
         with open(concat_list, "w") as f:
@@ -3280,12 +3333,12 @@ def _flush_black_run(
                 check=True,
             )
             logger.debug(
-                "Merged %d black placeholders (indices %d..%d) → %s",
+                "Merged %d placeholders (indices %d..%d) → %s",
                 len(indices), first, last, merged_path.name,
             )
         except Exception as exc:
             logger.warning(
-                "Could not merge %d black placeholders: %s — using first one",
+                "Could not merge %d placeholders: %s — using first one",
                 len(indices), exc,
             )
             merged_paths.append(segment_paths[first])

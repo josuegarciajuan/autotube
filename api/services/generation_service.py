@@ -2958,8 +2958,6 @@ async def start_generation_job_subprocess(
         db.update_job(job_id, status="failed",
                       error_msg=f"Global concurrency guard: {active_count} active job(s)")
         # ── Cleanup orphaned records ────────────────────────────
-        # The job was created but blocked. Reset video and planned_slot
-        # so they don't stay stuck in 'generating'/'running'.
         try:
             with db._connect() as _conn:
                 _conn.execute(
@@ -2975,6 +2973,41 @@ async def start_generation_job_subprocess(
         except Exception:
             pass
         return None
+
+    # ── RAM-aware guard: if 2 workers are already running, check memory ──
+    # A prep+render combo can consume ~8+ GB. If free RAM is critically low
+    # (< 3 GB), defer dispatch until the current render finishes to avoid OOM.
+    if active_count >= 2:
+        try:
+            avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+        except Exception:
+            try:
+                import psutil
+                avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            except ImportError:
+                avail_gb = 99  # assume OK
+        if avail_gb < 3.0:
+            logger.warning(
+                "Subprocess spawn deferred: %d active + only %.1f GB free RAM (need ≥ 3 GB)",
+                active_count, avail_gb,
+            )
+            db.update_job(job_id, status="failed",
+                          error_msg=f"RAM too low: {active_count} active + {avail_gb:.1f} GB free")
+            try:
+                with db._connect() as _conn:
+                    _conn.execute(
+                        "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
+                        (video_id,),
+                    )
+                    _conn.execute(
+                        "UPDATE planned_slots SET status = 'pending', job_id = NULL "
+                        "WHERE job_id = ? AND status = 'running'",
+                        (job_id,),
+                    )
+                    _conn.commit()
+            except Exception:
+                pass
+            return None
 
     # ── Guard: don't spawn if a job is already running for THIS channel ──
     active = db.get_active_job_for_channel(channel_id)

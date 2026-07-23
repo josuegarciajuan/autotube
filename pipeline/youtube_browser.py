@@ -647,6 +647,14 @@ async def check_session_valid(account: str, cache_seconds: int = 300) -> dict:
         if now - ts < cache_seconds:
             return cached
 
+    # ── Shortcut: if browser is already alive for this account, skip ──
+    # the expensive Chromium launch. The persistent session stays valid
+    # across the API's 5-minute check cycle. Re-check only on failure.
+    if account in _browser_instances and _browser_instances[account]._context is not None:
+        result = {"status": "valid", "detail": "Browser session alive (cached)"}
+        _session_check_cache[account] = (now, result)
+        return result
+
     from pathlib import Path as _Path
     user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
     if not user_data_dir.exists():
@@ -723,7 +731,11 @@ async def check_session_valid(account: str, cache_seconds: int = 300) -> dict:
         else:
             status = "error"
             detail = f"Could not verify session: {error_msg[:200]}"
-        logger.warning("check_session_valid error for %s: %s", account, e)
+        # in_use is expected when a persistent browser is running — not a warning
+        if status == "in_use":
+            logger.debug("check_session_valid for %s: profile in use (expected)", account)
+        else:
+            logger.warning("check_session_valid error for %s: %s", account, e)
 
     result = {"status": status, "detail": detail}
     _session_check_cache[account] = (now, result)
