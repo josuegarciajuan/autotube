@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
 Cleanup script for videos affected by the black-screen bug (Jul 2026).
+Second wave — global video_clips/ rmtree race condition.
 
 Actions:
-  1. UNLIST published videos on YouTube (videos 485, 491, 492, 518)
-  2. DELETE not-yet-published videos from DB and disk (videos 508, 514, 517, 523, 524, 527)
+  1. UNLIST published videos on YouTube (set to private)
+  2. DELETE not-yet-published videos from DB and disk
 
 Usage:
   python3 scripts/cleanup_black_screen_videos.py
   python3 scripts/cleanup_black_screen_videos.py --dry-run
+  python3 scripts/cleanup_black_screen_videos.py --unlist-only   # only YT actions
+  python3 scripts/cleanup_black_screen_videos.py --delete-only   # only DB+disk actions
 """
 
 import os
@@ -36,35 +39,61 @@ if env_file.exists():
 from database.db_extended import ExtendedDatabase
 
 DRY_RUN = "--dry-run" in sys.argv
+UNLIST_ONLY = "--unlist-only" in sys.argv
+DELETE_ONLY = "--delete-only" in sys.argv
+DO_ALL = not UNLIST_ONLY and not DELETE_ONLY
 
-# ── Videos to UNLIST (published on YouTube) ──────────────────────
-# (video_id, yt_video_id, title)
+# ── Videos to UNLIST (published on YouTube, confirmed black screens) ──
+# (video_id, yt_video_id, title, channel_slug)
 UNLIST_VIDEOS = [
-    (518, "hxOEIbT6ZLs", "La pesadilla que activó su ASCO más profundo"),
-    (492, "O3dWIIE9Kn8", "La tragedia de los Andes que Netflix no te contó"),
-    (491, "1Fw5ImTE8ys", "El amuleto que abrió las puertas del más allá"),
-    (485, "WP5pX8uZ4bk", "Sueños lúcidos: el secreto que la ciencia descubrió"),
+    (286, "Xe1rqPd_NOE", "canal2"),
+    (294, "5tu05u6HICQ", "canal5"),
+    (317, "e4usN6Q_3U0", "canal5"),
+    (471, "yKe8-R8CkI0", "canal3"),
+    (473, "nVPWg61OO_c", "canal3"),
+    (474, "Idn3pSNM5xc", "canal5"),
+    (475, "RqX62z1wYyY", "canal5"),
+    (476, "7jKGe1GYMss", "canal2"),
+    (541, "av14YjZMxvE", "canal5"),
+    (640, "zMjKw3fP0Bc", "canal3"),
+    (785, "moBYVTVc0Ww", "canal4"),
+    (887, "VWAtZnLT1U4", "canal2"),
+    (914, "s7AiA4RkXeI", "canal5"),
+    (917, "KoqaSkRdfY8", "canal4"),
+    (920, "s1CdW1auYWA", "canal2"),
 ]
 
-# ── Videos to DELETE (not yet published) ─────────────────────────
-# (video_id, yt_video_id or None, title)
+# ── Videos to DELETE (not yet published or already failed) ──
+# (video_id, description)
 DELETE_VIDEOS = [
-    (527, None, "El voluntario que colapsó en oncología"),
-    (524, None, "El sueño precognitivo que marcó su infancia"),
-    (523, "9uyMi9wGwBc", "El vuelo 240 de Malév que israel derribó en secreto"),
-    (517, "WctKO7miwQs", "El catalizador que HARÁ explotar la economía del hidrógeno"),
-    (514, "kT3C-g02euE", "El rodaje extremo de 'The way we dance'"),
-    (508, "I5ufuYlHFDg", "Sueños de bebés: el caso de la madre que soñó un parto"),
+    (490, "canal3 error"),
+    (493, "canal2 error"),
+    (495, "canal3 error"),
+    (496, "canal3 error"),
+    (497, "canal3 error"),
+    (507, "canal3 error"),
+    (509, "canal2 error"),
+    (510, "canal2 error"),
+    (511, "canal3 error"),
+    (512, "canal3 error"),
+    (513, "canal3 error"),
+    (515, "canal2 error"),
+    (516, "canal3 error"),
+    (519, "canal3 error"),
+    (520, "canal3 error"),
+    (521, "canal3 error"),
+    (522, "canal3 error"),
+    (525, "canal3 error"),
+    (526, "canal3 error"),
+    (582, "canal3 error"),
+    (904, "canal3 error"),
+    (907, "canal3 error"),
+    (910, "canal2 awaiting_upload"),
+    (912, "canal3 error"),
+    (918, "canal3 error"),
+    (921, "canal3 awaiting_upload"),
+    # 922 excluded — currently generating (job 1441 running)
 ]
-
-
-def get_channel_slug(db, video_id: int) -> str:
-    """Get the channel slug for a video_id."""
-    video = db.get_video(video_id)
-    if video and video.get("channel_id"):
-        channel = db.get_channel(video["channel_id"])
-        return channel["slug"] if channel else "unknown"
-    return "unknown"
 
 
 def get_video_file_paths(db, video_id: int) -> dict:
@@ -72,34 +101,33 @@ def get_video_file_paths(db, video_id: int) -> dict:
     video = db.get_video(video_id)
     if not video:
         return {}
-    return {
-        "video_path": video.get("video_path"),
-        "thumbnail_path": video.get("thumbnail_path"),
-        "audio_path": video.get("audio_path"),
-    }
+    paths = {}
+    for k in ["video_path", "thumbnail_path", "audio_path"]:
+        v = video.get(k)
+        if v:
+            paths[k] = str(v)
+    return paths
 
 
-def unlist_video(video_id: int, yt_video_id: str, title: str) -> bool:
-    """Set a published video to unlisted on YouTube and in DB."""
+def unlist_video(video_id: int, yt_video_id: str, channel_slug: str) -> bool:
+    """Set a published video to private on YouTube and mark in DB."""
     db = ExtendedDatabase()
-    slug = get_channel_slug(db, video_id)
-    logger.info("Unlisting: video_id=%d yt_id=%s channel=%s title=%s",
-                video_id, yt_video_id, slug, title[:60])
+    logger.info("Unlisting: video_id=%d yt_id=%s channel=%s",
+                video_id, yt_video_id, channel_slug)
 
     if DRY_RUN:
-        logger.info("  [DRY RUN] Would unlist %s on channel %s", yt_video_id, slug)
+        logger.info("  [DRY RUN] Would unlist %s on channel %s", yt_video_id, channel_slug)
         return True
 
     try:
-        # Instantiate YouTubeUploader for this channel
         from pipeline.youtube_uploader import YouTubeUploader
-        uploader = YouTubeUploader(account_name=slug, db=db, channel_slug=slug)
+        uploader = YouTubeUploader(account_name=channel_slug, db=db, channel_slug=channel_slug)
         uploader.authenticate()
         uploader.set_privacy(yt_video_id, "unlisted")
         logger.info("  ✅ YouTube: set to unlisted")
     except Exception as exc:
         logger.error("  ❌ YouTube API failed for %s (channel %s): %s",
-                     yt_video_id, slug, exc)
+                     yt_video_id, channel_slug, exc)
         return False
 
     try:
@@ -114,14 +142,12 @@ def unlist_video(video_id: int, yt_video_id: str, title: str) -> bool:
     return True
 
 
-def delete_video_complete(video_id: int, yt_video_id: str | None, title: str) -> bool:
-    """Delete a video from DB, disk, and optionally YouTube."""
+def delete_video(video_id: int, desc: str) -> bool:
+    """Delete a video from DB and disk."""
     db = ExtendedDatabase()
-    slug = get_channel_slug(db, video_id)
-    logger.info("Deleting: video_id=%d yt_id=%s channel=%s title=%s",
-                video_id, yt_video_id or "N/A", slug, title[:60])
+    logger.info("Deleting: video_id=%d desc=%s", video_id, desc)
 
-    # ── Get file paths BEFORE deleting DB records ──
+    # Get file paths BEFORE deleting DB records
     paths = get_video_file_paths(db, video_id)
     segment_dir = Path("output/videos/segments") / str(video_id)
 
@@ -135,40 +161,26 @@ def delete_video_complete(video_id: int, yt_video_id: str | None, title: str) ->
                         sum(1 for _ in segment_dir.rglob("*")))
         return True
 
-    # ── 1. YouTube: delete video if it exists on YT ──
-    if yt_video_id:
-        try:
-            from pipeline.youtube_uploader import YouTubeUploader
-            uploader = YouTubeUploader(account_name=slug, db=db, channel_slug=slug)
-            uploader.authenticate()
-            service = uploader._get_service()
-            service.videos().delete(id=yt_video_id).execute()
-            logger.info("  ✅ YouTube: deleted %s", yt_video_id)
-        except Exception as exc:
-            logger.warning("  ⚠️ YouTube delete failed (may not exist): %s", exc)
-
-    # ── 2. DB: delete orphan records (no CASCADE) ──
+    # ── 1. DB: delete related records ──
     try:
         with db._connect() as conn:
             conn.execute("PRAGMA foreign_keys = ON")
-            # These tables have NO ACTION FK → must delete manually
             conn.execute("DELETE FROM video_playlists WHERE video_id = ?", (video_id,))
             conn.execute("DELETE FROM video_lifecycle_actions WHERE video_id = ?", (video_id,))
             conn.execute("DELETE FROM comment_log WHERE video_id = ?", (video_id,))
             conn.execute("DELETE FROM shorts_planned_slots WHERE source_video_id = ?", (video_id,))
-            # Nullify SET NULL FKs (optional — these get nullified by FK engine)
             conn.execute("UPDATE generation_jobs SET video_id = NULL WHERE video_id = ?", (video_id,))
             conn.execute("UPDATE planned_slots SET video_id = NULL WHERE video_id = ?", (video_id,))
             conn.execute("UPDATE shorts SET source_video_id = NULL WHERE source_video_id = ?", (video_id,))
-            # Now delete the video — CASCADE handles video_scenes, stats_history, asset_history
+            # CASCADE handles: video_scenes, stats_history, asset_history
             conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
             conn.commit()
-        logger.info("  ✅ DB: video %d and all related records deleted", video_id)
+        logger.info("  ✅ DB: video %d and related records deleted", video_id)
     except Exception as exc:
         logger.error("  ❌ DB delete failed: %s", exc)
         return False
 
-    # ── 3. Disk: delete files ──
+    # ── 2. Disk: delete files ──
     files_deleted = 0
     for key in ["video_path", "thumbnail_path", "audio_path"]:
         p = paths.get(key)
@@ -195,29 +207,28 @@ def delete_video_complete(video_id: int, yt_video_id: str | None, title: str) ->
 
 
 def main():
-    db = ExtendedDatabase()
     success = 0
     fail = 0
 
-    # ── Phase 1: Unlist published videos ──────────────────────
-    logger.info("=" * 60)
-    logger.info("PHASE 1: Unlisting %d published videos on YouTube", len(UNLIST_VIDEOS))
-    logger.info("=" * 60)
-    for video_id, yt_id, title in UNLIST_VIDEOS:
-        if unlist_video(video_id, yt_id, title):
-            success += 1
-        else:
-            fail += 1
+    if DO_ALL or UNLIST_ONLY:
+        logger.info("=" * 60)
+        logger.info("PHASE 1: Unlisting %d published videos on YouTube", len(UNLIST_VIDEOS))
+        logger.info("=" * 60)
+        for video_id, yt_id, channel_slug in UNLIST_VIDEOS:
+            if unlist_video(video_id, yt_id, channel_slug):
+                success += 1
+            else:
+                fail += 1
 
-    # ── Phase 2: Delete not-published videos ──────────────────
-    logger.info("=" * 60)
-    logger.info("PHASE 2: Deleting %d not-published videos", len(DELETE_VIDEOS))
-    logger.info("=" * 60)
-    for video_id, yt_id, title in DELETE_VIDEOS:
-        if delete_video_complete(video_id, yt_id, title):
-            success += 1
-        else:
-            fail += 1
+    if DO_ALL or DELETE_ONLY:
+        logger.info("=" * 60)
+        logger.info("PHASE 2: Deleting %d unpublished videos", len(DELETE_VIDEOS))
+        logger.info("=" * 60)
+        for video_id, desc in DELETE_VIDEOS:
+            if delete_video(video_id, desc):
+                success += 1
+            else:
+                fail += 1
 
     # ── Summary ───────────────────────────────────────────────
     logger.info("=" * 60)

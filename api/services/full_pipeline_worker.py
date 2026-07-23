@@ -1096,6 +1096,11 @@ def run_job(
             error_msg=error_msg[:500] if error_msg else None,
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
+        # ── Release media file locks so future cleanups can reclaim stale files ──
+        try:
+            db.unlock_media_files(job_id)
+        except Exception:
+            pass
         try:
             if orch is not None:
                 orch.cleanup()

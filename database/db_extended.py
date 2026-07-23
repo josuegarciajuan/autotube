@@ -574,6 +574,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v10: optimal publish slots (data-driven peak hour calculation) ──
     _migrate_v10(conn, logger)
+
+    # ── v11: media_file_locks (prevents cross-job file deletion race) ──
+    _migrate_v11(conn, logger)
     
     conn.commit()
     conn.close()
@@ -973,6 +976,34 @@ def _migrate_v10(conn, logger):
     )
     conn.commit()
     logger.info("Migration v10: optimal_publish_slots table ensured")
+
+
+def _migrate_v11(conn, logger):
+    """Idempotent v11 migration: media_file_locks table.
+
+    Tracks which files are owned by which active generation jobs,
+    so the pipeline cleanup never deletes files that another job
+    is still using (race condition fix for black-screen bug).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS media_file_locks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id      INTEGER NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+            file_path   TEXT NOT NULL,
+            locked_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_id, file_path)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mfl_job "
+        "ON media_file_locks(job_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mfl_path "
+        "ON media_file_locks(file_path)"
+    )
+    conn.commit()
+    logger.info("Migration v11: media_file_locks table ensured")
 
 
 class ExtendedDatabase(Database):
@@ -3641,7 +3672,74 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchone()
         return row is not None
-    
+
+    # ── Media file locks (v11: cross-job file deletion prevention) ──
+
+    def lock_media_files(self, job_id: int, file_paths: list) -> int:
+        """Register locks on media files for a job. Idempotent via UNIQUE constraint.
+        Returns the number of files locked."""
+        if not file_paths:
+            return 0
+        locked = 0
+        try:
+            with self._connect() as conn:
+                for fp in file_paths:
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO media_file_locks (job_id, file_path) VALUES (?, ?)",
+                            (job_id, str(fp)),
+                        )
+                        locked += 1
+                    except Exception:
+                        pass
+                conn.commit()
+        except Exception:
+            pass
+        return locked
+
+    def unlock_media_files(self, job_id: int) -> int:
+        """Release all media file locks for a job. Returns count of released locks."""
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM media_file_locks WHERE job_id = ?",
+                    (job_id,),
+                )
+                conn.commit()
+                return cur.rowcount
+        except Exception:
+            return 0
+
+    def get_locked_file_paths(self) -> set:
+        """Get all file paths locked by currently active jobs (running/queued)."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute("""
+                    SELECT DISTINCT ml.file_path
+                    FROM media_file_locks ml
+                    JOIN generation_jobs gj ON ml.job_id = gj.id
+                    WHERE gj.status IN ('running', 'queued')
+                """).fetchall()
+                return {str(row[0]) for row in rows} if rows else set()
+        except Exception:
+            return set()
+
+    def cleanup_stale_locks(self) -> int:
+        """Delete locks for jobs that have finished (completed/failed/cancelled).
+        Returns number of locks cleaned."""
+        try:
+            with self._connect() as conn:
+                cur = conn.execute("""
+                    DELETE FROM media_file_locks
+                    WHERE job_id NOT IN (
+                        SELECT id FROM generation_jobs WHERE status IN ('running', 'queued')
+                    )
+                """)
+                conn.commit()
+                return cur.rowcount
+        except Exception:
+            return 0
+
     def upsert_channel_template(self, channel_id: int, segment_type: str,
                                  video_path: str, image_path: str = None,
                                  config_json: str = None) -> int:

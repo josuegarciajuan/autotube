@@ -1771,20 +1771,33 @@ class PipelineOrchestrator:
         # Reset per-run state
         self._theme_context = None
 
-        # ── Disk cleanup before pipeline (moved from phase_media) ──
-        import shutil
+        # ── Disk cleanup before pipeline (lock-aware: never delete files owned by active jobs) ──
+        import time as _time
+        try:
+            locked_paths = self.db.get_locked_file_paths()
+        except Exception:
+            locked_paths = set()
         _cleanup_dirs = [
             Path("output/video_clips"),
             Path("output/temp"),
         ]
         for _d in _cleanup_dirs:
             if _d.exists():
-                try:
-                    shutil.rmtree(_d)
-                    _d.mkdir(parents=True, exist_ok=True)
-                    logger.info("[%s] Cleaned up %s before pipeline", self.canal, _d)
-                except Exception as _exc:
-                    logger.warning("[%s] Could not clean %s: %s", self.canal, _d, _exc)
+                _deleted = 0
+                for _f in _d.iterdir():
+                    if not _f.is_file():
+                        continue
+                    _rel = str(_f)
+                    # Never delete files locked by another running/queued job
+                    if _rel in locked_paths:
+                        continue
+                    try:
+                        _f.unlink()
+                        _deleted += 1
+                    except OSError:
+                        pass
+                logger.info("[%s] Cleaned %d stale files from %s (%d locked files preserved)",
+                            self.canal, _deleted, _d, len(locked_paths))
 
         # ── Playlist selection: pick a random playlist BEFORE scraping ──
         target_playlist = getattr(self, '_target_playlist', None)
@@ -1893,6 +1906,15 @@ class PipelineOrchestrator:
         n_video = sum(1 for a in media_assets if a.get("type") == "video")
         n_image = sum(1 for a in media_assets if a.get("type") == "image")
         logger.info(f"[{self.canal}] Media ready ({len(media_assets)} assets: {n_video} video, {n_image} image)")
+
+        # ── Lock media files for this job ──
+        # Prevents another concurrently-starting pipeline from deleting these files
+        # during the video assembly phase (race condition → black screens).
+        if job_id is not None:
+            _media_paths = [str(a["path"]) for a in media_assets if a.get("path")]
+            if _media_paths:
+                _locked_count = self.db.lock_media_files(job_id, _media_paths)
+                logger.info("[%s] Locked %d media files for job #%d", self.canal, _locked_count, job_id)
 
         # Phase 4: Video assembly
         logger.info(f"[{self.canal}] Phase 4/6: Assembling video...")
