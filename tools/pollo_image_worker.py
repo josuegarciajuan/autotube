@@ -43,8 +43,13 @@ UNKNOWN_FAILURE_GRACE_POLLS = 6  # tolerancia a flapping de Pollo.ai: 6 polls ×
 MAX_PROMPT_CHARS = 2000
 
 # Fingerprints TLS para burlar Cloudflare — se prueban en cascada hasta que uno funcione.
+# Ordenados: primero los soportados por la versión instalada de libcurl/curl-cffi,
+# luego opciones legacy como fallback.
+# Nota: chrome147+ no está realmente soportado por curl-cffi 0.15.0 (libcurl)
+# a nivel de red; fallan con "Impersonating X is not supported".
 IMPERSONATION_TARGETS = [
     "chrome146",
+    "edge101",
     "chrome145",
     "chrome142",
     "chrome136",
@@ -169,6 +174,13 @@ def create_generation(client, prompt, model_cfg, aspect_ratio, num_outputs):
     if resp.status_code == 401:
         raise RuntimeError("Sesion caducada (401). Renueva la cookie en Josue > ConfigM.")
     if resp.status_code == 403:
+        # Distinguir entre Cloudflare WAF y "sin créditos" de Pollo
+        resp_text = (resp.text or "").lower()
+        if "user video limit" in resp_text or "limit error" in resp_text:
+            raise RuntimeError(
+                "Cuenta de Pollo.ai sin créditos disponibles (403 User video limit error). "
+                "Recarga créditos o cambia de cuenta."
+            )
         raise RuntimeError("Acceso denegado (403). curl-cffi no pudo pasar Cloudflare.")
     if resp.status_code not in (200, 201):
         raise RuntimeError("HTTP %s: %s" % (resp.status_code, str(resp.text)[:800]))
@@ -618,13 +630,23 @@ def cmd_generate(args):
                 working_fingerprint = fp
                 print("CLOUDFLARE_BYPASS: fingerprint=%s OK" % fp, file=sys.stderr)
                 break
-            except RuntimeError as exc:
+            except Exception as exc:
                 err = str(exc)
-                if "403" in err or "Cloudflare" in err.lower() or "denegado" in err.lower():
-                    print("CLOUDFLARE_BYPASS: fingerprint=%s FAILED (403) — probando siguiente..." % fp, file=sys.stderr)
+                # Errores que justifican probar el siguiente fingerprint:
+                #   - Cloudflare 403 (WAF bloquea el fingerprint)
+                #   - "not supported" (fingerprint no soportado por libcurl)
+                retryable = (
+                    "403" in err
+                    or "Cloudflare" in err.lower()
+                    or "denegado" in err.lower()
+                    or "not supported" in err.lower()
+                    or "Impersonating" in err
+                )
+                if retryable:
+                    print("CLOUDFLARE_BYPASS: fingerprint=%s FAILED — probando siguiente..." % fp, file=sys.stderr)
                     last_error = err
                     continue
-                raise  # otro error (401 cookie, timeout, etc.) — no reintentar
+                raise  # error fatal (401 cookie expirada, timeout, etc.) — no reintentar
 
         if not working_fingerprint:
             attempted = ", ".join(IMPERSONATION_TARGETS[:6]) + "..."
