@@ -1406,6 +1406,24 @@ class PipelineOrchestrator:
                         except Exception:
                             target_dt = now_utc_dt + timedelta(minutes=warmup)
                         was_already_past = True
+                        # Persist recalculated target to DB so UI + collision
+                        # detection stay in sync with the actual publish time.
+                        try:
+                            if self.db and self.db_video_id:
+                                import pytz as _pz
+                                local_tz_p = _pz.timezone(tz)
+                                local_target = target_dt.astimezone(local_tz_p)
+                                local_target_str = local_target.strftime("%Y-%m-%d %H:%M:%S")
+                                self.db.update_video(self.db_video_id, target_public_at=local_target_str)
+                                logger.info(
+                                    "[%s] DB target_public_at updated → %s (video #%d)",
+                                    self.canal, local_target_str, self.db_video_id,
+                                )
+                        except Exception as _persist_exc:
+                            logger.debug(
+                                "[%s] Failed to persist recalculated target_public_at: %s",
+                                self.canal, _persist_exc,
+                            )
                     elif target_dt < now_utc_dt + timedelta(minutes=warmup):
                         # Target is in the future but within the warmup window.
                         # RESPECT the planned time — do NOT override it.
