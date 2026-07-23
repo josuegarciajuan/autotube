@@ -1257,7 +1257,8 @@ class ExtendedDatabase(Database):
     
     def update_job(self, job_id: int, **kwargs) -> bool:
         allowed = ["status", "progress", "phase", "error_msg", "video_id",
-                   "pipeline_phase", "last_heartbeat_at", "retry_count", "worker_pid"]
+                   "pipeline_phase", "last_heartbeat_at", "retry_count", "worker_pid",
+                   "started_at"]
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:

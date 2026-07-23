@@ -682,14 +682,14 @@ class OptimalSlotsCalculator:
             if target_local <= now_local:
                 target_local += timedelta(days=1)
 
-            target_utc = target_local.astimezone(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S")
+            target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
 
             with self._db._connect() as conn:
                 conn.execute(
                     """UPDATE planned_slots
                        SET target_public_at = ?
                        WHERE id = ?""",
-                    (target_utc, slot["id"]),
+                    (target_local_str, slot["id"]),
                 )
                 conn.commit()
             updated += 1

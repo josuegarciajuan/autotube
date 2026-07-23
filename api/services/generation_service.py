@@ -3060,9 +3060,10 @@ async def start_generation_job_subprocess(
         job_id, proc.pid, canal,
     )
 
-    # ── Update job status ─────────────────────────────────────
+    # ── Update job and video status ─────────────────────────────
     db.update_job(job_id, status="running",
                   started_at=db_now())
+    db.update_video(video_id, generation_started_at=db_now())
 
     await _broadcast_progress(
         job_id, 1, "inicio",
