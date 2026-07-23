@@ -369,20 +369,35 @@ def _acquire_render_slot(job_id: int, db, timeout_sec: int = 7200) -> bool:
 # ── Pre-flight cleanup ────────────────────────────────────────────
 
 def _preflight_cleanup(logger):
-    """Clean temp directories before starting the pipeline."""
-    import shutil
+    """Clean temp directories before starting the pipeline.
+    
+    Lock-aware: never deletes files owned by another active (running/queued)
+    generation_job, preventing race conditions that cause black-screen renders.
+    """
+    from database.db_extended import ExtendedDatabase
+    _db = ExtendedDatabase()
+    locked = _db.get_locked_file_paths()
+    
     cleanup_dirs = [
         _PROJECT_ROOT / "output" / "video_clips",
         _PROJECT_ROOT / "output" / "temp",
     ]
     for d in cleanup_dirs:
-        if d.exists():
+        if not d.exists():
+            continue
+        deleted = 0
+        for f in d.iterdir():
+            if not f.is_file():
+                continue
+            if str(f) in locked:
+                continue
             try:
-                shutil.rmtree(d)
-                d.mkdir(parents=True, exist_ok=True)
-                logger.info("Cleaned up %s", d)
-            except Exception as exc:
-                logger.warning("Could not clean %s: %s", d, exc)
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+        logger.info("Cleaned %d stale files from %s (%d locked files preserved)",
+                     deleted, d, len(locked))
 
 
 # ── Phase order (for checkpoint resume) ──────────────────────────
@@ -767,7 +782,7 @@ def run_job(
             db.update_video(video_id, progress=45, progress_phase="media")
             logger.info("Phase 3/6: Fetching media assets...")
             
-            media_assets = orch.phase_media(script, audio_data)
+            media_assets = orch.phase_media(script, audio_data, job_id=job_id)
             if not media_assets:
                 error_msg = "No se encontraron imagenes ni videos"
                 logger.error(error_msg)

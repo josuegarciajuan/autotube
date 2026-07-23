@@ -847,7 +847,7 @@ class PipelineOrchestrator:
             _safe_log_error(self.db, self.canal, "tts", str(e))
             return None
 
-    def phase_media(self, script: dict, audio_data: Optional[dict] = None) -> Optional[list[dict]]:
+    def phase_media(self, script: dict, audio_data: Optional[dict] = None, job_id: int = None) -> Optional[list[dict]]:
         """Fetch media (video/image) for each enforceable scene range.
 
         When ``audio_data`` is provided (with TTS timestamps), scene ranges are
@@ -921,6 +921,12 @@ class PipelineOrchestrator:
                 content_id=script.get("id"),
                 duration_ms=duration_ms,
             )
+            # ── Lock media files for this job ──
+            if job_id is not None:
+                _media_paths = [str(a["path"]) for a in media_assets if a.get("path")]
+                if _media_paths:
+                    _locked = self.db.lock_media_files(job_id, _media_paths)
+                    logger.info("[%s] Locked %d media files for job #%d", self.canal, _locked, job_id)
             return media_assets
 
         except Exception as e:
@@ -1899,22 +1905,13 @@ class PipelineOrchestrator:
 
         # Phase 3: Media (video + image hybrid)
         logger.info(f"[{self.canal}] Phase 3/6: Fetching media assets (video + image)...")
-        media_assets = self.phase_media(script, audio_data)
+        media_assets = self.phase_media(script, audio_data, job_id=job_id)
         if not media_assets:
             logger.error(f"[{self.canal}] PIPELINE ABORTED: Media fetch failed")
             return False
         n_video = sum(1 for a in media_assets if a.get("type") == "video")
         n_image = sum(1 for a in media_assets if a.get("type") == "image")
         logger.info(f"[{self.canal}] Media ready ({len(media_assets)} assets: {n_video} video, {n_image} image)")
-
-        # ── Lock media files for this job ──
-        # Prevents another concurrently-starting pipeline from deleting these files
-        # during the video assembly phase (race condition → black screens).
-        if job_id is not None:
-            _media_paths = [str(a["path"]) for a in media_assets if a.get("path")]
-            if _media_paths:
-                _locked_count = self.db.lock_media_files(job_id, _media_paths)
-                logger.info("[%s] Locked %d media files for job #%d", self.canal, _locked_count, job_id)
 
         # Phase 4: Video assembly
         logger.info(f"[{self.canal}] Phase 4/6: Assembling video...")

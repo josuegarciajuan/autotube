@@ -3442,17 +3442,26 @@ async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str
                 except Exception as exc:
                     logger.warning("Could not delete thumbnail %s: %s", thumb_file, exc)
 
-    # Clean temp directories (shared across all jobs)
+    # Clean temp directories (lock-aware: never delete files owned by other active jobs)
     for temp_dir_name in ("video_clips", "temp"):
         temp_dir = project_root / "output" / temp_dir_name
         if temp_dir.exists():
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                cleaned.append(f"output/{temp_dir_name}/ (purged)")
-                logger.info("Purged temp directory: %s", temp_dir)
-            except Exception as exc:
-                logger.warning("Could not clean %s: %s", temp_dir, exc)
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            locked = _db.get_locked_file_paths()
+            deleted = 0
+            for f in temp_dir.iterdir():
+                if not f.is_file():
+                    continue
+                if str(f) in locked:
+                    continue
+                try:
+                    f.unlink()
+                    deleted += 1
+                except OSError:
+                    pass
+            cleaned.append(f"output/{temp_dir_name}/ ({deleted} stale files, {len(locked)} locked preserved)")
+            logger.info("Cleaned %d stale files from %s (%d locked)", deleted, temp_dir, len(locked))
 
     result["files_cleaned"] = cleaned
 

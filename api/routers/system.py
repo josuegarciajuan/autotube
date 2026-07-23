@@ -107,7 +107,27 @@ def _fmt_bytes(n: int) -> str:
 
 @router.post("/system/stabilize")
 def stabilize():
-    """Run full system stabilization and return summary."""
+    """Run full system stabilization and return summary.
+    
+    Refuses to run if any generation jobs are currently active,
+    to prevent destroying assets of in-progress renders.
+    """
+    # ── Guard: refuse if active generation jobs exist ──
+    from database.db_extended import ExtendedDatabase
+    _db = ExtendedDatabase()
+    active_jobs = _db.count_active_jobs()
+    if active_jobs > 0:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "Hay jobs de generación activos",
+                "detail": f"No se puede estabilizar mientras hay {active_jobs} job(s) activos. Cancela los jobs primero.",
+                "active_jobs": active_jobs,
+                "steps": [],
+            }
+        )
+    
     steps = []
     total_killed = 0
     total_freed = 0

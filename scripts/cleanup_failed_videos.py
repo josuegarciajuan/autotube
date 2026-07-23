@@ -229,7 +229,17 @@ def _clean_orphaned_scene_files(conn):
     It scans output/images/, output/video_clips/, output/ai_scenes/ and
     removes files that have zero references in the video_scenes table.
     Files shared across multiple videos are preserved.
+    
+    Refuses to run if any generation jobs are currently active, to prevent
+    deleting files that are being downloaded by an in-progress pipeline.
     """
+    active = conn.execute(
+        "SELECT COUNT(*) FROM generation_jobs WHERE status IN ('running', 'queued')"
+    ).fetchone()[0]
+    if active > 0:
+        logger.warning("  Deep clean SKIPPED — %d active generation job(s) running", active)
+        return
+    
     logger.info("\n--- Deep clean: scanning for orphaned scene files ---")
 
     refs: set[str] = set()
