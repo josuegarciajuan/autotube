@@ -642,19 +642,22 @@ def compute_horizon_slots(
                 # push the publication time forward to after upload+warmup.
                 if is_scheduled:
                     warmup_minutes = ch.get("publish_warmup_min", 120)
+                    # Add 60min safety buffer so the gap is clearly visible even
+                    # after timezone conversions and UI rounding
+                    effective_warmup = warmup_minutes + 60
                     upload_dt_chk = _dt.strptime(target_upload_at, "%Y-%m-%d %H:%M:%S")
                     public_dt_chk = _dt.strptime(target_public_at, "%Y-%m-%d %H:%M:%S")
-                    min_public_dt = upload_dt_chk + _td(minutes=warmup_minutes)
+                    min_public_dt = upload_dt_chk + _td(minutes=effective_warmup)
                     if public_dt_chk < min_public_dt:
                         new_public = min_public_dt
                         old_public_at = target_public_at
                         target_public_at = new_public.strftime("%Y-%m-%d %H:%M:%S")
                         logger.warning(
                             "compute_horizon_slots: [%s] target_public_at pushed: "
-                            "%s → %s (upload at %s + %dmin warmup)",
+                            "%s → %s (upload at %s + %dmin warmup+%dmin buffer)",
                             ch.get("slug", "?"),
                             old_public_at[11:16], target_public_at[11:16],
-                            target_upload_at[11:16], warmup_minutes,
+                            target_upload_at[11:16], warmup_minutes, 60,
                         )
                 
                 all_raw_slots.append({

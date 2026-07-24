@@ -4,25 +4,70 @@ import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Sm
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
+
+/**
+ * Parse a datetime string and return the local time as "HH:MM".
+ * Handles both ISO8601 UTC ("2026-07-24T20:43:00+00:00") and naive local
+ * ("2026-07-24 20:43:00") formats. Converts UTC to Europe/Madrid local.
+ */
 function toLocalTime(ts: string): string {
-  try {
-    // Handle "YYYY-MM-DD HH:MM:SS" format (Europe/Madrid local from DB)
-    const m = ts.match(/(\d{2}):(\d{2})/)
-    return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
-  } catch {
-    return ts?.slice(0, 5) || '--:--'
+  if (!ts) return '--:--'
+  const raw = ts.trim()
+
+  // ISO8601 with explicit timezone offset or Z suffix → parse as full datetime
+  if (raw.match(/[+-]\d{2}:\d{2}$/) || raw.endsWith('Z')) {
+    const dt = new Date(raw)
+    if (!isNaN(dt.getTime())) {
+      return dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
+    }
   }
+
+  // ISO8601 without timezone ("YYYY-MM-DDTHH:MM:SS") → treat as UTC
+  if (raw.includes('T') && raw.length >= 16) {
+    const dt = new Date(raw + '+00:00')
+    if (!isNaN(dt.getTime())) {
+      return dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
+    }
+  }
+
+  // Naive local "YYYY-MM-DD HH:MM:SS" → extract HH:MM directly
+  const m = raw.match(/[\sT](\d{2}):(\d{2})/)
+  if (m) {
+    return `${m[1]}:${m[2]}`
+  }
+
+  return raw.length >= 5 ? raw.slice(0, 5) : '--:--'
 }
 
+/**
+ * Parse a datetime string and return the local date in Spanish locale.
+ * Handles both ISO8601 UTC and naive local formats.
+ * Uses the browser's Intl API for correct timezone conversion.
+ */
 function toLocalDate(ts: string): string {
+  if (!ts) return ''
   try {
-    const m = ts.match(/(\d{4}-\d{2}-\d{2})/)
-    if (m) {
-      const d = new Date(m[1] + 'T00:00:00')
-      return d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })
+    let dt: Date
+    const raw = ts.trim()
+
+    // ISO8601 with explicit timezone → let JS handle conversion
+    if (raw.match(/[+-]\d{2}:\d{2}$/) || raw.endsWith('Z')) {
+      dt = new Date(raw)
+    } else if (raw.includes('T') && raw.length >= 16) {
+      // ISO without TZ → treat as UTC
+      dt = new Date(raw + '+00:00')
+    } else {
+      // Naive local "YYYY-MM-DD HH:MM:SS" → parse date part
+      const m = raw.match(/(\d{4})-(\d{2})-(\d{2})/)
+      if (m) dt = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
+      else return ''
     }
-  } catch {}
-  return ''
+
+    if (isNaN(dt.getTime())) return ''
+    return dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })
+  } catch {
+    return ''
+  }
 }
 
 function phaseLabel(phase: string): string {

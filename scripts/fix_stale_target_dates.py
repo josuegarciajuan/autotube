@@ -288,7 +288,17 @@ def find_stale_planned_slots(conn, dry_run: bool = False) -> list[dict]:
                 continue
 
         from datetime import timedelta
-        min_pub_utc = up_utc + timedelta(minutes=120)  # warmup_min default
+        # Use channel's warmup from config
+        cfg = {}
+        try:
+            cfg = json.loads(conn.execute(
+                'SELECT config_json FROM channels WHERE slug=?', (row['canal'],)
+            ).fetchone()['config_json'] or '{}')
+        except Exception:
+            pass
+        warmup = cfg.get('PUBLISH_WARMUP_MIN', 120)
+        effective_warmup = warmup + 60  # 60min safety buffer
+        min_pub_utc = up_utc + timedelta(minutes=effective_warmup)
 
         if pub_utc < min_pub_utc:
             gap_min = int((pub_utc - min_pub_utc).total_seconds() / 60)
@@ -328,7 +338,18 @@ def fix_stale_planned_slots(conn, stale_slots: list[dict], dry_run: bool = False
             errors += 1
             continue
 
-        new_pub_utc = up_utc + _td(minutes=120)
+        # Use channel's warmup from config plus 60min safety buffer
+        cfg = {}
+        try:
+            cfg = json.loads(conn.execute(
+                'SELECT config_json FROM channels WHERE slug=?', (s['canal'],)
+            ).fetchone()['config_json'] or '{}')
+        except Exception:
+            pass
+        warmup = cfg.get('PUBLISH_WARMUP_MIN', 120)
+        effective_warmup = warmup + 60  # 60min safety buffer
+
+        new_pub_utc = up_utc + _td(minutes=effective_warmup)
         new_pub_str = new_pub_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         old_pub = str(s["target_public_at"])[:19]
 
