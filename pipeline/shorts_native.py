@@ -120,7 +120,7 @@ class NativeShortsPipeline:
                         f"{topic_list}\n\nElige temas COMPLETAMENTE DIFERENTES.\n"
                     )
 
-            client = create_llm_client()
+            client = create_llm_client(enable_thinking=True)
 
             prompt = f"""Genera 3 ideas virales para un YouTube Short (30-90 segundos) en español.
 

@@ -266,7 +266,7 @@ INSTRUCCIONES:
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
-        client = create_llm_client(timeout=120.0, max_retries=2)
+        client = create_llm_client(enable_thinking=True, timeout=120.0, max_retries=2)
         
         try:
             response = client.chat.completions.create(

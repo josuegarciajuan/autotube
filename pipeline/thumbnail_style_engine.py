@@ -297,7 +297,7 @@ def _decide_style_via_llm(
     from config.llm_client import create_llm_client
     from config.settings import LLM_MODEL
 
-    client = create_llm_client(timeout=60.0, max_retries=2)
+    client = create_llm_client(enable_thinking=True, timeout=60.0, max_retries=2)
 
     prompt = STYLE_DECISION_PROMPT.format(
         channel_name=channel_name[:100],

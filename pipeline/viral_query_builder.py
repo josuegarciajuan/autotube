@@ -49,7 +49,7 @@ def _get_llm_client(config: Optional[SimpleNamespace] = None):
 
     model = LLM_MODEL or OPENAI_MODEL
 
-    return create_llm_client(), model
+    return create_llm_client(enable_thinking=True), model
 
 
 def _llm_generate_concepts(

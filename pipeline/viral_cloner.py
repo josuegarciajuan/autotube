@@ -46,7 +46,7 @@ def _get_llm_client(config: Optional[SimpleNamespace] = None):
 
     model = LLM_MODEL or OPENAI_MODEL
 
-    return create_llm_client(), model
+    return create_llm_client(enable_thinking=True), model
 
 
 def _call_llm_json(config: Optional[SimpleNamespace], system: str, user: str, temp: float = 0.5) -> dict | None:

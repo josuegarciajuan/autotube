@@ -776,7 +776,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
 
     # 1. Script via LLM
     from config.llm_client import create_llm_client
-    client = create_llm_client()
+    client = create_llm_client(enable_thinking=True)
 
     response = client.chat.completions.create(
         model=LLM_MODEL,

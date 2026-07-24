@@ -64,7 +64,7 @@ def generate_playlists_for_channel(
     api_key = llm_api_key or None  # handled by create_llm_client defaults
     base_url = llm_base_url or None
 
-    client = create_llm_client(api_key=api_key, base_url=base_url)
+    client = create_llm_client(enable_thinking=True, api_key=api_key, base_url=base_url)
 
     keywords_text = ", ".join(niche_keywords) if niche_keywords else ""
     niche_text = f"{channel_name}"

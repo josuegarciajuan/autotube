@@ -767,7 +767,7 @@ async def generate_native(channel_id: int):
         )
 
     # 2. Generate script via LLM
-    client = create_llm_client()
+    client = create_llm_client(enable_thinking=True)
 
     prompt = f"""IMPORTANTE: responde ÚNICAMENTE con el JSON. Sin introducción, sin markdown, sin explicación. Solo el JSON.
 

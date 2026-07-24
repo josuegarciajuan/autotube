@@ -243,7 +243,7 @@ class ThumbnailBrainstorm:
         from config.llm_client import create_llm_client
         from config.settings import LLM_MODEL
 
-        client = create_llm_client(timeout=60.0, max_retries=2)
+        client = create_llm_client(enable_thinking=True, timeout=60.0, max_retries=2)
 
         # Build system prompt with face directive
         system_prompt = PSYCHOLOGY_AGENT_SYSTEM.format(
@@ -285,7 +285,7 @@ class ThumbnailBrainstorm:
         from config.llm_client import create_llm_client
         from config.settings import LLM_MODEL
 
-        client = create_llm_client(timeout=60.0, max_retries=2)
+        client = create_llm_client(enable_thinking=True, timeout=60.0, max_retries=2)
 
         # Build system prompt with face directive
         system_prompt = MARKETING_AGENT_SYSTEM.format(

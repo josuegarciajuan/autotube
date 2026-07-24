@@ -18,6 +18,7 @@ from config.llm_client import create_llm_client
 
 from config.settings import (
     LLM_MODEL,
+    LLM_MODEL_SCRIPT,
     LLM_PROVIDER,
     OPENAI_MAX_TOKENS,
     OPENAI_TEMPERATURE,
@@ -106,6 +107,7 @@ class ScriptGenerator:
         self.canal_config = canal_config
         self.canal = canal_config.CANAL_NAME
         self.client = create_llm_client(
+            enable_thinking=True,
             timeout=120.0,   # 2 min for LLM calls
             max_retries=2,
         )
@@ -230,7 +232,7 @@ class ScriptGenerator:
 
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -286,7 +288,7 @@ class ScriptGenerator:
 
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -595,7 +597,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -738,7 +740,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1170,7 +1172,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": outline_system},
                     {"role": "user", "content": outline_prompt},
@@ -1244,7 +1246,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             for ch_attempt in range(2):  # original + 1 retry
                 try:
                     response = self.client.chat.completions.create(
-                        model=LLM_MODEL,
+                        model=LLM_MODEL_SCRIPT,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": chapter_prompt},
@@ -1356,7 +1358,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         start_time = time.time()
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=messages,
                 temperature=OPENAI_TEMPERATURE,
                 max_tokens=OPENAI_MAX_TOKENS,
@@ -1672,7 +1674,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
             try:
                 response = self.client.chat.completions.create(
-                    model=LLM_MODEL,
+                    model=LLM_MODEL_SCRIPT,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -2167,7 +2169,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
         try:
             response = self.client.chat.completions.create(
-                model=LLM_MODEL,
+                model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

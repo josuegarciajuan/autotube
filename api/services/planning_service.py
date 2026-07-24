@@ -2118,7 +2118,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         )
 
     # 1. Script via LLM
-    client = create_llm_client()
+    client = create_llm_client(enable_thinking=True)
     niche = getattr(ch_config, "CANAL_NARRATIVE_STYLE", "documental")
     display_name = getattr(ch_config, "CANAL_DISPLAY_NAME", channel_slug)
     tagline = getattr(ch_config, "CANAL_TAGLINE", "")

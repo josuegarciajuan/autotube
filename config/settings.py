@@ -67,7 +67,15 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY = os.getenv("LLM_API_KEY", OPENAI_API_KEY)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 
-# ── OpenAI (legacy / fallback) ─────────────────────────────────
+# Multi-model tiers for DeepSeek V4 (env-configurable, defaults below)
+# Tier 1: Script generation — highest quality, thinking enabled
+LLM_MODEL_SCRIPT = os.getenv("LLM_MODEL_SCRIPT", "deepseek-v4-pro")
+# Tier 2: Creative tasks (metadata, thumbnails, shorts, marketing) — thinking enabled
+LLM_MODEL_CREATIVE = os.getenv("LLM_MODEL_CREATIVE", "deepseek-v4-flash")
+# Tier 3: Default (theme extraction, comments, classification) — no thinking
+# (uses LLM_MODEL above — currently deepseek-v4-flash)
+
+# OpenAI (legacy / fallback) ────────────────────────────────────
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.8"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))

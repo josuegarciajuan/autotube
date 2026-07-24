@@ -89,6 +89,7 @@ class MetadataOptimizer:
     def _get_llm(self) -> OpenAI:
         if self._llm_client is None:
             self._llm_client = create_llm_client(
+                enable_thinking=True,
                 timeout=60.0,
                 max_retries=2,
             )
