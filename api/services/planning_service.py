@@ -485,25 +485,55 @@ def compute_daily_slots(
 # ── 3-Phase Horizon Planning (v9) ──────────────────────────────
 
 def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
-                         window_start: int = None, window_end: int = None,
-                         videos_per_day: int = 1,
-                         windows: list = None) -> tuple:
+                          window_start: int = None, window_end: int = None,
+                          videos_per_day: int = 1,
+                          windows: list = None,
+                          public_hour: int = None,
+                          warmup_min: int = 120) -> tuple:
     """Pick a deterministic minute within the upload window(s) for one slot.
 
     v11+: Accepts `windows` list of dicts [{"start":10,"end":13},...] with
     round-robin distribution across windows. Falls back to single window_start/end
     for backward compatibility.
 
+    v12+: Accepts `public_hour` to filter upload windows that complete BEFORE
+    the publication time (accounting for warmup). This prevents the ordering bug
+    where target_upload_at > target_public_at.
+
     Spreads multiple videos from the same channel across the window
     (min 15 min apart). Returns (hour, minute, window_start, window_end).
     """
     # ── v11: multi-window round-robin ──
     if windows and isinstance(windows, list) and len(windows) > 0:
-        # Validate and pick window via round-robin
+        # Validate windows
         valid_windows = []
         for w in windows:
             if isinstance(w, dict) and "start" in w and "end" in w:
                 valid_windows.append(w)
+
+        if valid_windows and public_hour is not None:
+            # ── v12: Filter windows to only those BEFORE publication ──
+            # Upload must complete at least warmup_min before the publication peak
+            latest_upload_hour = public_hour - (warmup_min / 60.0)
+            before_pub_windows = [
+                w for w in valid_windows
+                if w["end"] <= latest_upload_hour
+            ]
+            if before_pub_windows:
+                valid_windows = before_pub_windows
+                logger.debug(
+                    "_pick_upload_minute: filtered %d→%d windows before pub=%02d:00 "
+                    "(warmup=%dmin, latest_upload=%02d:00)",
+                    len(windows), len(valid_windows), public_hour,
+                    warmup_min, int(latest_upload_hour),
+                )
+            else:
+                logger.debug(
+                    "_pick_upload_minute: no upload window fits before pub=%02d:00 "
+                    "(warmup=%dmin) — using all windows, public_at will be adjusted",
+                    public_hour, warmup_min,
+                )
+
         if valid_windows:
             rr_idx = (day_seed + slot_pos + channel_id) % len(valid_windows)
             chosen = valid_windows[rr_idx]
@@ -596,12 +626,36 @@ def compute_horizon_slots(
                     # Immediate mode: upload = right after gen (use target_public_at as deadline)
                     up_h, up_m = peak_h, peak_m
                 else:
+                    warmup_minutes = ch.get("publish_warmup_min", 120)
                     up_h, up_m, ws_start, ws_end = _pick_upload_minute(
                         _day_seed(date_str), ch_id, pos,
                         window_start=win_start, window_end=win_end,
                         videos_per_day=n, windows=upload_windows,
+                        public_hour=peak_h if is_scheduled else None,
+                        warmup_min=warmup_minutes,
                     )
                 target_upload_at = f"{date_str} {up_h:02d}:{up_m:02d}:00"
+
+                # ── v12: Enforce target_upload_at < target_public_at ──
+                # Upload MUST happen before publication (with warmup buffer).
+                # If the upload window falls after the peak publish time,
+                # push the publication time forward to after upload+warmup.
+                if is_scheduled:
+                    warmup_minutes = ch.get("publish_warmup_min", 120)
+                    upload_dt_chk = _dt.strptime(target_upload_at, "%Y-%m-%d %H:%M:%S")
+                    public_dt_chk = _dt.strptime(target_public_at, "%Y-%m-%d %H:%M:%S")
+                    min_public_dt = upload_dt_chk + _td(minutes=warmup_minutes)
+                    if public_dt_chk < min_public_dt:
+                        new_public = min_public_dt
+                        old_public_at = target_public_at
+                        target_public_at = new_public.strftime("%Y-%m-%d %H:%M:%S")
+                        logger.warning(
+                            "compute_horizon_slots: [%s] target_public_at pushed: "
+                            "%s → %s (upload at %s + %dmin warmup)",
+                            ch.get("slug", "?"),
+                            old_public_at[11:16], target_public_at[11:16],
+                            target_upload_at[11:16], warmup_minutes,
+                        )
                 
                 all_raw_slots.append({
                     "channel_id": ch_id,

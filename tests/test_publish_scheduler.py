@@ -149,15 +149,16 @@ class TestEnsureFutureTarget:
         """Recalculated target is at least warmup_min minutes in the future."""
         past = "2020-01-01T12:00:00+00:00"
         warmup = 120
+        now_before = datetime.now(timezone.utc)
         result = ensure_future_target_public_at(
             past, slug="test", timezone_str="Europe/Madrid",
             warmup_min=warmup, jitter_min=0,
         )
         result_dt = datetime.fromisoformat(result)
-        now_utc = datetime.now(timezone.utc)
-        min_allowed = now_utc + timedelta(minutes=warmup)
+        # Target must be at least warmup minutes from the time we captured before the call
+        min_allowed = now_before + timedelta(minutes=warmup)
         assert result_dt >= min_allowed, (
-            f"Expected {result_dt} >= {min_allowed} (now + {warmup}min)"
+            f"Expected {result_dt} >= {min_allowed} (now_before + {warmup}min)"
         )
 
 
