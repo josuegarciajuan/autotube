@@ -14,11 +14,9 @@ import time
 from difflib import SequenceMatcher
 from typing import Optional
 
-from openai import OpenAI
+from config.llm_client import create_llm_client
 
 from config.settings import (
-    LLM_API_KEY,
-    LLM_BASE_URL,
     LLM_MODEL,
     LLM_PROVIDER,
     OPENAI_MAX_TOKENS,
@@ -107,9 +105,7 @@ class ScriptGenerator:
         self.db = db
         self.canal_config = canal_config
         self.canal = canal_config.CANAL_NAME
-        self.client = OpenAI(
-            api_key=LLM_API_KEY,
-            base_url=LLM_BASE_URL,
+        self.client = create_llm_client(
             timeout=120.0,   # 2 min for LLM calls
             max_retries=2,
         )

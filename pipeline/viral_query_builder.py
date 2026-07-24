@@ -42,18 +42,14 @@ Generate EXACTLY 4 concepts."""
 def _get_llm_client(config: Optional[SimpleNamespace] = None):
     """Get OpenAI-compatible client from config."""
     from config.settings import (
-        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
-        OPENAI_API_KEY, OPENAI_MODEL,
+        LLM_MODEL,
+        OPENAI_MODEL,
     )
-    from openai import OpenAI
+    from config.llm_client import create_llm_client
 
-    api_key = LLM_API_KEY or OPENAI_API_KEY
-    base_url = LLM_BASE_URL
     model = LLM_MODEL or OPENAI_MODEL
 
-    if api_key:
-        return OpenAI(api_key=api_key, base_url=base_url), model
-    return None, None
+    return create_llm_client(), model
 
 
 def _llm_generate_concepts(

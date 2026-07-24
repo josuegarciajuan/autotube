@@ -12,15 +12,17 @@ Quota costs (per operation):
   - comments().insert()        → 50 units
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from openai import OpenAI
+from config.llm_client import create_llm_client
 from googleapiclient.errors import HttpError
 
-from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, TOKENS_DIR
+from config.settings import LLM_MODEL, TOKENS_DIR
 from pipeline.youtube_playlists import _load_credentials
 
 logger = logging.getLogger(__name__)
@@ -99,9 +101,7 @@ class YouTubeCommentManager:
 
     def _get_llm(self) -> OpenAI:
         if self._llm_client is None:
-            self._llm_client = OpenAI(
-                api_key=LLM_API_KEY,
-                base_url=LLM_BASE_URL,
+            self._llm_client = create_llm_client(
                 timeout=30.0,
                 max_retries=1,
             )

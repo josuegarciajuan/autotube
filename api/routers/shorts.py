@@ -713,7 +713,8 @@ async def generate_native(channel_id: int):
     import time
     import traceback as tb
     from pathlib import Path
-    from config.settings import DATABASE_PATH, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OUTPUT_DIR
+    from config.settings import DATABASE_PATH, LLM_MODEL, OUTPUT_DIR
+    from config.llm_client import create_llm_client
     from config.config_bridge import get_channel_config
     from pipeline.youtube_uploader import YouTubeUploader
 
@@ -766,8 +767,7 @@ async def generate_native(channel_id: int):
         )
 
     # 2. Generate script via LLM
-    from openai import OpenAI
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    client = create_llm_client()
 
     prompt = f"""IMPORTANTE: responde ÚNICAMENTE con el JSON. Sin introducción, sin markdown, sin explicación. Solo el JSON.
 

@@ -745,7 +745,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
     import time
     import sqlite3
     from pathlib import Path
-    from config.settings import DATABASE_PATH, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OUTPUT_DIR
+    from config.settings import DATABASE_PATH, LLM_MODEL, OUTPUT_DIR
     from config.config_bridge import get_channel_config
 
     ch_config = get_channel_config(channel_slug)
@@ -775,8 +775,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
         )
 
     # 1. Script via LLM
-    from openai import OpenAI
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    from config.llm_client import create_llm_client
+    client = create_llm_client()
 
     response = client.chat.completions.create(
         model=LLM_MODEL,

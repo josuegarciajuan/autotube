@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Optional
 
-from config.settings import LLM_PROVIDER, LLM_MODEL, LLM_API_KEY, LLM_BASE_URL
+from config.settings import LLM_PROVIDER, LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +78,14 @@ class ShortsExtractor:
             return self._client
 
         try:
-            from openai import OpenAI
+            from config.llm_client import create_llm_client
         except ImportError:
             raise ImportError(
                 "openai package required for shorts extraction. "
                 "Install with: pip install openai"
             )
 
-        self._client = OpenAI(
-            api_key=LLM_API_KEY,
-            base_url=LLM_BASE_URL,
-        )
+        self._client = create_llm_client()
         return self._client
 
     def extract(

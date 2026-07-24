@@ -57,14 +57,14 @@ def generate_playlists_for_channel(
         ``slug``, ``name``, ``description``, ``type`` (always "thematic"),
         ``keywords`` (English keywords for scraping)
     """
-    from openai import OpenAI
-    from config.settings import LLM_MODEL, LLM_API_KEY, LLM_BASE_URL
+    from config.llm_client import create_llm_client
+    from config.settings import LLM_MODEL
 
     model = llm_model or LLM_MODEL
-    api_key = llm_api_key or LLM_API_KEY
-    base_url = llm_base_url or LLM_BASE_URL
+    api_key = llm_api_key or None  # handled by create_llm_client defaults
+    base_url = llm_base_url or None
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = create_llm_client(api_key=api_key, base_url=base_url)
 
     keywords_text = ", ".join(niche_keywords) if niche_keywords else ""
     niche_text = f"{channel_name}"

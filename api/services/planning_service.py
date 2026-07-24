@@ -2090,7 +2090,8 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     """
     import json, re, subprocess, time, sqlite3
     from pathlib import Path
-    from config.settings import DATABASE_PATH, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, OUTPUT_DIR
+    from config.settings import DATABASE_PATH, LLM_MODEL, OUTPUT_DIR
+    from config.llm_client import create_llm_client
     from config.config_bridge import get_channel_config
 
     ch_config = get_channel_config(channel_slug)
@@ -2117,8 +2118,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         )
 
     # 1. Script via LLM
-    from openai import OpenAI
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    client = create_llm_client()
     niche = getattr(ch_config, "CANAL_NARRATIVE_STYLE", "documental")
     display_name = getattr(ch_config, "CANAL_DISPLAY_NAME", channel_slug)
     tagline = getattr(ch_config, "CANAL_TAGLINE", "")

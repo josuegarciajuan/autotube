@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from openai import OpenAI
-from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from config.llm_client import create_llm_client
+from config.settings import LLM_MODEL
 
 _MARKETING_SYSTEM_PROMPT = """Eres un experto en marketing digital y YouTube SEO especializado en hacer videos virales en español.
 
@@ -39,7 +39,7 @@ Responde SIEMPRE en formato JSON con estas claves:
 
 def get_marketing_client():
     """Get OpenAI-compatible client for marketing generation."""
-    return OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
+    return create_llm_client(timeout=60.0, max_retries=2)
 
 
 async def generate_marketing_content(script_text: str, keywords: list[str] = None,

@@ -100,8 +100,8 @@ class NativeShortsPipeline:
         Fetches recently published native short topics and instructs the LLM to avoid them.
         """
         try:
-            from openai import OpenAI
-            from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+            from config.llm_client import create_llm_client
+            from config.settings import LLM_MODEL
 
             niche = getattr(self.config, "CANAL_NARRATIVE_STYLE", "documental")
             display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
@@ -120,7 +120,7 @@ class NativeShortsPipeline:
                         f"{topic_list}\n\nElige temas COMPLETAMENTE DIFERENTES.\n"
                     )
 
-            client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+            client = create_llm_client()
 
             prompt = f"""Genera 3 ideas virales para un YouTube Short (30-90 segundos) en español.
 
@@ -155,10 +155,10 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
 
     def _phase_script_short(self, content_item: dict) -> Optional[dict]:
         """Generate a 30-90 second script for a Short."""
-        from openai import OpenAI
-        from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+        from config.llm_client import create_llm_client
+        from config.settings import LLM_MODEL
 
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = create_llm_client()
 
         niche = getattr(self.config, "CANAL_NARRATIVE_STYLE", "documental")
         display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)

@@ -294,10 +294,10 @@ def _decide_style_via_llm(
     keywords: list[str],
 ) -> dict:
     """Call the LLM to decide the best visual style."""
-    from openai import OpenAI
-    from config.settings import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+    from config.llm_client import create_llm_client
+    from config.settings import LLM_MODEL
 
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=60.0, max_retries=2)
+    client = create_llm_client(timeout=60.0, max_retries=2)
 
     prompt = STYLE_DECISION_PROMPT.format(
         channel_name=channel_name[:100],
