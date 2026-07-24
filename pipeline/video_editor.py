@@ -594,6 +594,29 @@ class VideoEditor:
             sum(1 for a in media_assets if a.get("type") == "video"),
         )
 
+        # ── Placeholder ratio safety gate ──────────────────────────
+        # If >30% of segments are black/gradient placeholders, the final
+        # video will have a visible "black screen from halfway" defect.
+        # This catches the checkpoint-resume race condition where media
+        # files were deleted by concurrent cleanup but the checkpoint was
+        # accepted anyway (now fixed at the checkpoint load level too).
+        _n_placeholder = sum(
+            1 for sp in segment_paths
+            if "_black" in Path(sp).stem or "_placeholder" in Path(sp).stem
+        )
+        _placeholder_pct = (_n_placeholder / len(segment_paths)) * 100 if segment_paths else 0
+        if _placeholder_pct > 30:
+            raise RuntimeError(
+                f"Placeholder ratio {_placeholder_pct:.0f}% ({_n_placeholder}/{len(segment_paths)} "
+                f"segments are black/placeholder — media files likely missing). "
+                f"Aborting to prevent black-screen video."
+            )
+        if _n_placeholder > 0:
+            self.logger.warning(
+                "  %d/%d segments (%.0f%%) are placeholders — video may have gaps",
+                _n_placeholder, len(segment_paths), _placeholder_pct,
+            )
+
         # ── v6: merge consecutive gradient placeholders ──────────
         # When many consecutive scenes fail to get media (e.g. due to
         # off-niche theme poisoning), the concat gets overloaded with
@@ -777,6 +800,59 @@ class VideoEditor:
             raise RuntimeError(f"ffmpeg concat failed (rc={result.returncode}): {stderr_tail}")
         if not concat_output.exists() or concat_output.stat().st_size == 0:
             raise RuntimeError("ffmpeg concat produced empty output")
+
+        # ── Blackness sanity check: sample frames to detect black-screen defect ──
+        # Extracts a frame at 50% of the video duration and checks if it's
+        # >90% near-black. Catches the checkpoint-resume race condition where
+        # media files were deleted and the video ends up mostly black.
+        _black_check_output = None
+        try:
+            import tempfile
+            _black_check_output = output_path.with_suffix(".blackcheck.jpg")
+            _probe_result = subprocess.run([
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(concat_output),
+            ], capture_output=True, text=True, timeout=15)
+            _vid_dur = float(_probe_result.stdout.strip()) if _probe_result.stdout.strip() else 0
+            if _vid_dur > 10:
+                _check_ts = _vid_dur * 0.5
+                _frame_result = subprocess.run([
+                    "ffmpeg", "-y", "-v", "error",
+                    "-ss", str(_check_ts), "-i", str(concat_output),
+                    "-vframes", "1", "-q:v", "2",
+                    str(_black_check_output),
+                ], capture_output=True, text=True, timeout=30)
+                if _black_check_output.exists() and _black_check_output.stat().st_size > 100:
+                    from PIL import Image
+                    import numpy as np
+                    _img = Image.open(str(_black_check_output)).convert("RGB")
+                    _arr = np.array(_img, dtype=np.float32)
+                    # Pixels with all channels < 15 are "near-black"
+                    _black_pixels = np.sum(np.all(_arr < 15, axis=2))
+                    _total_pixels = _arr.shape[0] * _arr.shape[1]
+                    _black_pct = (_black_pixels / _total_pixels) * 100
+                    if _black_pct > 90:
+                        raise RuntimeError(
+                            f"BLACK-SCREEN DETECTED: frame at {_check_ts:.0f}s is "
+                            f"{_black_pct:.0f}% near-black. Video is mostly black — "
+                            f"media files were likely deleted. Aborting to prevent publishing bad video."
+                        )
+                    self.logger.info(
+                        "Blackness check: %.0f%% near-black at %.0fs (OK: < 90%%)",
+                        _black_pct, _check_ts,
+                    )
+        except RuntimeError:
+            raise
+        except Exception as _bc_err:
+            self.logger.warning("Blackness check skipped (non-fatal): %s", _bc_err)
+        finally:
+            if _black_check_output and _black_check_output.exists():
+                try:
+                    _black_check_output.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # Replace output_path with concat result
         output_path.unlink(missing_ok=True)
