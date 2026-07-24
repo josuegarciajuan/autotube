@@ -531,18 +531,27 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # 2. Cancel stale pending slots (>6h past scheduled_at)
     _cancel_stale_shorts_slots(db)
 
-    # 3. Guard: only one SHORT at a time (videos can run concurrently)
+    # 3. Global guard: strictly sequential — only ONE job (any type) at a time
+    # Imports _DISPATCH_LOCK to prevent TOCTOU races with long-form dispatchers
+    from api.services.generation_service import _DISPATCH_LOCK
+    with _DISPATCH_LOCK:
+        active_count = db.count_active_jobs()
+        if active_count > 0:
+            logger.info("Shorts dispatch skipped: %d active job(s) — sequential only", active_count)
+            return None
+
+    # 4. Guard: only one SHORT at a time (backup check)
     active = db.get_active_shorts_job()
     if active:
         logger.debug("Shorts dispatch skipped: short job #%d is %s", active["id"], active["status"])
         return None
 
-    # 4. Memory gate (shorts use minimal RAM — 1 GB is enough)
+    # 5. Memory gate (shorts use minimal RAM — 1 GB is enough)
     if not _memory_ok(min_free_gb=1.0):
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
-    # 5. Get next pending short slot that is due
+    # 6. Get next pending short slot that is due
     next_slot = db.get_next_pending_shorts_slot()
     if not next_slot:
         logger.debug("No pending shorts slots due")

@@ -3542,19 +3542,12 @@ class ExtendedDatabase(Database):
         return dict(row) if row else None
     
     def count_active_jobs(self) -> int:
-        """Count long-form generation jobs currently running or queued.
+        """Count ALL generation jobs currently running or queued.
         
-        Used by all long-form dispatchers as a global concurrency guard:
-        only one long-form generation job runs at a time system-wide,
-        preventing ffmpeg resource contention that causes video assembly
-        timeouts.
-        
-        Shorts (generate_native_short, generate_clip_short) are EXCLUDED
-        because they run concurrently with long-form and have their own
-        guard (get_active_shorts_job).
-        
-        Upload-only jobs (upload_only) are EXCLUDED because they are 
-        network-bound and can run concurrently with generation.
+        Strictly sequential — one job at a time system-wide for ANY type
+        (long-form, shorts, clips, uploads). Prevents ffmpeg resource
+        contention, race conditions in preflight cleanup, and black-screen
+        renders caused by concurrent job interference.
         
         Counts both 'running' AND 'queued' to close the TOCTOU race window:
         a job created by process_planned_slots() may briefly be 'queued'
@@ -3564,8 +3557,7 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
-                "WHERE status IN ('running', 'queued') "
-                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+                "WHERE status IN ('running', 'queued')"
             ).fetchone()
         return row["cnt"] if row else 0
     

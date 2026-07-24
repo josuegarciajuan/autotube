@@ -621,15 +621,26 @@ def run_job(
         assets = media_cp.get("assets", [])
         scene_ranges = media_cp.get("scene_ranges")
         if assets:
-            # Verify at least some asset files exist
+            # Strict checkpoint validation: at least 80% of asset files must
+            # still exist on disk. If too many were deleted (e.g. by concurrent
+            # preflight cleanup in a previous run), forfeit the checkpoint so
+            # media is re-fetched from scratch instead of rendering black
+            # placeholder segments for missing files.
             existing = sum(1 for a in assets if isinstance(a, dict) and 
                           a.get("path") and Path(str(a["path"])).exists())
-            if existing > 0:
+            required = max(1, int(len(assets) * 0.8))
+            if existing >= required:
                 media_assets = assets
-                logger.info("Media checkpoint: %d/%d assets still on disk", 
-                           existing, len(assets))
+                logger.info("Media checkpoint: %d/%d assets on disk (≥ %d required) — accepted",
+                           existing, len(assets), required)
             else:
-                logger.warning("Media files missing — will re-fetch")
+                logger.warning(
+                    "Media checkpoint REJECTED: only %d/%d assets on disk "
+                    "(need ≥ %d). Files were likely deleted by a concurrent "
+                    "cleanup in a prior run. Will re-fetch media from scratch.",
+                    existing, len(assets), required,
+                )
+                media_assets = None  # force re-fetch
     
     video_data = checkpoint.get("video")
     if video_data and isinstance(video_data, dict):

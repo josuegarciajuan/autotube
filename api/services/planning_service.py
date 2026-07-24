@@ -1474,7 +1474,7 @@ def process_planned_slots(db=None) -> dict | None:
     #     - If 2 jobs already active → defer dispatch.
     active_count = db.count_active_jobs()
     render_count = db.count_render_phase_jobs()
-    MAX_TOTAL_JOBS = 2
+    MAX_TOTAL_JOBS = 1
     MAX_RENDER_JOBS = 1
     
     if active_count >= MAX_TOTAL_JOBS:

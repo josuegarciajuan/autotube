@@ -717,6 +717,15 @@ async def generate_native(channel_id: int):
     from config.config_bridge import get_channel_config
     from pipeline.youtube_uploader import YouTubeUploader
 
+    # ── Global concurrency guard: strictly sequential — only ONE job at a time ──
+    from api.services.generation_service import _DISPATCH_LOCK
+    from database.db_extended import ExtendedDatabase
+    with _DISPATCH_LOCK:
+        db_concurrency = ExtendedDatabase(str(DATABASE_PATH))
+        active = db_concurrency.count_active_jobs()
+        if active > 0:
+            raise HTTPException(409, f"Ya hay {active} generacion(es) en curso. Solo una a la vez.")
+
     logger.info("generate-native START for channel_id=%d", channel_id)
 
     # 1. Get channel info
