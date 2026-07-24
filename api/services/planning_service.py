@@ -14,8 +14,9 @@ Architecture:
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+import pytz
 
 logger = logging.getLogger("autotube.planning")
 
@@ -126,6 +127,30 @@ def _day_seed(date_str: str) -> int:
 def _channel_seed(day_seed: int, channel_id: int) -> int:
     """Combine day seed with channel id for per-channel variation."""
     return (day_seed ^ (channel_id * 0x9E3779B9)) & 0xFFFFFFFF
+
+
+# ── Timezone helpers ─────────────────────────────────────────
+
+def _naive_local_to_utc(naive_str: str, tz_str: str) -> str:
+    """Convert a naive local datetime string to ISO8601 UTC.
+
+    Args:
+        naive_str: e.g. '2026-07-24 21:07:00' (local time, no TZ).
+        tz_str: e.g. 'Europe/Madrid'.
+
+    Returns:
+        ISO8601 UTC string, e.g. '2026-07-24T19:07:00+00:00'.
+    """
+    try:
+        tz = pytz.timezone(tz_str)
+        naive_dt = datetime.strptime(naive_str, "%Y-%m-%d %H:%M:%S")
+        localized = tz.localize(naive_dt)
+        utc_dt = localized.astimezone(timezone.utc)
+        return utc_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    except (pytz.UnknownTimeZoneError, ValueError, TypeError):
+        # Fallback: return as-is (will be treated as naive by downstream parsers)
+        logger.debug("_naive_local_to_utc failed for '%s' (tz=%s) — returning as-is", naive_str, tz_str)
+        return naive_str
 
 
 # ── Core algorithm ────────────────────────────────────────────
@@ -359,8 +384,6 @@ def compute_daily_slots(
                 "channel_id": ch["channel_id"],
                 "date_key": date_str,
                 "scheduled_at": sched_str,
-                # For scheduled: target_upload_at is the PUBLIC peak time
-                # For immediate: target_upload_at is the upload time (unchanged)
                 "target_upload_at": target_str,
                 "target_public_at": target_str if is_scheduled else None,
                 "slot_position": pos,
@@ -368,6 +391,7 @@ def compute_daily_slots(
                 "channel_slug": ch.get("slug", ""),
                 "source_mode": slot_mode,
                 "publish_mode": ch.get("publish_mode", "immediate"),
+                "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
                 "upload_window_start": ch.get("upload_window_start", 9),
                 "upload_window_end": ch.get("upload_window_end", 11),
             })
@@ -446,6 +470,14 @@ def compute_daily_slots(
     # Update slot positions after collision resolution
     for pos, s in enumerate(resolved, 1):
         s["slot_position"] = pos
+    
+    # ── Convert target_public_at from naive local → ISO8601 UTC ──
+    for s in resolved:
+        if s.get("target_public_at") and s.get("publish_mode") == "scheduled":
+            tz_str = s.get("publish_timezone", "Europe/Madrid")
+            s["target_public_at"] = _naive_local_to_utc(s["target_public_at"], tz_str)
+        elif not s.get("publish_mode") == "scheduled":
+            s["target_public_at"] = None
     
     return resolved
 
@@ -581,6 +613,7 @@ def compute_horizon_slots(
                     "channel_slug": ch.get("slug", ""),
                     "source_mode": mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original",
                     "publish_mode": ch.get("publish_mode", "immediate"),
+                    "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
                     "lead_hours": ch.get("generation_lead_hours", 36),
                     "avg_duration_min": ch.get("avg_duration_min", ESTIMATED_PIPELINE_MINUTES),
                     "upload_window_start": ws_start,
@@ -671,7 +704,20 @@ def compute_horizon_slots(
     for pos, s in enumerate(all_raw_slots, 1):
         s["slot_position"] = pos
     
+    # ── 5. Convert target_public_at from naive local → ISO8601 UTC ──
+    for s in all_raw_slots:
+        if s.get("target_public_at") and s.get("publish_mode") == "scheduled":
+            tz_str = _get_slot_timezone(s)
+            s["target_public_at"] = _naive_local_to_utc(s["target_public_at"], tz_str)
+        elif not s.get("publish_mode") == "scheduled":
+            s["target_public_at"] = None
+    
     return all_raw_slots
+
+
+def _get_slot_timezone(slot: dict) -> str:
+    """Extract timezone string from a slot dict. Falls back to Europe/Madrid."""
+    return slot.get("publish_timezone", "Europe/Madrid")
 
 
 # ── Persistence layer ─────────────────────────────────────────

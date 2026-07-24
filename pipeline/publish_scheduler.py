@@ -683,3 +683,149 @@ def _adjust_from_history(db, channel_id: int, seed_hour: int,
                 conn.close()
             except Exception:
                 pass
+
+
+def _parse_target_public_at(target_public_at: str, timezone_str: str = "Europe/Madrid") -> Optional[datetime]:
+    """Parse a target_public_at string into a timezone-aware UTC datetime.
+
+    Handles multiple formats:
+      - ISO8601 with TZ: '2026-07-24T19:07:00+00:00'
+      - ISO8601 with Z:   '2026-07-24T19:07:00Z'
+      - Naive local:      '2026-07-24 21:07:00' (interpreted as the channel's timezone)
+      - Naive T-separated: '2026-07-24T21:07:00' (interpreted as the channel's timezone)
+
+    Returns None if parsing fails.
+    """
+    if not target_public_at:
+        return None
+
+    raw = str(target_public_at).strip()
+
+    # Try ISO8601 with timezone info (contains +, Z, or explicit offset)
+    for fmt, is_utc in [
+        ("%Y-%m-%dT%H:%M:%S%z", False),
+        ("%Y-%m-%dT%H:%M:%S+00:00", False),
+    ]:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            if raw.endswith("Z") or raw.endswith("z"):
+                dt = _dt.fromisoformat(raw.replace("z", "Z").replace("Z", "+00:00"))
+            elif "+" in raw[10:] or raw.count("-") > 2:
+                # Contains timezone offset — parse directly
+                dt = _dt.fromisoformat(raw.replace(" ", "T"))
+            else:
+                # Naive: interpret as channel's timezone
+                dt = _dt.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+                try:
+                    tz = pytz.timezone(timezone_str)
+                except pytz.UnknownTimeZoneError:
+                    tz = pytz.UTC
+                dt = tz.localize(dt)
+
+            if dt.tzinfo is None:
+                try:
+                    tz = pytz.timezone(timezone_str)
+                except pytz.UnknownTimeZoneError:
+                    tz = pytz.UTC
+                dt = tz.localize(dt)
+
+            return dt.astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+    # Last resort: try fromisoformat
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace(" ", "T"))
+        if dt.tzinfo is None:
+            try:
+                tz = pytz.timezone(timezone_str)
+            except pytz.UnknownTimeZoneError:
+                tz = pytz.UTC
+            dt = tz.localize(dt)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        pass
+
+    return None
+
+
+def _target_is_stale(target_public_at: Optional[str],
+                     timezone_str: str = "Europe/Madrid",
+                     warmup_min: int = 120) -> bool:
+    """Check if a target_public_at is already in the past (stale).
+
+    Returns True if the target is before now_utc.
+    Returns False if the target is in the future or None.
+    """
+    if not target_public_at:
+        return True  # No target at all → needs recalculation
+
+    parsed = _parse_target_public_at(target_public_at, timezone_str)
+    if parsed is None:
+        return True  # Can't parse → treat as stale
+
+    now_utc = datetime.now(timezone.utc)
+    return parsed < now_utc
+
+
+def ensure_future_target_public_at(
+    target_public_at: Optional[str],
+    slug: str,
+    timezone_str: str = "Europe/Madrid",
+    primary_keyword: str = "",
+    secondary_keywords: list[str] = None,
+    target_hour: Optional[int] = None,
+    jitter_min: int = 20,
+    warmup_min: int = 120,
+    db=None,
+    channel_id: Optional[int] = None,
+) -> str:
+    """Validate that target_public_at is in the future. Recalculate if stale.
+
+    This is the single guard function that should be called before any upload
+    or scheduling operation to ensure the target_public_at is never in the past.
+
+    Args:
+        target_public_at: Current target (can be None, ISO8601 UTC, or naive local).
+        slug: Channel slug for logging + recalculation.
+        timezone_str: Channel timezone (for parsing naive strings).
+        primary_keyword, secondary_keywords, target_hour, jitter_min, warmup_min:
+            Parameters forwarded to calculate_target_public_time() if recalc needed.
+        db: Database instance for history-based recalculation.
+        channel_id: Channel DB ID for history lookup.
+
+    Returns:
+        ISO8601 UTC string guaranteed to be in the future.
+    """
+    if not _target_is_stale(target_public_at, timezone_str, warmup_min):
+        # Already valid — parse and return as ISO8601 UTC
+        parsed = _parse_target_public_at(target_public_at, timezone_str)
+        if parsed is not None:
+            return parsed.isoformat()
+
+    # ── Stale or None → recalculate ──
+    logger.info(
+        "[%s] Target_public_at is stale or missing (%s). Recalculating...",
+        slug, (str(target_public_at)[:19] if target_public_at else "None"),
+    )
+
+    result = calculate_target_public_time(
+        slug=slug,
+        primary_keyword=primary_keyword,
+        secondary_keywords=secondary_keywords or [],
+        timezone_str=timezone_str,
+        target_hour=target_hour,
+        jitter_min=jitter_min,
+        warmup_min=warmup_min,
+        db=db,
+        channel_id=channel_id,
+    )
+
+    new_target = result["target_public_at"]
+    logger.info(
+        "[%s] Recalculated target_public_at: %s → %s",
+        slug,
+        (str(target_public_at)[:19] if target_public_at else "None"),
+        new_target,
+    )
+    return new_target

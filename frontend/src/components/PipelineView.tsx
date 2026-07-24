@@ -87,7 +87,7 @@ function PlannedCard({ slot }: { slot: PlannedSlot }) {
           <Play size={11} className="text-purple-400" />
           <span className="text-gray-400">Gen:</span>
           <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
-          {slot.date_key && slot.date_key !== slot.scheduled_at?.slice(0, 10) && (
+          {slot.scheduled_at && slot.scheduled_at.slice(0, 10) !== new Date().toISOString().slice(0, 10) && (
             <span className="text-[9px] text-purple-400/70 ml-1">{toLocalDate(slot.scheduled_at)}</span>
           )}
         </div>

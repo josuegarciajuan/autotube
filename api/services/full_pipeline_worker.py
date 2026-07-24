@@ -1000,6 +1000,7 @@ def run_job(
             # ── Seed scheduled_upload_at from planned slot's target_upload_at ──
             seed_upload_at = None
             stale_public_at = False
+            recalculated_target = None
             if action == "generate_only":
                 try:
                     slot = db.get_planned_slot_for_video(video_id)
@@ -1007,20 +1008,46 @@ def run_job(
                         seed_upload_at = str(slot["target_upload_at"])
                         logger.info("[%s] Seeded scheduled_upload_at=%s from planned slot #%s",
                                      canal, seed_upload_at, slot.get("id"))
-                    # Check if target_public_at is stale (before scheduled_upload_at)
+                    # Check if target_public_at is stale using proper timezone-aware comparison
                     vr = db.get_video(video_id)
                     tpa = vr.get("target_public_at") if vr else None
-                    if tpa and seed_upload_at and str(tpa) < seed_upload_at:
-                        stale_public_at = True
-                        logger.info("[%s] Nullifying stale target_public_at=%s (before upload=%s)",
-                                     canal, tpa, seed_upload_at)
+                    if tpa:
+                        from pipeline.publish_scheduler import (
+                            _target_is_stale, ensure_future_target_public_at,
+                        )
+                        ch_cfg = db.get_channel(channel_id)
+                        tz_str = "Europe/Madrid"
+                        if ch_cfg and ch_cfg.get("config_json"):
+                            try:
+                                import json as _json_inner
+                                cfg = _json_inner.loads(ch_cfg["config_json"])
+                                tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+                            except Exception:
+                                pass
+
+                        if _target_is_stale(tpa, timezone_str=tz_str, warmup_min=120):
+                            stale_public_at = True
+                            # Recalculate instead of nullifying
+                            try:
+                                recalculated_target = ensure_future_target_public_at(
+                                    tpa, slug=canal, timezone_str=tz_str,
+                                    db=db, channel_id=channel_id,
+                                    warmup_min=120, jitter_min=20,
+                                )
+                                logger.info(
+                                    "[%s] Recalculated stale target_public_at: %s → %s",
+                                    canal, str(tpa)[:19], recalculated_target,
+                                )
+                            except Exception as recalc_exc:
+                                logger.warning("[%s] Recalc failed, will nullify: %s", canal, recalc_exc)
+                                recalculated_target = None
                 except Exception as e:
                     logger.debug("[%s] Could not seed scheduled_upload_at: %s", canal, e)
             update_kwargs = dict(progress=100, status=gen_status,
                                  generation_finished_at=db_now(),
                                  scheduled_upload_at=seed_upload_at)
             if stale_public_at:
-                update_kwargs["target_public_at"] = None
+                update_kwargs["target_public_at"] = recalculated_target  # new UTC target (or None if recalc failed)
             db.update_video(video_id, **update_kwargs)
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
@@ -1033,6 +1060,28 @@ def run_job(
             if video_record and video_record.get("publish_mode") == "scheduled":
                 planned_public_at = video_record.get("target_public_at")
                 if planned_public_at:
+                    # ── Staleness guard: recalculate before upload if target passed ──
+                    try:
+                        from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
+                        ch_cfg2 = db.get_channel(channel_id)
+                        tz_str2 = "Europe/Madrid"
+                        if ch_cfg2 and ch_cfg2.get("config_json"):
+                            try:
+                                cfg2 = json.loads(ch_cfg2["config_json"])
+                                tz_str2 = cfg2.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+                            except Exception:
+                                pass
+                        if _target_is_stale(planned_public_at, timezone_str=tz_str2, warmup_min=120):
+                            logger.info("[%s] target_public_at is stale before upload — recalculating", canal)
+                            planned_public_at = ensure_future_target_public_at(
+                                planned_public_at, slug=canal, timezone_str=tz_str2,
+                                db=db, channel_id=channel_id,
+                                warmup_min=120,
+                            )
+                            # Persist recalculation immediately
+                            db.update_video(video_id, target_public_at=planned_public_at)
+                    except Exception as stale_exc:
+                        logger.debug("[%s] Pre-upload stale check skipped: %s", canal, stale_exc)
                     logger.info("📅 Publicación programada para: %s UTC", planned_public_at)
             
             yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,

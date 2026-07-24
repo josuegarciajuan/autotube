@@ -2102,6 +2102,18 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
 
             # ── Schedule lifecycle actions (F3: go_public + playlists + comments) ──
             try:
+                # Re-read video record to get potentially updated target_public_at
+                # (orchestrator may have recalculated it if stale)
+                v_refreshed = db.get_video(video_id)
+                effective_target = (v_refreshed.get("target_public_at") if v_refreshed
+                                    else target_public_at)
+                if effective_target != target_public_at:
+                    logger.info(
+                        "[%s] target_public_at was recalculated: %s → %s",
+                        canal, str(target_public_at)[:19] if target_public_at else "None",
+                        str(effective_target)[:19] if effective_target else "None",
+                    )
+
                 script_text = None
                 lifecycle = VideoLifecycleManager(canal)
                 lifecycle.on_video_uploaded_scheduled(
@@ -2109,7 +2121,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                     yt_video_id=yt_video_id,
                     channel_id=channel_id,
                     script_text=script_text,
-                    target_public_at=target_public_at,
+                    target_public_at=effective_target,
                 )
                 logger.info("[%s] Lifecycle actions scheduled for video %s", canal, yt_video_id)
             except Exception as lc_exc:

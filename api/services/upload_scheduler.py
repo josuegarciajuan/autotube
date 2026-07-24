@@ -231,17 +231,18 @@ def dispatch_due_uploads(db=None) -> dict | None:
         target_public = row["target_public_at"]
         if target_public:
             try:
-                pub_dt = datetime.strptime(str(target_public), "%Y-%m-%d %H:%M:%S")
-                if pub_dt < now:
+                from pipeline.publish_scheduler import _parse_target_public_at
+                # Parse with timezone awareness (handles both naive local and ISO8601 UTC)
+                pub_dt = _parse_target_public_at(str(target_public))
+                if pub_dt is not None and pub_dt < now:
                     past_due = True
                     logger.info(
                         "Video %d: public time already passed — uploading ASAP", video_id
                     )
             except (ValueError, TypeError):
+                # Fallback: try legacy naive parsing
                 try:
-                    pub_dt = datetime.fromisoformat(
-                        str(target_public).replace("Z", "+00:00")
-                    )
+                    pub_dt = datetime.strptime(str(target_public)[:19], "%Y-%m-%d %H:%M:%S")
                     if pub_dt < now:
                         past_due = True
                         logger.info(
@@ -249,7 +250,18 @@ def dispatch_due_uploads(db=None) -> dict | None:
                             video_id,
                         )
                 except (ValueError, TypeError):
-                    pass
+                    try:
+                        pub_dt = datetime.fromisoformat(
+                            str(target_public).replace("Z", "+00:00")
+                        )
+                        if pub_dt < now:
+                            past_due = True
+                            logger.info(
+                                "Video %d: public time already passed — uploading ASAP",
+                                video_id,
+                            )
+                    except (ValueError, TypeError):
+                        pass
 
         # Window gate (unless past-due)
         current_hour = now.hour

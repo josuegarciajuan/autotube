@@ -1416,14 +1416,11 @@ class PipelineOrchestrator:
                         # detection stay in sync with the actual publish time.
                         try:
                             if self.db and self.db_video_id:
-                                import pytz as _pz
-                                local_tz_p = _pz.timezone(tz)
-                                local_target = target_dt.astimezone(local_tz_p)
-                                local_target_str = local_target.strftime("%Y-%m-%d %H:%M:%S")
-                                self.db.update_video(self.db_video_id, target_public_at=local_target_str)
+                                # Store as ISO8601 UTC — consistent with planning_service
+                                self.db.update_video(self.db_video_id, target_public_at=target_dt.isoformat())
                                 logger.info(
                                     "[%s] DB target_public_at updated → %s (video #%d)",
-                                    self.canal, local_target_str, self.db_video_id,
+                                    self.canal, target_dt.isoformat()[:19], self.db_video_id,
                                 )
                         except Exception as _persist_exc:
                             logger.debug(
