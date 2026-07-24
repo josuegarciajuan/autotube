@@ -353,6 +353,41 @@ def dispatch_due_uploads(db=None) -> dict | None:
         db.update_video(video_id, status="error", progress_phase="upload")
         return None
 
+    # ── v12: Recalculate target_public_at if stale before dispatch ──
+    # The video's target_public_at may be in the past (planned before gen delay)
+    # or before the upload time. Recalculate to ensure it's after upload+warmup.
+    effective_target = video.get("target_public_at")
+    try:
+        from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
+        ch_cfg_raw = ch_cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+        if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=120):
+            logger.warning(
+                "[%s] Video #%d: target_public_at is stale (%s). Recalculating...",
+                slug, video_id, str(effective_target)[:19] if effective_target else "None"
+            )
+            effective_target = ensure_future_target_public_at(
+                effective_target,
+                slug=slug,
+                timezone_str=ch_cfg_raw,
+                db=db,
+                channel_id=channel_id,
+                warmup_min=120,
+            )
+            # Persist to both tables
+            db.update_video(video_id, target_public_at=effective_target)
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE planned_slots SET target_public_at = ? WHERE video_id = ?",
+                    (effective_target, video_id),
+                )
+                conn.commit()
+            logger.info(
+                "[%s] Video #%d: target_public_at recalculated → %s",
+                slug, video_id, effective_target[:19],
+            )
+    except Exception as e:
+        logger.debug("[%s] Target recalculation skipped: %s", slug, e)
+
     logger.info(
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",
         video_id, slug, vp.name,

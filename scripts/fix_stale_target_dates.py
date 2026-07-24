@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Fix videos where target_public_at is before created_at or uploaded_at.
+"""Fix videos and planned_slots where target_public_at is before created_at,
+uploaded_at, or target_upload_at.
 
 Problem: Due to timezone confusion and missing staleness checks in the
 publish pipeline, some videos ended up with a target_public_at that is
-chronologically before their creation or upload time.
+chronologically before their creation, upload, or the planned upload time.
 
 This script:
 1. Finds all videos with target_public_at < created_at or < uploaded_at
-2. Recalculates target_public_at via calculate_target_public_time()
-3. Updates videos.target_public_at
-4. Updates dependent lifecycle actions (go_public) to match
-5. Logs all changes before/after
+2. Finds all planned_slots with target_public_at < target_upload_at (any status)
+3. Recalculates target_public_at via calculate_target_public_time()
+4. Updates videos.target_public_at AND planned_slots.target_public_at
+5. Updates dependent lifecycle actions (go_public) to match
+6. Logs all changes before/after
 
 Safe to re-run: stale targets that have been fixed will be skipped.
 """
@@ -237,9 +239,157 @@ def fix_stale_targets(conn, stale_videos: list[dict], dry_run: bool = False) -> 
     }
 
 
+def find_stale_planned_slots(conn, dry_run: bool = False) -> list[dict]:
+    """Find planned_slots where target_public_at < target_upload_at.
+
+    Checks ALL statuses (pending, completed, running, cancelled) because
+    completed slots linked to awaiting_upload videos still display in the UI.
+    """
+    from datetime import timezone as _tz
+    import pytz as _pytz
+
+    rows = conn.execute("""
+        SELECT ps.id, ps.channel_id, ps.date_key, ps.status,
+               ps.target_upload_at, ps.target_public_at,
+               ps.video_id,
+               c.slug as canal
+        FROM planned_slots ps
+        JOIN channels c ON ps.channel_id = c.id
+        WHERE ps.target_public_at IS NOT NULL
+          AND ps.target_upload_at IS NOT NULL
+        ORDER BY ps.date_key, c.slug
+    """).fetchall()
+
+    stale = []
+    tz = _pytz.timezone("Europe/Madrid")
+    for row in rows:
+        up_str = str(row["target_upload_at"])[:19]
+        pub_str = str(row["target_public_at"])
+
+        # Parse upload (always naive local)
+        try:
+            up_dt = datetime.strptime(up_str, "%Y-%m-%d %H:%M:%S")
+            up_utc = tz.localize(up_dt).astimezone(_tz.utc)
+        except (ValueError, TypeError):
+            continue
+
+        # Parse public (could be ISO8601 UTC or naive local)
+        try:
+            pub_dt = _parse_target(str(pub_str))
+            if pub_dt is None:
+                continue
+            pub_utc = pub_dt.astimezone(_tz.utc) if pub_dt.tzinfo else tz.localize(pub_dt).astimezone(_tz.utc)
+        except (ValueError, TypeError):
+            # Fallback naive
+            try:
+                pub_dt = datetime.strptime(str(pub_str)[:19], "%Y-%m-%d %H:%M:%S")
+                pub_utc = tz.localize(pub_dt).astimezone(_tz.utc)
+            except:
+                continue
+
+        from datetime import timedelta
+        min_pub_utc = up_utc + timedelta(minutes=120)  # warmup_min default
+
+        if pub_utc < min_pub_utc:
+            gap_min = int((pub_utc - min_pub_utc).total_seconds() / 60)
+            stale.append({
+                "slot_id": row["id"],
+                "channel_id": row["channel_id"],
+                "canal": row["canal"],
+                "date_key": row["date_key"],
+                "slot_status": row["status"],
+                "target_public_at": str(pub_str),
+                "target_upload_at": up_str,
+                "min_pub_utc": min_pub_utc.isoformat(),
+                "video_id": row["video_id"],
+                "reason": f"pub < up+warmup (gap={gap_min}min)",
+            })
+
+    return stale
+
+
+def fix_stale_planned_slots(conn, stale_slots: list[dict], dry_run: bool = False) -> dict:
+    """Fix stale planned_slots by setting target_public_at = target_upload_at + warmup."""
+    from datetime import timezone as _tz, timedelta as _td
+    import pytz as _pytz
+
+    tz = _pytz.timezone("Europe/Madrid")
+    fixed_slots = 0
+    fixed_videos = 0
+    errors = 0
+    changes = []
+
+    for s in stale_slots:
+        up_str = s["target_upload_at"]
+        try:
+            up_dt = datetime.strptime(up_str, "%Y-%m-%d %H:%M:%S")
+            up_utc = tz.localize(up_dt).astimezone(_tz.utc)
+        except (ValueError, TypeError):
+            errors += 1
+            continue
+
+        new_pub_utc = up_utc + _td(minutes=120)
+        new_pub_str = new_pub_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        old_pub = str(s["target_public_at"])[:19]
+
+        change = {
+            "slot_id": s["slot_id"],
+            "canal": s["canal"],
+            "date_key": s["date_key"],
+            "slot_status": s["slot_status"],
+            "old_target": old_pub,
+            "new_target": new_pub_str[:19],
+            "reason": s["reason"],
+        }
+        changes.append(change)
+
+        logger.info(
+            "  slot#%d [%s] %s: %s → %s (%s)",
+            s["slot_id"], s["canal"], s["date_key"],
+            old_pub, new_pub_str[:19], s["reason"],
+        )
+
+        if not dry_run:
+            try:
+                conn.execute(
+                    "UPDATE planned_slots SET target_public_at = ? WHERE id = ?",
+                    (new_pub_str, s["slot_id"]),
+                )
+                fixed_slots += 1
+
+                # Also update linked video if applicable
+                if s.get("video_id"):
+                    conn.execute(
+                        "UPDATE videos SET target_public_at = ? WHERE id = ?",
+                        (new_pub_str, s["video_id"]),
+                    )
+                    # Update lifecycle go_public actions
+                    conn.execute(
+                        """UPDATE video_lifecycle_actions
+                           SET scheduled_for = ?
+                           WHERE video_id = ? AND action_type = 'go_public' AND status = 'pending'""",
+                        (new_pub_str, s["video_id"]),
+                    )
+                    fixed_videos += 1
+
+                conn.commit()
+            except Exception as e:
+                logger.error("  FAIL slot#%d: %s", s["slot_id"], e)
+                conn.rollback()
+                errors += 1
+
+    return {
+        "total_checked": len(stale_slots),
+        "slots_fixed": fixed_slots,
+        "videos_fixed": fixed_videos,
+        "errors": errors,
+        "changes": changes,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Fix videos with target_public_at before created_at or uploaded_at"
+        description="Fix videos and planned_slots with stale target_public_at"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -248,6 +398,14 @@ def main():
     parser.add_argument(
         "--db", type=str, default=DB_PATH,
         help="Path to the SQLite database",
+    )
+    parser.add_argument(
+        "--videos-only", action="store_true",
+        help="Only fix videos (skip planned_slots)",
+    )
+    parser.add_argument(
+        "--slots-only", action="store_true",
+        help="Only fix planned_slots (skip videos)",
     )
     args = parser.parse_args()
 
@@ -259,46 +417,85 @@ def main():
     conn.row_factory = sqlite3.Row
 
     try:
-        # ── 1. Find stale videos ──
-        logger.info("Scanning for videos with stale target_public_at...")
-        stale = find_stale_videos(conn, dry_run=args.dry_run)
+        total_fixed = 0
 
-        if not stale:
-            logger.info("No stale targets found — all good!")
-            return
+        if not args.slots_only:
+            # ── 1. Find and fix stale videos ──
+            logger.info("Scanning for videos with stale target_public_at...")
+            stale_vids = find_stale_videos(conn, dry_run=args.dry_run)
 
-        logger.info("Found %d video(s) with stale target_public_at:", len(stale))
-        for v in stale:
-            logger.info(
-                "  #%d [%s] '%s': %s",
-                v["id"], v["canal"],
-                (v["titulo"] or "?")[:40],
-                v["reason"],
-            )
+            if stale_vids:
+                logger.info("Found %d video(s) with stale target_public_at:", len(stale_vids))
+                for v in stale_vids:
+                    logger.info(
+                        "  #%d [%s] '%s': %s",
+                        v["id"], v["canal"],
+                        (v["titulo"] or "?")[:40],
+                        v["reason"],
+                    )
 
-        # ── 2. Fix them ──
-        mode = "DRY RUN (no changes)" if args.dry_run else "FIXING"
-        logger.info("\n%s %d stale target(s)...", mode, len(stale))
-        result = fix_stale_targets(conn, stale, dry_run=args.dry_run)
+                mode = "DRY RUN (no changes)" if args.dry_run else "FIXING"
+                logger.info("\n%s %d stale video target(s)...", mode, len(stale_vids))
+                result_vids = fix_stale_targets(conn, stale_vids, dry_run=args.dry_run)
+                total_fixed += result_vids["fixed"]
+
+                logger.info(
+                    "Videos: %d checked, %d fixed, %d errors %s",
+                    result_vids["total_checked"],
+                    result_vids["fixed"],
+                    result_vids["errors"],
+                    "(dry run)" if args.dry_run else "",
+                )
+
+                if args.dry_run and result_vids["changes"]:
+                    logger.info("\nVideo changes that would be applied:")
+                    for c in result_vids["changes"]:
+                        logger.info(
+                            "  #%d [%s] %s → %s",
+                            c["video_id"], c["canal"],
+                            c["old_target"][:19] if c["old_target"] else "None",
+                            c["new_target"][:19],
+                        )
+            else:
+                logger.info("No stale video targets found.")
+
+        if not args.videos_only:
+            # ── 2. Find and fix stale planned_slots ──
+            logger.info("\nScanning for planned_slots with stale target_public_at...")
+            stale_slots = find_stale_planned_slots(conn, dry_run=args.dry_run)
+
+            if stale_slots:
+                logger.info("Found %d planned_slot(s) with stale target_public_at:", len(stale_slots))
+                for s in stale_slots:
+                    logger.info(
+                        "  slot#%d [%s] %s status=%s: %s",
+                        s["slot_id"], s["canal"], s["date_key"],
+                        s["slot_status"], s["reason"],
+                    )
+
+                mode = "DRY RUN (no changes)" if args.dry_run else "FIXING"
+                logger.info("\n%s %d stale planned_slot target(s)...", mode, len(stale_slots))
+                result_slots = fix_stale_planned_slots(conn, stale_slots, dry_run=args.dry_run)
+                total_fixed += result_slots["slots_fixed"]
+
+                logger.info(
+                    "Planned_slots: %d checked, %d slots fixed, %d videos fixed, %d errors %s",
+                    result_slots["total_checked"],
+                    result_slots["slots_fixed"],
+                    result_slots["videos_fixed"],
+                    result_slots["errors"],
+                    "(dry run)" if args.dry_run else "",
+                )
+            else:
+                logger.info("No stale planned_slot targets found.")
 
         # ── 3. Summary ──
         logger.info(
-            "\nDone: %d checked, %d fixed, %d errors %s",
-            result["total_checked"],
-            result["fixed"],
-            result["errors"],
-            "(dry run — no changes applied)" if args.dry_run else "",
+            "\n╔══════════════════════════════════╗\n"
+            "║  Total fixed: %d                  ║\n"
+            "╚══════════════════════════════════╝",
+            total_fixed,
         )
-
-        if args.dry_run and result["changes"]:
-            logger.info("\nChanges that would be applied:")
-            for c in result["changes"]:
-                logger.info(
-                    "  #%d [%s] %s → %s",
-                    c["video_id"], c["canal"],
-                    c["old_target"][:19] if c["old_target"] else "None",
-                    c["new_target"][:19],
-                )
 
     finally:
         conn.close()
