@@ -1136,8 +1136,10 @@ class ExtendedDatabase(Database):
                 q += " AND v.status = ?"
                 params.append(status)
             else:
-                # Exclude videos deleted from YouTube (soft-delete) by default
-                q += " AND v.status != 'deleted_on_yt'"
+                # Exclude videos deleted from YouTube (soft-delete) and
+                # failed/error videos by default to keep listings clean.
+                # Pass status='error' explicitly to see failures.
+                q += " AND v.status NOT IN ('deleted_on_yt', 'error')"
             q += " ORDER BY v.created_at DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             rows = conn.execute(q, params).fetchall()
@@ -1235,6 +1237,35 @@ class ExtendedDatabase(Database):
             conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
             conn.commit()
         return True
+
+    def cleanup_error_videos(self, channel_id: int, older_than_days: int = 7) -> int:
+        """Delete videos with status='error' older than X days.
+        
+        ON DELETE CASCADE handles video_scenes, video_stats_history, etc.
+        Returns count of deleted rows.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """DELETE FROM videos
+                   WHERE channel_id = ?
+                     AND status = 'error'
+                     AND created_at < datetime('now', '-' || ? || ' days')""",
+                (channel_id, older_than_days),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def count_error_videos(self, channel_id: int, older_than_days: int = 7) -> int:
+        """Count videos with status='error' older than X days (for dry-run preview)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos
+                   WHERE channel_id = ?
+                     AND status = 'error'
+                     AND created_at < datetime('now', '-' || ? || ' days')""",
+                (channel_id, older_than_days),
+            ).fetchone()
+            return row["cnt"] if row else 0
     
     # ── Video Scenes ─────────────────────────────────────────
     

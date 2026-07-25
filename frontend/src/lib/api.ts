@@ -25,15 +25,21 @@ export const api = {
   collectChannelStats: (id: number) => request<any>(`/channels/${id}/collect-stats`, { method: 'POST' }),
   syncChannelConfig: (id: number) => request<any>(`/channels/${id}/sync-config`, { method: 'POST' }),
   deleteChannel: (id: number) => request<any>(`/channels/${id}`, { method: 'DELETE' }),
-  getChannelVideos: (id: number, status?: string, playlistId?: number, sourceMode?: string) => {
+  getChannelVideos: (id: number, status?: string, playlistId?: number, sourceMode?: string, limit?: number, offset?: number) => {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (playlistId) params.set('playlist_id', String(playlistId));
     if (sourceMode) params.set('source_mode', sourceMode);
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (offset !== undefined) params.set('offset', String(offset));
     const qs = params.toString();
     return request<any[]>(`/channels/${id}/videos${qs ? `?${qs}` : ''}`);
   },
   getChannelContent: (id: number, unusedOnly = true) => request<any[]>(`/channels/${id}/content?unused_only=${unusedOnly}`),
+  cleanupErrorVideos: (id: number, olderThanDays: number = 7, dryRun: boolean = false) => {
+    const params = new URLSearchParams({ older_than_days: String(olderThanDays), dry_run: String(dryRun) });
+    return request<any>(`/channels/${id}/videos/cleanup-errors?${params}`, { method: 'DELETE' });
+  },
   getManualSetup: (id: number) => request<any>(`/channels/${id}/manual-setup`),
   getChannelYoutubeStats: (id: number) => request<any>(`/channels/${id}/youtube-stats`),
   getChannelShortsStats: (id: number) => request<any>(`/channels/${id}/shorts-stats`),

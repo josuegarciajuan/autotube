@@ -205,6 +205,11 @@ export default function ChannelDetail() {
   const [filterPlaylistId, setFilterPlaylistId] = useState<number | null>(null)
   const [channelPlaylists, setChannelPlaylists] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [showErrors, setShowErrors] = useState(false)
+  const [videosPage, setVideosPage] = useState(0)
+  const [hasMoreVideos, setHasMoreVideos] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const PAGE_SIZE = 50
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
   const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '', yt_studio_url: '' })
@@ -267,6 +272,11 @@ export default function ChannelDetail() {
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [growthDays, setGrowthDays] = useState(30)
 
+  // Cleanup error videos state
+  const [cleanupPreview, setCleanupPreview] = useState<number | null>(null)
+  const [cleanupLoading, setCleanupLoading] = useState(false)
+  const [cleanupResult, setCleanupResult] = useState<string | null>(null)
+
   // Scheduled publishing mode
   const [scheduledMode, setScheduledMode] = useState('immediate')
 
@@ -290,12 +300,18 @@ export default function ChannelDetail() {
   useEffect(() => {
     async function load() {
       try {
+        // Reset pagination and error filter on channel change
+        setVideosPage(0)
+        setHasMoreVideos(true)
+        setShowErrors(false)
+
         const [ch, vids] = await Promise.all([
           api.getChannel(channelId),
           api.getChannelVideos(channelId),
         ])
         setChannel(ch)
         setVideos(vids)
+        setHasMoreVideos(vids.length >= PAGE_SIZE)
         // Load playlists for filter
         try { const pl = await api.getChannelPlaylists(channelId); setChannelPlaylists(pl) } catch {}
         // Parse scheduled mode from config_json
@@ -318,12 +334,35 @@ export default function ChannelDetail() {
     }
   }, [channelActiveJob?.jobId, channelId])
 
-  // Reload videos when filter changes
+  // Reload videos when filter changes (reset to page 0)
   useEffect(() => {
     if (!channelId) return
-    api.getChannelVideos(channelId, undefined, filterPlaylistId || undefined)
-      .then(setVideos).catch(() => {})
-  }, [filterPlaylistId, channelId])
+    setVideosPage(0)
+    setHasMoreVideos(true)
+    setLoadingMore(true)
+    api.getChannelVideos(channelId, showErrors ? 'error' : undefined,
+      filterPlaylistId || undefined, undefined, PAGE_SIZE, 0)
+      .then(vids => {
+        setVideos(vids)
+        setHasMoreVideos(vids.length >= PAGE_SIZE)
+      })
+      .catch(() => {})
+      .finally(() => setLoadingMore(false))
+  }, [filterPlaylistId, showErrors, channelId])
+
+  // Load next page when user clicks "Load more"
+  useEffect(() => {
+    if (videosPage === 0 || !channelId) return
+    setLoadingMore(true)
+    api.getChannelVideos(channelId, showErrors ? 'error' : undefined,
+      filterPlaylistId || undefined, undefined, PAGE_SIZE, videosPage * PAGE_SIZE)
+      .then(vids => {
+        setVideos(prev => [...prev, ...vids])
+        setHasMoreVideos(vids.length >= PAGE_SIZE)
+      })
+      .catch(() => {})
+      .finally(() => setLoadingMore(false))
+  }, [videosPage])
   useEffect(() => {
     api.getAuthStatus(channelId).then(setAuthStatus).catch(() => {})
   }, [channelId])
@@ -517,6 +556,37 @@ export default function ChannelDetail() {
       setVideos(vids)
       setDeleteTarget(null)
     } catch (e: any) { alert('Error: ' + e.message) }
+  }
+
+  async function handleCleanupErrorVideos() {
+    setCleanupLoading(true)
+    setCleanupResult(null)
+    try {
+      // Dry-run first to get count
+      const preview = await api.cleanupErrorVideos(channelId, 7, true)
+      setCleanupPreview(preview.would_delete)
+    } catch (e: any) {
+      setCleanupResult('Error: ' + e.message)
+      setCleanupLoading(false)
+    }
+  }
+
+  async function handleConfirmCleanup() {
+    setCleanupLoading(true)
+    setCleanupResult(null)
+    try {
+      const res = await api.cleanupErrorVideos(channelId, 7, false)
+      setCleanupResult(`Eliminados ${res.deleted} vídeos con error.`)
+      setCleanupPreview(null)
+      // Reload videos to reflect changes
+      const vids = await api.getChannelVideos(channelId, 'error',
+        filterPlaylistId || undefined, undefined, PAGE_SIZE, 0)
+      setVideos(vids)
+      setHasMoreVideos(vids.length >= PAGE_SIZE)
+    } catch (e: any) {
+      setCleanupResult('Error: ' + e.message)
+    }
+    setCleanupLoading(false)
   }
 
   async function handleSaveProfile() {
@@ -1069,20 +1139,64 @@ export default function ChannelDetail() {
             onClick={() => setVideoTab('slots')}
           ><Clock size={14} className="inline mr-1" />Horarios</button>
           
-          {/* ── Playlist filter ── */}
-          {videoTab === 'videos' && channelPlaylists.length > 0 && (
-            <div className="ml-auto">
-              <select
-                value={filterPlaylistId || ''}
-                onChange={e => setFilterPlaylistId(e.target.value ? Number(e.target.value) : null)}
-                className="bg-dark-700 text-gray-300 text-xs px-3 py-1.5 rounded-lg border border-surface-border focus:outline-none focus:border-neon-red/50"
+          {/* ── Filters: playlists + error toggle ── */}
+          {videoTab === 'videos' && (
+            <>
+            <div className="ml-auto flex items-center gap-3">
+              {channelPlaylists.length > 0 && (
+                <select
+                  value={filterPlaylistId || ''}
+                  onChange={e => setFilterPlaylistId(e.target.value ? Number(e.target.value) : null)}
+                  className="bg-dark-700 text-gray-300 text-xs px-3 py-1.5 rounded-lg border border-surface-border focus:outline-none focus:border-neon-red/50"
+                >
+                  <option value="">Todas las listas</option>
+                  {channelPlaylists.map((pl: any) => (
+                    <option key={pl.id} value={pl.id}>{pl.name}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                onClick={() => setShowErrors(!showErrors)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg border transition-colors ${
+                  showErrors
+                    ? 'bg-red-600/20 border-red-600/40 text-red-400'
+                    : 'bg-dark-700 border-surface-border text-gray-500 hover:text-gray-300'
+                }`}
               >
-                <option value="">Todas las listas</option>
-                {channelPlaylists.map((pl: any) => (
-                  <option key={pl.id} value={pl.id}>{pl.name}</option>
-                ))}
-              </select>
+                <AlertTriangle size={12} className="inline mr-1" />
+                {showErrors ? 'Ocultar errores' : 'Mostrar errores'}
+              </button>
+              {showErrors && (
+                <button
+                  onClick={handleCleanupErrorVideos}
+                  disabled={cleanupLoading}
+                  className="text-xs px-2.5 py-1.5 rounded-lg border border-red-600/30 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  <Trash2 size={12} />
+                  Limpiar errores
+                </button>
+              )}
             </div>
+            {/* Cleanup result / confirmation */}
+            {cleanupPreview !== null && (
+              <div className="mt-2 text-xs text-gray-400 bg-dark-700 border border-surface-border rounded-lg p-3 flex items-center justify-between">
+                <span>Se eliminarán <strong className="text-red-400">{cleanupPreview}</strong> vídeos con error de hace 7+ días.</span>
+                <div className="flex gap-2">
+                  <button onClick={() => setCleanupPreview(null)} className="px-3 py-1 rounded bg-dark-600 text-gray-400 hover:text-white text-xs">Cancelar</button>
+                  <button onClick={handleConfirmCleanup} disabled={cleanupLoading} className="px-3 py-1 rounded bg-red-600/80 text-white hover:bg-red-600 text-xs disabled:opacity-50 flex items-center gap-1">
+                    {cleanupLoading && <Loader2 size={10} className="animate-spin" />}
+                    Confirmar
+                  </button>
+                </div>
+              </div>
+            )}
+            {cleanupResult && (
+              <div className={`mt-2 text-xs px-3 py-2 rounded-lg ${cleanupResult.startsWith('Error') ? 'bg-red-600/10 border border-red-600/30 text-red-400' : 'bg-green-600/10 border border-green-600/30 text-green-400'}`}>
+                {cleanupResult}
+                <button onClick={() => setCleanupResult(null)} className="ml-2 text-gray-500 hover:text-white">✕</button>
+              </div>
+            )}
+            </>
           )}
         </div>
         {videoTab === 'growth' ? (
@@ -1441,6 +1555,7 @@ export default function ChannelDetail() {
             <p className="text-xs text-gray-600 mt-1">Genera tu primer video usando el panel de arriba</p>
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
             {videos.map((v: any) => {
               // If YouTube ID exists, the video was successfully uploaded regardless
@@ -1509,7 +1624,7 @@ export default function ChannelDetail() {
                         <div className="flex items-center gap-1">
                           <ListPlus size={10} className="text-neon-purple" />
                           <span className="text-[10px] text-neon-purple/70">{v.target_playlist_name}</span>
-                        </div>
+          </div>
                       )}
                       {pendingManual > 0 && (
                         <span className="inline-flex items-center gap-1 text-[10px] text-neon-red bg-neon-red/10 px-1.5 py-0.5 rounded-full">
@@ -1540,6 +1655,23 @@ export default function ChannelDetail() {
               );
             })}
           </div>
+          {/* Load more button */}
+          {hasMoreVideos && (
+            <div className="flex justify-center mt-4">
+              <button
+                onClick={() => setVideosPage(p => p + 1)}
+                disabled={loadingMore}
+                className="px-6 py-2 rounded-lg bg-dark-700 border border-surface-border text-gray-300 text-sm font-medium hover:bg-dark-600 hover:border-neon-red/30 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {loadingMore ? (
+                  <><Loader2 size={14} className="animate-spin" /> Cargando...</>
+                ) : (
+                  'Cargar más vídeos'
+                )}
+              </button>
+            </div>
+          )}
+          </>
         )}
           </div>
         )}

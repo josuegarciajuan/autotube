@@ -300,6 +300,26 @@ def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, of
     return videos
 
 
+@router.delete("/{channel_id}/videos/cleanup-errors")
+def cleanup_error_videos(channel_id: int, older_than_days: int = 7, dry_run: bool = False):
+    """Delete videos with status='error' older than X days.
+
+    Set dry_run=true to preview the count without deleting anything.
+    Set older_than_days to control the age threshold (default 7).
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    if dry_run:
+        count = db.count_error_videos(channel_id, older_than_days)
+        return {"ok": True, "dry_run": True, "would_delete": count}
+
+    deleted = db.cleanup_error_videos(channel_id, older_than_days)
+    return {"ok": True, "deleted": deleted}
+
+
 @router.get("/{channel_id}/content")
 def list_channel_content(channel_id: int, limit: int = 50, unused_only: bool = True):
     db = get_db()
