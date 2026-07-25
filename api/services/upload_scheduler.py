@@ -21,7 +21,7 @@ Called every 5 min by the checker loop in api/main.py.
 import json
 import logging
 import random
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger("autotube.upload_scheduler")
@@ -172,6 +172,8 @@ def dispatch_due_uploads(db=None) -> dict | None:
 
     # ── 2. Find videos awaiting upload (due now or needing scheduling) ──
     now = datetime.now()
+    now_utc = datetime.now(timezone.utc)  # UTC-aware for past-due comparisons
+    now_utc_naive = now_utc.replace(tzinfo=None)  # naive UTC for legacy fallback comparisons
 
     with db._connect() as conn:
         rows = conn.execute(
@@ -234,16 +236,18 @@ def dispatch_due_uploads(db=None) -> dict | None:
                 from pipeline.publish_scheduler import _parse_target_public_at
                 # Parse with timezone awareness (handles both naive local and ISO8601 UTC)
                 pub_dt = _parse_target_public_at(str(target_public))
-                if pub_dt is not None and pub_dt < now:
+                # Compare aware-vs-aware: pub_dt is UTC-aware, now_utc is also UTC-aware
+                if pub_dt is not None and pub_dt < now_utc:
                     past_due = True
                     logger.info(
                         "Video %d: public time already passed — uploading ASAP", video_id
                     )
             except (ValueError, TypeError):
                 # Fallback: try legacy naive parsing
+                # target_public format: "2026-07-24T23:00:00+00:00" — strip tz offset for naive parse
                 try:
-                    pub_dt = datetime.strptime(str(target_public)[:19], "%Y-%m-%d %H:%M:%S")
-                    if pub_dt < now:
+                    pub_dt = datetime.strptime(str(target_public)[:19], "%Y-%m-%dT%H:%M:%S")
+                    if pub_dt < now_utc_naive:
                         past_due = True
                         logger.info(
                             "Video %d: public time already passed — uploading ASAP",
@@ -254,7 +258,7 @@ def dispatch_due_uploads(db=None) -> dict | None:
                         pub_dt = datetime.fromisoformat(
                             str(target_public).replace("Z", "+00:00")
                         )
-                        if pub_dt < now:
+                        if pub_dt < now_utc:
                             past_due = True
                             logger.info(
                                 "Video %d: public time already passed — uploading ASAP",
