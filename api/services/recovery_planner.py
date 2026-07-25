@@ -25,6 +25,8 @@ from typing import Optional
 
 import pytz
 
+from api.services.planning_service import _resolve_videos_per_day
+
 logger = logging.getLogger("autotube.recovery_planner")
 
 # ── Constants ────────────────────────────────────────────────────
@@ -206,7 +208,7 @@ def auto_recover_missing_publications(db=None) -> dict:
         cfg = db.get_channel_planning_config(channel_id)
         if not cfg.get("planning_enabled", True):
             continue
-        target = cfg.get("videos_per_day", 0)
+        target = _resolve_videos_per_day(cfg, today)
         if target <= 0:
             continue
 

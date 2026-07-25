@@ -3,7 +3,7 @@
  */
 
 import { useState, useEffect } from 'react'
-import { Plus, Minus, Video, Play, Clock, Zap } from 'lucide-react'
+import { Plus, Minus, Video, Play, Clock, Zap, TrendingUp } from 'lucide-react'
 import { api } from '../lib/api'
 import { CHANNEL_DOT } from '../lib/channelConfig'
 
@@ -14,6 +14,8 @@ interface ChannelConfig {
   videos_per_day: number
   viral_per_day: number
   planning_enabled: boolean
+  videos_day_boost_weight: number
+  viral_day_boost_weight: number
 }
 
 export default function ChannelConfigCard({
@@ -21,7 +23,8 @@ export default function ChannelConfigCard({
   onUpdate,
 }: {
   config: ChannelConfig
-  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) => void
+  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number;
+                      videos_day_boost_weight?: number; viral_day_boost_weight?: number }) => void
 }) {
   const [saving, setSaving] = useState(false)
   const [peakInfo, setPeakInfo] = useState<any>(null)
@@ -31,7 +34,8 @@ export default function ChannelConfigCard({
     api.getChannelPeakInfo(config.channel_id).then(setPeakInfo).catch(() => {})
   }, [config.channel_id])
 
-  async function update(data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) {
+  async function update(data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number;
+                                 videos_day_boost_weight?: number; viral_day_boost_weight?: number }) {
     setSaving(true)
     try { onUpdate(data) } finally { setTimeout(() => setSaving(false), 500) }
   }
@@ -114,6 +118,54 @@ export default function ChannelConfigCard({
           <button
             onClick={() => update({ viral_per_day: Math.min(config.videos_per_day, (config.viral_per_day || 0) + 1) })}
             disabled={!config.planning_enabled || config.videos_per_day <= 0}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Plus size={12} />
+          </button>
+        </div>
+      </div>
+
+      {/* Boost weight: probability of +1 video/day */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-gray-400 flex items-center gap-1.5">
+          <TrendingUp size={12} className="text-blue-400" /> Prob. +1 video
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => update({ videos_day_boost_weight: Math.max(0, (config.videos_day_boost_weight || 0.7) - 0.05) })}
+            disabled={!config.planning_enabled}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Minus size={12} />
+          </button>
+          <span className="text-white font-mono w-10 text-center">{Math.round((config.videos_day_boost_weight || 0.7) * 100)}%</span>
+          <button
+            onClick={() => update({ videos_day_boost_weight: Math.min(1.0, (config.videos_day_boost_weight || 0.7) + 0.05) })}
+            disabled={!config.planning_enabled || (config.videos_day_boost_weight || 0.7) >= 1.0}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Plus size={12} />
+          </button>
+        </div>
+      </div>
+
+      {/* Boost weight: probability of 2nd viral/day */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-gray-400 flex items-center gap-1.5">
+          <Zap size={12} className="text-purple-400" /> Prob. 2º viral
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => update({ viral_day_boost_weight: Math.max(0, (config.viral_day_boost_weight || 0.2) - 0.05) })}
+            disabled={!config.planning_enabled}
+            className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
+          >
+            <Minus size={12} />
+          </button>
+          <span className="text-white font-mono w-10 text-center">{Math.round((config.viral_day_boost_weight || 0.2) * 100)}%</span>
+          <button
+            onClick={() => update({ viral_day_boost_weight: Math.min(1.0, (config.viral_day_boost_weight || 0.2) + 0.05) })}
+            disabled={!config.planning_enabled || (config.viral_day_boost_weight || 0.2) >= 1.0}
             className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30"
           >
             <Plus size={12} />

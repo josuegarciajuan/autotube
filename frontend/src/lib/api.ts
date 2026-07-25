@@ -141,7 +141,7 @@ export const api = {
 
   // Planning (dynamic scheduling v2)
   getPlanningConfig: () => request<any[]>('/planning/config'),
-  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) =>
+  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; videos_day_boost_weight?: number; viral_day_boost_weight?: number }) =>
     request<any>(`/planning/config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   getPlannedSlots: (date?: string, channelId?: number, status?: string) => {
     const params = new URLSearchParams();

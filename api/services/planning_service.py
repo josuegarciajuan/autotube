@@ -52,48 +52,84 @@ DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
 # ── Alternate pattern resolution ─────────────────────────────────
 
 def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
-    """Resolve effective videos_per_day, supporting alternate patterns.
+    """Resolve effective videos_per_day for a channel on a specific date.
 
-    If ch has 'alternate_pattern' (a list like [2, 3]), alternates based on
-    the day ordinal + channel-specific offset. Otherwise uses 'videos_per_day'.
+    Supports two modes:
+    1. Random daily boost (default): base videos_per_day + probabilistic +1.
+       Uses MD5 hash of (date, channel_id) for deterministic randomness —
+       same inputs always give the same result.
+    2. Alternate pattern (legacy): if 'alternate_pattern' is set, it takes
+       precedence over the random boost.
     """
+    # Legacy alternate pattern takes precedence if explicitly set
     pattern = ch.get("alternate_pattern")
     if pattern and isinstance(pattern, list) and len(pattern) >= 2:
-        from datetime import datetime
         day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
         offset = ch.get("alternate_offset", 0)
         idx = (day_ordinal + offset) % len(pattern)
-        return pattern[idx]
-    return ch.get("videos_per_day", 1)
+        return int(pattern[idx])
+
+    base = int(ch.get("videos_per_day", 2) or 2)
+    if base <= 0:
+        return 0
+
+    boost_weight = float(ch.get("videos_day_boost_weight", 0.7))
+    ch_id = int(ch.get("channel_id", 0) or 0)
+
+    # Deterministic hash-based random — better uniformity than random.Random(seed)
+    seed_str = f"{date_str}|{ch_id}|videos"
+    h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+    roll = h / 0xFFFFFFFF
+
+    if roll < boost_weight:
+        return base + 1
+    return base
 
 # ── Source mode alternation ─────────────────────────────────
 
-def _build_source_mode_sequence(total: int, viral_per_day: int) -> list[str]:
+def _build_source_mode_sequence(total: int, ch: dict, date_str: str) -> list[str]:
     """Build alternating source_mode sequence for one channel's daily slots.
 
-    Always starts with 'viral' when viral_per_day > 0 so viral slots get
+    Viral count is computed deterministically: viral_per_day (base minimum) +
+    probabilistic +1 based on viral_day_boost_weight, capped at total.
+
+    Always starts with 'viral' when viral_count > 0 so viral slots get
     earlier scheduled_at and are dispatched first. Then alternates to
     distribute them evenly throughout the day.
 
     Examples:
-        total=3, viral=1 → ['viral', 'original', 'original']
-        total=3, viral=2 → ['viral', 'original', 'viral']
-        total=4, viral=2 → ['viral', 'original', 'viral', 'original']
-        total=4, viral=1 → ['viral', 'original', 'original', 'original']
-        total=2, viral=0 → ['original', 'original']
-        total=2, viral=2 → ['viral', 'viral']
+        total=3, viral_count=1 → ['viral', 'original', 'original']
+        total=3, viral_count=2 → ['viral', 'original', 'viral']
+        total=4, viral_count=2 → ['viral', 'original', 'viral', 'original']
+        total=2, viral_count=0 → ['original', 'original']
+        total=2, viral_count=2 → ['viral', 'viral']
     """
-    if viral_per_day <= 0:
+    # ── Deterministic viral count with boost ──
+    viral_min = int(ch.get("viral_per_day", 1) or 1)
+    viral_boost = float(ch.get("viral_day_boost_weight", 0.2))
+    ch_id = int(ch.get("channel_id", 0) or 0)
+
+    # Deterministic hash-based random with offset suffix to avoid same seed as videos
+    seed_str = f"{date_str}|{ch_id}|viral"
+    h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+    roll = h / 0xFFFFFFFF
+
+    viral_count = min(viral_min, total)
+    if total > viral_min and roll < viral_boost:
+        viral_count = min(viral_min + 1, total)
+    viral_count = max(0, min(viral_count, total))
+
+    if viral_count <= 0:
         return ["original"] * total
-    if viral_per_day >= total:
+    if viral_count >= total:
         return ["viral"] * total
 
-    original_count = total - viral_per_day
+    original_count = total - viral_count
     # Always start with viral first so they get earlier scheduled_at
     # and are dispatched before original slots. The alternation still
     # ensures even distribution throughout the day.
     first, second = "viral", "original"
-    first_avail, second_avail = viral_per_day, original_count
+    first_avail, second_avail = viral_count, original_count
 
     result = []
     for i in range(total):
@@ -351,8 +387,7 @@ def compute_daily_slots(
         jitter_min = ch.get("publish_jitter_min", 20) if is_scheduled else 0
         
         # ── Build source_mode sequence for this channel's daily slots ──
-        viral_n = ch.get("viral_per_day", 0)
-        mode_sequence = _build_source_mode_sequence(n, viral_n) if n > 0 else []
+        mode_sequence = _build_source_mode_sequence(n, ch, date_str) if n > 0 else []
         
         # _distribute_slots returns (h, m) = TARGET_UPLOAD (public for scheduled)
         raw_slots = _distribute_slots(n, day_seed, ch["channel_id"],
@@ -612,8 +647,7 @@ def compute_horizon_slots(
             )
             
             # ── B. Build source_mode sequence ──
-            viral_n = ch.get("viral_per_day", 0)
-            mode_sequence = _build_source_mode_sequence(n, viral_n) if n > 0 else ["original"] * n
+            mode_sequence = _build_source_mode_sequence(n, ch, date_str) if n > 0 else ["original"] * n
             
             for pos, (peak_h, peak_m) in enumerate(raw_peaks, 1):
                 target_public_at = f"{date_str} {peak_h:02d}:{peak_m:02d}:00"
@@ -1031,7 +1065,7 @@ def sync_midday(db=None) -> dict:
     for ch in channels:
         cfg = db.get_channel_planning_config(ch["id"])
         ch_id = ch["id"]
-        target = cfg.get("videos_per_day", 0) if cfg.get("planning_enabled", True) else 0
+        target = _resolve_videos_per_day(cfg, today) if cfg.get("planning_enabled", True) else 0
         
         # Current slots for this channel today
         ch_slots = [s for s in existing if s["channel_id"] == ch_id]
@@ -1316,7 +1350,7 @@ def smart_replan(db=None) -> dict:
         except (_json.JSONDecodeError, TypeError):
             cfg = {}
         
-        vpd = int(cfg.get("videos_per_day", 1) or 1)
+        vpd = _resolve_videos_per_day({**cfg, "channel_id": ch_id}, today)
         planning_enabled = cfg.get("planning_enabled", True)
         
         if not planning_enabled:
@@ -1366,11 +1400,11 @@ def smart_replan(db=None) -> dict:
                     (ch_id, tomorrow_str),
                 ).fetchone()
                 tcnt = tomorrow_cnt["cnt"] if tomorrow_cnt else 0
-            if tcnt > 0 and tcnt != vpd:
+            if tcnt > 0 and tcnt != _resolve_videos_per_day({**cfg, "channel_id": ch_id}, tomorrow_str):
                 logger.warning(
-                    "Config mismatch for %s: tomorrow has %d slots but videos_per_day=%d. "
+                    "Config mismatch for %s: tomorrow has %d slots but resolved_vpd=%d. "
                     "Triggering horizon replan.",
-                    slug, tcnt, vpd,
+                    slug, tcnt, _resolve_videos_per_day({**cfg, "channel_id": ch_id}, tomorrow_str),
                 )
                 if not horizon_replanned:
                     result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
@@ -1481,7 +1515,7 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     try:
         generated_today = db.count_videos_generated_today(ch_id)
         if generated_today == 0:
-            vpd = int(cfg_json.get("videos_per_day", 1) or 1)
+            vpd = _resolve_videos_per_day({**cfg_json, "channel_id": ch_id}, today_str)
             if vpd > 0:
                 score += 30  # channel needs content today
     except Exception:

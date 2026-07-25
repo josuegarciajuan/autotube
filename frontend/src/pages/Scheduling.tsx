@@ -29,6 +29,8 @@ interface PlanningConfig {
   videos_per_day: number
   viral_per_day: number
   planning_enabled: boolean
+  videos_day_boost_weight: number
+  viral_day_boost_weight: number
 }
 
 // ── Timezone ─────────────────────────────────────────────

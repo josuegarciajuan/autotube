@@ -3250,6 +3250,22 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
     
+    def count_completed_videos_for_date(self, channel_id: int, date_key: str) -> int:
+        """Count long-form videos published/uploaded for a specific date_key.
+        
+        Used by shorts scheduler to determine how many clip slots to create
+        (2 clips per long-form video published yesterday).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos v
+                   JOIN planned_slots p ON p.video_id = v.id
+                   WHERE p.channel_id = ? AND p.date_key = ?
+                   AND v.status IN ('uploaded', 'published', 'uploaded_private')""",
+                (channel_id, date_key),
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
     def count_awaiting_upload(self, channel_id: int) -> int:
         """Count videos in awaiting_upload status for a channel."""
         with self._connect() as conn:
@@ -3438,6 +3454,9 @@ class ExtendedDatabase(Database):
             "alternate_offset": config.get("alternate_offset", 0),
             # ── Source mode distribution (videos_per_day = total, viral_per_day = how many viral) ──
             "viral_per_day": config.get("viral_per_day", 0),
+            # ── Random daily boost weights (v9.1) ──
+            "videos_day_boost_weight": config.get("videos_day_boost_weight", 0.7),
+            "viral_day_boost_weight": config.get("viral_day_boost_weight", 0.2),
             # ── 3-phase pipeline config (v9) ──
             "upload_window_start": config.get("UPLOAD_WINDOW_START", 9),
             "upload_window_end": config.get("UPLOAD_WINDOW_END", 11),
@@ -3463,7 +3482,9 @@ class ExtendedDatabase(Database):
                                         upload_window_end: int = None,
                                         generation_lead_hours: int = None,
                                         upload_windows: list = None,
-                                        publish_window_spread_min: int = None) -> bool:
+                                        publish_window_spread_min: int = None,
+                                        videos_day_boost_weight: float = None,
+                                        viral_day_boost_weight: float = None) -> bool:
         """Update planning fields in channel config_json.
 
         Pass alternate_pattern=None (the Python value) to explicitly clear it.
@@ -3504,6 +3525,10 @@ class ExtendedDatabase(Database):
             config["UPLOAD_WINDOWS"] = valid if valid else [{"start": 9, "end": 11}]
         if publish_window_spread_min is not None:
             config["PUBLISH_WINDOW_SPREAD_MIN"] = max(10, min(180, publish_window_spread_min))
+        if videos_day_boost_weight is not None:
+            config["videos_day_boost_weight"] = round(max(0.0, min(1.0, videos_day_boost_weight)), 2)
+        if viral_day_boost_weight is not None:
+            config["viral_day_boost_weight"] = round(max(0.0, min(1.0, viral_day_boost_weight)), 2)
         return self.update_channel(channel_id, config=config)
     
     def get_active_job(self) -> dict | None:

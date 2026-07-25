@@ -278,6 +278,27 @@ def _build_shorts_slots_for_channel(
     return slots, pos
 
 
+def _get_yesterday_published_count(channel_id: int, date_str: str, db=None) -> int:
+    """Count long-form videos published/uploaded on the day before date_str.
+    
+    Clip shorts are now based on yesterday's published videos (not today's planned).
+    Returns the count of videos with status IN ('uploaded','published','uploaded_private')
+    for the date_key = (date_str - 1 day).
+    """
+    from datetime import datetime as _dt, timedelta
+    yesterday = (_dt.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        count = db.count_completed_videos_for_date(channel_id, yesterday)
+        return count
+    except Exception as exc:
+        logger.debug("Yesterday published count lookup failed for ch%d date=%s: %s",
+                     channel_id, yesterday, exc)
+        return 0
+
+
 def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, list[int]]:
     """Get how many long-form videos are planned today for a channel.
 
@@ -335,7 +356,8 @@ def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, 
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
-    v12: clip count is dynamic — clips_per_long × long_videos_planned_today.
+    v13: clip count is dynamic — clips_per_long × long_videos_published_yesterday.
+    Native count is fixed at shorts_native_per_day.
     Timestamps are converted to UTC for storage.
 
     Returns list of dicts sorted by scheduled_at.
@@ -372,14 +394,15 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         if native_count == 0 and clips_per_long == 0:
             continue
 
-        # Dynamic: how many long videos are planned today?
-        long_video_count, long_target_hours = _get_planned_long_video_count(
-            ch_id, date_str,
-        )
+        # Dynamic: how many long-form videos were published yesterday?
+        # Clip slots are now based on YESTERDAY's published videos, not today's planned.
+        yesterday_count = _get_yesterday_published_count(ch_id, date_str, db)
+        # No real target hours for yesterday's videos → use empty list (defaults apply)
+        long_target_hours: list[int] = []
 
         channel_slots, global_pos = _build_shorts_slots_for_channel(
             ch, date_str, native_count, clips_per_long,
-            long_video_count, long_target_hours, global_pos,
+            yesterday_count, long_target_hours, global_pos,
         )
         all_slots.extend(channel_slots)
 
