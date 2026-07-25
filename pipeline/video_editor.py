@@ -1773,7 +1773,10 @@ class VideoEditor:
         w, h = self.video_size
         palette = self.canal.get("color_palette", {}) if self.canal else {}
 
-        def _parse(hex_str: str) -> tuple[int, int, int]:
+        def _parse(hex_str) -> tuple[int, int, int]:
+            # Fix: color_palette values may be RGB tuples/lists from config, not hex strings
+            if isinstance(hex_str, (tuple, list)) and len(hex_str) == 3:
+                return tuple(hex_str)  # type: ignore[return-value]
             hx = hex_str.lstrip("#")
             return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 

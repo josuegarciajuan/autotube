@@ -461,6 +461,29 @@ class MediaFetcher:
         # Each downloaded video clip is ~10-50 MB. 50 videos ≈ 1-2 GB in-memory
         # before rendering. Beyond this, ffmpeg decoders risk OOM kills.
         MAX_ABSOLUTE_VIDEOS = 50
+
+        # ── RAM-aware cap: further reduce video limit when free RAM is low ──
+        try:
+            from pipeline.ram_governor import available_mb
+            free_ram_mb = available_mb()
+            if free_ram_mb > 0 and free_ram_mb < 3000:
+                # <3 GB free → cap at 15 videos (prevent OOM like worker#1655)
+                MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, 15)
+                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
+                logger.warning(
+                    "RAM governor: only %.1f GB free → capping videos at %d (was %d)",
+                    free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS, 50,
+                )
+            elif free_ram_mb > 0 and free_ram_mb < 5000:
+                # 3-5 GB free → moderate cap
+                MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, 25)
+                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
+                logger.warning(
+                    "RAM governor: only %.1f GB free → capping videos at %d",
+                    free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
+                )
+        except Exception:
+            pass  # ram_governor unavailable (non-critical)
         video_ok = 0  # declared early for hard-cap check in the fetch loop
         logger.info(
             "Ratio governor: %d scenes, target %d video (%.0f%%), "
@@ -565,6 +588,12 @@ class MediaFetcher:
             if video_ok >= MAX_ABSOLUTE_VIDEOS:
                 want_video = False
                 _force_images = True
+                if video_ok == MAX_ABSOLUTE_VIDEOS:  # log once
+                    logger.warning(
+                        "RAM safety cap reached (%d videos) — "
+                        "forcing remaining %d scenes to image-only",
+                        MAX_ABSOLUTE_VIDEOS, n_scenes - i,
+                    )
 
             logger.info(
                 "Scene %d/%d [%s]: want_video=%s dur=%.1fs",
@@ -698,6 +727,13 @@ class MediaFetcher:
                     continue
 
                 target_dur = scene.get("duration", 5)
+                # ── Respect hard cap even during rescue pass ──
+                if video_ok >= MAX_ABSOLUTE_VIDEOS:
+                    logger.warning(
+                        "Video rescue stopped: hard cap reached (%d videos)",
+                        MAX_ABSOLUTE_VIDEOS,
+                    )
+                    break
                 # Try each generic query in order
                 for fbq in generic_queries:
                     if rescued >= needed:
