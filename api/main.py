@@ -439,6 +439,20 @@ async def _schedule_checker_loop():
             await asyncio.sleep(60)
 
 
+def _get_available_ram_gb() -> float:
+    """Return available RAM in GB, preferring SC_AVPHYS_PAGES, falling back to psutil."""
+    try:
+        import os
+        avail_bytes = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        return avail_bytes / (1024 ** 3)
+    except Exception:
+        try:
+            import psutil
+            return psutil.virtual_memory().available / (1024 ** 3)
+        except ImportError:
+            return 99.0  # assume OK
+
+
 async def _process_planned_slots():
     """Process due planned_slots using the dynamic planning engine.
     
@@ -451,6 +465,24 @@ async def _process_planned_slots():
         _db = ExtendedDatabase()
         if _db.get_system_state("scheduler_paused") == "true":
             return False  # Operator paused scheduling — skip dispatch
+        
+        # ── Early RAM gate: skip dispatch if a render is active and RAM is low ──
+        # Prevents flooding the DB with error/blocked video/job records when
+        # the render worker consumes most available RAM. The gate in
+        # start_generation_job_subprocess() still acts as safety net, but this
+        # avoids creating records that would be immediately rejected.
+        try:
+            active_count = _db.count_active_jobs()
+            if active_count >= 1:
+                avail_gb = _get_available_ram_gb()
+                if avail_gb < 3.0:
+                    logger.debug(
+                        "Planner skip: %d active job(s) + %.1f GB free RAM (need >= 3 GB)",
+                        active_count, avail_gb,
+                    )
+                    return False
+        except Exception:
+            pass  # Non-critical — let the subprocess guard handle it
     except Exception:
         pass
     try:

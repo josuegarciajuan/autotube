@@ -24,19 +24,22 @@ class ImageProcessor:
         self.config = style_config
         logger.info("ImageProcessor initialized with palette=%s", self.config.COLOR_PALETTE)
 
-    def process(self, image_path: Path, output_path: Path | None = None) -> Path:
+    def process(self, image_path, output_path=None):
         """Run the full processing pipeline on a single image.
 
         Args:
-            image_path: Path to the source image.
+            image_path: Path or str to the source image.
             output_path: Destination path. Defaults to
                 IMAGES_DIR / processed_{stem}.jpg.
 
         Returns:
             Path to the processed image file.
         """
+        image_path = Path(image_path)
         if output_path is None:
             output_path = settings.IMAGES_DIR / f"processed_{image_path.stem}.jpg"
+        else:
+            output_path = Path(output_path)
 
         if output_path.exists():
             logger.info("Processed image already cached: %s", output_path)
@@ -74,16 +77,16 @@ class ImageProcessor:
         logger.info("Processed and saved: %s", output_path)
         return output_path
 
-    def process_batch(self, image_paths: list[Path]) -> list[Path]:
+    def process_batch(self, image_paths):
         """Process multiple images.
 
         Args:
-            image_paths: List of source image paths.
+            image_paths: List of source image paths (Path or str).
 
         Returns:
             List of output Path objects.
         """
-        results: list[Path] = []
+        results = []
         for ip in image_paths:
             try:
                 results.append(self.process(ip))

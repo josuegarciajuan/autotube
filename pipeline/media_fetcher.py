@@ -149,6 +149,13 @@ class MediaFetcher:
         # orchestrator/service after video_id is assigned.
         self._pending_asset_records: list[dict] = []
 
+        # ── Bad URL cache (prevent retry storms on broken Pixabay CDN URLs) ──
+        # URLs that returned error/HTML/non-JPEG are remembered for this
+        # session to avoid retrying them hundreds of times. Reset on
+        # fetch_for_script() boundary or after TTL expiry.
+        self._bad_image_urls: set[str] = set()
+        self._bad_image_urls_ts: float = 0.0
+
         # ── Pollo AI scene generator (lazy, avoids ~7 min per image unless absolutely needed) ─
         self._pollo_scene_gen = None
         self._ai_fallback_enabled = self._media_strategy.get("ai_image_fallback", False)
@@ -416,6 +423,10 @@ class MediaFetcher:
         self._pixabay_img_consecutive_empty = 0
         self._pixabay_img_disabled_until = None
 
+        # Reset bad URL cache for fresh script
+        self._bad_image_urls.clear()
+        self._bad_image_urls_ts = 0.0
+
         if not bloques:
             return []
 
@@ -446,11 +457,16 @@ class MediaFetcher:
         target_video_count = max(1, round(target_video_pct / 100.0 * n_scenes))
         target_video_count = min(target_video_count, round(max_video_pct / 100.0 * n_scenes))
         target_video_count = min(target_video_count, n_scenes)
+        # ── Hard cap: never exceed 50 video assets to prevent RAM exhaustion ──
+        # Each downloaded video clip is ~10-50 MB. 50 videos ≈ 1-2 GB in-memory
+        # before rendering. Beyond this, ffmpeg decoders risk OOM kills.
+        MAX_ABSOLUTE_VIDEOS = 50
+        video_ok = 0  # declared early for hard-cap check in the fetch loop
         logger.info(
             "Ratio governor: %d scenes, target %d video (%.0f%%), "
-            "max placeholder %.0f%%",
+            "max placeholder %.0f%%, hard cap %d videos",
             n_scenes, target_video_count, target_video_pct,
-            max_placeholder_pct,
+            max_placeholder_pct, MAX_ABSOLUTE_VIDEOS,
         )
 
         # ── Phase 1: build priority list for video assignment ─
@@ -501,7 +517,7 @@ class MediaFetcher:
 
         # ── Phase 2: fetch per scene ──────────────────────────
         results: list[dict] = [{} for _ in range(n_scenes)]
-        video_ok = 0
+        # video_ok declared earlier (Phase 0) for hard-cap check
         image_ok = 0
         placeholder = 0
 
@@ -542,6 +558,14 @@ class MediaFetcher:
             if scene.get("is_transition"):
                 want_video = False
 
+            # ── RAM safety: hard-cap video assets to prevent OOM ──
+            # When we hit the absolute video limit, force remaining scenes
+            # to use only images (no video fallback in interleaved providers).
+            _force_images = False
+            if video_ok >= MAX_ABSOLUTE_VIDEOS:
+                want_video = False
+                _force_images = True
+
             logger.info(
                 "Scene %d/%d [%s]: want_video=%s dur=%.1fs",
                 i + 1, n_scenes, scene_tipo, want_video, target_dur,
@@ -566,6 +590,7 @@ class MediaFetcher:
                 )
                 asset = self._fetch_asset_exhaustive(
                     scene, query_pool, want_video, target_dur, ctx,
+                    force_images=_force_images,
                 )
 
             # ── Pollo AI: rescate si el stock falló y hay cupo ─
@@ -1375,6 +1400,7 @@ class MediaFetcher:
     def _fetch_asset_exhaustive(
         self, scene: dict, query_pool: list[str],
         want_video: bool, target_dur: float, ctx,
+        force_images: bool = False,
     ) -> dict | None:
         """Search exhaustively for a non-duplicate asset.
 
@@ -1390,7 +1416,7 @@ class MediaFetcher:
         This guarantees that we only give up after exhausting:
           ~11 queries × ~6 providers × ~10 pages each ≈ 660 candidate evaluations
         """
-        providers = self._interleaved_providers(want_video, scene)
+        providers = self._interleaved_providers(want_video, scene, force_images=force_images)
 
         for query in query_pool:
             if not query or not query.strip():
@@ -1425,19 +1451,27 @@ class MediaFetcher:
 
         return None
 
-    def _interleaved_providers(self, want_video: bool, scene: dict) -> list:
+    def _interleaved_providers(self, want_video: bool, scene: dict, force_images: bool = False) -> list:
         """Return providers in interleaved order: preferred type first, then the other.
 
         This ensures that even when a scene wants an image, video providers are
         tried after image providers are exhausted (cross-rotation).
+
+        When force_images is True (RAM safety cap), video providers are excluded
+        entirely to prevent OOM from too many downloaded video assets.
         """
         is_transition = scene.get("is_transition", False)
         if is_transition:
             # Transitions always use images (Ken Burns)
             return self._get_all_image_providers()
 
-        video_providers_list = list(self.video_providers) if self.video_providers else []
         image_providers_list = self._get_all_image_providers()
+
+        if force_images:
+            # RAM safety cap: only image providers, no video fallback
+            return image_providers_list
+
+        video_providers_list = list(self.video_providers) if self.video_providers else []
 
         if want_video:
             return video_providers_list + image_providers_list
@@ -1762,6 +1796,18 @@ class MediaFetcher:
         - Must have JPEG magic bytes (ff d8 ff)
         - Must have at least 800px on the shorter axis (Ken Burns minimum)
         """
+        # ── Bad URL cache: skip URLs that already failed this session ──
+        import time as _time
+        if url in self._bad_image_urls:
+            # TTL check: expire cache after 10 min to allow recovery
+            if _time.time() - self._bad_image_urls_ts < 600:
+                # Skip silently — caller treats None as "no valid asset" and moves on
+                return None
+            else:
+                # TTL expired — clear cache and retry
+                self._bad_image_urls.clear()
+                self._bad_image_urls_ts = _time.time()
+
         filepath = settings.IMAGES_DIR / filename
         if filepath.exists():
             # Re-validate cached images on each hit (catches corrupt cache)
@@ -1789,6 +1835,8 @@ class MediaFetcher:
                     "Image download too small (%d bytes) — likely HTML/error page: %s",
                     content_len, url[:100],
                 )
+                self._bad_image_urls.add(url)
+                self._bad_image_urls_ts = _time.time()
                 return None
 
             # JPEG magic bytes check
@@ -1797,6 +1845,8 @@ class MediaFetcher:
                     "Downloaded content is not JPEG (magic=%r) — discarding: %s",
                     content[:8], url[:100],
                 )
+                self._bad_image_urls.add(url)
+                self._bad_image_urls_ts = _time.time()
                 return None
 
             settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1823,6 +1873,8 @@ class MediaFetcher:
             return filepath
         except Exception as exc:
             logger.error("Image download failed %s: %s", url, exc)
+            self._bad_image_urls.add(url)
+            self._bad_image_urls_ts = _time.time()
             return None
 
     @staticmethod

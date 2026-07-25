@@ -902,7 +902,7 @@ class PipelineOrchestrator:
             for asset in media_assets:
                 if asset["type"] == "image" and asset["path"] and not skip_processing:
                     try:
-                        asset["path"] = self.image_processor.process(asset["path"])
+                        asset["path"] = self.image_processor.process(Path(asset["path"]))
                     except Exception as exc:
                         logger.warning("[%s] Image processing failed for %s: %s",
                                        self.canal, asset["path"], exc)
