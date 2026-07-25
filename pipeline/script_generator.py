@@ -111,6 +111,8 @@ class ScriptGenerator:
             timeout=120.0,   # 2 min for LLM calls
             max_retries=2,
         )
+        self._llm_retries = 3        # max retries for empty/broken JSON responses
+        self._llm_retry_delay = 2.0  # initial backoff seconds (doubles each retry)
 
         # P2/P3: multi-chunk, theme context, word count emphasis
         self._theme_context = None
@@ -137,6 +139,53 @@ class ScriptGenerator:
             LLM_MODEL,
             self.canal,
         )
+
+    def _llm_json_call(self, **call_kwargs):
+        """Call LLM chat.completions.create and parse JSON with retry.
+
+        Handles empty/invalid JSON responses from the API by retrying up
+        to ``self._llm_retries`` times with exponential backoff.  Returns
+        the parsed dict, or raises the last exception on total failure.
+        """
+        last_exc = None
+        for attempt in range(self._llm_retries):
+            try:
+                response = self.client.chat.completions.create(**call_kwargs)
+                content = response.choices[0].message.content
+                if content is None or not content.strip():
+                    raise ValueError(
+                        "LLM returned empty content (attempt %d/%d)" % (
+                            attempt + 1, self._llm_retries,
+                        )
+                    )
+                return json.loads(content.strip())
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                if attempt < self._llm_retries - 1:
+                    delay = self._llm_retry_delay * (2 ** attempt)
+                    logger.warning(
+                        "LLM JSON parse failed (attempt %d/%d): %s — retrying in %.1fs",
+                        attempt + 1, self._llm_retries, exc, delay,
+                    )
+                    time.sleep(delay)
+            except ValueError as exc:
+                last_exc = exc
+                if attempt < self._llm_retries - 1:
+                    delay = self._llm_retry_delay * (2 ** attempt)
+                    logger.warning(
+                        "%s — retrying in %.1fs", exc, delay,
+                    )
+                    time.sleep(delay)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self._llm_retries - 1:
+                    delay = self._llm_retry_delay * (2 ** attempt)
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
+                        attempt + 1, self._llm_retries, exc, delay,
+                    )
+                    time.sleep(delay)
+        raise last_exc
 
     def set_theme_context(self, ctx):
         """Set visual theme context for the next generation."""
@@ -231,7 +280,7 @@ class ScriptGenerator:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -241,7 +290,6 @@ class ScriptGenerator:
                 max_tokens=min(3000, OPENAI_MAX_TOKENS),
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content.strip())
             chapters = data.get("chapters", [])
             if not chapters or not isinstance(chapters, list):
                 logger.warning("_generate_outline: empty or invalid chapters")
@@ -287,7 +335,7 @@ class ScriptGenerator:
         user_prompt = f"Fuente: {content_title}\n\nContinúa la narración documental."
 
         try:
-            response = self.client.chat.completions.create(
+            data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -298,7 +346,6 @@ class ScriptGenerator:
                 response_format={"type": "json_object"},
             )
 
-            data = json.loads(response.choices[0].message.content.strip())
             bloques = data.get("bloques", [])
 
             if not isinstance(bloques, list):
@@ -596,7 +643,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            response = self.client.chat.completions.create(
+            data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -607,7 +654,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 response_format={"type": "json_object"},
             )
 
-            data = json.loads(response.choices[0].message.content.strip())
             enriched_batch = data.get("bloques", [])
 
             if not isinstance(enriched_batch, list) or len(enriched_batch) != len(batch):
@@ -739,7 +785,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            response = self.client.chat.completions.create(
+            data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -749,8 +795,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 max_tokens=min(4096, OPENAI_MAX_TOKENS),
                 response_format={"type": "json_object"},
             )
-
-            data = json.loads(response.choices[0].message.content.strip())
 
             # Post-process parrafos: convert indices to actual bloques
             raw_parrafos = data.get("parrafos", [])
@@ -1171,7 +1215,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             f'{{"chapters": [{{"title": "...", "word_target": N, "order": 1}}, ...]}}'
         )
         try:
-            response = self.client.chat.completions.create(
+            outline_data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": outline_system},
@@ -1181,7 +1225,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 max_tokens=min(OPENAI_MAX_TOKENS, 1500),
                 response_format={"type": "json_object"},
             )
-            outline_data = json.loads(response.choices[0].message.content.strip())
             chapters = outline_data.get("chapters", [])
             if not chapters:
                 logger.warning("Outline returned no chapters — falling back to single-chunk")
@@ -1241,32 +1284,23 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 f"CONTENIDO:\n{content_text[:3000]}"
             )
 
-            # Generate chapter with one retry on failure
+            # Generate chapter with retry (via _llm_json_call)
             ch_data = None
-            for ch_attempt in range(2):  # original + 1 retry
-                try:
-                    response = self.client.chat.completions.create(
-                        model=LLM_MODEL_SCRIPT,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": chapter_prompt},
-                        ],
-                        temperature=OPENAI_TEMPERATURE,
-                        max_tokens=OPENAI_MAX_TOKENS,
-                        response_format={"type": "json_object"},
-                    )
-                    ch_data = json.loads(response.choices[0].message.content.strip())
-                    break  # success
-                except Exception as exc:
-                    if ch_attempt == 0:
-                        logger.warning(
-                            "Chapter %d attempt 1 failed: %s — retrying", ch_order, exc,
-                        )
-                        time.sleep(1.0)
-                    else:
-                        logger.error(
-                            "Chapter %d generation failed after retry: %s — skipping", ch_order, exc,
-                        )
+            try:
+                ch_data = self._llm_json_call(
+                    model=LLM_MODEL_SCRIPT,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": chapter_prompt},
+                    ],
+                    temperature=OPENAI_TEMPERATURE,
+                    max_tokens=OPENAI_MAX_TOKENS,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                logger.error(
+                    "Chapter %d generation failed after retries: %s — skipping", ch_order, exc,
+                )
             if ch_data is None:
                 continue  # both attempts failed; expansion will compensate
 
@@ -1673,7 +1707,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             )
 
             try:
-                response = self.client.chat.completions.create(
+                expanded = self._llm_json_call(
                     model=LLM_MODEL_SCRIPT,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -1683,7 +1717,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     max_tokens=OPENAI_MAX_TOKENS,
                     response_format={"type": "json_object"},
                 )
-                expanded = json.loads(response.choices[0].message.content.strip())
             except Exception as exc:
                 logger.warning("Expansion round %d API/parse error: %s", round_num, exc)
                 stale_rounds += 1
@@ -2168,7 +2201,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            response = self.client.chat.completions.create(
+            data = self._llm_json_call(
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -2178,8 +2211,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 max_tokens=min(4000, OPENAI_MAX_TOKENS),
                 response_format={"type": "json_object"},
             )
-            raw = response.choices[0].message.content.strip()
-            data = json.loads(raw)
             regenerated_paras = data.get("regenerated_parrafos", [])
 
             if not isinstance(regenerated_paras, list) or not regenerated_paras:
