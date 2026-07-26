@@ -3,6 +3,7 @@
 Serves the React SPA and REST API for the multi-channel video management panel.
 """
 import sys
+import os
 import json
 import time
 import asyncio
@@ -16,7 +17,7 @@ import mimetypes
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse, Response
 
 from api.deps import get_db
 from api.progress import get_progress_manager
@@ -1413,8 +1414,13 @@ async def serve_video_file(video_id: int, request: Request):
 
 
 @app.get("/api/thumbnail/{video_id}")
-async def serve_thumbnail(video_id: int):
-    """Serve the thumbnail for a video with no-cache headers."""
+async def serve_thumbnail(video_id: int, request: Request):
+    """Serve the thumbnail for a video with aggressive anti-cache headers + ETag.
+
+    The ETag is built from the file's mtime + size so any regeneration
+    (which creates a new file or overwrites with different content) will
+    produce a new ETag, forcing the browser to re-fetch.
+    """
     db = get_db()
     v = db.get_video(video_id)
     if not v or not v.get("thumbnail_path"):
@@ -1424,7 +1430,23 @@ async def serve_thumbnail(video_id: int):
     if thumb_path is None:
         raise HTTPException(404, "Thumbnail file not found on disk")
 
-    return FileResponse(thumb_path, media_type="image/jpeg", headers=NO_CACHE_MEDIA)
+    # ── Build ETag from file mtime + size ──────────────────
+    stat = os.stat(thumb_path)
+    etag = f'"{stat.st_mtime:.0f}-{stat.st_size}"'
+
+    # ── Check If-None-Match for conditional 304 ─────────────
+    if_none = request.headers.get("if-none-match", "")
+    if if_none and if_none.strip('"') == etag.strip('"'):
+        return Response(status_code=304)
+
+    # ── Aggressive anti-cache: ETag + zero-age + no-store ──
+    headers = {
+        **NO_CACHE_MEDIA,
+        "ETag": etag,
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    }
+
+    return FileResponse(thumb_path, media_type="image/jpeg", headers=headers)
 
 
 @app.get("/api/channels/{channel_id}/templates/{segment_type}/file")
