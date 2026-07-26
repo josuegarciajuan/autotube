@@ -934,6 +934,23 @@ class PipelineOrchestrator:
             _safe_log_error(self.db, self.canal, "media", str(e))
             return None
 
+    def _media_fetch_on_demand(self, query: str, duration: float):
+        """Fetch a single image urgently for dynamic gap filling.
+
+        Called by the VideoEditor during rendering when a scene has no
+        available asset. Searches all image providers for one image
+        matching the query. Returns a Path or None.
+        """
+        from pathlib import Path as _Path2
+        try:
+            asset = self.media_fetcher.fetch_single_image_urgent(query)
+            if asset and asset.get("path") and _Path2(asset["path"]).exists():
+                return _Path2(asset["path"])
+        except Exception as e:
+            logger.warning("[%s] On-demand image fetch failed for query=%r: %s",
+                           self.canal, query[:60], e)
+        return None
+
     def _phase_images_legacy(self, script: dict) -> Optional[list]:
         """Legacy image fetching — kept for scripts without bloques field."""
         return self.phase_images(script)
@@ -1020,6 +1037,8 @@ class PipelineOrchestrator:
                 self._emit_progress(60, "video", f"Renderizando video con {len(bloques)} bloques (MoviePy)...")
                 logger.info("[%s] Building video with v2 block API: %d blocks, %d assets",
                             self.canal, len(bloques), len(media_assets))
+                # Set on-demand image fetcher for dynamic gap filling
+                self.video_editor._on_demand_fetcher = self._media_fetch_on_demand
                 video_path = self.video_editor.build_video(
                     bloques=bloques,
                     media_assets=media_assets,

@@ -759,6 +759,42 @@ class MediaFetcher:
 
         return results
 
+    def fetch_single_image_urgent(self, query: str) -> dict | None:
+        """Fetch ONE image urgently from any available provider.
+
+        Used by the dynamic gap-fill system during video rendering when
+        a scene runs out of pre-fetched assets. Skips cross-video dedup
+        but still avoids the very last downloaded image to prevent
+        exact duplicates within the same fill session.
+
+        Returns {type, path, source} dict or None if all providers fail.
+        """
+        import time
+        _last_url = getattr(self, '_urgent_last_url', None)
+        for provider in self._image_providers:
+            if not provider.available:
+                continue
+            try:
+                candidates = provider.search(query, per_page=10)
+                if not candidates:
+                    continue
+                for candidate in candidates:
+                    url = getattr(candidate, 'url', '')
+                    if url and url == _last_url:
+                        continue  # skip exact duplicate from same session
+                    path = self._download_image(url, f"fill_{int(time.time())}.jpg")
+                    if path and self._is_valid_image(path):
+                        self._urgent_last_url = url
+                        return {
+                            "type": "image",
+                            "path": str(path),
+                            "source": getattr(provider, 'name', 'unknown'),
+                        }
+            except Exception:
+                continue
+            time.sleep(0.1)  # rate-limit between providers
+        return None
+
     # ── Pollo AI last resort ────────────────────────────────────
 
     def _try_pollo_scene(self, query: str, scene_tipo: str, ctx) -> dict | None:
@@ -1109,6 +1145,28 @@ class MediaFetcher:
         filename = f"{provider.name}_{url_hash}.mp4"
         path = self._download_video(asset.url, filename)
         if path and self._is_valid_video(path):
+            # ── Duration validation: compare real vs claimed ────────────
+            # Stock APIs (Pixabay, Pexels) often report inflated durations
+            # (15s claimed → 6s real). Flag short-real videos so the renderer
+            # knows to fill the gap instead of rejecting the scene entirely.
+            try:
+                import subprocess as _sp3
+                result = _sp3.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    real_dur = float(result.stdout.strip())
+                    claimed_dur = getattr(asset, 'duration', 0) or 0
+                    if claimed_dur > 0 and real_dur > 0 and real_dur < claimed_dur * 0.65:
+                        logger.warning(
+                            "Video duration mismatch: real %.1fs << claimed %.1fs "
+                            "(%s). Accepting but renderer will fill gap.",
+                            real_dur, claimed_dur, path.name,
+                        )
+            except Exception:
+                pass  # non-critical
             # ── Pre-transcode: downscale >1080p videos at download time ──
             # This prevents MoviePy from ever decoding 4K (4096x2160) or
             # 2.7K (2732x1440) raw RGB frames (~25 MB each), which would

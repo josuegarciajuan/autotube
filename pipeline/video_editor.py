@@ -267,6 +267,11 @@ class VideoEditor:
         self._current_clip_idx: int = 0
         # When reusing an image, vary Ken Burns focus to avoid visual repetition
         self._image_reuse_count: dict[str, int] = {}  # path → how many times reused
+        # On-demand image fetcher callback (set by orchestrator before build_video)
+        self._on_demand_fetcher: Optional[callable] = None
+        # Pending fill tracking: when a video is too short, signal fill needed
+        self._pending_fill_dur: float = 0.0
+        self._pending_fill_usable: float = 0.0
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -627,6 +632,61 @@ class VideoEditor:
             segment_paths, block_ranges, seg_dir, self.logger,
         )
 
+        # ── v11: Dynamic gap fill — ensure body video covers full narration ──
+        # After all planned scenes are rendered (including checkpoints), measure
+        # the total rendered body duration vs the narration audio duration.
+        # If there's a gap, render additional fill scenes on-demand using images
+        # fetched in real-time (related to the narration topic at that timestamp).
+        # This prevents the "black screen from halfway" bug.
+        if audio_path:
+            try:
+                _body_vid_dur = self._probe_video_duration(segment_paths)
+                _body_aud_dur = self._get_voice_duration(Path(audio_path))
+                _gap = _body_aud_dur - _body_vid_dur
+                if _gap > 3.0:
+                    self.logger.warning(
+                        "⚠ Body gap detected: video=%.1fs audio=%.1fs gap=%.1fs. "
+                        "Filling dynamically…",
+                        _body_vid_dur, _body_aud_dur, _gap,
+                    )
+                    _fill_idx = len(segment_paths)
+                    _cumulative = _body_vid_dur
+                    while _gap > 2.0 and _fill_idx < len(segment_paths) + 30:
+                        _fill_dur = min(_gap, 10.0)
+                        _fill_query = self._find_nearest_scene_query(
+                            _cumulative, block_ranges, bloques
+                        )
+                        _fill_seg = self._render_fill_scene_on_demand(
+                            query=_fill_query or "documentary background atmospheric",
+                            duration=_fill_dur,
+                            seg_dir=seg_dir,
+                            scene_idx=_fill_idx,
+                        )
+                        if _fill_seg and Path(_fill_seg).exists():
+                            segment_paths.append(_fill_seg)
+                            block_ranges.append({
+                                "start": _cumulative,
+                                "end": _cumulative + _fill_dur,
+                                "duration": _fill_dur,
+                                "tipo": "fill",
+                                "texto": "",
+                            })
+                            _cumulative += _fill_dur
+                            _gap -= _fill_dur
+                            _fill_idx += 1
+                            self.logger.info(
+                                "  Fill scene %d: %.1fs (gap remaining: %.1fs)",
+                                _fill_idx, _fill_dur, _gap,
+                            )
+                        else:
+                            self.logger.warning(
+                                "  Could not fetch fill image — "
+                                "%.1fs gap will remain", _gap,
+                            )
+                            break
+            except Exception as _gf_err:
+                self.logger.warning("Dynamic gap fill skipped (non-fatal): %s", _gf_err)
+
         # ── Concat segments with crossfades (+ grain + vignette) ──
         self.logger.info("Step 3/6: Concatenating %d segments with xfade…", len(segment_paths))
         body_path = seg_dir / "body.mp4"
@@ -801,14 +861,14 @@ class VideoEditor:
         if not concat_output.exists() or concat_output.stat().st_size == 0:
             raise RuntimeError("ffmpeg concat produced empty output")
 
-        # ── Blackness sanity check: sample frames to detect black-screen defect ──
-        # Extracts a frame at 50% of the video duration and checks if it's
-        # >90% near-black. Catches the checkpoint-resume race condition where
-        # media files were deleted and the video ends up mostly black.
+        # ── Blackness sanity check: multi-point sample ────────────
+        # Samples frames at 25%, 50%, and 75% of the video duration.
+        # If ANY point is >90% near-black, the video is defective.
+        # Single-point check at 50% missed defects where the first
+        # half was fine but the second half was all-black/placeholder.
         _black_check_output = None
         try:
             import tempfile
-            _black_check_output = output_path.with_suffix(".blackcheck.jpg")
             _probe_result = subprocess.run([
                 "ffprobe", "-v", "error",
                 "-show_entries", "format=duration",
@@ -817,32 +877,39 @@ class VideoEditor:
             ], capture_output=True, text=True, timeout=15)
             _vid_dur = float(_probe_result.stdout.strip()) if _probe_result.stdout.strip() else 0
             if _vid_dur > 10:
-                _check_ts = _vid_dur * 0.5
-                _frame_result = subprocess.run([
-                    "ffmpeg", "-y", "-v", "error",
-                    "-ss", str(_check_ts), "-i", str(concat_output),
-                    "-vframes", "1", "-q:v", "2",
-                    str(_black_check_output),
-                ], capture_output=True, text=True, timeout=30)
-                if _black_check_output.exists() and _black_check_output.stat().st_size > 100:
-                    from PIL import Image
-                    import numpy as np
-                    _img = Image.open(str(_black_check_output)).convert("RGB")
-                    _arr = np.array(_img, dtype=np.float32)
-                    # Pixels with all channels < 15 are "near-black"
-                    _black_pixels = np.sum(np.all(_arr < 15, axis=2))
-                    _total_pixels = _arr.shape[0] * _arr.shape[1]
-                    _black_pct = (_black_pixels / _total_pixels) * 100
-                    if _black_pct > 90:
-                        raise RuntimeError(
-                            f"BLACK-SCREEN DETECTED: frame at {_check_ts:.0f}s is "
-                            f"{_black_pct:.0f}% near-black. Video is mostly black — "
-                            f"media files were likely deleted. Aborting to prevent publishing bad video."
-                        )
-                    self.logger.info(
-                        "Blackness check: %.0f%% near-black at %.0fs (OK: < 90%%)",
-                        _black_pct, _check_ts,
+                from PIL import Image
+                import numpy as np
+                _black_check_output = output_path.with_suffix(".blackcheck.jpg")
+                _check_points = [0.25, 0.50, 0.75]
+                _worst_pct = 0.0
+                _worst_ts = 0.0
+                for _cp in _check_points:
+                    _check_ts = _vid_dur * _cp
+                    subprocess.run([
+                        "ffmpeg", "-y", "-v", "error",
+                        "-ss", str(_check_ts), "-i", str(concat_output),
+                        "-vframes", "1", "-q:v", "2",
+                        str(_black_check_output),
+                    ], capture_output=True, text=True, timeout=30)
+                    if _black_check_output.exists() and _black_check_output.stat().st_size > 100:
+                        _img = Image.open(str(_black_check_output)).convert("RGB")
+                        _arr = np.array(_img, dtype=np.float32)
+                        _black_pixels = np.sum(np.all(_arr < 15, axis=2))
+                        _total_pixels = _arr.shape[0] * _arr.shape[1]
+                        _black_pct = (_black_pixels / _total_pixels) * 100
+                        if _black_pct > _worst_pct:
+                            _worst_pct = _black_pct
+                            _worst_ts = _check_ts
+                if _worst_pct > 90:
+                    raise RuntimeError(
+                        f"BLACK-SCREEN DETECTED: frame at {_worst_ts:.0f}s is "
+                        f"{_worst_pct:.0f}% near-black (worst of 3 check points). "
+                        f"Video is mostly black — aborting to prevent publishing bad video."
                     )
+                self.logger.info(
+                    "Blackness check (3 pts): worst %.0f%% near-black at %.0fs (OK: < 90%%)",
+                    _worst_pct, _worst_ts,
+                )
         except RuntimeError:
             raise
         except Exception as _bc_err:
@@ -1442,9 +1509,51 @@ class VideoEditor:
                 else:
                     return None
             else:
-                # Advance the offset so the next scene (even with same file)
-                # starts where this one ended.
-                self._video_offset_tracker[asset_path] = offset + block_dur
+                # Video clip created successfully. Check if it was truncated
+                # (video shorter than block_dur → pending fill needed).
+                pending = getattr(self, '_pending_fill_dur', 0.0)
+                if pending > 0 and getattr(self, '_pending_fill_usable', 0) > 0:
+                    # ── Hybrid: video usable + fill with on-demand image ──
+                    usable_dur = self._pending_fill_usable
+                    fill_dur = pending
+                    self._pending_fill_dur = 0.0
+                    self._pending_fill_usable = 0.0
+                    self.logger.info(
+                        "Video %s used for %.1fs (of %.1fs needed) — filling %.1fs",
+                        Path(asset_path).name, usable_dur, block_dur, fill_dur,
+                    )
+                    # Try on-demand fill image first (avoids cannibalizing primary pool)
+                    fill_path = None
+                    if self._on_demand_fetcher is not None:
+                        scene_query = block_range.get("search_query_en", "")
+                        try:
+                            fill_path = self._on_demand_fetcher(scene_query, fill_dur)
+                        except Exception as e:
+                            self.logger.debug("On-demand fill fetch failed: %s", e)
+                    # Fallback: use pool image if on-demand failed
+                    if fill_path is None and fallback_pool:
+                        _avail = [p for p in fallback_pool if str(p) not in self._used_asset_paths]
+                        if _avail:
+                            fill_path = random.choice(_avail)
+                            self.logger.info("  Using pool image as fill: %s", Path(fill_path).name)
+                    if fill_path is not None and Path(str(fill_path)).exists():
+                        fill_clip = self._image_clip_for_block(Path(str(fill_path)), fill_dur)
+                        # Crossfade from video end to image start
+                        crossfade_s = 0.5
+                        if MOVIEPY_V2:
+                            fill_clip = fill_clip.with_start(max(0, usable_dur - crossfade_s))
+                        clip = CompositeVideoClip([clip, fill_clip])
+                        self._used_asset_paths.add(str(fill_path))
+                    else:
+                        self.logger.warning(
+                            "  No fill image available — video scene will be %.1fs shorter",
+                            fill_dur,
+                        )
+                    # Advance offset by actual usable duration (not full block_dur)
+                    self._video_offset_tracker[asset_path] = offset + usable_dur
+                else:
+                    # Normal case: video covers the full block_dur
+                    self._video_offset_tracker[asset_path] = offset + block_dur
                 self._used_asset_paths.add(asset_path)
                 if content_hash:
                     self._used_asset_paths.add(content_hash)
@@ -1526,7 +1635,26 @@ class VideoEditor:
                 effective_start = start_offset % clip_dur
                 remaining = effective_end - clip_dur
                 if remaining > block_dur * 0.5:
-                    return None
+                    # ── Video too short but DON'T discard it ────────────
+                    # Instead of returning None (which triggers image-cannibalization
+                    # cascade from the primary pool), return the usable portion.
+                    # The caller (_create_block_clip) will fill the gap with an
+                    # on-demand image fetched via the orchestrator callback.
+                    usable_dur = clip_dur - effective_start
+                    if usable_dur < 1.0:
+                        return None  # truly unusable fragment
+                    # Return truncated clip; caller checks _pending_fill_dur
+                    self._pending_fill_dur = block_dur - usable_dur
+                    self._pending_fill_usable = usable_dur
+                    clip = clip.subclipped(effective_start, min(effective_end, clip_dur))
+                    try:
+                        zoom_factor = random.uniform(1.03, 1.05)
+                        zoom_w = int(self.video_size[0] * zoom_factor)
+                        zoom_h = int(self.video_size[1] * zoom_factor)
+                        clip = clip.resized((zoom_w, zoom_h)).resized(self.video_size)
+                    except Exception:
+                        pass  # zoom is optional
+                    return clip
                 if clip_dur > 0 and remaining > 0.5:
                     try:
                         _clipped = clip.subclipped(effective_start, clip_dur)
@@ -1774,11 +1902,33 @@ class VideoEditor:
         palette = self.canal.get("color_palette", {}) if self.canal else {}
 
         def _parse(hex_str) -> tuple[int, int, int]:
-            # Fix: color_palette values may be RGB tuples/lists from config, not hex strings
-            if isinstance(hex_str, (tuple, list)) and len(hex_str) == 3:
-                return tuple(hex_str)  # type: ignore[return-value]
-            hx = hex_str.lstrip("#")
-            return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+            """Parse a color value robustly — handles hex strings, RGB/RGBA
+            tuples, lists, JSON-stringified tuples, and unexpected types."""
+            # Already a 3-int tuple/list
+            if isinstance(hex_str, (tuple, list)):
+                if len(hex_str) >= 3 and all(isinstance(v, (int, float)) for v in hex_str[:3]):
+                    return (int(hex_str[0]), int(hex_str[1]), int(hex_str[2]))
+                if len(hex_str) == 3:
+                    return tuple(int(v) for v in hex_str)
+            # String: hex color
+            if isinstance(hex_str, str):
+                hx = hex_str.strip().lstrip("#")
+                if len(hx) == 6:
+                    try:
+                        return (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+                    except ValueError:
+                        pass
+                # JSON-stringified tuple: "(255, 0, 0)"
+                if hx.startswith("(") and hx.endswith(")"):
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(hx)
+                        if isinstance(parsed, (tuple, list)) and len(parsed) >= 3:
+                            return (int(parsed[0]), int(parsed[1]), int(parsed[2]))
+                    except (ValueError, SyntaxError):
+                        pass
+            # Fallback: dark muted gray-blue
+            return (26, 26, 46)
 
         primary = _parse(palette.get("primary", "#1a1a2e"))
         accent = _parse(palette.get("accent", "#3a3a5c"))
@@ -3173,6 +3323,87 @@ class VideoEditor:
         except Exception as exc:
             self.logger.warning("Placeholder segment render failed: %s", exc)
             return ""
+
+    def _probe_video_duration(self, segment_paths: list[str]) -> float:
+        """Get total duration of rendered segments using ffprobe."""
+        total = 0.0
+        for sp in segment_paths:
+            if sp and Path(sp).exists():
+                try:
+                    result = subprocess.run([
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        str(sp),
+                    ], capture_output=True, text=True, timeout=10)
+                    if result.stdout.strip():
+                        total += float(result.stdout.strip())
+                except Exception:
+                    pass
+        return total
+
+    def _find_nearest_scene_query(
+        self, timestamp: float, block_ranges: list[dict], bloques: list[dict],
+    ) -> str | None:
+        """Find the search query of the scene nearest to a given timestamp."""
+        for br in block_ranges:
+            if br.get("start", 0) <= timestamp <= br.get("end", 0):
+                return br.get("search_query_en", "")
+        # Fallback: use the last block's query
+        if block_ranges:
+            return block_ranges[-1].get("search_query_en", "")
+        if bloques:
+            return bloques[-1].get("search_query_en", "")
+        return None
+
+    def _render_fill_scene_on_demand(
+        self, query: str, duration: float, seg_dir: Path, scene_idx: int,
+    ) -> str | None:
+        """Fetch one image on-demand and render it as a Ken Burns segment.
+
+        Uses the orchestrator's _on_demand_fetcher callback to search and
+        download a real image related to the narration topic at this point.
+        Falls back to gradient placeholder if no image is available.
+        """
+        seg_path = seg_dir / f"fill_{scene_idx:04d}.mp4"
+        if seg_path.exists():
+            import uuid
+            seg_path = seg_path.with_stem(f"{seg_path.stem}_{uuid.uuid4().hex[:4]}")
+
+        img_path = None
+        if self._on_demand_fetcher is not None:
+            try:
+                img_path = self._on_demand_fetcher(query, duration)
+            except Exception as e:
+                self.logger.warning("On-demand fetch error: %s", e)
+
+        if img_path is None or not Path(str(img_path)).exists():
+            # Ultimate fallback: gradient placeholder (not black)
+            return self._render_placeholder_segment(
+                {"duration": duration}, seg_path,
+            )
+
+        try:
+            clip = self._single_ken_burns_clip(
+                Path(str(img_path)), duration,
+                zoom_percent=random.uniform(3, 6),
+            )
+            clip.write_videofile(
+                str(seg_path), fps=self.fps, codec=VIDEO_CODEC,
+                preset=self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
+                bitrate=VIDEO_BITRATE,
+                ffmpeg_params=["-pix_fmt", "yuv420p", "-an"],
+                logger=None,
+            )
+            clip.close()
+            self.logger.info("  Fill scene rendered: %s (%.1fs, query=%s)",
+                             seg_path.name, duration, query[:60])
+            return str(seg_path)
+        except Exception as exc:
+            self.logger.warning("Fill scene render failed: %s", exc)
+            return self._render_placeholder_segment(
+                {"duration": duration}, seg_path,
+            )
 
     def _concat_body_with_crossfades(
         self, segment_paths: list[str], block_ranges: list[dict],
