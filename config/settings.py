@@ -201,6 +201,11 @@ STATS_ENABLED = os.getenv("STATS_ENABLED", "true").lower() == "true"
 LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "true").lower() == "true"
 LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15"))
 
+# ── First comment ──────────────────────────────────────────────
+# Disabled by default — requires commentThreads OAuth scope which most
+# channel tokens don't have, causing 403 errors on every attempt.
+FIRST_COMMENT_ENABLED = os.getenv("FIRST_COMMENT_ENABLED", "false").lower() == "true"
+
 # Timeline por defecto — delays relativos al momento de publicación
 # Cada canal puede sobrescribir via LIFECYCLE_TIMELINE en su config
 LIFECYCLE_DEFAULT_TIMELINE = [

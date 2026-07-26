@@ -2968,17 +2968,19 @@ async def start_generation_job_subprocess(
         )
         db.update_job(job_id, status="failed",
                       error_msg=f"Global concurrency guard: {active_count} active job(s)")
-        # ── Cleanup orphaned records ────────────────────────────
+        # ── Record slot failure with backoff (v12) ──────────────
+        slot_result = db.record_slot_dispatch_failure(job_id)
+        if slot_result:
+            logger.info(
+                "Slot dispatch failure (concurrency guard): %s — backoff=%s",
+                job_id, slot_result,
+            )
+        # ── Cleanup video record ─────────────────────────────────
         try:
             with db._connect() as _conn:
                 _conn.execute(
                     "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
                     (video_id,),
-                )
-                _conn.execute(
-                    "UPDATE planned_slots SET status = 'pending', job_id = NULL "
-                    "WHERE job_id = ? AND status = 'running'",
-                    (job_id,),
                 )
                 _conn.commit()
         except Exception:
@@ -3004,16 +3006,18 @@ async def start_generation_job_subprocess(
             )
             db.update_job(job_id, status="failed",
                           error_msg=f"RAM too low: {active_count} active + {avail_gb:.1f} GB free")
+            # ── Record slot failure with backoff (v12) ──────────
+            slot_result = db.record_slot_dispatch_failure(job_id)
+            if slot_result:
+                logger.info(
+                    "Slot dispatch failure (RAM guard): %s — backoff=%s",
+                    job_id, slot_result,
+                )
             try:
                 with db._connect() as _conn:
                     _conn.execute(
                         "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
                         (video_id,),
-                    )
-                    _conn.execute(
-                        "UPDATE planned_slots SET status = 'pending', job_id = NULL "
-                        "WHERE job_id = ? AND status = 'running'",
-                        (job_id,),
                     )
                     _conn.commit()
             except Exception:
@@ -3035,17 +3039,19 @@ async def start_generation_job_subprocess(
         )
         db.update_job(job_id, status="failed",
                       error_msg="Active job already running for this channel")
-        # ── Cleanup orphaned records ────────────────────────────
+        # ── Record slot failure with backoff (v12) ──────────────
+        slot_result = db.record_slot_dispatch_failure(job_id)
+        if slot_result:
+            logger.info(
+                "Slot dispatch failure (channel guard): %s — backoff=%s",
+                job_id, slot_result,
+            )
+        # ── Cleanup video record ─────────────────────────────────
         try:
             with db._connect() as _conn:
                 _conn.execute(
                     "UPDATE videos SET status = 'error', progress_phase = 'blocked' WHERE id = ?",
                     (video_id,),
-                )
-                _conn.execute(
-                    "UPDATE planned_slots SET status = 'pending', job_id = NULL "
-                    "WHERE job_id = ? AND status = 'running'",
-                    (job_id,),
                 )
                 _conn.commit()
         except Exception:

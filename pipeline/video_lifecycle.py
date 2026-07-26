@@ -27,6 +27,7 @@ from config.settings import (
     COMMENT_REPLY_MAX_PER_VIDEO,
     METADATA_OPTIMIZE_ENABLED,
     METADATA_OPTIMIZE_CTR_THRESHOLD,
+    FIRST_COMMENT_ENABLED,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,11 @@ class VideoLifecycleManager:
 
         for action_def in timeline:
             action_type = action_def["action"]
+            
+            # Skip first_comment scheduling if disabled (v12)
+            if action_type == "first_comment" and not FIRST_COMMENT_ENABLED:
+                continue
+            
             offset_minutes = action_def.get("offset_minutes", 0)
             offset_hours = action_def.get("offset_hours", 0)
             total_offset = timedelta(minutes=offset_minutes, hours=offset_hours)
@@ -260,20 +266,21 @@ class VideoLifecycleManager:
             scheduled_count += 1
 
             # ── 3. First comment: 5 min after public ──
-            comment_at = (target_dt + _td(minutes=5)).isoformat()
-            config_json = None
-            if script_text:
-                import json
-                config_json = json.dumps({"script_snippet": script_text[:2000]})
-            self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="first_comment",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=comment_at,
-                config_json=config_json,
-            )
-            scheduled_count += 1
+            if FIRST_COMMENT_ENABLED:
+                comment_at = (target_dt + _td(minutes=5)).isoformat()
+                config_json = None
+                if script_text:
+                    import json
+                    config_json = json.dumps({"script_snippet": script_text[:2000]})
+                self.db.create_lifecycle_action(
+                    video_id=db_video_id,
+                    action_type="first_comment",
+                    channel_id=channel_id,
+                    yt_video_id=yt_video_id,
+                    scheduled_for=comment_at,
+                    config_json=config_json,
+                )
+                scheduled_count += 1
 
             # ── 4-5. Comment replies at 12h and 24h after public ──
             reply1_at = (target_dt + _td(hours=12)).isoformat()
@@ -470,6 +477,14 @@ class VideoLifecycleManager:
         elif action_type == "go_public":
             return self._handle_go_public(yt_video_id, db_video_id, action)
         elif action_type == "first_comment":
+            from config.settings import FIRST_COMMENT_ENABLED
+            if not FIRST_COMMENT_ENABLED:
+                import json
+                self.db.update_lifecycle_action_status(
+                    action["id"], "skipped",
+                    result_json=json.dumps({"skipped": True, "reason": "FIRST_COMMENT_ENABLED=false"}),
+                )
+                return True
             return self._handle_first_comment(yt_video_id, db_video_id, action)
         elif action_type in ("comment_reply_1", "comment_reply_2"):
             return self._handle_comment_reply(yt_video_id, db_video_id, action)
@@ -695,6 +710,15 @@ class VideoLifecycleManager:
     def _handle_first_comment(self, yt_video_id: str, db_video_id: int,
                                _action: dict) -> bool:
         """Post an engaging first comment on the video."""
+        from config.settings import FIRST_COMMENT_ENABLED
+        if not FIRST_COMMENT_ENABLED:
+            import json
+            self.db.update_lifecycle_action_status(
+                _action["id"], "skipped",
+                result_json=json.dumps({"skipped": True, "reason": "FIRST_COMMENT_ENABLED=false"}),
+            )
+            return True
+
         from pipeline.youtube_comments import YouTubeCommentManager
 
         mgr = YouTubeCommentManager(self.slug)

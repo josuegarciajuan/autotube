@@ -1805,11 +1805,22 @@ def _sync_running_slots(db):
     This prevents orphaned running slots from accumulating when jobs are
     dispatched from future date_keys and subsequently fail.
     
+    For transient failures (RAM, timeout, etc.), applies exponential backoff
+    via dispatch cooldown instead of immediately cancelling the slot.
+    Permanent failures (API errors, code bugs) are cancelled as before.
+    
     Also triggers _readjust_pending_slots() when a job completes, to
     realign the remaining slots and avoid cascading time drift.
     """
     running_slots = db.get_planned_slots(status="running")
     any_completed = False
+    
+    # Transient error patterns (same as generation_service._auto_retry_if_transient)
+    TRANSIENT_PATTERNS = [
+        "timeout", "memory guard", "broken pipe", "brokenpipe",
+        "orphaned: process lost", "memory", "abortado: memoria",
+        "ram too low", "ram insuficiente",
+    ]
     
     for s in running_slots:
         job_id = s.get("job_id")
@@ -1829,9 +1840,19 @@ def _sync_running_slots(db):
             logger.info("Slot #%d marked completed (job #%d done)", s["id"], job_id)
             any_completed = True
         elif job["status"] in ("failed", "cancelled"):
-            # Job failed or was cancelled → slot was never consumed
-            db.update_slot_status(s["id"], "cancelled")
-            logger.info("Slot #%d cancelled (job #%d %s)", s["id"], job_id, job["status"])
+            error_msg = (job.get("error_msg") or "").lower()
+            is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS)
+            if is_transient:
+                # Apply backoff instead of cancelling — v12
+                result = db.record_slot_dispatch_failure(job_id)
+                logger.info(
+                    "Slot #%d (%s) transient failure — backoff=%s (error: %.100s)",
+                    s["id"], job_id, result, error_msg,
+                )
+            else:
+                # Permanent failure → cancel slot
+                db.update_slot_status(s["id"], "cancelled")
+                logger.info("Slot #%d cancelled (job #%d %s)", s["id"], job_id, job["status"])
             # NOT any_completed — failed slots should NOT trigger readjustment
     
     if any_completed:

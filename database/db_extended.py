@@ -577,6 +577,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v11: media_file_locks (prevents cross-job file deletion race) ──
     _migrate_v11(conn, logger)
+
+    # ── v12: dispatch backoff (failed_attempts + last_failed_at on planned_slots) ──
+    _migrate_v12(conn, logger)
     
     conn.commit()
     conn.close()
@@ -935,6 +938,32 @@ def _migrate_v9(conn, logger):
     )
     conn.commit()
     logger.info("Migration v9: complete (added %d columns, seeded %d channels)", added, seeded)
+
+
+def _migrate_v12(conn, logger):
+    """Idempotent v12 migration: dispatch backoff columns on planned_slots.
+
+    Adds failed_attempts and last_failed_at to prevent infinite retry loops
+    when a slot dispatch fails due to transient conditions (low RAM, concurrency).
+    Slots that fail repeatedly get exponential cooldown to avoid hundreds of
+    wasted attempts per day.
+
+    Also adds FIRST_COMMENT_ENABLED config default to settings.
+    """
+    existing_ps = {row[1] for row in conn.execute("PRAGMA table_info(planned_slots)").fetchall()}
+    ps_columns = [
+        ("failed_attempts", "INTEGER DEFAULT 0"),
+        ("last_failed_at", "TIMESTAMP"),
+    ]
+    for col_name, col_def in ps_columns:
+        if col_name not in existing_ps:
+            try:
+                conn.execute(f"ALTER TABLE planned_slots ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration v12: added %s column to planned_slots", col_name)
+            except Exception as e:
+                logger.debug("v12 planned_slots.%s: %s", col_name, e)
+    conn.commit()
+    logger.info("Migration v12: complete")
 
 
 def _migrate_v10(conn, logger):
@@ -3185,19 +3214,59 @@ class ExtendedDatabase(Database):
             rows = conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
     
+    # ── Dispatch backoff helpers (v12) ────────────────────────────────────
+    
+    @staticmethod
+    def _is_slot_in_cooldown(slot: dict) -> bool:
+        """Check if a pending slot is in cooldown after a failed dispatch attempt.
+        
+        Returns True if the slot should be skipped (too recent failure).
+        Exponential backoff: attempt 1 → 5min, 2 → 15min, 3+ → 60min.
+        Slots with 3+ failed_attempts and no successful retry are considered
+        poisoned and will be cancelled by _cancel_stale_slots().
+        """
+        failed = slot.get("failed_attempts", 0) or 0
+        if failed <= 0:
+            return False
+        last = slot.get("last_failed_at")
+        if not last:
+            return False
+        try:
+            from datetime import datetime, timedelta
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            # Exponential backoff: attempt 1 → 5min, 2 → 15min, 3+ → 60min
+            _COOLDOWNS = [5, 15, 60]
+            idx = min(failed - 1, len(_COOLDOWNS) - 1)
+            cooldown_min = _COOLDOWNS[max(0, idx)]
+            if datetime.now(tz=last_dt.tzinfo) - last_dt < timedelta(minutes=cooldown_min):
+                return True
+        except (ValueError, TypeError):
+            pass
+        return False
+    
+    # Adjust import to make helper usable as module-level, but it's a staticmethod
+    # so it also works via ExtendedDatabase._is_slot_in_cooldown().
+    
     def get_next_pending_slot(self) -> dict | None:
         """Get the next pending slot that is due (scheduled_at <= now), 
-        ordered by scheduled_at. Returns None if none."""
+        ordered by scheduled_at. Returns None if none.
+        
+        Skips slots in dispatch cooldown (recently failed with exponential backoff).
+        """
         with self._connect() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
                    WHERE ps.status = 'pending'
-                      AND ps.scheduled_at <= datetime('now', 'localtime')
-                   ORDER BY ps.scheduled_at ASC LIMIT 1"""
-            ).fetchone()
-        return dict(row) if row else None
+                     AND ps.scheduled_at <= datetime('now', 'localtime')
+                   ORDER BY ps.scheduled_at ASC LIMIT 20"""
+            ).fetchall()
+        for row in rows:
+            slot = dict(row)
+            if not self._is_slot_in_cooldown(slot):
+                return slot
+        return None
     
     def get_next_available_slot(self, max_future_hours: int = 36) -> dict | None:
         """Get the first pending slot whose target_public_at is within
@@ -3215,9 +3284,11 @@ class ExtendedDatabase(Database):
         IMPORTANT: excludes slots where date_key is in the past (yesterday or
         earlier). Past-date slots have missed their upload window entirely and
         should be cancelled, not dispatched.
+        
+        Skips slots in dispatch cooldown (v12 backoff).
         """
         with self._connect() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """SELECT ps.*, c.name as channel_name, c.slug as channel_slug
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
@@ -3234,10 +3305,14 @@ class ExtendedDatabase(Database):
                    ORDER BY
                       CASE WHEN ps.scheduled_at <= datetime('now', 'localtime') THEN 0 ELSE 1 END,
                       COALESCE(ps.target_public_at, ps.target_upload_at) ASC
-                   LIMIT 1""",
+                   LIMIT 20""",
                 (f"+{max_future_hours}",),
-            ).fetchone()
-        return dict(row) if row else None
+            ).fetchall()
+        for row in rows:
+            slot = dict(row)
+            if not self._is_slot_in_cooldown(slot):
+                return slot
+        return None
     
     def get_priority_slot_candidates(self, max_future_hours: int = 36,
                                      limit: int = 20) -> list[dict]:
@@ -3247,6 +3322,8 @@ class ExtendedDatabase(Database):
         them and pick the best one. Includes channel slug and extra metadata.
         
         ORDERED by target_public_at ASC so the scorer can prioritize by date urgency.
+        
+        Skips slots in dispatch cooldown (v12 backoff).
         """
         with self._connect() as conn:
             rows = conn.execute(
@@ -3268,7 +3345,9 @@ class ExtendedDatabase(Database):
                    LIMIT ?""",
                 (f"+{max_future_hours}", limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        candidates = [dict(r) for r in rows]
+        # Filter out slots in cooldown
+        return [s for s in candidates if not self._is_slot_in_cooldown(s)]
     
     def count_videos_generated_today(self, channel_id: int) -> int:
         """Count videos generated, uploading, or uploaded today for a channel."""
@@ -3355,6 +3434,73 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
         return True
+
+    def increment_slot_failed_attempts(self, slot_id: int) -> int:
+        """Record a failed dispatch attempt on a slot and return new attempt count.
+        
+        Increments failed_attempts, sets last_failed_at to now, and resets
+        job_id to NULL (so the next dispatch creates a fresh job).
+        
+        Returns the new failed_attempts count.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE planned_slots 
+                   SET failed_attempts = COALESCE(failed_attempts, 0) + 1,
+                       last_failed_at = datetime('now', 'localtime'),
+                       job_id = NULL
+                   WHERE id = ?""",
+                (slot_id,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT failed_attempts FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            return (row["failed_attempts"] or 0) if row else 0
+
+    def record_slot_dispatch_failure(self, job_id: int) -> str | None:
+        """Record a failed dispatch on the slot linked to this job.
+        
+        Finds the slot by job_id, increments failed_attempts, sets last_failed_at.
+        If failed_attempts >= 3, cancels the slot permanently.
+        Otherwise resets to 'pending' so it can be retried after cooldown.
+        
+        Returns: 'cancelled' if slot was cancelled (permanent), 
+                 'cooldown' if reset to pending with backoff,
+                 None if no slot found for this job.
+        """
+        with self._connect() as conn:
+            # Find the slot linked to this job
+            slot_row = conn.execute(
+                "SELECT id, failed_attempts FROM planned_slots WHERE job_id = ? AND status = 'running'",
+                (job_id,),
+            ).fetchone()
+            if not slot_row:
+                return None
+            slot_id = slot_row["id"]
+            prev_failed = slot_row["failed_attempts"] or 0
+            new_failed = prev_failed + 1
+
+            # Exponential backoff: attempt 1→5min, 2→15min, 3+→cancel
+            if new_failed >= 4:  # 4th+ attempt = permanently cancel
+                conn.execute(
+                    "UPDATE planned_slots SET status = 'cancelled', job_id = NULL, "
+                    "failed_attempts = ?, last_failed_at = datetime('now', 'localtime') "
+                    "WHERE id = ?",
+                    (new_failed, slot_id),
+                )
+                conn.commit()
+                return 'cancelled'
+            else:
+                # Reset to pending with backoff info
+                conn.execute(
+                    "UPDATE planned_slots SET status = 'pending', job_id = NULL, "
+                    "failed_attempts = ?, last_failed_at = datetime('now', 'localtime') "
+                    "WHERE id = ?",
+                    (new_failed, slot_id),
+                )
+                conn.commit()
+                return 'cooldown'
 
     def cancel_slots(self, slot_ids: list[int]) -> int:
         """Cancel multiple planned slots. Returns count."""

@@ -517,13 +517,24 @@ def dispatch_next_due_slot(db=None) -> dict | None:
 
 
 def _sync_running_slots(db):
-    """Check running slots: if their job is done, mark the slot accordingly."""
+    """Check running slots: if their job is done, mark the slot accordingly.
+    
+    For transient failures (RAM, timeout, etc.), applies exponential backoff
+    via dispatch cooldown instead of immediately cancelling the slot.
+    """
     from datetime import date as _date
     today = _date.today().isoformat()
 
     running_slots = db.get_planned_slots(date_key=today, status="running")
     if not running_slots:
         return
+
+    # Transient error patterns (same as generation_service._auto_retry_if_transient)
+    TRANSIENT_PATTERNS = [
+        "timeout", "memory guard", "broken pipe", "brokenpipe",
+        "orphaned: process lost", "memory", "abortado: memoria",
+        "ram too low", "ram insuficiente",
+    ]
 
     for s in running_slots:
         if not s.get("job_id"):
@@ -541,9 +552,18 @@ def _sync_running_slots(db):
             db.update_slot_status(s["id"], "completed")
             logger.info("Slot #%d marked completed (job #%d done)", s["id"], s["job_id"])
         elif job["status"] in ("failed", "cancelled"):
-            # cancelled job = dead, slot was never consumed
-            db.update_slot_status(s["id"], "cancelled")
-            logger.info("Slot #%d cancelled (job #%d %s)", s["id"], s["job_id"], job["status"])
+            error_msg = (job.get("error_msg") or "").lower()
+            is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS)
+            if is_transient:
+                # Apply backoff instead of cancelling — v12
+                result = db.record_slot_dispatch_failure(s["job_id"])
+                logger.info(
+                    "Slot #%d (%s) transient failure — backoff=%s (error: %.100s)",
+                    s["id"], s["job_id"], result, error_msg,
+                )
+            else:
+                db.update_slot_status(s["id"], "cancelled")
+                logger.info("Slot #%d cancelled (job #%d %s)", s["id"], s["job_id"], job["status"])
 
 
 def _cancel_stale_slots(db):
