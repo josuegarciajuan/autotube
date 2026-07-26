@@ -878,7 +878,7 @@ THUMBNAIL_BORDER_WIDTH = 5
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF2D55"       # hot pink/red — viral medical alert
 THUMBNAIL_SHOW_4K_BADGE = True
-THUMBNAIL_TEXT_STROKE_WIDTH = 0
+THUMBNAIL_TEXT_STROKE_WIDTH = 3
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
 # ── Medical-themed overlays (clinical_mystery style) ──────────
@@ -895,7 +895,10 @@ THUMBNAIL_CONCEPT_DIRECTIVE = (
     "estructuras celulares al microscopio, monitores cardiacos ECG, instrumental quirurgico, "
     "siluetas humanas contra luz clinica fria, manos sosteniendo diagnosticos, "
     "tubos de ensayo y laboratorios, X-rays y tomografias. Estilo documental medico "
-    "de alto contraste, fotorealista, cinematografico. SIN caras, SIN sonrisas, SIN sangre visible."
+    "de alto contraste, fotorealista, cinematografico. SIN caras, SIN sonrisas, SIN sangre visible. "
+    "SE PERMITEN siluetas humanas contra luz clinica, figuras de espaldas o en "
+    "penumbra, y manos sosteniendo objetos medicos para añadir humanidad sin recurrir "
+    "a expresiones faciales."
 )
 
 THUMBNAIL_STYLE = {

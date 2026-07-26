@@ -621,18 +621,19 @@ THUMBNAIL_CONCEPT_DIRECTIVE = (
 )
 
 # Manual style config for distress_signal
+# v2.2 — overhaul for higher CTR: pure white text, boosted contrast, warm-cold pop
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "distress_signal",
     "color_palette": {
         "primary": "#0F2841",
         "accent": "#FF5C00",
-        "text": "#EBF0F5",
+        "text": "#FFFFFF",          # pure white — maximum contrast against dark arctic
         "shadow": "#060C18",
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.25,
-        "saturation": 0.90,
+        "contrast_boost": 1.35,     # was 1.25 — extreme contrast for scroll-stopping
+        "saturation": 1.05,         # was 0.90 — vivid, NOT desaturated
         "vignette": 0.40,
     },
     "text_style": {
@@ -640,10 +641,11 @@ THUMBNAIL_MANUAL_STYLE = {
         "max_words": 4,
     },
     "pollo_prompt_suffix": (
-        "cinematic documentary photography, dramatic expedition atmosphere, "
-        "distress signal aesthetic, emergency orange accents, "
-        "dramatic documentary lighting, vast landscape 16:9 aspect ratio, "
-        "high contrast, no text overlay, no gore, no explicit violence"
+        "dramatic rescue photography, extreme survival conditions, "
+        "warm-cold color contrast, emergency orange accents popping against "
+        "dark arctic backgrounds, high contrast, bold vivid colors, "
+        "viral YouTube documentary aesthetic, 16:9 aspect ratio, "
+        "photorealistic, dramatic lighting, cinematic atmosphere"
     ),
 }
 
@@ -903,7 +905,7 @@ THUMBNAIL_BORDER_WIDTH = 7
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF5C00"       # rescue orange — emergency distress signal
 THUMBNAIL_SHOW_4K_BADGE = True
-THUMBNAIL_TEXT_STROKE_WIDTH = 0
+THUMBNAIL_TEXT_STROKE_WIDTH = 3
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
 THUMBNAIL_STYLE = {

@@ -838,7 +838,9 @@ class ThumbnailMaker:
             for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
                            (-stroke_w, -stroke_w), (stroke_w, stroke_w), (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
                 draw.text((l1_x + sx, l1_y + sy), text_gancho_v, fill=shadow_color, font=gancho_font)
-            draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font)
+            # Main text with outline stroke for readability on any background
+            draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font,
+                      stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
         
         # Draw L2 (complemento) — centered, below L1
         if text_complemento_v and comp_font:
@@ -850,7 +852,9 @@ class ThumbnailMaker:
             for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
                            (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
                 draw.text((l2_x + sx, l2_y + sy), text_complemento_v, fill=shadow_color, font=comp_font)
-            draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font)
+            # Main text with outline stroke for readability on any background
+            draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font,
+                      stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
         
         # ── Badge stamp (top-right corner, replaces old 4K badge position) ──
         badge_text_v = badge_text if badge_text else ""

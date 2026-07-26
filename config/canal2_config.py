@@ -853,7 +853,7 @@ THUMBNAIL_BORDER_WIDTH = 5
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"       # sans-serif bold (Sincronías style)
 THUMBNAIL_BORDER_COLOR = "#CC0000"              # brand red (classic)
 THUMBNAIL_SHOW_4K_BADGE = True                  # keep 4K badge
-THUMBNAIL_TEXT_STROKE_WIDTH = 0                 # no outline
+THUMBNAIL_TEXT_STROKE_WIDTH = 3                 # outline for readability (matching canal3)
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"         # unused (stroke=0)
 
 # ── Per-channel visual style (coherent across all videos) ───────
@@ -861,28 +861,30 @@ THUMBNAIL_VISUAL_STYLE = "moody_atmospheric"
 THUMBNAIL_STYLE_OVERRIDE = True
 
 # Manual style config for moody_atmospheric (deterministic, no LLM needed)
+# v2.2 — overhaul for higher CTR: bold contrast, vivid colors, golden text
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "moody_atmospheric",
     "color_palette": {
-        "primary": "#4A4E69",
-        "accent": "#C9ADA7",
-        "text": "#F2E9E4",
-        "shadow": "#1A1A2E",
+        "primary": "#1A1A3E",       # deep blue — dramatic, better contrast with gold
+        "accent": "#D4AF37",        # metallic gold — vibrant, eye-catching
+        "text": "#FFD700",          # bright gold — maximum contrast on dark backgrounds
+        "shadow": "#0A0A0F",        # near-black — deeper depth, better readability
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.1,
-        "saturation": 0.8,
-        "vignette": 0.35,
+        "contrast_boost": 1.30,     # was 1.1 — dramatic impact for scroll-stopping
+        "saturation": 1.10,         # was 0.8 — vivid colors, NOT washed out
+        "vignette": 0.40,          # was 0.35 — stronger focus on subject
     },
     "text_style": {
         "uppercase": False,
         "max_words": 5,
     },
     "pollo_prompt_suffix": (
-        "moody atmospheric photography, soft lighting, contemplative, "
-        "cinematic composition with negative space, 16:9 aspect ratio, "
-        "subtle color grading, artistic photography, ethereal glow"
+        "dramatic lighting, high contrast, mysterious atmosphere, "
+        "warm golden accents, cinematic depth, viral YouTube thumbnail "
+        "aesthetic, bold vivid colors, photorealistic, 16:9 aspect ratio, "
+        "professional photography, golden hour glow, intense shadows"
     ),
 }
 
