@@ -5,6 +5,7 @@ Uses the v2 4-phase pipeline: Style Engine → Brainstorming → Pollo AI + QC �
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -57,7 +58,8 @@ async def regenerate_thumbnail_for_video(video_id: int):
             video_id=video_id,
         )
 
-        db.update_video(video_id, thumbnail_path=str(thumbnail_path))
+        db.update_video(video_id, thumbnail_path=str(thumbnail_path),
+                        updated_at=datetime.utcnow().isoformat())
         return str(thumbnail_path)
     except Exception as e:
         import logging

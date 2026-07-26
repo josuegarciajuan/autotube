@@ -177,7 +177,7 @@ def process_video(video_id: int) -> int:
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute(
-            "UPDATE videos SET thumbnail_path = ? WHERE id = ?",
+            "UPDATE videos SET thumbnail_path = ?, updated_at = datetime('now') WHERE id = ?",
             (str(thumb_path), video_id),
         )
         conn.commit()

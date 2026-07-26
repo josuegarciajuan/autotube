@@ -1192,7 +1192,9 @@ class ExtendedDatabase(Database):
                     "target_playlist_id", "target_playlist_slug",
                     "manual_altered_content_done", "manual_end_screens_done",
                     "generation_started_at", "generation_finished_at",
-                    "scheduled_upload_at"]
+                    "scheduled_upload_at",
+                    # ── Cache-busting for frontend ──
+                    "updated_at"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
