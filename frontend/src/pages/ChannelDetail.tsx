@@ -1568,7 +1568,7 @@ export default function ChannelDetail() {
               <div key={v.id} className={`group cursor-pointer ${(v.source_mode === 'viral' || v.source_url) ? 'border-l-[3px] border-amber-500/70 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.15)]' : 'border-l-[3px] border-transparent'}`} onClick={() => navigate(`/videos/${v.id}/edit`)}>
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
                   {v.thumbnail_path ? (
-                    <img src={apiUrl(`/thumbnail/${v.id}?v=${v.updated_at || v.id}`)} alt={v.titulo_final} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                    <img src={apiUrl(`/thumbnail/${v.id}?t=${Date.now()}`)} alt={v.titulo_final} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" loading="lazy" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-dark-700 to-dark-900"><Video size={28} className="text-gray-700" /></div>
                   )}

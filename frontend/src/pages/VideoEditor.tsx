@@ -403,7 +403,7 @@ export default function VideoEditor() {
             <div className="aspect-video relative bg-dark-800 flex items-center justify-center group cursor-pointer"
                  onClick={() => window.open(video.yt_url || `https://www.youtube.com/watch?v=${video.yt_video_id}`, '_blank', 'noopener')}>
               {video.thumbnail_path ? (
-                <img src={apiUrl(`/thumbnail/${videoId}?v=${video.updated_at || videoId}`)}
+                <img src={apiUrl(`/thumbnail/${videoId}?t=${Date.now()}`)}
                      alt={video.titulo_final} className="w-full h-full object-cover opacity-60" />
               ) : null}
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-dark-900/70">
