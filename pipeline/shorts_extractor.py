@@ -119,7 +119,12 @@ class ShortsExtractor:
         client = self._get_client()
 
         try:
-            response = client.chat.completions.create(
+            from config.llm_helpers import llm_json_call_or_fallback
+            data = llm_json_call_or_fallback(
+                client,
+                fallback={"clips": []},
+                max_retries=3,
+                retry_delay=2.0,
                 model=LLM_MODEL,
                 messages=[
                     {
@@ -133,12 +138,6 @@ class ShortsExtractor:
                 temperature=0.4,
                 max_tokens=2000,
             )
-
-            content = response.choices[0].message.content
-
-            # Extract JSON from response (may be wrapped in ```json blocks)
-            json_str = self._extract_json(content)
-            data = json.loads(json_str)
             clips = data.get("clips", [])
 
             # Validate and sort by ranking
@@ -163,11 +162,10 @@ class ShortsExtractor:
             return valid_clips[:max_clips]
 
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse LLM clip extraction response: %s", e)
-            logger.debug("Raw response: %s", content[:500] if 'content' in dir() else "N/A")
+            logger.error("Failed to parse LLM clip extraction response after retries: %s", e)
             return []
         except Exception as e:
-            logger.error("Clip extraction failed: %s", e)
+            logger.error("Clip extraction failed after retries: %s", e)
             return []
 
     def _format_timestamps(self, timestamps: list[dict]) -> str:

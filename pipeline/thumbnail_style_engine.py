@@ -295,7 +295,8 @@ def _decide_style_via_llm(
 ) -> dict:
     """Call the LLM to decide the best visual style."""
     from config.llm_client import create_llm_client
-    from config.settings import LLM_MODEL
+    from config.settings import LLM_MODEL_CREATIVE
+    from config.llm_helpers import llm_json_call_or_fallback
 
     client = create_llm_client(enable_thinking=False, timeout=60.0, max_retries=2)
 
@@ -306,30 +307,30 @@ def _decide_style_via_llm(
         keywords=", ".join(keywords[:15]),
     )
 
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres un director de arte especializado en miniaturas virales "
-                    "de YouTube. Analizas canales y decides su identidad visual. "
-                    "Respondes exclusivamente con JSON válido."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.7,
-        max_tokens=600,
-    )
-
-    content = response.choices[0].message.content.strip()
-    if content.startswith("```"):
-        lines = content.split("\n")
-        content = "\n".join(lines[1:-1])
-        content = content.replace("```json", "").replace("```", "").strip()
-
-    style = json.loads(content)
+    try:
+        style = llm_json_call_or_fallback(
+            client,
+            fallback={"visual_style": "dark_cinematic"},
+            max_retries=3,
+            retry_delay=2.0,
+            model=LLM_MODEL_CREATIVE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres un director de arte especializado en miniaturas virales "
+                        "de YouTube. Analizas canales y decides su identidad visual. "
+                        "Respondes exclusivamente con JSON válido."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=600,
+        )
+    except Exception as e:
+        logger.warning("Style engine LLM call failed after retries: %s — using dark_cinematic", e)
+        style = {"visual_style": "dark_cinematic"}
 
     # Merge with defaults for any missing keys
     visual_style = style.get("visual_style", "dark_cinematic")

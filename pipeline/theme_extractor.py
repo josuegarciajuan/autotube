@@ -123,7 +123,22 @@ class ThemeExtractor:
                             to prevent off-niche content from poisoning media queries.
         """
         from config.llm_client import create_llm_client
-        from config.settings import LLM_MODEL
+        from config.settings import LLM_MODEL_CREATIVE
+        from config.llm_helpers import llm_json_call_or_fallback
+
+        _DEFAULT_FALLBACK_DATA = {
+            "genre": "documental",
+            "era": "atemporal",
+            "visual_style": "oscuro_documental",
+            "key_motifs": [],
+            "forbidden_elements": [],
+            "theme_keywords_en": [],
+            "primary_subject": "",
+            "mood": "misterioso",
+            "lighting": "claroscuro",
+            "composition": "primeros planos",
+            "era_decade": "",
+        }
 
         client = create_llm_client(timeout=60.0, max_retries=2)
 
@@ -148,8 +163,12 @@ class ThemeExtractor:
             user_prompt += niche_banner
 
         try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
+            data = llm_json_call_or_fallback(
+                client,
+                fallback=_DEFAULT_FALLBACK_DATA,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL_CREATIVE,
                 messages=[
                     {"role": "system", "content": THEME_EXTRACTOR_SYSTEM},
                     {"role": "user", "content": user_prompt},
@@ -158,8 +177,6 @@ class ThemeExtractor:
                 max_tokens=350,
                 response_format={"type": "json_object"},
             )
-            content = response.choices[0].message.content.strip()
-            data = json.loads(content)
 
             ctx = ThemeContext(
                 genre=data.get("genre", ""),

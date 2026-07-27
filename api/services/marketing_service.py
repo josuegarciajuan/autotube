@@ -42,6 +42,15 @@ def get_marketing_client():
     return create_llm_client(enable_thinking=False, timeout=60.0, max_retries=2)
 
 
+def _extract_keyword(text: str) -> str:
+    """Extract a meaningful keyword from text for fallback metadata."""
+    import re
+    stopwords = {"de","la","el","los","las","un","una","en","con","por","para","que","del","al","lo","le","se","su","sus","y","o","a","e","ni","no","es","the","a","an","of","in","on","to","for","and","or","is","it","that","this","with","was","are","be","from","by"}
+    words = re.findall(r'\b[\wáéíóúñÁÉÍÓÚÑ]+\b', text[:500])
+    keywords = [w for w in words if len(w) > 3 and w.lower() not in stopwords]
+    return keywords[0][:100] if keywords else ""
+
+
 async def generate_marketing_content(script_text: str, keywords: list[str] = None,
                                       channel_name: str = "") -> dict:
     """Generate viral-optimized titles, description, tags, and thumbnail text.
@@ -78,7 +87,11 @@ INSTRUCCIONES ESPECIALES:
 IMPORTANTE: Responde SOLO con el objeto JSON, sin texto adicional."""
 
     try:
-        response = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call
+        result = llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": _MARKETING_SYSTEM_PROMPT},
@@ -87,20 +100,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin texto adicional."""
             temperature=0.9,
             max_tokens=1500,
         )
-        
-        content = response.choices[0].message.content.strip()
-        
-        # Extract JSON from response (handle markdown code blocks)
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-            content = content.replace("```json", "").replace("```", "").strip()
-        
-        result = json.loads(content)
-        
+
         title = result.get("title", "")
         if not title:
-            title = "Historia Impactante que No Creerás"
+            title = _derive_title_from_content(script_text[:200])
         
         return {
             "title": title[:100],
@@ -109,12 +112,14 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin texto adicional."""
             "thumbnail_text": result.get("thumbnail_text", ""),
         }
     except Exception as e:
-        # Fallback: return basic metadata
+        # Fallback: derive from content
+        content_keyword = _extract_keyword(script_text)
+        logger.warning("Marketing content generation failed after retries: %s", e)
         return {
-            "title": "Historia Impactante que No Creerás",
-            "description": "Una historia real que te dejará sin palabras...\n\n#historiasreales #impactante",
+            "title": content_keyword if content_keyword else "Historia Impactante que No Creerás",
+            "description": f"{content_keyword}\n\nUna historia real que te dejará sin palabras...\n\n#historiasreales #impactante",
             "tags": keywords or ["historias reales", "impactante", "increíble"],
-            "thumbnail_text": "IMPACTANTE",
+            "thumbnail_text": content_keyword.upper()[:15] if content_keyword else "IMPACTANTE",
         }
 
 
@@ -131,20 +136,25 @@ CONTENIDO:
 {script_text[:2000]}"""
 
     try:
-        response = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call
+        result = llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "Eres un experto en títulos virales de YouTube. Responde solo JSON."},
+                {"role": "system", "content": "Eres un experto en títulos virales de YouTube. Responde SOLO con JSON: {\"title\": \"...\"}."},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=1.0,
+            temperature=0.9,
             max_tokens=500,
         )
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-            content = content.replace("```json", "").replace("```", "").strip()
-        return json.loads(content)
-    except Exception:
+        titles = result.get("title") if isinstance(result, dict) else result
+        if isinstance(titles, str) and titles:
+            return [titles[:100]]
+        if isinstance(titles, list):
+            return [t[:100] for t in titles if isinstance(t, str)][:count]
+        return ["La Historia Real Más Impactante que Escucharás Hoy"]
+    except Exception as e:
+        logger.warning("Title options generation failed after retries: %s", e)
         return ["La Historia Real Más Impactante que Escucharás Hoy"]

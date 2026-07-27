@@ -42,12 +42,12 @@ Generate EXACTLY 4 concepts."""
 def _get_llm_client(config: Optional[SimpleNamespace] = None, enable_thinking: bool = False):
     """Get OpenAI-compatible client from config."""
     from config.settings import (
-        LLM_MODEL,
+        LLM_MODEL_CREATIVE,
         OPENAI_MODEL,
     )
     from config.llm_client import create_llm_client
 
-    model = LLM_MODEL or OPENAI_MODEL
+    model = LLM_MODEL_CREATIVE or OPENAI_MODEL
 
     return create_llm_client(enable_thinking=enable_thinking), model
 
@@ -80,7 +80,12 @@ Already used concepts (DO NOT repeat any of these):
 {json.dumps(recently_used_keywords[:15], indent=2)}"""
 
     try:
-        resp = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call_or_fallback
+        concepts = llm_json_call_or_fallback(
+            client,
+            fallback=[],
+            max_retries=3,
+            retry_delay=2.0,
             model=model,
             messages=[
                 {"role": "system", "content": _CONCEPT_SYSTEM_PROMPT},
@@ -90,16 +95,13 @@ Already used concepts (DO NOT repeat any of these):
             max_tokens=800,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content
-        if content:
-            data = json.loads(content)
-            concepts = data if isinstance(data, list) else data.get("concepts", [])
-            concepts = [c.strip() for c in concepts if isinstance(c, str) and len(c.strip()) > 3]
-            if concepts:
-                logger.info("LLM generated %d fresh concepts: %s", len(concepts), concepts)
-                return concepts[:4]
+        concepts = concepts if isinstance(concepts, list) else concepts.get("concepts", [])
+        concepts = [c.strip() for c in concepts if isinstance(c, str) and len(c.strip()) > 3]
+        if concepts:
+            logger.info("LLM generated %d fresh concepts: %s", len(concepts), concepts)
+            return concepts[:4]
     except Exception as e:
-        logger.warning("LLM concept generation failed: %s", e)
+        logger.warning("LLM concept generation failed after retries: %s", e)
 
     # Fallback
     return [
@@ -305,7 +307,12 @@ Already used concepts (DO NOT repeat):
 
     concepts = []
     try:
-        resp = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call_or_fallback
+        result = llm_json_call_or_fallback(
+            client,
+            fallback={},
+            max_retries=3,
+            retry_delay=2.0,
             model=model,
             messages=[
                 {"role": "system", "content": _BUILD_CONCEPTS_SYSTEM},
@@ -315,13 +322,10 @@ Already used concepts (DO NOT repeat):
             max_tokens=1500,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content
-        if content:
-            data = json.loads(content)
-            raw = data if isinstance(data, list) else data.get("concepts", [])
-            concepts = [c.strip() for c in raw if isinstance(c, str) and len(c.strip()) > 3]
+        raw = result if isinstance(result, list) else result.get("concepts", [])
+        concepts = [c.strip() for c in raw if isinstance(c, str) and len(c.strip()) > 3]
     except Exception as e:
-        logger.warning("AI concept generation failed: %s", e)
+        logger.warning("AI concept generation failed after retries: %s", e)
 
     if len(concepts) < 5:
         # Fallback: expand keywords
@@ -411,7 +415,12 @@ Already used topics to avoid:
 
     queries = []
     try:
-        resp = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call_or_fallback
+        result = llm_json_call_or_fallback(
+            client,
+            fallback={},
+            max_retries=3,
+            retry_delay=2.0,
             model=model,
             messages=[
                 {"role": "system", "content": _NATURAL_LANG_SYSTEM},
@@ -421,13 +430,10 @@ Already used topics to avoid:
             max_tokens=1500,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content
-        if content:
-            data = json.loads(content)
-            raw = data if isinstance(data, list) else data.get("queries", [])
-            queries = [q.strip() for q in raw if isinstance(q, str) and len(q.strip()) > 8]
+        raw = result if isinstance(result, list) else result.get("queries", [])
+        queries = [q.strip() for q in raw if isinstance(q, str) and len(q.strip()) > 8]
     except Exception as e:
-        logger.warning("Natural language query generation failed: %s", e)
+        logger.warning("Natural language query generation failed after retries: %s", e)
 
     if len(queries) < 5:
         # Fallback

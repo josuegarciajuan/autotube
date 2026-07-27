@@ -19,8 +19,10 @@ from config.llm_client import create_llm_client
 
 from config.settings import (
     LLM_MODEL,
+    LLM_MODEL_CREATIVE,
     LLM_PROVIDER,
 )
+from config.llm_helpers import llm_json_call, _derive_hook_from_title
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +101,8 @@ Ejemplos de buena capitalización:
 
 🖼️ TEXTO MINIATURA (DOS LÍNEAS DE OVERLAY):
 Ahora la miniatura tiene DOS líneas de texto en vez de una:
-- LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máximo 12 caracteres. Debe ser la palabra o frase más impactante que haga DETENER el scroll. Formatos probados:
-  • Palabra-gancho con signos: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO"
+- LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máximo 12 caracteres. Debe ser la palabra o frase más impactante que haga DETENER el scroll. **DEBE contener una palabra CLAVE del título del video — NUNCA uses frases genéricas.** Formatos probados:
+  • Palabra-clave del título: "SIN SANGRE", "COLAPSO", "ODÍSEA", "DEVORADA"
   • Cifra impactante: "3 MINUTOS", "NINGUNO SALIÓ", "5 MÉDICOS"
   • Afirmación extrema: "FUE REAL", "CAMBIÓ TODO"
 - LÍNEA 2 (complemento, texto MEDIANO debajo de L1): 2-4 palabras. Máximo 24 caracteres. Complementa a L1 y al título sin repetirlos. Añade la pieza de intriga que falta. Formatos probados:
@@ -111,7 +113,7 @@ Ahora la miniatura tiene DOS líneas de texto en vez de una:
 ═══ COHERENCIA TÍTULO ↔ MINIATURA ═══
 El título, L1 y L2 deben trabajar JUNTOS, sin repetirse:
 - TÍTULO: promete el tema principal + el gancho ("5 médicos vieron esto y NO pudieron explicarlo (REAL)").
-- L1 (thumbnail): palabra-gancho visual ("¿QUÉ PASÓ?").
+- L1 (thumbnail): palabra-gancho extraída del título ("5 MÉDICOS" o "SIN EXPLICACIÓN").
 - L2 (thumbnail): el complemento intrigante ("El informe secreto").
 - Juntos deben contar una mini-historia de 3 actos que obligue a hacer clic.
 
@@ -269,25 +271,18 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         client = create_llm_client(enable_thinking=False, timeout=120.0, max_retries=2)
         
         try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
+            result = llm_json_call(
+                client,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL_CREATIVE,
                 messages=[
                     {"role": "system", "content": _METADATA_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.9,
-                max_tokens=2000,
+                max_tokens=4000,
             )
-            
-            content = response.choices[0].message.content.strip()
-            
-            # Extract JSON from response (handle markdown code blocks)
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-                content = content.replace("```json", "").replace("```", "").strip()
-            
-            result = json.loads(content)
             
             # Validate and sanitize — single title
             title = result.get("title", "")
@@ -328,22 +323,16 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             if thumbnail_text_raw:
                 thumbnail_text = _smart_overlay_text(thumbnail_text_raw).upper()
             else:
-                thumbnail_text = _smart_overlay_text(title).upper() if title else "¿QUÉ PASÓ?"
+                thumbnail_text = _smart_overlay_text(title).upper() if title else _derive_hook_from_title(title)
             
             # Parse badge text for thumbnail seal
             badge_text = result.get("badge_text", "").strip().upper()
             if badge_text:
                 badge_text = badge_text.strip("()（）[]")
             
-            # Track token usage
-            usage = response.usage
-            token_count = usage.total_tokens if usage else 0
+            # Track token usage (estimated — retry wrapper hides raw response)
+            token_count = 0
             cost_estimate = 0.0
-            if usage:
-                cost_estimate = (
-                    (usage.prompt_tokens / 1_000_000) * PRICE_INPUT_PER_M
-                    + (usage.completion_tokens / 1_000_000) * PRICE_OUTPUT_PER_M
-                )
             
             elapsed = time.time() - start
             logger.info(
@@ -364,11 +353,11 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             }
             
         except json.JSONDecodeError as e:
-            logger.error("MetadataGenerator: failed to parse JSON response: %s", e)
-            logger.debug("Raw response: %s", content[:500] if 'content' in dir() else "N/A")
+            # Should not happen with llm_json_call's internal retry, but kept as safety
+            logger.error("MetadataGenerator: JSON parse failed after retries: %s", e)
             return self._fallback_metadata(script)
         except Exception as e:
-            logger.error("MetadataGenerator: LLM call failed: %s", e)
+            logger.error("MetadataGenerator: LLM call failed after retries: %s", e)
             return self._fallback_metadata(script)
 
     def _validate_tags(self, tags: list[str]) -> list[str]:
@@ -446,7 +435,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             "selected_title": title,
             "description": description[:5000],
             "tags": self._validate_tags(tags),
-            "thumbnail_text": "¿QUÉ PASÓ? | La verdad detrás",
+            "thumbnail_text": _derive_hook_from_title(title),
             "badge_text": "DOCUMENTAL",
             "category_id": self.yt_category_id,
             "token_count": 0,

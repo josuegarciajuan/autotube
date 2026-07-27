@@ -55,7 +55,11 @@ def _call_llm_json(config: Optional[SimpleNamespace], system: str, user: str, te
     if not client:
         return None
     try:
-        resp = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call
+        return llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
             model=model,
             messages=[
                 {"role": "system", "content": system},
@@ -65,10 +69,8 @@ def _call_llm_json(config: Optional[SimpleNamespace], system: str, user: str, te
             max_tokens=2048,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content
-        return json.loads(content) if content else None
     except Exception as e:
-        logger.error("LLM call failed: %s", e)
+        logger.error("LLM call failed after retries: %s", e)
         return None
 
 
@@ -411,22 +413,38 @@ Write:
             f"Add these hashtags at the end if appropriate: {hashtags_line}"
         )
 
-        import openai
-        response = openai.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.6,
-            max_tokens=400,
-        )
-        result = response.choices[0].message.content
-        if result:
-            logger.info("_generate_description_via_llm: generated %d chars", len(result))
-            return result.strip()
+        import time as _time
+        from config.llm_helpers import llm_json_call
+        
+        # Simple text retry (not JSON, so manual retry)
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.6,
+                    max_tokens=400,
+                )
+                result = resp.choices[0].message.content
+                if result and result.strip():
+                    logger.info("_generate_description_via_llm: generated %d chars", len(result))
+                    return result.strip()
+                raise ValueError("LLM returned empty content")
+            except Exception as e:
+                last_exc = e
+                if attempt < 2:
+                    delay = 2.0 * (2 ** attempt)
+                    logger.warning(
+                        "_generate_description_via_llm: attempt %d/3 failed: %s — retrying in %.1fs",
+                        attempt + 1, e, delay,
+                    )
+                    _time.sleep(delay)
     except Exception as e:
-        logger.warning("_generate_description_via_llm: failed — %s", e)
+        logger.warning("_generate_description_via_llm: failed after retries — %s", e)
     return ""
 
 

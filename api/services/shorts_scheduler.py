@@ -797,50 +797,50 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
 
     # 1. Script via LLM
     from config.llm_client import create_llm_client
+    from config.llm_helpers import llm_json_call
     client = create_llm_client(enable_thinking=False)
 
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[{"role": "user", "content": (
-            f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). "
-            f"Canal: {display_name} — {niche}. Tagline: {tagline}."
-            f"{topic_warning}"
-            f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). "
-            f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
-            f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
-            f"El total debe superar 50 palabras. "
-            f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
-            f"imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + "
-            f"detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español "
-            f"(las APIs de stock no lo entienden). "
-            f"Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL "
-            f"del short para mantener coherencia entre escenas. "
-            f"Devuelve SOLO JSON: "
-            f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
-            f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
-            f'"theme_keywords_en": ["global", "theme", "keywords"], '
-            f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
-            f'"search_query_en": "english keywords for stock search"}}, '
-            f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
-            f'"search_query_en": "english keywords"}}, '
-            f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
-            f'"search_query_en": "english keywords"}}, '
-            f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
-            f'"search_query_en": "english keywords"}}, '
-            f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
-            f'"search_query_en": "english keywords"}}]}}. '
-            f"NADA MAS fuera del JSON."
-        )}],
-        temperature=0.9, max_tokens=1200,
-    )
-    content = response.choices[0].message.content
-    content = re.sub(r"^```(?:json)?\s*\n", "", content)
-    content = re.sub(r"\n```\s*$", "", content).strip()
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
-        logger.error("No JSON found in LLM response for %s: %s", channel_slug, content[:200])
+    try:
+        script = llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": (
+                f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). "
+                f"Canal: {display_name} — {niche}. Tagline: {tagline}."
+                f"{topic_warning}"
+                f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). "
+                f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
+                f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
+                f"El total debe superar 50 palabras. "
+                f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
+                f"imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + "
+                f"detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español "
+                f"(las APIs de stock no lo entienden). "
+                f"Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL "
+                f"del short para mantener coherencia entre escenas. "
+                f"Devuelve SOLO JSON: "
+                f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
+                f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
+                f'"theme_keywords_en": ["global", "theme", "keywords"], '
+                f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
+                f'"search_query_en": "english keywords for stock search"}}, '
+                f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
+                f'"search_query_en": "english keywords"}}, '
+                f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
+                f'"search_query_en": "english keywords"}}, '
+                f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
+                f'"search_query_en": "english keywords"}}, '
+                f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
+                f'"search_query_en": "english keywords"}}]}}. '
+                f"NADA MAS fuera del JSON."
+            )}],
+            temperature=0.9, max_tokens=1200,
+        )
+    except Exception as e:
+        logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
         return None
-    script = json.loads(match.group(0))
 
     # 1b. Validate script completeness
     from pipeline.shorts_tts import validate_short_script

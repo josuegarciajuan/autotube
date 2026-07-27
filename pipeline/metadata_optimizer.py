@@ -18,7 +18,7 @@ from typing import Any, Optional
 from config.llm_client import create_llm_client
 from googleapiclient.errors import HttpError
 
-from config.settings import LLM_MODEL, TOKENS_DIR
+from config.settings import LLM_MODEL_CREATIVE, TOKENS_DIR
 from pipeline.youtube_playlists import _load_credentials
 
 logger = logging.getLogger(__name__)
@@ -132,9 +132,13 @@ CONTENIDO DEL VIDEO (guion):
 Genera NUEVOS metadatos que mejoren el rendimiento."""
 
         try:
+            from config.llm_helpers import llm_json_call
             client = self._get_llm()
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
+            result = llm_json_call(
+                client,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL_CREATIVE,
                 messages=[
                     {"role": "system", "content": _OPTIMIZE_SYSTEM},
                     {"role": "user", "content": user_prompt},
@@ -142,16 +146,6 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
                 temperature=0.9,
                 max_tokens=2000,
             )
-
-            content = response.choices[0].message.content.strip()
-
-            # Extract JSON from response
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-                content = content.replace("```json", "").replace("```", "").strip()
-
-            result = json.loads(content)
 
             title = result.get("title", current_title)[:100]
             description = result.get("description", "")
@@ -171,7 +165,7 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
             logger.warning("[%s] LLM returned invalid JSON for metadata reoptimization", self.slug)
             return None
         except Exception as exc:
-            logger.error("[%s] Metadata reoptimization failed: %s", self.slug, exc)
+            logger.error("[%s] Metadata reoptimization failed after retries: %s", self.slug, exc)
             return None
 
     def apply_optimization(self, yt_video_id: str, new_title: str,

@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from config.llm_helpers import _derive_hook_from_title
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,7 +116,8 @@ de imagen + texto maximiza el Click-Through Rate (CTR).
 Tu expertise:
 - Texto overlay de DOS LÍNEAS (NO una sola):
   • LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máx 12 chars.
-    Formatos: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO", "3 MINUTOS", "5 MÉDICOS"
+    **DEBE contener una palabra CLAVE del título del video. NUNCA uses frases genéricas.**
+    Formatos: "SIN SANGRE", "FUE REAL", "3 MINUTOS", "5 MÉDICOS", "NADIE LO VIO"
   • LÍNEA 2 (complemento, texto MEDIANO): 2-4 palabras. Máx 24 chars. Complementa L1 y título.
     Formatos: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
 - BADGE/SELLO en esquina superior: texto de confianza (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE). Máx 15 chars.
@@ -141,7 +144,8 @@ REQUISITOS:
    - LÍNEA 1 (text_gancho): 1-2 palabras en MAYÚSCULAS. Máx 12 caracteres. Palabra-gancho que DETIENE el scroll.
    - LÍNEA 2 (text_complemento): 2-4 palabras. Máx 24 caracteres. Complementa L1 y título sin repetirlos.
    - Regla: L1 + L2 + título deben contar una mini-historia de 3 actos.
-   - Formatos para L1: "¿QUÉ PASÓ?", "NADIE LO VIO", "PROHIBIDO", "3 MINUTOS", "5 MÉDICOS", "FUE REAL"
+   - Formatos para L1: "SIN SANGRE", "FUE REAL", "3 MINUTOS", "5 MÉDICOS", "NADIE LO VIO", "PROHIBIDO"
+   - **L1 DEBE contener una palabra clave extraída del TÍTULO. NUNCA uses frases genéricas.**
    - Formatos para L2: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
 2. Define el BADGE/SELLO de confianza (badge_text): DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío.
 3. Define la composición (dónde va el texto, dónde el foco visual). {face_directive}
@@ -217,7 +221,7 @@ class ThumbnailBrainstorm:
                 face_directive=face_directive,
             )
 
-            brief = self._merge(psych, marketing, style)
+            brief = self._merge(psych, marketing, style, title=title)
             logger.info(
                 "Thumbnail brief: emotion=%s text=%r layout=%s",
                 brief.emotion_target, brief.text_overlay, brief.layout,
@@ -241,7 +245,8 @@ class ThumbnailBrainstorm:
     ) -> dict:
         """Call the psychology LLM agent."""
         from config.llm_client import create_llm_client
-        from config.settings import LLM_MODEL
+        from config.settings import LLM_MODEL_CREATIVE
+        from config.llm_helpers import llm_json_call
 
         client = create_llm_client(enable_thinking=False, timeout=60.0, max_retries=2)
 
@@ -259,19 +264,22 @@ class ThumbnailBrainstorm:
             face_directive=face_directive or DEFAULT_FACE_DIRECTIVE,
         )
 
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.8,
-            max_tokens=400,
-        )
-
-        content = self._extract_json(response.choices[0].message.content)
-        logger.debug("Psychology agent: %s", json.dumps(content, ensure_ascii=False)[:200])
-        return content
+        try:
+            return llm_json_call(
+                client,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.8,
+                max_tokens=400,
+            )
+        except Exception:
+            logger.debug("Psychology agent failed after retries — returning empty dict")
+            return {}
 
     def _run_marketing_agent(
         self,
@@ -283,7 +291,8 @@ class ThumbnailBrainstorm:
     ) -> dict:
         """Call the marketing LLM agent."""
         from config.llm_client import create_llm_client
-        from config.settings import LLM_MODEL
+        from config.settings import LLM_MODEL_CREATIVE
+        from config.llm_helpers import llm_json_call
 
         client = create_llm_client(enable_thinking=False, timeout=60.0, max_retries=2)
 
@@ -300,30 +309,36 @@ class ThumbnailBrainstorm:
             face_directive=face_directive or DEFAULT_FACE_DIRECTIVE,
         )
 
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.9,
-            max_tokens=500,
-        )
-
-        content = self._extract_json(response.choices[0].message.content)
-        logger.debug("Marketing agent: %s", json.dumps(content, ensure_ascii=False)[:200])
-        return content
+        try:
+            return llm_json_call(
+                client,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.9,
+                max_tokens=500,
+            )
+        except Exception:
+            logger.debug("Marketing agent failed after retries — returning empty dict")
+            return {}
 
     # ── Merge ─────────────────────────────────────────────────
 
-    def _merge(self, psych: dict, marketing: dict, style: dict) -> ThumbnailBrief:
+    def _merge(self, psych: dict, marketing: dict, style: dict, title: str = "") -> ThumbnailBrief:
         """Merge psychology + marketing agent outputs into a ThumbnailBrief."""
         # Best text for compatibility: L1 | L2 or single line
         best_text = marketing.get("best_text", "")
         if not best_text:
             gancho = marketing.get("text_gancho", "")
             complemento = marketing.get("text_complemento", "")
-            best_text = f"{gancho} | {complemento}" if gancho and complemento else "¿QUÉ PASÓ?"
+            if gancho and complemento:
+                best_text = f"{gancho} | {complemento}"
+            else:
+                best_text = _derive_hook_from_title(title) if title else "FUE REAL | La verdad oculta"
         
         return ThumbnailBrief(
             image_concept=psych.get("visual_concept", ""),
@@ -346,6 +361,11 @@ class ThumbnailBrainstorm:
 
     def _fallback_brief(self, title: str, style: dict, allow_faces: bool = True) -> ThumbnailBrief:
         """Return a minimal brief when the LLM agents are unavailable."""
+        hook_text = _derive_hook_from_title(title)
+        hook_parts = hook_text.split(" | ")
+        l1 = hook_parts[0] if len(hook_parts) >= 1 else "FUE REAL"
+        l2 = hook_parts[1] if len(hook_parts) >= 2 else "La verdad oculta"
+
         if not allow_faces:
             # Clinical/medical fallback — no surprised faces
             return ThumbnailBrief(
@@ -357,9 +377,9 @@ class ThumbnailBrainstorm:
                 visual_focus="anatomical or scientific detail with dramatic clinical lighting",
                 emotion_target="curiosidad clínica",
                 curiosity_gap="¿Qué anomalía se oculta en este diagnóstico?",
-                text_overlay="¿QUÉ PASÓ? | El diagnóstico oculto",
-                text_gancho="¿QUÉ PASÓ?",
-                text_complemento="El diagnóstico oculto",
+                text_overlay=hook_text,
+                text_gancho=l1,
+                text_complemento=l2,
                 badge_text="DOCUMENTAL",
                 secondary_scene="medical report with redacted text, classified stamp",
                 text_color_hex="#FFFFFF",
@@ -375,9 +395,9 @@ class ThumbnailBrainstorm:
             visual_focus="central dramatic element with strong contrast",
             emotion_target="shock",
             curiosity_gap="¿Qué secreto se oculta?",
-            text_overlay="¿QUÉ PASÓ? | La verdad oculta",
-            text_gancho="¿QUÉ PASÓ?",
-            text_complemento="La verdad oculta",
+            text_overlay=hook_text,
+            text_gancho=l1,
+            text_complemento=l2,
             badge_text="DOCUMENTAL",
             secondary_scene="classified document with redacted text",
             text_color_hex="#FFFFFF",

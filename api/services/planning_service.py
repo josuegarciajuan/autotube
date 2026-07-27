@@ -2173,21 +2173,24 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         )
 
     # 1. Script via LLM
+    from config.llm_helpers import llm_json_call
     client = create_llm_client(enable_thinking=False)
     niche = getattr(ch_config, "CANAL_NARRATIVE_STYLE", "documental")
     display_name = getattr(ch_config, "CANAL_DISPLAY_NAME", channel_slug)
     tagline = getattr(ch_config, "CANAL_TAGLINE", "")
 
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}.{topic_warning}Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"tema\": \"frase corta que identifica el tema (max 80 chars)\", \"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
-        temperature=0.9, max_tokens=1200,
-    )
-    content = response.choices[0].message.content
-    content = re.sub(r"^```(?:json)?\s*\n", "", content)
-    content = re.sub(r"\n```\s*$", "", content).strip()
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    script = json.loads(match.group(0))
+    try:
+        script = llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}.{topic_warning}Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"tema\": \"frase corta que identifica el tema (max 80 chars)\", \"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre + suscribete\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
+            temperature=0.9, max_tokens=1200,
+        )
+    except Exception as e:
+        logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
+        return
 
     # 1b. Validate script completeness
     from pipeline.shorts_tts import validate_short_script

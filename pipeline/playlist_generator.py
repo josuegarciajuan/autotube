@@ -96,7 +96,12 @@ def generate_playlists_for_channel(
     )
 
     try:
-        response = client.chat.completions.create(
+        from config.llm_helpers import llm_json_call
+
+        raw = llm_json_call(
+            client,
+            max_retries=3,
+            retry_delay=2.0,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -105,15 +110,6 @@ def generate_playlists_for_channel(
             temperature=0.8,
             max_tokens=4000,
         )
-
-        content = response.choices[0].message.content.strip()
-
-        # Extract JSON from possible markdown code blocks
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
-        if json_match:
-            content = json_match.group(1)
-
-        raw = json.loads(content)
 
         if not isinstance(raw, list):
             raise ValueError(f"Expected JSON array, got {type(raw).__name__}")

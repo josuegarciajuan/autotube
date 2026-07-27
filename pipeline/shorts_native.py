@@ -134,22 +134,22 @@ Formato: datos impactantes, cliffhangers, o revelaciones que enganchen en los pr
 Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
 [{{"title": "...", "tema": "frase corta que identifica el tema (max 80 chars)"}}, ...]"""
 
-            response = client.chat.completions.create(
+            from config.llm_helpers import llm_json_call_or_fallback
+            result = llm_json_call_or_fallback(
+                client,
+                fallback=[],
+                max_retries=3,
+                retry_delay=2.0,
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.9,
                 max_tokens=500,
             )
-
-            import json, re
-            content = response.choices[0].message.content
-            match = re.search(r"\[.*\]", content, re.DOTALL)
-            if match:
-                ideas = json.loads(match.group(0))
-                logger.info("LLM generated %d topic ideas for native short", len(ideas))
-                return ideas
+            if isinstance(result, list) and result:
+                logger.info("LLM generated %d topic ideas for native short", len(result))
+                return result
         except Exception as e:
-            logger.warning("LLM topic generation failed: %s", e)
+            logger.warning("LLM topic generation failed after retries: %s", e)
 
         return []
 
@@ -193,7 +193,12 @@ Devuelve SOLO JSON:
 {{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
 
         try:
-            response = client.chat.completions.create(
+            from config.llm_helpers import llm_json_call_or_fallback
+            result = llm_json_call_or_fallback(
+                client,
+                fallback={},
+                max_retries=3,
+                retry_delay=2.0,
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": "Eres un guionista de YouTube Shorts virales."},
@@ -202,16 +207,12 @@ Devuelve SOLO JSON:
                 temperature=0.8,
                 max_tokens=1000,
             )
-
-            import json, re
-            content = response.choices[0].message.content
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
+            if result:
+                return result
             return None
 
         except Exception as e:
-            logger.error(f"Short script generation error: {e}")
+            logger.error(f"Short script generation error after retries: {e}")
             return None
 
     def _phase_tts_short(self, script: dict) -> Optional[dict]:
