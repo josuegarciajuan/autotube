@@ -39,7 +39,7 @@ Responde SIEMPRE en formato JSON con estas claves:
 
 def get_marketing_client():
     """Get OpenAI-compatible client for marketing generation."""
-    return create_llm_client(enable_thinking=True, timeout=60.0, max_retries=2)
+    return create_llm_client(enable_thinking=False, timeout=60.0, max_retries=2)
 
 
 async def generate_marketing_content(script_text: str, keywords: list[str] = None,

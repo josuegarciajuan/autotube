@@ -39,7 +39,7 @@ Rules:
 Generate EXACTLY 4 concepts."""
 
 
-def _get_llm_client(config: Optional[SimpleNamespace] = None):
+def _get_llm_client(config: Optional[SimpleNamespace] = None, enable_thinking: bool = False):
     """Get OpenAI-compatible client from config."""
     from config.settings import (
         LLM_MODEL,
@@ -49,7 +49,7 @@ def _get_llm_client(config: Optional[SimpleNamespace] = None):
 
     model = LLM_MODEL or OPENAI_MODEL
 
-    return create_llm_client(enable_thinking=True), model
+    return create_llm_client(enable_thinking=enable_thinking), model
 
 
 def _llm_generate_concepts(
@@ -87,7 +87,7 @@ Already used concepts (DO NOT repeat any of these):
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.85,
-            max_tokens=500,
+            max_tokens=800,
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
@@ -312,7 +312,7 @@ Already used concepts (DO NOT repeat):
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.9,
-            max_tokens=1000,
+            max_tokens=1500,
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
@@ -379,7 +379,7 @@ def build_natural_language_queries(
     config=None,
 ) -> list[str]:
     """Strategy 4: Generate 15 natural-language YouTube search queries via LLM."""
-    client, model = _get_llm_client(config)
+    client, model = _get_llm_client(config, enable_thinking=True)
     recently_used = _get_recently_used(db, channel_slug, limit=30) if db else []
 
     if not client:
