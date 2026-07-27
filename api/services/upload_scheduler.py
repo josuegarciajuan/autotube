@@ -143,6 +143,62 @@ def _compute_random_upload_time(
     return scheduled_time
 
 
+def _recover_stuck_uploading_videos(db) -> int:
+    """Safety-net recovery for videos stuck in 'uploading' whose upload job died.
+
+    Scenarios this catches:
+    1. Server restart between `db.update_video(status='uploading')` and
+       `asyncio.create_task(...)` — the video gets stuck with no worker.
+    2. Worker crashed immediately after dispatch before marking job as `running`.
+    3. Startup recovery missed the video due to race condition or timing.
+
+    Strategy: find videos in 'uploading' status whose latest upload_only job is
+    'failed' (dead worker), and revert them to 'awaiting_upload' so the
+    dispatcher retries them on the next cycle.
+
+    Returns count of recovered videos.
+    """
+    recovered = 0
+    try:
+        with db._connect() as conn:
+            # Find videos stuck in 'uploading' with a failed upload_only job
+            # (latest job per video, only consider upload_only jobs)
+            stuck = conn.execute(
+                """SELECT v.id, v.channel_id
+                   FROM videos v
+                   JOIN (
+                       SELECT video_id, MAX(id) as max_job_id
+                       FROM generation_jobs
+                       WHERE action = 'upload_only'
+                       GROUP BY video_id
+                   ) j_latest ON j_latest.video_id = v.id
+                   JOIN generation_jobs j ON j.id = j_latest.max_job_id
+                   WHERE v.status = 'uploading'
+                     AND j.status = 'failed'
+                """
+            ).fetchall()
+
+            for row in stuck:
+                video_id = row["id"]
+                conn.execute(
+                    "UPDATE videos SET status='awaiting_upload', "
+                    "progress_phase='upload', scheduled_upload_at=NULL "
+                    "WHERE id=? AND status='uploading'",
+                    (video_id,)
+                )
+                if conn.total_changes > 0:
+                    recovered += 1
+                    logger.warning(
+                        "🔁 Recovery: video #%d (ch=%d) stuck in 'uploading' with dead "
+                        "upload job → reverted to 'awaiting_upload' for retry",
+                        video_id, row["channel_id"],
+                    )
+            conn.commit()
+    except Exception as e:
+        logger.debug("Recovery scan for stuck uploading videos skipped: %s", e)
+    return recovered
+
+
 def dispatch_due_uploads(db=None) -> dict | None:
     """Check for awaiting_upload videos and dispatch upload jobs.
 
@@ -161,6 +217,11 @@ def dispatch_due_uploads(db=None) -> dict | None:
 
         db = ExtendedDatabase()
 
+    # ── 0. Recovery scan: revert stuck 'uploading' videos whose job died ──
+    # This catches videos that got stuck due to server restart / worker crash
+    # where the startup recovery didn't revert them (e.g. race condition, missed tick).
+    _recover_stuck_uploading_videos(db)
+
     # ── 1. Count active upload jobs ──
     active_uploads = db.count_active_upload_jobs()
     if active_uploads >= MAX_CONCURRENT_UPLOADS:
@@ -178,8 +239,8 @@ def dispatch_due_uploads(db=None) -> dict | None:
     with db._connect() as conn:
         rows = conn.execute(
             """SELECT v.id, v.channel_id, v.canal, v.video_path, v.thumbnail_path,
-                      v.titulo_final, v.description, v.tags_json, v.target_public_at,
-                      v.scheduled_upload_at, c.slug as channel_slug, c.config_json
+                       v.titulo_final, v.description, v.tags_json, v.target_public_at,
+                       v.scheduled_upload_at, c.slug as channel_slug, c.config_json
                FROM videos v
                JOIN channels c ON v.channel_id = c.id
                WHERE v.status = 'awaiting_upload'

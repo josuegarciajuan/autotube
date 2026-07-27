@@ -2655,6 +2655,17 @@ async def auto_recover_on_startup():
                 "WHERE id=? AND status='generating'",
                 (rrow["video_id"],)
             )
+            # Recover videos stuck in 'uploading' whose upload job died:
+            # revert to 'awaiting_upload' so the upload scheduler can retry.
+            upload_recovered = conn.execute(
+                "UPDATE videos SET status='awaiting_upload', "
+                "progress_phase='upload', scheduled_upload_at=NULL "
+                "WHERE id=? AND status='uploading'",
+                (rrow["video_id"],)
+            ).rowcount
+            if upload_recovered:
+                log.info("Recovered video #%d: uploading → awaiting_upload (upload job died on restart)",
+                         rrow["video_id"])
             running_killed += 1
     if running_killed or running_alive:
         log.info("Running jobs: %d killed (worker dead), %d kept alive (worker survived restart)",
