@@ -82,6 +82,9 @@ export default function Dashboard() {
   const [collectStatsState, setCollectStatsState] = useState<any>(null)
   const [collectStatsFinishedAt, setCollectStatsFinishedAt] = useState<string | null>(null)
 
+  // Previous KPI snapshot — captured before stats collection, cleared on manual refresh
+  const [previousKpis, setPreviousKpis] = useState<Record<string, number> | null>(null)
+
   // Optimal slots recalculation state
   const [recalculatingSlots, setRecalculatingSlots] = useState(false)
   const [recalcSlotsResult, setRecalcSlotsResult] = useState<any>(null)
@@ -222,6 +225,15 @@ export default function Dashboard() {
     setCollectingStats(true)
     setCollectStatsError(false)
     setCollectStatsMsg('Recolectando stats de YouTube...')
+    // Capture current KPI values as snapshot so we can show change after collection
+    const k = data?.global_kpis
+    setPreviousKpis({
+      sparkline_subscribers: k?.subscribers?.value ?? 0,
+      sparkline_views: k?.total_views?.value ?? 0,
+      sparkline_engagement: k?.engagement?.value ?? 0,
+      sparkline_watch_hours: k?.watch_hours?.value ?? 0,
+      in_production: k?.in_production?.value ?? 0,
+    })
     try {
       await api.collectStats()
       pollStatsStatus()
@@ -375,7 +387,7 @@ export default function Dashboard() {
           {lastUpdated ? formatTimeAgo(lastUpdated) : ''}
         </span>
         <button
-          onClick={() => { setLoading(true); refreshDashboard() }}
+          onClick={() => { setLoading(true); setPreviousKpis(null); refreshDashboard() }}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-500/20 bg-gray-500/5 text-gray-400 hover:bg-gray-500/10 hover:border-gray-500/40 transition-all text-xs font-medium"
           title="Refrescar dashboard"
         >
@@ -502,6 +514,7 @@ export default function Dashboard() {
         kpis={kpiList}
         sparklines={sparklines}
         channelBreakdown={viewsBreakdown}
+        previousKpis={previousKpis}
       />
 
       {/* ═══════ NIVEL 1: Activity Heatmap ═══════ */}

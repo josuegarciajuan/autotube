@@ -19,6 +19,7 @@ interface VitalSignsBarProps {
   kpis: KPI[]
   sparklines: Record<string, number[]>
   channelBreakdown?: Array<{ name: string; slug: string; value: number }>
+  previousKpis?: Record<string, number> | null
 }
 
 // Build sparkline data for Recharts
@@ -26,7 +27,7 @@ function buildSparkData(values: number[]) {
   return values.map((v, i) => ({ day: i, value: v }))
 }
 
-export default function VitalSignsBar({ kpis, sparklines, channelBreakdown }: VitalSignsBarProps) {
+export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, previousKpis }: VitalSignsBarProps) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
   const { triggerGlitch, glitchTick } = useEasterEgg()
 
@@ -107,6 +108,12 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown }: Vi
                   </span>
                   <DeltaBadge delta={kpi.delta} color={kpi.color} />
                 </div>
+                {/* Previous value — only shown after stats collection when it differs */}
+                {previousKpis && previousKpis[kpi.key] !== undefined && previousKpis[kpi.key] !== kpi.value && (
+                  <span className="text-[11px] text-gray-600 font-mono tabular-nums -mt-1">
+                    {formatShortNumber(previousKpis[kpi.key])}
+                  </span>
+                )}
                 {/* Mini sparkline */}
                 <div className="w-full h-8 opacity-50">
                   <ResponsiveContainer width="100%" height="100%">
