@@ -32,6 +32,7 @@ export default function SocialAccountsPanel({ channelId }: Props) {
   const [showPassword, setShowPassword] = useState<Record<string, boolean>>({})
   const [timing, setTiming] = useState<Record<string, number>>(DEFAULT_TIMING)
   const [showTiming, setShowTiming] = useState(false)
+  const [showStrategy, setShowStrategy] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   useEffect(() => {
@@ -147,7 +148,30 @@ export default function SocialAccountsPanel({ channelId }: Props) {
         <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
           🌐 Redes Sociales
         </h3>
+        <button
+          onClick={() => setShowStrategy(!showStrategy)}
+          className="text-[10px] text-neon-cyan/70 hover:text-neon-cyan flex items-center gap-1"
+        >
+          {showStrategy ? '▼' : '▶'} Estrategia de publicación
+        </button>
       </div>
+
+      {showStrategy && (
+        <div className="bg-dark-700/30 rounded-lg p-3 text-xs space-y-2 border border-neon-cyan/10">
+          <p className="text-gray-300 font-medium mb-1">📋 Estrategia por plataforma:</p>
+          {SOCIAL_PLATFORMS.map(p => (
+            <div key={p.id} className="flex items-start gap-2 pl-1">
+              <span className="text-sm shrink-0 mt-0.5">{p.icon}</span>
+              <div>
+                <span className="text-white font-medium">{p.label}</span>
+                <span className="text-gray-500"> — {p.description}</span>
+                <br />
+                <span className="text-[10px] text-gray-500">{p.strategy}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {result && (
         <div className={`px-3 py-2 rounded-lg text-xs ${result.ok ? 'bg-green-900/40 text-green-300 border border-green-700/40' : 'bg-red-900/40 text-red-300 border border-red-700/40'}`}>

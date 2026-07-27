@@ -320,11 +320,36 @@ export interface SocialAccount {
 }
 
 export const SOCIAL_PLATFORMS = [
-  { id: 'tiktok', label: 'TikTok', icon: '🎵', color: '#ff0050' },
-  { id: 'twitter', label: 'Twitter/X', icon: '𝕏', color: '#1da1f2' },
-  { id: 'instagram', label: 'Instagram', icon: '📷', color: '#e1306c' },
-  { id: 'facebook', label: 'Facebook', icon: '📘', color: '#1877f2' },
-  { id: 'reddit', label: 'Reddit', icon: '🤖', color: '#ff4500' },
+  {
+    id: 'tiktok', label: 'TikTok', icon: '🎵', color: '#ff0050',
+    description: 'Clip vertical 9:16 de 55-65s con cliffhanger. Subtítulos quemados.',
+    strategy: 'El clip NO resuelve la historia — corta antes del desenlace. CTA: "Video completo en mi perfil". NUNCA incluye link de YouTube en el caption.',
+    link: 'bio',
+  },
+  {
+    id: 'twitter', label: 'Twitter/X', icon: '𝕏', color: '#1da1f2',
+    description: 'Hilo de 5-7 tweets. Solo texto, sin imágenes ni video.',
+    strategy: 'Contenido autónomo de alto valor. Cada tweet es una pieza independiente. El link al video SOLO en el último tweet.',
+    link: 'last_tweet',
+  },
+  {
+    id: 'instagram', label: 'Instagram', icon: '📷', color: '#e1306c',
+    description: 'Reel vertical (mismo clip de TikTok). Caption con saltos de línea.',
+    strategy: '6-8 hashtags: 3 nicho + 3 alcance medio + 2 masivos. CTA: "Link en bio". Sin link directo (no es cliqueable).',
+    link: 'bio',
+  },
+  {
+    id: 'facebook', label: 'Facebook', icon: '📘', color: '#1877f2',
+    description: 'Post de texto con bullets + link de YouTube (OG card con thumbnail).',
+    strategy: '3 puntos clave en formato lista. Link directo — Facebook genera preview automática. Sin hashtags.',
+    link: 'direct',
+  },
+  {
+    id: 'reddit', label: 'Reddit', icon: '🤖', color: '#ff4500',
+    description: 'Post de texto largo (3-5 párrafos). Contenido 100% autónomo.',
+    strategy: 'CERO autopromoción. El post debe ser valioso por sí mismo. Sin link. Solo mención sutil al final: "Investigué esto para un video".',
+    link: 'none',
+  },
 ] as const
 
 export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {

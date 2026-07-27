@@ -4,16 +4,9 @@ Analyzes a generated video script to find the most engaging 45-90 second
 segment, then extracts it from the video and converts to vertical 9:16 format
 with burnt-in subtitles.
 
-Usage:
-    from pipeline.social_clip_extractor import SocialClipExtractor
-
-    extractor = SocialClipExtractor(channel_config)
-    result = extractor.extract_best_clip(
-        video_path="/path/to/video.mp4",
-        script_blocks=blocks,
-        output_dir="/path/to/output/",
-    )
-    # result: {"clip_path": "...", "start_time": 120.5, "duration": 65.0, "viral_score": 0.85}
+Strategy: find the PRE-CLIMAX — the moment of maximum suspense just BEFORE
+the resolution. This creates a cliffhanger that drives viewers to YouTube
+for the full story. Never include the full explanation or conclusion.
 """
 from __future__ import annotations
 
@@ -48,18 +41,22 @@ class SocialClipExtractor:
     to extract and reformat that segment for social media.
     """
 
-    # Scoring weights for segment selection
+    # Scoring weights for segment selection (v2 — pre-climax strategy)
     VIRAL_INDICATORS = {
-        "hook": 0.30,          # opening hook or attention grabber
-        "climax": 0.25,        # dramatic peak, revelation
-        "plot_twist": 0.20,    # unexpected turn
-        "emotional": 0.15,     # emotional high point
+        "hook": 0.35,          # opening hook or attention grabber (MAX weight)
+        "cliffhanger": 0.25,   # suspense-building, unresolved tension
+        "climax": 0.20,        # dramatic peak (we include start but exclude end)
+        "emotional": 0.10,     # emotional high point
         "visual": 0.10,        # visually described scene
     }
 
-    MIN_CLIP_DURATION = 30     # seconds
-    MAX_CLIP_DURATION = 90     # seconds
-    TARGET_DURATION = 60       # seconds (preferred)
+    # Pre-climax strategy: start BEFORE the climax and end JUST AFTER,
+    # never including the resolution/explanation.
+    PRE_CLIMAX_LEAD_SECONDS = 20   # seconds of buildup before climax
+    PRE_CLIMAX_TAIL_SECONDS = 10   # seconds after climax peak (no resolution)
+    MIN_CLIP_DURATION = 45         # seconds
+    MAX_CLIP_DURATION = 65         # seconds
+    TARGET_DURATION = 55           # seconds (preferred)
 
     def __init__(self, config=None):
         self.config = config or {}
@@ -112,28 +109,78 @@ class SocialClipExtractor:
         return scores
 
     def find_best_segment(self, script_blocks: list[dict], total_duration: float) -> SegmentScore | None:
-        """Find the single best segment for a social clip."""
+        """Find the best PRE-CLIMAX segment for a social clip.
+
+        Strategy: identify the climax block, then select a window that starts
+        BEFORE it (buildup) and ends JUST AFTER it (before resolution).
+        This creates a cliffhanger that drives YouTube clicks.
+        """
         scores = self.score_segments(script_blocks, total_duration)
         if not scores:
             return None
 
-        best = scores[0]
+        # Find the climax block: high score + late position but not last
+        # Sort by viral_score * position_penalty (favor middle-late blocks)
+        n = len(scores)
+        for s in scores:
+            # Position bonus: middle-late is ideal for climax (not very end)
+            position_ratio = s.block_index / max(n - 1, 1)
+            if 0.5 <= position_ratio <= 0.85:
+                s.viral_score += 0.10
+            elif position_ratio > 0.85:
+                s.viral_score -= 0.15  # Penalize very late (probably resolution)
+            elif position_ratio < 0.2:
+                s.viral_score -= 0.05  # Slight penalty for too early
+
+        scores.sort(key=lambda s: s.viral_score, reverse=True)
+        climax = scores[0]
+
+        # Build pre-climax window: start = (climax_start - LEAD), end = (climax_start + TAIL)
+        pre_start = max(0, climax.start_time - self.PRE_CLIMAX_LEAD_SECONDS)
+        post_end = climax.start_time + climax.duration + self.PRE_CLIMAX_TAIL_SECONDS
+
+        # Clamp to min/max duration
+        window_duration = post_end - pre_start
+        if window_duration < self.MIN_CLIP_DURATION:
+            # Extend forward to reach minimum
+            post_end = pre_start + self.MIN_CLIP_DURATION
+            window_duration = self.MIN_CLIP_DURATION
+        elif window_duration > self.MAX_CLIP_DURATION:
+            # Tighten: reduce lead time
+            pre_start = post_end - self.MAX_CLIP_DURATION
+            window_duration = self.MAX_CLIP_DURATION
+
+        best = SegmentScore(
+            block_index=climax.block_index,
+            start_time=pre_start,
+            duration=window_duration,
+            text=climax.text,
+            viral_score=climax.viral_score,
+            reason=f"Pre-climax window around block {climax.block_index}: {climax.reason}",
+        )
+
         logger.info(
-            "Best clip segment: block %d, score=%.2f, start=%.1fs, dur=%.1fs: %s",
+            "Best clip segment (pre-climax): block %d, score=%.2f, start=%.1fs, dur=%.1fs: %s",
             best.block_index, best.viral_score, best.start_time, best.duration, best.reason,
         )
         return best
 
     def _llm_score_block(self, text: str, block_index: int, total_blocks: int) -> tuple[float, str]:
-        """Use LLM to score a block for viral potential. Returns (score, reason)."""
+        """Use LLM to score a block for viral potential (pre-climax strategy).
+
+        Rewards: hook quality, unresolved suspense, emotional intensity, visual imagery.
+        Penalizes: resolution, explanation, summary, conclusions.
+        """
         try:
             from config.settings import AI_API_KEY, AI_BASE_URL, AI_MODEL
             import requests
 
             prompt = (
-                "Evalua este fragmento de guion de video de YouTube en una escala 0-1 "
-                "para potencial viral en TikTok/Reels. Busca: hook impactante, climax, "
-                "plot twist, momento emocional, o revelacion visual.\n\n"
+                "Evalua este fragmento de guion para un clip de TikTok/Reels (0-1).\n"
+                "BUSCAMOS EL PRE-CLIMAX: maximo suspense ANTES de la resolucion.\n"
+                "Puntua ALTO si: hook fuerte, suspense sin resolver, revelacion parcial, "
+                "emocion intensa.\n"
+                "Puntua BAJO si: explicacion, conclusion, resumen, desenlace.\n\n"
                 f"Fragmento #{block_index + 1}/{total_blocks}:\n{text[:500]}\n\n"
                 "Responde SOLO en formato JSON: {\"score\": 0.XX, \"reason\": \"breve explicacion\"}"
             )
@@ -154,7 +201,6 @@ class SocialClipExtractor:
             )
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
-            # Parse JSON from response
             result = json.loads(re.search(r'\{.*\}', content, re.DOTALL).group())
             return float(result.get("score", 0.5)), str(result.get("reason", "AI scored"))
         except Exception as exc:
@@ -162,57 +208,76 @@ class SocialClipExtractor:
             return self._heuristic_score(text, block_index, total_blocks)
 
     def _heuristic_score(self, text: str, block_index: int, total_blocks: int) -> tuple[float, str]:
-        """Heuristic fallback for viral scoring without LLM.
+        """Heuristic fallback for pre-climax scoring.
 
         Rewards:
-        - Early blocks (hooks) and late blocks (climax)
-        - Emotional language (exclamation, questions)
-        - Short, punchy sentences
+        - Middle-late blocks (climax zone) but NOT last blocks (resolution)
+        - Suspense language (questions, cliffhangers, "pero", "sin embargo")
+        - Emotional intensity indicators
+        - Visual descriptions
+
+        Penalizes:
+        - Conclusion words ("en conclusion", "finalmente", "asi que")
+        - Last blocks (usually resolution)
         """
-        score = 0.3  # baseline
+        score = 0.3
         reasons = []
 
-        # Block position: early = hook, late = climax, middle = lowest
+        # Position: pre-climax zone is 0.4-0.8
         position_ratio = block_index / max(total_blocks - 1, 1)
-        if position_ratio < 0.2:
-            score += 0.30
-            reasons.append("posicion: hook inicial")
-        elif position_ratio > 0.7:
+        if 0.4 <= position_ratio <= 0.75:
             score += 0.25
-            reasons.append("posicion: climax/revelacion")
-        elif 0.35 < position_ratio < 0.55:
+            reasons.append("zona pre-climax")
+        elif position_ratio > 0.85:
+            score -= 0.20
+            reasons.append("posicion: probable resolucion")
+        elif position_ratio < 0.15:
             score += 0.05
-            reasons.append("posicion: desarrollo")
+            reasons.append("posicion: posible hook")
 
-        # Emotional language cues
+        # Penalize resolution/conclusion words
         text_lower = text.lower()
-        emotional_words = [
-            "increible", "impactante", "aterrador", "sorprendente", "revelacion",
-            "secreto", "misterio", "descubrimiento", "nunca", "jamas", "no podras",
-            "no creeras", "impactante", "escalofriante", "increiblemente",
-            "impresionante", "extraordinario", "devastador", "milagro", "milagroso",
+        conclusion_words = [
+            "en conclusion", "finalmente", "asi que", "por eso", "por lo tanto",
+            "en resumen", "para concluir", "la moraleja", "en definitiva",
+            "por consiguiente", "como resultado", "esto demuestra",
         ]
-        for word in emotional_words:
+        penalty = sum(0.08 for w in conclusion_words if w in text_lower)
+        score -= min(0.30, penalty)
+        if penalty > 0:
+            reasons.append(f"penalizacion conclusion (-{min(0.30, penalty):.2f})")
+
+        # Reward suspense/cliffhanger indicators
+        suspense_words = [
+            "pero", "sin embargo", "lo que paso", "lo que encontro", "descubrio",
+            "nunca", "jamas", "inesperado", "sorprendente", "aterrador",
+            "misterio", "secreto", "oculto", "prohibido", "desconocido",
+            "lo que nadie", "repentinamente", "de pronto", "entonces",
+        ]
+        for word in suspense_words:
             if word in text_lower:
-                score += 0.04
+                score += 0.03
                 if score > 0.95:
                     break
+        reasons.append("indicadores de suspense")
 
-        # Exclamation / questions
+        # Emotional intensity: exclamations + questions
         exclamations = text.count("!") + text.count("¡")
         questions = text.count("?") + text.count("¿")
-        score += min(0.15, (exclamations + questions) * 0.03)
+        score += min(0.10, (exclamations + questions) * 0.02)
 
-        # Word count reward (concise > verbose for social)
-        word_count = len(text.split())
-        if 30 <= word_count <= 100:
-            score += 0.10
-            reasons.append("longitud optima para clip social")
+        # Visual descriptions (good for TikTok/Reels)
+        visual_words = [
+            "imagen", "video", "grabacion", "foto", "vista", "oscuro",
+            "luz", "sombras", "gigante", "enorme", "profundo",
+        ]
+        visual_count = sum(1 for w in visual_words if w in text_lower)
+        score += min(0.10, visual_count * 0.02)
 
         if not reasons:
             reasons.append("analisis heuristico")
 
-        return min(score, 1.0), ", ".join(reasons)
+        return min(score, 1.0), "; ".join(reasons)
 
     # ── ffmpeg clip extraction ─────────────────────────────
 

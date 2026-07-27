@@ -1196,6 +1196,16 @@ class VideoLifecycleManager:
         from pipeline.social_browser import BrowserSessionManager
         from pipeline.social_publishers.base import SocialContent, get_publisher
 
+        # ── 6. Determine link strategy per platform ───────────────────
+        link_strategy_map = {
+            "tiktok": "bio",         # CTA "link in bio", no direct URL
+            "twitter": "last_tweet", # URL only in final tweet of thread
+            "instagram": "bio",      # CTA "link en bio"
+            "facebook": "direct",    # Full URL visible in post
+            "reddit": "none",        # No link at all, just subtle mention
+        }
+        link_strategy = link_strategy_map.get(platform, "none")
+
         publish_content = SocialContent(
             platform=platform,
             text=caption.text,
@@ -1203,6 +1213,7 @@ class VideoLifecycleManager:
             yt_url=yt_url,
             thread_parts=caption.thread_parts,
             hashtags=caption.hashtags,
+            link_strategy=link_strategy,
         )
 
         try:

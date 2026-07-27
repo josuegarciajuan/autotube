@@ -1,14 +1,20 @@
 """AI-powered caption generator for social media platforms.
 
-Generates platform-optimized captions, threads, and hashtags for each
-social media platform using the video's script and metadata.
+Generates platform-optimized captions with exact structures proven to
+maximize reach and drive traffic to YouTube. Strategy per platform:
+
+    TikTok:    Vertical clip (cliffhanger) + short caption, NO link.
+               CTA = "Video completo en mi perfil".
+    Twitter/X: 5-7 tweet thread. Self-contained value, link only in last tweet.
+    Instagram: Same clip as TikTok. Caption with line breaks. Link in bio.
+    Facebook:  Text post with bullets + DIRECT YouTube link (OG card).
+    Reddit:    Long-form text post (standalone value). No link, subtle mention.
 
 Usage:
     from pipeline.social_caption_generator import SocialCaptionGenerator
 
     gen = SocialCaptionGenerator()
     result = gen.generate("twitter", script_text, video_title, yt_url)
-    # result: {"text": "...", "thread_parts": [...], "hashtags": [...]}
 """
 from __future__ import annotations
 
@@ -36,60 +42,77 @@ class SocialCaptionGenerator:
     # ── Character limits ───────────────────────────────────
 
     LIMITS = {
-        "twitter": 280,        # per tweet
-        "tiktok": 2200,        # caption
-        "instagram": 2200,     # caption
-        "facebook": 63206,     # post text
-        "reddit": 40000,       # post text
+        "twitter_thread": 280,   # per tweet
+        "twitter_hook": 240,     # first tweet (leaves room for 🧵)
+        "tiktok": 150,           # max 150 chars for caption
+        "instagram": 2200,       # caption + hidden hashtags
+        "facebook": 63206,       # post text
+        "reddit": 40000,         # post text
     }
 
-    # ── Platform prompt templates ──────────────────────────
+    # ── Platform prompt templates (v2 — strategy-driven) ────
 
     PLATFORM_PROMPTS = {
         "twitter": (
-            "Eres un creador de contenido viral en Twitter/X. "
-            "Crea un HILO de 4-6 tweets usando este guion de video de YouTube. "
-            "El primer tweet debe ser un gancho IMPACTANTE (max 280 chars). "
-            "Los siguientes tweets desarrollan los puntos clave. "
-            "El ultimo tweet incluye un CTA con el enlace al video completo. "
-            "Usa emojis relevantes. NO uses hashtags excesivos (max 2). "
-            "El tono debe ser intrigante y misterioso.\n\n"
+            "Eres un creador de hilos virales en Twitter/X.\n"
+            "REGLAS ESTRICTAS:\n"
+            "- Genera EXACTAMENTE 5-7 tweets (no mas, no menos).\n"
+            "- Tweet 1: HOOK. Dato increible o pregunta intrigante. Max 240 chars. "
+            "NO incluyas el link aqui.\n"
+            "- Tweets 2 al penultimo: Desarrolla la historia. Un dato o revelacion por tweet. "
+            "Manten el suspense.\n"
+            "- ULTIMO tweet: CTA + link al video. Ej: 'El analisis completo con todos "
+            "los datos en YouTube: [LINK]'.\n"
+            "- Maximo 1 hashtag en total (opcional).\n"
+            "- Cada tweet debe ser autonomo y leerse bien por separado.\n"
+            "- Sin emojis en el primer tweet. Max 1 emoji en los demas.\n"
+            "- Tono: intrigante, objetivo, cero clickbait barato.\n\n"
         ),
         "tiktok": (
-            "Eres un creador de contenido en TikTok. "
-            "Crea un caption corto y ENGANCHE para un clip de 60 segundos de un video mas largo. "
-            "Las primeras 3 palabras son CRITICAS para la retencion (usa 'No creeras...', "
-            "'Esto es real...', 'El secreto de...', etc.). "
-            "Incluye 3-5 hashtags relevantes y populares. "
-            "Termina con un CTA tipo 'Mira el video completo en mi perfil'. "
-            "Max 150 palabras.\n\n"
+            "Eres un creador de contenido en TikTok.\n"
+            "REGLAS ESTRICTAS:\n"
+            "- Caption CORTO: max 150 caracteres (espacios incluidos).\n"
+            "- PRIMERAS 3-5 PALABRAS = gancho (ej: 'Esto es real...', 'No sabias que...', "
+            "'El experimento mas...').\n"
+            "- NUNCA incluyas el link de YouTube. TikTok penaliza links externos.\n"
+            "- CTA suave: 'Video completo en mi perfil' o 'Parte 2 en mi perfil 🔗'.\n"
+            "- 3-5 hashtags de NICHO (no genericos como #fyp #viral).\n"
+            "- Sin emojis en los hashtags. Max 1-2 emojis en total.\n\n"
         ),
         "instagram": (
-            "Eres un creador de contenido en Instagram. "
-            "Crea un caption para un Reel de 60 segundos. "
-            "Empieza con una pregunta intrigante o dato impactante. "
-            "Usa saltos de linea para crear ritmo visual. "
-            "Incluye 5-8 hashtags al final (los 3 primeros de nicho, "
-            "los siguientes de alcance medio, y los ultimos de alto volumen). "
-            "CTA: 'Guarda este reel para verlo despues' o 'Comparte con alguien que deba ver esto'. "
-            "Max 200 palabras.\n\n"
+            "Eres un creador de contenido en Instagram.\n"
+            "REGLAS ESTRICTAS:\n"
+            "- Empieza con una PREGUNTA intrigante o dato impactante.\n"
+            "- Usa saltos de linea (linea en blanco cada 2-3 frases) para ritmo visual.\n"
+            "- NUNCA incluyas el link de YouTube en el caption (no es cliqueable en IG).\n"
+            "- CTA: 'Guarda este reel para verlo despues 🔖' y/o "
+            "'Mira el video completo 👉 Link en bio'.\n"
+            "- 6-8 hashtags: 3 de nicho especifico + 3 de alcance medio + 2 masivos.\n"
+            "- Los hashtags separados del caption con puntos (.) para ocultarlos.\n\n"
         ),
         "facebook": (
-            "Eres un creador de contenido en Facebook. "
-            "Crea un post de texto para compartir un video de YouTube. "
-            "Empieza con una pregunta o dato curioso. "
-            "Resume los 3 puntos clave del video en forma de lista. "
-            "Incluye el enlace al video completo. "
-            "Tono conversacional, cercano. No uses hashtags.\n\n"
+            "Eres un creador de contenido en Facebook.\n"
+            "REGLAS ESTRICTAS:\n"
+            "- Empieza con: 'Sabias que...?' o dato curioso impactante.\n"
+            "- Resume 3 puntos clave del video en formato lista (con emojis de bullet: 🔍 📂 ⚠️).\n"
+            "- INCLUYE el link de YouTube. Facebook SI genera preview card con thumbnail.\n"
+            "- CTA directo: 'Mira el video completo aqui 👇' y luego el link.\n"
+            "- Tono conversacional, cercano, como si hablaras con un amigo.\n"
+            "- CERO hashtags (Facebook los ignora).\n\n"
         ),
         "reddit": (
-            "Eres un usuario de Reddit compartiendo contenido de valor. "
-            "Crea un post de texto para un subreddit de [misterio/historia/ciencia]. "
-            "Empieza con un TL;DR de 1-2 lineas. "
-            "Luego desarrolla el contenido con 3-4 parrafos sustanciales. "
-            "Incluye un enlace al video de YouTube como fuente. "
-            "Tono objetivo, informativo, sin autopromocion obvia. "
-            "NO uses emojis. NO uses hashtags.\n\n"
+            "Eres un usuario de Reddit compartiendo una historia fascinante.\n"
+            "REGLAS ESTRICTAS:\n"
+            "- EMPIEZA con TL;DR: 1-2 lineas resumiendo lo mas impactante.\n"
+            "- Desarrolla 3-5 parrafos sustanciales. Cada parrafo = una idea completa.\n"
+            "- El post DEBE ser valioso por si mismo. Si alguien lee solo el post, "
+            "debe sentir que aprendio algo.\n"
+            "- NO incluyas el link de YouTube. NO hagas autopromocion.\n"
+            "- Solo al final, una mencion SUTIL: 'Investigue este tema para un video. "
+            "Si te interesa profundizar, el analisis completo esta en mi perfil.'\n"
+            "- Tono objetivo, informativo, bien documentado.\n"
+            "- CERO emojis. CERO hashtags. CERO mayusculas innecesarias.\n"
+            "- NO uses 'mira mi video', 'suscribete', ni nada promocional.\n\n"
         ),
     }
 
@@ -107,26 +130,13 @@ class SocialCaptionGenerator:
         channel_niche: str = "",
         channel_tone: str = "",
     ) -> PlatformCaption:
-        """Generate a platform-optimized caption.
-
-        Args:
-            platform: One of 'twitter', 'tiktok', 'instagram', 'facebook', 'reddit'.
-            script_text: The full video script text.
-            video_title: Final YouTube video title.
-            yt_url: YouTube video URL.
-            channel_niche: Channel niche for context (e.g., 'misterio', 'historia').
-            channel_tone: Channel narrative tone.
-
-        Returns:
-            PlatformCaption with text, thread_parts, hashtags, and media_ready flag.
-        """
+        """Generate a platform-optimized caption."""
         platform = platform.lower()
         if platform not in self.PLATFORM_PROMPTS:
             logger.warning("Unknown platform '%s', using generic caption", platform)
             return self._generic_caption(platform, script_text, video_title, yt_url)
 
         try:
-            # Try LLM generation
             result = self._llm_generate(
                 platform, script_text, video_title, yt_url, channel_niche, channel_tone,
             )
@@ -151,21 +161,101 @@ class SocialCaptionGenerator:
 
         user_prompt = (
             f"TITULO DEL VIDEO: {video_title}\n"
-            f"ENLACE: {yt_url}\n\n"
-            f"GUION (primeros 1500 caracteres):\n{script_text[:1500]}\n\n"
+            f"ENLACE DE YOUTUBE: {yt_url}\n\n"
+            f"GUION (primeros 2000 caracteres):\n{script_text[:2000]}\n\n"
         )
 
-        if platform == "twitter":
-            user_prompt += (
-                "Genera un objeto JSON con este formato EXACTO:\n"
-                '{"thread_parts": ["tweet1", "tweet2", ...], "hashtags": ["#tag1", "#tag2"]}\n'
-                "Cada tweet max 280 caracteres."
-            )
-        else:
-            user_prompt += (
-                "Genera un objeto JSON con este formato EXACTO:\n"
-                '{"text": "caption completo", "hashtags": ["#tag1", "#tag2", ...]}\n'
-            )
+        # ── Platform-specific JSON schemas ─────────────────
+
+        schemas = {
+            "twitter": {
+                "schema": (
+                    'Genera un JSON EXACTO con este formato (sin texto fuera del JSON):\n'
+                    '{"thread_parts": [\n'
+                    '  "Tweet 1: HOOK. Max 240 chars. NO incluye link.",\n'
+                    '  "Tweet 2: Desarrollo. Un dato intrigante.",\n'
+                    '  "Tweet 3: Mas desarrollo o giro.",\n'
+                    '  "Tweet 4: Plot twist o revelacion parcial.",\n'
+                    '  "Tweet 5: Cliffhanger.",\n'
+                    '  "Tweet 6: CTA + link al video completo."\n'
+                    '], "hashtags": ["#UnSoloHashtag"]}'
+                ),
+                "parser": lambda p: PlatformCaption(
+                    platform=platform,
+                    text=p.get("thread_parts", [""])[0] if p.get("thread_parts") else "",
+                    thread_parts=p.get("thread_parts", []),
+                    hashtags=p.get("hashtags", [])[:1],
+                ),
+            },
+            "tiktok": {
+                "schema": (
+                    'Genera un JSON EXACTO con este formato (sin texto fuera del JSON):\n'
+                    '{"text": "Gancho en 3-5 palabras + 1 linea de contexto. '
+                    'Max 150 chars TOTALES. NUNCA incluyas link.",\n'
+                    '"hashtags": ["#nicho1", "#nicho2", "#nicho3"]}'
+                ),
+                "parser": lambda p: PlatformCaption(
+                    platform=platform,
+                    text=p.get("text", ""),
+                    hashtags=p.get("hashtags", [])[:5],
+                    media_ready=True,
+                ),
+            },
+            "instagram": {
+                "schema": (
+                    'Genera un JSON EXACTO con este formato (sin texto fuera del JSON):\n'
+                    '{"text": "Pregunta o dato intrigante.\\\\n\\\\n'
+                    'Frase de contexto.\\\\n.\\\\n.\\\\n.\\\\n'
+                    'CTA: Guarda este reel / Link en bio.\\\\n'
+                    'LOS HASHTAGS VAN ABAJO, SEPARADOS POR PUNTOS",\n'
+                    '"hashtags": ["#nicho1", "#nicho2", "#nicho3", '
+                    '"#alcance1", "#alcance2", "#alcance3", "#masivo1", "#masivo2"]}'
+                ),
+                "parser": lambda p: PlatformCaption(
+                    platform=platform,
+                    text=p.get("text", ""),
+                    hashtags=p.get("hashtags", [])[:8],
+                    media_ready=True,
+                ),
+            },
+            "facebook": {
+                "schema": (
+                    'Genera un JSON EXACTO con este formato (sin texto fuera del JSON):\n'
+                    '{"text": "Sabias que...? dato impactante.\\\\n\\\\n'
+                    'Acabo de publicar un video sobre [tema]. Esto descubri:\\\\n\\\\n'
+                    '🔍 Punto 1\\\\n📂 Punto 2\\\\n⚠️ Punto 3\\\\n\\\\n'
+                    'Mira el video completo aqui: [LINK]"}'
+                ),
+                "parser": lambda p: PlatformCaption(
+                    platform=platform,
+                    text=p.get("text", ""),
+                    hashtags=[],
+                ),
+            },
+            "reddit": {
+                "schema": (
+                    'Genera un JSON EXACTO con este formato (sin texto fuera del JSON):\n'
+                    '{"title": "Titulo del post (dato intrigante, max 300 chars)",\n'
+                    '"text": "**TL;DR:** [1-2 lineas].\\\\n\\\\n'
+                    '[Parrafo 1: Contexto].\\\\n\\\\n'
+                    '[Parrafo 2: Detalles impactantes].\\\\n\\\\n'
+                    '[Parrafo 3: Implicaciones].\\\\n\\\\n'
+                    '\\\\n---\\\\n'
+                    'Fuentes:\\\\n- Fuente 1\\\\n- Fuente 2\\\\n'
+                    'Investigue este tema para un video. Si quieres profundizar, '
+                    'el analisis completo esta en mi perfil."}'
+                ),
+                "parser": lambda p: PlatformCaption(
+                    platform=platform,
+                    text=p.get("text", ""),
+                    hashtags=[],
+                ),
+            },
+        }
+
+        schema_info = schemas.get(platform, {})
+        if schema_info:
+            user_prompt += schema_info["schema"]
 
         resp = requests.post(
             f"{AI_BASE_URL}/chat/completions",
@@ -182,7 +272,7 @@ class SocialCaptionGenerator:
                 "temperature": 0.7,
                 "max_tokens": 800,
             },
-            timeout=20,
+            timeout=25,
         )
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -194,93 +284,98 @@ class SocialCaptionGenerator:
 
         parsed = json.loads(json_match.group())
 
-        if platform == "twitter":
-            thread_parts = parsed.get("thread_parts", [])
-            return PlatformCaption(
-                platform=platform,
-                text=thread_parts[0] if thread_parts else "",
-                thread_parts=thread_parts,
-                hashtags=parsed.get("hashtags", []),
-                media_ready=False,
-            )
-        else:
-            return PlatformCaption(
-                platform=platform,
-                text=parsed.get("text", ""),
-                hashtags=parsed.get("hashtags", []),
-                media_ready=platform in ("tiktok", "instagram"),
-            )
+        if schema_info and "parser" in schema_info:
+            return schema_info["parser"](parsed)
 
-    # ── Heuristic fallback ─────────────────────────────────
+        # Generic fallback parser
+        return PlatformCaption(
+            platform=platform,
+            text=parsed.get("text", ""),
+            hashtags=parsed.get("hashtags", []),
+        )
+
+    # ── Heuristic fallback (strategy-aligned) ───────────────
 
     def _heuristic_caption(
         self, platform: str, script_text: str, video_title: str, yt_url: str,
     ) -> PlatformCaption:
-        """Generate a caption without LLM, using the script text directly."""
-        # Extract first meaningful sentences
+        """Generate a caption without LLM, following the exact strategy."""
         sentences = re.split(r'[.!?]+', script_text[:2000])
-        key_points = [s.strip() for s in sentences if len(s.strip()) > 20][:3]
+        key_points = [s.strip() for s in sentences if len(s.strip()) > 20][:5]
 
         if platform == "twitter":
-            # Create a mini-thread from key points
-            thread = [f"🔥 {video_title}\n"]
-            for i, point in enumerate(key_points[:4]):
-                tweet = f"{i+1}/ {point}..."
-                if len(tweet) > 280:
-                    tweet = tweet[:277] + "..."
+            thread = []
+            # Tweet 1: hook
+            hook = f"{key_points[0][:235]}..." if key_points else f"{video_title[:235]} 🧵"
+            thread.append(hook)
+            # Tweets 2-5: development
+            for i, pt in enumerate(key_points[1:4]):
+                tweet = f"{pt[:275]}..." if len(pt) > 275 else pt
                 thread.append(tweet)
-            thread.append(f"🎬 Video completo: {yt_url}")
+            # Last tweet: CTA + link
+            thread.append(f"El analisis completo en YouTube:\n{yt_url}")
             return PlatformCaption(
                 platform=platform,
                 text=thread[0],
                 thread_parts=thread,
-                hashtags=["#YouTube"],
-                media_ready=False,
+                hashtags=[],
             )
 
-        elif platform in ("tiktok", "instagram"):
-            hook_phrases = [
-                "No creeras lo que descubri 🔥",
-                "Esto cambia todo lo que sabias 😱",
-                "El secreto que nadie te cuenta 👀",
-                "Mira esto antes de que lo borren ⚡",
-            ]
-            hook = hook_phrases[hash(video_title) % len(hook_phrases)]
-            text = f"{hook}\n\n{video_title}\n\n"
-            if key_points:
-                text += f"{key_points[0]}...\n\n"
-            text += f"🎬 Video completo en mi perfil — Link en bio"
+        elif platform == "tiktok":
+            hook = key_points[0][:100] if key_points else video_title[:100]
+            text = f"{hook}... 🎬 Video completo en mi perfil"
+            return PlatformCaption(
+                platform=platform,
+                text=text[:150],
+                hashtags=["#misterio", "#curiosidades", "#datos"],
+                media_ready=True,
+            )
+
+        elif platform == "instagram":
+            hook = key_points[0][:120] if key_points else video_title[:120]
+            text = (
+                f"Sabias esto? 🤔\n\n"
+                f"{hook}...\n.\n.\n.\n"
+                f"Guarda este reel para verlo despues 🔖\n"
+                f"Mira el video completo 👉 Link en bio"
+            )
             return PlatformCaption(
                 platform=platform,
                 text=text,
-                hashtags=["#viral", "#curiosidades", "#datoscuriosos"],
+                hashtags=["#misterio", "#historia", "#documental", "#curiosidades", "#datos", "#sabiasque"],
                 media_ready=True,
             )
 
         elif platform == "facebook":
-            text = f"🤔 {video_title}\n\n"
-            for i, point in enumerate(key_points[:3]):
-                text += f"{i+1}. {point}\n"
-            text += f"\n📺 Mira el video completo aqui: {yt_url}"
+            bullets = "\n".join(
+                ["🔍 " + key_points[i] for i in range(min(3, len(key_points)))]
+            ) if key_points else "Descubrelo tu mismo"
+            text = (
+                f"Sabias que {key_points[0][:80].lower() if key_points else 'esto'}? 🤔\n\n"
+                f"Acabo de publicar un video sobre {video_title}.\n"
+                f"Esto fue lo que descubri:\n\n"
+                f"{bullets}\n\n"
+                f"Mira el video completo aqui 👇\n"
+                f"{yt_url}"
+            )
             return PlatformCaption(
-                platform=platform,
-                text=text,
-                hashtags=[],
-                media_ready=False,
+                platform=platform, text=text, hashtags=[],
             )
 
         elif platform == "reddit":
-            text = f"**TL;DR:** {key_points[0] if key_points else video_title}\n\n"
-            text += f"{script_text[:1500]}...\n\n"
-            text += f"[Video completo en YouTube]({yt_url})"
+            tl_dr = key_points[0][:200] if key_points else video_title[:200]
+            body = "\n\n".join(key_points[:4]) if key_points else script_text[:1500]
+            text = (
+                f"**TL;DR:** {tl_dr}\n\n"
+                f"{body}\n\n"
+                f"---\n"
+                f"Investigue este tema para un video. Si te interesa profundizar, "
+                f"el analisis completo esta en mi perfil."
+            )
             return PlatformCaption(
-                platform=platform,
-                text=text,
-                hashtags=[],
-                media_ready=False,
+                platform=platform, text=text, hashtags=[],
             )
 
-        # Generic fallback
         return self._generic_caption(platform, script_text, video_title, yt_url)
 
     def _generic_caption(

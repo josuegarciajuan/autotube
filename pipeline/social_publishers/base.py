@@ -23,6 +23,11 @@ class SocialContent:
     thread_parts: list[str] = field(default_factory=list)  # for Twitter threads
     hashtags: list[str] = field(default_factory=list)
     scheduled_delay_min: int = 0       # how long after go_public this posts
+    link_strategy: str = "none"        # "none" | "bio" | "direct" | "last_tweet"
+    #   "none"        = No link included (Reddit)
+    #   "bio"         = CTA "link in bio", no direct URL (TikTok, Instagram)
+    #   "direct"      = Full URL visible in post (Facebook)
+    #   "last_tweet"  = URL only in final tweet of thread (Twitter/X)
 
 
 # ── SocialPlatform ───────────────────────────────────────
