@@ -83,12 +83,11 @@ class InstagramPublisher(SocialPlatform):
             logger.error("Instagram login error: %s", exc)
             return False
 
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         try:
             await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
 
-            # Click "Create" button (+) on navbar
             create_btn = await page.query_selector(
                 'svg[aria-label="New post"], svg[aria-label="Nueva publicacion"], '
                 'a[href="/reels/create/"]'
@@ -97,25 +96,18 @@ class InstagramPublisher(SocialPlatform):
                 create_btn = await page.query_selector(
                     'div[role="menuitem"]:has-text("Create"), div[role="menuitem"]:has-text("Crear")'
                 )
-
             if create_btn:
                 await create_btn.click()
                 await page.wait_for_timeout(2000)
 
-            # Upload video
             if content.media_path and os.path.exists(content.media_path):
                 file_input = await page.wait_for_selector(
                     'input[type="file"]', timeout=10000,
                 )
                 if file_input:
                     await file_input.set_input_files(content.media_path)
-                    await page.wait_for_timeout(10000)  # Wait for upload + processing
-                    logger.info("Instagram: video uploaded")
-                else:
-                    logger.error("Instagram: file input not found")
-                    return ""
+                    await page.wait_for_timeout(10000)
 
-            # Click "Next" through edit screens (usually 2-3 screens)
             for _ in range(3):
                 await asyncio.sleep(2.0)
                 next_btn = await page.query_selector(
@@ -126,7 +118,6 @@ class InstagramPublisher(SocialPlatform):
                 else:
                     break
 
-            # Fill caption
             try:
                 caption_input = await page.wait_for_selector(
                     'textarea[aria-label*="caption"], div[contenteditable="true"]',
@@ -141,14 +132,19 @@ class InstagramPublisher(SocialPlatform):
             except Exception:
                 pass
 
-            # Click "Share" / "Compartir"
+            if dry_run:
+                os.makedirs("output/social_tests", exist_ok=True)
+                shot = f"output/social_tests/dryrun_instagram_{int(__import__('time').time())}.png"
+                await page.screenshot(path=shot)
+                logger.info("[DRY-RUN] Instagram preview: %s", shot)
+                return f"[DRY-RUN] {shot}"
+
             share_btn = await page.query_selector(
                 'div[role="button"]:has-text("Share"), div[role="button"]:has-text("Compartir")'
             )
             if share_btn:
                 await share_btn.click()
                 await page.wait_for_timeout(8000)
-                logger.info("Instagram: posted")
                 return "https://www.instagram.com"
 
             return ""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from pipeline.social_publishers.base import SocialContent, SocialPlatform, register_publisher
 
@@ -56,13 +57,11 @@ class FacebookPublisher(SocialPlatform):
             logger.error("Facebook login error: %s", exc)
             return False
 
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         try:
-            # Go to profile or page
             await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
 
-            # Click "Create post" / "What's on your mind?"
             create_btn = await page.query_selector(
                 'div[role="button"]:has-text("What"), '
                 'div[aria-label*="Create"], '
@@ -72,7 +71,6 @@ class FacebookPublisher(SocialPlatform):
                 await create_btn.click()
                 await page.wait_for_timeout(1000)
 
-            # Find the text field
             text_field = await page.wait_for_selector(
                 'div[contenteditable="true"], div[role="textbox"]', timeout=5000,
             )
@@ -81,14 +79,19 @@ class FacebookPublisher(SocialPlatform):
                 await text_field.fill(content.text)
                 await asyncio.sleep(1.0)
 
-            # Click "Post"
+            if dry_run:
+                os.makedirs("output/social_tests", exist_ok=True)
+                shot = f"output/social_tests/dryrun_facebook_{int(__import__('time').time())}.png"
+                await page.screenshot(path=shot)
+                logger.info("[DRY-RUN] Facebook preview: %s", shot)
+                return f"[DRY-RUN] {shot}"
+
             post_btn = await page.query_selector(
                 'div[role="button"]:has-text("Post"), div[role="button"]:has-text("Publicar")'
             )
             if post_btn:
                 await post_btn.click()
                 await page.wait_for_timeout(5000)
-                logger.info("Facebook: posted")
                 return "https://www.facebook.com"
 
             return ""
@@ -139,23 +142,18 @@ class RedditPublisher(SocialPlatform):
             logger.error("Reddit login error: %s", exc)
             return False
 
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         try:
-            # Go to submit page
             await page.goto("https://www.reddit.com/submit", wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
 
-            # Fill title
             title_input = await page.wait_for_selector(
                 'textarea[placeholder*="title"], textarea[id*="title"]', timeout=10000,
             )
             if title_input:
-                # Use first line of content as title
                 title = content.text.split("\n")[0][:300] if content.text else "Check this out"
                 await title_input.fill(title)
 
-            # Fill body
-            # Reddit uses a rich text editor; find the contenteditable field
             editor_modes = await page.query_selector(
                 'button:has-text("Markdown"), button:has-text("Switch to Markdown")'
             )
@@ -170,15 +168,19 @@ class RedditPublisher(SocialPlatform):
                 await body_field.fill(content.text)
                 await asyncio.sleep(1.0)
 
-            # Click submit
+            if dry_run:
+                os.makedirs("output/social_tests", exist_ok=True)
+                shot = f"output/social_tests/dryrun_reddit_{int(__import__('time').time())}.png"
+                await page.screenshot(path=shot)
+                logger.info("[DRY-RUN] Reddit preview: %s", shot)
+                return f"[DRY-RUN] {shot}"
+
             submit_btn = await page.query_selector(
                 'button:has-text("Post"), button:has-text("Submit"), button:has-text("Publicar")'
             )
             if submit_btn:
                 await submit_btn.click()
                 await page.wait_for_timeout(5000)
-                logger.info("Reddit: posted")
-                # Try to grab the post URL
                 try:
                     post_link = await page.query_selector('a[data-click-id="body"]')
                     if post_link:
@@ -188,7 +190,6 @@ class RedditPublisher(SocialPlatform):
                 except Exception:
                     pass
                 return "https://www.reddit.com"
-
             return ""
         except Exception as exc:
             logger.error("Reddit publish error: %s", exc)

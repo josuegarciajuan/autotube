@@ -35,9 +35,8 @@ _CHROMIUM_ARGS = [
     "--window-size=1280,900",
 ]
 
-_LAUNCH_OPTIONS = {
+_LAUNCH_OPTIONS_BASE = {
     "args": _CHROMIUM_ARGS,
-    "headless": True,
 }
 
 # ── BrowserSessionManager ──────────────────────────────────
@@ -50,10 +49,11 @@ class BrowserSessionManager:
     per-channel/platform session isolation.
     """
 
-    def __init__(self, user_data_dir: str = None):
+    def __init__(self, user_data_dir: str = None, headless: bool = True):
         self._browser = None
         self._context = None
         self._playwright = None
+        self._headless = headless
         self._user_data_dir = user_data_dir or str(
             Path(__file__).resolve().parent.parent / "browser_data"
         )
@@ -74,8 +74,9 @@ class BrowserSessionManager:
                 "playwright install chromium"
             )
 
+        launch_opts = {**_LAUNCH_OPTIONS_BASE, "headless": self._headless}
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(**_LAUNCH_OPTIONS)
+        self._browser = await self._playwright.chromium.launch(**launch_opts)
         self._context = await self._browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent=(

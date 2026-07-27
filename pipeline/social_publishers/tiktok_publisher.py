@@ -112,18 +112,17 @@ class TikTokPublisher(SocialPlatform):
             logger.error("TikTok login error: %s", exc)
             return False
 
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         """Upload and post a TikTok video with caption."""
         try:
             if not content.media_path or not os.path.exists(content.media_path):
                 logger.error("TikTok publish: no media file at %s", content.media_path)
                 return ""
 
-            # Navigate to creator upload page
             await page.goto(self.UPLOAD_URL, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
 
-            # Upload video file
+            # Upload video
             file_input = await page.wait_for_selector(
                 'input[type="file"][accept*="video"]', timeout=15000,
             )
@@ -131,7 +130,6 @@ class TikTokPublisher(SocialPlatform):
                 await file_input.set_input_files(content.media_path)
                 logger.info("TikTok: video file uploaded, waiting for processing...")
             else:
-                # Alternative: look for upload area
                 upload_area = await page.query_selector('div[class*="upload"]')
                 if upload_area:
                     await upload_area.click()
@@ -140,13 +138,12 @@ class TikTokPublisher(SocialPlatform):
                     if file_input2:
                         await file_input2.set_input_files(content.media_path)
                     else:
-                        logger.error("TikTok: could not find file input after clicking upload")
                         return ""
 
-            # Wait for video processing (TikTok takes 10-30s to process)
+            # Wait for processing
             await page.wait_for_timeout(15000)
 
-            # Try to find and fill caption field
+            # Fill caption
             try:
                 caption_input = await page.wait_for_selector(
                     'div[contenteditable="true"], div[data-placeholder*="caption"]',
@@ -155,20 +152,24 @@ class TikTokPublisher(SocialPlatform):
                 if caption_input:
                     await caption_input.click()
                     await asyncio.sleep(0.5)
-
-                    # Build full caption with hashtags
                     full_caption = content.text
                     if content.hashtags:
                         full_caption += "\n\n" + " ".join(content.hashtags)
-
                     await caption_input.fill(full_caption)
                     await asyncio.sleep(1.0)
-                else:
-                    logger.warning("TikTok: caption field not found, posting without caption")
             except Exception as exc:
                 logger.warning("TikTok: caption fill error: %s", exc)
 
-            # Click "Post" button
+            # Take screenshot for dry-run
+            if dry_run:
+                import os as _os
+                _os.makedirs("output/social_tests", exist_ok=True)
+                shot = f"output/social_tests/dryrun_tiktok_{int(time.time())}.png"
+                await page.screenshot(path=shot)
+                logger.info("[DRY-RUN] TikTok preview: %s", shot)
+                return f"[DRY-RUN] {shot}"
+
+            # Click Post
             await page.wait_for_timeout(1000)
             post_btn = await page.query_selector(
                 'button:has-text("Post"), button:has-text("Publicar"), div[role="button"]:has-text("Post")'
@@ -176,25 +177,17 @@ class TikTokPublisher(SocialPlatform):
             if post_btn:
                 await post_btn.click()
                 await page.wait_for_timeout(5000)
-                logger.info("TikTok: post button clicked")
-            else:
-                logger.warning("TikTok: post button not found")
-                return ""
 
-            # TikTok doesn't give us a direct post URL easily
-            # Return a best-guess URL based on the profile
             try:
                 profile_link = await page.query_selector('a[href*="/@"]')
                 if profile_link:
                     href = await profile_link.get_attribute("href")
                     if href:
-                        tiktok_url = f"https://www.tiktok.com{href}" if not href.startswith("http") else href
-                        logger.info("TikTok posted: profile %s", tiktok_url)
-                        return tiktok_url
+                        return f"https://www.tiktok.com{href}" if not href.startswith("http") else href
             except Exception:
                 pass
 
-            return "https://www.tiktok.com"  # Generic success URL
+            return "https://www.tiktok.com"
 
         except Exception as exc:
             logger.error("TikTok publish error: %s", exc)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from pipeline.social_publishers.base import SocialContent, SocialPlatform, register_publisher
@@ -93,7 +94,7 @@ class TwitterPublisher(SocialPlatform):
             logger.error("Twitter login error: %s", exc)
             return False
 
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         """Post a tweet thread to Twitter/X."""
         try:
             parts = content.thread_parts or [content.text]
@@ -108,11 +109,9 @@ class TwitterPublisher(SocialPlatform):
             post_url = ""
             for i, tweet_text in enumerate(parts):
                 if i > 0:
-                    # Open reply to previous tweet (or new tweet)
                     await page.goto(self.COMPOSE_URL, wait_until="domcontentloaded")
                     await page.wait_for_timeout(1000)
 
-                # Find text input
                 editor = await page.wait_for_selector(
                     'div[data-contents="true"], div[role="textbox"]', timeout=10000,
                 )
@@ -122,23 +121,32 @@ class TwitterPublisher(SocialPlatform):
 
                 await editor.click()
                 await asyncio.sleep(0.5)
-
-                # Type tweet text
                 await editor.fill("")
                 await editor.type(tweet_text, delay=30)
                 await asyncio.sleep(1.0)
 
-                # Add media if first tweet and we have a path
+                # Add media if first tweet
                 if i == 0 and content.media_path:
                     try:
                         file_input = await page.query_selector('input[type="file"]')
                         if file_input:
                             await file_input.set_input_files(content.media_path)
-                            await page.wait_for_timeout(3000)  # Wait for upload
+                            await page.wait_for_timeout(3000)
                     except Exception as exc:
                         logger.warning("Media upload failed: %s", exc)
 
-                # Click "Post" button
+                if dry_run:
+                    logger.info("[DRY-RUN] Would tweet: %s...", tweet_text[:60])
+                    if i == 0:
+                        import os
+                        screenshot_dir = "output/social_tests"
+                        os.makedirs(screenshot_dir, exist_ok=True)
+                        shot = f"{screenshot_dir}/dryrun_twitter_{int(time.time())}.png"
+                        await page.screenshot(path=shot)
+                        return f"[DRY-RUN] {shot}"
+                    continue
+
+                # Click Post
                 post_btn = await page.query_selector(
                     'button[data-testid="tweetButton"], div[role="button"]:has-text("Post")'
                 )
@@ -146,10 +154,8 @@ class TwitterPublisher(SocialPlatform):
                     await post_btn.click()
                     await page.wait_for_timeout(3000)
 
-                    # Get tweet URL
                     if i == 0:
                         try:
-                            # Look for the posted tweet's timestamp link
                             tweet_link = await page.query_selector(
                                 'a[href*="/status/"] time, article a[href*="/status/"]'
                             )
@@ -162,10 +168,11 @@ class TwitterPublisher(SocialPlatform):
 
                 await asyncio.sleep(1.0)
 
+            if dry_run:
+                return f"[DRY-RUN] {len(parts)} tweets previewed"
+
             if post_url:
                 logger.info("Twitter thread posted: %s", post_url)
-            else:
-                logger.warning("Twitter thread posted but URL not captured")
             return post_url
 
         except Exception as exc:

@@ -198,3 +198,90 @@ def update_social_timing(channel_id: int, data: SocialTimingUpdate):
     config["SOCIAL_TIMING"] = social_timing
     db.update_channel(channel_id, config=config)
     return {"ok": True, "social_timing": social_timing}
+
+
+# ── Test connection ─────────────────────────────────────────
+
+@router.post("/{channel_id}/social-accounts/{platform}/test")
+async def test_social_account(channel_id: int, platform: str):
+    """Test login to a social media platform with current credentials.
+
+    Opens a VISIBLE browser (headless=false), attempts login with stored
+    credentials, takes a screenshot, and saves cookies on success.
+
+    Returns {ok, message, screenshot_path, cookies_saved}.
+    """
+    import asyncio
+    import base64
+    import os
+    from pathlib import Path
+
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    platform_lower = platform.lower()
+    acct = db.get_social_account(channel_id, platform_lower)
+    if not acct:
+        raise HTTPException(404, f"No credentials configured for {platform}")
+
+    # Decrypt password
+    from pipeline.social_encryption import get_encryption
+    enc = get_encryption()
+    password = enc.decrypt(acct["encrypted_password"])
+    if not password:
+        raise HTTPException(400, f"Failed to decrypt password for {platform}")
+
+    # Screenshot dir
+    screenshot_dir = Path(__file__).resolve().parent.parent.parent / "output" / "social_tests"
+    os.makedirs(screenshot_dir, exist_ok=True)
+    screenshot_path = str(screenshot_dir / f"login_{platform_lower}_{channel_id}_{int(__import__('time').time())}.png")
+
+    try:
+        from pipeline.social_browser import BrowserSessionManager
+
+        # Use headless=False so user can see what happens (for debugging)
+        async with BrowserSessionManager(headless=False) as bsm:
+            page = await bsm.new_page()
+
+            # Try login
+            result = await bsm.login_and_save(
+                channel_id=channel_id,
+                platform=platform_lower,
+                username=acct["username"],
+                password=password,
+            )
+
+            # Take screenshot regardless of result
+            try:
+                await page.screenshot(path=screenshot_path, full_page=False)
+            except Exception:
+                pass  # Screenshot is best-effort
+
+            if result["success"]:
+                # Save cookies to DB
+                if result.get("cookies_json"):
+                    db.update_social_cookies(acct["id"], result["cookies_json"])
+                    logger.info("Test login OK for %s on %s (cookies saved)", acct["username"], platform_lower)
+                else:
+                    logger.info("Test login OK for %s on %s (no cookies captured)", acct["username"], platform_lower)
+
+                return {
+                    "ok": True,
+                    "message": f"Login exitoso en {platform_lower} como {acct['username']}",
+                    "screenshot_path": screenshot_path,
+                    "cookies_saved": bool(result.get("cookies_json")),
+                }
+            else:
+                db.update_social_error(acct["id"], result.get("error", "Login failed"))
+                return {
+                    "ok": False,
+                    "message": f"Login fallido en {platform_lower}: {result.get('error', 'Unknown error')}",
+                    "screenshot_path": screenshot_path,
+                    "cookies_saved": False,
+                }
+
+    except Exception as exc:
+        db.update_social_error(acct["id"], str(exc)[:1000])
+        raise HTTPException(500, f"Test failed: {exc}")

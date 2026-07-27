@@ -57,15 +57,18 @@ class SocialPlatform(ABC):
         ...
 
     @abstractmethod
-    async def publish(self, page, content: SocialContent) -> str:
+    async def publish(self, page, content: SocialContent, dry_run: bool = False) -> str:
         """Publish content to the platform.
 
         Args:
             page: Playwright Page object (already authenticated).
             content: Content to publish (text, media, etc.).
+            dry_run: If True, navigate and fill fields but do NOT click Post.
+                     Take a screenshot instead.
 
         Returns:
-            URL of the published post on success, empty string on failure.
+            URL of the published post on success, "[DRY-RUN] screenshot_path" if dry_run,
+            empty string on failure.
         """
         ...
 
