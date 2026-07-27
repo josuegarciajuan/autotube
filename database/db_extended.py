@@ -580,6 +580,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v12: dispatch backoff (failed_attempts + last_failed_at on planned_slots) ──
     _migrate_v12(conn, logger)
+
+    # ── v13: fix optimal_publish_slots CHECK constraint (1-3 → 1-5) ──
+    _migrate_v13(conn, logger)
     
     conn.commit()
     conn.close()
@@ -964,6 +967,87 @@ def _migrate_v12(conn, logger):
                 logger.debug("v12 planned_slots.%s: %s", col_name, e)
     conn.commit()
     logger.info("Migration v12: complete")
+
+
+def _migrate_v13(conn, logger):
+    """Idempotent v13 migration: fix optimal_publish_slots CHECK constraint.
+
+    The original v10 migration code had CHECK(slot_rank BETWEEN 1 AND 5)
+    but some databases were created with CHECK(slot_rank BETWEEN 1 AND 3),
+    causing the optimal slots calculator to fail when generating 4 peak slots
+    (NUM_PEAKS_SHORT was 4).
+
+    This migration recreates the table with the correct 1-5 range if the
+    constraint is currently 1-3. Uses table recreation since SQLite doesn't
+    support ALTER TABLE for CHECK constraints.
+    """
+    # Check current constraint
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='optimal_publish_slots'"
+    ).fetchone()
+
+    if not row:
+        logger.debug("Migration v13: optimal_publish_slots doesn't exist yet — skipping")
+        return
+
+    ddl = row[0] or ""
+    if "BETWEEN 1 AND 5" in ddl:
+        logger.debug("Migration v13: constraint already 1-5 — nothing to do")
+        return
+
+    logger.info("Migration v13: fixing optimal_publish_slots CHECK constraint (1-3 → 1-5)")
+
+    # Step 1: create new table with correct constraint
+    conn.execute("""
+        CREATE TABLE optimal_publish_slots_new (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            content_type        TEXT NOT NULL DEFAULT 'long',
+            slot_rank           INTEGER NOT NULL CHECK(slot_rank BETWEEN 1 AND 5),
+            target_hour         INTEGER NOT NULL,
+            target_minute       INTEGER NOT NULL DEFAULT 0,
+            timezone            TEXT NOT NULL,
+            score               REAL DEFAULT 0.0,
+            confidence          REAL DEFAULT 0.0,
+            audience_focus      TEXT DEFAULT 'blend',
+            metrics_snapshot    TEXT DEFAULT '{}',
+            data_sources        TEXT DEFAULT '{}',
+            audience_split      TEXT DEFAULT '{}',
+            calculated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            used_count          INTEGER DEFAULT 0,
+            total_views_result  INTEGER DEFAULT 0,
+            avg_views_result    REAL DEFAULT 0.0,
+            UNIQUE(channel_id, content_type, slot_rank)
+        )
+    """)
+
+    # Step 2: copy data
+    conn.execute(
+        "INSERT INTO optimal_publish_slots_new "
+        "SELECT * FROM optimal_publish_slots"
+    )
+
+    # Step 3: drop old table
+    conn.execute("DROP TABLE optimal_publish_slots")
+
+    # Step 4: rename
+    conn.execute(
+        "ALTER TABLE optimal_publish_slots_new "
+        "RENAME TO optimal_publish_slots"
+    )
+
+    # Step 5: recreate indexes
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_channel "
+        "ON optimal_publish_slots(channel_id, content_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_calculated "
+        "ON optimal_publish_slots(calculated_at)"
+    )
+
+    conn.commit()
+    logger.info("Migration v13: optimal_publish_slots constraint fixed (1-5)")
 
 
 def _migrate_v10(conn, logger):

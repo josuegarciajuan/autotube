@@ -532,7 +532,9 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
     Called every 5 min by the API checker loop.
-    Only dispatches if no job is currently running.
+    Shorts can coexist with long-form generation (AGENTS.md excludes
+    shorts from sequential-only limit). Guarded by: one-short-at-a-time,
+    per-channel cooldown, and minimum RAM threshold.
 
     - For native slots: dispatch immediately
     - For clip slots: check if source long video exists (today, completed)
@@ -551,19 +553,15 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
 
-    # 2. Cancel stale pending slots (>6h past scheduled_at)
+    # 2. Cancel stale pending slots (>4h past scheduled_at)
     _cancel_stale_shorts_slots(db)
 
-    # 3. Global guard: strictly sequential — only ONE job (any type) at a time
-    # Imports _DISPATCH_LOCK to prevent TOCTOU races with long-form dispatchers
-    from api.services.generation_service import _DISPATCH_LOCK
-    with _DISPATCH_LOCK:
-        active_count = db.count_active_jobs()
-        if active_count > 0:
-            logger.info("Shorts dispatch skipped: %d active job(s) — sequential only", active_count)
-            return None
+    # 3. Allowed concurrency: shorts coexist with long-form generation and uploads.
+    #    Per AGENTS.md, shorts are excluded from the sequential-only limit.
+    #    Guards #4 (one short at a time), #5 (min 1GB RAM), and #6 (per-channel
+    #    cooldown) provide sufficient resource protection for low-footprint shorts.
 
-    # 4. Guard: only one SHORT at a time (backup check)
+    # 4. Guard: only one SHORT at a time
     active = db.get_active_shorts_job()
     if active:
         logger.debug("Shorts dispatch skipped: short job #%d is %s", active["id"], active["status"])
@@ -586,7 +584,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     short_type = next_slot.get("short_type", "native")
     scheduled = next_slot.get("scheduled_at", "?")
 
-    # 5.5 Per-channel cooldown guard: enforce minimum spacing between
+    # 7. Per-channel cooldown guard: enforce minimum spacing between
     # same-channel shorts. Prevents rapid-fire dispatch when many
     # slots are past-due (e.g. after server restart generates catch-up slots).
     if not _channel_shorts_cooldown_ok(channel_id, db):
@@ -1379,7 +1377,7 @@ def _sync_running_shorts_slots(db):
 
 
 def _cancel_stale_shorts_slots(db):
-    """Cancel pending shorts slots that are >8h past their scheduled_at (UTC).
+    """Cancel pending shorts slots that are >4h past their scheduled_at (UTC).
     
     Scans ALL dates (not just today) to catch stuck slots from previous days.
     """
@@ -1402,12 +1400,12 @@ def _cancel_stale_shorts_slots(db):
             sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         except (ValueError, TypeError):
             continue
-        if (now_utc - sched).total_seconds() > 8 * 3600:
+        if (now_utc - sched).total_seconds() > 4 * 3600:
             db.update_shorts_slot_status(s["id"], "cancelled")
             cancelled += 1
 
     if cancelled:
-        logger.info("Cancelled %d stale pending shorts slots (>8h past scheduled)", cancelled)
+        logger.info("Cancelled %d stale pending shorts slots (>4h past scheduled)", cancelled)
 
 
 def _memory_ok(min_free_gb: float = 4.0) -> bool:

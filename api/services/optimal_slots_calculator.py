@@ -32,9 +32,9 @@ logger = logging.getLogger("autotube.optimal_slots")
 WEIGHTS_LONG = {"activity": 0.5, "historical": 0.3, "watchtime": 0.2}
 WEIGHTS_SHORT = {"activity": 0.40, "historical": 0.40, "watchtime": 0.2}
 
-# ── Peak counts per content type (v12: 3 long, 4 shorts) ────────
+# ── Peak counts per content type (v12: 3 long, 3 shorts) ────────
 NUM_PEAKS_LONG = 3
-NUM_PEAKS_SHORT = 4
+NUM_PEAKS_SHORT = 3
 
 # ── Peak detection ────────────────────────────────────────────────
 MIN_PEAK_SPACING_HOURS = 3

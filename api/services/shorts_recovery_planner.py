@@ -396,6 +396,36 @@ def auto_recover_shorts(db=None) -> dict:
                     "recovered": len(created), "slots": created,
                 })
 
+        # ── EMERGENCY: 0 published but system thinks "covered" ──
+        # If it's late in the day and the channel hasn't published a single
+        # short, force-create recovery slots even if the "covered" count
+        # looks fine (pending slots may be stuck / blocked from dispatch).
+        EMERGENCY_HOUR = 16  # 4 PM — don't let the day end with 0 shorts
+        if (now_hour >= EMERGENCY_HOUR
+                and published_native == 0
+                and native_covered >= native_target
+                and native_target > 0):
+            emergency_count = min(2, native_target)  # at most 2 emergency slots
+            logger.warning(
+                "[shorts:%s] EMERGENCY: 0 native shorts published by %02d:00 "
+                "(%d pending slots — forcing %d recovery slots)",
+                slug, EMERGENCY_HOUR, len(active_native), emergency_count,
+            )
+            created = _create_recovery_slots(
+                ch_id, slug, today, "native", emergency_count,
+                now_minute_of_day, active_slots, db,
+            )
+            if created:
+                result["recovered_count"] += len(created)
+                if slug not in result["channels_affected"]:
+                    result["channels_affected"].append(slug)
+                result["details"].append({
+                    "channel_id": ch_id, "slug": slug,
+                    "action": "recovered_native_emergency",
+                    "target": native_target, "published": 0,
+                    "recovered": len(created), "slots": created,
+                })
+
         # ── CLIPS: excess → cancel, deficit → ONLY recreate if more longs completed ──
         if clip_covered > clip_target:
             excess = clip_covered - clip_target
