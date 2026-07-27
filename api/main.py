@@ -24,7 +24,7 @@ from api.progress import get_progress_manager
 from api.routers import channels, videos, scenes, jobs, schedules, sources, voices, dashboard, system, ws as ws_router
 from api.routers import auth, planning, shorts
 from api.routers import monetization, milestones, analytics
-from api.routers import promotion, gamification
+from api.routers import promotion, gamification, social_accounts
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
@@ -1176,6 +1176,7 @@ app.include_router(milestones.router, prefix="/api", tags=["Milestones"])
 app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(promotion.router, tags=["Promotion"])
 app.include_router(gamification.router, prefix="/api", tags=["Gamification"])
+app.include_router(social_accounts.router, prefix="/api/channels", tags=["Social Media"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

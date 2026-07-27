@@ -319,6 +319,43 @@ class DashboardStats(BaseModel):
     unused_scripts: int
 
 
+# ── Social Media Accounts ───────────────────────────────────
+
+class SocialAccountCreate(BaseModel):
+    platform: str  # 'tiktok', 'twitter', 'instagram', 'facebook', 'reddit'
+    username: str
+    password: str  # plaintext — server encrypts before storing
+    enabled: bool = True
+
+
+class SocialAccountUpdate(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class SocialAccountResponse(BaseModel):
+    id: int
+    channel_id: int
+    platform: str
+    username: str
+    enabled: bool
+    has_cookies: bool = False
+    last_login_at: Optional[str] = None
+    last_error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class SocialTimingUpdate(BaseModel):
+    """Per-platform delay in minutes after go_public."""
+    tiktok: Optional[int] = None
+    twitter: Optional[int] = None
+    instagram: Optional[int] = None
+    facebook: Optional[int] = None
+    reddit: Optional[int] = None
+
+
 # ── WebSocket Messages ──────────────────────────────────────
 
 class ProgressMessage(BaseModel):

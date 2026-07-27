@@ -286,6 +286,11 @@ export type LifecycleActionType =
   | 'comment_reply_2'
   | 'ctr_check'
   | 'metadata_reoptimize'
+  | 'social_clip_tiktok'
+  | 'social_thread_twitter'
+  | 'social_reel_instagram'
+  | 'social_post_facebook'
+  | 'social_post_reddit'
 
 export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
   playlist_add: 'Añadir a playlists',
@@ -294,7 +299,33 @@ export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
   comment_reply_2: 'Responder comentarios (24h)',
   ctr_check: 'Análisis de CTR',
   metadata_reoptimize: 'Reoptimizar metadata',
+  social_clip_tiktok: 'Publicar clip en TikTok',
+  social_thread_twitter: 'Publicar hilo en Twitter/X',
+  social_reel_instagram: 'Publicar Reel en Instagram',
+  social_post_facebook: 'Publicar en Facebook',
+  social_post_reddit: 'Publicar en Reddit',
 }
+
+export interface SocialAccount {
+  id: number
+  channel_id: number
+  platform: string
+  username: string
+  enabled: boolean
+  has_cookies: boolean
+  last_login_at: string | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const SOCIAL_PLATFORMS = [
+  { id: 'tiktok', label: 'TikTok', icon: '🎵', color: '#ff0050' },
+  { id: 'twitter', label: 'Twitter/X', icon: '𝕏', color: '#1da1f2' },
+  { id: 'instagram', label: 'Instagram', icon: '📷', color: '#e1306c' },
+  { id: 'facebook', label: 'Facebook', icon: '📘', color: '#1877f2' },
+  { id: 'reddit', label: 'Reddit', icon: '🤖', color: '#ff4500' },
+] as const
 
 export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
   pending: '⏳ Pendiente',

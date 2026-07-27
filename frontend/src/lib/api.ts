@@ -46,6 +46,20 @@ export const api = {
   getChannelVideosAggregate: (id: number) => request<any>(`/channels/${id}/videos-aggregate-stats`),
   generateChannelProfile: (id: number) => request<any>(`/channels/${id}/generate-profile`, { method: 'POST' }),
   
+  // Social Media Accounts
+  getSocialAccounts: (channelId: number) => request<any[]>(`/channels/${channelId}/social-accounts`),
+  saveSocialAccount: (channelId: number, platform: string, data: { username: string; password: string; enabled: boolean }) =>
+    request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'PUT', body: JSON.stringify(data) }),
+  updateSocialAccount: (channelId: number, platform: string, data: { username?: string; password?: string; enabled?: boolean }) =>
+    request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteSocialAccount: (channelId: number, platform: string) =>
+    request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'DELETE' }),
+  testSocialLogin: (channelId: number, platform: string) =>
+    request<any>(`/channels/${channelId}/social-accounts/${platform}/test`, { method: 'POST' }),
+  getSocialTiming: (channelId: number) => request<any>(`/channels/${channelId}/social-timing`),
+  updateSocialTiming: (channelId: number, data: Record<string, number>) =>
+    request<any>(`/channels/${channelId}/social-timing`, { method: 'PUT', body: JSON.stringify(data) }),
+  
   // Templates
   generateTemplate: (channelId: number, segmentType: string) =>
     request<any>(`/channels/${channelId}/templates/${segmentType}/generate`, { method: 'POST' }),

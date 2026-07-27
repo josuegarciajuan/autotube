@@ -3,12 +3,17 @@
 After a video is published to YouTube, this module schedules and executes a
 timeline of promotion actions:
 
-  T+1min:   Add video to configured playlists
-  T+5min:   Post engaging first comment
-  T+12h:    Reply to viewer comments (round 1)
-  T+24h:    Reply to viewer comments (round 2)
-  T+48h:    Analyze CTR and performance
-  T+72h:    Re-optimize metadata if CTR is low
+   T+1min:   Add video to configured playlists
+   T+5min:   Post engaging first comment
+   T+12h:    Reply to viewer comments (round 1)
+   T+24h:    Reply to viewer comments (round 2)
+   T+48h:    Analyze CTR and performance
+   T+72h:    Re-optimize metadata if CTR is low
+   T+30min:  TikTok clip (if account configured)
+   T+60min:  Twitter/X thread
+   T+120min: Instagram Reel
+   T+180min: Facebook post
+   T+240min: Reddit post
 
 All actions are idempotent and non-critical — failures don't affect the main
 pipeline. The scheduler in api/main.py processes pending actions every 15 min.
@@ -330,6 +335,51 @@ class VideoLifecycleManager:
             )
             scheduled_count += 1
 
+            # ── 8-12: Social media promotion actions ──
+            # Read per-platform timing from channel config
+            social_timing = self._get_social_timing()
+
+            social_actions = [
+                ("social_clip_tiktok", "tiktok"),
+                ("social_thread_twitter", "twitter"),
+                ("social_reel_instagram", "instagram"),
+                ("social_post_facebook", "facebook"),
+                ("social_post_reddit", "reddit"),
+            ]
+
+            social_config = None
+            if script_text:
+                import json
+                social_config = json.dumps({
+                    "script_text": script_text,
+                    "db_video_id": db_video_id,
+                })
+
+            for action_type, platform_key in social_actions:
+                delay_min = social_timing.get(platform_key, 0)
+                if delay_min <= 0:
+                    # Platform not configured or disabled — skip
+                    continue
+
+                # Check if channel has an enabled account for this platform
+                if not self._has_social_account(platform_key):
+                    logger.debug("[%s] No enabled %s account — skipping %s",
+                                 self.slug, platform_key, action_type)
+                    continue
+
+                social_at = (target_dt + _td(minutes=delay_min)).isoformat()
+                self.db.create_lifecycle_action(
+                    video_id=db_video_id,
+                    action_type=action_type,
+                    channel_id=channel_id,
+                    yt_video_id=yt_video_id,
+                    scheduled_for=social_at,
+                    config_json=social_config,
+                )
+                scheduled_count += 1
+                logger.debug("[%s] Scheduled %s at T+%dmin (%s)",
+                             self.slug, action_type, delay_min, social_at)
+
         else:
             # No target time provided — fallback to wrap-up now
             logger.warning("[%s] No target_public_at — scheduling go_public with warmup only", self.slug)
@@ -492,6 +542,8 @@ class VideoLifecycleManager:
             return self._handle_ctr_check(yt_video_id, db_video_id, action)
         elif action_type == "metadata_reoptimize":
             return self._handle_metadata_reoptimize(yt_video_id, db_video_id, action)
+        elif action_type.startswith("social_"):
+            return self._handle_social_action(yt_video_id, db_video_id, action)
         else:
             logger.warning("[%s] Unknown action_type: %s", self.slug, action_type)
             return False
@@ -931,6 +983,271 @@ class VideoLifecycleManager:
                 _action["id"], "failed",
                 error_message="reoptimization returned no result",
             )
+            return False
+
+    # ── Social media helpers ─────────────────────────────────────
+
+    def _get_social_timing(self) -> dict:
+        """Read per-platform social timing delays from channel config."""
+        try:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(self.slug)
+            social_timing = getattr(config, "SOCIAL_TIMING", None)
+            if social_timing and isinstance(social_timing, dict):
+                return social_timing
+        except Exception:
+            pass
+
+        # Check config_json in DB
+        try:
+            ch = self.db.get_channel_by_slug(self.slug)
+            if ch and ch.get("config_json"):
+                import json
+                cfg = ch["config_json"]
+                if isinstance(cfg, str):
+                    cfg = json.loads(cfg)
+                st = cfg.get("SOCIAL_TIMING", {})
+                if st:
+                    return st
+        except Exception:
+            pass
+
+        # Default delays
+        return {
+            "tiktok": 30,
+            "twitter": 60,
+            "instagram": 120,
+            "facebook": 180,
+            "reddit": 240,
+        }
+
+    def _has_social_account(self, platform: str) -> bool:
+        """Check if the channel has an enabled social account for this platform."""
+        try:
+            ch = self.db.get_channel_by_slug(self.slug)
+            if not ch:
+                return False
+            accounts = self.db.get_enabled_social_accounts(ch["id"])
+            return any(a["platform"] == platform and a["enabled"] for a in accounts)
+        except Exception:
+            return False
+
+    def _handle_social_action(self, yt_video_id: str, db_video_id: int,
+                              action: dict) -> bool:
+        """Handle all social media posting actions.
+
+        Routes to the correct platform publisher based on action_type.
+        """
+        action_type = action["action_type"]
+        platform_map = {
+            "social_clip_tiktok": "tiktok",
+            "social_thread_twitter": "twitter",
+            "social_reel_instagram": "instagram",
+            "social_post_facebook": "facebook",
+            "social_post_reddit": "reddit",
+        }
+        platform = platform_map.get(action_type)
+        if not platform:
+            logger.warning("[%s] Unknown social action type: %s", self.slug, action_type)
+            return False
+
+        try:
+            import asyncio
+            result = asyncio.run(self._publish_social_post(
+                action, platform, yt_video_id, db_video_id,
+            ))
+            return result
+        except RuntimeError as exc:
+            # If already in an event loop, use create_task
+            if "This event loop is already running" in str(exc):
+                import nest_asyncio
+                try:
+                    nest_asyncio.apply()
+                    result = asyncio.run(self._publish_social_post(
+                        action, platform, yt_video_id, db_video_id,
+                    ))
+                    return result
+                except ImportError:
+                    logger.error("[%s] nest_asyncio not available for social publish", self.slug)
+                    return False
+            logger.error("[%s] Event loop error for %s: %s", self.slug, platform, exc)
+            return False
+        except Exception as exc:
+            logger.error("[%s] Social publish failed for %s: %s", self.slug, platform, exc)
+            self.db.update_lifecycle_action_status(
+                action["id"], "failed", error_message=str(exc)[:500],
+            )
+            return False
+
+    async def _publish_social_post(self, action: dict, platform: str,
+                                    yt_video_id: str, db_video_id: int) -> bool:
+        """Publish content to a social media platform."""
+        # ── 1. Get account credentials ──
+        ch = self.db.get_channel_by_slug(self.slug)
+        if not ch:
+            logger.error("[%s] Channel not found for social publish", self.slug)
+            return False
+
+        acct = self.db.get_social_account(ch["id"], platform)
+        if not acct or not acct.get("enabled"):
+            logger.info("[%s] No enabled %s account — skipping", self.slug, platform)
+            self.db.update_lifecycle_action_status(action["id"], "skipped",
+                                                    error_message=f"no enabled {platform} account")
+            return True  # Not a failure — just skipped
+
+        # ── 2. Decrypt password ──
+        from pipeline.social_encryption import get_encryption
+        enc = get_encryption()
+        password = enc.decrypt(acct["encrypted_password"])
+        if not password:
+            logger.error("[%s] Failed to decrypt %s password", self.slug, platform)
+            return False
+
+        # ── 3. Get video metadata ──
+        video = self.db.get_video(db_video_id)
+        video_title = video.get("titulo_final", "") if video else ""
+        yt_url = f"https://youtu.be/{yt_video_id}" if yt_video_id else ""
+
+        # Get script text for caption generation
+        script_text = ""
+        if action.get("config_json"):
+            import json
+            try:
+                cfg = json.loads(action["config_json"])
+                script_text = cfg.get("script_text", "")
+            except Exception:
+                pass
+
+        # ── 4. Generate caption ──
+        from pipeline.social_caption_generator import SocialCaptionGenerator
+        cap_gen = SocialCaptionGenerator()
+        channel_niche = ""
+        try:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(self.slug)
+            channel_niche = getattr(config, "SEO_PRIMARY_KEYWORD", "")
+        except Exception:
+            pass
+
+        caption = cap_gen.generate(
+            platform=platform,
+            script_text=script_text,
+            video_title=video_title,
+            yt_url=yt_url,
+            channel_niche=channel_niche,
+        )
+
+        # ── 5. Create social post log ──
+        log_id = self.db.create_social_post_log(
+            video_id=db_video_id,
+            channel_id=ch["id"],
+            platform=platform,
+            account_id=acct["id"],
+            lifecycle_action_id=action["id"],
+            caption_text=caption.text[:2000],
+            status="publishing",
+        )
+
+        # ── 6. Generate clip if needed (TikTok, Instagram) ──
+        clip_path = ""
+        if platform in ("tiktok", "instagram") and caption.media_ready:
+            try:
+                from pipeline.social_clip_extractor import SocialClipExtractor
+                extractor = SocialClipExtractor()
+
+                # Find the video file path
+                video_path = video.get("file_path") if video else None
+                if not video_path or not os.path.exists(video_path):
+                    # Try to find in output dir
+                    from config.settings import OUTPUT_DIR
+                    pattern = OUTPUT_DIR / "videos" / self.slug / f"*{db_video_id}*"
+                    import glob
+                    candidates = glob.glob(str(pattern))
+                    if candidates:
+                        video_path = candidates[0]
+
+                if video_path and os.path.exists(video_path):
+                    clip_output = OUTPUT_DIR / "social_clips" / self.slug
+                    os.makedirs(clip_output, exist_ok=True)
+                    clip_path = str(clip_output / f"social_{platform}_{db_video_id}.mp4")
+
+                    # Use ffmpeg to extract a 60s clip from the middle
+                    import subprocess
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", video_path],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    total_duration = float(probe.stdout.strip() or 120)
+                    start = max(0, (total_duration / 2) - 30)
+                    duration = min(60, total_duration - start)
+
+                    extractor.extract_clip(
+                        video_path, start, duration, clip_path,
+                        subtitle_text=caption.text[:200],
+                    )
+                    logger.info("[%s] Generated social clip: %s", self.slug, clip_path)
+                else:
+                    logger.warning("[%s] No video file found for social clip", self.slug)
+            except Exception as exc:
+                logger.warning("[%s] Clip generation failed (non-fatal): %s", self.slug, exc)
+
+        # ── 7. Publish via browser ──
+        from pipeline.social_browser import BrowserSessionManager
+        from pipeline.social_publishers.base import SocialContent, get_publisher
+
+        publish_content = SocialContent(
+            platform=platform,
+            text=caption.text,
+            media_path=clip_path,
+            yt_url=yt_url,
+            thread_parts=caption.thread_parts,
+            hashtags=caption.hashtags,
+        )
+
+        try:
+            async with BrowserSessionManager() as bsm:
+                page = await bsm.new_page()
+
+                # Load existing cookies
+                if acct.get("cookies_json"):
+                    await bsm.load_cookies(page, acct["cookies_json"])
+
+                publisher = get_publisher(platform)
+                post_url = await publisher.publish(page, publish_content)
+
+                if post_url:
+                    # Save updated cookies
+                    new_cookies = await bsm.save_cookies(page)
+                    if new_cookies:
+                        self.db.update_social_cookies(acct["id"], new_cookies)
+
+                    # Update social post log
+                    self.db.update_social_post_result(
+                        log_id, "published", post_url=post_url,
+                    )
+
+                    # Update lifecycle action
+                    import json
+                    self.db.update_lifecycle_action_status(
+                        action["id"], "executed",
+                        result_json=json.dumps({"post_url": post_url, "platform": platform}),
+                    )
+                    logger.info("[%s] Published to %s: %s", self.slug, platform, post_url)
+                    return True
+                else:
+                    self.db.update_social_post_result(
+                        log_id, "failed", error_message="publish returned no URL",
+                    )
+                    self.db.update_social_error(acct["id"], "publish returned no URL")
+                    return False
+
+        except Exception as exc:
+            logger.error("[%s] Browser publish failed for %s: %s", self.slug, platform, exc)
+            self.db.update_social_post_result(
+                log_id, "failed", error_message=str(exc)[:2000],
+            )
+            self.db.update_social_error(acct["id"], str(exc)[:1000])
             return False
 
     # ════════════════════════════════════════════════════════════

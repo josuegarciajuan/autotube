@@ -9,7 +9,8 @@ import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
 import WatchTimeChart from '../components/WatchTimeChart'
 import HorariosTab from '../components/HorariosTab'
-import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType } from '../types/channel'
+import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType, SOCIAL_PLATFORMS } from '../types/channel'
+import SocialAccountsPanel from '../components/SocialAccountsPanel'
 
 // ── PromotionTab (inline component) ─────────────────────────
 
@@ -1866,6 +1867,11 @@ export default function ChannelDetail() {
             {editingConfig ? ' Editando configuración. Guarda los cambios al terminar.' : ' Para editar, haz clic en "Editar". O modifica config.py y haz "Sync Python".'}
           </p>
         </div>
+      )}
+
+      {/* Social Media Accounts */}
+      {showConfig && channel?.id && (
+        <SocialAccountsPanel channelId={channel.id} />
       )}
 
       {/* --- Auth Modal --- */}

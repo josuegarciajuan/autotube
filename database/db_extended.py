@@ -583,6 +583,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v13: fix optimal_publish_slots CHECK constraint (1-3 → 1-5) ──
     _migrate_v13(conn, logger)
+
+    # ── v14: social media accounts & post log ──
+    _migrate_v14(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1048,6 +1051,20 @@ def _migrate_v13(conn, logger):
 
     conn.commit()
     logger.info("Migration v13: optimal_publish_slots constraint fixed (1-5)")
+
+
+def _migrate_v14(conn, logger):
+    """Idempotent v14 migration: social media accounts & post log tables."""
+    import os
+    schema_v14 = Path(__file__).parent / "schema_v14.sql"
+    if schema_v14.exists():
+        logger.debug("Migration v14: running schema_v14.sql")
+        with open(schema_v14) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v14: social media tables created")
+    else:
+        logger.warning("Migration v14: schema_v14.sql not found")
 
 
 def _migrate_v10(conn, logger):
@@ -5038,6 +5055,126 @@ class ExtendedDatabase(Database):
                      value = excluded.value,
                      updated_at = excluded.updated_at""",
                 (key, value),
+            )
+            conn.commit()
+
+    # ── Social Media Accounts ──────────────────────────────────
+
+    def get_channel_social_accounts(self, channel_id: int) -> list[dict]:
+        """Get all social accounts for a channel (passwords still encrypted)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM channel_social_accounts WHERE channel_id = ? ORDER BY platform",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_social_account(self, channel_id: int, platform: str) -> dict | None:
+        """Get a single social account by channel and platform."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM channel_social_accounts WHERE channel_id = ? AND platform = ?",
+                (channel_id, platform),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_social_account(
+        self, channel_id: int, platform: str, username: str,
+        encrypted_password: str, enabled: bool = True,
+    ) -> bool:
+        """Insert or update a social media account credential."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO channel_social_accounts
+                   (channel_id, platform, username, encrypted_password, enabled, updated_at)
+                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(channel_id, platform) DO UPDATE SET
+                   username = excluded.username,
+                   encrypted_password = excluded.encrypted_password,
+                   enabled = excluded.enabled,
+                   updated_at = CURRENT_TIMESTAMP""",
+                (channel_id, platform, username, encrypted_password, int(enabled)),
+            )
+            conn.commit()
+        return True
+
+    def delete_social_account(self, channel_id: int, platform: str) -> bool:
+        """Delete a social media account. Returns True if deleted."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM channel_social_accounts WHERE channel_id = ? AND platform = ?",
+                (channel_id, platform),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_social_cookies(self, account_id: int, cookies_json: str) -> None:
+        """Update saved browser cookies for a social account."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_social_accounts SET cookies_json = ?, last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (cookies_json, account_id),
+            )
+            conn.commit()
+
+    def update_social_error(self, account_id: int, error_message: str) -> None:
+        """Record the last error for a social account."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_social_accounts SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (error_message[:1000], account_id),
+            )
+            conn.commit()
+
+    def get_enabled_social_accounts(self, channel_id: int) -> list[dict]:
+        """Get only enabled social accounts with credentials for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM channel_social_accounts WHERE channel_id = ? AND enabled = 1",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Social Post Log ───────────────────────────────────────
+
+    def create_social_post_log(
+        self, video_id: int, channel_id: int, platform: str,
+        account_id: int = None, lifecycle_action_id: int = None,
+        caption_text: str = None, clip_path: str = None, status: str = "pending",
+    ) -> int:
+        """Create a log entry for a social media post. Returns the log ID."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO social_post_log
+                   (video_id, channel_id, platform, account_id, lifecycle_action_id,
+                    caption_text, clip_path, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (video_id, channel_id, platform, account_id, lifecycle_action_id,
+                 caption_text, clip_path, status),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_social_post_result(
+        self, log_id: int, status: str, post_url: str = None,
+        post_id: str = None, error_message: str = None,
+    ) -> None:
+        """Update a social post log with result."""
+        with self._connect() as conn:
+            fields = ["status = ?"]
+            values = [status]
+            if post_url is not None:
+                fields.append("post_url = ?"); values.append(post_url)
+            if post_id is not None:
+                fields.append("post_id = ?"); values.append(post_id)
+            if error_message is not None:
+                fields.append("error_message = ?"); values.append(error_message[:2000])
+            if status == "published":
+                fields.append("published_at = CURRENT_TIMESTAMP")
+            values.append(log_id)
+            conn.execute(
+                f"UPDATE social_post_log SET {', '.join(fields)} WHERE id = ?",
+                values,
             )
             conn.commit()
 
