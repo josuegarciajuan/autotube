@@ -1375,42 +1375,7 @@ async def serve_video_file(video_id: int, request: Request):
             return RedirectResponse(url=yt_url, status_code=302)
         raise HTTPException(404, "Video file not found on disk")
     
-    file_size = video_path.stat().st_size
-
-    file_size = video_path.stat().st_size
-    range_header = request.headers.get("range")
-
-    if range_header:
-        # Parse range header
-        start_str, end_str = range_header.replace("bytes=", "").split("-")
-        start = int(start_str)
-        end = int(end_str) if end_str else file_size - 1
-        chunk_size = end - start + 1
-
-        async def ranged_stream():
-            with open(video_path, "rb") as f:
-                f.seek(start)
-                bytes_sent = 0
-                while bytes_sent < chunk_size:
-                    buf = f.read(min(65536, chunk_size - bytes_sent))
-                    if not buf:
-                        break
-                    bytes_sent += len(buf)
-                    yield buf
-
-        return StreamingResponse(
-            ranged_stream(),
-            status_code=206,
-            media_type="video/mp4",
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(chunk_size),
-                **NO_CACHE_MEDIA,
-            },
-        )
-    else:
-        return FileResponse(video_path, media_type="video/mp4", headers=NO_CACHE_MEDIA)
+    return FileResponse(video_path, media_type="video/mp4", headers=NO_CACHE_MEDIA)
 
 
 @app.get("/api/thumbnail/{video_id}")
@@ -1463,38 +1428,6 @@ async def serve_template_file(channel_id: int, segment_type: str, request: Reque
     video_path = resolve_media_path(tpl["video_path"])
     if video_path is None or not video_path.exists():
         raise HTTPException(404, "Template file not found on disk")
-
-    file_size = video_path.stat().st_size
-    range_header = request.headers.get("range")
-
-    if range_header:
-        start_str, end_str = range_header.replace("bytes=", "").split("-")
-        start = int(start_str)
-        end = int(end_str) if end_str else file_size - 1
-        chunk_size = end - start + 1
-
-        async def ranged_stream():
-            with open(video_path, "rb") as f:
-                f.seek(start)
-                bytes_sent = 0
-                while bytes_sent < chunk_size:
-                    buf = f.read(min(65536, chunk_size - bytes_sent))
-                    if not buf:
-                        break
-                    bytes_sent += len(buf)
-                    yield buf
-
-        return StreamingResponse(
-            ranged_stream(),
-            status_code=206,
-            media_type="video/mp4",
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(chunk_size),
-                **NO_CACHE_MEDIA,
-            },
-        )
 
     return FileResponse(video_path, media_type="video/mp4", headers=NO_CACHE_MEDIA)
 
