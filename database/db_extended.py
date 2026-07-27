@@ -2955,31 +2955,66 @@ class ExtendedDatabase(Database):
                         round((aggr["watch_minutes"] or 0) / 60.0, 1)
                     )
 
-            # ── Recent published videos (last 10, all statuses) ──
+            # ── Helper: build action history from timestamps ──
+            def _build_action_history(row_dict: dict) -> list:
+                history = []
+                if row_dict.get("generation_started_at"):
+                    history.append({"action": "Generándose", "date": str(row_dict["generation_started_at"])})
+                if row_dict.get("generation_finished_at"):
+                    history.append({"action": "Generado", "date": str(row_dict["generation_finished_at"])})
+                if row_dict.get("uploaded_at"):
+                    history.append({"action": "Subido", "date": str(row_dict["uploaded_at"])})
+                if row_dict.get("published_at"):
+                    history.append({"action": "Publicado", "date": str(row_dict["published_at"])})
+                return history
+
+            # ── Recent videos (last 10), ordered by most recent action ──
             rec_where = "AND v.channel_id = ?" if channel_id else ""
-            recent_videos = conn.execute(
-                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
-                           v.status, c.name as channel_name, c.slug as channel_slug
+            recent_videos_rows = conn.execute(
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
+                           v.uploaded_at, v.published_at,
+                           v.generation_started_at, v.generation_finished_at,
+                           v.status, v.created_at,
+                           c.name as channel_name, c.slug as channel_slug
                     FROM videos v
                     JOIN channels c ON v.channel_id = c.id
                     WHERE 1=1 {rec_where}
-                    ORDER BY COALESCE(v.uploaded_at, v.created_at) DESC
+                    ORDER BY COALESCE(v.published_at, v.uploaded_at,
+                                     v.generation_finished_at, v.generation_started_at,
+                                     v.created_at) DESC
                     LIMIT 10""",
                 ch_params,
             ).fetchall()
+            recent_videos = []
+            for r in recent_videos_rows:
+                d = dict(r)
+                d["action_history"] = _build_action_history(d)
+                recent_videos.append(d)
 
-            # ── Videos published today (last 10, all statuses) ──
-            today_videos = conn.execute(
-                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg, v.uploaded_at,
-                           v.status, c.name as channel_name, c.slug as channel_slug
+            # ── Videos with activity today, ordered by most recent action ──
+            today_videos_rows = conn.execute(
+                f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
+                           v.uploaded_at, v.published_at,
+                           v.generation_started_at, v.generation_finished_at,
+                           v.status, v.created_at,
+                           c.name as channel_name, c.slug as channel_slug
                     FROM videos v
                     JOIN channels c ON v.channel_id = c.id
-                    WHERE COALESCE(v.uploaded_at, v.created_at) >= datetime('now', 'localtime', '-1 day')
+                    WHERE COALESCE(v.published_at, v.uploaded_at,
+                                  v.generation_finished_at, v.generation_started_at,
+                                  v.created_at) >= datetime('now', 'localtime', '-1 day')
                       {rec_where}
-                    ORDER BY COALESCE(v.uploaded_at, v.created_at) DESC
+                    ORDER BY COALESCE(v.published_at, v.uploaded_at,
+                                     v.generation_finished_at, v.generation_started_at,
+                                     v.created_at) DESC
                     LIMIT 10""",
                 ch_params,
             ).fetchall()
+            today_videos = []
+            for r in today_videos_rows:
+                d = dict(r)
+                d["action_history"] = _build_action_history(d)
+                today_videos.append(d)
 
             # ── Recent shorts (last 10, all statuses) ──
             recs_where = "AND s.channel_id = ?" if channel_id else ""
@@ -3103,9 +3138,9 @@ class ExtendedDatabase(Database):
             "shorts_pipeline": shorts_pipeline_data,
             "upcoming": [dict(r) for r in upcoming],
             "top_videos": [dict(r) for r in top_videos],
-            "recent_videos": [dict(r) for r in recent_videos],
+            "recent_videos": recent_videos,
             "recent_shorts": [dict(r) for r in recent_shorts],
-            "today_videos": [dict(r) for r in today_videos],
+            "today_videos": today_videos,
             "ypp_progress": channels_data,
             "revenue_overview": {
                 "total_min": round(total_revenue_min, 2),
