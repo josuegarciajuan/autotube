@@ -55,7 +55,7 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
   };
 
   const handleCancel = async () => {
-    if (!confirm('¿Cancelar la publicación programada? El vídeo se quedará en privado.')) return;
+    if (!confirm('¿Cancelar la publicación programada? El vídeo se quedará como no listado.')) return;
     setCancelling(true);
     try {
       await api.cancelSchedule(videoId);
@@ -97,7 +97,7 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
         {video.uploaded_at && (
           <div className="flex items-center gap-2 text-gray-400">
             <span className="w-2 h-2 rounded-full bg-cyan-500" />
-            Subido como privado: {new Date(video.uploaded_at).toLocaleString('es-ES')}
+            Subido como no listado: {new Date(video.uploaded_at).toLocaleString('es-ES')}
           </div>
         )}
 

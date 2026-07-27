@@ -300,7 +300,7 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
   )
 }
 
-// ── Card: Warming (uploaded private) ─────────────────────────
+// ── Card: Warming (uploaded unlisted) ────────────────────────
 function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualToggle: (videoId: number, item: string, done: boolean) => void }) {
   const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
 
@@ -743,7 +743,7 @@ export default function PipelineView() {
 
       {/* ── Column 4: Warming ─────────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Lock} title="En privado (calentando)" count={warming.length} colorClass="text-amber-400" />
+        <ColumnHeader icon={Lock} title="No listado (calentando)" count={warming.length} colorClass="text-amber-400" />
         {warming.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos en calentamiento</p>
         ) : (

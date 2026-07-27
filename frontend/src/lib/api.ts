@@ -523,7 +523,7 @@ export function statusLabel(status: string): string {
     uploading: 'Subiendo...',
     uploaded: 'Subido',
     error: 'Error',
-    uploaded_private: 'Subido (privado)',
+    uploaded_private: 'Subido (no listado)',
     warming: 'Calentando',
     scheduled: 'Programado',
     published: 'Publicado',

@@ -1111,7 +1111,7 @@ def run_job(
 
                 if pub_mode == "scheduled":
                     tp = video_record.get("target_public_at", "?") if video_record else "?"
-                    logger.info("📤 SUBIDO (privado): %s | se hará público: %s UTC", yt_url, tp)
+                    logger.info("📤 SUBIDO (no listado): %s | se hará público: %s UTC", yt_url, tp)
                     # ── Schedule lifecycle actions (go_public, playlist, comments) ──
                     try:
                         from pipeline.video_lifecycle import VideoLifecycleManager

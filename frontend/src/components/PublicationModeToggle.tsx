@@ -74,7 +74,7 @@ export default function PublicationModeToggle({ channelId, currentMode, onToggle
             <div className="space-y-3 text-sm text-gray-400 mb-6">
               <div className="flex items-start gap-2">
                 <AlertCircle size={14} className="text-neon-gold mt-0.5 flex-shrink-0" />
-                <p>Los vídeos de este canal se subirán como <strong className="text-white">privados</strong> en lugar de públicos.</p>
+                <p>Los vídeos de este canal se subirán como <strong className="text-white">no listados</strong> en lugar de públicos.</p>
               </div>
               <div className="flex items-start gap-2">
                 <Clock size={14} className="text-neon-gold mt-0.5 flex-shrink-0" />

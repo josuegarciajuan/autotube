@@ -2138,7 +2138,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             except Exception:
                 pass
 
-            await _broadcast_progress(job_id, 100, "upload", f"Subido (privado): {yt_url}",
+            await _broadcast_progress(job_id, 100, "upload", f"Subido (no listado): {yt_url}",
                                        "completed", video_id)
             logger.info("[%s] F2 upload complete: %s (pub scheduled for %s)",
                          canal, yt_url, target_public_at)

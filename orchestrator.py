@@ -1482,7 +1482,7 @@ class PipelineOrchestrator:
                         db=self.db,
                         channel_id=channel_id,
                     )
-                upload_privacy = "private"
+                upload_privacy = "unlisted"
                 # ── Log resumido para el log principal ──
                 target_utc = publish_schedule_info["target_public_at"]
                 # Calculate local time equivalent
@@ -1496,7 +1496,7 @@ class PipelineOrchestrator:
                 except Exception:
                     pass
                 logger.info(
-                    "[%s] 📤 SUBIDO COMO PRIVADO | público programado: %s%s | "
+                    "[%s] 📤 SUBIDO COMO NO LISTADO | público programado: %s%s | "
                     "peak=%d (src=%s) | warmup=%dmin | jitter=%+dmin",
                     self.canal,
                     target_utc[:19], local_info,
@@ -1510,7 +1510,7 @@ class PipelineOrchestrator:
                     from api.services.scheduled_publish_logger import log_publish_event
                     video_title = video_data.get("titulo", "?") if video_data else "?"
                     log_publish_event(
-                        event="uploaded_private",
+                        event="uploaded_unlisted",
                         slug=self.canal,
                         video_title=video_title[:80],
                         yt_video_id="(pending)",
