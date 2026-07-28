@@ -606,21 +606,21 @@ THUMBNAIL_MANUAL_STYLE = {
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.25,    # boosted for viral impact
-        "saturation": 1.50,        # vibrant, NOT desaturated
-        "vignette": 0.40,          # deeper drama
+        "contrast_boost": 1.15,    # moderate — clinical but natural
+        "saturation": 0.95,        # balanced — professional, not garish
+        "vignette": 0.35,          # subtle focus
     },
     "text_style": {
         "uppercase": True,
         "max_words": 4,
     },
     "pollo_prompt_suffix": (
-        "dramatic medical imagery, human anatomy close-ups, DNA helix "
+        "professional medical photography, human anatomy close-ups, DNA helix "
         "visualization, cellular structures under microscope, X-ray aesthetic, "
-        "surgical lighting with dramatic shadows, heart monitor ECG waveforms, "
-        "viral YouTube medical thumbnail aesthetic, high contrast, bold vivid "
-        "colors, 16:9 aspect ratio, photorealistic, no text overlay, no gore, "
-        "no explicit blood or open wounds, medical drama documentary style"
+        "clinical lighting with soft shadows, heart monitor ECG waveforms, "
+        "scientific documentary style, 16:9 aspect ratio, photorealistic, "
+        "no text overlay, no gore, no explicit blood or open wounds, "
+        "medical journal quality photography"
     ),
 }
 
@@ -883,15 +883,19 @@ THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
 # ── Medical-themed overlays (clinical_mystery style) ──────────
 THUMBNAIL_MEDICAL_ECG = True             # ECG heartbeat waveform across bottom
-THUMBNAIL_MEDICAL_CROSS = True           # medical cross (+) glowing stamp
-THUMBNAIL_MEDICAL_DIAGNOSIS = True       # "DIAGNÓSTICO" badge pill
+THUMBNAIL_MEDICAL_CROSS = False          # disabled — reduces visual clutter
+THUMBNAIL_MEDICAL_DIAGNOSIS = False      # disabled — reduces visual clutter
 
-# ── Per-channel concept directive (overrides default surprised-face pattern) ──
-THUMBNAIL_ALLOW_FACES = False
+# ── Per-channel concept directive ──
+# Allow faces for emotional connection (doctor/patient expressions)
+THUMBNAIL_ALLOW_FACES = True
 THUMBNAIL_CONCEPT_DIRECTIVE = (
-    "Este es un canal medico. NUNCA usar rostros AI con sorpresa/shock/miedo/asombro. "
-    "Usar SOLO imagenes clinicas y cientificas de alto impacto: primeros planos anatomicos, "
-    "radiografias y resonancias magneticas con iluminacion dramatica, helices de ADN, "
+    "Canal medico-cientifico. El rostro humano PUEDE aparecer con expresion de "
+    "preocupacion/asombro PROFESIONAL (medico mirando un diagnostico, paciente con "
+    "expresion de alivio o intriga). Evitar expresiones exageradas tipo MrBeast. "
+    "Priorizar imagenes clinicas y cientificas de alto impacto: primeros planos "
+    "anatomicos, radiografias y resonancias magneticas con iluminacion dramatica, "
+    "helices de ADN, "
     "estructuras celulares al microscopio, monitores cardiacos ECG, instrumental quirurgico, "
     "siluetas humanas contra luz clinica fria, manos sosteniendo diagnosticos, "
     "tubos de ensayo y laboratorios, X-rays y tomografias. Estilo documental medico "

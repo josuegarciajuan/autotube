@@ -872,19 +872,19 @@ THUMBNAIL_MANUAL_STYLE = {
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.30,     # was 1.1 — dramatic impact for scroll-stopping
-        "saturation": 1.10,         # was 0.8 — vivid colors, NOT washed out
-        "vignette": 0.40,          # was 0.35 — stronger focus on subject
+        "contrast_boost": 1.15,     # moderate — natural cinematic look (canal3-style)
+        "saturation": 0.85,         # slightly desaturated — elegant, not garish
+        "vignette": 0.35,           # subtle — draws eye without darkening image
     },
     "text_style": {
         "uppercase": False,
         "max_words": 5,
     },
     "pollo_prompt_suffix": (
-        "dramatic lighting, high contrast, mysterious atmosphere, "
-        "warm golden accents, cinematic depth, viral YouTube thumbnail "
-        "aesthetic, bold vivid colors, photorealistic, 16:9 aspect ratio, "
-        "professional photography, golden hour glow, intense shadows"
+        "soft cinematic lighting, mysterious atmosphere, warm golden accents, "
+        "contemplative mood, golden hour glow, subtle color grading, artistic "
+        "photography, 16:9 aspect ratio, photorealistic, professional documentary "
+        "photography, rich textures, atmospheric depth"
     ),
 }
 

@@ -132,7 +132,68 @@ class ThumbnailMaker:
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
         self.font_small = _find_font(int(self.font_size * 0.65), bold=True,
-                                     font_name=self.font_family)
+                                      font_name=self.font_family)
+
+    # ── Layout-driven composition profiles ──────────────────────
+    # Each layout maps to a set of visual complexity flags.
+    # The F4 composition engine reads this dict to decide which
+    # elements (insets, badge, border weight, gradient opacity,
+    # vignette strength, number of text lines) are applied.
+    LAYOUT_COMPOSITION: dict = {
+        "shock_closeup": {
+            "show_insets": False,
+            "show_badge": False,
+            "show_border": True,
+            "border_width_factor": 0.5,
+            "gradient_opacity": 120,
+            "gradient_start_pct": 0.35,
+            "text_lines": 1,
+            "vignette_strength": 0.4,
+        },
+        "dark_reveal": {
+            "show_insets": True,
+            "inset_count": 1,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 0.7,
+            "gradient_opacity": 160,
+            "gradient_start_pct": 0.45,
+            "text_lines": 2,
+            "vignette_strength": 0.6,
+        },
+        "split_face": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 1.0,
+            "gradient_opacity": 140,
+            "gradient_start_pct": 0.40,
+            "text_lines": 2,
+            "vignette_strength": 0.5,
+        },
+        "classified_document": {
+            "show_insets": True,
+            "inset_count": 2,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 1.0,
+            "gradient_opacity": 200,
+            "gradient_start_pct": 0.50,
+            "text_lines": 2,
+            "vignette_strength": 0.7,
+        },
+        "incomplete_puzzle": {
+            "show_insets": True,
+            "inset_count": 1,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 0.8,
+            "gradient_opacity": 150,
+            "gradient_start_pct": 0.45,
+            "text_lines": 2,
+            "vignette_strength": 0.55,
+        },
+    }
 
     def make(
         self, image_path: Path, title: str, channel_name: str | None = None,
@@ -322,6 +383,7 @@ class ThumbnailMaker:
             text_complemento=text_complemento,
             badge_text=badge_text,
             secondary_scene=secondary_scene,
+            layout=getattr(brief, 'layout', '') or '',
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
@@ -681,22 +743,46 @@ class ThumbnailMaker:
         text_complemento: str = "",
         badge_text: str = "",
         secondary_scene: str = "",
+        layout: str = "",
+        inset_image_path: Path | None = None,
     ) -> Path:
         """Apply channel-style mosaic composition to the base image.
 
-        Layers applied:
-        1. Color grading (contrast + saturation per style)
-        2. Dark gradient overlay (bottom 50%)
-        3. Inset recuadros (2 styled boxes with labels)
-        4. Marketing text overlay (2 lines: L1 gancho + L2 complemento)
-        5. Badge stamp (top-right corner)
-        6. Accent border
+        Layers applied *depend on the layout profile*:
+        1. Color grading (contrast + saturation per style, 1.5x boost)
+        2. Focus vignette (strength varies by layout)
+        3. Dark gradient overlay (opacity and range vary by layout)
+        4. Inset recuadros — ONLY when layout profile allows them
+        5. Marketing text overlay (1 or 2 lines depending on layout)
+        6. Badge stamp / 4K — ONLY when layout profile allows it
+        7. Accent border (weight varies by layout)
         """
-        # Load and resize
+        # ── Resolve layout profile ─────────────────────────────
+        resolved_layout = layout or brief.layout or style.get("base_composition", "dark_reveal")
+        comp = self.LAYOUT_COMPOSITION.get(
+            resolved_layout, self.LAYOUT_COMPOSITION["dark_reveal"]
+        )
+        logger.info(
+            "[Thumbnail v2] F4: layout=%s complexity=%s insets=%s badge=%s lines=%d",
+            resolved_layout, resolved_layout,
+            "yes" if comp["show_insets"] else "no",
+            "yes" if comp["show_badge"] else "no",
+            comp["text_lines"],
+        )
+
+        # ── Palette helpers ─────────────────────────────────────
+        color_palette = style.get("color_palette", {})
+        accent_rgb = self._hex_to_rgb(color_palette.get("accent", "#CC3333"))
+        text_style = style.get("text_style", {})
+        use_uppercase = text_style.get("uppercase", True)
+        text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
+        shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
+
+        # ── Load and resize ─────────────────────────────────────
         img = Image.open(base_image).convert("RGB")
         img = self._resize_center_crop(img)
 
-        # Color grading per style (boosted 1.5x for viral impact)
+        # ── Color grading per style (1.5x viral boost) ──────────
         effects = style.get("effects", {})
         contrast_boost = float(effects.get("contrast_boost", 1.3)) * 1.5
         saturation = float(effects.get("saturation", 0.85)) * 1.5
@@ -704,87 +790,47 @@ class ThumbnailMaker:
         img = enhancer.enhance(contrast_boost)
         enhancer = ImageEnhance.Color(img)
         img = enhancer.enhance(saturation)
-
-        # Apply sharpening filter to the focal area
         enhancer = ImageEnhance.Sharpness(img)
         img = enhancer.enhance(2.0)
 
+        # ── Focus vignette (strength from layout profile) ───────
+        img = self._apply_focus_vignette(
+            img, strength=comp["vignette_strength"]
+        )
 
-        # ── Focus vignette (radial darkening → draws eye to centre) ──
-        # More subtle vignette to keep image bright
-        img = self._apply_focus_vignette(img, strength=0.6)  # reduced from 1.0
-
-        # Dark gradient overlay (bottom 50%)
+        # ── Dark gradient overlay ───────────────────────────────
         overlay = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
-        start_y = int(self.height * 0.50)
+        gradient_opacity = comp["gradient_opacity"]
+        gradient_start = comp["gradient_start_pct"]
+        start_y = int(self.height * gradient_start)
         for y in range(start_y, self.height):
-            alpha = int(200 * (y - start_y) / (self.height - start_y))
+            alpha = int(gradient_opacity * (y - start_y) / (self.height - start_y))
             draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
-        # Subtle top gradient
-        for y in range(0, int(self.height * 0.10)):
-            alpha = int(50 * (1 - y / (self.height * 0.10)))
+        # Subtle top gradient (always applied, halved)
+        for y in range(0, int(self.height * 0.08)):
+            alpha = int(30 * (1 - y / (self.height * 0.08)))
             draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # ── v2: Inset recuadros (styled boxes for mosaic effect) ──
-        inset_draw = ImageDraw.Draw(img)
-        color_palette = style.get("color_palette", {})
-        accent_rgb = self._hex_to_rgb(color_palette.get("accent", "#CC3333"))
-        
-        # Inset A: bottom-left recuadro (20% of canvas, semi-transparent dark bg)
-        inset_w, inset_h = int(self.width * 0.22), int(self.height * 0.20)
-        inset_x, inset_y = 15, self.height - inset_h - 15
-        inset_bg = (15, 15, 20, 180)
-        inset_overlay_a = Image.new("RGBA", (inset_w, inset_h), inset_bg)
-        # Draw accent border on overlay
-        inset_draw_a = ImageDraw.Draw(inset_overlay_a)
-        inset_draw_a.rounded_rectangle(
-            [2, 2, inset_w - 2, inset_h - 2], radius=8,
-            outline=accent_rgb + (220,), width=3
-        )
-        # Label for inset A
-        if secondary_scene:
-            label_a = secondary_scene[:30].upper()
-        else:
-            label_a = "DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA"
-        inset_font_sm = _find_font(max(14, int(inset_h * 0.18)), bold=True, font_name=self.font_family)
-        if inset_font_sm:
-            bbox_a = inset_draw_a.textbbox((0, 0), label_a, font=inset_font_sm)
-            tw, th = bbox_a[2] - bbox_a[0], bbox_a[3] - bbox_a[1]
-            tx = (inset_w - tw) // 2
-            ty = (inset_h - th) // 2
-            inset_draw_a.text((tx, ty), label_a, fill=(200, 200, 200, 255), font=inset_font_sm)
-        img.paste(inset_overlay_a, (inset_x, inset_y), inset_overlay_a)
-        
-        # Inset B: bottom-right recuadro (15% of canvas)
-        inset_w2, inset_h2 = int(self.width * 0.16), int(self.height * 0.18)
-        inset_x2 = self.width - inset_w2 - 15
-        inset_y2 = self.height - inset_h2 - 15
-        inset_overlay_b = Image.new("RGBA", (inset_w2, inset_h2), (15, 15, 25, 160))
-        inset_draw_b = ImageDraw.Draw(inset_overlay_b)
-        inset_draw_b.rounded_rectangle(
-            [2, 2, inset_w2 - 2, inset_h2 - 2], radius=8,
-            outline=accent_rgb + (180,), width=2
-        )
-        # Label for inset B — use badge_text or derive from content
-        label_b = badge_text if badge_text else "DOCUMENTAL"
-        if len(label_b) > 14:
-            label_b = label_b[:12] + ".."
-        inset_font_xs = _find_font(max(12, int(inset_h2 * 0.2)), bold=True, font_name=self.font_family)
-        if inset_font_xs:
-            bbox_b = inset_draw_b.textbbox((0, 0), label_b, font=inset_font_xs)
-            tw2, th2 = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
-            tx2 = (inset_w2 - tw2) // 2
-            ty2 = (inset_h2 - th2) // 2
-            inset_draw_b.text((tx2, ty2), label_b, fill=(200, 200, 200, 255), font=inset_font_xs)
-        img.paste(inset_overlay_b, (inset_x2, inset_y2), inset_overlay_b)
-        
-        # ── v2: Two-line marketing text overlay ──────────────────
+        # ── Inset recuadros (conditional on layout) ──────────
+        if comp["show_insets"]:
+            self._draw_insets(
+                img=img,
+                draw=draw,
+                accent_rgb=accent_rgb,
+                title=title,
+                secondary_scene=secondary_scene,
+                badge_text=badge_text,
+                inset_count=comp.get("inset_count", 2),
+                inset_image_path=inset_image_path,
+            )
+
+        # ── Text overlay (1 or 2 lines per layout) ──────────────
         text_gancho_v = text_gancho.strip() if text_gancho else ""
         text_complemento_v = text_complemento.strip() if text_complemento else ""
-        
+
         # Fallback: parse from legacy overlay_text (format: "L1 | L2")
         if not text_gancho_v and overlay_text.strip():
             parts = overlay_text.strip().split("|")
@@ -793,7 +839,7 @@ class ThumbnailMaker:
                 text_complemento_v = parts[1].strip()
             else:
                 text_gancho_v = overlay_text.strip()
-        
+
         # If still nothing, derive from brief.text_overlay
         if not text_gancho_v and brief.text_overlay:
             parts = brief.text_overlay.split("|")
@@ -802,78 +848,75 @@ class ThumbnailMaker:
                 text_complemento_v = parts[1].strip()
             else:
                 text_gancho_v = brief.text_overlay[:12]
-        
-        # Determine font sizes
-        text_style = style.get("text_style", {})
-        use_uppercase = text_style.get("uppercase", True)
-        
-        # L1: big gancho font (72-96px)
-        gancho_font_size = max(62, int(self.height * 0.13))
-        gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
-        # L2: medium complemento font (38-52px)
-        comp_font_size = max(32, int(self.height * 0.07))
-        comp_font = _find_font(comp_font_size, bold=True, font_name=self.font_family)
-        
+
         if use_uppercase:
             text_gancho_v = text_gancho_v.upper()
             text_complemento_v = text_complemento_v.upper()
-        
+
         # Truncate
         text_gancho_v = text_gancho_v[:14]
         text_complemento_v = text_complemento_v[:28]
-        
-        text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
-        shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
+
         stroke_w = max(3, self.text_stroke_width + 2)
-        
-        # Draw L1 (gancho) — centered, lower-third
-        if text_gancho_v and gancho_font:
-            bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
-            l1_w = bbox_l1[2] - bbox_l1[0]
-            l1_h = bbox_l1[3] - bbox_l1[1]
-            l1_x = (self.width - l1_w) // 2
-            l1_y = int(self.height * 0.52)  # lower half
-            
-            # Shadow
-            for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
-                           (-stroke_w, -stroke_w), (stroke_w, stroke_w), (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
-                draw.text((l1_x + sx, l1_y + sy), text_gancho_v, fill=shadow_color, font=gancho_font)
-            # Main text with outline stroke for readability on any background
-            draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font,
-                      stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
-        
-        # Draw L2 (complemento) — centered, below L1
-        if text_complemento_v and comp_font:
-            bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
-            l2_w = bbox_l2[2] - bbox_l2[0]
-            l2_x = (self.width - l2_w) // 2
-            l2_y = l1_y + l1_h + 12  # 12px gap
-            
-            for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
-                           (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
-                draw.text((l2_x + sx, l2_y + sy), text_complemento_v, fill=shadow_color, font=comp_font)
-            # Main text with outline stroke for readability on any background
-            draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font,
-                      stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
-        
-        # ── Badge stamp (top-right corner, replaces old 4K badge position) ──
+
+        # ── L1 (gancho) — larger for 1-line layouts ─────────
+        if text_gancho_v:
+            # Bigger font when there is only one text line
+            if comp["text_lines"] == 1:
+                gancho_font_size = max(72, int(self.height * 0.17))
+                l1_y_pct = 0.38   # more centred
+            else:
+                gancho_font_size = max(62, int(self.height * 0.13))
+                l1_y_pct = 0.52  # lower third
+            gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
+            if gancho_font:
+                bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
+                l1_w = bbox_l1[2] - bbox_l1[0]
+                l1_h = bbox_l1[3] - bbox_l1[1]
+                l1_x = (self.width - l1_w) // 2
+                l1_y = int(self.height * l1_y_pct)
+
+                # Shadow in 8 directions
+                for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                               (-stroke_w, -stroke_w), (stroke_w, stroke_w), (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
+                    draw.text((l1_x + sx, l1_y + sy), text_gancho_v, fill=shadow_color, font=gancho_font)
+                draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font,
+                          stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
+
+        # ── L2 (complemento) — only when 2-line layout ─────
+        if comp["text_lines"] >= 2 and text_complemento_v:
+            comp_font_size = max(32, int(self.height * 0.07))
+            comp_font = _find_font(comp_font_size, bold=True, font_name=self.font_family)
+            if comp_font and 'l1_y' in locals():
+                bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
+                l2_w = bbox_l2[2] - bbox_l2[0]
+                l2_x = (self.width - l2_w) // 2
+                l2_y = l1_y + l1_h + 12
+
+                for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                               (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
+                    draw.text((l2_x + sx, l2_y + sy), text_complemento_v, fill=shadow_color, font=comp_font)
+                draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font,
+                          stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
+
+        # ── Badge stamp (top-right, conditional on layout) ───────
         badge_text_v = badge_text if badge_text else ""
-        if badge_text_v:
+        if comp["show_badge"] and badge_text_v:
             self._draw_badge_stamp(draw, badge_text_v, accent_rgb)
-        elif self.show_4k_badge:
+        elif comp["show_badge"] and self.show_4k_badge:
             self._draw_4k_badge(draw)
 
-        # ── Border (per-channel configurable color) ─────────────
-        border_w = max(6, self.border_width + 2)  # thicker for viral impact
-        for i in range(border_w):
-            draw.rectangle(
-                [i, i, self.width - 1 - i, self.height - 1 - i],
-                outline=self.border_color,
-            )
+        # ── Border (width varies by layout) ─────────────────
+        if comp["show_border"]:
+            border_w = max(2, int((self.border_width + 2) * comp["border_width_factor"]))
+            for i in range(border_w):
+                draw.rectangle(
+                    [i, i, self.width - 1 - i, self.height - 1 - i],
+                    outline=self.border_color,
+                )
 
-        # ── Classified stamp (if style matches) ──────────────
-        layout = brief.layout or style.get("base_composition", "dark_reveal")
-        if layout == "classified_document":
+        # ── Classified stamp ────────────────────────────────
+        if resolved_layout == "classified_document":
             self._add_classified_overlay(draw, {
                 "accent": accent_rgb,
                 "text_primary": text_color,
@@ -909,6 +952,151 @@ class ThumbnailMaker:
         img.save(out_path, "JPEG", quality=95)
         logger.info("Viral v2 thumbnail saved: %s", out_path)
         return out_path
+
+    # ── Inset recuadros helper ──────────────────────────────
+
+    def _draw_insets(
+        self,
+        img: Image.Image,
+        draw: ImageDraw.ImageDraw,
+        accent_rgb: tuple,
+        title: str,
+        secondary_scene: str = "",
+        badge_text: str = "",
+        inset_count: int = 2,
+        inset_image_path: Path | None = None,
+    ) -> None:
+        """Draw 1–2 inset boxes at the bottom of the thumbnail.
+
+        Each box uses ``_fit_text_to_box`` to ensure its label
+        never overflows.  If a label cannot fit at the minimum
+        font size, that inset is silently skipped.
+
+        When *inset_image_path* is provided, inset A will embed
+        a thumbnail crop of that image instead of a text-only box.
+        """
+        # ── Shared dimensions ─────────────────────────────────
+        inset_w = int(self.width * 0.22)
+        inset_h = int(self.height * 0.20)
+        inset_x = 15
+        inset_y = self.height - inset_h - 15
+
+        # ── Inset A : bottom-left ─────────────────────────────
+        label_a = (
+            secondary_scene[:30].upper()
+            if secondary_scene
+            else ("DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA")
+        )
+
+        # Determine whether to embed an image or draw text
+        use_image_inset = bool(inset_image_path and inset_image_path.exists())
+
+        if use_image_inset:
+            # Embed a cropped thumbnail version of the secondary image
+            try:
+                secondary_img = Image.open(inset_image_path).convert("RGB")
+                secondary_img = self._resize_center_crop(secondary_img)
+                # Crop to inset dimensions
+                inset_crop = secondary_img.resize(
+                    (inset_w, inset_h), Image.LANCZOS
+                )
+                # Build a rounded-rectangle mask
+                mask = Image.new("L", (inset_w, inset_h), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rounded_rectangle(
+                    [0, 0, inset_w, inset_h], radius=10, fill=255
+                )
+                # Paste the cropped image onto the main RGB canvas
+                # using the mask for smooth rounded corners
+                img.paste(inset_crop, (inset_x, inset_y), mask)
+                # Draw accent border *after* paste so it sits on top
+                draw.rounded_rectangle(
+                    [
+                        inset_x - 1,
+                        inset_y - 1,
+                        inset_x + inset_w + 1,
+                        inset_y + inset_h + 1,
+                    ],
+                    radius=10,
+                    outline=accent_rgb,
+                    width=3,
+                )
+            except Exception as exc:
+                logger.warning("Inset image embedding failed: %s — falling back to text", exc)
+                use_image_inset = False
+
+        if not use_image_inset:
+            # Text-only box with fitted label
+            fitted = self._fit_text_to_box(
+                draw, label_a, inset_w - 8, inset_h - 8, bold=True, min_font_size=11
+            )
+            if fitted:
+                inset_overlay_a = Image.new(
+                    "RGBA", (inset_w, inset_h), (15, 15, 20, 180)
+                )
+                inset_draw_a = ImageDraw.Draw(inset_overlay_a)
+                inset_draw_a.rounded_rectangle(
+                    [2, 2, inset_w - 2, inset_h - 2],
+                    radius=8,
+                    outline=accent_rgb + (200,),
+                    width=2,
+                )
+                # Centre all lines vertically
+                total_h = fitted["total_h"]
+                start_y2 = (inset_h - total_h) // 2
+                for line in fitted["lines"]:
+                    w_line, _ = self._measure_text_size(inset_draw_a, line, fitted["font"])
+                    tx_a = (inset_w - w_line) // 2
+                    inset_draw_a.text(
+                        (tx_a, start_y2),
+                        line,
+                        fill=(220, 220, 220, 255),
+                        font=fitted["font"],
+                    )
+                    start_y2 += fitted["total_h"] // len(fitted["lines"]) + fitted.get("line_spacing", 2)
+
+                img.paste(inset_overlay_a, (inset_x, inset_y), inset_overlay_a)
+                draw = ImageDraw.Draw(img)
+
+        # ── Inset B : bottom-right (only when inset_count >= 2) ─
+        if inset_count < 2:
+            return
+
+        inset_w2 = int(self.width * 0.16)
+        inset_h2 = int(self.height * 0.18)
+        inset_x2 = self.width - inset_w2 - 15
+        inset_y2 = self.height - inset_h2 - 15
+
+        label_b = badge_text if badge_text else "DOCUMENTAL"
+        fitted_b = self._fit_text_to_box(
+            draw, label_b, inset_w2 - 8, inset_h2 - 8, bold=True, min_font_size=10
+        )
+        if fitted_b:
+            inset_overlay_b = Image.new(
+                "RGBA", (inset_w2, inset_h2), (15, 15, 25, 150)
+            )
+            inset_draw_b = ImageDraw.Draw(inset_overlay_b)
+            inset_draw_b.rounded_rectangle(
+                [2, 2, inset_w2 - 2, inset_h2 - 2],
+                radius=8,
+                outline=accent_rgb + (170,),
+                width=2,
+            )
+            total_h_b = fitted_b["total_h"]
+            start_b = (inset_h2 - total_h_b) // 2
+            for line in fitted_b["lines"]:
+                w_line_b, _ = self._measure_text_size(inset_draw_b, line, fitted_b["font"])
+                tx_b = (inset_w2 - w_line_b) // 2
+                inset_draw_b.text(
+                    (tx_b, start_b),
+                    line,
+                    fill=(200, 200, 200, 255),
+                    font=fitted_b["font"],
+                )
+                start_b += total_h_b // len(fitted_b["lines"]) + fitted_b.get("line_spacing", 1)
+
+            img.paste(inset_overlay_b, (inset_x2, inset_y2), inset_overlay_b)
+            draw = ImageDraw.Draw(img)
 
     def _draw_4k_badge(self, draw: ImageDraw.ImageDraw) -> None:
         """Draw a small '4K' badge in the top-right corner."""
@@ -1455,6 +1643,133 @@ class ThumbnailMaker:
             img = img.crop((0, top, w, top + new_h))
 
         return img.resize((self.width, self.height), Image.LANCZOS)
+
+    def _measure_text_size(self, draw, text: str, font) -> tuple:
+        """Return (width, height) of text with given font."""
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    def _fit_text_to_box(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        box_width: int,
+        box_height: int,
+        bold: bool = True,
+        min_font_size: int = 10,
+    ) -> dict | None:
+        """Fit text inside a fixed-size box by wrapping and scaling font.
+
+        Strategy:
+        1. Start with font at 40 % of box height.
+        2. Measure text width → if it overflows box, try word-wrapping
+           into 2 lines and re-measure.
+        3. If 2-line wrap still overflows, iteratively shrink font by
+           2 px down to *min_font_size*.
+        4. If even the minimum font overflows, truncate with "…".
+        5. Returns None when text is empty or cannot be rendered at
+           min_font_size + 1-char.
+
+        Returns:
+            dict with keys ``lines``, ``font``, ``font_size``,
+            ``total_h``, ``line_spacing`` — or None.
+        """
+        if not text or not text.strip():
+            return None
+
+        text = text.strip()
+
+        def _wrap_two(text_str: str, max_w: int, font) -> list[str]:
+            """Pure word-wrap into at most 2 lines."""
+            words = text_str.split()
+            if not words:
+                return [text_str]
+            line1, line2 = "", ""
+            best = [text_str]  # fallback: single line
+            # Try split point
+            for i in range(1, len(words) + 1):
+                l1 = " ".join(words[:i]).strip()
+                l2 = " ".join(words[i:]).strip()
+                w1, _ = self._measure_text_size(draw, l1, font)
+                w2, _ = self._measure_text_size(draw, l2, font) if l2 else (0, 0)
+                if w1 <= max_w and w2 <= max_w:
+                    best = [l1, l2] if l2 else [l1]
+                    break
+            return best
+
+        # Start with a generous font size
+        font_size = max(min_font_size + 2, int(box_height * 0.38))
+        font = _find_font(font_size, bold=bold, font_name=self.font_family)
+        if not font:
+            return None
+
+        max_w = box_width - 12  # internal padding
+
+        for _ in range(20):  # safety cap
+            w, _ = self._measure_text_size(draw, text, font)
+            if w <= max_w:
+                # Single line fits
+                h, _ = self._measure_text_size(draw, text, font)
+                if getattr(font, 'size', font_size) is not None:
+                    _, asc, _, _ = draw.textbbox((0, 0), "Ag", font=font)
+                    line_h = asc
+                else:
+                    line_h = font_size
+                return {
+                    "lines": [text],
+                    "font": font,
+                    "font_size": font_size,
+                    "total_h": line_h,
+                    "line_spacing": 2,
+                }
+
+            # Try 2-line wrap
+            wrapped = _wrap_two(text, max_w, font)
+            if len(wrapped) == 2:
+                w1, _ = self._measure_text_size(draw, wrapped[0], font)
+                w2, _ = self._measure_text_size(draw, wrapped[1], font)
+            else:
+                w1, w2 = w, 0
+
+            if w1 <= max_w and w2 <= max_w:
+                # Both lines fit
+                _, asc, _, _ = draw.textbbox((0, 0), "Ag", font=font)
+                line_h = int(asc * 1.15)
+                total_h = line_h * len(wrapped)
+                if total_h <= box_height - 6:
+                    return {
+                        "lines": wrapped,
+                        "font": font,
+                        "font_size": font_size,
+                        "total_h": total_h,
+                        "line_spacing": int(asc * 0.15),
+                    }
+
+            # Shrink and retry
+            if font_size <= min_font_size:
+                break
+            font_size -= 2
+            font = _find_font(font_size, bold=bold, font_name=self.font_family)
+            if not font:
+                return None
+
+        # Last resort: truncate with ellipsis
+        font = _find_font(min_font_size, bold=bold, font_name=self.font_family)
+        if not font:
+            return None
+        truncated = text[:8] + "…" if len(text) > 8 else text
+        w_trunc, _ = self._measure_text_size(draw, truncated, font)
+        if w_trunc <= max_w:
+            _, asc, _, _ = draw.textbbox((0, 0), "Ag", font=font)
+            return {
+                "lines": [truncated],
+                "font": font,
+                "font_size": min_font_size,
+                "total_h": asc,
+                "line_spacing": 0,
+            }
+
+        return None
 
     def _draw_gradient_overlay(
         self, overlay: Image.Image, draw: ImageDraw.ImageDraw

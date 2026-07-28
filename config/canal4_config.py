@@ -603,7 +603,7 @@ THUMBNAIL_STYLE_OVERRIDE = True
 #   - MAYDAY banner across the top
 #   - GPS coordinates overlay (bottom-left corner)
 #   - "SIN SEÑAL" red stamp (top-right, below 4K badge)
-THUMBNAIL_RESCUE_MAYDAY = True
+THUMBNAIL_RESCUE_MAYDAY = False           # disabled — too much visual clutter
 THUMBNAIL_RESCUE_COORDINATES = True
 THUMBNAIL_RESCUE_SIN_SENAL = True
 
@@ -632,20 +632,20 @@ THUMBNAIL_MANUAL_STYLE = {
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.35,     # was 1.25 — extreme contrast for scroll-stopping
-        "saturation": 1.05,         # was 0.90 — vivid, NOT desaturated
-        "vignette": 0.40,
+        "contrast_boost": 1.20,     # moderate — avoids muddy dark areas
+        "saturation": 0.80,         # slightly desaturated — cold, realistic documentary look
+        "vignette": 0.35,
     },
     "text_style": {
         "uppercase": True,
         "max_words": 4,
     },
     "pollo_prompt_suffix": (
-        "dramatic rescue photography, extreme survival conditions, "
-        "warm-cold color contrast, emergency orange accents popping against "
-        "dark arctic backgrounds, high contrast, bold vivid colors, "
-        "viral YouTube documentary aesthetic, 16:9 aspect ratio, "
-        "photorealistic, dramatic lighting, cinematic atmosphere"
+        "cold desaturated cinematography, arctic survival atmosphere, "
+        "emergency orange accents, dramatic natural lighting, photorealistic, "
+        "16:9 aspect ratio, National Geographic documentary style, "
+        "professional expedition photography, cinematic composition, "
+        "epic scale wilderness, no text overlay"
     ),
 }
 
