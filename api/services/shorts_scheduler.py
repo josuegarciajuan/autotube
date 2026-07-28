@@ -309,6 +309,20 @@ def _build_shorts_slots_for_channel(
         pushed_min = min(pushed_min, 24 * 60 - 1)
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
+    # ── 3b. Dedup same-type slots at the exact same minute ──
+    #    Can happen when multiple slots get clamped at end-of-day (24*60-1).
+    #    Works backward: for each same-type pair at the same minute,
+    #    pushes the later slot forward by SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES.
+    deduped: list[tuple[int, str, any, any]] = []
+    for minutes_val, stype, long_pos, rank in resolved:
+        pushed = minutes_val
+        for prev_min, prev_type, _, _ in deduped:
+            if prev_type == stype and prev_min == pushed:
+                pushed = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+        pushed = min(pushed, 24 * 60 - 1)
+        deduped.append((pushed, stype, long_pos, rank))
+    resolved = deduped
+
     # ── 4. Build slot dicts ──
     slots = []
     for total_min, slot_type, long_pos, slot_rank in resolved:
