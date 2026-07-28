@@ -589,6 +589,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v15: shorts_planned_slots slot_rank tracking ──
     _migrate_v15(conn, logger)
+
+    # ── v16: short_asset_history (cross-short asset dedup) ──
+    _migrate_v16(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1082,6 +1085,19 @@ def _migrate_v15(conn, logger):
     except Exception:
         # Column already exists — idempotent
         logger.debug("Migration v15: slot_rank column already exists")
+
+
+def _migrate_v16(conn, logger):
+    """Idempotent v16 migration: short_asset_history for cross-short dedup."""
+    schema_v16 = Path(__file__).parent / "schema_v16.sql"
+    if schema_v16.exists():
+        logger.debug("Migration v16: running schema_v16.sql")
+        with open(schema_v16) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v16: short_asset_history table created")
+    else:
+        logger.warning("Migration v16: schema_v16.sql not found")
 
 
 def _migrate_v10(conn, logger):
@@ -5252,12 +5268,39 @@ class ExtendedDatabase(Database):
             conn.commit()
 
     def get_all_used_filenames(self) -> set[str]:
-        """Return all filenames ever used (for dedup at fetch time)."""
+        """Return all filenames ever used (for dedup at fetch time).
+
+        Includes both long-form (video_asset_history) and short
+        (short_asset_history) assets so new shorts never reuse images
+        or videos already published in previous shorts or long-form videos.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT file_path FROM video_asset_history"
             ).fetchall()
-        return {r["file_path"] for r in rows if r["file_path"]}
+            # Also include short assets (v16 cross-short dedup)
+            try:
+                short_rows = conn.execute(
+                    "SELECT DISTINCT file_path FROM short_asset_history"
+                ).fetchall()
+            except Exception:
+                short_rows = []
+        result = {r["file_path"] for r in rows if r["file_path"]}
+        result.update(r["file_path"] for r in short_rows if r["file_path"])
+        return result
+
+    def insert_short_asset_history(self, short_id: int, channel_id: int,
+                                   file_path: str, source: str,
+                                   asset_url: str = "") -> None:
+        """Record a short asset as used for cross-short deduplication."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO short_asset_history
+                   (short_id, channel_id, file_path, source, asset_url)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (short_id, channel_id, file_path, source, asset_url),
+            )
+            conn.commit()
 
     def delete_video_asset_history(self, video_id: int) -> int:
         """Delete all history rows for a video. Returns count deleted."""

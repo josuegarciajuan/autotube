@@ -133,6 +133,22 @@ SHORTS_NATIVE_SCHEDULE = [
 ]
 SHORTS_NATIVE_MAX_DAILY = 4
 
+# ── Shorts video/image mix strategy ──────────────────────────
+SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
+SHORTS_MIN_VIDEO_PCT = float(os.getenv("SHORTS_MIN_VIDEO_PCT", "0.30"))  # minimum acceptable video ratio
+SHORTS_KEN_BURNS_ZOOM = 0.0015  # zoom increment per frame for Ken Burns on still images
+SHORTS_CROSSFADE_DUR = 1.0      # crossfade seconds between scenes
+
+# Generic fallback queries when block-specific queries return no results
+SHORTS_FALLBACK_QUERIES = [
+    "dramatic mystery atmosphere cinematic vertical",
+    "historical documentary archival photography",
+    "nature landscape exploration discovery cinematic",
+    "ancient ruins archaeological artifacts cinematic",
+    "dark moody atmospheric mysterious cinematic",
+    "documentary storytelling dramatic cinematic portrait",
+]
+
 
 # ── Global media provider configuration ──────────────────────
 # Shared by all channels. Each channel's MEDIA_STRATEGY should reference

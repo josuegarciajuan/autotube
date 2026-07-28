@@ -54,6 +54,7 @@ class PixabayVideoProvider(BaseVideoProvider):
         resolution: tuple = (1920, 1080),
         page: int = 1,
         per_page: int = 20,
+        orientation: str = "landscape",
     ) -> Optional[VideoAsset]:
         """Search Pixabay for the first clip matching all criteria.
 
@@ -64,18 +65,22 @@ class PixabayVideoProvider(BaseVideoProvider):
             resolution: Preferred resolution (width, height).
             page: Page number (1-indexed).
             per_page: Results per page (max 200).
+            orientation: 'landscape' or 'portrait'.
 
         Returns:
             VideoAsset or None.
         """
         target_w, target_h = resolution
+        min_w = 720 if orientation == "portrait" else target_w
+        min_h = 1080 if orientation == "portrait" else target_h
+
         params: dict = {
             "key": self._api_key,
             "q": query[:100],  # Pixabay 100-char limit — safety net
             "per_page": min(per_page, 200),
             "page": page,
-            "min_width": target_w,
-            "min_height": target_h,
+            "min_width": min_w,
+            "min_height": min_h,
         }
 
         resp = self._request_with_retry(params)
@@ -125,11 +130,18 @@ class PixabayVideoProvider(BaseVideoProvider):
         resolution: tuple = (1920, 1080),
         page: int = 1,
         per_page: int = 20,
+        orientation: str = "landscape",
     ) -> "SearchPage":
         """Search Pixabay Videos for ALL matching clips on a page (paginated).
 
         Reads totalHits from the API response (capped at 500) and returns all
         candidates that match the duration window.
+
+        Args:
+            orientation: 'landscape' (default) or 'portrait' for vertical
+                         video search (used for Shorts). When portrait,
+                         resolution defaults to (1080, 1920) and min dimensions
+                         are relaxed to 720x1080 to match typical stock footage.
 
         Returns:
             SearchPage with all matching VideoAsset candidates and pagination metadata.
@@ -137,13 +149,18 @@ class PixabayVideoProvider(BaseVideoProvider):
         from pipeline.providers.base import SearchPage
 
         target_w, target_h = resolution
+        # For portrait orientation, use more relaxed minimum dimensions
+        # since portrait stock footage is often ~720x1280, not 1080x1920
+        min_w = 720 if orientation == "portrait" else target_w
+        min_h = 1080 if orientation == "portrait" else target_h
+
         params: dict = {
             "key": self._api_key,
             "q": query[:100],
             "per_page": min(per_page, 200),
             "page": page,
-            "min_width": target_w,
-            "min_height": target_h,
+            "min_width": min_w,
+            "min_height": min_h,
         }
 
         resp = self._request_with_retry(params)

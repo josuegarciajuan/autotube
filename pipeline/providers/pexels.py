@@ -51,6 +51,7 @@ class PexelsVideoProvider(BaseVideoProvider):
         resolution: tuple = (1920, 1080),
         page: int = 1,
         per_page: int = 20,
+        orientation: str = "landscape",
     ) -> Optional[VideoAsset]:
         """Search Pexels Videos API for the first clip matching all criteria.
 
@@ -61,10 +62,11 @@ class PexelsVideoProvider(BaseVideoProvider):
             resolution: Preferred resolution (width, height).
             page: Page number (1-indexed).
             per_page: Results per page (max 80).
+            orientation: 'landscape' (default) or 'portrait' for vertical
+                         video search (used for Shorts).
 
         Returns:
-            VideoAsset with file_path set to Path() (placeholder — set by
-            download()), or None if no suitable clip is found.
+            VideoAsset with file_path set to Path() (placeholder), or None.
         """
         if not self._api_key:
             logger.error("Cannot search Pexels without an API key")
@@ -74,7 +76,7 @@ class PexelsVideoProvider(BaseVideoProvider):
             "query": query,
             "per_page": min(per_page, 80),
             "page": page,
-            "orientation": "landscape",
+            "orientation": orientation,
             "size": "medium",
         }
 
@@ -127,11 +129,16 @@ class PexelsVideoProvider(BaseVideoProvider):
         resolution: tuple = (1920, 1080),
         page: int = 1,
         per_page: int = 20,
+        orientation: str = "landscape",
     ) -> "SearchPage":
         """Search Pexels Videos for ALL matching clips on a page (paginated).
 
         Reads total_results from the API response and returns all candidates
         that match the duration window.
+
+        Args:
+            orientation: 'landscape' (default) or 'portrait' for vertical
+                         video search (used for Shorts).
 
         Returns:
             SearchPage with all matching VideoAsset candidates and pagination metadata.
@@ -146,7 +153,7 @@ class PexelsVideoProvider(BaseVideoProvider):
             "query": query,
             "per_page": min(per_page, 80),
             "page": page,
-            "orientation": "landscape",
+            "orientation": orientation,
             "size": "medium",
         }
 
