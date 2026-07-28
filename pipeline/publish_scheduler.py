@@ -355,6 +355,7 @@ def calculate_target_public_time(
     timezone_str: str = "Europe/Madrid",
     target_hour: Optional[int] = None,
     jitter_min: int = 20,
+    jitter_after: int = 30,
     warmup_min: int = 120,
     db=None,
     channel_id: Optional[int] = None,
@@ -409,7 +410,7 @@ def calculate_target_public_time(
                 except Exception:
                     pass
                 # Skip niche/heuristic steps
-                jitter = random.randint(-jitter_min, jitter_min)
+                jitter = random.randint(-jitter_min, jitter_after)
                 effective_hour = seed_hour + (jitter / 60.0)
                 try:
                     tz = pytz.timezone(timezone_str)
@@ -483,9 +484,9 @@ def calculate_target_public_time(
             logger.debug("[%s] History adjustment skipped: %s", slug, e)
 
     # ── 3. Aplicar spread aleatorio dentro de la ventana de publicación ──
-    # PUBLISH_WINDOW_SPREAD_MIN define ±minutos alrededor del peak (ej. 90 min = ventana de 3h)
-    # jitter_min se usa como spread — el orchestrator pasa PUBLISH_WINDOW_SPREAD_MIN si existe
-    jitter = random.randint(-jitter_min, jitter_min)
+    # PUBLISH_WINDOW_SPREAD_MIN define minutos ANTES del peak (ej. 90 min).
+    # PUBLISH_JITTER_AFTER_MIN define minutos DESPUÉS del peak (ej. 30 min).
+    jitter = random.randint(-jitter_min, jitter_after)
     effective_hour = seed_hour + (jitter / 60.0)  # hora decimal
 
     # ── 4. Determinar la próxima ocurrencia de esa hora en la zona local ──

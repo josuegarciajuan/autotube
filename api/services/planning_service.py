@@ -206,8 +206,8 @@ def _pick_time_in_window(
     # Base: deterministically pick a minute offset within the range
     offset = channel_seed % range_minutes
     
-    # Jitter: ±random(0, 20) based on seed
-    jitter = ((channel_seed >> 16) % 41) - 20  # -20..+20
+    # Jitter: asymmetric — more room before, tight after (-25..+5)
+    jitter = ((channel_seed >> 16) % 31) - 25  # -25..+5
     
     total_offset = offset + jitter
     total_offset = max(0, min(range_minutes - 1, total_offset))

@@ -1387,6 +1387,7 @@ class PipelineOrchestrator:
                 spread = getattr(self.config, "PUBLISH_WINDOW_SPREAD_MIN", None)
                 if spread is None:
                     spread = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
+                jitter_after = getattr(self.config, "PUBLISH_JITTER_AFTER_MIN", 30)
                 warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 120)
                 channel_id = self._get_channel_id()
 
@@ -1420,6 +1421,7 @@ class PipelineOrchestrator:
                                 timezone_str=tz,
                                 target_hour=target_h,
                                 jitter_min=spread,
+                                jitter_after=jitter_after,
                                 warmup_min=warmup,
                                 db=self.db,
                                 channel_id=channel_id,
@@ -1478,6 +1480,7 @@ class PipelineOrchestrator:
                         timezone_str=tz,
                         target_hour=target_h,
                         jitter_min=spread,
+                        jitter_after=jitter_after,
                         warmup_min=warmup,
                         db=self.db,
                         channel_id=channel_id,

@@ -52,8 +52,8 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
     except Exception as e:
         logger.warning("[%s] Auto-mark IA error for short %s: %s", channel_slug, yt_id, e)
 
-# ── Timezone constants ────────────────────────────────────────
-CEST = ZoneInfo("Europe/Madrid")
+# ── Timezone defaults ─────────────────────────────────────────
+DEFAULT_TIMEZONE = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
 
 # ── Spacing constants ─────────────────────────────────────────
@@ -63,7 +63,12 @@ CLIP_END_OF_DAY = 23           # Latest clip target hour (local)
 CLIP_END_MIN = 45              # Latest clip target minute
 DAY_START_MINUTES = 9 * 60     # 9:00 AM — earliest short
 
-JITTER_MINUTES = 20
+# ── Jitter: asymmetric — more room before peak, tight after ──
+JITTER_BEFORE_MIN = 25         # max minutes before target slot
+JITTER_AFTER_MIN = 5           # max minutes after target slot
+
+# ── Generation lead time: shorts take ~5 min to generate ──────
+SHORT_GEN_LEAD_MIN = 5
 
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
 SHORTS_COOLDOWN_MINUTES = 30
@@ -77,12 +82,12 @@ NATIVE_WINDOWS = [
 ]
 
 
-def _cest_to_utc(date_str: str, hour: int, minute: int) -> str:
-    """Convert a naive CEST datetime (YYYY-MM-DD HH:MM:SS) to UTC string."""
-    dt_cest = datetime.strptime(
+def _local_to_utc(date_str: str, hour: int, minute: int, tz: ZoneInfo) -> str:
+    """Convert a naive local datetime (YYYY-MM-DD HH:MM:SS) to UTC string."""
+    dt_local = datetime.strptime(
         f"{date_str} {hour:02d}:{minute:02d}:00", "%Y-%m-%d %H:%M:%S"
-    ).replace(tzinfo=CEST)
-    dt_utc = dt_cest.astimezone(UTC)
+    ).replace(tzinfo=tz)
+    dt_utc = dt_local.astimezone(UTC)
     return dt_utc.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -92,23 +97,29 @@ def _day_seed(date_str: str, channel_slug: str, slot_idx: int) -> int:
     return int(h[:8], 16)
 
 
-def _jitter_minutes(date_str: str, channel_slug: str, slot_idx: int) -> int:
-    """Return deterministic jitter in minutes (-JITTER_MINUTES .. +JITTER_MINUTES)."""
+def _jitter_minutes(date_str: str, channel_slug: str, slot_idx: int,
+                    before_min: int = None, after_min: int = None) -> int:
+    """Return deterministic asymmetric jitter (-before_min .. +after_min)."""
+    if before_min is None:
+        before_min = JITTER_BEFORE_MIN
+    if after_min is None:
+        after_min = JITTER_AFTER_MIN
     seed = _day_seed(date_str, channel_slug, slot_idx)
-    return (seed % (2 * JITTER_MINUTES + 1)) - JITTER_MINUTES
+    return (seed % (before_min + after_min + 1)) - before_min
 
 
 def _minutes_to_utc_slot(date_str: str, total_min: int,
                           channel_id: int, channel_slug: str,
-                          short_type: str, long_slot_position: int = None,
+                          short_type: str, tz: ZoneInfo,
+                          long_slot_position: int = None,
                           slot_position: int = 0) -> dict:
-    """Convert a minute-of-day (CEST) to a slot dict with UTC timestamps."""
+    """Convert a minute-of-day (local tz) to a slot dict with UTC timestamps."""
     total_min = max(0, min(total_min, 24 * 60 - 1))
     h, m = total_min // 60, total_min % 60
-    target_utc = _cest_to_utc(date_str, h, m)
-    sched_total = max(0, total_min - 3)
+    target_utc = _local_to_utc(date_str, h, m, tz)
+    sched_total = max(0, total_min - SHORT_GEN_LEAD_MIN)
     sh, sm = sched_total // 60, sched_total % 60
-    sched_utc = _cest_to_utc(date_str, sh, sm)
+    sched_utc = _local_to_utc(date_str, sh, sm, tz)
     return {
         "channel_id": channel_id,
         "date_key": date_str,
@@ -132,17 +143,18 @@ def _build_shorts_slots_for_channel(
 ) -> tuple[list[dict], int]:
     """Generate shorts slots for ONE channel for a given date.
 
-    v12 dynamic clip scaling:
-    - clip_count = clips_per_long × long_video_count
-    - Clips anchored to their source long video's target publish hour
+    v14: Uses optimal publish slots (epsilon-greedy) for native shorts,
+    per-channel timezone (PUBLISH_TIMEZONE), asymmetric jitter,
+    and records slot usage for performance feedback.
+    Clips also prefer optimal short slots within their anchor windows.
 
     Args:
         ch: channel dict with at least id, slug, name
         date_str: YYYY-MM-DD
         native_count: how many native shorts today
         clips_per_long: multiplier (default 3)
-        long_video_count: how many long videos planned today
-        long_target_hours: target publish hours for those long videos (CEST)
+        long_video_count: how many long videos published yesterday
+        long_target_hours: target publish hours for those long videos (local tz)
         global_start_pos: starting slot_position for this channel
 
     Returns (slots_list, next_global_pos).
@@ -154,49 +166,68 @@ def _build_shorts_slots_for_channel(
 
     clip_count = clips_per_long * long_video_count
 
-    # ── Load optimal publish slots for shorts (4 slots from v12) ──
-    optimal_hours = None
+    # ── Load channel timezone from config ──
+    tz = DEFAULT_TIMEZONE
+    try:
+        from config.config_bridge import get_channel_config
+        ch_config = get_channel_config(slug)
+        tz_str = getattr(ch_config, "PUBLISH_TIMEZONE", None)
+        if tz_str:
+            tz = ZoneInfo(tz_str)
+    except Exception:
+        pass
+
+    # ── Load optimal publish slots for shorts from DB ──
+    optimal_franjas = []  # list of (hour, minute, slot_rank)
     try:
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
         optimal_slots = _db.get_optimal_slots(channel_id, "short")
-        if optimal_slots and len(optimal_slots) >= 3:
-            optimal_hours = sorted([s["target_hour"] for s in optimal_slots])
+        if optimal_slots and len(optimal_slots) >= 1:
+            for s in optimal_slots:
+                optimal_franjas.append((
+                    s["target_hour"],
+                    s.get("target_minute", 0),
+                    s["slot_rank"],
+                ))
+            optimal_franjas.sort(key=lambda x: (x[0], x[1]))
             logger.debug("Using %d optimal short slots for %s: %s",
-                         len(optimal_hours), slug, optimal_hours)
+                         len(optimal_franjas), slug,
+                         [f"{h:02d}:{m:02d}" for h, m, _ in optimal_franjas])
     except Exception as exc:
         logger.debug("Optimal shorts slots lookup skipped for %s: %s", slug, exc)
 
-    # ── 1. Native slots: 3 of 4 franjas (daily rotation) ──
-    # Which 3 franjas to use today: deterministic rotation
-    day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
-    if optimal_hours and len(optimal_hours) >= 4:
-        # Rotate: day N uses franjas [N%4 .. (N+2)%4]
-        working_hours = optimal_hours
-        start_idx = day_ordinal % len(working_hours)
-        # Pick 3 consecutive in the circular list (or all if < 3)
-        pick_count = min(3, len(working_hours))
-        franjas = [working_hours[(start_idx + i) % len(working_hours)]
-                    for i in range(pick_count)]
-        # Sort by hour to distribute through the day
-        franjas.sort()
-    else:
-        franjas = [window[0] for window in NATIVE_WINDOWS[:3]]
+    # ── Fallback franjas if no optimal slots ──
+    if not optimal_franjas:
+        optimal_franjas = [(int(w[0]), int(w[1]), 0)
+                           for w in NATIVE_WINDOWS[:3]]
+        logger.debug("[%s] Using fallback native windows: %s", slug,
+                     [f"{h:02d}:{m:02d}" for h, m, _ in optimal_franjas])
 
+    # ── 1. Native slots: one per optimal franja (epsilon-greedy picks the slot) ──
     for i in range(native_count):
-        franja_h = franjas[i % len(franjas)]
-        base_min = franja_h * 60 + 7  # start at :07 past the hour
+        # Pick a franja: round-robin through available ones
+        franja_h, franja_m, slot_rank = optimal_franjas[i % len(optimal_franjas)]
+        base_min = franja_h * 60 + franja_m
         jitter = _jitter_minutes(date_str, slug, i)
-        # Spread within ±25 min of the franja hour
         total_min = base_min + jitter
         total_min = max(DAY_START_MINUTES, min(total_min, 24 * 60 - 1))
         total_min = int(total_min)
-        all_slots.append((total_min, "native", None))
+        all_slots.append((total_min, "native", None, slot_rank))
 
-    # ── 2. Clip slots: anchored to source long videos ──
+        # Record slot usage for epsilon-greedy feedback
+        try:
+            _db.record_slot_usage(channel_id, "short", slot_rank)
+        except Exception:
+            pass
+
+    # ── 2. Clip slots: anchored to source long videos, prefer optimal short hours ──
     if clip_count > 0:
         # Default long publish anchors if no real data
         effective_long_hours = long_target_hours if long_target_hours else [16, 19, 22]
+
+        # Build a set of optimal short hours for clip preference
+        optimal_short_hours = set(h for h, _, _ in optimal_franjas)
 
         for long_idx in range(long_video_count):
             # Get the expected publish hour for this long video
@@ -221,7 +252,7 @@ def _build_shorts_slots_for_channel(
             if window_minutes <= 0:
                 window_minutes = 60  # safety: at least 1h
 
-            # Spread the 3 clips for this long video evenly
+            # Spread the clips for this long video evenly
             for c in range(clips_per_long):
                 if clips_per_long > 1:
                     offset = c * window_minutes // (clips_per_long - 1)
@@ -229,43 +260,55 @@ def _build_shorts_slots_for_channel(
                     offset = window_minutes // 2
 
                 total_min_center = clip_window_start + offset
-                # Jitter: ±15 min around the spread point
-                seed = _day_seed(date_str, f"{slug}_clip_{long_idx}_{c}", long_idx * clips_per_long + c)
-                jitter = (seed % 31) - 15
+
+                # Prefer optimal short hours within the clip window
+                clip_hour = total_min_center // 60
+                if clip_hour in optimal_short_hours:
+                    # Snap to the optimal short hour's exact minute
+                    matching = [m for h, m, r in optimal_franjas if h == clip_hour]
+                    if matching:
+                        total_min_center = clip_hour * 60 + matching[0]
+
+                # Jitter: asymmetric around the spread point
+                seed = _day_seed(date_str, f"{slug}_clip_{long_idx}_{c}",
+                                long_idx * clips_per_long + c)
+                jitter = (seed % 31) - 25  # -25..+5 asymmetric
                 total_min = total_min_center + jitter
                 total_min = max(clip_window_start + 5, min(total_min, clip_window_end - 5))
 
                 # long_slot_position: 1-indexed position of source long video
                 long_slot_pos = long_idx + 1
 
-                all_slots.append((int(total_min), "clip", long_slot_pos))
+                # Clip's slot_rank = 0 (not tied to an optimal short slot)
+                all_slots.append((int(total_min), "clip", long_slot_pos, 0))
 
     # ── 3. Sort all slots by time and resolve collisions ──
     all_slots.sort(key=lambda x: x[0])
 
     # Push forward any slots that are too close (min gap enforcement)
     resolved = []
-    for total_min, slot_type, long_pos in all_slots:
-        # Push forward until minimum gap is satisfied
+    for total_min, slot_type, long_pos, slot_rank in all_slots:
         pushed_min = total_min
-        for prev_min, _, _ in reversed(resolved):
+        for prev_min, _, _, _ in reversed(resolved):
             if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
                 pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
                 break
         pushed_min = min(pushed_min, 24 * 60 - 1)
-        resolved.append((pushed_min, slot_type, long_pos))
+        resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
     # ── 4. Build slot dicts ──
     slots = []
-    for total_min, slot_type, long_pos in resolved:
+    for total_min, slot_type, long_pos, slot_rank in resolved:
         pos += 1
         slot = _minutes_to_utc_slot(
             date_str, total_min, channel_id, slug,
             short_type=slot_type,
+            tz=tz,
             long_slot_position=long_pos,
             slot_position=pos,
         )
         slot["channel_name"] = ch.get("name", slug)
+        slot["slot_rank"] = slot_rank  # track which optimal slot was used
         slots.append(slot)
 
     logger.debug(
@@ -314,7 +357,7 @@ def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, 
             # Count non-cancelled slots
             active = [s for s in slots if s.get("status") != "cancelled"]
             count = len(active)
-            # Extract target upload hours (CEST, parse from DB string)
+            # Extract target upload hours (local tz, parse from DB string)
             hours = []
             for s in active:
                 tu = s.get("target_upload_at") or s.get("target_public_at") or s.get("scheduled_at") or ""
@@ -450,7 +493,7 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    today = datetime.now(CEST).date()
+    today = datetime.now(DEFAULT_TIMEZONE).date()
     results = {}
 
     for day_offset in range(days):
@@ -500,7 +543,7 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    today = datetime.now(CEST).date().isoformat()
+    today = datetime.now(DEFAULT_TIMEZONE).date().isoformat()
     existing = db.get_shorts_planned_slots(date_key=today)
 
     # Only count pending and running slots as "needs no regeneration"
@@ -583,6 +626,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     slug = next_slot.get("channel_slug", "")
     short_type = next_slot.get("short_type", "native")
     scheduled = next_slot.get("scheduled_at", "?")
+    slot_rank = next_slot.get("slot_rank", 0)
 
     # 7. Per-channel cooldown guard: enforce minimum spacing between
     # same-channel shorts. Prevents rapid-fire dispatch when many
@@ -645,6 +689,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
             channel_slug=slug,
             short_type=short_type,
             source_video_id=source_video_id,
+            slot_rank=slot_rank,
         )
     )
 
@@ -682,16 +727,18 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
 
 async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                                  channel_slug: str, short_type: str,
-                                 source_video_id: int = None):
+                                 source_video_id: int = None,
+                                 slot_rank: int = 0):
     """Async wrapper that dispatches the actual short generation and updates DB."""
     import sqlite3
     from config.settings import DATABASE_PATH
 
     try:
         if short_type == "native":
-            short_id = _dispatch_native_short(channel_id, channel_slug)
+            short_id = _dispatch_native_short(channel_id, channel_slug, slot_rank=slot_rank)
         else:
-            short_id = _dispatch_clip_short(channel_id, channel_slug, source_video_id)
+            short_id = _dispatch_clip_short(channel_id, channel_slug, source_video_id,
+                                            slot_rank=slot_rank)
 
         if short_id:
             # Mark slot as completed
@@ -753,7 +800,8 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
 
 # ── Native short generation ────────────────────────────────────
 
-def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
+def _dispatch_native_short(channel_id: int, channel_slug: str,
+                           slot_rank: int = 0) -> int | None:
     """Generate and publish a native Short.
 
     Uses the existing native short generation pipeline (LLM script → TTS → render → upload).
@@ -1027,7 +1075,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str) -> int | None:
 # ── Clip short generation ──────────────────────────────────────
 
 def _dispatch_clip_short(channel_id: int, channel_slug: str,
-                          source_video_id: int) -> int | None:
+                          source_video_id: int, slot_rank: int = 0) -> int | None:
     """Extract a clip from a long video, render, and publish.
 
     Uses the ShortsExtractor pipeline pattern from api/routers/shorts.py
@@ -1334,7 +1382,7 @@ def _sync_running_shorts_slots(db):
     Previously only scanned today's slots, which left server-restart orphans
     stuck in 'running' state indefinitely for previous days.
     """
-    today = datetime.now(CEST).date()
+    today = datetime.now(DEFAULT_TIMEZONE).date()
     all_running = []
     for offset in range(-7, 1):  # scan last 7 days including today
         date_key = (today + timedelta(days=offset)).isoformat()
@@ -1382,7 +1430,7 @@ def _cancel_stale_shorts_slots(db):
     Scans ALL dates (not just today) to catch stuck slots from previous days.
     """
     # Fetch pending slots across all recent dates (past 7 days)
-    today = datetime.now(CEST).date()
+    today = datetime.now(DEFAULT_TIMEZONE).date()
     all_pending = []
     for offset in range(-7, 1):  # from 7 days ago to today
         date_key = (today + timedelta(days=offset)).isoformat()

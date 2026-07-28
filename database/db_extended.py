@@ -586,6 +586,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v14: social media accounts & post log ──
     _migrate_v14(conn, logger)
+
+    # ── v15: shorts_planned_slots slot_rank tracking ──
+    _migrate_v15(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1065,6 +1068,20 @@ def _migrate_v14(conn, logger):
         logger.info("Migration v14: social media tables created")
     else:
         logger.warning("Migration v14: schema_v14.sql not found")
+
+
+def _migrate_v15(conn, logger):
+    """Idempotent v15 migration: slot_rank column in shorts_planned_slots."""
+    # Add slot_rank if it doesn't exist (SQLite ignores ALTER errors via try/except)
+    try:
+        conn.execute(
+            "ALTER TABLE shorts_planned_slots ADD COLUMN slot_rank INTEGER DEFAULT 0"
+        )
+        conn.commit()
+        logger.info("Migration v15: shorts_planned_slots.slot_rank column added")
+    except Exception:
+        # Column already exists — idempotent
+        logger.debug("Migration v15: slot_rank column already exists")
 
 
 def _migrate_v10(conn, logger):
@@ -4631,12 +4648,13 @@ class ExtendedDatabase(Database):
                 conn.execute(
                     """INSERT INTO shorts_planned_slots
                        (channel_id, date_key, scheduled_at, target_upload_at,
-                        short_type, slot_position, long_slot_position, source_video_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        short_type, slot_position, long_slot_position, source_video_id,
+                        slot_rank)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (s["channel_id"], s["date_key"], s["scheduled_at"],
                      s.get("target_upload_at"), s["short_type"],
                      s.get("slot_position", 0), s.get("long_slot_position"),
-                     s.get("source_video_id")),
+                     s.get("source_video_id"), s.get("slot_rank", 0)),
                 )
                 count += 1
             conn.commit()
