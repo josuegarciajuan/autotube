@@ -913,13 +913,16 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
 
     - For native slots: dispatch immediately
     - For clip slots: check if source long video exists (today, completed)
-      If not, skip. If yes, set source_video_id and dispatch.
+      If not, cancel the slot and retry with the next candidate (up to
+      _MAX_CLIP_RETRIES times to avoid wasting scheduler ticks).
 
     Returns:
         dict with dispatched slot info, or None if nothing to do.
     """
     import sqlite3
     from config.settings import DATABASE_PATH
+
+    _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
 
     if db is None:
         from database.db_extended import ExtendedDatabase
@@ -928,7 +931,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
 
-    # 2. Cancel stale pending slots (>4h past scheduled_at)
+    # 2. Cancel stale pending slots (>24h past scheduled_at)
     _cancel_stale_shorts_slots(db)
 
     # 3. Allowed concurrency: shorts coexist with long-form generation and uploads.
@@ -947,103 +950,104 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
-    # 6. Get next pending short slot that is due
-    next_slot = db.get_next_pending_shorts_slot()
-    if not next_slot:
-        logger.debug("No pending shorts slots due")
-        return None
+    # ── Core dispatch loop (retries on clip cancellations) ──────
+    for _retry in range(_MAX_CLIP_RETRIES):
+        # 6. Get next pending short slot that is due
+        next_slot = db.get_next_pending_shorts_slot()
+        if not next_slot:
+            logger.debug("No pending shorts slots due")
+            return None
 
-    slot_id = next_slot["id"]
-    channel_id = next_slot["channel_id"]
-    slug = next_slot.get("channel_slug", "")
-    short_type = next_slot.get("short_type", "native")
-    scheduled = next_slot.get("scheduled_at", "?")
-    slot_rank = next_slot.get("slot_rank", 0)
+        slot_id = next_slot["id"]
+        channel_id = next_slot["channel_id"]
+        slug = next_slot.get("channel_slug", "")
+        short_type = next_slot.get("short_type", "native")
+        scheduled = next_slot.get("scheduled_at", "?")
+        slot_rank = next_slot.get("slot_rank", 0)
 
-    # 7. Per-channel cooldown guard: enforce minimum spacing between
-    # same-channel shorts. Prevents rapid-fire dispatch when many
-    # slots are past-due (e.g. after server restart generates catch-up slots).
-    if not _channel_shorts_cooldown_ok(channel_id, db):
-        logger.debug(
-            "Shorts dispatch skipped for %s: cooldown active "
-            "(last short < %d min ago)",
-            slug, SHORTS_COOLDOWN_MINUTES,
-        )
-        return None
-
-    # 8. Same-type publish guard: enforces SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
-    #    between same-type shorts (native↔native, clip↔clip).
-    #    Cross-type (native↔clip) overlap is intentionally allowed.
-    target_upload = next_slot.get("target_upload_at")
-    if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
-                                        exclude_slot_id=slot_id):
-        logger.debug(
-            "Shorts dispatch skipped for %s: same-type (%s) conflict "
-            "(another %s publishing within %d min)",
-            slug, short_type, short_type, SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
-        )
-        return None
-
-    logger.info(
-        "Dispatching shorts slot #%d: %s type=%s (scheduled %s)",
-        slot_id, slug, short_type, scheduled,
-    )
-
-    # 9. For clip slots: check source video dependency
-    source_video_id = None
-    if short_type == "clip":
-        long_pos = next_slot.get("long_slot_position")
-        source_video_id = _resolve_clip_source(channel_id, long_pos)
-        if source_video_id is None:
-            # No source video available — cancel this slot so it doesn't
-            # block the queue. Next cycle picks the next due slot.
-            db.update_shorts_slot_status(
-                slot_id, "cancelled",
-                error_message="No completed source long video available",
-            )
-            logger.info(
-                "Shorts slot #%d cancelled: clip type but no completed source "
-                "long video (channel=%s, long_slot=%s)",
-                slot_id, slug, long_pos,
+        # 7. Per-channel cooldown guard
+        if not _channel_shorts_cooldown_ok(channel_id, db):
+            logger.debug(
+                "Shorts dispatch skipped for %s: cooldown active "
+                "(last short < %d min ago)",
+                slug, SHORTS_COOLDOWN_MINUTES,
             )
             return None
 
-    # 10. Mark slot as running with source_video_id
-    db.update_shorts_slot_status(slot_id, "running", source_video_id=source_video_id)
+        # 8. Same-type publish guard (catch-up bypass for past-due slots)
+        target_upload = next_slot.get("target_upload_at")
+        if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
+                                            exclude_slot_id=slot_id):
+            logger.debug(
+                "Shorts dispatch skipped for %s: same-type (%s) conflict "
+                "(another %s publishing within %d min)",
+                slug, short_type, short_type, SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+            )
+            return None
 
-    # 11. Create job record for tracking
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-    job_action = "generate_native_short" if short_type == "native" else "generate_clip_short"
-    job_id = db.create_job(channel_id, job_action)
-
-    # Mark job as running immediately
-    db.update_job(job_id, status="running")
-
-    # Link job to slot
-    db.update_shorts_slot_status(slot_id, "running", job_id=job_id,
-                                  source_video_id=source_video_id)
-    conn.close()
-
-    # 12. Dispatch the actual generation (fire and forget)
-    import asyncio
-    asyncio.create_task(
-        _dispatch_short_async(
-            slot_id=slot_id,
-            job_id=job_id,
-            channel_id=channel_id,
-            channel_slug=slug,
-            short_type=short_type,
-            source_video_id=source_video_id,
-            slot_rank=slot_rank,
+        logger.info(
+            "Dispatching shorts slot #%d: %s type=%s (scheduled %s)",
+            slot_id, slug, short_type, scheduled,
         )
-    )
 
-    return {
-        "slot_id": slot_id,
-        "job_id": job_id,
-        "channel_slug": slug,
-        "short_type": short_type,
-    }
+        # 9. For clip slots: check source video dependency
+        source_video_id = None
+        if short_type == "clip":
+            long_pos = next_slot.get("long_slot_position")
+            source_video_id = _resolve_clip_source(channel_id, long_pos)
+            if source_video_id is None:
+                # No source video available — cancel this slot and retry
+                db.update_shorts_slot_status(
+                    slot_id, "cancelled",
+                    error_message="No completed source long video available",
+                )
+                logger.info(
+                    "Shorts slot #%d cancelled: clip type but no completed source "
+                    "long video (channel=%s, long_slot=%s) — retrying next slot",
+                    slot_id, slug, long_pos,
+                )
+                continue  # ← retry with next candidate
+
+        # 10. Mark slot as running with source_video_id
+        db.update_shorts_slot_status(slot_id, "running", source_video_id=source_video_id)
+
+        # 11. Create job record for tracking
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+        job_action = "generate_native_short" if short_type == "native" else "generate_clip_short"
+        job_id = db.create_job(channel_id, job_action)
+
+        # Mark job as running immediately
+        db.update_job(job_id, status="running")
+
+        # Link job to slot
+        db.update_shorts_slot_status(slot_id, "running", job_id=job_id,
+                                      source_video_id=source_video_id)
+        conn.close()
+
+        # 12. Dispatch the actual generation (fire and forget)
+        import asyncio
+        asyncio.create_task(
+            _dispatch_short_async(
+                slot_id=slot_id,
+                job_id=job_id,
+                channel_id=channel_id,
+                channel_slug=slug,
+                short_type=short_type,
+                source_video_id=source_video_id,
+                slot_rank=slot_rank,
+            )
+        )
+
+        return {
+            "slot_id": slot_id,
+            "job_id": job_id,
+            "channel_slug": slug,
+            "short_type": short_type,
+        }
+
+    # Exhausted all retries (e.g. all pending clip slots have no source)
+    logger.warning("Shorts dispatch: exhausted %d clip retries — no dispatchable slot", _MAX_CLIP_RETRIES)
+    return None
 
 
 def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
@@ -1773,6 +1777,19 @@ def _same_type_shorts_slot_conflict(
         if target_dt.tzinfo is None:
             target_dt = target_dt.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
+        return False
+
+    # ── Catch-up bypass: if the slot's target upload time is already
+    #     in the past, it's an overdue slot. Allow immediate dispatch
+    #     regardless of same-type spacing — the spacing was meant for
+    #     future slots, and there's no point blocking overdue catch-up.
+    now_utc = datetime.now(UTC)
+    if target_dt < now_utc:
+        logger.debug(
+            "Bypassing same-type conflict for past-due slot "
+            "(target=%s, now=%s — catch-up mode)",
+            target_dt.isoformat()[:16], now_utc.isoformat()[:16],
+        )
         return False
 
     min_gap = timedelta(minutes=SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
