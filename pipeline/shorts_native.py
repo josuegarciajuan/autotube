@@ -163,34 +163,36 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
         niche = getattr(self.config, "CANAL_NARRATIVE_STYLE", "documental")
         display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
 
-        prompt = f"""Crea un guion para YouTube Shorts (~35-45 segundos de narración, ~70-90 palabras en español).
+        prompt = f"""Crea un guion para YouTube Shorts (~40-50 segundos de narración, ~55-70 palabras en español).
 
 CANAL: {display_name}
 ESTILO: {niche}
-FORMATO: Video vertical 9:16, sin presentador, imágenes y texto en pantalla.
+FORMATO: Video vertical 9:16, sin presentador, videos e imágenes en pantalla.
 TEMA: {content_item.get('title', '')}
 
-El guion debe tener:
-1. HOOK inicial (3-8 segundos) — frase impactante que enganche
-2. DESARROLLO rápido (20-25 segundos) — 2-3 datos clave
-3. CIERRE con llamado a la acción (3-7 segundos) — "suscríbete para más"
+Usa entre 5 y 7 bloques narrativos:
+1. hook (3-5 seg) — frase impactante que enganche
+2. desarrollo1 (7-10 seg) — contexto y origen del dato
+3. desarrollo2 (7-10 seg) — dato más impactante, comparaciones
+4. desarrollo3 (opcional, 5-8 seg) — detalle adicional si el tema lo justifica
+5. climax (5-8 seg) — consecuencia, revelación o misterio
+6. cierre (3-5 seg) — "suscríbete para más"
 
-Estructura en bloques:
-- bloque_hook: texto del gancho inicial (1-2 frases)
-- bloque_desarrollo: texto principal (2-3 frases)
-- bloque_cierre: llamado a la acción (1-2 frases)
-
-IMPORTANTE — BÚSQUEDA DE IMÁGENES:
+IMPORTANTE — BÚSQUEDA DE ASSETS (imágenes y videos):
 - Para CADA bloque, genera "search_query_en" con 5-8 keywords EN INGLÉS que describan
   la escena visual exacta de ese bloque. Usa solo inglés (las APIs de stock no entienden español).
-  Incluye: tema concreto + detalles visuales (iluminación, tipo de plano, atmósfera, época).
+  Incluye: tema concreto + detalles visuales (iluminación, tipo de plano, atmósfera, época, acción).
   NO uses adjetivos abstractos ("beautiful", "amazing"). Sé MUY concreto.
+  Piensa en lo que se VERÍA en pantalla mientras se narra ese texto exacto.
 - Además, genera "theme_keywords_en" a nivel del short: 5-8 keywords EN INGLÉS que capturen
   el tema visual GLOBAL del short. Estas keywords se mezclarán en todas las búsquedas para
   mantener coherencia visual entre escenas.
 
-Devuelve SOLO JSON:
-{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}"""
+Devuelve SOLO JSON con entre 5 y 7 bloques:
+{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo1", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo2", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo3", "texto": "narración en español (opcional)", "search_query_en": "english stock search keywords"}}, {{"tipo": "climax", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}
+
+El array bloques debe tener 5, 6 o 7 elementos. Si usas 5, omite desarrollo3.
+NADA MAS fuera del JSON."""
 
         try:
             from config.llm_helpers import llm_json_call_or_fallback
@@ -205,7 +207,7 @@ Devuelve SOLO JSON:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.8,
-                max_tokens=1000,
+                max_tokens=1800,
             )
             if result:
                 return result
@@ -255,60 +257,38 @@ Devuelve SOLO JSON:
             return None
 
     def _phase_media_short(self, script: dict) -> Optional[list]:
-        """Fetch vertical-oriented media for the short.
+        """Fetch assets exhaustively (v2) — one distinct asset per block.
 
-        Builds English search queries from LLM-generated ``search_query_en`` keywords
-        combined with theme keywords and channel style modifiers for thematic coherence.
-        Falls back to raw ``texto`` snippets if ``search_query_en`` is missing.
+        Uses the new v2 exhaustive search with query pool, provider pagination,
+        cross-short dedup, and 50-60% portrait video mix.
         """
-        from pipeline.shorts_media import fetch_portrait_images, _build_portrait_query
+        from pipeline.shorts_media import fetch_short_assets_exhaustive
 
         theme_kw = script.get("theme_keywords_en", [])
-        style_mod = getattr(self.config, "IMAGE_STYLE_MODIFIERS", "")
+        bloques = script.get("bloques", [])
+        channel_id = getattr(self, "channel_id", 0)
 
-        queries = []
-        for b in script.get("bloques", []):
-            search_en = b.get("search_query_en", "")
-            if search_en and search_en.strip():
-                # Build composite query: scene keywords + theme context + style modifiers
-                q = _build_portrait_query(search_en, theme_kw, style_mod)
-                queries.append(q)
-            else:
-                # Fallback for legacy scripts: use raw Spanish text (poor results)
-                texto = b.get("texto", "")
-                if texto.strip():
-                    queries.append(texto[:80])
-
-        if not queries:
+        if not bloques:
             return []
 
         try:
-            image_paths = fetch_portrait_images(queries, self.config, count=4)
-            # Return as list of {path, type} dicts for render compatibility
-            assets = [{"path": p, "type": "image"} for p in image_paths]
+            assets = fetch_short_assets_exhaustive(bloques, self.config, theme_kw, channel_id)
+            logger.info("Fetched %d assets for native Short (blocks=%d)", len(assets), len(bloques))
             return assets
         except Exception as e:
-            logger.error(f"Short media error: {e}")
+            logger.error("Short media fetch failed: %s", e)
             return []
 
     def _phase_render_short(
         self, script: dict, audio: dict, media: list
     ) -> Optional[Path]:
-        """Render the short video in vertical format."""
-        from pipeline.shorts_renderer import ShortsRenderer
+        """Render the short video using hybrid FFmpeg render (v2).
 
-        renderer = ShortsRenderer(self.config)
-
-        # For native shorts, use MoviePy to assemble
-        try:
-            from moviepy import (
-                VideoFileClip, ImageClip, AudioFileClip,
-                CompositeVideoClip, TextClip, concatenate_videoclips,
-            )
-        except ImportError:
-            logger.error("MoviePy not available for native Shorts rendering")
-            return None
-
+        Mixes video clips, Ken Burns still images, xfade transitions, and
+        burned SRT subtitles. Falls back to solid-colour background if no
+        valid assets are available.
+        """
+        from pipeline.shorts_media import render_short_hybrid
         from config.settings import OUTPUT_DIR
 
         output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -318,73 +298,42 @@ Devuelve SOLO JSON:
         ts = int(time.time())
         output_path = output_dir / f"native_short_{self.channel_slug}_{ts}.mp4"
 
+        audio_path = Path(audio["audio_path"]) if audio.get("audio_path") else None
+        audio_duration = audio.get("duration_sec", None)
+        if audio_duration is not None:
+            audio_duration = audio_duration + 1.5
+
+        color_palette = getattr(self.config, "COLOR_PALETTE", {})
+        def _to_hex(c):
+            if isinstance(c, (tuple, list)) and len(c) == 3:
+                return f"{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
+            return str(c).lstrip("#").replace("#", "")
+        bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
+
         try:
-            clips = []
-            blocks = script.get("bloques", [])
-            hook_text = script.get("hook_text", script.get("titulo", ""))
-
-            for i, block in enumerate(blocks):
-                media_item = media[i] if i < len(media) else None
-                block_text = block.get("texto", "")
-
-                if media_item and media_item.get("type") == "video":
-                    clip = VideoFileClip(media_item["path"])
-                    clip = clip.resized((1080, 1920))
-                else:
-                    # Create a colored background with text
-                    from PIL import Image as PILImage
-                    import numpy as np
-                    bg = PILImage.new("RGB", (1080, 1920), (20, 20, 30))
-                    bg_array = np.array(bg)
-                    clip = ImageClip(bg_array).with_duration(5)
-                    clip = clip.resized((1080, 1920))
-
-                # Add burned text
-                if block_text:
-                    txt = TextClip(
-                        text=block_text[:200],
-                        font_size=50,
-                        color="white",
-                        stroke_color="black",
-                        stroke_width=2,
-                        font="Arial",
-                        method="caption",
-                        size=(900, None),
-                    )
-                    txt = txt.with_position(("center", 1400)).with_duration(clip.duration or 5)
-                    clip = CompositeVideoClip([clip, txt])
-
-                clips.append(clip)
-
-            # Add audio
-            audio_path = Path(audio["audio_path"]) if audio.get("audio_path") else None
-            if audio_path and audio_path.exists():
-                final = concatenate_videoclips(clips)
-                audio_clip = AudioFileClip(str(audio_path))
-                final = final.with_audio(audio_clip)
-                final = final.with_duration(audio_clip.duration)
-            else:
-                final = concatenate_videoclips(clips)
-
-            final.write_videofile(
-                str(output_path),
-                fps=30,
-                codec="libx264",
-                bitrate="6000k",
-                audio_codec="aac",
-                preset="medium",
+            render_short_hybrid(
+                asset_items=media or [],
+                audio_path=audio_path,
+                output_path=output_path,
+                audio_duration=audio_duration,
+                bg_color_hex=bg_color,
             )
-
-            final.close()
-            for c in clips:
-                try: c.close()
-                except: pass
-
             return output_path
-
         except Exception as e:
-            logger.error(f"Native Short render error: {e}")
-            return None
+            logger.error("Native Short hybrid render failed: %s", e)
+            # Fallback to solid bg
+            try:
+                render_short_hybrid(
+                    asset_items=[],
+                    audio_path=audio_path,
+                    output_path=output_path,
+                    audio_duration=audio_duration,
+                    bg_color_hex=bg_color,
+                )
+                return output_path
+            except Exception as e2:
+                logger.error("Native Short solid-bg render also failed: %s", e2)
+                return None
 
     def _phase_upload_short(self, script: dict, video_path: Path) -> Optional[dict]:
         """Upload the short to YouTube."""

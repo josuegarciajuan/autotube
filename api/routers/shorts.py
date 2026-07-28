@@ -774,17 +774,18 @@ async def generate_native(channel_id: int):
 Canal: {display_name} — {niche}
 Tagline: {tagline}
 {topic_warning}
-Genera un Short viral de ~40-45 segundos de narración (~70-90 palabras en español). USA 5 BLOQUES, cada uno con 1-2 frases concisas. El JSON EXACTO es:
+Genera un Short viral de ~40-50 segundos de narración (~55-70 palabras en español). USA ENTRE 5 Y 7 BLOQUES, cada uno con 1-2 frases concisas (min 8 palabras por bloque, max 18). Añade desarrollo3 SOLO si el tema lo justifica. El JSON EXACTO es:
 
-{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "theme_keywords_en": ["global", "theme", "keywords", "visual", "context"], "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente.", "search_query_en": "5-8 english keywords describing exact scene visuals for stock image search. Be VERY concrete: include topic details, lighting, shot type, atmosphere. NO spanish."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato. Añade detalles concretos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Profundiza en la revelación. Usa comparaciones o datos numéricos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver. Qué significa este dato. Por qué debería importarnos.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto, deja una reflexión, e invita a suscribirse.", "search_query_en": "5-8 english keywords. Scene-specific. Include visual details."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
+{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto viral máximo 60 chars", "hook_text": "frase de gancho de 8-12 palabras para pantalla", "theme_keywords_en": ["global", "theme", "keywords", "visual", "context"], "bloques": [{{"tipo": "hook", "texto": "1-2 frases que enganchen en los primeros 3-4 segundos. Plantea una pregunta, misterio o hecho sorprendente.", "search_query_en": "5-8 english keywords describing exact scene visuals. Be VERY concrete: include topic details, lighting, shot type, atmosphere. NO spanish."}}, {{"tipo": "desarrollo1", "texto": "1-2 frases con contexto. Explica el origen, la historia detrás del dato.", "search_query_en": "5-8 english keywords. Scene-specific."}}, {{"tipo": "desarrollo2", "texto": "1-2 frases con el dato más impactante. Usa comparaciones o datos numéricos.", "search_query_en": "5-8 english keywords. Scene-specific."}}, {{"tipo": "desarrollo3", "texto": "1-2 frases con detalle adicional. SOLO si el tema lo justifica (mas variedad visual).", "search_query_en": "5-8 english keywords. Scene-specific."}}, {{"tipo": "climax", "texto": "1-2 frases con la consecuencia o el misterio sin resolver.", "search_query_en": "5-8 english keywords. Scene-specific."}}, {{"tipo": "cierre", "texto": "1-2 frases de cierre. Resume el impacto e invita a suscribirse.", "search_query_en": "5-8 english keywords. Scene-specific."}}], "hashtags": ["#Shorts", "#Curiosidades"]}}
 
+El array bloques debe tener exactamente 5, 6 o 7 elementos. Si usas 5, omite desarrollo3.
 RESPONDE SOLO CON EL JSON. NADA MÁS."""
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8, max_tokens=1400,
+            temperature=0.8, max_tokens=1800,
         )
         content = response.choices[0].message.content
         content = re.sub(r"^```(?:json)?\s*\n", "", content)
@@ -839,67 +840,44 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     except Exception as e:
         raise HTTPException(500, f"TTS failed: {str(e)[:200]}")
 
-    # 3b. Fetch portrait images — build theme-aware English queries
-    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images, _build_portrait_query
+    # 3b. Fetch assets exhaustively (v2) — one distinct asset per block
+    from pipeline.shorts_media import (
+        fetch_short_assets_exhaustive, render_short_hybrid, flush_short_asset_history,
+    )
     theme_kw = script.get("theme_keywords_en", [])
-    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
 
-    portrait_queries = []
-    for b in bloques:
-        search_en = b.get("search_query_en", "")
-        if search_en and search_en.strip():
-            portrait_queries.append(_build_portrait_query(search_en, theme_kw, style_mod))
-        else:
-            texto = b.get("texto", "")
-            if texto.strip():
-                portrait_queries.append(texto[:80])
-
-    if not portrait_queries:
-        portrait_queries = [hook_text[:80]]
-
-    image_paths = []
+    asset_items = []
     try:
-        image_paths = fetch_portrait_images(portrait_queries, ch_config, count=4)
-        logger.info("Fetched %d portrait images for Short", len(image_paths))
+        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id)
+        logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
-        logger.warning("Portrait image fetch failed (will use solid bg): %s", e)
+        logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
 
-    # 4. Render vertical video: slideshow of images + burned text + audio
+    # 4. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"native_short_{channel_slug}_{ts}.mp4"
 
     try:
-        render_slideshow_with_images(
-            image_paths=image_paths,
+        render_short_hybrid(
+            asset_items=asset_items,
             audio_path=audio_path,
-            hook_text=hook_text,
             output_path=video_path,
             audio_duration=audio_duration,
             bg_color_hex=bg_color,
             srt_path=srt_path if srt_path.exists() else None,
         )
     except Exception as e:
-        logger.warning("Slideshow render failed (will use solid bg fallback): %s", e)
-        # Solid-bg fallback with subtitles
-        from pipeline.shorts_media import _build_solid_bg_filter
-        filter_str = _build_solid_bg_filter(
-            bg_color,
-            srt_path=srt_path if srt_path.exists() else None,
-        )
-        render_cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=0x{bg_color}:s=1080x1920:d={audio_duration}:r=30",
-            "-i", str(audio_path),
-            "-filter_complex", filter_str,
-            "-map", "[v]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-pix_fmt", "yuv420p", "-r", "30",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest", "-movflags", "+faststart",
-            str(video_path),
-        ]
-        result = subprocess.run(render_cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg render failed: {result.stderr[-300:]}")
+        logger.warning("Hybrid render failed, falling back to solid bg: %s", e)
+        try:
+            render_short_hybrid(
+                asset_items=[],
+                audio_path=audio_path,
+                output_path=video_path,
+                audio_duration=audio_duration,
+                bg_color_hex=bg_color,
+                srt_path=srt_path if srt_path.exists() else None,
+            )
+        except Exception as e2:
+            raise RuntimeError(f"Solid-bg fallback render also failed: {e2}")
 
     if not video_path.exists():
         raise HTTPException(500, "Render produced no output file")
@@ -952,6 +930,13 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     short_id = cursor.lastrowid
     conn.commit()
     conn.close()
+
+    # Record assets for cross-short dedup
+    if asset_items:
+        try:
+            flush_short_asset_history(short_id, channel_id, asset_items)
+        except Exception as e:
+            logger.warning("Failed to flush short asset history for short %s: %s", short_id, e)
 
     # Update shorts_schedule produced_count
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)

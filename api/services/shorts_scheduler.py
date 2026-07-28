@@ -909,18 +909,19 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             retry_delay=2.0,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). "
+                f"Genera un Short viral en español de ~40-50 segundos (~55-70 palabras totales, minimo 45). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
-                f"Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). "
-                f"IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. "
-                f"Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. "
-                f"El total debe superar 50 palabras. "
+                f"Usa entre 5 y 7 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
+                f"IMPORTANTE: los bloques de desarrollo y climax deben tener 2-3 frases cada uno. "
+                f"Hook y cierre: 1-2 frases. Minimo 8 palabras por bloque, maximo 18. "
+                f"El total debe superar 45 palabras y no exceder 160. "
+                f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                 f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
-                f"imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + "
-                f"detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español "
-                f"(las APIs de stock no lo entienden). "
-                f"Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL "
+                f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
+                f"Incluye tema + detalles visuales (iluminacion, tipo de plano, atmosfera, accion). "
+                f"NO uses espanol (las APIs de stock no lo entienden). "
+                f"Ademas genera 'theme_keywords_en': 5-8 keywords EN INGLES del tema visual GLOBAL "
                 f"del short para mantener coherencia entre escenas. "
                 f"Devuelve SOLO JSON: "
                 f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
@@ -932,13 +933,15 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 f'"search_query_en": "english keywords"}}, '
                 f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
                 f'"search_query_en": "english keywords"}}, '
+                f'{{"tipo": "desarrollo3", "texto": "2-3 frases con detalle adicional (opcional)", '
+                f'"search_query_en": "english keywords"}}, '
                 f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
                 f'"search_query_en": "english keywords"}}, '
                 f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
                 f'"search_query_en": "english keywords"}}]}}. '
-                f"NADA MAS fuera del JSON."
+                f"NADA MAS fuera del JSON. El array bloques debe tener entre 5 y 7 elementos."
             )}],
-            temperature=0.9, max_tokens=1200,
+            temperature=0.9, max_tokens=1800,
         )
     except Exception as e:
         logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
@@ -976,31 +979,21 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Short TTS failed for %s: %s", channel_slug, e)
         return None
 
-    # 3. Fetch portrait images — build theme-aware English queries
-    from pipeline.shorts_media import fetch_portrait_images, render_slideshow_with_images, _build_portrait_query
+    # 3. Fetch assets exhaustively (v2) — one distinct asset per block,
+    #    50-60% video mix, cross-short dedup, query pool with variations
+    from pipeline.shorts_media import (
+        fetch_short_assets_exhaustive, render_short_hybrid,
+        flush_short_asset_history,
+    )
     theme_kw = script.get("theme_keywords_en", [])
-    style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
-
-    portrait_queries = []
-    for b in bloques:
-        search_en = b.get("search_query_en", "")
-        if search_en and search_en.strip():
-            portrait_queries.append(_build_portrait_query(search_en, theme_kw, style_mod))
-        else:
-            # Fallback for legacy scripts without search_query_en
-            texto = b.get("texto", "")
-            if texto.strip():
-                portrait_queries.append(texto[:80])
-
-    if not portrait_queries:
-        portrait_queries = [hook_text[:80]]
-    image_paths = []
+    asset_items = []
     try:
-        image_paths = fetch_portrait_images(portrait_queries, ch_config, count=4)
+        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id)
+        logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
-        logger.warning("Portrait image fetch failed (will use solid bg): %s", e)
+        logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
 
-    # 4. Render
+    # 4. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"sched_short_{channel_slug}_{ts}.mp4"
 
     color_palette = getattr(ch_config, "COLOR_PALETTE", {})
@@ -1011,36 +1004,30 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
 
     try:
-        render_slideshow_with_images(
-            image_paths=image_paths,
+        render_short_hybrid(
+            asset_items=asset_items,
             audio_path=audio_path,
-            hook_text=hook_text,
             output_path=video_path,
             audio_duration=audio_duration,
             bg_color_hex=bg_color,
             srt_path=srt_path if srt_path.exists() else None,
         )
     except Exception as e:
-        logger.warning("Slideshow render failed, falling back to solid bg: %s", e)
-        from pipeline.shorts_media import _build_solid_bg_filter
-        filter_str = _build_solid_bg_filter(
-            bg_color,
-            srt_path=srt_path if srt_path.exists() else None,
-        )
-        render_cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=0x{bg_color}:s=1080x1920:d={audio_duration}:r=30",
-            "-i", str(audio_path), "-filter_complex", filter_str,
-            "-map", "[v]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-pix_fmt", "yuv420p", "-r", "30",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest", "-movflags", "+faststart",
-            str(video_path),
-        ]
-        result = subprocess.run(render_cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            logger.error("FFmpeg render failed for %s: %s", channel_slug, result.stderr[-300:])
+        logger.warning("Hybrid render failed, falling back to solid bg: %s", e)
+        # render_short_hybrid internally uses solid-color bg when asset_items is empty,
+        # but if it raised an exception (e.g. complex FFmpeg filter error),
+        # re-render with empty assets to force the solid-bg path
+        try:
+            render_short_hybrid(
+                asset_items=[],
+                audio_path=audio_path,
+                output_path=video_path,
+                audio_duration=audio_duration,
+                bg_color_hex=bg_color,
+                srt_path=srt_path if srt_path.exists() else None,
+            )
+        except Exception as e2:
+            logger.error("Solid-bg fallback render also failed for %s: %s", channel_slug, e2)
             return None
 
     if not video_path.exists():
@@ -1097,6 +1084,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     short_id = cursor.lastrowid
     conn.commit()
     conn.close()
+
+    # 6b. Record assets in short_asset_history for cross-short dedup
+    if asset_items:
+        try:
+            flush_short_asset_history(short_id, channel_id, asset_items)
+        except Exception as e:
+            logger.warning("[%s] Failed to flush short asset history: %s", channel_slug, e)
 
     # Auto-mark altered content (IA) via browser
     try:
