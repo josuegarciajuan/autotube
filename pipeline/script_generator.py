@@ -582,6 +582,42 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 "Continúa el arco narrativo de forma natural.\n"
             )
 
+        # ── Build theme context block for the prompt ──────────────────
+        theme_block = ""
+        tc = self._theme_context
+        if tc:
+            theme_lines = ["\nCONTEXTO TEMÁTICO DEL VIDEO (datos extraídos del análisis del guion completo):"]
+            if tc.genre and tc.genre != "documental":
+                theme_lines.append(f"- Género/ambientación: {tc.genre}")
+            if tc.era and tc.era != "atemporal":
+                theme_lines.append(f"- Época: {tc.era}")
+            if tc.era_decade and tc.era_decade not in ("atemporal", "presente", ""):
+                theme_lines.append(f"- Década: {tc.era_decade}")
+            if tc.primary_subject:
+                theme_lines.append(f"- Sujeto visual principal: {tc.primary_subject}")
+            if tc.visual_style:
+                theme_lines.append(f"- Estilo visual: {tc.visual_style}")
+            if tc.key_motifs:
+                theme_lines.append(f"- Motivos visuales icónicos disponibles: {', '.join(tc.key_motifs[:5])}")
+            if tc.mood:
+                theme_lines.append(f"- Estado de ánimo: {tc.mood}")
+            if tc.lighting:
+                theme_lines.append(f"- Iluminación: {tc.lighting}")
+            if tc.composition:
+                theme_lines.append(f"- Encuadre preferido: {tc.composition}")
+            if tc.forbidden_elements:
+                theme_lines.append(f"- ⛔ ELEMENTOS PROHIBIDOS (NUNCA incluir en search_query_en): {', '.join(tc.forbidden_elements)}")
+            theme_lines.append(
+                "\nINSTRUCCIÓN CLAVE: El contexto temático es el ANCLA VISUAL del video, NO una camisa de fuerza.\n"
+                "- Si el bloque narra algo que encaja con el género/época/motivos → úsalos para anclar la query visualmente\n"
+                "- Si el bloque habla de un concepto atemporal o moderno que no encaja con la época → "
+                "prioriza el mood, el estilo visual y los key_motifs como anclaje\n"
+                "- Lo fundamental: CADA escena debe sentirse parte del MISMO MUNDO VISUAL que el resto del video\n"
+                "- NUNCA incluyas elementos prohibidos en search_query_en — si un bloque menciona algo "
+                "de la lista prohibida, tradúcelo a un equivalente visual que SÍ pertenezca al mundo del video"
+            )
+            theme_block = "\n".join(theme_lines)
+
         system_prompt = (
             "Eres un asistente editorial. Tu tarea es enriquecer bloques narrativos "
             "de un guion documental en español latinoamericano.\n\n"
@@ -591,7 +627,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "3. Mantén el número EXACTO de bloques del lote.\n"
             "4. Responde ÚNICAMENTE con JSON.\n\n"
             f"{arc_hint}\n"
-            "CAMPOS POR BLOQUE:\n"
+            + (theme_block + "\n\n" if theme_block else "")
+            + "CAMPOS POR BLOQUE:\n"
             "- tipo: (hook|desarrollo|climax|reflexion|cierre)\n"
             "- emocion: sentimiento predominante en español (misterio, asombro, tensión, reflexión...)\n"
             "- search_query_en: frase de búsqueda en INGLÉS para encontrar "
@@ -601,17 +638,23 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "    (1) SUJETO NARRATIVO (VA PRIMERO): 2-4 keywords que describen\n"
             "        EXACTAMENTE lo que se narra en este bloque — persona, acción,\n"
             "        lugar, objeto mencionado en la narración.\n"
-            "    (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS): 1-2 keywords de\n"
-            "        época/estilo que anclan la escena en el mundo del video.\n"
+            "    (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS): 1-2 keywords del contexto\n"
+            "        temático que anclan la escena en el mundo visual del video.\n"
+            "        Usa preferentemente key_motifs, primary_subject, genre o era_decade.\n"
             "  * LO QUE VES = LO QUE OYES: si el bloque narra 'el médico examinó\n"
             "    al paciente con instrumentos rudimentarios', la query debe ser\n"
             "    sobre 'physician examining patient medieval instruments',\n"
             "    NO sobre 'medieval medicine history'.\n"
-            "  * PROGRESIÓN VISUAL: como procesas TODOS los bloques del lote a la\n"
-            "    vez, asegura que las escenas consecutivas compartan al menos UN\n"
-            "    elemento visual (misma luz, material, tipo de locación) para\n"
-            "    crear un HILO VISUAL que una el video. NO uses la misma keyword\n"
-            "    de anclaje temático en dos bloques seguidos.\n"
+            "  * HILO VISUAL (CONTINUIDAD ENTRE ESCENAS CONSECUTIVAS):\n"
+            "    Las escenas i e i+1 deben compartir al menos UNO de estos elementos:\n"
+            "    a) Un key_motif del contexto temático (ROTANDO entre ellos — no uses\n"
+            "       el mismo key_motif en dos bloques seguidos)\n"
+            "    b) El mismo tipo de iluminación o atmósfera\n"
+            "    c) El mismo material o tipo de locación (piedra, madera, agua,\n"
+            "       interior, exterior, noche, día...)\n"
+            "    d) La misma paleta cromática o mood\n"
+            "    PERO varía el encuadre/ángulo entre escenas consecutivas para evitar\n"
+            "    monotonía visual: alterna 'wide shot' ↔ 'close-up' ↔ 'detail'\n"
             "  * Usa términos visuales concretos: 'aerial shot', 'wide angle', "
             "'close up detail', 'drone footage', 'golden hour'\n"
             "  * Equilibra especificidad con disponibilidad en stock: "

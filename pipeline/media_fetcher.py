@@ -326,11 +326,12 @@ class MediaFetcher:
         target_dur = target_duration or block.get("media_duracion", 5)
         block_tipo = block.get("tipo", "desarrollo")
 
-        # Build query: scene topic + video-level theme context, fitting Pixabay's 100-char limit
+        # Build query: scene topic + video-level full theme context (v8), fitting Pixabay's 100-char limit
         ctx = theme_context or self._theme_context
         query = self._build_search_query(
             query=block_query,
             theme_keywords=ctx.theme_keywords_en if ctx else None,
+            theme_ctx=ctx,  # v8: pass full ThemeContext for richer anchoring
         )
         logger.info("Built search query: %r (%d chars)", query, len(query))
 
@@ -1460,10 +1461,18 @@ class MediaFetcher:
             if clean and clean != base and clean.strip():
                 pool.append(clean)
 
-        # Type-specific fallback queries
+        # Type-specific fallback queries (dynamically themed when ThemeContext is available)
         type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
         if type_fb and type_fb not in pool:
             pool.append(type_fb)
+
+        # Themed fallback queries (v8): built dynamically from ThemeContext
+        # These are more specific than the generic _FALLBACK_BY_TYPE and appear AFTER
+        # type-specific fallbacks so they don't shadow more specific queries
+        if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
+            themed_fb = self._build_themed_fallback(scene_tipo, ctx)
+            if themed_fb and themed_fb not in pool:
+                pool.append(themed_fb)
 
         # Channel-configured fallback queries
         fallbacks = self._media_strategy.get("fallback_queries", [
@@ -2019,6 +2028,85 @@ class MediaFetcher:
 
         return None
 
+    # ── Internal: themed fallback query builder (v8) ────────────────
+
+    @staticmethod
+    def _build_themed_fallback(scene_tipo: str, ctx) -> str:
+        """Build a fallback search query dynamically from the ThemeContext.
+
+        When all specific queries fail, this provides a last-resort query
+        that is at least anchored to the video's visual world (primary_subject,
+        key_motifs, mood) rather than a completely generic fallback.
+
+        Args:
+            scene_tipo: The block type (hook, desarrollo, climax, reflexion, cierre)
+            ctx: ThemeContext with primary_subject, key_motifs, mood, genre, etc.
+
+        Returns:
+            A themed fallback query string (in English), or empty string if no
+            theme data is available.
+        """
+        if not ctx:
+            return ""
+
+        # Gather available thematic anchors
+        anchors: list[str] = []
+
+        # Primary subject (best anchor when available)
+        if ctx.primary_subject:
+            ps_words = ctx.primary_subject.split()[:4]
+            anchors.extend(ps_words)
+
+        # Key motifs (the visual icons of this video's world)
+        if ctx.key_motifs:
+            for motif in ctx.key_motifs[:3]:
+                motif_words = motif.split()[:2]
+                anchors.extend(motif_words)
+
+        # Mood → English mapping for stock query compatibility
+        mood_map = {
+            "misterioso": "mysterious", "épico": "epic", "ominoso": "ominous",
+            "melancólico": "melancholic", "esperanzador": "hopeful",
+            "sereno": "serene", "perturbador": "disturbing",
+        }
+        mood_word = mood_map.get(ctx.mood, "") if ctx.mood else ""
+
+        if not anchors:
+            return ""  # No thematic data to build from
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_anchors = []
+        for a in anchors:
+            al = a.lower()
+            if al not in seen:
+                seen.add(al)
+                unique_anchors.append(a)
+
+        base = " ".join(unique_anchors[:5])
+        if not base:
+            return ""
+
+        # Compose per-type fallback with mood suffix
+        if mood_word:
+            mood_suffix = f" {mood_word}" if len(base) + len(mood_word) + 2 < 100 else ""
+        else:
+            mood_suffix = ""
+
+        by_type = {
+            "hook": f"{base}{mood_suffix} dramatic atmosphere",
+            "desarrollo": f"{base} documentary establishing shot",
+            "climax": f"{base}{mood_suffix} dark tension shadow",
+            "reflexion": f"{base}{mood_suffix} contemplative silence",
+            "cierre": f"{base}{mood_suffix} resolution hope ending",
+        }
+
+        result = by_type.get(scene_tipo, f"{base}{mood_suffix} cinematic")
+        # Truncate to 100 chars (Pixabay limit) at last complete word
+        if len(result) > 100:
+            result = result[:100].rsplit(" ", 1)[0]
+        return result
+
     # ── Internal: query simplification ────────────────────────────
 
     @staticmethod
@@ -2050,19 +2138,21 @@ class MediaFetcher:
         query: str,
         variation: str | None = None,
         theme_keywords: list[str] | None = None,
+        theme_ctx = None,  # ThemeContext object (v8 — full context)
         max_len: int = 100,
     ) -> str:
         """Build a search query that fuses scene-specific narrative content with
         video-level theme context.
 
-        Strategy (v7 — narrative-first fusion):
+        Strategy (v8 — full ThemeContext fusion):
         1. Extract scene narrative keywords from the LLM query (primary subject)
-        2. Add sub-scene variation for visual diversity (lowest priority)
-        3. Add 1-2 theme keywords as era/style anchors (not duplicate subjects)
-        4. Fit all within ``max_len`` chars, trimming variation first, then theme, then scene.
+        2. Add primary_subject / genre / era_decade from ThemeContext as contextual anchors
+        3. Add 1-2 theme keywords as additional anchors (dedup with anchors above)
+        4. Filter out forbidden elements from the final query
+        5. Fit all within ``max_len`` chars, trimming from lowest priority.
 
         The scene narrative content always leads the query so stock APIs weight it
-        higher. Theme keywords serve as contextual anchors appended at the end.
+        higher. Theme context fields serve as contextual anchors.
         """
         # 1. Extract scene topic keywords (strip style words, keep content nouns)
         words = query.split()
@@ -2071,18 +2161,49 @@ class MediaFetcher:
             scene_keywords = [w for w in words]  # fallback: all words
 
         # If both query and theme are empty, return the original query as-is
-        if not scene_keywords and not theme_keywords:
+        has_theme_data = bool(theme_keywords or (theme_ctx and (
+            theme_ctx.primary_subject or theme_ctx.era_decade or theme_ctx.genre
+        )))
+        if not scene_keywords and not has_theme_data:
             return query.strip()[:max_len]
 
-        # 2. Allocate character budget: scene leads, theme anchors, variation optional
-        #    scene: ~75% (narrative subject — the scene's primary visual content)
-        #    theme: ~20% (era/style anchor — max 1-2 keywords appended at end)
-        #    variation: ~15% (visual diversity — lowest priority, dropped first)
-        variation_budget = 14 if variation else 0
-        theme_budget = min(20, max_len - variation_budget)
-        scene_budget = max_len - variation_budget - theme_budget
+        # 2. Gather contextual anchors from ThemeContext (v8)
+        # Build anchor keywords list: [primary_subject keywords, era_decade, genre_keywords]
+        # These are HIGHER priority than theme_keywords because they define the visual world
+        ctx_anchors: list[str] = []
+        if theme_ctx:
+            # Primary subject keywords (e.g. "ancient Egyptian civilization")
+            if theme_ctx.primary_subject:
+                ps_words = [w for w in theme_ctx.primary_subject.split()
+                           if w.lower() not in MediaFetcher._STYLE_WORDS]
+                ctx_anchors.extend(ps_words[:3])
+            # Era/decade as anchor (only if meaningful, not "atemporal" or "presente")
+            if theme_ctx.era_decade and theme_ctx.era_decade.lower() not in ("atemporal", "presente", ""):
+                ctx_anchors.append(theme_ctx.era_decade)
+            elif theme_ctx.era and theme_ctx.era.lower() not in ("atemporal", "presente", ""):
+                # era field might be like "siglo_XIII" — extract meaningful part
+                era_clean = theme_ctx.era.replace("_", " ").strip()
+                if era_clean and len(era_clean) <= 15:
+                    ctx_anchors.extend(era_clean.split()[:2])
+            # Genre as anchor (only if not generic "documental")
+            if theme_ctx.genre and theme_ctx.genre.lower() not in ("documental", "documentary", ""):
+                genre_clean = theme_ctx.genre.replace("_", " ").strip()
+                ctx_anchors.extend(genre_clean.split()[:2])
 
-        # 3. Build scene narrative part (fit within scene_budget chars)
+        # Dedup ctx_anchors against scene part (to be done after scene_part is built)
+        ctx_anchors = list(dict.fromkeys(ctx_anchors))  # preserve order, remove dups
+
+        # 3. Allocate character budget
+        #    scene: ~60% (narrative subject — the scene's primary visual content)
+        #    ctx_anchors: ~15% (primary_subject / era / genre — defines visual world)
+        #    theme: ~15% (theme_keywords_en — complementary anchors)
+        #    variation: ~10% (visual diversity — lowest priority, dropped first)
+        variation_budget = 12 if variation else 0
+        theme_budget = min(15, max_len - variation_budget)
+        ctx_budget = min(15, max_len - variation_budget - theme_budget)
+        scene_budget = max_len - variation_budget - ctx_budget - theme_budget
+
+        # 4. Build scene narrative part (fit within scene_budget chars)
         scene_part = ""
         for w in scene_keywords:
             candidate = f"{scene_part} {w}".strip()
@@ -2093,27 +2214,41 @@ class MediaFetcher:
         if not scene_part:
             if scene_keywords:
                 scene_part = scene_keywords[0][:scene_budget]  # first word, truncated
-            elif theme_keywords:
-                # No scene keywords — build from theme keywords instead
-                scene_budget = max_len - (len(variation) + 1 if variation else 0)
-                for kw in theme_keywords[:2]:
+            elif has_theme_data:
+                # No scene keywords — build from context anchors + theme keywords instead
+                remaining = max_len - (len(variation) + 1 if variation else 0)
+                all_anchors = ctx_anchors[:2] + (theme_keywords or [])
+                for kw in all_anchors[:3]:
                     candidate = f"{scene_part} {kw}".strip()
-                    if len(candidate) <= scene_budget:
+                    if len(candidate) <= max(remaining, 10):
                         scene_part = candidate
                     else:
                         break
-                theme_keywords = None  # already consumed, skip step 4
+                ctx_anchors = []  # already consumed
+                theme_keywords = None  # already consumed
 
-        # 4. Build theme context part (era/style anchor at end, max 2 keywords, dedup)
+        # 5. Build ctx_anchor part (primary_subject/era/genre — max 2 keywords, dedup)
+        ctx_part = ""
+        if ctx_anchors:
+            scene_lower = scene_part.lower()
+            fresh_anchors = [a for a in ctx_anchors[:2] if a.lower() not in scene_lower]
+            remaining = max_len - len(scene_part) - len(variation if variation else "") - 1
+            for kw in fresh_anchors:
+                candidate = f"{ctx_part} {kw}".strip()
+                if len(candidate) <= max(remaining, 8):
+                    ctx_part = candidate
+                else:
+                    break
+
+        # 6. Build theme context part (theme_keywords — max 2 keywords, dedup with scene AND ctx)
         theme_part = ""
         if theme_keywords:
-            scene_lower = scene_part.lower()
-            # Only add theme keywords NOT already present in scene part
+            scene_and_ctx = (scene_part + " " + ctx_part).lower()
             fresh_keywords = [
                 kw for kw in theme_keywords[:2]
-                if kw.lower() not in scene_lower
+                if kw.lower() not in scene_and_ctx
             ]
-            remaining = max_len - len(scene_part)
+            remaining = max_len - len(scene_part) - len(ctx_part)
             if variation:
                 remaining -= (len(variation) + 1)  # space + variation
             for kw in fresh_keywords:
@@ -2123,8 +2258,10 @@ class MediaFetcher:
                 else:
                     break
 
-        # 5. Assemble: scene (primary) + variation (diversity) + theme (anchor)
+        # 7. Assemble: scene (primary) + ctx_anchor (visual world) + variation (diversity) + theme (anchor)
         parts = [scene_part]
+        if ctx_part:
+            parts.append(ctx_part)
         if variation:
             parts.append(variation)
         if theme_part:
@@ -2132,13 +2269,32 @@ class MediaFetcher:
 
         result = " ".join(parts)
 
-        # 6. Final safety: if still over budget, trim from right at last complete word
+        # 8. Final safety: if still over budget, trim from right at last complete word
         if len(result) > max_len:
             result = result[:max_len].rsplit(" ", 1)[0]
 
-        return result
+        # 9. Forbidden elements safety net (v8): strip any word from the
+        #    forbidden_elements list that may have slipped into the query
+        if theme_ctx and theme_ctx.forbidden_elements:
+            result_lower = result.lower()
+            for forbidden in theme_ctx.forbidden_elements:
+                fb_lower = forbidden.lower().strip()
+                if fb_lower and fb_lower in result_lower:
+                    # Remove the forbidden word/phrase from the query
+                    import re as _re
+                    result = _re.sub(r'\b' + _re.escape(forbidden) + r'\b', '', result, flags=_re.IGNORECASE)
+                    result = _re.sub(r'\s{2,}', ' ', result).strip()
+                    logger.warning(
+                        "Forbidden element '%s' removed from search query (query was: %r)",
+                        forbidden, result or "(empty after removal)",
+                    )
+                    if not result or len(result) < 5:
+                        # Query destroyed by forbidden removal — rebuild without the forbidden word's context
+                        result = " ".join([p for p in parts if forbidden.lower() not in p.lower()])
+                        if not result:
+                            result = query.strip()[:max_len]  # fallback to original
 
-    # ── Internal: Pixabay safety truncation ─────────────────────
+        return result
     @staticmethod
     def _sanitize_for_pixabay(query: str, max_len: int = 100) -> str:
         """Truncate a query to Pixabay's 100-char limit at the last complete word.

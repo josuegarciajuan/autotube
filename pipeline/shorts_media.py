@@ -145,15 +145,18 @@ def _build_portrait_query(
     search_query_en: str,
     theme_keywords: list[str] | None = None,
     style_modifiers: str = "",
+    theme_ctx = None,  # v8: full ThemeContext for richer anchoring
     max_len: int = 100,
 ) -> str:
     """Build a short-focused search query fusing scene narrative with theme context.
 
-    Strategy (v7 — narrative-first fusion):
-    1. Scene narrative keywords from ``search_query_en`` — primary subject (~75%)
-    2. Theme keywords as era/style anchors (~20%)
-    3. Channel style modifiers for aesthetic consistency (~15%)
-    4. Fit within ``max_len`` chars (Pixabay limit: 100).
+    Strategy (v8 — full ThemeContext fusion):
+    1. Scene narrative keywords from ``search_query_en`` — primary subject (~60%)
+    2. Context anchors from ThemeContext (primary_subject / era_decade / genre) (~15%)
+    3. Theme keywords as era/style anchors (~15%)
+    4. Channel style modifiers for aesthetic consistency (~10%)
+    5. Fit within ``max_len`` chars (Pixabay limit: 100).
+    6. Filter out forbidden elements from the final query.
 
     This mirrors ``MediaFetcher._build_search_query()`` adapted for portrait shorts.
     """
@@ -163,15 +166,34 @@ def _build_portrait_query(
     if not scene_keywords:
         scene_keywords = [w for w in words]
 
-    if not scene_keywords and not theme_keywords:
+    if not scene_keywords and not theme_keywords and not (theme_ctx and theme_ctx.primary_subject):
         return search_query_en.strip()[:max_len]
 
-    # 2. Allocate character budget: scene ~75%, theme ~20%, style ~15%
-    style_budget = min(len(style_modifiers) + 1, 14) if style_modifiers else 0
-    theme_budget = min(20, max_len - style_budget)
-    scene_budget = max_len - style_budget - theme_budget
+    # 2. Gather contextual anchors from ThemeContext (v8)
+    ctx_anchors: list[str] = []
+    if theme_ctx:
+        if theme_ctx.primary_subject:
+            ps_words = [w for w in theme_ctx.primary_subject.split()
+                       if w.lower() not in _STYLE_WORDS]
+            ctx_anchors.extend(ps_words[:3])
+        if theme_ctx.era_decade and theme_ctx.era_decade.lower() not in ("atemporal", "presente", ""):
+            ctx_anchors.append(theme_ctx.era_decade)
+        elif theme_ctx.era and theme_ctx.era.lower() not in ("atemporal", "presente", ""):
+            era_clean = theme_ctx.era.replace("_", " ").strip()
+            if era_clean and len(era_clean) <= 15:
+                ctx_anchors.extend(era_clean.split()[:2])
+        if theme_ctx.genre and theme_ctx.genre.lower() not in ("documental", "documentary", ""):
+            genre_clean = theme_ctx.genre.replace("_", " ").strip()
+            ctx_anchors.extend(genre_clean.split()[:2])
+    ctx_anchors = list(dict.fromkeys(ctx_anchors))
 
-    # 3. Build scene narrative part (primary subject)
+    # 3. Allocate character budget
+    style_budget = min(len(style_modifiers) + 1, 12) if style_modifiers else 0
+    theme_budget = min(15, max_len - style_budget)
+    ctx_budget = min(15, max_len - style_budget - theme_budget)
+    scene_budget = max_len - style_budget - ctx_budget - theme_budget
+
+    # 4. Build scene narrative part (primary subject)
     scene_part = ""
     for w in scene_keywords:
         candidate = f"{scene_part} {w}".strip()
@@ -181,25 +203,40 @@ def _build_portrait_query(
             break
     if not scene_part and scene_keywords:
         scene_part = scene_keywords[0][:scene_budget]
-    elif not scene_part and theme_keywords:
-        scene_budget = max_len - style_budget
-        for kw in theme_keywords[:2]:
+    elif not scene_part and (ctx_anchors or theme_keywords):
+        remaining = max_len - style_budget
+        all_anchors = ctx_anchors[:2] + (theme_keywords or [])
+        for kw in all_anchors[:3]:
             candidate = f"{scene_part} {kw}".strip()
-            if len(candidate) <= scene_budget:
+            if len(candidate) <= max(remaining, 10):
                 scene_part = candidate
             else:
                 break
+        ctx_anchors = []
         theme_keywords = None
 
-    # 4. Build theme context part (max 2 keywords, dedup with scene)
+    # 5. Build ctx_anchor part (primary_subject/era/genre — max 2 keywords, dedup)
+    ctx_part = ""
+    if ctx_anchors:
+        scene_lower = scene_part.lower()
+        fresh_anchors = [a for a in ctx_anchors[:2] if a.lower() not in scene_lower]
+        remaining = max_len - len(scene_part) - style_budget
+        for kw in fresh_anchors:
+            candidate = f"{ctx_part} {kw}".strip()
+            if len(candidate) <= max(remaining, 8):
+                ctx_part = candidate
+            else:
+                break
+
+    # 6. Build theme context part (max 2 keywords, dedup with scene AND ctx)
     theme_part = ""
     if theme_keywords:
-        scene_lower = scene_part.lower()
+        scene_and_ctx = (scene_part + " " + ctx_part).lower()
         fresh_keywords = [
             kw for kw in theme_keywords[:2]
-            if kw.lower() not in scene_lower
+            if kw.lower() not in scene_and_ctx
         ]
-        remaining = max_len - len(scene_part) - style_budget
+        remaining = max_len - len(scene_part) - len(ctx_part) - style_budget
         for kw in fresh_keywords:
             candidate = f"{theme_part} {kw}".strip()
             if len(candidate) <= max(remaining, 10):
@@ -207,11 +244,13 @@ def _build_portrait_query(
             else:
                 break
 
-    # 5. Add style modifiers
+    # 7. Add style modifiers
     style_part = style_modifiers if style_modifiers else ""
 
-    # 6. Assemble: scene (primary) + style (diversity) + theme (anchor)
+    # 8. Assemble: scene (primary) + ctx_anchor + style (diversity) + theme (anchor)
     parts = [scene_part]
+    if ctx_part:
+        parts.append(ctx_part)
     if style_part:
         parts.append(style_part)
     if theme_part:
@@ -219,9 +258,21 @@ def _build_portrait_query(
 
     result = " ".join(parts)
 
-    # 7. Final safety: truncate at last complete word
+    # 9. Final safety: truncate at last complete word
     if len(result) > max_len:
         result = result[:max_len].rsplit(" ", 1)[0]
+
+    # 10. Forbidden elements safety net (v8)
+    if theme_ctx and theme_ctx.forbidden_elements:
+        result_lower = result.lower()
+        for forbidden in theme_ctx.forbidden_elements:
+            fb_lower = forbidden.lower().strip()
+            if fb_lower and fb_lower in result_lower:
+                import re as _re
+                result = _re.sub(r'\b' + _re.escape(forbidden) + r'\b', '', result, flags=_re.IGNORECASE)
+                result = _re.sub(r'\s{2,}', ' ', result).strip()
+                if not result or len(result) < 5:
+                    result = search_query_en.strip()[:max_len]
 
     return result
 
@@ -234,6 +285,7 @@ def _build_query_pool(
     block: dict[str, Any],
     theme_keywords: list[str] | None = None,
     style_modifiers: str = "",
+    theme_ctx = None,  # v8: full ThemeContext for richer anchoring
     fallback_queries: list[str] | None = None,
 ) -> list[str]:
     """Build ~6-8 ordered query variations for exhaustive search per block.
@@ -246,7 +298,8 @@ def _build_query_pool(
       3. Simplified: first 4 content words of the query (stripped).
       4. Theme-clean: LLM query without style modifiers (raw keywords).
       5. Type-specific fallback from _FALLBACK_BY_TYPE.
-      6. Generic fallbacks from SHORTS_FALLBACK_QUERIES.
+      6. Themed fallback: built dynamically from ThemeContext (v8).
+      7. Generic fallbacks from SHORTS_FALLBACK_QUERIES.
 
     Returns a deduplicated ordered list of non-empty queries, each ≤100 chars.
     """
@@ -257,9 +310,11 @@ def _build_query_pool(
 
     pool: list[str] = []
 
-    # 1. Primary query: scene + theme + style
+    # 1. Primary query: scene + theme context + style (v8)
     if search_en and search_en.strip():
-        primary = _build_portrait_query(search_en, theme_keywords, style_modifiers)
+        primary = _build_portrait_query(
+            search_en, theme_keywords, style_modifiers, theme_ctx=theme_ctx,
+        )
         if primary.strip():
             pool.append(primary.strip()[:100])
 
@@ -302,7 +357,13 @@ def _build_query_pool(
     if type_fb and type_fb not in pool:
         pool.append(type_fb[:100])
 
-    # 6. Generic fallbacks
+    # 6. Themed fallback (v8): built dynamically from ThemeContext
+    if theme_ctx and theme_ctx.primary_subject:
+        themed_fb = _build_themed_short_fallback(block_type, theme_ctx)
+        if themed_fb and themed_fb not in pool:
+            pool.append(themed_fb[:100])
+
+    # 7. Generic fallbacks
     gen_fb = fallback_queries or SHORTS_FALLBACK_QUERIES
     for fb in gen_fb:
         if fb and fb not in pool:
@@ -320,6 +381,61 @@ def _build_query_pool(
         seen.add(q)
         result.append(q[:100])
 
+    return result
+
+
+def _build_themed_short_fallback(block_type: str, theme_ctx) -> str:
+    """Build a themed fallback query for shorts using the ThemeContext.
+
+    Similar to MediaFetcher._build_themed_fallback() but adapted for
+    vertical portrait shorts with shorter queries.
+    """
+    if not theme_ctx or not theme_ctx.primary_subject:
+        return ""
+
+    # Gather thematic anchors
+    anchors: list[str] = []
+    if theme_ctx.primary_subject:
+        ps_words = theme_ctx.primary_subject.split()[:4]
+        anchors.extend(ps_words)
+    if theme_ctx.key_motifs:
+        for motif in theme_ctx.key_motifs[:2]:
+            motif_words = motif.split()[:2]
+            anchors.extend(motif_words)
+
+    mood_map = {
+        "misterioso": "mysterious", "épico": "epic", "ominoso": "ominous",
+        "melancólico": "melancholic", "esperanzador": "hopeful",
+        "sereno": "serene", "perturbador": "disturbing",
+    }
+    mood_word = mood_map.get(theme_ctx.mood, "") if theme_ctx.mood else ""
+
+    if not anchors:
+        return ""
+
+    seen = set()
+    unique_anchors = []
+    for a in anchors:
+        al = a.lower()
+        if al not in seen:
+            seen.add(al)
+            unique_anchors.append(a)
+
+    base = " ".join(unique_anchors[:5])
+    if not base:
+        return ""
+
+    mood_suffix = f" {mood_word}" if mood_word and len(base) + len(mood_word) + 2 < 100 else ""
+
+    by_type = {
+        "hook": f"{base}{mood_suffix} dramatic atmosphere",
+        "desarrollo": f"{base} documentary establishing shot",
+        "climax": f"{base}{mood_suffix} dark tension shadow",
+        "cierre": f"{base}{mood_suffix} resolution ending",
+    }
+    result = by_type.get(block_type, f"{base}{mood_suffix} cinematic")
+    if len(result) > 100:
+        result = result[:100].rsplit(" ", 1)[0]
     return result
 
 
@@ -717,6 +833,7 @@ def fetch_short_assets_exhaustive(
     blocks: list[dict[str, Any]],
     ch_config: Any,
     theme_keywords: list[str] | None = None,
+    theme_ctx = None,  # v8: full ThemeContext for richer anchoring
     channel_id: int = 0,
     video_ratio: float | None = None,
     channel_slug: str = "",
@@ -826,6 +943,7 @@ def fetch_short_assets_exhaustive(
         # Build query pool for this block
         query_pool = _build_query_pool(
             block, theme_keywords, style_mod,
+            theme_ctx=theme_ctx,  # v8: pass full ThemeContext
             fallback_queries=settings.SHORTS_FALLBACK_QUERIES if hasattr(settings, "SHORTS_FALLBACK_QUERIES") else None,
         )
         logger.info(

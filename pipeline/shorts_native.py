@@ -38,6 +38,8 @@ class NativeShortsPipeline:
         self._media_fetcher = None
         self._renderer = None
         self._uploader = None
+        self._theme_extractor = None  # v8: ThemeExtractor for visual coherence
+        self._theme_context = None     # v8: cached ThemeContext per run
 
     def run(self) -> Optional[dict]:
         """Run the full native shorts pipeline. Returns short data dict on success."""
@@ -49,6 +51,10 @@ class NativeShortsPipeline:
             if not short_content:
                 logger.warning(f"[{self.channel_slug}] No content for native short")
                 return None
+
+            # 1b. Extract visual theme context (v8) — run BEFORE script generation
+            #     so the LLM can generate theme-aware search queries
+            self._extract_theme_for_short(short_content)
 
             # 2. Generate short script (30-90 seconds)
             short_script = self._phase_script_short(short_content)
@@ -93,6 +99,58 @@ class NativeShortsPipeline:
             return None
         import random
         return random.choice(items)
+
+    def _extract_theme_for_short(self, short_content: dict) -> None:
+        """Extract visual theme context for the short (v8).
+
+        Uses the same ThemeExtractor as the long-form pipeline to get
+        genre, era, key_motifs, forbidden_elements, mood, lighting, etc.
+        This enriches the script prompt and search queries with visual
+        coherence data.
+        """
+        if self._theme_context is not None:
+            return  # already extracted
+
+        content_title = short_content.get("title", "")
+        content_tema = short_content.get("tema", content_title)
+        if not content_tema:
+            return
+
+        try:
+            from pipeline.theme_extractor import ThemeExtractor
+            if self._theme_extractor is None:
+                self._theme_extractor = ThemeExtractor(config=self.config)
+
+            channel_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
+            channel_theme = getattr(self.config, "CANAL_TAGLINE", "")
+            niche_keywords = getattr(self.config, "NICHE_KEYWORDS_ENG", None)
+
+            self._theme_context = self._theme_extractor.extract(
+                content_text=content_tema[:3000],
+                channel_name=channel_name,
+                channel_theme=channel_theme,
+                niche_keywords=niche_keywords,
+            )
+            if self._theme_context and self._theme_context.theme_keywords_en:
+                logger.info(
+                    "[%s] Shorts theme extracted: genre=%s era=%s keywords=%s",
+                    self.channel_slug,
+                    self._theme_context.genre,
+                    self._theme_context.era,
+                    self._theme_context.theme_keywords_en,
+                )
+            else:
+                logger.warning(
+                    "[%s] Shorts theme extraction returned empty — using generic fallback",
+                    self.channel_slug,
+                )
+                self._theme_context = None
+        except Exception as exc:
+            logger.warning(
+                "[%s] Shorts theme extraction failed (non-fatal): %s",
+                self.channel_slug, exc,
+            )
+            self._theme_context = None
 
     def _generate_topic_idea(self) -> list[dict]:
         """Use LLM to generate a viral short-form topic in the channel's niche.
@@ -170,6 +228,35 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
         niche = getattr(self.config, "CANAL_NARRATIVE_STYLE", "documental")
         display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
 
+        # ── Build theme context block for the prompt (v8) ──────
+        theme_block = ""
+        tc = self._theme_context
+        if tc:
+            theme_lines = [
+                "\nCONTEXTO TEMÁTICO DEL SHORT (ancla visual para las escenas):"
+            ]
+            if tc.genre and tc.genre != "documental":
+                theme_lines.append(f"- Género: {tc.genre}")
+            if tc.era and tc.era != "atemporal":
+                theme_lines.append(f"- Época: {tc.era}")
+            if tc.primary_subject:
+                theme_lines.append(f"- Sujeto visual: {tc.primary_subject}")
+            if tc.key_motifs:
+                theme_lines.append(f"- Motivos visuales: {', '.join(tc.key_motifs[:4])}")
+            if tc.mood:
+                theme_lines.append(f"- Mood: {tc.mood}")
+            if tc.lighting:
+                theme_lines.append(f"- Iluminación: {tc.lighting}")
+            if tc.forbidden_elements:
+                theme_lines.append(
+                    f"- ⛔ NUNCA incluir en search_query_en: {', '.join(tc.forbidden_elements)}"
+                )
+            theme_lines.append(
+                "\nUsa este contexto para generar search_query_en que anclen cada escena "
+                "en el MISMO mundo visual."
+            )
+            theme_block = "\n".join(theme_lines) + "\n\n"
+
         # Cierre: natural conclusion (no subscription text if caller will add subscribe_cta)
         if include_subscribe_cta:
             cierre_desc = "6. cierre (3-5 seg) — conclusión natural del short, SIN pedir suscripción"
@@ -182,8 +269,7 @@ CANAL: {display_name}
 ESTILO: {niche}
 FORMATO: Video vertical 9:16, sin presentador, videos e imágenes en pantalla.
 TEMA: {content_item.get('title', '')}
-
-Usa entre 5 y 7 bloques narrativos:
+{theme_block}Usa entre 5 y 7 bloques narrativos:
 1. hook (3-5 seg) — frase impactante que enganche
 2. desarrollo1 (7-10 seg) — contexto y origen del dato
 3. desarrollo2 (7-10 seg) — dato más impactante, comparaciones
@@ -285,7 +371,11 @@ NADA MAS fuera del JSON."""
             return []
 
         try:
-            assets = fetch_short_assets_exhaustive(bloques, self.config, theme_kw, channel_id, channel_slug=self.channel_slug)
+            assets = fetch_short_assets_exhaustive(
+                bloques, self.config, theme_kw,
+                theme_ctx=self._theme_context,  # v8: pass full ThemeContext
+                channel_id=channel_id, channel_slug=self.channel_slug,
+            )
             logger.info("Fetched %d assets for native Short (blocks=%d)", len(assets), len(bloques))
             return assets
         except Exception as e:

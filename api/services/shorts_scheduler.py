@@ -1193,6 +1193,52 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             f"que identifique claramente de qué trata este Short.\n"
         )
 
+    # 0b. Extract visual theme context (v8) — run BEFORE script generation
+    #      so the LLM can generate theme-aware search queries
+    theme_context = None
+    try:
+        from pipeline.theme_extractor import ThemeExtractor
+        theme_extractor = ThemeExtractor(config=ch_config)
+        # Build a synthetic content text from the channel context and topic
+        theme_content = (
+            f"Short sobre: {niche}. Tagline: {tagline}."
+        )
+        theme_context = theme_extractor.extract(
+            content_text=theme_content[:2000],
+            channel_name=display_name,
+            channel_theme=tagline,
+            niche_keywords=getattr(ch_config, "NICHE_KEYWORDS_ENG", None),
+        )
+        if theme_context and theme_context.theme_keywords_en:
+            logger.info(
+                "Shorts theme extracted for %s: genre=%s keywords=%s",
+                channel_slug, theme_context.genre, theme_context.theme_keywords_en,
+            )
+        else:
+            theme_context = None
+    except Exception as te:
+        logger.debug("Shorts theme extraction skipped (non-fatal): %s", te)
+        theme_context = None
+
+    # ── Build theme context block for the LLM prompt (v8) ──────
+    theme_block = ""
+    if theme_context:
+        tl = ["\nCONTEXTO TEMÁTICO DEL SHORT (ancla visual para las escenas):"]
+        if theme_context.genre and theme_context.genre != "documental":
+            tl.append(f"- Género: {theme_context.genre}")
+        if theme_context.era and theme_context.era != "atemporal":
+            tl.append(f"- Época: {theme_context.era}")
+        if theme_context.primary_subject:
+            tl.append(f"- Sujeto visual: {theme_context.primary_subject}")
+        if theme_context.key_motifs:
+            tl.append(f"- Motivos visuales: {', '.join(theme_context.key_motifs[:4])}")
+        if theme_context.mood:
+            tl.append(f"- Mood: {theme_context.mood}")
+        if theme_context.forbidden_elements:
+            tl.append(f"- ⛔ NUNCA incluir en search_query_en: {', '.join(theme_context.forbidden_elements)}")
+        tl.append("\nUsa este contexto para generar search_query_en ancladas al MISMO mundo visual.")
+        theme_block = "\n".join(tl) + "\n"
+
     # 1. Script via LLM
     from config.llm_client import create_llm_client
     from config.llm_helpers import llm_json_call
@@ -1208,6 +1254,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 f"Genera un Short viral en español de ~40-50 segundos (~55-70 palabras totales, minimo 45). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
+                f"{theme_block}"  # v8: visual theme context for query anchoring
                 f"Usa entre 5 y 7 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
                 f"IMPORTANTE: los bloques de desarrollo y climax deben tener 2-3 frases cada uno. "
                 f"Hook y cierre: 1-2 frases. Minimo 8 palabras por bloque, maximo 18. "
@@ -1297,7 +1344,11 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     theme_kw = script.get("theme_keywords_en", [])
     asset_items = []
     try:
-        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id, channel_slug=channel_slug)
+        asset_items = fetch_short_assets_exhaustive(
+            bloques, ch_config, theme_kw,
+            theme_ctx=theme_context,  # v8: pass full ThemeContext
+            channel_id=channel_id, channel_slug=channel_slug,
+        )
         logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
