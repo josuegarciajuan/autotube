@@ -25,6 +25,7 @@ from api.routers import channels, videos, scenes, jobs, schedules, sources, voic
 from api.routers import auth, planning, shorts
 from api.routers import monetization, milestones, analytics
 from api.routers import promotion, gamification, social_accounts
+from api.routers import monitor as monitor_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
@@ -194,12 +195,20 @@ async def lifespan(app: FastAPI):
     import asyncio
     schedule_task = asyncio.create_task(_schedule_checker_loop())
     
+    # Launch health monitor checker in background
+    health_monitor_task = asyncio.create_task(_health_monitor_loop())
+    
     yield
     
     # Shutdown
     schedule_task.cancel()
+    health_monitor_task.cancel()
     try:
         await schedule_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await health_monitor_task
     except asyncio.CancelledError:
         pass
 
@@ -279,6 +288,32 @@ async def _queue_consumer():
         
     except Exception as e:
         logger.error("Queue consumer error: %s", e)
+
+
+async def _health_monitor_loop():
+    """Periodic health check: scans for stuck/failed entities and generates alerts."""
+    await asyncio.sleep(30)  # Give API time to fully start before first scan
+    logger.info("Health monitor loop started (interval: 90s)")
+    while True:
+        try:
+            from api.services.lifecycle_monitor import check_all_health
+            db = get_db()
+            result = check_all_health(db)
+            if result.get("alerts_created", 0) > 0:
+                logger.info("Health check: %d new alerts created", result["alerts_created"])
+                # Broadcast to WS clients
+                try:
+                    from api.routers.monitor import broadcast_monitor_update
+                    await broadcast_monitor_update({
+                        "type": "health_update",
+                        "alerts_created": result["alerts_created"],
+                        "alerts_resolved": result.get("alerts_resolved", 0),
+                    })
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("Health monitor error: %s", exc)
+        await asyncio.sleep(90)  # Check every 90 seconds
 
 
 async def _schedule_checker_loop():
@@ -1177,6 +1212,7 @@ app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(promotion.router, tags=["Promotion"])
 app.include_router(gamification.router, prefix="/api", tags=["Gamification"])
 app.include_router(social_accounts.router, prefix="/api/channels", tags=["Social Media"])
+app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

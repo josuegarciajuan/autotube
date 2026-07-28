@@ -637,6 +637,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v17: shorts.longform_linked (YouTube Studio "Related video" tracking) ──
     _migrate_v17(conn, logger)
+
+    # ── v18: lifecycle_events + pipeline_alerts (unified monitoring) ──
+    _migrate_v18(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1175,6 +1178,19 @@ def _migrate_v17(conn, logger):
         logger.info("Migration v17: added %d column(s) to shorts (longform_linked)", added)
     else:
         logger.debug("Migration v17: longform_linked columns already present in shorts")
+
+
+def _migrate_v18(conn, logger):
+    """Idempotent v18 migration: lifecycle_events + pipeline_alerts monitoring tables."""
+    schema_v18 = Path(__file__).parent / "schema_v18.sql"
+    if schema_v18.exists():
+        logger.debug("Migration v18: running schema_v18.sql (lifecycle_events + pipeline_alerts)")
+        with open(schema_v18) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v18: lifecycle_events and pipeline_alerts tables created")
+    else:
+        logger.warning("Migration v18: schema_v18.sql not found")
 
 
 def _migrate_v10(conn, logger):

@@ -1,10 +1,11 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Radio, Activity, Calendar, X } from 'lucide-react'
+import { LayoutDashboard, Radio, Activity, Calendar, ShieldAlert, X } from 'lucide-react'
 
 const links = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/channels', label: 'Canales', icon: Radio },
   { to: '/scheduling', label: 'Programación', icon: Calendar },
+  { to: '/monitor', label: 'Monitor', icon: ShieldAlert },
 ]
 
 interface Props {

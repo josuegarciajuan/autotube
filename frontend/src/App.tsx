@@ -5,6 +5,7 @@ import Channels from './pages/Channels'
 import ChannelDetail from './pages/ChannelDetail'
 import VideoEditor from './pages/VideoEditor'
 import Scheduling from './pages/Scheduling'
+import Monitor from './pages/Monitor'
 import { GenerationProvider } from './context/GenerationContext'
 import { ChannelFilterProvider } from './context/ChannelFilterContext'
 import { EasterEggProvider } from './context/EasterEggContext'
@@ -22,6 +23,7 @@ export default function App() {
               <Route path="/channels/:id" element={<ChannelDetail />} />
               <Route path="/videos/:id/edit" element={<VideoEditor />} />
               <Route path="/scheduling" element={<Scheduling />} />
+              <Route path="/monitor" element={<Monitor />} />
             </Route>
           </Routes>
           <GenerationProgressBar />

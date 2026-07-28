@@ -1,18 +1,25 @@
 """Generation jobs router."""
 from fastapi import APIRouter, HTTPException
 from api.deps import get_db
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 @router.post("/{job_id}/cancel")
-def cancel_job(job_id: int):
-    """Request cooperative cancellation of a running generation job.
+async def cancel_job(job_id: int):
+    """Cancel a running generation job and clean up generated files.
     
-    Sets the orchestrator's stop flag so it halts at the next safe checkpoint.
-    The job status will transition to 'failed' once the orchestrator exits.
+    1. Requests cooperative cancellation (orchestrator stop flag)
+    2. Force-kills the worker subprocess if still alive
+    3. Deletes generated MP4s, thumbnails, clips, and temp files
+    4. Marks job as 'cancelled' and video as 'error' in DB
     """
-    from api.services.generation_service import cancel_job as _cancel
+    from api.services.generation_service import cancel_job as _cancel_cooperative
+    from api.services.generation_service import force_cancel_and_cleanup
     db = get_db()
     job = db.get_job(job_id)
     if not job:
@@ -20,18 +27,45 @@ def cancel_job(job_id: int):
     if job["status"] not in ("running", "queued"):
         raise HTTPException(409, f"Job is already {job['status']}, cannot cancel")
     
-    # Try cooperative cancellation first
-    cancelled = _cancel(job_id)
+    # Step 1: Cooperative cancellation
+    cooperatively_cancelled = _cancel_cooperative(job_id)
     
-    # Also mark as failed in DB in case the orchestrator is already dead
-    if job["status"] == "running":
+    # Step 2: Force-kill worker + clean up files
+    cleanup_result = {"killed_worker": False, "files_cleaned": [], "db_updated": False}
+    video_id = job.get("video_id") or 0
+    
+    # Get channel slug for file cleanup
+    channel_slug = ""
+    if channel_id := job.get("channel_id"):
+        ch = db.get_channel(channel_id)
+        channel_slug = ch.get("slug", "") if ch else ""
+    
+    if job["status"] == "running" and (video_id or channel_slug):
+        try:
+            cleanup_result = await force_cancel_and_cleanup(
+                job_id=job_id,
+                video_id=video_id,
+                channel_slug=channel_slug,
+            )
+        except Exception as exc:
+            logger.error("Cleanup after cancel failed for job #%d: %s", job_id, exc)
+    
+    # Fallback: if cleanup didn't update DB, mark as failed
+    if not cleanup_result["db_updated"] and job["status"] == "running":
         db.update_job(job_id, status="failed",
-                      error_msg="Cancelled by user" if cancelled else "Cancelled (orchestrator not reachable)")
+                      error_msg="Cancelled by user" if cooperatively_cancelled else "Cancelled (orchestrator not reachable)")
     
     return {
         "job_id": job_id,
-        "cancelled": cancelled,
-        "message": "Stop signal sent" if cancelled else "Job marked as failed (orchestrator not found)"
+        "cancelled": cooperatively_cancelled or cleanup_result.get("killed_worker", False),
+        "cooperatively_cancelled": cooperatively_cancelled,
+        "worker_killed": cleanup_result.get("killed_worker", False),
+        "files_cleaned": cleanup_result.get("files_cleaned", []),
+        "message": (
+            "Job cancelled and files cleaned" if cleanup_result["files_cleaned"]
+            else "Stop signal sent" if cooperatively_cancelled
+            else "Job marked as failed (orchestrator not found)"
+        ),
     }
 
 

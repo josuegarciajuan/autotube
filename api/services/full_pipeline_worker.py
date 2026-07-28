@@ -34,6 +34,9 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+# ── Lifecycle monitoring ──
+from api.services.lifecycle_monitor import log_event as log_lifecycle
+
 # ── Ensure the project root is on sys.path BEFORE any project imports ──
 # When invoked as a script (python3 api/services/full_pipeline_worker.py),
 # Python places the script's directory on sys.path[0], NOT the CWD.
@@ -578,6 +581,15 @@ def run_job(
                     progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
                     generation_started_at=db_now())
 
+    # ── Log lifecycle: generation started ──
+    try:
+        log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+                      event='generation_started', status='started',
+                      message=f'Pipeline started (action={action}, source_mode={source_mode})',
+                      metadata={'job_id': job_id, 'action': action, 'channel': canal})
+    except Exception:
+        pass
+
     # ── 6. Pre-flight cleanup (skip if resuming — don't delete downloaded clips) ──
     _kill_orphaned_ffmpeg()
     if start_idx == 0:
@@ -1082,6 +1094,15 @@ def run_job(
             db.update_video(video_id, progress=90, progress_phase="upload")
             logger.info("Phase 6/6: Uploading to YouTube...")
             
+            # ── Log lifecycle: upload started ──
+            try:
+                log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+                              event='upload_started', status='started',
+                              message='Uploading to YouTube',
+                              metadata={'publish_mode': video_record.get('publish_mode') if video_record else 'immediate'})
+            except Exception:
+                pass
+            
             # ── Read planned target from the video record (set by planning) ──
             planned_public_at = None
             video_record = db.get_video(video_id)
@@ -1207,11 +1228,34 @@ def run_job(
             else:
                 logger.error("Upload failed — video saved locally")
                 db.update_video(video_id, progress=95, status="ready")
+                # ── Log lifecycle: upload failed ──
+                try:
+                    log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+                                  event='upload_failed', status='failed',
+                                  message='Upload to YouTube failed — video saved locally')
+                except Exception:
+                    pass
 
         # ── Success ──────────────────────────────────────────
         success = True
         pipeline_duration = int((time.time() - pipeline_start))
         logger.info("PIPELINE COMPLETE in %d seconds", pipeline_duration)
+        
+        # ── Log lifecycle: upload completed ──
+        try:
+            upload_completed = action != 'generate_only' and upload
+            event_type = 'upload_completed' if upload_completed else 'generation_completed'
+            pub_mode = video_record.get('publish_mode', 'immediate') if video_record else 'immediate'
+            event_msg = f'Uploaded to YouTube (yt_id={yt_video_id})' if upload_completed and yt_video_id else 'Generation completed (no upload)'
+            log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+                          event=event_type, status='completed',
+                          message=event_msg,
+                          metadata={'duration_ms': pipeline_duration * 1000,
+                                    'yt_video_id': yt_video_id,
+                                    'publish_mode': pub_mode,
+                                    'action': action})
+        except Exception:
+            pass
         
         try:
             db.update_video(video_id, timing_data=orch.collect_timing_json())
@@ -1229,6 +1273,16 @@ def run_job(
         logger.error("Pipeline crashed: %s\n%s", exc, tb)
         db.update_job(job_id, status="failed", error_msg=error_msg[:500])
         db.update_video(video_id, status="error", progress_phase="error")
+        
+        # ── Log lifecycle: generation failed ──
+        try:
+            log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+                          event='generation_failed', status='failed',
+                          message=error_msg[:300],
+                          metadata={'traceback': tb[:500], 'job_id': job_id})
+        except Exception:
+            pass
+        
         # ── Save timing even on crash ────────────────────────
         try:
             if orch is not None:

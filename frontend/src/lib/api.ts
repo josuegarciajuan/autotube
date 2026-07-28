@@ -352,6 +352,33 @@ export const api = {
 
   getContentFlow: (channelId: number) =>
     request<any>(`/channels/${channelId}/content-flow`),
+
+  // Monitor (lifecycle events + alerts)
+  getMonitorDashboard: () => request<any>('/monitor/dashboard'),
+  getMonitorAlerts: (status?: string, severity?: string, entityType?: string, channelId?: number, limit?: number) => {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    if (severity) params.set('severity', severity)
+    if (entityType) params.set('entity_type', entityType)
+    if (channelId) params.set('channel_id', String(channelId))
+    if (limit) params.set('limit', String(limit))
+    const qs = params.toString()
+    return request<{alerts: any[]}>(`/monitor/alerts${qs ? `?${qs}` : ''}`)
+  },
+  getMonitorEvents: (entityType?: string, entityId?: number, channelId?: number, limit?: number) => {
+    const params = new URLSearchParams()
+    if (entityType) params.set('entity_type', entityType)
+    if (entityId) params.set('entity_id', String(entityId))
+    if (channelId) params.set('channel_id', String(channelId))
+    if (limit) params.set('limit', String(limit || 100))
+    return request<{events: any[]}>(`/monitor/events?${params.toString()}`)
+  },
+  acknowledgeMonitorAlert: (alertId: number) =>
+    request<any>(`/monitor/alerts/${alertId}/acknowledge`, { method: 'POST' }),
+  resolveMonitorAlert: (alertId: number) =>
+    request<any>(`/monitor/alerts/${alertId}/resolve`, { method: 'POST' }),
+  triggerHealthCheck: () =>
+    request<any>('/monitor/health-check', { method: 'POST' }),
 };
 
 // ── Pipeline status types ────────────────────────────────────
