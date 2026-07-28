@@ -975,7 +975,8 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     #    between same-type shorts (native↔native, clip↔clip).
     #    Cross-type (native↔clip) overlap is intentionally allowed.
     target_upload = next_slot.get("target_upload_at")
-    if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db):
+    if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
+                                        exclude_slot_id=slot_id):
         logger.debug(
             "Shorts dispatch skipped for %s: same-type (%s) conflict "
             "(another %s publishing within %d min)",
@@ -1747,6 +1748,7 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
 def _same_type_shorts_slot_conflict(
     channel_id: int, short_type: str,
     target_upload_at: str, db,
+    exclude_slot_id: int | None = None,
 ) -> bool:
     """Check for same-channel, same-type shorts slot collisions.
 
@@ -1759,6 +1761,8 @@ def _same_type_shorts_slot_conflict(
         short_type: 'native' or 'clip'
         target_upload_at: ISO8601 timestamp of the candidate slot
         db: database instance
+        exclude_slot_id: optional slot ID to exclude from conflict check
+            (the candidate slot itself)
     """
     if not target_upload_at:
         return False
@@ -1777,19 +1781,35 @@ def _same_type_shorts_slot_conflict(
 
     try:
         with db._connect() as conn:
-            existing = conn.execute(
-                """SELECT sps.id, sps.short_type, sps.target_upload_at, sps.status
-                   FROM shorts_planned_slots sps
-                   WHERE sps.channel_id = ?
-                     AND sps.short_type = ?
-                     AND sps.status IN ('pending', 'running', 'completed')
-                     AND sps.target_upload_at IS NOT NULL
-                     AND sps.target_upload_at >= ?
-                     AND sps.target_upload_at <= ?
-                   ORDER BY sps.target_upload_at
-                   LIMIT 3""",
-                (channel_id, short_type, window_start, window_end),
-            ).fetchall()
+            if exclude_slot_id is not None:
+                existing = conn.execute(
+                    """SELECT sps.id, sps.short_type, sps.target_upload_at, sps.status
+                       FROM shorts_planned_slots sps
+                       WHERE sps.channel_id = ?
+                         AND sps.short_type = ?
+                         AND sps.status IN ('pending', 'running', 'completed')
+                         AND sps.target_upload_at IS NOT NULL
+                         AND sps.target_upload_at >= ?
+                         AND sps.target_upload_at <= ?
+                         AND sps.id != ?
+                       ORDER BY sps.target_upload_at
+                       LIMIT 3""",
+                    (channel_id, short_type, window_start, window_end, exclude_slot_id),
+                ).fetchall()
+            else:
+                existing = conn.execute(
+                    """SELECT sps.id, sps.short_type, sps.target_upload_at, sps.status
+                       FROM shorts_planned_slots sps
+                       WHERE sps.channel_id = ?
+                         AND sps.short_type = ?
+                         AND sps.status IN ('pending', 'running', 'completed')
+                         AND sps.target_upload_at IS NOT NULL
+                         AND sps.target_upload_at >= ?
+                         AND sps.target_upload_at <= ?
+                       ORDER BY sps.target_upload_at
+                       LIMIT 3""",
+                    (channel_id, short_type, window_start, window_end),
+                ).fetchall()
 
         if existing:
             logger.debug(
@@ -1855,10 +1875,15 @@ def _sync_running_shorts_slots(db):
 
 
 def _cancel_stale_shorts_slots(db):
-    """Cancel pending shorts slots that are >4h past their scheduled_at (UTC).
+    """Cancel pending shorts slots that are >24h past their scheduled_at (UTC).
     
     Scans ALL dates (not just today) to catch stuck slots from previous days.
+    Threshold is 24h to match the 24h visibility window in
+    get_next_pending_shorts_slot(), ensuring slots aren't cancelled before
+    they get a fair chance to be dispatched (e.g. after a long-form video
+    that took several hours to generate).
     """
+    STALE_HOURS = 24
     # Fetch pending slots across all recent dates (past 7 days)
     today = datetime.now(DEFAULT_TIMEZONE).date()
     all_pending = []
@@ -1878,12 +1903,12 @@ def _cancel_stale_shorts_slots(db):
             sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         except (ValueError, TypeError):
             continue
-        if (now_utc - sched).total_seconds() > 4 * 3600:
+        if (now_utc - sched).total_seconds() > STALE_HOURS * 3600:
             db.update_shorts_slot_status(s["id"], "cancelled")
             cancelled += 1
 
     if cancelled:
-        logger.info("Cancelled %d stale pending shorts slots (>4h past scheduled)", cancelled)
+        logger.info("Cancelled %d stale pending shorts slots (>%dh past scheduled)", cancelled, STALE_HOURS)
 
 
 def _memory_ok(min_free_gb: float = 4.0) -> bool:

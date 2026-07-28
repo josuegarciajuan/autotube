@@ -4823,13 +4823,15 @@ class ExtendedDatabase(Database):
         """Get the next pending short slot that is due (scheduled_at <= now),
         ordered by target_upload_at ASC (nearest upload date first). Returns
         None if none.
-        
+
         Shorts with the closest target_upload_at are generated first, ensuring
         that the most time-sensitive shorts are interleaved between long-form
         videos without missing their publish window.
         
-        Excludes past-date slots (date_key < today) to prevent obsolete
-        slots from previous days from blocking the dispatch queue.
+        Includes slots scheduled within the last 24 hours (not just today)
+        so that overdue slots from yesterday are still catchable.
+        Slots older than 24h are excluded to prevent truly obsolete slots
+        from blocking the dispatch queue.
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -4837,7 +4839,7 @@ class ExtendedDatabase(Database):
                    FROM shorts_planned_slots sps
                    JOIN channels c ON sps.channel_id = c.id
                    WHERE sps.status = 'pending'
-                       AND sps.date_key >= date('now', 'localtime')
+                       AND sps.scheduled_at >= datetime('now','-24 hours')
                        AND sps.scheduled_at <= datetime('now')
                      ORDER BY COALESCE(sps.target_upload_at, sps.scheduled_at) ASC LIMIT 1"""
             ).fetchone()

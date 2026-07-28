@@ -4,14 +4,15 @@ Unified priority-aware dispatch for shorts and long-form video generation.
 When a worker completes (monitor detects terminal status), this module
 decides what to generate next using a deterministic interleaving strategy:
 
-    1. Past-due long-form slots: ordered by target_public_at ASC
+    1. Batch ALL overdue shorts first: when a long-form video finishes,
+       catch up on every pending short that has passed its scheduled time.
+       Shorts are fast (~10 min) so batching them before the next long-form
+       (~45 min) prevents the shorts queue from starving.
+    
+    2. Fallback to long-form: only when no shorts are dispatchable.
+
+    3. Past-due long-form slots: ordered by target_public_at ASC
        → the video that should have been published earliest is generated first.
-    2. Past-due shorts slots: ordered by target_upload_at ASC
-       → the short with the nearest upload date is generated first.
-    3. Interleaving: shorts are ALWAYS tried before long-form.
-       Since shorts generate fast (~10 min) and long-form takes ~45 min,
-       this naturally intersperses shorts between long-form videos without
-       starving either queue.
 
 The actual sort order is enforced at the DB query level
 (get_next_available_slot and get_next_pending_shorts_slot).
@@ -26,17 +27,18 @@ logger = logging.getLogger("autotube.priority_dispatch")
 
 
 # ── Interleaving dispatch ───────────────────────────────────────
+_BATCH_MAX_SHORTS = 8  # safety cap: max overdue shorts dispatched per batch
+
 
 def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
-    """Dispatch the most urgent pending slot (short preferred over long-form).
+    """Dispatch all overdue shorts after a long-form completes, then fall
+    back to the next long-form slot.
 
-    Collects the next pending short and long-form candidates. Shorts are
-    always tried first because they are fast to generate and have tight
-    publish windows. Falls back to long-form if no short is ready.
-
-    Both candidates are already sorted correctly by the DB queries:
-      - Shorts: target_upload_at ASC (nearest upload date first)
-      - Long-form: past-due first, then target_public_at ASC
+    Batch strategy: when a long-form video finishes, loop-dispatch every
+    due pending short until no more are dispatchable (guards, cooldown,
+    or no pending slots). Each dispatched short runs as its own fire-and-
+    forget async task. Once the batch is exhausted, start the next
+    long-form.
 
     Returns:
         Dispatch result dict (slot_id, job_id, channel_slug, …),
@@ -46,32 +48,31 @@ def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
         from database.db_extended import ExtendedDatabase  # noqa: F811
         db = ExtendedDatabase()
 
-    # ── Collect candidates ──────────────────────────────────────
-    short_candidate = db.get_next_pending_shorts_slot()
-    long_candidate = db.get_next_available_slot(max_future_hours=36)
+    # ── Phase 1: batch ALL overdue shorts ───────────────────────
+    dispatched_shorts: list[dict[str, Any]] = []
 
-    # ── Shorts first (interleaving strategy) ────────────────────
-    if short_candidate:
-        slot_id = short_candidate["id"]
-        slug = short_candidate.get("channel_slug", "?")
-        scheduled = (str(short_candidate.get("scheduled_at")) or "?")[:16]
-        target_upload = (str(short_candidate.get("target_upload_at")) or "?")[:16]
-
-        logger.info(
-            "Priority dispatch: trying short slot #%d (channel=%s, upload=%s, scheduled=%s)",
-            slot_id, slug, target_upload, scheduled,
-        )
-
+    for _ in range(_BATCH_MAX_SHORTS):
         from api.services.shorts_scheduler import dispatch_next_due_shorts_slot  # noqa: F811
         result = dispatch_next_due_shorts_slot(db=db)
-        if result:
-            logger.info(
-                "Priority dispatch: short slot #%d dispatched (channel=%s, type=%s)",
-                slot_id, slug, result.get("short_type", "?"),
-            )
-            return result
+        if result is None:
+            break
+        dispatched_shorts.append(result)
 
-    # ── Fallback to long-form ───────────────────────────────────
+    if dispatched_shorts:
+        count = len(dispatched_shorts)
+        last = dispatched_shorts[-1]
+        logger.info(
+            "Priority dispatch: batched %d overdue short%s. "
+            "Last: slot#%d ch=%s type=%s",
+            count, "" if count == 1 else "s",
+            last["slot_id"],
+            last.get("channel_slug", "?"),
+            last.get("short_type", "?"),
+        )
+        return dispatched_shorts[0]
+
+    # ── Phase 2: fallback to long-form ──────────────────────────
+    long_candidate = db.get_next_available_slot(max_future_hours=36)
     if long_candidate:
         slot_id = long_candidate["id"]
         slug = long_candidate.get("channel_slug", "?")
