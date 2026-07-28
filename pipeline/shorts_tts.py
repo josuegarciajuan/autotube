@@ -54,8 +54,8 @@ def _run_async_in_thread(coro):
 
 TICK_TO_MS = 10000                # 100-nanosecond ticks → milliseconds
 SHORTS_MAX_DURATION_SEC = 55.0    # YouTube Shorts max = 60 s; leave 5 s buffer
-MIN_WORD_COUNT = 35               # minimum words for a coherent Short (50→35: LLM struggles with 5-block format)
-MAX_WORD_COUNT = 170              # hard cap to prevent over-long audio (≈55 s @ -10% rate)
+MIN_WORD_COUNT = 45               # minimum words for a coherent Short (raised from 35 for more visual variety)
+MAX_WORD_COUNT = 160              # hard cap to prevent over-long audio (reduced from 170 for safety margin)
 BLOCK_PAUSE_MS = 350              # silence between narrative blocks (human rhythm)
 
 # Fallback per-block voice settings when channel config has none
@@ -63,6 +63,7 @@ _DEFAULT_RATES: dict[str, str] = {
     "hook":        "-5%",
     "desarrollo1": "-10%",
     "desarrollo2": "-10%",
+    "desarrollo3": "-10%",
     "climax":      "-15%",
     "cierre":      "-5%",
 }
@@ -219,6 +220,9 @@ async def _synthesize_block(
 def validate_short_script(script: dict) -> list[str]:
     """Verify that a Short script JSON is structurally sound.
 
+    Accepts 5-7 blocks: hook, desarrollo1, desarrollo2, [desarrollo3],
+    climax, cierre. The LLM decides how many desarrollo blocks to use.
+
     Returns a list of error messages (empty = valid).
     """
     errors: list[str] = []
@@ -228,21 +232,40 @@ def validate_short_script(script: dict) -> list[str]:
         errors.append("No blocks in script")
         return errors
 
-    expected = ["hook", "desarrollo1", "desarrollo2", "climax", "cierre"]
-    found    = [b.get("tipo") for b in bloques]
+    found_types = [b.get("tipo") for b in bloques]
+    n = len(found_types)
 
-    for t in expected:
-        if t not in found:
-            errors.append(f"Missing block: '{t}'")
+    # Must have at least 5 blocks, at most 7
+    if n < 5:
+        errors.append(f"Expected 5-7 blocks, got {n} (too few)")
+    if n > 7:
+        errors.append(f"Expected 5-7 blocks, got {n} (too many)")
 
-    if found and found[-1] != "cierre":
-        errors.append(f"Last block must be 'cierre', got '{found[-1]}'")
+    # First block must be hook
+    if found_types and found_types[0] != "hook":
+        errors.append(f"First block must be 'hook', got '{found_types[0]}'")
 
+    # Last block must be cierre
+    if found_types and found_types[-1] != "cierre":
+        errors.append(f"Last block must be 'cierre', got '{found_types[-1]}'")
+
+    # All blocks must have valid types
+    valid_types = {"hook", "desarrollo1", "desarrollo2", "desarrollo3", "climax", "cierre"}
     for b in bloques:
-        tipo  = b.get("tipo", "?")
+        tipo = b.get("tipo", "?")
         texto = b.get("texto", "")
+        if tipo not in valid_types:
+            errors.append(f"Invalid block type: '{tipo}'")
         if not texto.strip():
             errors.append(f"Block '{tipo}' has empty text")
+
+    # Check development blocks are sequential (desarrollo1 before desarrollo2 before desarrollo3)
+    dev_types = [t for t in found_types if t.startswith("desarrollo")]
+    if dev_types:
+        for i, t in enumerate(dev_types):
+            expected = f"desarrollo{i+1}"
+            if t != expected:
+                errors.append(f"Development blocks must be sequential: expected '{expected}', got '{t}'")
 
     total_words = len(
         " ".join(b.get("texto", "") for b in bloques).split()
