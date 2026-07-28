@@ -1,4 +1,4 @@
-"""Tests for scene duration enforcement (merge short, split long, 5-20s).
+"""Tests for scene duration enforcement (merge short below MIN, split long above MAX).
 
 Run:  python3 -m pytest tests/test_scene_ranges.py -v
 """

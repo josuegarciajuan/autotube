@@ -210,13 +210,13 @@ class VideoEditor:
     INTRO_DURATION: float = 3.0
     OUTRO_DURATION: float = 5.0
     SCENE_DURATION_MIN: float = 6.0   # Enforced — scenes shorter than this are merged
-    SCENE_DURATION_MAX: float = 25.0  # Enforced — fewer sub-scenes = fewer unique media assets needed
+    SCENE_DURATION_MAX: float = 10.0  # Enforced — ~10s scenes for dynamic visual rotation (Oct 2025)
     # Legacy aliases kept for backward compatibility
     MIN_SCENE_DURATION: float = SCENE_DURATION_MIN
     MAX_SCENE_DURATION: float = SCENE_DURATION_MAX
     # Hard cap: when accumulated clip duration exceeds this, force a new clip
     # from the fallback pool instead of extending the same image indefinitely.
-    MAX_CLIP_EXTEND_SEC: float = 25.0
+    MAX_CLIP_EXTEND_SEC: float = 15.0  # lowered 25→15 (Oct 2025) to match ~10s scene ceiling
 
     DEFAULT_FONT: str = "DejaVu-Sans"
 

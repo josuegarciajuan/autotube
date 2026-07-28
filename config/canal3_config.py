@@ -613,8 +613,10 @@ KEN_BURNS_ZOOM_MIN = 4
 KEN_BURNS_ZOOM_MAX = 10
 
 # ── Scene pacing ────────────────────────────────────────────────
-SCENE_DURATION_MIN = 6.0             # default — keep scenes visually varied
-SCENE_DURATION_MAX = 20.0            # increased from 15 → 20 (Jul 2026): fewer sub-scenes = less media pressure + ffmpeg concat overhead
+# ─ Oct 2025: reduced MAX from 20 → 10 for more dynamic visual rotation (~10s scenes).
+#   MIN stays at 6.0 — provides margin for TTS blocks under 6s to be merged with neighbors.
+SCENE_DURATION_MIN = 6.0
+SCENE_DURATION_MAX = 10.0
 
 # ── Subtitle style ─────────────────────────────────────────────
 SUBTITLE_FONT_SIZE = 52

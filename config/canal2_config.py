@@ -112,14 +112,17 @@ PROD_VIDEO_DURATION_MAX = 14
 # ── Scene duration enforcement (overrides video_editor defaults) ──
 # Scenes shorter than MIN are merged with neighbors.
 # Scenes longer than MAX are split into sub-scenes (each with its own media asset).
-SCENE_DURATION_MIN = 4.0   # default 6.0 — shorter scenes force more visual changes
-SCENE_DURATION_MAX = 15.0   # increased from 9 → 15 (Jul 2026): fewer sub-scenes = less media pressure + ffmpeg concat overhead
+# ─ Oct 2025: reduced MAX from 15 → 10 for more dynamic visual rotation (~10s scenes).
+#   MIN raised from 4 → 5 to reduce merge pressure (TTS blocks under 5s get merged).
+SCENE_DURATION_MIN = 5.0
+SCENE_DURATION_MAX = 10.0
 
 # ── Hard cap: maximum accumulated duration for any composited clip ──
 # When a clip has been extended (via scene merges) beyond this limit,
 # the next scene with no media forces a NEW clip from the fallback pool
 # instead of further extending the same image. Prevents "same image for 200s".
-MAX_CLIP_EXTEND_SEC = 25.0
+# ─ Reduced from 25 → 15 to match the ~10s scene ceiling.
+MAX_CLIP_EXTEND_SEC = 15.0
 
 # ── Image reuse: STRICTLY FORBIDDEN (Jul 2026) ──
 # Images are NEVER reused within the same video to prevent YouTube

@@ -594,8 +594,10 @@ KEN_BURNS_ZOOM_MIN = 10
 KEN_BURNS_ZOOM_MAX = 18
 
 # ── Scene pacing ────────────────────────────────────────────────
-SCENE_DURATION_MIN = 8
-SCENE_DURATION_MAX = 20  # Fewer sub-scenes = less media asset pressure
+# ─ Oct 2025: reduced MAX from 20 → 10 for more dynamic visual rotation (~10s scenes).
+#   MIN lowered from 8 → 5 to avoid excessive TTS block merging with the tighter MAX.
+SCENE_DURATION_MIN = 5.0
+SCENE_DURATION_MAX = 10.0
 
 # ── Render resolution ──────────────────────────────────────────
 # 720p to stay within RAM budget on CPU-only renders (18 GB total).

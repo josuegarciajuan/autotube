@@ -21,7 +21,7 @@ _RANGE_RULES: List[Tuple[str, float, float, float, str]] = [
     ("VIGNETTE_RADIUS_FACTOR", 0.55, 0.95, 0.72, "Vignette radius factor"),
     ("VIGNETTE_INTENSITY",   5.0,  50.0, 15.0,  "Vignette intensity"),
     ("FILM_GRAIN_OPACITY",   0.0,  20.0,  5.0,  "Film grain opacity"),
-    ("MAX_CLIP_EXTEND_SEC", 15.0,  60.0, 25.0,  "Max clip extend seconds"),
+    ("MAX_CLIP_EXTEND_SEC", 10.0,  60.0, 25.0,  "Max clip extend seconds"),
     ("SCENE_DURATION_MIN",   2.0,  10.0,  5.0,  "Minimum scene duration (s)"),
     ("SCENE_DURATION_MAX",   5.0,  30.0, 20.0,  "Maximum scene duration (s)"),
     ("BACKGROUND_MUSIC_VOLUME", -35.0, -5.0, -18.0, "Background music volume (dB)"),
@@ -95,14 +95,14 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
             f"forcing MAX={scene_min + 5}"
         )
         config["SCENE_DURATION_MAX"] = scene_min + 5
-    elif scene_max < 12:
-        # Enforce floor: max < 12s produces too many sub-scenes per TTS block,
-        # which causes media fetch timeouts when providers have limited unique assets.
+    elif scene_max < 5:
+        # Enforce sanity floor: max < 5s would produce excessive sub-scenes.
+        # (Oct 2025: lowered floor from 12 → 5 to allow ~10s scene pacing.)
         warnings.append(
             f"[{slug}] SCENE_DURATION_MAX ({scene_max}) is too low — "
-            f"forcing MAX=20 to avoid excessive scene splitting"
+            f"forcing MAX=10 to avoid excessive scene splitting"
         )
-        config["SCENE_DURATION_MAX"] = 20
+        config["SCENE_DURATION_MAX"] = 10
 
     # ── Color palette: prevent solid-black vignette ────────────
     color_pal = config.get("COLOR_PALETTE")

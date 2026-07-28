@@ -106,6 +106,6 @@ class TestConfigBridge:
         assert "SCENE_DURATION_MAX" in orch_config, (
             "SCENE_DURATION_MAX MUST be in the test_video.py for-loop bridge!"
         )
-        assert orch_config["SCENE_DURATION_MAX"] >= 14.0, (
-            f"SCENE_DURATION_MAX should be >= 14, got {orch_config.get('SCENE_DURATION_MAX')}"
+        assert orch_config["SCENE_DURATION_MAX"] >= 9.0, (
+            f"SCENE_DURATION_MAX should be >= 9, got {orch_config.get('SCENE_DURATION_MAX')}"
         )
