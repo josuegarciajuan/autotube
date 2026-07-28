@@ -691,16 +691,34 @@ OUTRO_FONT_SIZE = 52
 OUTRO_BG_COLOR = (8, 20, 38)
 OUTRO_TEXT = "Suscribete"
 OUTRO_CTA_LIKE = "👍 Like"
-OUTRO_CTA_SUBSCRIBE = "🔔 Suscribete"
+OUTRO_CTA_SUBSCRIBE = "❤️ Suscribete"
 OUTRO_CTA_BELL = "📢 Comparte"
 # ── CTA visual text ────────────────────────────────────────────
 CTA_TEXT = (
-    "Si estos misterios medicos te fascinan,\n"
-    "¡dale like, suscribete y activa la campana!"
+    "Si has llegado hasta aqui y este caso te ha fascinado,\n"
+    "suscribete y dale like\n"
+    "para seguir revelando los misterios del cuerpo humano."
 )
+CTA_TEXT_VARIANTS = [
+    (
+        "Si has llegado hasta aqui y este caso te ha fascinado,\n"
+        "suscribete y dale like\n"
+        "para seguir revelando los misterios del cuerpo humano."
+    ),
+    (
+        "Gracias por investigar este misterio medico con nosotros.\n"
+        "Suscribete y dale like:\n"
+        "el proximo caso es aun mas increible."
+    ),
+    (
+        "El cuerpo humano guarda secretos que desafian a la ciencia.\n"
+        "Suscribete, dale like y comparte\n"
+        "para que juntos sigamos desvelando estas anomalias."
+    ),
+]
 # ── Template voice-over texts ──────────────────────────────────
 INTRO_VOICE_TEXT = "Bienvenidos a Anomalias Medicas, donde el cuerpo humano guarda secretos que la ciencia aun no comprende."
-CTA_VOICE_TEXT = "Si llegaste hasta aqui, ya formas parte de esta investigacion. Suscribete y no te pierdas el proximo caso."
+CTA_VOICE_TEXT = "Si has llegado hasta aqui y este caso te ha dejado sin palabras, suscribete y dale like. Sigamos investigando los misterios del cuerpo humano juntos."
 OUTRO_VOICE_TEXT = "Gracias por acompanarnos. Hasta el proximo misterio medico."
 
 CANAL_INITIALS = "AM"              # Anomalias Medicas

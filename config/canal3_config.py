@@ -682,16 +682,34 @@ OUTRO_FONT_SIZE = 60
 OUTRO_BG_COLOR = (22, 18, 12)
 OUTRO_TEXT = "Suscríbete"
 OUTRO_CTA_LIKE = "👍 Like"
-OUTRO_CTA_SUBSCRIBE = "🔔 Suscríbete"
+OUTRO_CTA_SUBSCRIBE = "❤️ Suscríbete"
 OUTRO_CTA_BELL = "📢 Comparte"
 # ── CTA visual text (shown on screen during the CTA segment) ──
 CTA_TEXT = (
-    "Si te apasiona descubrir civilizaciones olvidadas,\n"
-    "¡dale like, suscríbete y acompáñanos en la próxima expedición!"
+    "Si has llegado hasta aquí y te ha fascinado este viaje al pasado,\n"
+    "suscríbete y dale like\n"
+    "para seguir desenterrando juntos civilizaciones perdidas."
 )
+CTA_TEXT_VARIANTS = [
+    (
+        "Si has llegado hasta aquí y te ha fascinado este viaje al pasado,\n"
+        "suscríbete y dale like\n"
+        "para seguir desenterrando juntos civilizaciones perdidas."
+    ),
+    (
+        "Gracias por explorar con nosotros esta historia olvidada.\n"
+        "Suscríbete y dale like:\n"
+        "aún quedan cientos de ruinas por descubrir."
+    ),
+    (
+        "Cada civilización guarda un secreto, y tú acabas de descubrir uno.\n"
+        "Suscríbete, dale like y comparte\n"
+        "para que la historia no vuelva a quedar enterrada."
+    ),
+]
 # ── Template voice-over texts (TTS with channel narrator voice) ──
 INTRO_VOICE_TEXT = "Bienvenidos a Civilizaciones Olvidadas, la historia que el tiempo enterró."
-CTA_VOICE_TEXT = "Si esta historia despertó tu curiosidad, suscríbete y desentierra con nosotros el próximo secreto."
+CTA_VOICE_TEXT = "Si has llegado hasta aquí y despertó tu curiosidad, suscríbete y acompáñanos. El próximo secreto de la historia te espera."
 OUTRO_VOICE_TEXT = "Gracias por vernos. Nos vemos en la próxima civilización."
 
 CANAL_INITIALS = "CO"             # Civilizaciones Olvidadas

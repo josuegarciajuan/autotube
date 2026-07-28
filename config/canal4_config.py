@@ -716,17 +716,35 @@ OUTRO_FONT_SIZE = 52
 OUTRO_BG_COLOR = (6, 12, 24)
 OUTRO_TEXT = "Suscribete"
 OUTRO_CTA_LIKE = "👍 Like"
-OUTRO_CTA_SUBSCRIBE = "🔔 Suscribete"
+OUTRO_CTA_SUBSCRIBE = "❤️ Suscribete"
 OUTRO_CTA_BELL = "📢 Comparte"
 # ── CTA visual text (shown on screen during the CTA segment) ──
 CTA_TEXT = (
-    "Si estas historias de supervivencia te atrapan,\n"
-    "¡dale like, suscribete y activa la campana!"
+    "Si has llegado hasta aqui y te ha atrapado esta aventura,\n"
+    "suscribete y dale like\n"
+    "para seguir explorando juntos las expediciones mas extremas."
 )
+CTA_TEXT_VARIANTS = [
+    (
+        "Si has llegado hasta aqui y te ha atrapado esta aventura,\n"
+        "suscribete y dale like\n"
+        "para seguir explorando juntos las expediciones mas extremas."
+    ),
+    (
+        "Gracias por sobrevivir a esta expedicion con nosotros.\n"
+        "Suscribete y dale like:\n"
+        "la proxima aventura te dejara sin aliento."
+    ),
+    (
+        "Has llegado al final de esta travesia, pero aun queda mucho por explorar.\n"
+        "Suscribete, dale like y comparte\n"
+        "para que mas gente descubra lo que hay mas alla."
+    ),
+]
 # ── Template voice-over texts (TTS with channel narrator voice) ──
 INTRO_VOICE_TEXT = "Bienvenidos a Expediciones sin retorno, donde no todos vuelven para contarlo."
-CTA_VOICE_TEXT = "Si has llegado hasta aquí, ya eres parte de la expedición. Suscríbete y no te quedes atrás."
-OUTRO_VOICE_TEXT = "Gracias por ver. Nos vemos en la próxima expedición."
+CTA_VOICE_TEXT = "Si has llegado hasta aqui, ya eres parte de la expedicion. Suscribete y dale like para no perderte la proxima aventura."
+OUTRO_VOICE_TEXT = "Gracias por ver. Nos vemos en la proxima expedicion."
 
 CANAL_INITIALS = "ESR"             # Expediciones Sin Retorno
 LOGO_SIZE = 180

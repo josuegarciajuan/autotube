@@ -2941,10 +2941,15 @@ class VideoEditor:
         bg_color = self.canal.get("CTA_BG_COLOR", (8, 8, 10))
         font_size = self.canal.get("CTA_FONT_SIZE", 44)
 
-        cta_text = self.canal.get(
-            "CTA_TEXT",
-            "Si este contenido te ha hecho reflexionar,\nsuscríbete para más historias como esta",
-        )
+        # CTA text with optional variant rotation
+        cta_text_raw = self.canal.get("CTA_TEXT_VARIANTS") or self.canal.get("CTA_TEXT")
+        if isinstance(cta_text_raw, list) and len(cta_text_raw) > 0:
+            import random as _random
+            cta_text = _random.choice(cta_text_raw)
+        elif isinstance(cta_text_raw, str):
+            cta_text = cta_text_raw
+        else:
+            cta_text = "Si este contenido te ha hecho reflexionar,\nsuscríbete para más historias como esta"
 
         try:
             font = self._resolve_font()

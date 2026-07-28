@@ -658,16 +658,36 @@ OUTRO_FONT_SIZE = 60
 OUTRO_BG_COLOR = (15, 32, 62)
 OUTRO_TEXT = "Suscríbete"
 OUTRO_CTA_LIKE = "👍 Like"
-OUTRO_CTA_SUBSCRIBE = "🔔 Suscríbete"
+OUTRO_CTA_SUBSCRIBE = "❤️ Suscríbete"
 OUTRO_CTA_BELL = "📢 Comparte"
 # ── CTA visual text (shown on screen during the CTA segment) ──
+# Single CTA (used when template is pre-generated)
 CTA_TEXT = (
-    "Si este contenido te ha hecho reflexionar,\n"
-    "¡dale like, suscríbete y activa la campana!"
+    "Si has llegado hasta aquí y esta historia te ha resonado,\n"
+    "suscríbete y dale like\n"
+    "para que más almas encuentren las señales del universo."
 )
+# Variants for visual CTA rotation (randomly picked per video)
+CTA_TEXT_VARIANTS = [
+    (
+        "Si has llegado hasta aquí y esta historia te ha resonado,\n"
+        "suscríbete y dale like\n"
+        "para que más almas encuentren las señales del universo."
+    ),
+    (
+        "Gracias por acompañarnos hasta el final de esta sincronía.\n"
+        "Suscríbete y dale like,\n"
+        "que la próxima señal ya está vibrando en el éter."
+    ),
+    (
+        "El universo ha hablado y tú has escuchado.\n"
+        "Suscríbete, dale like y comparte:\n"
+        "estas historias necesitan llegar a más almas."
+    ),
+]
 # ── Template voice-over texts (TTS with channel narrator voice) ──
 INTRO_VOICE_TEXT = "Bienvenidos a Sincronías, donde nada es casualidad."
-CTA_VOICE_TEXT = "Si sientes que esto no ha sido casualidad, suscríbete: la próxima señal podría cambiarlo todo."
+CTA_VOICE_TEXT = "Si has llegado hasta aquí, esta historia era para ti. Suscríbete y dale like: la próxima señal puede cambiarlo todo."
 OUTRO_VOICE_TEXT = "Gracias por acompañarnos. Hasta la próxima sincronía."
 
 CANAL_INITIALS = "SX"             # Sincronías
