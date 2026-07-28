@@ -3044,17 +3044,16 @@ async def start_generation_job_subprocess(
 
     # ── RAM-aware guard: if another worker is active, check memory ──
     # A render can consume ~8+ GB. If free RAM is critically low
-    # (< 3 GB), defer dispatch until the current render finishes to avoid OOM.
+    # (< 2.5 GB), defer dispatch until the current render finishes to avoid OOM.
     if active_count >= 1:
         try:
-            avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+            avail_mb = _get_available_memory_mb()
+            avail_gb = avail_mb / 1024 if avail_mb else None
         except Exception:
-            try:
-                import psutil
-                avail_gb = psutil.virtual_memory().available / (1024 ** 3)
-            except ImportError:
-                avail_gb = 99  # assume OK
-        if avail_gb < 3.0:
+            avail_gb = None
+        if avail_gb is None:
+            avail_gb = 99  # assume OK if we can't check
+        if avail_gb < 2.5:
             logger.warning(
                 "Subprocess spawn deferred: %d active + only %.1f GB free RAM (need ≥ 3 GB)",
                 active_count, avail_gb,

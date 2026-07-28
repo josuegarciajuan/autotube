@@ -67,9 +67,13 @@ def get_monitor_dashboard():
                 "SELECT COUNT(*) as c FROM pipeline_alerts WHERE acknowledged = 0 AND resolved = 0"
             ).fetchone()["c"]
 
-            # Health score (0-100)
-            total_issues = videos_error + shorts_failed + alerts_critical
-            health = max(0, 100 - total_issues * 5)
+            # Health score (0-100): capped per-category penalties
+            # Errors > 0 cost 15 pts, each additional error costs 1 pt up to max penalty
+            # Plus 5 pts per critical alert, 2 pts per warning
+            error_penalty = min(60, 15 + videos_error * 1) if videos_error > 0 else 0
+            short_penalty = min(30, 10 + shorts_failed * 2) if shorts_failed > 0 else 0
+            alert_penalty = min(30, alerts_critical * 5 + alerts_warning * 2)
+            health = max(0, 100 - error_penalty - short_penalty - alert_penalty)
 
             # Active generating videos details
             active_videos = [

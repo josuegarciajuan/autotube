@@ -30,6 +30,7 @@ from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
 
+logger = logging.getLogger("autotube.main")
 
 # ── Lifespan ─────────────────────────────────────────────────
 

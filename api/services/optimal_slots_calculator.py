@@ -169,10 +169,10 @@ class OptimalSlotsCalculator:
         fetcher = YouTubeStatsFetcher(slug)
         api_ok = fetcher.authenticate()
 
-        # Source A: YT Analytics hourly activity
+        # Source A: YT Analytics hourly activity (disabled — 'hour' dimension
+        # not supported by YouTube Analytics API v2 for channel reports.
+        # Falls back to niche heuristics + historical DB data.)
         hourly_data = {}
-        if api_ok:
-            hourly_data = fetcher.get_viewer_activity_by_hour(days=30)
 
         # Source B: Country split (ES vs LATAM)
         country_split = {}

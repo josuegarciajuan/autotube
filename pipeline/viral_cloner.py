@@ -228,12 +228,12 @@ _LEAK_INDICATORS = [
     (r'(?:patreon|paypal|buymeacoffee)\.', 'payment link'),
     (r'bit\.ly/[^\s]+', 'short link'),
     (r'@[a-zA-Z0-9_]+', '@handle'),
-    (r'subscribe[^\n]{0,30}(?:now|today|here|below|and|activate)', 'subscribe CTA', re.IGNORECASE),
-    (r'(?:join|follow|find)\s+(?:me|us|my|our)\s+(?:on|at)', 'follow CTA', re.IGNORECASE),
-    (r'(?:activate|hit|press)\s+(?:the\s+)?(?:bell|notification)', 'bell CTA', re.IGNORECASE),
-    (r'(?:business|contact)\s*(?:inquir|mail|email)', 'business contact', re.IGNORECASE),
-    (r'like\s*(?:&|and|y)\s*(?:share|subscribe|comment)', 'like-share CTA', re.IGNORECASE),
-    (r'check\s+(?:out|my)\s+(?:my\s+)?(?:channel|video|link)', 'check my CTA', re.IGNORECASE),
+    (r'(?i)subscribe[^\n]{0,30}(?:now|today|here|below|and|activate)', 'subscribe CTA'),
+    (r'(?i)(?:join|follow|find)\s+(?:me|us|my|our)\s+(?:on|at)', 'follow CTA'),
+    (r'(?i)(?:activate|hit|press)\s+(?:the\s+)?(?:bell|notification)', 'bell CTA'),
+    (r'(?i)(?:business|contact)\s*(?:inquir|mail|email)', 'business contact'),
+    (r'(?i)like\s*(?:&|and|y)\s*(?:share|subscribe|comment)', 'like-share CTA'),
+    (r'(?i)check\s+(?:out|my)\s+(?:my\s+)?(?:channel|video|link)', 'check my CTA'),
 ]
 
 # Lines to remove entirely (case-insensitive match at line level)
