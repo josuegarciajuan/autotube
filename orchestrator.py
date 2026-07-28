@@ -608,6 +608,21 @@ class PipelineOrchestrator:
         # Get translated title
         translated_title = viral_meta.get("translated_title") or original_title or "Video"
 
+        # Validate title is Spanish — if original_title is English and used as fallback, extract from blocks
+        if translated_title and original_title and translated_title == original_title:
+            es_accents = sum(1 for c in original_title if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
+            en_words = len(re.findall(
+                r'\b(the|and|that|with|this|from|have|what|when|will|about|your|our|for|not|but)\b',
+                original_title.lower()
+            ))
+            if en_words >= 1 and es_accents == 0:
+                logger.warning("[%s] Viral title is English (original_title used as fallback) — extracting Spanish title from blocks", self.canal)
+                blocks_text = [b.get("texto", "") for b in blocks]
+                if blocks_text:
+                    first_sentence = blocks_text[0].split(".")[0].strip()[:100]
+                    if first_sentence and len(first_sentence) > 20:
+                        translated_title = first_sentence
+
         # Generate alternative titles
         alt_titles = [translated_title]
         if len(translated_title) > 5:

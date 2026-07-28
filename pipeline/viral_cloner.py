@@ -304,6 +304,18 @@ def sanitize_promo_content(text: str) -> str:
         logger.warning("sanitize_promo_content: after cleanup only %d chars remain — returning empty", len(stripped))
         return ""
 
+    # Step 5: Language check — reject English descriptions in Spanish channels
+    es_accents = sum(1 for c in stripped if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
+    if es_accents == 0 and len(stripped) >= 30:
+        en_func = len(re.findall(
+            r'\b(the|and|that|have|from|with|this|they|will|what|it|are|was|for|not|but|you|all|can|had|has|one|were|your|our|been|would|could|should|there|their)\b',
+            stripped.lower()
+        ))
+        total_words = len(stripped.split())
+        if total_words > 0 and en_func / total_words > 0.10:
+            logger.warning("sanitize_promo_content: description appears to be English (%d/%d English function words) — returning empty", en_func, total_words)
+            return ""
+
     if stripped != text.strip():
         logger.info("sanitize_promo_content: cleaned %d → %d chars", len(text.strip()), len(stripped))
 
@@ -321,6 +333,16 @@ def _is_description_leaked(desc: str, original_desc: str = "") -> bool:
 
     if not desc or len(desc) < 20:
         return False  # too short to judge — let sanitize handle it
+
+    # Check 0: Language detection — English description in a Spanish channel is a leak
+    es_chars = sum(1 for c in desc if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
+    en_function_words = re.findall(
+        r'\b(the|and|that|have|from|with|this|they|will|what|when|about|your|our|join|subscribe|watch|like|share|follow)\b',
+        desc.lower()
+    )
+    if len(en_function_words) >= 5 and es_chars == 0:
+        logger.info("_is_description_leaked: detected ENGLISH language (%d English function words, 0 Spanish accents)", len(en_function_words))
+        return True
 
     # Check 1: Promo indicators
     for pattern, label in _LEAK_INDICATORS:
@@ -532,6 +554,16 @@ def clone_title_description(
     if translated_desc:
         translated_desc = sanitize_promo_content(translated_desc)
 
+    # ── Rebuild from blocks if sanitize emptied the description ──
+    if not translated_desc and block_texts:
+        logger.warning("[%s] Description emptied by sanitize (likely English content) — rebuilding from blocks", channel_slug)
+        translated_desc = _rebuild_description_from_blocks(
+            viral_meta.get("blocks", []), channel_config,
+        )
+        if translated_desc:
+            logger.info("[%s] Rebuilt description from script blocks after sanitize (%d chars)",
+                        channel_slug, len(translated_desc))
+
     # ── Append channel hashtags (SEO enrichment) ──
     if translated_desc and seo_hashtags:
         hashtag_str = " ".join(seo_hashtags[:5])
@@ -542,7 +574,17 @@ def clone_title_description(
     tags = _extract_tags_from_script(block_texts, channel_config)
 
     # Build thumbnail overlay text (short punchy phrase from title, without names)
-    thumbnail_text = translated_title[:40] if translated_title else channel_tagline[:40]
+    # Validate title is Spanish before using for thumbnail text
+    _title_es_chars = sum(1 for c in (translated_title or '') if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
+    if not _title_es_chars and translated_title and len(translated_title) > 10:
+        # Title might be English — use first Spanish block text as fallback
+        if block_texts:
+            first_block = block_texts[0] if block_texts else ""
+            thumbnail_text = first_block[:40] if first_block else channel_tagline[:40]
+        else:
+            thumbnail_text = channel_tagline[:40]
+    else:
+        thumbnail_text = translated_title[:40] if translated_title else channel_tagline[:40]
 
     # Generate alternative titles by paraphrasing
     alt_titles = _generate_alt_titles(translated_title, channel_config)

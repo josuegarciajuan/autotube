@@ -283,7 +283,15 @@ class YouTubeViralScraper(BaseScraper):
                     max_tokens=4096,
                 )
                 content = resp.choices[0].message.content
-                return content.strip() if content else None
+                if content:
+                    content = content.strip()
+                    if not self._is_spanish_text(content):
+                        logger.warning("[%s] LLM returned non-Spanish text (attempt %d) — discarding",
+                                       self.canal, attempt)
+                        if attempt < self.max_retries:
+                            continue
+                        return None
+                return content if content else None
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
@@ -296,6 +304,38 @@ class YouTubeViralScraper(BaseScraper):
                                  self.canal, self.max_retries, e)
 
         return None
+
+    @staticmethod
+    def _detect_language(text: str) -> str:
+        """Fast heuristic language detection based on character n-grams.
+
+        Returns 'es' (Spanish), 'en' (English), or 'unknown'.
+        """
+        if not text or len(text) < 10:
+            return "unknown"
+        t = text.lower()
+        spanish_markers = ['á', 'é', 'í', 'ó', 'ú', 'ñ', 'ü', '¿', '¡']
+        spanish_chars = sum(1 for c in text if c in spanish_markers)
+        if spanish_chars > 0:
+            return "es"
+        english_markers = [' the ', ' and ', ' that ', ' have ', ' from ', ' with ',
+                           ' this ', ' they ', ' will ', ' what ', ' when ', ' about ',
+                           ' your ', ' our ', ' join ', ' subscribe ', ' which ', ' there ',
+                           ' would ', ' could ', ' should ', ' their ']
+        english_hits = sum(1 for m in english_markers if m in t)
+        if english_hits >= 3:
+            return "en"
+        words = t.split()
+        if len(words) >= 10:
+            ascii_words = sum(1 for w in words if w.isascii() and all(c.isascii() for c in w))
+            if ascii_words / len(words) > 0.85 and spanish_chars == 0:
+                return "en"
+        return "es"
+
+    @classmethod
+    def _is_spanish_text(cls, text: str) -> bool:
+        """Return True if text is Spanish (or ambiguous), False if clearly English."""
+        return cls._detect_language(text) != "en"
 
     # ── YouTube discovery via yt-dlp ────────────────────────────
 
@@ -1439,6 +1479,9 @@ class YouTubeViralScraper(BaseScraper):
         if english_text:
             user_msg = f"Translate and paraphrase this viral video transcript into Spanish:\n\n{english_text[:8000]}"
             translated_script = self._call_llm(_TRANSLATE_SYSTEM_PROMPT, user_msg, temperature=0.7)
+            if translated_script and not self._is_spanish_text(translated_script):
+                logger.warning("[%s] Script translation returned non-Spanish text — discarding", self.canal)
+                translated_script = None
 
         # 2. Generate a FRESH Spanish title (NOT a translation of the original)
         if original_title:
@@ -1451,6 +1494,9 @@ class YouTubeViralScraper(BaseScraper):
             translated_title = self._call_llm(
                 _TITLE_CREATION_SYSTEM_PROMPT, title_msg, temperature=0.85
             )
+            if translated_title and not self._is_spanish_text(translated_title):
+                logger.warning("[%s] Title generation returned non-Spanish text — discarding", self.canal)
+                translated_title = None
 
             # ── Step B: Anti-plagiarism check — retry if too similar ──
             if translated_title:
@@ -1505,11 +1551,15 @@ class YouTubeViralScraper(BaseScraper):
                 _DESCRIPTION_CREATION_SYSTEM_PROMPT, desc_msg, temperature=0.6
             )
             if translated_description:
-                translated_description = translated_description.strip()
-                logger.info(
-                    "[%s] Description generated: %d chars",
-                    self.canal, len(translated_description),
-                )
+                if not self._is_spanish_text(translated_description):
+                    logger.warning("[%s] Description generation returned non-Spanish text — discarding", self.canal)
+                    translated_description = None
+                else:
+                    translated_description = translated_description.strip()
+                    logger.info(
+                        "[%s] Description generated: %d chars",
+                        self.canal, len(translated_description),
+                    )
             else:
                 logger.warning("[%s] Description generation returned empty", self.canal)
 
@@ -1714,8 +1764,8 @@ class YouTubeViralScraper(BaseScraper):
             transcript_en, top["title"]
         )
         if not translated_script:
-            logger.error("[%s] Step 5 FAILED: Translation returned empty — using raw EN transcription", self.canal)
-            translated_script = transcript_en
+            logger.error("[%s] Step 5 FAILED: Translation returned empty — ABORTING (cannot use raw EN content)", self.canal)
+            return items
         else:
             logger.info("[%s] Step 5 (translate): done in %.1fs → %d words ES, title='%s'",
                         self.canal, time.time() - t5, len(translated_script.split()),

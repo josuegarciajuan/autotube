@@ -44,7 +44,7 @@ _LEAK_PATTERNS = [
 
 
 def description_has_leaks(desc: str) -> bool:
-    """Check if a description contains foreign promo content."""
+    """Check if a description contains foreign promo content or is in English."""
     if not desc or len(desc) < 30:
         return False
     if desc[:20].lower().startswith(("join my discord", "watch ad-free", "directed by @")):
@@ -55,6 +55,17 @@ def description_has_leaks(desc: str) -> bool:
             flags = rest[0] if rest else 0
             if re.search(pat, desc, flags=flags):
                 return True
+    # Language check: detect English descriptions in Spanish channels
+    es_accents = sum(1 for c in desc if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
+    if es_accents == 0:
+        en_func_count = len(re.findall(
+            r'\b(the|and|that|have|from|with|this|they|will|what|when|about|your|our|all|can|been|were|are|for|not|but|you|had|has|one|there|their|would|could|should)\b',
+            desc.lower()
+        ))
+        total_words = len(desc.split())
+        if total_words > 0 and en_func_count / total_words > 0.10:
+            logger.debug("description_has_leaks: detected English language (%d/%d English function words)", en_func_count, total_words)
+            return True
     return False
 
 
@@ -216,6 +227,7 @@ def main():
 
     # ── Check which ones still have leaks on YouTube ─────────
     need_push = []
+    skipped_english = []  # videos with English DB descriptions (needs different repair)
 
     # Group by channel for efficient auth
     channels = sorted(set(v["canal"] for v in all_videos))
@@ -237,6 +249,14 @@ def main():
 
             has_leaks = description_has_leaks(yt_desc)
             db_desc = vid["db_desc"]
+
+            # Skip videos where the DB description itself is English — pushing won't help
+            db_has_leaks = description_has_leaks(db_desc)
+            if db_has_leaks:
+                logger.warning("  video #%d (%s): DB description is English/leaked (%d chars) — SKIPPING (needs manual repair)",
+                               vid["id"], yt_id, len(db_desc))
+                skipped_english.append(vid)
+                continue
 
             if has_leaks:
                 logger.info("  video #%d (%s): YT=%d chars LEAKED → pushing DB version (%d chars)",
@@ -369,6 +389,8 @@ def main():
     print(f"  Verificado:   {verify_ok}")
     print(f"  Pend. verif:  {verify_fail + verify_skip}")
     print(f"  Falló:        {len(failed)}")
+    if skipped_english:
+        print(f"  Desc inglés:  {len(skipped_english)} (requieren reparación manual)")
     print(f"{'═' * 60}")
 
 
