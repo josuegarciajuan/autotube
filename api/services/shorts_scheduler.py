@@ -288,22 +288,24 @@ def _build_shorts_slots_for_channel(
     # ── 3. Sort all slots by time and resolve collisions ──
     #    Same-type (native↔native, clip↔clip) → 60min publish gap enforced
     #    Cross-type (native↔clip) → overlap allowed, only 35min gen gap
+    #    Iterates forward through resolved slots; skips later slots to avoid
+    #    false-positive negative gaps from reversed-order checking.
     all_slots.sort(key=lambda x: x[0])
 
     resolved = []
     for total_min, slot_type, long_pos, slot_rank in all_slots:
         pushed_min = total_min
-        for prev_min, prev_type, _, _ in reversed(resolved):
+        for prev_min, prev_type, _, _ in resolved:
+            if prev_min >= pushed_min:
+                continue  # This resolved slot is after us — not a collision
             if slot_type == prev_type:
                 # Same type: enforce publish-level gap
                 if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
                     pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
-                    break
             else:
                 # Cross-type (native↔clip): only enforce gen-level gap
                 if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
                     pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
-                    break
         pushed_min = min(pushed_min, 24 * 60 - 1)
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
