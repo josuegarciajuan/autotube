@@ -1567,6 +1567,14 @@ class PipelineOrchestrator:
                 )
                 logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
 
+            # ── SEO filename slug from final title ─────────────────
+            # YouTube uses the uploaded file name as a ranking signal.
+            # We construct a keyword-rich slug so the temp copy sent to
+            # YouTube carries the video title in its filename.
+            from pipeline.utils import slugify_filename
+            filename_slug = slugify_filename(title)
+            logger.info("[%s] SEO filename slug: '%s' (from '%s')", self.canal, filename_slug, title[:60])
+
             # Upload — API mode: suppress uploader's own _log_to_db (single video record)
             _saved_uploader_db = self._uploader.db
 
@@ -1596,6 +1604,8 @@ class PipelineOrchestrator:
                 category_id=metadata.get("category_id", self.config.YT_CATEGORY_ID) if metadata else self.config.YT_CATEGORY_ID,
                 privacy=upload_privacy,
                 heartbeat_callback=upload_heartbeat,
+                suggested_video_filename=filename_slug,
+                suggested_thumb_filename=filename_slug,
             )
 
             video_id = result.get("video_id")

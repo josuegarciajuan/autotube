@@ -14,6 +14,7 @@ Supports:
 import logging
 import os
 import pickle
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -334,6 +335,8 @@ class YouTubeUploader:
         language: str = "es",
         heartbeat_callback=None,
         progress_callback=None,
+        suggested_video_filename: str = None,
+        suggested_thumb_filename: str = None,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -345,6 +348,11 @@ class YouTubeUploader:
           to signal the orphan detector that the upload is still alive.
         - progress_callback: optional callable(pct: int) invoked on each chunk
           with the upload progress percentage (0-100).
+        - suggested_video_filename: if provided, the video file is copied to a
+          temp file with this name (preserving .mp4 extension) before upload.
+          YouTube uses the filename for SEO — a keyword-rich stem helps ranking.
+        - suggested_thumb_filename: if provided, the thumbnail is copied to a
+          temp file with this name (preserving .jpg extension) before setting.
 
         Returns {video_id: str, url: str, warnings: list}
         """
@@ -354,94 +362,136 @@ class YouTubeUploader:
 
         service = self._get_service()
 
-        default_tags = self._get_config_attr("YT_DEFAULT_TAGS", [])
-        tags = tags or default_tags
-        
-        # Sanitize tags: YouTube rejects tags with certain characters
-        sanitized = []
-        for tag in tags:
-            # Remove quotes, newlines, special chars
-            clean = str(tag).replace('"', '').replace("'", '').replace('\n', '').strip()
-            if clean and len(clean) > 0 and len(clean) <= 30:
-                sanitized.append(clean)
-        tags = sanitized[:60]  # Max 60 tags per YouTube
+        # ── SEO-friendly temp copies ────────────────────────────
+        # YouTube's processing pipeline uses the uploaded file name as
+        # a ranking signal.  We copy the originals to temp files with
+        # keyword-rich names, upload those, and clean up afterward.
+        # The original files are never modified — other phases may
+        # still depend on their canonical paths.
+        _tmp_video = None
+        _tmp_thumb = None
+        _cleanup_paths = []
+        try:
+            if suggested_video_filename:
+                # Preserve extension (.mp4, .mov, etc.)
+                ext = video_path.suffix
+                _tmp_video = video_path.with_name(
+                    f"{suggested_video_filename}{ext}"
+                )
+                shutil.copy2(video_path, _tmp_video)
+                _cleanup_paths.append(_tmp_video)
+                logger.info(
+                    "SEO copy: %s → %s (uploading renamed)", video_path.name, _tmp_video.name
+                )
+                video_path = _tmp_video
 
-        body = {
-            "snippet": {
-                "title": title[:100],
-                "description": description[:5000],
-                "tags": tags,
-                "categoryId": category_id,
-                "defaultLanguage": language,
-                "defaultAudioLanguage": language,
-            },
-            "status": {
-                "privacyStatus": privacy,
-                "selfDeclaredMadeForKids": False,
-                "embeddable": True,
-                "publicStatsViewable": True,
-            },
-        }
+            if suggested_thumb_filename and thumbnail_path:
+                thumb_path = Path(thumbnail_path)
+                if str(thumb_path).strip() and thumb_path.is_file():
+                    ext = thumb_path.suffix or ".jpg"
+                    _tmp_thumb = thumb_path.with_name(
+                        f"{suggested_thumb_filename}{ext}"
+                    )
+                    shutil.copy2(thumb_path, _tmp_thumb)
+                    _cleanup_paths.append(_tmp_thumb)
+                    thumbnail_path = _tmp_thumb
 
-        media = MediaFileUpload(
-            str(video_path),
-            mimetype="video/*",
-            chunksize=256 * 1024,
-            resumable=True,
-        )
+            default_tags = self._get_config_attr("YT_DEFAULT_TAGS", [])
+            tags = tags or default_tags
+            
+            # Sanitize tags: YouTube rejects tags with certain characters
+            sanitized = []
+            for tag in tags:
+                # Remove quotes, newlines, special chars
+                clean = str(tag).replace('"', '').replace("'", '').replace('\n', '').strip()
+                if clean and len(clean) > 0 and len(clean) <= 30:
+                    sanitized.append(clean)
+            tags = sanitized[:60]  # Max 60 tags per YouTube
 
-        request = service.videos().insert(
-            part="snippet,status",
-            body=body,
-            media_body=media,
-        )
+            body = {
+                "snippet": {
+                    "title": title[:100],
+                    "description": description[:5000],
+                    "tags": tags,
+                    "categoryId": category_id,
+                    "defaultLanguage": language,
+                    "defaultAudioLanguage": language,
+                },
+                "status": {
+                    "privacyStatus": privacy,
+                    "selfDeclaredMadeForKids": False,
+                    "embeddable": True,
+                    "publicStatsViewable": True,
+                },
+            }
 
-        logger.info("Uploading: %s (privacy=%s)", title, privacy)
-        response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback,
-                                          progress_callback=progress_callback)
+            media = MediaFileUpload(
+                str(video_path),
+                mimetype="video/*",
+                chunksize=256 * 1024,
+                resumable=True,
+            )
 
-        # ── Validate YouTube response ─────────────────────────
-        self._validate_upload_response(response)
+            request = service.videos().insert(
+                part="snippet,status",
+                body=body,
+                media_body=media,
+            )
 
-        video_id: str = response["id"]
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        logger.info("Upload complete: %s", youtube_url)
+            logger.info("Uploading: %s (privacy=%s)", title, privacy)
+            response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback,
+                                              progress_callback=progress_callback)
 
-        # ── Post-upload verification: confirm video exists on YouTube ──
-        self._verify_upload_exists(service, video_id)
+            # ── Validate YouTube response ─────────────────────────
+            self._validate_upload_response(response)
 
-        # ── Build warnings for non-uploadable fields ─────────
-        warnings = []
-        warnings.append({
-            "field": "subtitles",
-            "reason": "Subtítulos requieren API aparte (captions.insert). Subir manualmente en YouTube Studio.",
-            "ready": False,
-        })
-        warnings.append({
-            "field": "playlist",
-            "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
-            "ready": False,
-        })
-        warnings.append({
-            "field": "end_screens",
-            "reason": "Pantallas finales solo configurables en YouTube Studio. "
-                      "Recomendado: 2 elementos (vídeo recomendado 'mejor para el espectador' + botón suscribirse).",
-            "ready": False,
-        })
-        warnings.append({
-            "field": "altered_content",
-            "reason": "YouTube exige marcar 'contenido alterado' si se ha generado con IA. "
-                      "Márcalo en YouTube Studio > Contenido > ¿Contenido alterado o sintético? > Sí.",
-            "ready": False,
-        })
+            video_id: str = response["id"]
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info("Upload complete: %s", youtube_url)
 
-        if thumbnail_path and Path(thumbnail_path).exists():
-            self._set_thumbnail(service, video_id, Path(thumbnail_path))
+            # ── Post-upload verification: confirm video exists on YouTube ──
+            self._verify_upload_exists(service, video_id)
 
-        if self.db is not None:
-            self._log_to_db(video_path, title, video_id, youtube_url)
+            # ── Build warnings for non-uploadable fields ─────────
+            warnings = []
+            warnings.append({
+                "field": "subtitles",
+                "reason": "Subtítulos requieren API aparte (captions.insert). Subir manualmente en YouTube Studio.",
+                "ready": False,
+            })
+            warnings.append({
+                "field": "playlist",
+                "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
+                "ready": False,
+            })
+            warnings.append({
+                "field": "end_screens",
+                "reason": "Pantallas finales solo configurables en YouTube Studio. "
+                          "Recomendado: 2 elementos (vídeo recomendado 'mejor para el espectador' + botón suscribirse).",
+                "ready": False,
+            })
+            warnings.append({
+                "field": "altered_content",
+                "reason": "YouTube exige marcar 'contenido alterado' si se ha generado con IA. "
+                          "Márcalo en YouTube Studio > Contenido > ¿Contenido alterado o sintético? > Sí.",
+                "ready": False,
+            })
 
-        return {"video_id": video_id, "url": youtube_url, "warnings": warnings}
+            if thumbnail_path and Path(thumbnail_path).exists():
+                self._set_thumbnail(service, video_id, Path(thumbnail_path))
+
+            if self.db is not None:
+                self._log_to_db(video_path, title, video_id, youtube_url)
+
+            return {"video_id": video_id, "url": youtube_url, "warnings": warnings}
+
+        finally:
+            # ── Clean up SEO temp copies ───────────────────────
+            for p in _cleanup_paths:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def upload_from_script(
         self,
