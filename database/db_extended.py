@@ -634,6 +634,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v16: short_asset_history (cross-short asset dedup) ──
     _migrate_v16(conn, logger)
+
+    # ── v17: shorts.longform_linked (YouTube Studio "Related video" tracking) ──
+    _migrate_v17(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1140,6 +1143,38 @@ def _migrate_v16(conn, logger):
         logger.info("Migration v16: short_asset_history table created")
     else:
         logger.warning("Migration v16: schema_v16.sql not found")
+
+
+def _migrate_v17(conn, logger):
+    """Idempotent v17 migration: add longform_linked column to shorts table.
+
+    Tracks whether the YouTube Studio "Related video" native link has been set
+    to connect a Short with its source long-form video. Only applicable for
+    clip-type shorts (source_video_id IS NOT NULL).
+    """
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(shorts)").fetchall()}
+    except sqlite3.OperationalError:
+        logger.debug("Migration v17: shorts table does not exist yet — skipping")
+        return
+
+    v17_columns = [
+        ("longform_linked", "BOOLEAN DEFAULT 0"),
+        ("longform_linked_at", "TEXT"),
+    ]
+    added = 0
+    for col_name, col_def in v17_columns:
+        if col_name not in existing:
+            try:
+                conn.execute(f"ALTER TABLE shorts ADD COLUMN {col_name} {col_def}")
+                added += 1
+            except sqlite3.OperationalError as e:
+                logger.debug("v17 shorts.%s: %s", col_name, e)
+
+    if added > 0:
+        logger.info("Migration v17: added %d column(s) to shorts (longform_linked)", added)
+    else:
+        logger.debug("Migration v17: longform_linked columns already present in shorts")
 
 
 def _migrate_v10(conn, logger):

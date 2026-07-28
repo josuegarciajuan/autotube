@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS shorts (
     ranking INTEGER,                      -- 1-5, impact rank (1 = most impactful)
     topic TEXT,                           -- Short topic/theme (for dedup across native shorts)
     has_subscribe_cta BOOLEAN DEFAULT 0,  -- Whether this short includes a subscribe CTA block
+    longform_linked BOOLEAN DEFAULT 0,    -- Whether YouTube Studio "Related video" is linked to source video
+    longform_linked_at TEXT,              -- When the link was set (YYYY-MM-DD HH:MM:SS)
     error_message TEXT,                   -- Error details if failed
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),

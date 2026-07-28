@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 
 from api.deps import get_db
 from pipeline.shorts_scheduler import ShortsScheduler
+from api.services.shorts_scheduler import _auto_link_longform_for_short
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,20 @@ async def publish_short(short_id: int):
             source_video_id=short.get("source_video_id"),
             channel_config=ch_config,
         )
+
+        # ── Auto-link long-form video as "Related video" (clip shorts only) ──
+        source_vid = short.get("source_video_id")
+        if short.get("type") == "clip" and source_vid:
+            from pipeline.youtube_browser import get_account_for_channel
+            account = get_account_for_channel(ch["slug"])
+            if account:
+                import threading
+                threading.Thread(
+                    target=_auto_link_longform_for_short,
+                    args=(video_id, ch["slug"], account, short_id, source_vid),
+                    daemon=True,
+                ).start()
+
         return {
             "message": "Short published successfully",
             "youtube_id": video_id,
@@ -341,6 +356,77 @@ def update_short(short_id: int, data: dict):
         raise HTTPException(400, "No valid fields to update")
 
     return {"message": "Short updated", "short_id": short_id}
+
+
+@router.post("/{short_id}/link-longform")
+def link_longform_video(short_id: int):
+    """Manually link the source long-form video as 'Related video' on a Short.
+
+    Resolves the short's source_video_id → YouTube video ID, then uses
+    YouTube Studio browser automation to set the native 'Related video' link.
+    Only works for clip-type shorts that have been published on YouTube.
+    """
+    scheduler = _get_scheduler()
+    short = scheduler.get_short(short_id)
+    if not short:
+        raise HTTPException(404, "Short not found")
+
+    if short.get("type") != "clip":
+        raise HTTPException(400, "Long-form linking only applies to clip-type shorts")
+
+    source_video_id = short.get("source_video_id")
+    if not source_video_id:
+        raise HTTPException(400, "Short has no source video to link")
+
+    yt_id = short.get("youtube_id")
+    if not yt_id:
+        raise HTTPException(400, "Short has not been published on YouTube yet")
+
+    if short.get("status") != "published":
+        raise HTTPException(400, f"Short must be published (current status: {short.get('status')})")
+
+    if short.get("longform_linked"):
+        return {
+            "message": "Already linked",
+            "short_id": short_id,
+            "longform_linked_at": short.get("longform_linked_at"),
+        }
+
+    # Resolve the long-form YouTube video ID
+    import sqlite3
+    from config.settings import DATABASE_PATH
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+    row = conn.execute(
+        "SELECT yt_video_id FROM videos WHERE id = ? AND yt_video_id IS NOT NULL AND yt_video_id != ''",
+        (source_video_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        raise HTTPException(400, f"Source video #{source_video_id} has no YouTube ID yet")
+
+    longform_yt_id = row[0]
+    channel_slug = short.get("channel_slug")
+
+    from pipeline.youtube_browser import get_account_for_channel
+    account = get_account_for_channel(channel_slug)
+    if not account:
+        raise HTTPException(500, f"No browser account configured for channel '{channel_slug}'")
+
+    # Spawn background thread (browser automation takes time)
+    import threading
+    threading.Thread(
+        target=_auto_link_longform_for_short,
+        args=(yt_id, channel_slug, account, short_id, source_video_id),
+        daemon=True,
+    ).start()
+
+    return {
+        "message": "Long-form video linking started",
+        "short_id": short_id,
+        "short_yt_id": yt_id,
+        "longform_yt_id": longform_yt_id,
+    }
 
 
 @router.delete("/{short_id}")

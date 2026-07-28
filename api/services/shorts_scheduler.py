@@ -52,6 +52,61 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
     except Exception as e:
         logger.warning("[%s] Auto-mark IA error for short %s: %s", channel_slug, yt_id, e)
 
+
+# ── Auto-link long-form video to short helper ──────────────────
+
+def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: str,
+                                   short_id: int, source_video_id: int):
+    """Background thread: link the source long-form video as 'Related video' on a Short.
+
+    YouTube API has no endpoint for this — must use YouTube Studio browser automation.
+    Only works for clip-type shorts (source_video_id IS NOT NULL).
+    """
+    import time as _time
+    import sqlite3
+    from config.settings import DATABASE_PATH
+
+    try:
+        # Wait longer than mark_altered_content (YouTube needs time to process the Short)
+        _time.sleep(45)
+
+        # Resolve the long-form YouTube video ID
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+        row = conn.execute(
+            "SELECT yt_video_id FROM videos WHERE id = ? AND yt_video_id IS NOT NULL AND yt_video_id != ''",
+            (source_video_id,),
+        ).fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            logger.warning("[%s] No YouTube ID for source video #%d — cannot link to short %s",
+                           channel_slug, source_video_id, short_yt_id)
+            return
+
+        longform_yt_id = row[0]
+
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+        success = browser.link_longform_video(short_yt_id, longform_yt_id)
+
+        conn2 = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+        if success:
+            conn2.execute(
+                "UPDATE shorts SET longform_linked = 1, longform_linked_at = datetime('now','localtime') WHERE id = ?",
+                (short_id,),
+            )
+            logger.info("[%s] ✅ Long-form video %s linked to short %s",
+                        channel_slug, longform_yt_id, short_yt_id)
+        else:
+            logger.warning("[%s] Failed to link long-form %s to short %s",
+                           channel_slug, longform_yt_id, short_yt_id)
+        conn2.commit()
+        conn2.close()
+    except Exception as e:
+        logger.warning("[%s] Auto-link longform error for short %s → source #%d: %s",
+                       channel_slug, short_yt_id, source_video_id, e)
+
+
 # ── Timezone defaults ─────────────────────────────────────────
 DEFAULT_TIMEZONE = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -1474,6 +1529,22 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
                     ).start()
         except Exception as e:
             logger.warning("[%s] Failed to trigger auto-mark IA for short: %s", channel_slug, e)
+
+        # Auto-link long-form video as "Related video" (only for clip shorts)
+        try:
+            from pipeline.youtube_browser import get_account_for_channel
+            account = get_account_for_channel(channel_slug)
+            if account and source_video_id:
+                import threading
+                threading.Thread(
+                    target=_auto_link_longform_for_short,
+                    args=(yt_id, channel_slug, account, short_id, source_video_id),
+                    daemon=True
+                ).start()
+                logger.info("[%s] Triggered longform link for short %s → source_video #%d",
+                            channel_slug, yt_id, source_video_id)
+        except Exception as e:
+            logger.warning("[%s] Failed to trigger longform link for short: %s", channel_slug, e)
 
         run_post_publish_promotion(
             channel_slug=channel_slug,

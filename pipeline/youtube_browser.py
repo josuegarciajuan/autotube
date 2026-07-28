@@ -724,6 +724,388 @@ class YouTubeBrowser:
         page.close()
         return False
 
+    # ── Short → Long-form video linking ──────────────────────────────
+
+    def link_longform_video(self, short_yt_id: str, longform_yt_id: str) -> bool:
+        """Link a long-form video as the "Related video" on a YouTube Short.
+
+        YouTube Data API v3 has NO endpoint for this. It must be done via
+        YouTube Studio browser automation. Navigates to the Short's edit
+        page, finds the "Video relacionado" section, searches for the
+        long-form video, selects it, and saves.
+
+        Args:
+            short_yt_id: YouTube video ID of the Short.
+            longform_yt_id: YouTube video ID of the long-form video to link.
+
+        Returns:
+            True if the link was set successfully, False otherwise.
+        """
+        with self._lock:
+            try:
+                self._ensure_browser()
+                page = self._context.new_page()
+                return self._do_link_longform(page, short_yt_id, longform_yt_id)
+            except Exception as e:
+                logger.error("link_longform_video failed for %s → %s: %s",
+                             short_yt_id, longform_yt_id, e)
+                return False
+
+    def _do_link_longform(self, page, short_yt_id: str, longform_yt_id: str) -> bool:
+        """Internal: execute the related-video linking flow on a fresh page."""
+        try:
+            human_delay(1.0, 3.0, "longform: initial")
+            edit_url = f"https://studio.youtube.com/video/{short_yt_id}/edit"
+            logger.info("Longform link: navigating to %s", edit_url)
+            page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
+            human_delay(4.0, 8.0, "longform: page load")
+
+            if "/video/" not in page.url or "/edit" not in page.url:
+                logger.error("Longform link: navigation failed for %s: %s",
+                             short_yt_id, page.url[:120])
+                page.close()
+                return False
+
+            # Wait for the editor to settle
+            try:
+                page.wait_for_selector("[id='title-textarea']", timeout=10000, state="visible")
+            except PlaywrightTimeout:
+                logger.warning("Longform link: title field not found, continuing")
+            human_delay(2.0, 4.0, "longform: editor settle")
+
+            # Check if already linked (idempotent guard)
+            if self._longform_already_linked(page):
+                logger.info("Longform link: already linked for %s — skipping",
+                            short_yt_id)
+                page.close()
+                return True
+
+            # Scroll down to reveal the "Video relacionado" section
+            self._scroll_page_to_bottom(page)
+            human_delay(1.0, 2.0, "longform: post-scroll")
+
+            # Try to find the "Mostrar más" button and expand sections
+            found_mostrar = self._find_and_click_mostrar_mas(page)
+            if found_mostrar:
+                human_delay(1.5, 3.0, "longform: expanded sections")
+                self._scroll_page_to_bottom(page)
+                human_delay(0.5, 1.5, "longform: post-expand scroll")
+
+            # ─ Strategy A: Find the "Related video" input field directly ──
+            longform_url = f"https://www.youtube.com/watch?v={longform_yt_id}"
+            success = self._paste_longform_url(page, longform_url)
+
+            if success:
+                # Save changes
+                human_delay(1.0, 2.0, "longform: pre-save after link")
+                saved = self._save_for_longform(page, short_yt_id)
+                if saved:
+                    logger.info("✅ Longform video linked: %s → %s",
+                                short_yt_id, longform_yt_id)
+                    page.close()
+                    return True
+
+            # ─ Strategy B: Click "Añadir" button → search in dialog ──
+            logger.info("Longform link: Strategy A failed, trying Strategy B")
+            success = self._longform_via_add_button(page, longform_yt_id)
+            if success:
+                human_delay(1.0, 2.0, "longform: pre-save after link B")
+                saved = self._save_for_longform(page, short_yt_id)
+                if saved:
+                    logger.info("✅ Longform video linked (strategy B): %s → %s",
+                                short_yt_id, longform_yt_id)
+                    page.close()
+                    return True
+
+            logger.warning("Longform link: all strategies failed for %s", short_yt_id)
+            page.close()
+            return False
+
+        except PlaywrightTimeout as e:
+            logger.error("Longform link timeout for %s: %s", short_yt_id, e)
+            try: page.close()
+            except Exception: pass
+            return False
+        except Exception as e:
+            logger.error("Longform link error for %s: %s", short_yt_id, e)
+            try: page.close()
+            except Exception: pass
+            return False
+
+    def _longform_already_linked(self, page) -> bool:
+        """Check if a related video is already linked by looking for a
+        linked video card / thumbnail in the 'Video relacionado' section."""
+        try:
+            result = page.evaluate("""() => {
+                // Look for the "Video relacionado" section heading
+                const headings = document.querySelectorAll(
+                    'ytcp-form-label, ytcp-form-section-title, .form-section-title, ' +
+                    '[id*="related"], [class*="related"]');
+                for (const h of headings) {
+                    const text = (h.textContent || '').toLowerCase();
+                    if (text.includes('relacionado') || text.includes('related')) {
+                        // Look for a linked video indicator nearby:
+                        // thumbnail image or video title already filled
+                        const parent = h.closest('[id*="related"], [class*="related"], ' +
+                            'ytcp-form-group, .form-group');
+                        const container = parent || h.parentElement?.parentElement;
+                        if (!container) return false;
+
+                        // Check for already-linked video: a thumbnail img or video title
+                        const thumbs = container.querySelectorAll(
+                            'img[src*="ytimg"], img[src*="ggpht"]');
+                        const videoTitles = container.querySelectorAll(
+                            'a[href*="watch?v="], ytcp-video-list-cell, ' +
+                            '[id*="video-title"], [class*="video-title"]');
+
+                        // If there's a clear button (X) or remove link, it's already linked
+                        const removeBtns = container.querySelectorAll(
+                            '[aria-label*="eliminar" i], [aria-label*="remove" i], ' +
+                            '[aria-label*="quitar" i]');
+
+                        if (removeBtns.length > 0) return true;
+                        if (thumbs.length > 0 && videoTitles.length > 0) return true;
+                    }
+                }
+                return false;
+            }""")
+            return bool(result)
+        except Exception:
+            return False
+
+    def _paste_longform_url(self, page, longform_url: str) -> bool:
+        """Strategy A: Find the 'Video relacionado' input field and paste the
+        long-form video URL directly. YouTube Studio should auto-resolve it."""
+        try:
+            result = page.evaluate("""(url) => {
+                // Find the "Video relacionado" section
+                const allText = document.querySelectorAll('[id*="related"], ' +
+                    '[class*="related"], ytcp-form-group');
+                for (const el of allText) {
+                    const text = (el.textContent || '').toLowerCase();
+                    if (text.includes('relacionado') || text.includes('related')) {
+                        // Find the input field within or near this section
+                        const inputs = el.querySelectorAll(
+                            'input[type="text"], input:not([type]), ' +
+                            'tp-yt-paper-input input, ' +
+                            'iron-autogrow-textarea textarea, ' +
+                            'input[aria-label*="relacionado" i], ' +
+                            'input[aria-label*="related" i]');
+                        for (const input of inputs) {
+                            if (input.offsetParent) {
+                                // Clear & type the URL
+                                input.focus();
+                                input.value = '';
+                                input.dispatchEvent(new Event('input', {bubbles: true}));
+                                input.value = url;
+                                input.dispatchEvent(new Event('input', {bubbles: true}));
+                                input.dispatchEvent(new Event('change', {bubbles: true}));
+                                return true;
+                            }
+                        }
+
+                        // Fallback: find click target that opens the search
+                        const addBtn = el.querySelector(
+                            'button, ytcp-button, [role="button"], a.clickable');
+                        if (addBtn && addBtn.offsetParent) {
+                            // Try clicking the description/annotation next to
+                            // "Video relacionado" to open the search input
+                            const parent = el.parentElement?.parentElement;
+                            if (!parent) return false;
+                            const allInputs = parent.querySelectorAll(
+                                'input[type="text"], input:not([type])');
+                            for (const inp of allInputs) {
+                                if (inp.offsetParent) {
+                                    inp.focus();
+                                    inp.value = url;
+                                    inp.dispatchEvent(new Event('input', {bubbles: true}));
+                                    inp.dispatchEvent(new Event('change', {bubbles: true}));
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                return false;
+            }""", longform_url)
+
+            if result:
+                human_delay(2.0, 4.0, "longform: url pasted, waiting for resolve")
+                # Wait for YouTube to auto-resolve the URL and show the video card
+                time.sleep(3)
+                # Try to press Enter or Tab to confirm selection
+                try:
+                    page.keyboard.press("Enter")
+                    human_delay(1.0, 2.0, "longform: Enter pressed")
+                except Exception:
+                    pass
+                return True
+
+            return False
+        except Exception as e:
+            logger.debug("Longform link strategy A error: %s", e)
+            return False
+
+    def _longform_via_add_button(self, page, longform_yt_id: str) -> bool:
+        """Strategy B: Click the 'Añadir' / 'Add' button next to 'Related video',
+        then search for the long-form video in the dialog."""
+        try:
+            # Click "Añadir" / "Add" in the related video section
+            clicked = page.evaluate("""() => {
+                const headings = document.querySelectorAll(
+                    'ytcp-form-label, ytcp-form-section-title, .form-section-title');
+                for (const h of headings) {
+                    const text = (h.textContent || '').toLowerCase();
+                    if (text.includes('relacionado') || text.includes('related')) {
+                        // Find parent container
+                        const parent = h.closest('ytcp-form-group, .form-group, ' +
+                            '[id*="related"], [class*="related"]');
+                        const container = parent || h.parentElement?.parentElement;
+                        if (!container) continue;
+
+                        // Look for "Añadir" / "Add" button
+                        const btns = container.querySelectorAll(
+                            'button, ytcp-button, [role="button"]');
+                        for (const btn of btns) {
+                            const btnText = (btn.textContent || '').trim().toLowerCase();
+                            if (btnText === 'añadir' || btnText === 'add' ||
+                                btnText.includes('a\u00f1adir') || btnText.includes('agregar')) {
+                                if (btn.offsetParent) {
+                                    btn.click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                return false;
+            }""")
+
+            if not clicked:
+                logger.debug("Longform link: 'Añadir' button not found")
+                return False
+
+            human_delay(2.0, 4.0, "longform: dialog opened")
+            longform_url = f"https://www.youtube.com/watch?v={longform_yt_id}"
+
+            # In the dialog, find the search input and paste the URL
+            url_pasted = page.evaluate("""(url) => {
+                // Look for dialog with search input
+                const dialogs = document.querySelectorAll(
+                    '[role="dialog"], ytcp-dialog, ytcp-paper-dialog');
+                for (const dlg of dialogs) {
+                    if (!dlg.offsetParent) continue;
+                    const inputs = dlg.querySelectorAll(
+                        'input[type="text"], input:not([type]), ' +
+                        'tp-yt-paper-input input');
+                    for (const input of inputs) {
+                        if (input.offsetParent) {
+                            input.focus();
+                            input.value = '';
+                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                            input.value = url;
+                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                            input.dispatchEvent(new Event('change', {bubbles: true}));
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""", longform_url)
+
+            if not url_pasted:
+                logger.debug("Longform link: search input in dialog not found")
+                return False
+
+            human_delay(2.0, 4.0, "longform: search executed")
+            time.sleep(2)
+
+            # Press Enter to confirm the search
+            try:
+                page.keyboard.press("Enter")
+                human_delay(2.0, 4.0, "longform: enter after search")
+            except Exception:
+                pass
+
+            # Wait for results and select the first one
+            selected = page.evaluate("""(vid) => {
+                // Wait up to 5s for results to appear
+                const dialogs = document.querySelectorAll('[role="dialog"]');
+                for (const dlg of dialogs) {
+                    if (!dlg.offsetParent) continue;
+                    // Look for video list items
+                    const items = dlg.querySelectorAll(
+                        'ytcp-video-list-cell, [role="radio"], [role="option"], ' +
+                        'tp-yt-paper-item, ytcp-video-row');
+                    for (const item of items) {
+                        if (!item.offsetParent) continue;
+                        // Check if this item matches our video
+                        const itemText = (item.textContent || '').toLowerCase();
+                        const itemHtml = item.innerHTML || '';
+                        if (itemText.includes(vid) || itemHtml.includes(vid)) {
+                            item.click();
+                            return true;
+                        }
+                    }
+                    // If no match, select first visible item as fallback
+                    for (const item of items) {
+                        if (item.offsetParent &&
+                            (item.textContent || '').trim().length > 3) {
+                            item.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""", longform_yt_id)
+
+            if not selected:
+                logger.debug("Longform link: no result selected in dialog")
+                # Try to dismiss dialog
+                try: page.keyboard.press("Escape")
+                except Exception: pass
+                return False
+
+            human_delay(1.0, 2.0, "longform: video selected")
+
+            # Dismiss dialog if still open
+            try:
+                page.keyboard.press("Escape")
+                human_delay(0.5, 1.0, "longform: dialog dismissed")
+            except Exception:
+                pass
+
+            return True
+
+        except Exception as e:
+            logger.debug("Longform link strategy B error: %s", e)
+            return False
+
+    def _save_for_longform(self, page, video_id: str) -> bool:
+        """Click save and confirm for long-form linking."""
+        human_delay(1.0, 2.0, "longform: pre-guardar")
+        guardar_el = None
+        for _ in range(30):
+            guardar_el = page.query_selector(SEL_GUARDAR_ENABLED)
+            if guardar_el and guardar_el.is_enabled():
+                break
+            time.sleep(1)
+        if not guardar_el:
+            logger.error("Longform link: Guardar never enabled for %s", video_id)
+            return False
+
+        human_delay(0.8, 2.0, "longform: click guardar")
+        guardar_el.click()
+        human_delay(2.0, 4.0, "longform: save settling")
+
+        try:
+            page.wait_for_selector(SEL_SAVE_CONFIRM, timeout=5000, state="attached")
+            logger.info("Longform link: Save confirmed for %s", video_id)
+        except PlaywrightTimeout:
+            logger.info("Longform link: No save toast for %s (clicked anyway)", video_id)
+
+        return True
+
 
 def get_browser(account: str) -> YouTubeBrowser:
     with _browser_lock:
