@@ -116,16 +116,31 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
                           short_type: str, tz: ZoneInfo,
                           long_slot_position: int = None,
                           slot_position: int = 0) -> dict:
-    """Convert a minute-of-day (local tz) to a slot dict with UTC timestamps."""
-    total_min = max(0, min(total_min, 24 * 60 - 1))
+    """Convert a minute-of-day (local tz) to a slot dict with UTC timestamps.
+
+    Handles overflow past midnight: target_upload_at / scheduled_at spill
+    into the next day, but date_key stays as the original planning day.
+    """
+    # Handle overflow past midnight: adjust effective date for datetime
+    # conversion, but keep original date_key (slot was planned for this day)
+    overflow_days = total_min // (24 * 60)
+    if overflow_days > 0:
+        dt_date = date.fromisoformat(date_str)
+        dt_date = dt_date + timedelta(days=overflow_days)
+        effective_date_str = dt_date.isoformat()
+        total_min = total_min % (24 * 60)
+    else:
+        effective_date_str = date_str
+        total_min = max(0, total_min)
+
     h, m = total_min // 60, total_min % 60
-    target_utc = _local_to_utc(date_str, h, m, tz)
+    target_utc = _local_to_utc(effective_date_str, h, m, tz)
     sched_total = max(0, total_min - SHORT_GEN_LEAD_MIN)
     sh, sm = sched_total // 60, sched_total % 60
-    sched_utc = _local_to_utc(date_str, sh, sm, tz)
+    sched_utc = _local_to_utc(effective_date_str, sh, sm, tz)
     return {
         "channel_id": channel_id,
-        "date_key": date_str,
+        "date_key": date_str,  # keep original planning date
         "scheduled_at": sched_utc,
         "target_upload_at": target_utc,
         "short_type": short_type,
@@ -306,20 +321,20 @@ def _build_shorts_slots_for_channel(
                 # Cross-type (native↔clip): only enforce gen-level gap
                 if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
                     pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
-        pushed_min = min(pushed_min, 24 * 60 - 1)
+        pushed_min = pushed_min  # no end-of-day clamp — _minutes_to_utc_slot handles overflow
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
     # ── 3b. Dedup same-type slots at the exact same minute ──
-    #    Can happen when multiple slots get clamped at end-of-day (24*60-1).
-    #    Works backward: for each same-type pair at the same minute,
-    #    pushes the later slot forward by SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES.
-    deduped: list[tuple[int, str, any, any]] = []
+    #    When multiple same-type slots collide at the exact same minute
+    #    (e.g. end-of-day clamping from earlier collision rounds before
+    #    the overflow fix), push later ones forward by the gap.
+    #    Overflow past midnight is handled by _minutes_to_utc_slot.
+    deduped: list = []
     for minutes_val, stype, long_pos, rank in resolved:
         pushed = minutes_val
         for prev_min, prev_type, _, _ in deduped:
             if prev_type == stype and prev_min == pushed:
                 pushed = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
-        pushed = min(pushed, 24 * 60 - 1)
         deduped.append((pushed, stype, long_pos, rank))
     resolved = deduped
 
