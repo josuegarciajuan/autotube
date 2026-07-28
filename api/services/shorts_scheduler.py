@@ -61,7 +61,8 @@ MIN_SHORTS_GAP_MINUTES = 35    # Minimum gap between any same-channel shorts
 CLIP_DELAY_AFTER_LONG_MINUTES = 45  # Wait 45 min after long publish before clip
 CLIP_END_OF_DAY = 23           # Latest clip target hour (local)
 CLIP_END_MIN = 45              # Latest clip target minute
-DAY_START_MINUTES = 9 * 60     # 9:00 AM — earliest short
+DAY_START_MINUTES = 0           # Allow 24h slots (LATAM overnight slots like 02:37)
+DAY_END_MINUTES = 24 * 60       # End of day cap
 
 # ── Jitter: asymmetric — more room before peak, tight after ──
 JITTER_BEFORE_MIN = 25         # max minutes before target slot
