@@ -752,85 +752,150 @@ class YouTubeBrowser:
                 return False
 
     def _do_link_longform(self, page, short_yt_id: str, longform_yt_id: str) -> bool:
-        """Internal: execute the related-video linking flow on a fresh page."""
-        try:
-            human_delay(1.0, 3.0, "longform: initial")
-            edit_url = f"https://studio.youtube.com/video/{short_yt_id}/edit"
-            logger.info("Longform link: navigating to %s", edit_url)
+        """Internal: execute the related-video linking flow on a fresh page.
+
+        Includes a retry loop: if YouTube Studio shows a 'processing' indicator
+        (video not yet ready for editing), the method waits with backoff and
+        retries up to 3 times before giving up.
+        """
+        edit_url = f"https://studio.youtube.com/video/{short_yt_id}/edit"
+        max_retries = 3
+        retry_delays = [15, 30, 60]  # seconds between retries
+
+        for attempt in range(max_retries):
+            # ── Navigate ────────────────────────────────────────
+            human_delay(1.0, 3.0, f"longform: initial (attempt {attempt + 1})")
+            logger.info("Longform link: navigating to %s (attempt %d/%d)",
+                        edit_url, attempt + 1, max_retries)
             page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
             human_delay(4.0, 8.0, "longform: page load")
 
             if "/video/" not in page.url or "/edit" not in page.url:
                 logger.error("Longform link: navigation failed for %s: %s",
                              short_yt_id, page.url[:120])
+                if attempt < max_retries - 1:
+                    logger.info("Longform link: retrying after navigation failure...")
+                    time.sleep(retry_delays[attempt])
+                    continue
                 page.close()
                 return False
 
-            # Wait for the editor to settle
+            # ── Check for "processing" state ────────────────────
+            # YouTube may still be transcoding the Short; the edit page will
+            # show a spinner or "Procesando" message and won't have the editor UI.
+            if self._page_shows_processing(page, short_yt_id):
+                if attempt < max_retries - 1:
+                    wait = retry_delays[attempt]
+                    logger.info("Longform link: video %s still processing — "
+                                "waiting %ds before retry %d/%d",
+                                short_yt_id, wait, attempt + 2, max_retries)
+                    page.close()
+                    time.sleep(wait)
+                    page = self._context.new_page()
+                    continue
+                else:
+                    logger.warning("Longform link: video %s still processing after %d attempts — giving up",
+                                   short_yt_id, max_retries)
+                    page.close()
+                    return False
+
+            # ── Editor UI detected — proceed ───────────────────
             try:
                 page.wait_for_selector("[id='title-textarea']", timeout=10000, state="visible")
             except PlaywrightTimeout:
                 logger.warning("Longform link: title field not found, continuing")
             human_delay(2.0, 4.0, "longform: editor settle")
+            break  # Exit retry loop — page is ready
 
-            # Check if already linked (idempotent guard)
-            if self._longform_already_linked(page):
-                logger.info("Longform link: already linked for %s — skipping",
-                            short_yt_id)
+        # ── Page is ready ────────────────────────────────────────
+
+        # Check if already linked (idempotent guard)
+        if self._longform_already_linked(page):
+            logger.info("Longform link: already linked for %s — skipping",
+                        short_yt_id)
+            page.close()
+            return True
+
+        # Scroll down to reveal the "Video relacionado" section
+        self._scroll_page_to_bottom(page)
+        human_delay(1.0, 2.0, "longform: post-scroll")
+
+        # Try to find the "Mostrar más" button and expand sections
+        found_mostrar = self._find_and_click_mostrar_mas(page)
+        if found_mostrar:
+            human_delay(1.5, 3.0, "longform: expanded sections")
+            self._scroll_page_to_bottom(page)
+            human_delay(0.5, 1.5, "longform: post-expand scroll")
+
+        # ─ Strategy A: Find the "Related video" input field directly ──
+        longform_url = f"https://www.youtube.com/watch?v={longform_yt_id}"
+        success = self._paste_longform_url(page, longform_url)
+
+        if success:
+            # Save changes
+            human_delay(1.0, 2.0, "longform: pre-save after link")
+            saved = self._save_for_longform(page, short_yt_id)
+            if saved:
+                logger.info("✅ Longform video linked: %s → %s",
+                            short_yt_id, longform_yt_id)
                 page.close()
                 return True
 
-            # Scroll down to reveal the "Video relacionado" section
-            self._scroll_page_to_bottom(page)
-            human_delay(1.0, 2.0, "longform: post-scroll")
+        # ─ Strategy B: Click "Añadir" button → search in dialog ──
+        logger.info("Longform link: Strategy A failed, trying Strategy B")
+        success = self._longform_via_add_button(page, longform_yt_id)
+        if success:
+            human_delay(1.0, 2.0, "longform: pre-save after link B")
+            saved = self._save_for_longform(page, short_yt_id)
+            if saved:
+                logger.info("✅ Longform video linked (strategy B): %s → %s",
+                            short_yt_id, longform_yt_id)
+                page.close()
+                return True
 
-            # Try to find the "Mostrar más" button and expand sections
-            found_mostrar = self._find_and_click_mostrar_mas(page)
-            if found_mostrar:
-                human_delay(1.5, 3.0, "longform: expanded sections")
-                self._scroll_page_to_bottom(page)
-                human_delay(0.5, 1.5, "longform: post-expand scroll")
+        logger.warning("Longform link: all strategies failed for %s", short_yt_id)
+        page.close()
+        return False
 
-            # ─ Strategy A: Find the "Related video" input field directly ──
-            longform_url = f"https://www.youtube.com/watch?v={longform_yt_id}"
-            success = self._paste_longform_url(page, longform_url)
+    def _page_shows_processing(self, page, video_id: str) -> bool:
+        """Check if the YouTube Studio edit page shows a 'processing' indicator.
 
-            if success:
-                # Save changes
-                human_delay(1.0, 2.0, "longform: pre-save after link")
-                saved = self._save_for_longform(page, short_yt_id)
-                if saved:
-                    logger.info("✅ Longform video linked: %s → %s",
-                                short_yt_id, longform_yt_id)
-                    page.close()
-                    return True
+        When YouTube is still transcoding / processing a video, the edit page
+        either redirects away from /edit or shows a spinner/message indicating
+        the video isn't ready for editing. Returns True if the page is NOT yet
+        ready for editing.
+        """
+        try:
+            result = page.evaluate("""() => {
+                // Check 1: did we get redirected away from /edit?
+                if (!window.location.href.includes('/edit')) return true;
 
-            # ─ Strategy B: Click "Añadir" button → search in dialog ──
-            logger.info("Longform link: Strategy A failed, trying Strategy B")
-            success = self._longform_via_add_button(page, longform_yt_id)
-            if success:
-                human_delay(1.0, 2.0, "longform: pre-save after link B")
-                saved = self._save_for_longform(page, short_yt_id)
-                if saved:
-                    logger.info("✅ Longform video linked (strategy B): %s → %s",
-                                short_yt_id, longform_yt_id)
-                    page.close()
-                    return True
+                // Check 2: is there a "processing" / "procesando" indicator?
+                const pageText = (document.body?.textContent || '').toLowerCase();
+                if (pageText.includes('procesando') || pageText.includes('processing video') ||
+                    pageText.includes('still processing') || pageText.includes('transcoding')) {
+                    return true;
+                }
 
-            logger.warning("Longform link: all strategies failed for %s", short_yt_id)
-            page.close()
-            return False
+                // Check 3: is the title field (core editor UI) NOT yet visible?
+                const titleField = document.querySelector('[id="title-textarea"]');
+                if (!titleField || !titleField.offsetParent) {
+                    // No editor UI visible — likely still loading / processing
+                    const spinners = document.querySelectorAll(
+                        'tp-yt-paper-spinner, [role="progressbar"], ytcp-video-thumbnail-spinner');
+                    for (const s of spinners) {
+                        if (s.offsetParent) return true;  // Spinner visible = still processing
+                    }
+                }
 
-        except PlaywrightTimeout as e:
-            logger.error("Longform link timeout for %s: %s", short_yt_id, e)
-            try: page.close()
-            except Exception: pass
-            return False
-        except Exception as e:
-            logger.error("Longform link error for %s: %s", short_yt_id, e)
-            try: page.close()
-            except Exception: pass
-            return False
+                return false;
+            }""")
+            if result:
+                logger.debug("Longform link: page shows processing indicator for %s", video_id)
+            return bool(result)
+        except Exception:
+            # If we can't evaluate, assume the page is not ready
+            return True
 
     def _longform_already_linked(self, page) -> bool:
         """Check if a related video is already linked by looking for a

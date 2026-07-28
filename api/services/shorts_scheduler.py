@@ -55,6 +55,110 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
 
 # ── Auto-link long-form video to short helper ──────────────────
 
+def _wait_until_processed(channel_slug: str, yt_id: str, timeout: int = 300) -> bool:
+    """Poll YouTube Data API until the video finishes processing.
+
+    Checks processingDetails.processingStatus via YouTube Data API v3.
+    Waits until status transitions from "processing" to "succeeded" (or fails).
+
+    If the API is unavailable, falls back to exponential backoff sleep
+    as a best-effort substitute.
+
+    Args:
+        channel_slug: Channel slug for auth.
+        yt_id: YouTube video ID to check.
+        timeout: Maximum total wait time in seconds (default 5 min).
+
+    Returns:
+        True when the video is ready (processingStatus != "processing").
+        False if timeout is reached or the API consistently fails.
+    """
+    import time as _time
+
+    start = _time.monotonic()
+    api_attempts = 0
+    api_failures = 0
+
+    while True:
+        elapsed = _time.monotonic() - start
+        if elapsed > timeout:
+            logger.warning("[%s] Timeout waiting for video %s to finish processing (%.0fs)",
+                           channel_slug, yt_id, elapsed)
+            return False
+
+        # ── Try YouTube Data API ────────────────────────────────
+        try:
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
+            if not uploader.authenticate():
+                raise RuntimeError("Authentication failed for " + channel_slug)
+
+            service = uploader._get_service()
+            resp = service.videos().list(
+                part="processingDetails", id=yt_id
+            ).execute()
+
+            items = resp.get("items", [])
+            if not items:
+                # Video not yet visible in API — still processing
+                logger.debug("[%s] Video %s not yet visible in API (attempt %d, %.0fs elapsed)",
+                             channel_slug, yt_id, api_attempts + 1, elapsed)
+                _time.sleep(15)
+                api_attempts += 1
+                continue
+
+            processing = items[0].get("processingDetails", {})
+            status = processing.get("processingStatus", "unknown")
+            progress = processing.get("processingProgress", {})
+
+            if status == "succeeded":
+                logger.info("[%s] Video %s processing complete (API confirmed in %.0fs, %d attempts)",
+                            channel_slug, yt_id, elapsed, api_attempts + 1)
+                return True
+
+            if status == "failed":
+                reason = processing.get("processingFailureReason", "unknown")
+                logger.error("[%s] Video %s processing FAILED: %s", channel_slug, yt_id, reason)
+                return False
+
+            if status == "terminated":
+                logger.warning("[%s] Video %s processing terminated — may have been taken down",
+                               channel_slug, yt_id)
+                return False
+
+            # Still "processing"
+            parts_processed = progress.get("partsProcessed", "?")
+            parts_total = progress.get("partsTotal", "?")
+            logger.debug("[%s] Video %s still processing (%s/%s parts, attempt %d, %.0fs elapsed)",
+                         channel_slug, yt_id, parts_processed, parts_total,
+                         api_attempts + 1, elapsed)
+            _time.sleep(15)
+            api_attempts += 1
+
+        except Exception as api_err:
+            api_failures += 1
+            logger.debug("[%s] API polling failed for %s (failure %d): %s",
+                         channel_slug, yt_id, api_failures, api_err)
+
+            if api_failures >= 3:
+                # Too many API failures — fall back to time-based wait
+                logger.warning("[%s] API polling failed %d times for %s — "
+                               "falling back to exponential backoff sleep",
+                               channel_slug, api_failures, yt_id)
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    return False
+                # Conservative sleep: wait the remaining estimated processing time
+                # capped at 120s (typical short processing takes 30-90s)
+                wait = min(remaining, 120)
+                logger.info("[%s] Waiting %.0fs (backoff fallback) for video %s",
+                            channel_slug, wait, yt_id)
+                _time.sleep(wait)
+                return True  # Assume ready after backoff
+            else:
+                _time.sleep(15)
+
+
 def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: str,
                                    short_id: int, source_video_id: int):
     """Background thread: link the source long-form video as 'Related video' on a Short.
@@ -62,13 +166,18 @@ def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: 
     YouTube API has no endpoint for this — must use YouTube Studio browser automation.
     Only works for clip-type shorts (source_video_id IS NOT NULL).
     """
-    import time as _time
     import sqlite3
     from config.settings import DATABASE_PATH
 
     try:
-        # Wait longer than mark_altered_content (YouTube needs time to process the Short)
-        _time.sleep(45)
+        # ── Poll API until the Short finishes processing ──────
+        # YouTube needs time to transcode and process the Short before
+        # the edit page becomes available. Instead of a hardcoded sleep,
+        # we query processingDetails via YouTube Data API.
+        if not _wait_until_processed(channel_slug, short_yt_id, timeout=300):
+            logger.warning("[%s] Short %s did not finish processing in time — skipping longform link",
+                           channel_slug, short_yt_id)
+            return
 
         # Resolve the long-form YouTube video ID
         conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
