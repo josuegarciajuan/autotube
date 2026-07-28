@@ -57,7 +57,9 @@ DEFAULT_TIMEZONE = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
 
 # ── Spacing constants ─────────────────────────────────────────
-MIN_SHORTS_GAP_MINUTES = 35    # Minimum gap between any same-channel shorts
+MIN_SHORTS_GAP_MINUTES = 35    # Minimum generation gap between any same-channel shorts
+SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 60  # native↔native or clip↔clip min publish gap
+CROSS_TYPE_SHORTS_ALLOW_OVERLAP = True      # native↔clip CAN share same publish time
 CLIP_DELAY_AFTER_LONG_MINUTES = 45  # Wait 45 min after long publish before clip
 CLIP_END_OF_DAY = 23           # Latest clip target hour (local)
 CLIP_END_MIN = 45              # Latest clip target minute
@@ -284,16 +286,24 @@ def _build_shorts_slots_for_channel(
                 all_slots.append((int(total_min), "clip", long_slot_pos, 0))
 
     # ── 3. Sort all slots by time and resolve collisions ──
+    #    Same-type (native↔native, clip↔clip) → 60min publish gap enforced
+    #    Cross-type (native↔clip) → overlap allowed, only 35min gen gap
     all_slots.sort(key=lambda x: x[0])
 
-    # Push forward any slots that are too close (min gap enforcement)
     resolved = []
     for total_min, slot_type, long_pos, slot_rank in all_slots:
         pushed_min = total_min
-        for prev_min, _, _, _ in reversed(resolved):
-            if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
-                pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
-                break
+        for prev_min, prev_type, _, _ in reversed(resolved):
+            if slot_type == prev_type:
+                # Same type: enforce publish-level gap
+                if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
+                    pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                    break
+            else:
+                # Cross-type (native↔clip): only enforce gen-level gap
+                if pushed_min - prev_min < MIN_SHORTS_GAP_MINUTES:
+                    pushed_min = prev_min + MIN_SHORTS_GAP_MINUTES
+                    break
         pushed_min = min(pushed_min, 24 * 60 - 1)
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
@@ -640,12 +650,24 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         )
         return None
 
+    # 8. Same-type publish guard: enforces SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+    #    between same-type shorts (native↔native, clip↔clip).
+    #    Cross-type (native↔clip) overlap is intentionally allowed.
+    target_upload = next_slot.get("target_upload_at")
+    if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db):
+        logger.debug(
+            "Shorts dispatch skipped for %s: same-type (%s) conflict "
+            "(another %s publishing within %d min)",
+            slug, short_type, short_type, SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+        )
+        return None
+
     logger.info(
         "Dispatching shorts slot #%d: %s type=%s (scheduled %s)",
         slot_id, slug, short_type, scheduled,
     )
 
-    # 6. For clip slots: check source video dependency
+    # 9. For clip slots: check source video dependency
     source_video_id = None
     if short_type == "clip":
         long_pos = next_slot.get("long_slot_position")
@@ -664,10 +686,10 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
             )
             return None
 
-    # 7. Mark slot as running with source_video_id
+    # 10. Mark slot as running with source_video_id
     db.update_shorts_slot_status(slot_id, "running", source_video_id=source_video_id)
 
-    # 8. Create job record for tracking
+    # 11. Create job record for tracking
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     job_action = "generate_native_short" if short_type == "native" else "generate_clip_short"
     job_id = db.create_job(channel_id, job_action)
@@ -680,7 +702,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
                                   source_video_id=source_video_id)
     conn.close()
 
-    # 9. Dispatch the actual generation (fire and forget)
+    # 12. Dispatch the actual generation (fire and forget)
     import asyncio
     asyncio.create_task(
         _dispatch_short_async(
@@ -1374,6 +1396,67 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
         return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
     except (ValueError, TypeError):
         return True  # Can't parse — let it proceed
+
+
+def _same_type_shorts_slot_conflict(
+    channel_id: int, short_type: str,
+    target_upload_at: str, db,
+) -> bool:
+    """Check for same-channel, same-type shorts slot collisions.
+
+    Returns True if another same-type short from the same channel is
+    scheduled or recently published within SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES.
+    Cross-type (native↔clip) collisions are intentionally allowed.
+
+    Args:
+        channel_id: channel to check
+        short_type: 'native' or 'clip'
+        target_upload_at: ISO8601 timestamp of the candidate slot
+        db: database instance
+    """
+    if not target_upload_at:
+        return False
+
+    try:
+        target_dt = datetime.fromisoformat(
+            target_upload_at.replace("Z", "+00:00").replace(" ", "T"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+    min_gap = timedelta(minutes=SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+    window_start = (target_dt - min_gap).strftime("%Y-%m-%d %H:%M:%S")
+    window_end = (target_dt + min_gap).strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        with db._connect() as conn:
+            existing = conn.execute(
+                """SELECT sps.id, sps.short_type, sps.target_upload_at, sps.status
+                   FROM shorts_planned_slots sps
+                   WHERE sps.channel_id = ?
+                     AND sps.short_type = ?
+                     AND sps.status IN ('pending', 'running', 'completed')
+                     AND sps.target_upload_at IS NOT NULL
+                     AND sps.target_upload_at >= ?
+                     AND sps.target_upload_at <= ?
+                   ORDER BY sps.target_upload_at
+                   LIMIT 3""",
+                (channel_id, short_type, window_start, window_end),
+            ).fetchall()
+
+        if existing:
+            logger.debug(
+                "Same-type conflict: %s slot ch=%d has %d nearby same-type "
+                "slots in [%s .. %s]",
+                short_type, channel_id, len(existing),
+                window_start, window_end,
+            )
+            return True
+    except Exception as exc:
+        logger.debug("Same-type conflict check failed: %s", exc)
+
+    return False
 
 
 def _sync_running_shorts_slots(db):
