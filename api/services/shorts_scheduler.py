@@ -57,8 +57,8 @@ DEFAULT_TIMEZONE = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
 
 # ── Spacing constants ─────────────────────────────────────────
-MIN_SHORTS_GAP_MINUTES = 35    # Minimum generation gap between any same-channel shorts
-SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 60  # native↔native or clip↔clip min publish gap
+MIN_SHORTS_GAP_MINUTES = 20    # Minimum generation gap between any same-channel shorts (was 35)
+SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 45  # native↔native or clip↔clip min publish gap (was 60)
 CROSS_TYPE_SHORTS_ALLOW_OVERLAP = True      # native↔clip CAN share same publish time
 CLIP_DELAY_AFTER_LONG_MINUTES = 45  # Wait 45 min after long publish before clip
 CLIP_END_OF_DAY = 23           # Latest clip target hour (local)
@@ -74,7 +74,7 @@ JITTER_AFTER_MIN = 5           # max minutes after target slot
 SHORT_GEN_LEAD_MIN = 5
 
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
-SHORTS_COOLDOWN_MINUTES = 30
+SHORTS_COOLDOWN_MINUTES = 20  # was 30 — reduced for 10-15/day density
 
 # ── Native fallback windows (used when no optimal slots available) ──
 NATIVE_WINDOWS = [
@@ -82,6 +82,16 @@ NATIVE_WINDOWS = [
     (13, 0),     # midday
     (18, 30),    # evening
     (21, 0),     # prime time
+]
+
+# ── Filler windows: low-audience hours for extra slots ──────
+# Used when (native + clip) < MIN_DAILY_SHORTS to pad the schedule
+# without cannibalizing prime-time slots.
+FILLER_WINDOWS = [
+    (2, 0),     # madrugada
+    (4, 0),     # madrugada
+    (14, 0),    # mediodía (post-almuerzo)
+    (15, 0),    # mediodía
 ]
 
 
@@ -363,6 +373,96 @@ def _build_shorts_slots_for_channel(
     return slots, pos
 
 
+def _build_filler_slots_for_channel(
+    ch: dict,
+    date_str: str,
+    fillers_needed: int,
+    existing_slots: list[dict],
+    global_start_pos: int,
+) -> tuple[list[dict], int]:
+    """Create filler shorts slots to meet MIN_DAILY_SHORTS floor.
+
+    Fillers are scheduled in low-audience windows (FILLER_WINDOWS)
+    and do not cannibalize optimal franja slots. They use the same
+    collision resolution as regular native slots to avoid overcrowding.
+
+    Args:
+        ch: channel dict
+        date_str: YYYY-MM-DD
+        fillers_needed: how many extra filler slots to create
+        existing_slots: already-built slot dicts for this channel (from _build_shorts_slots_for_channel)
+        global_start_pos: current slot position counter
+
+    Returns (filler_slots, next_global_pos).
+    """
+    slug = ch["slug"]
+    channel_id = ch["id"]
+    pos = global_start_pos
+
+    # Load channel timezone from config
+    tz = DEFAULT_TIMEZONE
+    try:
+        from config.config_bridge import get_channel_config
+        ch_config = get_channel_config(slug)
+        tz_str = getattr(ch_config, "PUBLISH_TIMEZONE", None)
+        if tz_str:
+            tz = ZoneInfo(tz_str)
+    except Exception:
+        pass
+
+    # Extract existing slot minute-of-day values to avoid collisions
+    existing_minutes = []
+    for s in existing_slots:
+        # Parse slot's target_upload_at minute
+        tu = s.get("target_upload_at", "")
+        try:
+            parts = str(tu).replace("T", " ").split(" ")
+            time_part = parts[1].split(":")
+            h, m = int(time_part[0]), int(time_part[1])
+            existing_minutes.append(h * 60 + m)
+        except (ValueError, IndexError):
+            pass
+
+    filler_slots = []
+    for i in range(fillers_needed):
+        # Round-robin through filler windows
+        franja_h, franja_m = FILLER_WINDOWS[i % len(FILLER_WINDOWS)]
+        base_min = franja_h * 60 + franja_m
+        jitter = _jitter_minutes(date_str, f"{slug}_filler", i,
+                                 before_min=15, after_min=15)
+        total_min = base_min + jitter
+        total_min = max(0, min(total_min, 24 * 60 - 1))
+
+        # Resolve collisions with existing slots (same type = native)
+        pushed_min = total_min
+        for prev_min in sorted(existing_minutes):
+            if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
+                pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+
+        existing_minutes.append(pushed_min)
+        existing_minutes.sort()
+
+        slot = _minutes_to_utc_slot(
+            date_str, pushed_min, channel_id, slug,
+            short_type="native",
+            tz=tz,
+            long_slot_position=None,
+            slot_position=pos + 1,
+        )
+        pos += 1
+        slot["channel_name"] = ch.get("name", slug)
+        slot["slot_rank"] = -1  # filler — no optimal slot rank
+        slot["is_filler"] = True  # mark so UI/analytics can distinguish
+        filler_slots.append(slot)
+
+    logger.debug(
+        "[%s] Added %d filler slots (total now %d)",
+        slug, len(filler_slots), len(existing_slots) + len(filler_slots),
+    )
+
+    return filler_slots, pos
+
+
 def _get_yesterday_published_count(channel_id: int, date_str: str, db=None) -> int:
     """Count long-form videos published/uploaded on the day before date_str.
     
@@ -441,8 +541,10 @@ def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, 
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
-    v13: clip count is dynamic — clips_per_long × long_videos_published_yesterday.
+    v14: clip count is dynamic — clips_per_long × long_videos_published_yesterday.
     Native count is fixed at shorts_native_per_day.
+    Filler slots are added when (native + clip) < MIN_DAILY_SHORTS to
+    guarantee the daily floor. Fillers go to low-audience windows.
     Timestamps are converted to UTC for storage.
 
     Returns list of dicts sorted by scheduled_at.
@@ -450,6 +552,8 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
+
+    from config.settings import MIN_DAILY_SHORTS, MAX_DAILY_SHORTS
 
     # Get active channels
     channels = db.get_channels(active_only=True)
@@ -489,6 +593,28 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             ch, date_str, native_count, clips_per_long,
             yesterday_count, long_target_hours, global_pos,
         )
+
+        # ── Filler: guarantee MIN_DAILY_SHORTS floor ──────────────
+        clip_count = clips_per_long * yesterday_count
+        total_planned = native_count + clip_count
+
+        if total_planned < MIN_DAILY_SHORTS:
+            fillers_needed = min(
+                MIN_DAILY_SHORTS - total_planned,
+                MAX_DAILY_SHORTS - (total_planned + 0),
+            )
+            if fillers_needed > 0:
+                logger.info(
+                    "[%s] Adding %d filler shorts to reach floor (%d < %d): "
+                    "planned=%d native + %d clips",
+                    slug, fillers_needed, total_planned, MIN_DAILY_SHORTS,
+                    native_count, clip_count,
+                )
+                filler_slots, global_pos = _build_filler_slots_for_channel(
+                    ch, date_str, fillers_needed, channel_slots, global_pos,
+                )
+                channel_slots.extend(filler_slots)
+
         all_slots.extend(channel_slots)
 
     # Sort by scheduled_at

@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_ss_channel ON shorts_schedule(channel_id, schedul
 CREATE TABLE IF NOT EXISTS shorts_planning_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id INTEGER NOT NULL UNIQUE,
-    shorts_native_per_day INTEGER DEFAULT 3,
+    shorts_native_per_day INTEGER DEFAULT 5,
     shorts_clip_per_day INTEGER DEFAULT 2,
     shorts_enabled BOOLEAN DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),

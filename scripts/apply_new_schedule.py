@@ -94,10 +94,10 @@ def main():
 
     # ── 5. Update shorts planning configs ────────────────────────
     shorts_updates = [
-        (ch2["id"], dict(shorts_native_per_day=3, shorts_clips_per_long=1)),
-        (ch3["id"], dict(shorts_native_per_day=3, shorts_clips_per_long=2)),
-        (ch4["id"], dict(shorts_native_per_day=2, shorts_clips_per_long=2)),
-        (ch5["id"], dict(shorts_native_per_day=2, shorts_clips_per_long=1)),
+        (ch2["id"], dict(shorts_native_per_day=5, shorts_clips_per_long=5)),
+        (ch3["id"], dict(shorts_native_per_day=5, shorts_clips_per_long=5)),
+        (ch4["id"], dict(shorts_native_per_day=4, shorts_clips_per_long=5)),
+        (ch5["id"], dict(shorts_native_per_day=4, shorts_clips_per_long=5)),
     ]
 
     for ch_id, upd in shorts_updates:

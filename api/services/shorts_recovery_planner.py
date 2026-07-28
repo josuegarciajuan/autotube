@@ -33,12 +33,21 @@ import pytz
 logger = logging.getLogger("autotube.shorts_recovery")
 
 # ── Constants ────────────────────────────────────────────────────
-MIN_GAP_MINUTES = 30                # Minimum gap between same-channel slot starts
+MIN_GAP_MINUTES = 20                # Minimum gap between same-channel slot starts (was 30)
 SHORTS_GEN_MINUTES = 30             # Shorts generate much faster than long-form (~30 min)
 MIN_HOUR_AHEAD = 1                  # Minimum hours from now to schedule a recovery slot
 # Window during which recovery is active (local hours in CEST)
 RECOVERY_START_HOUR = 10            # 10:00 AM
 RECOVERY_END_HOUR = 23              # 11:00 PM
+
+# ── v13 tiered recovery thresholds ────────────────────────────
+# At 14:00: if < 40% of total daily target published → emergency slots
+# At 18:00: if < 70% of total daily target published → aggressive forced slots
+# Total = native_target + clip_target (or MIN_DAILY_SHORTS as fallback).
+RECOVERY_TIER_1_HOUR = 14
+RECOVERY_TIER_1_PCT = 0.40
+RECOVERY_TIER_2_HOUR = 18
+RECOVERY_TIER_2_PCT = 0.70
 
 
 def _now_madrid() -> datetime:
@@ -396,35 +405,83 @@ def auto_recover_shorts(db=None) -> dict:
                     "recovered": len(created), "slots": created,
                 })
 
-        # ── EMERGENCY: 0 published but system thinks "covered" ──
-        # If it's late in the day and the channel hasn't published a single
-        # short, force-create recovery slots even if the "covered" count
-        # looks fine (pending slots may be stuck / blocked from dispatch).
-        EMERGENCY_HOUR = 16  # 4 PM — don't let the day end with 0 shorts
-        if (now_hour >= EMERGENCY_HOUR
-                and published_native == 0
-                and native_covered >= native_target
-                and native_target > 0):
-            emergency_count = min(2, native_target)  # at most 2 emergency slots
-            logger.warning(
-                "[shorts:%s] EMERGENCY: 0 native shorts published by %02d:00 "
-                "(%d pending slots — forcing %d recovery slots)",
-                slug, EMERGENCY_HOUR, len(active_native), emergency_count,
-            )
-            created = _create_recovery_slots(
-                ch_id, slug, today, "native", emergency_count,
-                now_minute_of_day, active_slots, db,
-            )
-            if created:
-                result["recovered_count"] += len(created)
-                if slug not in result["channels_affected"]:
-                    result["channels_affected"].append(slug)
-                result["details"].append({
-                    "channel_id": ch_id, "slug": slug,
-                    "action": "recovered_native_emergency",
-                    "target": native_target, "published": 0,
-                    "recovered": len(created), "slots": created,
-                })
+        # ── TIERED RECOVERY (v13): time-based thresholds ───────────
+        # Total target includes BOTH natives + clips. Use MIN_DAILY_SHORTS
+        # as fallback floor if config is lower.
+        try:
+            from config.settings import MIN_DAILY_SHORTS
+        except ImportError:
+            MIN_DAILY_SHORTS = 10
+        total_target = max(native_target + clip_target, MIN_DAILY_SHORTS)
+        total_published = published_native + published_clip
+        total_covered = native_covered + clip_covered
+        pct_published = total_published / max(total_target, 1)
+
+        # Tier 1 (14:00): < 40% of total target → emergency
+        if RECOVERY_TIER_1_HOUR <= now_hour < RECOVERY_TIER_2_HOUR:
+            if pct_published < RECOVERY_TIER_1_PCT and total_target > 0:
+                emergency_count = max(
+                    1, int((RECOVERY_TIER_1_PCT - pct_published) * total_target)
+                )
+                emergency_count = min(emergency_count, total_target - total_covered)
+                if emergency_count > 0:
+                    logger.warning(
+                        "[shorts:%s] TIER-1 EMERGENCY @ %02d:00: "
+                        "%d/%d published (%.0f%% < %.0f%%) — "
+                        "creating %d emergency slots",
+                        slug, RECOVERY_TIER_1_HOUR,
+                        total_published, total_target,
+                        pct_published * 100, RECOVERY_TIER_1_PCT * 100,
+                        emergency_count,
+                    )
+                    created = _create_recovery_slots(
+                        ch_id, slug, today, "native", emergency_count,
+                        now_minute_of_day, active_slots, db,
+                    )
+                    if created:
+                        result["recovered_count"] += len(created)
+                        if slug not in result["channels_affected"]:
+                            result["channels_affected"].append(slug)
+                        result["details"].append({
+                            "channel_id": ch_id, "slug": slug,
+                            "action": "recovered_tier1_emergency",
+                            "total_target": total_target,
+                            "published": total_published,
+                            "pct": round(pct_published * 100, 1),
+                            "recovered": len(created), "slots": created,
+                        })
+
+        # Tier 2 (18:00): < 70% of total target → aggressive forced fill
+        if now_hour >= RECOVERY_TIER_2_HOUR:
+            if pct_published < RECOVERY_TIER_2_PCT and total_target > 0:
+                # Force all remaining slots for the day
+                forced_count = total_target - total_covered
+                if forced_count > 0:
+                    logger.warning(
+                        "[shorts:%s] TIER-2 AGGRESSIVE @ %02d:00: "
+                        "%d/%d published (%.0f%% < %.0f%%) — "
+                        "forcing %d remaining slots",
+                        slug, RECOVERY_TIER_2_HOUR,
+                        total_published, total_target,
+                        pct_published * 100, RECOVERY_TIER_2_PCT * 100,
+                        forced_count,
+                    )
+                    created = _create_recovery_slots(
+                        ch_id, slug, today, "native", forced_count,
+                        now_minute_of_day, active_slots, db,
+                    )
+                    if created:
+                        result["recovered_count"] += len(created)
+                        if slug not in result["channels_affected"]:
+                            result["channels_affected"].append(slug)
+                        result["details"].append({
+                            "channel_id": ch_id, "slug": slug,
+                            "action": "recovered_tier2_aggressive",
+                            "total_target": total_target,
+                            "published": total_published,
+                            "pct": round(pct_published * 100, 1),
+                            "recovered": len(created), "slots": created,
+                        })
 
         # ── CLIPS: excess → cancel, deficit → ONLY recreate if more longs completed ──
         if clip_covered > clip_target:

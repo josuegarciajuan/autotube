@@ -133,6 +133,21 @@ SHORTS_NATIVE_SCHEDULE = [
 ]
 SHORTS_NATIVE_MAX_DAILY = 4
 
+# ── Shorts frequency targets (v13: 10–15/day per channel) ──────
+# Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots)
+# and recovery planner (auto_recover_shorts).
+MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "10"))
+MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "15"))
+
+# Conservative QUOTA cap: YouTube API default 10,000 units/day.
+# Each short upload costs ~1,650 units (1,600 upload + 50 thumbnail).
+# 15 shorts × 1,650 = 24,750/day — ~2.5× the default quota.
+# System will naturally throttle as YouTube rejects uploads over quota.
+# Request quota increase from Google Cloud Console when ready.
+MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
+    "MAX_DAILY_SHORTS_QUOTA_SAFE", "6"
+))  # Safe with default 10,000 unit quota
+
 # ── Shorts video/image mix strategy ──────────────────────────
 SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
 SHORTS_MIN_VIDEO_PCT = float(os.getenv("SHORTS_MIN_VIDEO_PCT", "0.30"))  # minimum acceptable video ratio

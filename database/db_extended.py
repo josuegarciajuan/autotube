@@ -286,11 +286,11 @@ def migrate_v2(db_path: str = None):
             (ch["id"],),
         ).fetchone()
         if exists["c"] == 0:
-            # All channels: 3 native + 3 clips per long video (v12 dynamic scaling)
+            # All channels: 5 native + 5 clips per long video (v13)
             conn.execute(
                 """INSERT INTO shorts_planning_config
                    (channel_id, shorts_native_per_day, shorts_clip_per_day, shorts_clips_per_long, shorts_enabled)
-                   VALUES (?, 3, 2, 3, 1)""",
+                   VALUES (?, 5, 2, 5, 1)""",
                 (ch["id"],),
             )
     conn.commit()
@@ -304,6 +304,40 @@ def migrate_v2(db_path: str = None):
         WHERE shorts_native_per_day < 3
            OR shorts_clips_per_long IS NULL
     """)
+    conn.commit()
+    
+    # ── v13: bump shorts targets to 10-15/day ──────────────────────
+    # Per-channel targets:
+    #   canal2, canal3 → 5 native + 5 clips_per_long
+    #   canal4, canal5 → 4 native + 5 clips_per_long
+    #   any other channel → 5 native + 5 clips_per_long
+    # Only updates rows that don't already match the target via JOIN on channels.slug.
+    conn.execute("""
+        UPDATE shorts_planning_config
+        SET shorts_native_per_day = CASE
+                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
+                     IN ('canal2', 'canal3') THEN 5
+                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
+                     IN ('canal4', 'canal5') THEN 4
+                ELSE 5
+            END,
+            shorts_clips_per_long = 5
+        WHERE shorts_native_per_day < (
+            CASE
+                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
+                     IN ('canal4', 'canal5') THEN 4
+                ELSE 5
+            END
+        )
+           OR shorts_clips_per_long < 5
+           OR shorts_clips_per_long IS NULL
+    """)
+    updated = conn.total_changes
+    if updated:
+        logger.info(
+            "Migration v13: bumped %d shorts_planning_config rows "
+            "to 10-15/day targets (5 native + 5 clips_per_long)", updated
+        )
     conn.commit()
     
     # Add topic column to shorts for native short topic deduplication (idempotent)
