@@ -38,7 +38,7 @@ def get_monitor_dashboard():
                 "SELECT COUNT(*) as c FROM videos WHERE status = 'uploaded_private'"
             ).fetchone()["c"]
             videos_error = conn.execute(
-                "SELECT COUNT(*) as c FROM videos WHERE status = 'error'"
+                "SELECT COUNT(*) as c FROM videos WHERE status = 'error' AND created_at > datetime('now', '-7 days')"
             ).fetchone()["c"]
 
             # Active short counts
@@ -49,7 +49,7 @@ def get_monitor_dashboard():
                 "SELECT COUNT(*) as c FROM shorts WHERE status = 'uploading'"
             ).fetchone()["c"]
             shorts_failed = conn.execute(
-                "SELECT COUNT(*) as c FROM shorts WHERE status = 'failed'"
+                "SELECT COUNT(*) as c FROM shorts WHERE status = 'failed' AND created_at > datetime('now', '-7 days')"
             ).fetchone()["c"]
 
             # Alert counts
