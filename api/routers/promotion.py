@@ -105,6 +105,91 @@ async def sync_channel_playlists(channel_id: int):
     return result
 
 
+@router.get("/channels/{channel_id}/playlists/diagnose")
+async def diagnose_channel_playlists(channel_id: int, limit: int = 20):
+    """Diagnose playlist assignment health for a channel's recent videos.
+
+    For each recent video, checks:
+      - Has target_playlist_slug set on the video record
+      - Has entries in the video_playlists join table
+      - Whether the target slug exists in youtube_playlists cache
+      - Returns a summary of assignment health
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    slug = ch.get("slug")
+    playlists_cached = db.get_channel_youtube_playlists(channel_id)
+
+    # Get recent videos
+    all_videos = db.get_videos(channel_id=channel_id, limit=limit)
+
+    videos_report = []
+    assigned_count = 0
+    unassigned_count = 0
+    slug_not_in_cache = 0
+
+    for v in all_videos:
+        vid = v.get("id")
+        tgt_slug = v.get("target_playlist_slug")
+        tgt_pl_id = v.get("target_playlist_id")
+        yt_vid = v.get("yt_video_id")
+        status = v.get("status", "")
+
+        assignments = db.get_video_playlists_db(vid) if vid else []
+        has_db_assignment = len(assignments) > 0
+
+        # Check if target slug exists in youtube_playlists cache
+        slug_in_cache = False
+        if tgt_slug:
+            for pl in playlists_cached:
+                if pl.get("slug") == tgt_slug:
+                    slug_in_cache = True
+                    break
+
+        if has_db_assignment:
+            assigned_count += 1
+        elif tgt_slug and yt_vid:
+            unassigned_count += 1
+            if not slug_in_cache:
+                slug_not_in_cache += 1
+
+        videos_report.append({
+            "video_id": vid,
+            "yt_video_id": yt_vid,
+            "status": status,
+            "target_playlist_slug": tgt_slug,
+            "target_playlist_id": tgt_pl_id,
+            "slug_in_cache": slug_in_cache,
+            "has_db_assignment": has_db_assignment,
+            "db_assignments": [
+                {
+                    "playlist_slug": a.get("playlist_slug"),
+                    "playlist_name": a.get("playlist_name"),
+                    "yt_playlist_item_id": a.get("yt_playlist_item_id"),
+                    "added_at": str(a.get("added_at", "")),
+                }
+                for a in assignments
+            ],
+        })
+
+    return {
+        "channel_id": channel_id,
+        "channel_slug": slug,
+        "playlists_in_cache": len(playlists_cached),
+        "playlist_slugs_cached": [p.get("slug") for p in playlists_cached],
+        "recent_videos": len(videos_report),
+        "assigned_to_playlist": assigned_count,
+        "unassigned_to_playlist": unassigned_count,
+        "slug_not_in_cache": slug_not_in_cache,
+        "health": "healthy" if assigned_count == len(videos_report) or unassigned_count == 0
+                  else ("warning" if unassigned_count < len(videos_report) / 2 else "critical"),
+        "videos": videos_report,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 # Video-level: Playlists
 # ═══════════════════════════════════════════════════════════════

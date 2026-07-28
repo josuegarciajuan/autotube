@@ -1113,7 +1113,8 @@ def run_job(
                     logger.info("📅 Publicación programada para: %s UTC", planned_public_at)
             
             yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,
-                                             planned_public_at=planned_public_at)
+                                              planned_public_at=planned_public_at,
+                                              skip_lifecycle_scheduling=True)
             if yt_video_id:
                 yt_url = f"https://youtube.com/watch?v={yt_video_id}"
                 # Determine correct upload status based on publish mode

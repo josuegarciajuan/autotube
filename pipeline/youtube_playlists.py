@@ -351,24 +351,56 @@ class YouTubePlaylistManager:
 
     # ── High-level operations ─────────────────────────────────────
 
-    def sync_playlists_from_config(self, playlist_configs: list[dict] = None) -> dict:
+    def sync_playlists_from_config(self, playlist_configs: list[dict] = None,
+                                     include_generated: bool = True) -> dict:
         """Ensure all playlists defined in channel config exist on YouTube.
 
-        Creates missing playlists, caches IDs in DB. Uses the PLAYLISTS config
-        list from the channel config.
+        Creates missing playlists, caches IDs in DB. Uses:
+          1. Static PLAYLISTS from channel config (canalX_config.py)
+          2. LLM-generated PLAYLISTS_GENERATED from channels.config_json (if include_generated=True)
 
         Returns {created: [...], existing: [...], errors: [...]}.
         """
-        if playlist_configs is None:
-            playlist_configs = getattr(self.config, "PLAYLISTS", [])
+        all_configs = []
 
-        if not playlist_configs:
+        # ── 1. Static playlists from Python config ──
+        if playlist_configs is None:
+            static_cfgs = getattr(self.config, "PLAYLISTS", [])
+        else:
+            static_cfgs = playlist_configs
+        all_configs.extend(static_cfgs)
+
+        # ── 2. LLM-generated playlists from DB config_json ──
+        if include_generated:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+            ch = db.get_channel_by_slug(self.slug)
+            if ch:
+                cj = ch.get("config_json", "{}")
+                if isinstance(cj, str):
+                    import json; cj = json.loads(cj) if cj else {}
+                generated = cj.get("PLAYLISTS_GENERATED", [])
+                if generated:
+                    logger.info("[%s] Including %d LLM-generated playlists in sync",
+                               self.slug, len(generated))
+                    all_configs.extend(generated)
+
+        if not all_configs:
             logger.info("[%s] No playlists defined in config", self.slug)
             return {"created": [], "existing": [], "errors": []}
 
+        # ── Deduplicate by slug (static takes precedence) ──
+        seen = set()
+        deduped = []
+        for cfg in all_configs:
+            s = cfg.get("slug", "")
+            if s and s not in seen:
+                seen.add(s)
+                deduped.append(cfg)
+
         created, existing, errors = [], [], []
 
-        for pl_cfg in playlist_configs:
+        for pl_cfg in deduped:
             name = pl_cfg.get("name", "")
             slug_key = pl_cfg.get("slug", "")
             description = pl_cfg.get("description", "")
@@ -390,9 +422,36 @@ class YouTubePlaylistManager:
                 errors.append(f"{name}: {exc}")
                 logger.error("[%s] Error syncing playlist %s: %s", self.slug, name, exc)
 
-        logger.info("[%s] Playlist sync: created=%d existing=%d errors=%d",
-                     self.slug, len(created), len(existing), len(errors))
+        logger.info("[%s] Playlist sync: created=%d existing=%d errors=%d (total configs: %d)",
+                     self.slug, len(created), len(existing), len(errors), len(deduped))
         return {"created": created, "existing": existing, "errors": errors}
+
+    def sync_and_cache_all_playlists(self, channel_id: int) -> int:
+        """Sync all playlists (static + generated) to YouTube and cache in DB.
+
+        This is the comprehensive sync that covers both playlist sources.
+        Returns the number of playlists in DB after sync.
+        """
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+        sync_result = self.sync_playlists_from_config(include_generated=True)
+
+        for pl in sync_result.get("created", []):
+            db.upsert_youtube_playlist(
+                channel_id, pl["slug"], pl["yt_playlist_id"], pl.get("name"),
+            )
+        for pl in sync_result.get("existing", []):
+            db.upsert_youtube_playlist(
+                channel_id, pl["slug"], pl["yt_playlist_id"], pl.get("name"),
+            )
+
+        all_pl = db.get_channel_youtube_playlists(channel_id)
+        logger.info("[%s] Total playlists in DB after sync: %d (created=%d, existing=%d)",
+                     self.slug, len(all_pl),
+                     len(sync_result.get("created", [])),
+                     len(sync_result.get("existing", [])))
+        return len(all_pl)
 
     def add_video_to_all_playlists(self, yt_video_id: str,
                                     playlist_configs: list[dict] = None) -> dict:
@@ -456,10 +515,10 @@ class YouTubePlaylistManager:
                                        channel_id: int = None) -> dict:
         """Add a video to a specific playlist by its DB slug (not YouTube ID).
 
-        Looks up the YouTube playlist ID from the local cache, then delegates
-        to ``add_video_to_playlist()``.
+        Looks up the YouTube playlist ID from the local cache. If not found,
+        triggers a full sync (static + generated playlists) and retries.
 
-        Returns: see ``add_video_to_playlist()``.
+        Returns: same as ``add_video_to_playlist()``, plus ``error`` key on failure.
         """
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -467,11 +526,53 @@ class YouTubePlaylistManager:
         if channel_id is None:
             ch = db.get_channel_by_slug(self.slug)
             if not ch:
+                logger.warning("[%s] add_video_to_playlist_by_slug: channel '%s' not found in DB",
+                             self.slug, self.slug)
                 return {"error": "Channel not found in DB"}
             channel_id = ch["id"]
 
+        logger.info("[%s] add_video_to_playlist_by_slug: looking up slug='%s' for channel_id=%d",
+                    self.slug, playlist_slug, channel_id)
+
         cached = db.get_playlist_by_slug(channel_id, playlist_slug)
         if not cached or not cached.get("yt_playlist_id"):
-            return {"error": f"Playlist slug '{playlist_slug}' not cached in DB"}
+            # ── Fallback: sync all playlists and retry ──
+            logger.warning(
+                "[%s] Playlist slug '%s' NOT FOUND in DB (channel_id=%d). "
+                "Triggering full sync and retrying...",
+                self.slug, playlist_slug, channel_id,
+            )
+            # Log what IS in DB for diagnostics
+            all_pl = db.get_channel_youtube_playlists(channel_id)
+            logger.info("[%s] Available playlists in DB (%d): %s",
+                       self.slug, len(all_pl),
+                       [(p.get("slug"), p.get("name")) for p in all_pl])
 
-        return self.add_video_to_playlist(cached["yt_playlist_id"], yt_video_id)
+            try:
+                self.sync_and_cache_all_playlists(channel_id)
+                # Retry lookup after sync
+                cached = db.get_playlist_by_slug(channel_id, playlist_slug)
+            except Exception as sync_exc:
+                logger.error("[%s] Fallback sync failed: %s", self.slug, sync_exc)
+
+        if not cached or not cached.get("yt_playlist_id"):
+            # Still not found after sync
+            logger.error(
+                "[%s] CRITICAL: Playlist slug '%s' still not in DB after full sync. "
+                "Video %s will NOT be added to any playlist.",
+                self.slug, playlist_slug, yt_video_id,
+            )
+            return {"error": f"Playlist slug '{playlist_slug}' not cached in DB (after sync retry)"}
+
+        logger.info("[%s] Found playlist '%s' → yt_playlist_id=%s",
+                    self.slug, cached.get("name", playlist_slug), cached["yt_playlist_id"])
+
+        result = self.add_video_to_playlist(cached["yt_playlist_id"], yt_video_id)
+        if result.get("yt_playlist_item_id"):
+            logger.info("[%s] ✅ SUCCESS: Video %s added to playlist '%s' (item: %s)",
+                       self.slug, yt_video_id, cached.get("name", playlist_slug),
+                       result["yt_playlist_item_id"])
+        elif result.get("was_already_present"):
+            logger.info("[%s] ⏭️ Video %s already in playlist '%s'",
+                       self.slug, yt_video_id, cached.get("name", playlist_slug))
+        return result

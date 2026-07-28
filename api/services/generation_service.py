@@ -2102,6 +2102,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             metadata=metadata,
             job_id=job_id,
             planned_public_at=target_public_at,
+            skip_lifecycle_scheduling=True,
         )
 
         if yt_video_id:

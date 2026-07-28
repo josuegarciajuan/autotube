@@ -1345,7 +1345,8 @@ class PipelineOrchestrator:
 
     def phase_upload(self, script: dict, video_data: dict,
                       metadata: dict = None, job_id: int = None,
-                      planned_public_at: str = None) -> Optional[str]:
+                      planned_public_at: str = None,
+                      skip_lifecycle_scheduling: bool = False) -> Optional[str]:
         """Upload video to YouTube. Returns video_id or None.
         
         Args:
@@ -1359,6 +1360,8 @@ class PipelineOrchestrator:
             planned_public_at: Optional ISO8601 string from planning system.
                       If provided and publish_mode=scheduled, overrides the
                       calculated target_public_at to align with the planning.
+            skip_lifecycle_scheduling: If True, skip scheduling lifecycle
+                      actions (caller handles it separately, e.g. worker).
         """
         start = time.time()
         self._emit_progress(80, "upload", "Preparando subida a YouTube...")
@@ -1720,36 +1723,39 @@ class PipelineOrchestrator:
                     pass
 
             # ── Post-upload: schedule lifecycle promotion actions ──
-            try:
-                from pipeline.video_lifecycle import VideoLifecycleManager
-                lifecycle = VideoLifecycleManager(self.canal)
-                script_text = script.get("guion", "") if script else ""
-                db_vid_for_lifecycle = db_video_id or self.db_video_id
-                channel_id_for_lifecycle = self._get_channel_id()
-                
-                if publish_mode == "scheduled" and publish_schedule_info:
-                    # Scheduled mode: schedule warmup + go_public timeline
-                    lifecycle.on_video_uploaded_scheduled(
-                        db_video_id=db_vid_for_lifecycle,
-                        yt_video_id=video_id,
-                        channel_id=channel_id_for_lifecycle,
-                        script_text=script_text,
-                        target_public_at=publish_schedule_info["target_public_at"],
-                        warmup_until=publish_schedule_info["warmup_until"],
-                    )
-                    logger.info(f"[{self.canal}] Scheduled lifecycle actions for video {video_id} "
-                               f"(target public: {publish_schedule_info['target_public_at']})")
-                else:
-                    # Immediate mode: standard lifecycle from upload time
-                    lifecycle.on_video_published(
-                        db_video_id=db_vid_for_lifecycle,
-                        yt_video_id=video_id,
-                        channel_id=channel_id_for_lifecycle,
-                        script_text=script_text,
-                    )
-                    logger.info(f"[{self.canal}] Lifecycle actions scheduled for video {video_id}")
-            except Exception as lifecycle_exc:
-                logger.warning(f"[{self.canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
+            if not skip_lifecycle_scheduling:
+                try:
+                    from pipeline.video_lifecycle import VideoLifecycleManager
+                    lifecycle = VideoLifecycleManager(self.canal)
+                    script_text = script.get("guion", "") if script else ""
+                    db_vid_for_lifecycle = db_video_id or self.db_video_id
+                    channel_id_for_lifecycle = self._get_channel_id()
+                    
+                    if publish_mode == "scheduled" and publish_schedule_info:
+                        # Scheduled mode: schedule warmup + go_public timeline
+                        lifecycle.on_video_uploaded_scheduled(
+                            db_video_id=db_vid_for_lifecycle,
+                            yt_video_id=video_id,
+                            channel_id=channel_id_for_lifecycle,
+                            script_text=script_text,
+                            target_public_at=publish_schedule_info["target_public_at"],
+                            warmup_until=publish_schedule_info["warmup_until"],
+                        )
+                        logger.info(f"[{self.canal}] Scheduled lifecycle actions for video {video_id} "
+                                   f"(target public: {publish_schedule_info['target_public_at']})")
+                    else:
+                        # Immediate mode: standard lifecycle from upload time
+                        lifecycle.on_video_published(
+                            db_video_id=db_vid_for_lifecycle,
+                            yt_video_id=video_id,
+                            channel_id=channel_id_for_lifecycle,
+                            script_text=script_text,
+                        )
+                        logger.info(f"[{self.canal}] Lifecycle actions scheduled for video {video_id}")
+                except Exception as lifecycle_exc:
+                    logger.warning(f"[{self.canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
+            else:
+                logger.debug("[%s] Lifecycle scheduling skipped (caller handles it)", self.canal)
 
             # ── Post-upload: add video to the selected playlist ──
             try:
@@ -1757,6 +1763,7 @@ class PipelineOrchestrator:
                 if db_vid:
                     vid_record = self.db.get_video(db_vid)
                     tgt_slug = vid_record.get("target_playlist_slug") if vid_record else None
+                    tgt_playlist_db_id = vid_record.get("target_playlist_id") if vid_record else None
                     if tgt_slug and video_id:
                         from pipeline.youtube_playlists import YouTubePlaylistManager
                         pl_mgr = YouTubePlaylistManager(self.canal)
@@ -1772,6 +1779,26 @@ class PipelineOrchestrator:
                             logger.info("[%s] Added video %s to playlist '%s' (item: %s)",
                                        self.canal, video_id, tgt_slug,
                                        result["yt_playlist_item_id"])
+                            # ── Record assignment in DB immediately ──
+                            if tgt_playlist_db_id:
+                                self.db.add_video_to_playlist_db(
+                                    db_vid, tgt_playlist_db_id,
+                                    yt_playlist_item_id=result["yt_playlist_item_id"],
+                                )
+                                logger.info("[%s] ✅ DB recorded: video %d → playlist %d (slug='%s')",
+                                           self.canal, db_vid, tgt_playlist_db_id, tgt_slug)
+                            else:
+                                # Lookup playlist DB id from slug
+                                from database.db_extended import ExtendedDatabase
+                                ext_db2 = ExtendedDatabase()
+                                pl_cached = ext_db2.get_playlist_by_slug(channel_id_for_lifecycle, tgt_slug)
+                                if pl_cached:
+                                    self.db.add_video_to_playlist_db(
+                                        db_vid, pl_cached["id"],
+                                        yt_playlist_item_id=result["yt_playlist_item_id"],
+                                    )
+                                    logger.info("[%s] ✅ DB recorded (slug lookup): video %d → playlist '%s'",
+                                               self.canal, db_vid, tgt_slug)
                         else:
                             logger.warning("[%s] Could not add video %s to playlist '%s': %s",
                                          self.canal, video_id, tgt_slug, result.get("error", "unknown"))

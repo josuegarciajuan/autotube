@@ -653,8 +653,30 @@ class VideoLifecycleManager:
         playlist during pipeline execution (before scraping). This handler
         is kept for backward compatibility with any pending lifecycle actions
         from older videos, but no longer uses auto-classify.
+
+        If the video already has playlist assignments recorded in DB (from the
+        immediate post-upload handler), skips the YouTube API call entirely.
         """
         from pipeline.youtube_playlists import YouTubePlaylistManager
+
+        # ── Guard: skip if video already has playlist assignment in DB ──
+        existing_assignments = self.db.get_video_playlists_db(db_video_id)
+        if existing_assignments:
+            logger.info("[%s] playlist_add SKIPPED for video %d — already assigned to %d playlist(s): %s",
+                       self.slug, db_video_id, len(existing_assignments),
+                       [(a.get("playlist_slug"), a.get("playlist_name")) for a in existing_assignments])
+            import json
+            self.db.update_lifecycle_action_status(
+                _action["id"], "skipped",
+                result_json=json.dumps(
+                    {"reason": "already_assigned", "existing": [
+                        {"slug": a.get("playlist_slug"), "name": a.get("playlist_name")}
+                        for a in existing_assignments
+                    ]},
+                    ensure_ascii=False,
+                ),
+            )
+            return True
 
         mgr = YouTubePlaylistManager(self.slug)
         if not mgr.authenticate():
@@ -689,23 +711,31 @@ class VideoLifecycleManager:
             )
             added = [tgt_slug] if result.get("yt_playlist_item_id") else []
             already_in = [tgt_slug] if result.get("was_already_present") else []
+            item_id = result.get("yt_playlist_item_id")
         else:
             # Legacy: add to all playlists
             add_result = mgr.add_video_to_all_playlists(yt_video_id)
             added = add_result.get("added_to", [])
             already_in = add_result.get("already_in", [])
+            item_id = None
 
         # Record in DB
         if channel_id:
             for slug_key in added:
                 cached = self.db.get_playlist_by_slug(channel_id, slug_key)
                 if cached:
-                    self.db.add_video_to_playlist_db(db_video_id, cached["id"])
+                    self.db.add_video_to_playlist_db(
+                        db_video_id, cached["id"],
+                        yt_playlist_item_id=item_id if len(added) == 1 else None,
+                    )
 
             for slug_key in already_in:
                 cached = self.db.get_playlist_by_slug(channel_id, slug_key)
                 if cached:
-                    self.db.add_video_to_playlist_db(db_video_id, cached["id"])
+                    self.db.add_video_to_playlist_db(
+                        db_video_id, cached["id"],
+                        yt_playlist_item_id=item_id if len(already_in) == 1 else None,
+                    )
 
         # Store result
         import json
