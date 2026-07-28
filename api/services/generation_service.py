@@ -2083,6 +2083,23 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             db.mark_video_uploaded(video_id, yt_video_id, yt_url)
             db.update_video(video_id, progress=100, status="uploaded_private")
 
+            # ── Auto-mark altered content (IA) via browser ──
+            try:
+                from config.config_bridge import get_channel_config as _get_cc
+                channel_config = _get_cc(canal)
+                if getattr(channel_config, "AUTO_MARK_ALTERED_CONTENT", False):
+                    from pipeline.youtube_browser import get_account_for_channel
+                    import threading
+                    account = get_account_for_channel(canal)
+                    if account:
+                        threading.Thread(
+                            target=_auto_mark_altered_content,
+                            args=(yt_video_id, canal, account, video_id),
+                            daemon=True
+                        ).start()
+            except Exception as e:
+                logger.warning("[%s] Failed to trigger auto-mark IA: %s", canal, e)
+
             # ── Clean up local mp4 ──
             vp = video_data.get("video_path", "")
             if vp and Path(vp).exists():

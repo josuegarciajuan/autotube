@@ -64,22 +64,34 @@ _browser_lock = threading.Lock()
 _xvfb_display = ":99"
 _xvfb_proc = None
 
-# Shared Playwright instance — only ONE sync_playwright().start() ever.
-# Creating multiple starts() causes "Playwright Sync API inside the asyncio loop"
-# errors because each call leaves a running event loop behind.
-_shared_playwright = None
+# Shared Playwright instances — one PER THREAD because sync_playwright()'s
+# greenlet is tied to the calling thread.  Using a thread that didn't create
+# the Playwright instance causes "cannot switch to a different thread".
+_thread_local = threading.local()
 _playwright_lock = threading.Lock()
 
 
 def _get_or_create_playwright():
-    """Return the singleton Playwright instance, creating it if needed."""
-    global _shared_playwright
+    """Return a SyncPlaywright instance bound to the CURRENT thread.
+
+    Each OS thread gets its own instance because sync_playwright()'s
+    greenlet-based event loop is tied to the calling thread.  A global
+    singleton shared across threads is what caused the "cannot switch
+    to a different thread (which happens to have exited)" errors.
+    """
+    pw = getattr(_thread_local, "playwright", None)
+    if pw is not None:
+        return pw
     with _playwright_lock:
-        if _shared_playwright is None:
-            _ensure_xvfb()
-            _shared_playwright = sync_playwright().start()
-            logger.debug("Shared Playwright instance started")
-        return _shared_playwright
+        # Double-check after acquiring lock
+        pw = getattr(_thread_local, "playwright", None)
+        if pw is not None:
+            return pw
+        _ensure_xvfb()
+        pw = sync_playwright().start()
+        _thread_local.playwright = pw
+        logger.debug("Playwright instance started for thread %s", str(threading.get_ident())[-6:])
+        return pw
 
 
 def _ensure_xvfb():
@@ -117,6 +129,7 @@ class YouTubeBrowser:
         self.user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
         self._playwright = None
         self._context = None
+        self._owning_thread_id: int | None = None  # thread that created _context
         self._lock = threading.Lock()
         if not self.user_data_dir.exists():
             raise FileNotFoundError(
@@ -125,10 +138,33 @@ class YouTubeBrowser:
             )
 
     def _ensure_browser(self):
-        if self._context is not None:
+        """Ensure browser context exists and belongs to the CURRENT thread.
+
+        Playwright's sync API uses greenlets tied to the thread that called
+        ``sync_playwright().start()``.  If a daemon thread creates the context
+        and exits, the next thread reusing the cached context hits
+        "cannot switch to a different thread (which happens to have exited)".
+
+        This method detects thread changes and recreates the context (and
+        the underlying Playwright instance) so every caller thread owns its
+        own greenlet.
+        """
+        current_thread = threading.get_ident()
+
+        # ── Same thread — context is valid ──
+        if self._context is not None and self._owning_thread_id == current_thread:
             return
-        # Use the shared Playwright singleton — creating multiple
-        # sync_playwright().start() instances causes asyncio loop conflicts.
+
+        # ── Different thread (or first call) — tear down old context ──
+        if self._context is not None:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            self._context = None
+            self._owning_thread_id = None
+
+        # ── Get a Playwright instance owned by THIS thread ──
         self._playwright = _get_or_create_playwright()
 
         # Clean up stale Chromium singleton locks from killed/interrupted sessions
@@ -142,7 +178,8 @@ class YouTubeBrowser:
             locale="es-ES",
             timezone_id="Europe/Madrid",
         )
-        logger.info("Browser ready for account: %s", self.account)
+        self._owning_thread_id = current_thread
+        logger.info("Browser ready for account: %s (thread %s)", self.account, str(current_thread)[-6:])
 
     def _cleanup_stale_locks(self):
         """Remove Chromium singleton locks left by killed/interrupted sessions.
@@ -265,6 +302,7 @@ class YouTubeBrowser:
             except Exception:
                 pass
             self._context = None
+            self._owning_thread_id = None
 
     def mark_altered_content(self, youtube_video_id: str) -> bool:
         with self._lock:
@@ -607,17 +645,20 @@ def get_browser(account: str) -> YouTubeBrowser:
 
 
 def close_all_browsers():
-    global _shared_playwright
     with _browser_lock:
         for b in _browser_instances.values():
             try: b.close()
             except Exception: pass
         _browser_instances.clear()
-    with _playwright_lock:
-        if _shared_playwright:
-            try: _shared_playwright.stop()
-            except Exception: pass
-        _shared_playwright = None
+    # Clean up thread-local Playwright instances.
+    # Each thread must stop its own — we can only stop the current thread's.
+    pw = getattr(_thread_local, "playwright", None)
+    if pw is not None:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        _thread_local.playwright = None
 
 
 def get_account_for_channel(channel_slug: str) -> Optional[str]:
