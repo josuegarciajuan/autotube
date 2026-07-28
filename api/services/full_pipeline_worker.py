@@ -47,55 +47,83 @@ from api.utils import db_now
 
 # ── Logging setup ──────────────────────────────────────────────────
 
+def _retry_end_screens_worker(browser, yt_video_id: str, wlog, max_retries: int = 3) -> bool:
+    """Retry end screen configuration with exponential backoff (worker process)."""
+    import time as _wt
+    import random as _wr
+    for attempt in range(1, max_retries + 1):
+        success = browser.add_end_screens(yt_video_id)
+        if success:
+            return True
+        if attempt < max_retries:
+            wait_s = 30 * (2 ** (attempt - 1)) + _wr.uniform(0, 15)
+            wlog.warning(
+                "End screens attempt %d/%d failed for %s — retrying in %.0fs",
+                attempt, max_retries, yt_video_id, wait_s,
+            )
+            _wt.sleep(wait_s)
+        else:
+            wlog.error(
+                "End screens exhausted %d retries for %s — giving up",
+                max_retries, yt_video_id,
+            )
+    return False
+
+
 def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: int):
-    """Background thread: mark video as AI-generated + configure end screens."""
+    """Background thread (worker subprocess): mark video as AI-generated + configure end screens.
+
+    End screens are ALWAYS attempted independently of the IA-mark result.
+    """
     wlog = logging.getLogger("autotube.worker")
+    import time as _time
+    import random
+
+    # ── Wait for YouTube to finish processing (60s, was 20s) ──
+    wlog.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
+    _time.sleep(60)
+
+    from pipeline.youtube_browser import get_browser
+    browser = get_browser(account)
+
+    # ── Step 1: Mark AI-generated content (best-effort, non-blocking) ──
     try:
-        import time as _time
-        import random
-        _time.sleep(20)  # Wait for YouTube to finish processing upload
-
-        from pipeline.youtube_browser import get_browser
-        browser = get_browser(account)
-
-        # ── Step 1: Mark AI-generated content ──
         success = browser.mark_altered_content(yt_video_id)
         if success:
             from database.db_extended import ExtendedDatabase
             db = ExtendedDatabase()
-            db._execute(
-                "UPDATE videos SET manual_altered_content_done = 1 WHERE id = ?",
-                (video_id,),
-            )
-            wlog.info("[%s] Altered content marked for %s", canal, yt_video_id)
+            db.update_video(video_id, manual_altered_content_done=1)
+            wlog.info("[%s] IA altered content marked for %s", canal, yt_video_id)
         else:
-            wlog.warning("[%s] Failed to mark altered content for %s", canal, yt_video_id)
-            return  # Don't proceed to end screens if IA mark failed
-
-        # ── Step 2: Configure end screens (same browser session!) ──
-        try:
-            from config.config_bridge import get_channel_config
-            channel_config = get_channel_config(canal)
-            if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
-                # Natural human delay between actions (5-12s)
-                delay = random.uniform(5, 12)
-                wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
-                _time.sleep(delay)
-
-                success2 = browser.add_end_screens(yt_video_id)
-                if success2:
-                    db._execute(
-                        "UPDATE videos SET manual_end_screens_done = 1 WHERE id = ?",
-                        (video_id,),
-                    )
-                    wlog.info("[%s] End screens configured for %s", canal, yt_video_id)
-                else:
-                    wlog.warning("[%s] Failed to configure end screens for %s", canal, yt_video_id)
-        except Exception as e:
-            wlog.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
-
+            wlog.warning("[%s] Failed to mark altered content for %s — continuing to end screens anyway", canal, yt_video_id)
     except Exception as e:
-        wlog.warning("[%s] Auto-mark IA error for %s: %s", canal, yt_video_id, e)
+        wlog.warning("[%s] IA-mark error for %s: %s — continuing to end screens anyway", canal, yt_video_id, e)
+        db = None
+
+    # ── Step 2: Configure end screens (always attempted, with retries) ──
+    try:
+        from config.config_bridge import get_channel_config
+        channel_config = get_channel_config(canal)
+        if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
+            # Natural human delay between actions (5-12s)
+            delay = random.uniform(5, 12)
+            wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
+            _time.sleep(delay)
+
+            wlog.info("[%s] 🎬 Attempting end screens for %s (up to 3 retries)", canal, yt_video_id)
+            success2 = _retry_end_screens_worker(browser, yt_video_id, wlog, max_retries=3)
+            if success2:
+                if db is None:
+                    from database.db_extended import ExtendedDatabase
+                    db = ExtendedDatabase()
+                db.update_video(video_id, manual_end_screens_done=1)
+                wlog.info("[%s] ✅ End screens configured for %s", canal, yt_video_id)
+            else:
+                wlog.warning("[%s] ❌ Failed to configure end screens for %s after all retries", canal, yt_video_id)
+        else:
+            wlog.debug("[%s] AUTO_END_SCREENS disabled, skipping", canal)
+    except Exception as e:
+        wlog.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
 
 
 # ── Shared state for graceful shutdown during critical phases ─────

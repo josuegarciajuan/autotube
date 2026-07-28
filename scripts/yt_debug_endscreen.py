@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-DEBUG: YouTube Studio End Screen editor — read-only DOM discovery.
+DEBUG: YouTube Studio End Screen editor — DOM discovery + active configuration.
 
 Navega al editor de pantallas finales, toma screenshots y vuelca el DOM
 para encontrar los selectores exactos.
 
+En modo --add, intenta configurar activamente las pantallas finales
+(Subscribe + Vídeo recomendado) con screenshots en cada paso.
+
 Usage:
+    # Read-only DOM discovery
     python3 scripts/yt_debug_endscreen.py --video-id qKpbl0-aK8M --account tracatrack
+    # Active end screen configuration
+    python3 scripts/yt_debug_endscreen.py --video-id qKpbl0-aK8M --account tracatrack --add
 """
 import argparse
 import json
@@ -173,10 +179,278 @@ def check_page_contains(page, texts: list[str]) -> dict:
     return results
 
 
+def try_add_endscreens(page, video_id: str, out_dir: Path) -> dict:
+    """Actually attempt to configure end screens and report each step.
+    
+    Returns dict with status and step results.
+    """
+    result = {"status": "unknown", "steps": {}}
+    
+    # Step 1: Remove overlays
+    print(f"\n{'='*60}")
+    print(f"🎬 TRY ADD END SCREENS (active mode)")
+    print(f"{'='*60}")
+    
+    print(f"\n  [1/7] Removing overlays...")
+    page.evaluate("""
+        () => {
+            document.querySelector('ytcp-promo-page')?.remove();
+            document.querySelector('ytve-warm-welcome')?.remove();
+        }
+    """)
+    human_delay(2, "overlay removed")
+    screenshot(page, "a01_overlay_removed", out_dir)
+    result["steps"]["overlay"] = "removed"
+    print(f"  ✅ Overlays removed")
+    
+    # Step 2: Enter edit mode if needed
+    print(f"\n  [2/7] Entering edit mode...")
+    try:
+        edit_btn = page.query_selector("button:has-text('Editar'), ytcp-button:has-text('Editar')")
+        if edit_btn and edit_btn.is_visible():
+            edit_btn.click()
+            human_delay(3, "edit mode entered")
+            print(f"  ✅ 'Editar' clicked")
+            result["steps"]["edit"] = "clicked"
+        else:
+            print(f"  ℹ️  Edit button not found — already in editor")
+            result["steps"]["edit"] = "not_needed"
+    except Exception as e:
+        print(f"  ⚠️  Edit mode error: {e}")
+        result["steps"]["edit"] = f"error: {e}"
+    screenshot(page, "a02_edit_mode", out_dir)
+    
+    # Step 3: Check existing elements
+    print(f"\n  [3/7] Checking existing elements...")
+    existing = page.evaluate("""() => {
+        const triggers = document.querySelectorAll('ytcp-dropdown-trigger');
+        let n = 0;
+        for (const t of triggers) { if (t.offsetParent) n++; }
+        return n;
+    }""")
+    result["steps"]["existing"] = existing
+    if existing > 0:
+        print(f"  ℹ️  {existing} end screen elements already exist")
+        # Check if save needed
+        save_btn = page.evaluate("""() => {
+            const btn = document.querySelector('#save-button');
+            return !!(btn && btn.offsetParent && !btn.hasAttribute('disabled'));
+        }""")
+        if save_btn:
+            print(f"  ⚠️  Unsaved changes detected — saving...")
+            page.evaluate("document.querySelector('#save-button')?.click()")
+            human_delay(10, "saving existing")
+            result["steps"]["save_attempted"] = True
+        else:
+            print(f"  ℹ️  Elements already saved — nothing to do")
+        screenshot(page, "a03_existing_elements", out_dir)
+        result["status"] = "already_configured"
+        result["steps"]["save_attempted"] = save_btn
+        return result
+    else:
+        print(f"  ✅ No existing elements — proceeding")
+    
+    # Step 4: Add Subscribe element
+    print(f"\n  [4/7] Adding 'Suscribirse' element...")
+    try:
+        # Click add button
+        found_add = page.evaluate("""() => {
+            const btn = document.querySelector('#add-element-menu-button')
+                || document.querySelector('#add-endscreen-icon-button');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }""")
+        human_delay(3, "menu open")
+        
+        if not found_add:
+            print(f"  ❌ Add-element button NOT FOUND")
+            result["steps"]["subscribe"] = "add_button_not_found"
+            result["status"] = "failed"
+            return result
+        
+        # Click Suscribirse in menu
+        found_sub = page.evaluate("""() => {
+            const items = document.querySelectorAll('tp-yt-paper-item, paper-item');
+            for (const item of items) {
+                if ((item.textContent || '').trim() === 'Suscribirse' && item.offsetParent) {
+                    item.click(); return true;
+                }
+            }
+            return false;
+        }""")
+        if found_sub:
+            print(f"  ✅ 'Suscribirse' added")
+            result["steps"]["subscribe"] = "added"
+        else:
+            # English fallback
+            found_sub_en = page.evaluate("""() => {
+                const items = document.querySelectorAll('tp-yt-paper-item, paper-item');
+                for (const item of items) {
+                    if ((item.textContent || '').trim() === 'Subscribe' && item.offsetParent) {
+                        item.click(); return true;
+                    }
+                }
+                return false;
+            }""")
+            if found_sub_en:
+                print(f"  ✅ 'Subscribe' added")
+                result["steps"]["subscribe"] = "added_en"
+            else:
+                print(f"  ❌ 'Suscribirse' NOT FOUND in menu")
+                result["steps"]["subscribe"] = "not_found_in_menu"
+                result["status"] = "failed"
+                screenshot(page, "a04_menu_error", out_dir)
+                dump_dom(page, "a04_menu", out_dir)
+                return result
+    except Exception as e:
+        print(f"  ❌ Subscribe error: {e}")
+        result["steps"]["subscribe"] = f"error: {e}"
+        result["status"] = "failed"
+        return result
+    human_delay(3, "subscribe settled")
+    screenshot(page, "a04_subscribe_added", out_dir)
+    
+    # Step 5: Add Video element
+    print(f"\n  [5/7] Adding 'Vídeo' element...")
+    try:
+        found_add2 = page.evaluate("""() => {
+            const btn = document.querySelector('#add-element-menu-button')
+                || document.querySelector('#add-endscreen-icon-button');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }""")
+        human_delay(3, "menu open for video")
+        
+        found_vid = page.evaluate("""() => {
+            const items = document.querySelectorAll('tp-yt-paper-item, paper-item');
+            for (const item of items) {
+                const t = (item.textContent || '').trim();
+                if ((t === 'Vídeo' || t === 'Video') && item.offsetParent) {
+                    item.click(); return true;
+                }
+            }
+            return false;
+        }""")
+        if found_vid:
+            print(f"  ✅ 'Vídeo' selected")
+            result["steps"]["video"] = "added"
+        else:
+            print(f"  ❌ 'Vídeo' NOT FOUND in menu")
+            result["steps"]["video"] = "not_found_in_menu"
+            result["status"] = "failed"
+            screenshot(page, "a05_menu_video_error", out_dir)
+            dump_dom(page, "a05_menu", out_dir)
+            return result
+    except Exception as e:
+        print(f"  ❌ Video element error: {e}")
+        result["steps"]["video"] = f"error: {e}"
+        result["status"] = "failed"
+        return result
+    human_delay(12, "video picker loading")
+    screenshot(page, "a05_video_picker", out_dir)
+    
+    # Handle video picker
+    print(f"\n  [5b/7] Handling video picker dialog...")
+    try:
+        dlg = page.query_selector('[role="dialog"], ytcp-dialog')
+        if dlg and dlg.is_visible():
+            for i in range(10):
+                option_count = page.evaluate("""() => {
+                    const d = document.querySelector('[role="dialog"], ytcp-dialog');
+                    if (!d || !d.offsetParent) return -1;
+                    const items = d.querySelectorAll(
+                        '[role="radio"], [role="option"], tp-yt-paper-item, paper-item');
+                    let n = 0;
+                    for (const it of items) {
+                        if (it.offsetParent && (it.textContent || '').trim().length > 3) n++;
+                    }
+                    return n;
+                }""")
+                if option_count == -1:
+                    print(f"  ℹ️  Dialog closed")
+                    result["steps"]["video_picker"] = "closed"
+                    break
+                if option_count > 0:
+                    print(f"  ✅ Video picker: {option_count} options — selecting first")
+                    page.evaluate("""() => {
+                        const d = document.querySelector('[role="dialog"]');
+                        const items = d.querySelectorAll(
+                            '[role="radio"], [role="option"], tp-yt-paper-item');
+                        for (const it of items) {
+                            if (it.offsetParent && (it.textContent || '').trim().length > 3) {
+                                it.click(); return;
+                            }
+                        }
+                    }""")
+                    human_delay(2, "video selected")
+                    result["steps"]["video_picker"] = f"selected_from_{option_count}"
+                    
+                    # Dismiss picker
+                    try:
+                        close_btn = dlg.query_selector('button:has-text("Cerrar")')
+                        if close_btn and close_btn.is_visible():
+                            close_btn.click()
+                    except Exception:
+                        page.keyboard.press("Escape")
+                    break
+                time.sleep(2)
+        else:
+            print(f"  ℹ️  No video picker dialog")
+            result["steps"]["video_picker"] = "no_dialog"
+    except Exception as e:
+        print(f"  ⚠️  Video picker error: {e}")
+        result["steps"]["video_picker"] = f"error: {e}"
+    human_delay(3, "video picker done")
+    screenshot(page, "a06_video_picker_done", out_dir)
+    
+    # Step 6: Save
+    print(f"\n  [6/7] Saving end screens...")
+    try:
+        save_visible = page.evaluate("""() => {
+            const btn = document.querySelector('#save-button');
+            if (!btn || !btn.offsetParent) return false;
+            return !(btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true');
+        }""")
+        if not save_visible:
+            print(f"  ❌ Save button not available")
+            screenshot(page, "a06_save_unavailable", out_dir)
+            result["steps"]["save"] = "not_available"
+            result["status"] = "failed"
+            return result
+        
+        print(f"  ✅ Save button available — clicking...")
+        page.evaluate("document.querySelector('#save-button')?.click()")
+        
+        # Wait for confirmation
+        human_delay(12, "saving")
+        for i in range(10):
+            gone = page.evaluate("() => !document.querySelector('#save-button')?.offsetParent")
+            if gone:
+                print(f"  ✅ Save confirmed (round {i+1})")
+                result["steps"]["save"] = "confirmed"
+                result["status"] = "success"
+                break
+            time.sleep(1)
+        else:
+            print(f"  ⚠️  Save button still visible — may not have applied")
+            result["steps"]["save"] = "not_confirmed"
+    except Exception as e:
+        print(f"  ❌ Save error: {e}")
+        result["steps"]["save"] = f"error: {e}"
+        result["status"] = "failed"
+    
+    screenshot(page, "a07_final", out_dir)
+    dump_dom(page, "a07_final", out_dir)
+    
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--video-id", required=True, help="YouTube video ID")
     parser.add_argument("--account", required=True, help="Google account name")
+    parser.add_argument("--add", action="store_true",
+                        help="Actually attempt to add end screens (subscribe + video) with screenshots")
     args = parser.parse_args()
 
     _ensure_xvfb()
@@ -431,71 +705,14 @@ def main():
 
             break  # Stop trying URLs
 
-    # Fallback: if no end screen editor found, go to the edit page and look for links
-    if working_url is None:
-        print(f"\n{'='*60}")
-        print(f"⚠️ No end screen editor found directly. Trying to find link from edit page.")
-        print(f"{'='*60}")
-        edit_url = f"https://studio.youtube.com/video/{args.video_id}/edit"
-        try:
-            page.goto(edit_url, wait_until="commit", timeout=60000)
-        except Exception as e:
-            print(f"  ❌ Edit page navigation failed: {e}")
-        human_delay(6, label="Edit page load")
-        screenshot(page, "99_edit_page", out_dir)
-
-        # Look for end screen navigation links in sidebar
-        print(f"\n  --- Looking for end screen navigation links in sidebar ---")
-        sidebar_selectors = [
-            "[role='navigation'] a",
-            "nav a",
-            "[id='menu-content'] a",
-            ".menu-content a",
-            "[role='tab']",
-            "a[href*='editor']",
-            "a[href*='endscreen']",
-            "a[href*='end-screen']",
-        ]
-        for sel in sidebar_selectors:
-            try:
-                els = page.query_selector_all(sel)
-                for el in els[:20]:
-                    text = (el.text_content() or "").strip()
-                    href = el.get_attribute("href") or ""
-                    if any(kw in (text + href).lower() for kw in ["pantalla", "final", "end", "screen", "editor"]):
-                        print(f"  🔗 NAV LINK: '{text[:60]}' -> {href}")
-            except Exception as e:
-                print(f"  ⚠️ Error with '{sel}': {e}")
-
-        # Dump all links on page
-        try:
-            links = page.evaluate(
-                """() => Array.from(document.querySelectorAll('a, [role="tab"], [role="menuitem"]'))
-                .filter(el => {
-                    const text = (el.textContent || '').trim();
-                    const href = el.getAttribute?.('href') || '';
-                    return text.length > 0 && text.length < 80;
-                })
-                .map(el => ({
-                    text: (el.textContent || '').trim(),
-                    href: el.getAttribute?.('href') || '',
-                    role: el.getAttribute?.('role') || '',
-                }))
-                .slice(0, 50)
-                """
-            )
-            print(f"  --- All links/tabs on page ---")
-            for l in links:
-                print(f"      [{l['role']}] '{l['text'][:60]}' -> {l['href']}")
-        except Exception as e:
-            print(f"  ⚠️ Link dump failed: {e}")
-
-        dump_dom(page, "edit_page", out_dir)
-        all_findings["edit_page_fallback"] = {
-            "url": page.url,
-            "title": page.title(),
-            "status": "explored_edit_page",
-        }
+    # ── ACTIVE MODE: try to add end screens ─────────────────────────
+    if args.add and working_url:
+        add_result = try_add_endscreens(page, args.video_id, out_dir)
+        print(f"\n  📋 Add result: {add_result['status']}")
+        print(f"  📋 Steps: {add_result['steps']}")
+        all_findings["add_attempt"] = add_result
+    elif args.add and not working_url:
+        print(f"\n  ❌ Cannot add end screens — editor not found")
 
     # ── Close ────────────────────────────────────────────────────────
     page.close()

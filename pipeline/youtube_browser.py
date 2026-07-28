@@ -170,16 +170,48 @@ class YouTubeBrowser:
         # Clean up stale Chromium singleton locks from killed/interrupted sessions
         self._cleanup_stale_locks()
 
-        self._context = self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.user_data_dir),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
-            viewport={"width": 1280, "height": 900},
-            locale="es-ES",
-            timezone_id="Europe/Madrid",
+        # ── Launch with retry for browser session contention ──
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self.user_data_dir),
+                    headless=False,
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
+                    viewport={"width": 1280, "height": 900},
+                    locale="es-ES",
+                    timezone_id="Europe/Madrid",
+                )
+                self._owning_thread_id = current_thread
+                logger.info("Browser ready for account: %s (thread %s, attempt %d)",
+                            self.account, str(current_thread)[-6:], attempt)
+                return
+            except Exception as e:
+                last_error = e
+                err_msg = str(e)
+                if "existing browser session" in err_msg.lower() or "singletonlock" in err_msg.lower():
+                    if attempt < 3:
+                        wait_s = 15 * attempt
+                        logger.warning(
+                            "[ES] Browser profile locked for %s (attempt %d/3) — "
+                            "killing orphans and retrying in %ds...",
+                            self.account, attempt, wait_s,
+                        )
+                        self._kill_profile_orphans()
+                        self._remove_singleton_files()
+                        time.sleep(wait_s)
+                    else:
+                        logger.error(
+                            "[ES] Browser profile still locked after 3 attempts for %s",
+                            self.account,
+                        )
+                else:
+                    logger.error("Browser launch failed for %s: %s", self.account, err_msg)
+                    break
+
+        raise RuntimeError(
+            f"Failed to launch browser for {self.account} after 3 attempts: {last_error}"
         )
-        self._owning_thread_id = current_thread
-        logger.info("Browser ready for account: %s (thread %s)", self.account, str(current_thread)[-6:])
 
     def _cleanup_stale_locks(self):
         """Remove Chromium singleton locks left by killed/interrupted sessions.
@@ -456,12 +488,13 @@ class YouTubeBrowser:
         try:
             human_delay(1.0, 3.0, "endscreen: initial")
             editor_url = f"https://studio.youtube.com/video/{video_id}/editor"
-            logger.info("End screen editor: %s", editor_url)
+            logger.info("[ES] Navigating to end screen editor: %s", editor_url)
             page.goto(editor_url, wait_until="commit", timeout=60000)
             human_delay(6.0, 10.0, "endscreen: page load")
 
+            logger.info("[ES] Landed on URL: %s | title: %s", page.url[:120], page.title())
             if "/video/" not in page.url:
-                logger.error("End screen navigation failed: %s", page.url[:120])
+                logger.error("[ES] Navigation failed — not a video page: %s", page.url[:120])
                 page.close()
                 return False
 
@@ -473,49 +506,61 @@ class YouTubeBrowser:
                     document.querySelector('%s')?.remove();
                 }
             """ % (SEL_OVERLAY_PROMO, SEL_OVERLAY_WELCOME))
+            logger.info("[ES] Overlay removed (promo + welcome)")
             human_delay(2.0, 4.0, "endscreen: post-overlay")
 
             # -- Enter edit mode if needed --
             edit_clicked = self._enter_edit_mode(page)
+            logger.info("[ES] Edit mode entry: %s", "clicked" if edit_clicked else "not needed")
             human_delay(2.0, 4.0, "endscreen: edit mode settle")
 
             # -- Check if end screens already exist --
             existing = self._check_existing_elements(page)
+            logger.info("[ES] Existing end screen elements found: %d", existing)
             if existing > 0:
-                logger.info("Video %s: %d end screen elements already exist", video_id, existing)
+                logger.info("[ES] Video %s: %d end screen elements already exist — verifying save", video_id, existing)
                 # Still try to ensure save if there are unsaved changes
                 if self._has_save_button(page):
-                    logger.info("Save button visible — saving pending changes")
+                    logger.info("[ES] Save button visible — saving pending changes")
                     return self._click_save(page, video_id)
+                logger.info("[ES] No save needed — elements already saved")
                 page.close()
                 return True
 
             # -- Add "Suscribirse" element --
             human_delay(1.0, 2.5, "endscreen: open menu for subscribe")
+            logger.info("[ES] Clicking 'Add element' button (subscribe)")
             self._click_add_button(page)
             human_delay(1.5, 3.0, "endscreen: menu open")
+            logger.info("[ES] Selecting 'Suscribirse' from menu")
             self._click_menu_item(page, "Suscribirse")
+            logger.info("[ES] 'Suscribirse' element added")
             human_delay(2.0, 4.0, "endscreen: subscribe added")
 
             # -- Add "Vídeo" element --
             human_delay(1.0, 2.5, "endscreen: open menu for video")
+            logger.info("[ES] Clicking 'Add element' button (video)")
             self._click_add_button(page)
             human_delay(1.5, 3.0, "endscreen: menu open for video")
+            logger.info("[ES] Selecting 'Vídeo' from menu")
             self._click_menu_item(page, "Vídeo")
+            logger.info("[ES] 'Vídeo' element selected — waiting for video picker")
             human_delay(8.0, 15.0, "endscreen: video picker loading")
             self._handle_video_picker(page)
+            logger.info("[ES] Video picker handled")
             human_delay(2.0, 4.0, "endscreen: video picker done")
 
             # -- Save --
+            logger.info("[ES] Attempting to save end screens...")
             return self._click_save(page, video_id)
 
         except PlaywrightTimeout as e:
-            logger.error("End screen timeout for %s: %s", video_id, e)
+            logger.error("[ES] End screen timeout for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
         except Exception as e:
-            logger.error("End screen error for %s: %s", video_id, e)
+            logger.error("[ES] End screen error for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
@@ -525,12 +570,13 @@ class YouTubeBrowser:
         try:
             edit_btn = page.query_selector(SEL_EDIT_BTN)
             if edit_btn and edit_btn.is_visible():
-                logger.debug("Clicking 'Editar' to enter end screen mode")
+                logger.info("[ES] Clicking 'Editar' to enter end screen mode")
                 edit_btn.click()
                 human_delay(2.0, 4.0, "edit mode enter")
                 return True
         except Exception:
             pass
+        logger.info("[ES] Edit mode not needed — already in editor")
         return False
 
     def _check_existing_elements(self, page) -> int:
@@ -562,34 +608,40 @@ class YouTubeBrowser:
 
     def _click_add_button(self, page):
         """Click the button to open the add-element menu."""
-        page.evaluate("""() => {
+        found = page.evaluate("""() => {
             const btn = document.querySelector('#add-element-menu-button')
                 || document.querySelector('#add-endscreen-icon-button');
-            if (btn) btn.click();
+            if (btn) { btn.click(); return true; }
+            return false;
         }""")
+        logger.info("[ES] Add-element button %s", "clicked" if found else "NOT FOUND")
 
     def _click_menu_item(self, page, text: str):
         """Click a menu item by exact text match (text-based, not ID-based)."""
-        page.evaluate("""(text) => {
+        found = page.evaluate("""(text) => {
             const items = document.querySelectorAll('tp-yt-paper-item, paper-item');
             for (const item of items) {
                 if ((item.textContent || '').trim() === text && item.offsetParent) {
                     item.click();
-                    return;
+                    return true;
                 }
             }
+            return false;
         }""", text)
+        logger.info("[ES] Menu item '%s' %s", text, "clicked" if found else "NOT FOUND")
 
     def _handle_video_picker(self, page):
         """Handle the video picker dialog: select first option or close it."""
         try:
             dlg = page.query_selector('[role="dialog"], ytcp-dialog')
             if not dlg or not dlg.is_visible():
+                logger.info("[ES] No video picker dialog — skipped")
                 return
 
             human_delay(1.0, 2.0, "video picker visible")
+            logger.info("[ES] Video picker dialog detected — waiting for options")
             # Wait for content to load (up to 20s)
-            for _ in range(10):
+            for i in range(10):
                 option_count = page.evaluate("""() => {
                     const d = document.querySelector('[role="dialog"], ytcp-dialog');
                     if (!d || !d.offsetParent) return -1;
@@ -602,10 +654,10 @@ class YouTubeBrowser:
                     return n;
                 }""")
                 if option_count == -1:
-                    logger.debug("Video picker dialog closed")
+                    logger.info("[ES] Video picker dialog closed")
                     break
                 if option_count > 0:
-                    logger.debug("Video picker: %d options, selecting first", option_count)
+                    logger.info("[ES] Video picker: %d options found, selecting first", option_count)
                     page.evaluate("""() => {
                         const d = document.querySelector('[role="dialog"]');
                         const items = d.querySelectorAll(
@@ -619,6 +671,7 @@ class YouTubeBrowser:
                     }""")
                     human_delay(1.0, 2.0, "video option selected")
                     break
+                logger.debug("[ES] Video picker: waiting for options... (round %d)", i + 1)
                 time.sleep(2)
 
             # Dismiss dialog if still open
@@ -627,11 +680,13 @@ class YouTubeBrowser:
                 close_btn = dlg.query_selector('button:has-text("Cerrar")')
                 if close_btn and close_btn.is_visible():
                     close_btn.click()
+                    logger.info("[ES] Video picker closed via 'Cerrar' button")
             except Exception:
                 page.keyboard.press("Escape")
+                logger.info("[ES] Video picker dismissed via Escape")
 
         except Exception as e:
-            logger.debug("Video picker handling: %s", e)
+            logger.debug("[ES] Video picker handling: %s", e)
             try: page.keyboard.press("Escape")
             except Exception: pass
 
@@ -645,26 +700,27 @@ class YouTubeBrowser:
         }""")
 
         if not save_visible:
-            logger.warning("Save button not available for %s", video_id)
+            logger.warning("[ES] Save button not available for %s", video_id)
             page.close()
             return False
 
+        logger.info("[ES] Save button found and enabled — clicking...")
         human_delay(0.8, 2.0, "click save")
         page.evaluate("document.querySelector('#save-button')?.click()")
         human_delay(8.0, 16.0, "save processing")
 
         # Verify: save button disappears on success
-        for _ in range(10):
+        for i in range(10):
             gone = page.evaluate(
                 "() => !document.querySelector('#save-button')?.offsetParent"
             )
             if gone:
-                logger.info("End screens saved successfully for %s", video_id)
+                logger.info("[ES] ✅ End screens saved successfully for %s (confirmed at round %d)", video_id, i + 1)
                 page.close()
                 return True
             time.sleep(1)
 
-        logger.warning("Save button still visible after save for %s", video_id)
+        logger.warning("[ES] Save button still visible after save for %s — may not have applied", video_id)
         page.close()
         return False
 
