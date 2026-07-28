@@ -3412,8 +3412,8 @@ class ExtendedDatabase(Database):
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
                    WHERE ps.status = 'pending'
-                     AND ps.scheduled_at <= datetime('now', 'localtime')
-                   ORDER BY ps.scheduled_at ASC LIMIT 20"""
+                      AND ps.scheduled_at <= datetime('now')
+                    ORDER BY ps.scheduled_at ASC LIMIT 20"""
             ).fetchall()
         for row in rows:
             slot = dict(row)
@@ -3446,17 +3446,17 @@ class ExtendedDatabase(Database):
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
                    WHERE ps.status = 'pending'
-                      AND ps.date_key >= date('now', 'localtime')
+                       AND ps.date_key >= date('now', 'localtime')
                       AND (
                           -- Due slot: scheduled_at has passed
-                          ps.scheduled_at <= datetime('now', 'localtime')
+                          ps.scheduled_at <= datetime('now')
                           OR
                           -- Pull-forward: target upload is within the lead window
                           (ps.target_public_at IS NOT NULL
-                           AND ps.target_public_at <= datetime('now', 'localtime', ? || ' hours'))
+                           AND ps.target_public_at <= datetime('now', ? || ' hours'))
                       )
                    ORDER BY
-                      CASE WHEN ps.scheduled_at <= datetime('now', 'localtime') THEN 0 ELSE 1 END,
+                      CASE WHEN ps.scheduled_at <= datetime('now') THEN 0 ELSE 1 END,
                       COALESCE(ps.target_public_at, ps.target_upload_at) ASC
                    LIMIT 20""",
                 (f"+{max_future_hours}",),
@@ -3485,17 +3485,17 @@ class ExtendedDatabase(Database):
                    FROM planned_slots ps
                    JOIN channels c ON ps.channel_id = c.id
                    WHERE ps.status = 'pending'
-                     AND ps.date_key >= date('now', 'localtime')
-                     AND (
-                         ps.scheduled_at <= datetime('now', 'localtime')
-                         OR
-                         (ps.target_public_at IS NOT NULL
-                          AND ps.target_public_at <= datetime('now', 'localtime', ? || ' hours'))
-                     )
-                   ORDER BY
-                     CASE WHEN ps.scheduled_at <= datetime('now', 'localtime') THEN 0 ELSE 1 END,
-                     COALESCE(ps.target_public_at, ps.target_upload_at) ASC
-                   LIMIT ?""",
+                      AND ps.date_key >= date('now', 'localtime')
+                      AND (
+                          ps.scheduled_at <= datetime('now')
+                          OR
+                          (ps.target_public_at IS NOT NULL
+                           AND ps.target_public_at <= datetime('now', ? || ' hours'))
+                      )
+                    ORDER BY
+                      CASE WHEN ps.scheduled_at <= datetime('now') THEN 0 ELSE 1 END,
+                      COALESCE(ps.target_public_at, ps.target_upload_at) ASC
+                    LIMIT ?""",
                 (f"+{max_future_hours}", limit),
             ).fetchall()
         candidates = [dict(r) for r in rows]
@@ -3956,7 +3956,7 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM planned_slots "
                 "WHERE status = 'pending' "
-                "AND scheduled_at <= datetime('now', 'localtime')"
+                "AND scheduled_at <= datetime('now')"
             ).fetchone()
         return row["cnt"] if row else 0
     
@@ -4414,14 +4414,20 @@ class ExtendedDatabase(Database):
             return cursor.lastrowid
 
     def get_due_lifecycle_actions(self) -> list[dict]:
-        """Get all pending lifecycle actions whose scheduled_for has passed."""
+        """Get all pending lifecycle actions whose scheduled_for has passed.
+
+        scheduled_for is stored as ISO8601 UTC (with +00:00 suffix).
+        SQLite's datetime() strips timezone offsets, so the comparison
+        must use datetime('now') (UTC) — NOT 'localtime' which would
+        mis-compare UTC-stored times against local time (2h early in CEST).
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT vla.*, c.slug as channel_slug
                    FROM video_lifecycle_actions vla
                    JOIN channels c ON vla.channel_id = c.id
                    WHERE vla.status = 'pending'
-                     AND datetime(vla.scheduled_for) <= datetime('now','localtime')
+                     AND datetime(vla.scheduled_for) <= datetime('now')
                    ORDER BY vla.scheduled_for ASC
                    LIMIT 50""",
             ).fetchall()
@@ -4712,9 +4718,9 @@ class ExtendedDatabase(Database):
                    FROM shorts_planned_slots sps
                    JOIN channels c ON sps.channel_id = c.id
                    WHERE sps.status = 'pending'
-                      AND sps.date_key >= date('now', 'localtime')
-                      AND sps.scheduled_at <= datetime('now', 'localtime')
-                    ORDER BY COALESCE(sps.target_upload_at, sps.scheduled_at) ASC LIMIT 1"""
+                       AND sps.date_key >= date('now', 'localtime')
+                       AND sps.scheduled_at <= datetime('now')
+                     ORDER BY COALESCE(sps.target_upload_at, sps.scheduled_at) ASC LIMIT 1"""
             ).fetchone()
         return dict(row) if row else None
 

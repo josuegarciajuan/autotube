@@ -242,7 +242,7 @@ class VideoLifecycleManager:
 
         # ── 1. go_public: set video to public at target time ──
         if target_public_at:
-            self.db.create_lifecycle_action(
+            action_row_id = self.db.create_lifecycle_action(
                 video_id=db_video_id,
                 action_type="go_public",
                 channel_id=channel_id,
@@ -253,6 +253,62 @@ class VideoLifecycleManager:
             scheduled_count += 1
             logger.info("[%s] Scheduled go_public for video %d at %s",
                         self.slug, db_video_id, target_public_at)
+
+            # ── v11.x: Post-creation re-check — close the upload race window.
+            #     Re-query for same-channel go_public collisions now that our
+            #     action is committed. If another upload raced in and created
+            #     a go_public within SAME_CHANNEL_GAP_HOURS of ours, push ours.
+            try:
+                from datetime import datetime as _dt3, timedelta as _td3
+                target_dt3 = _dt3.fromisoformat(
+                    target_public_at.replace("Z", "+00:00").replace(" ", "T"))
+                if target_dt3.tzinfo is None:
+                    target_dt3 = target_dt3.replace(tzinfo=timezone.utc)
+                min_gap = _td3(hours=SAME_CHANNEL_GAP_HOURS)
+                with self.db._connect() as conn:
+                    nearby_rows = conn.execute(
+                        """SELECT vla.id, vla.scheduled_for
+                           FROM video_lifecycle_actions vla
+                           WHERE vla.channel_id = ?
+                             AND vla.action_type = 'go_public'
+                             AND vla.status = 'pending'
+                             AND vla.id != ?
+                           ORDER BY vla.scheduled_for DESC
+                           LIMIT 5""",
+                        (channel_id, action_row_id),
+                    ).fetchall()
+
+                adjusted = False
+                for (other_id, other_sf) in nearby_rows:
+                    if not other_sf:
+                        continue
+                    try:
+                        other_dt = _dt3.fromisoformat(
+                            other_sf.replace("Z", "+00:00"))
+                        if other_dt.tzinfo is None:
+                            other_dt = other_dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+                    gap = target_dt3 - other_dt
+                    if abs(gap) < min_gap:
+                        new_target = other_dt + min_gap
+                        warmup_dt3 = datetime.now(timezone.utc) + timedelta(minutes=120)
+                        new_target = max(new_target, warmup_dt3)
+                        target_public_at = new_target.isoformat()
+                        self.db.update_lifecycle_action_status(
+                            action_row_id, "pending",
+                            scheduled_for=target_public_at)
+                        logger.warning(
+                            "[%s] POST-CHECK COLLISION: go_public for video %d "
+                            "within %dh of action #%d (upload race). Pushed to %s.",
+                            self.slug, db_video_id,
+                            SAME_CHANNEL_GAP_HOURS, other_id,
+                            target_public_at)
+                        adjusted = True
+                        break
+            except Exception as e:
+                logger.debug("[%s] Post-creation collision re-check skipped: %s",
+                             self.slug, e)
 
             # ── 2. Playlist add: 1 min after go_public (i.e., after public) ──
             from datetime import datetime as _dt, timedelta as _td
@@ -428,6 +484,10 @@ class VideoLifecycleManager:
         processed, succeeded, failed = 0, 0, 0
         by_type = {}  # action_type → {succeeded, failed}
         now_iso = datetime.now(timezone.utc).isoformat()
+        # Track go_public executed in this batch to prevent same-channel
+        # simultaneous publishing (two videos going public at the same instant).
+        go_public_executed_this_batch = False  # per-channel singleton
+        SAME_CHANNEL_PUBLISH_GAP_HOURS = 3
 
         logger.info("[%s] 📋 Procesando %d acciones lifecycle pendientes", self.slug, len(due_actions))
 
@@ -445,6 +505,39 @@ class VideoLifecycleManager:
                 failed += 1
                 continue
 
+            # ── go_public collision guard: prevent two same-channel videos
+            #     from going public simultaneously in this same batch.
+            if action_type == "go_public":
+                if go_public_executed_this_batch:
+                    # Another go_public for this channel already executed in
+                    # this batch. Reschedule this one to +3h later.
+                    other_scheduled = action.get("scheduled_for")
+                    try:
+                        if other_scheduled:
+                            other_dt = datetime.fromisoformat(
+                                other_scheduled.replace("Z", "+00:00").replace(" ", "T"))
+                            if other_dt.tzinfo is None:
+                                other_dt = other_dt.replace(tzinfo=timezone.utc)
+                        else:
+                            other_dt = datetime.now(timezone.utc)
+                    except Exception:
+                        other_dt = datetime.now(timezone.utc)
+                    new_scheduled = (other_dt + timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)).isoformat()
+                    self.db.update_lifecycle_action_status(
+                        action_id, "pending",
+                        scheduled_for=new_scheduled,
+                        retry_count=action.get("retry_count", 0),
+                    )
+                    logger.warning(
+                        "[%s] COLLISION GUARD (batch): skipping go_public action #%d — "
+                        "another go_public already executed in this batch. "
+                        "Rescheduled to %s.",
+                        self.slug, action_id, new_scheduled,
+                    )
+                    # Count as skipped (not failed)
+                    processed += 1
+                    continue
+
             try:
                 success = self._dispatch(action)
                 if success:
@@ -452,6 +545,8 @@ class VideoLifecycleManager:
                         action_id, "executed", executed_at=now_iso,
                     )
                     succeeded += 1
+                    if action_type == "go_public":
+                        go_public_executed_this_batch = True
                     by_type[action_type] = by_type.get(action_type, {"succeeded": 0, "failed": 0})
                     by_type[action_type]["succeeded"] += 1
                 else:
