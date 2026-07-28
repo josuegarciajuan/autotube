@@ -156,11 +156,12 @@ def main():
         print(f"\n{total_total} items would be processed.")
         return
 
-    from pipeline.youtube_browser import get_browser
+    from pipeline.youtube_browser import get_browser, close_all_browsers
 
     for account, items in by_account.items():
         logger.info(f"Processing {len(items)} items for account: {account}")
         browser = get_browser(account)
+        consecutive_browser_failures = 0
 
         for i, item in enumerate(items, 1):
             yt_id = item["yt_video_id"]
@@ -178,12 +179,28 @@ def main():
             success = browser.mark_altered_content(yt_id)
 
             if success:
+                consecutive_browser_failures = 0
                 mark_in_db(DB_PATH, source_type, db_id, yt_id)
                 total_done += 1
                 logger.info(f"[{total_done}/{total_total}] DONE {canal}:{yt_id}")
             else:
                 total_failed += 1
                 logger.warning(f"[{total_done}/{total_total}] FAILED {canal}:{yt_id}")
+                # If browser context is broken (dead/crashed/in-use), recreate it
+                # for the next video instead of reusing a broken session.
+                consecutive_browser_failures += 1
+                if consecutive_browser_failures >= 2:
+                    logger.warning("Browser session appears broken after %d consecutive "
+                                   "failures — recreating browser for %s",
+                                   consecutive_browser_failures, account)
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                    close_all_browsers()
+                    time.sleep(2)
+                    browser = get_browser(account)
+                    consecutive_browser_failures = 0
 
             # Human-like delay between videos (skip on last)
             if i < len(items):

@@ -197,6 +197,7 @@ class YouTubeBrowser:
         try:
             lock_content = lock_file.read_text().strip()
             if not lock_content:
+                self._remove_singleton_files()
                 return
             lock_pid = lock_content.split(":")[-1]
             pid = int(lock_pid)
@@ -204,7 +205,11 @@ class YouTubeBrowser:
             try:
                 os.kill(pid, 0)
             except (OSError, ValueError):
-                # PID is dead — just clean the stale lock files
+                # PID is dead — but there may still be orphan renderer/GPU
+                # processes holding file handles on the profile directory.
+                # Kill them all before launching a fresh browser.
+                logger.info("Lock PID %s is dead for %s — cleaning orphans", pid, self.account)
+                self._kill_profile_orphans()
                 self._remove_singleton_files()
                 logger.info("Cleaned stale browser locks (dead PID %s) for %s", pid, self.account)
                 return
@@ -219,7 +224,8 @@ class YouTubeBrowser:
                 try:
                     os.kill(pid, 0)
                 except OSError:
-                    # PID died while we waited
+                    # PID died while we waited — kill orphans + clean locks
+                    self._kill_profile_orphans()
                     self._remove_singleton_files()
                     logger.info("Lock released after %.0fs for %s", (attempt + 1) * 2, self.account)
                     return
@@ -229,19 +235,45 @@ class YouTubeBrowser:
                 os.kill(pid, 9)
             except OSError:
                 pass
-            # Also kill any other Chrome processes using this profile
-            import subprocess
-            try:
-                subprocess.run(
-                    ["pkill", "-9", "-f", str(self.user_data_dir)],
-                    capture_output=True, timeout=10,
-                )
-            except Exception:
-                pass
+            self._kill_profile_orphans()
             time.sleep(1)
             self._remove_singleton_files()
         except Exception as e:
             logger.debug("Lock check skipped: %s", e)
+
+    def _kill_profile_orphans(self):
+        """Kill all Chrome processes using this account's browser profile.
+
+        Handles zombie renderers, GPU processes, and crashed browser instances
+        that survived after the main browser PID died or was reused.
+        """
+        profile_dir = str(self.user_data_dir)
+        import subprocess
+        try:
+            # pgrep is faster and more reliable than pkill -f
+            r = subprocess.run(
+                ["pgrep", "-f", profile_dir],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip():
+                pids = r.stdout.strip().split()
+                logger.debug("Found %d orphan processes for %s: %s",
+                             len(pids), self.account, " ".join(pids))
+                subprocess.run(
+                    ["kill", "-9"] + pids,
+                    capture_output=True, timeout=5,
+                )
+        except subprocess.TimeoutExpired:
+            logger.debug("pgrep timed out for %s — falling back to pkill", self.account)
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-f", profile_dir],
+                    capture_output=True, timeout=8,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _remove_singleton_files(self):
         """Delete Chromium singleton lock files for this account's profile."""
