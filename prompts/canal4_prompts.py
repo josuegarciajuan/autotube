@@ -464,9 +464,22 @@ FASE 1 — EL GOLPE (0:00-0:15):
   - SIEMPRE: un DATO DEMOLEDOR, un HECHO CONCRETO con FECHA y NUMERO, o un CLIFFHANGER.
   - Ej: "El 19 de mayo de 1845, 129 hombres zarparon hacia el Artico. Ninguno volvio."
 
-FASE 2 — LA PROMESA (0:15-0:45):
+FASE 2 — LA PROMESA (0:15-0:30):
   - Enumera EXPLICITAMENTE lo que el espectador va a descubrir si se queda.
   - Crea un "contrato narrativo" en 3 puntos.
+
+FASE 2.5 — FRASE DE RETENCION (0:30-0:45):
+  - AÑADE UNA frase explicita que invite al espectador a quedarse hasta el final del video.
+  - Debe ser CONTEXTUAL, distinta en cada video, conectada con la historia que estas contando.
+  - La frase debe sonar natural, como si se la dijeras a alguien que esta a punto de irse.
+  - EJEMPLOS (NO los copies textualmente, inspirate y adaptalos):
+    "Si quieres saber que paso realmente esa noche, quedate hasta el final."
+    "Si quieres descubrir como termina esta historia, no te vayas."
+    "Quedate, porque lo que viene es aun mas increible."
+    "Quedate conmigo, porque en unos minutos vas a entenderlo todo."
+    "Si te vas ahora, te perderas lo mas impactante de esta historia."
+  - NUNCA uses la misma frase que en otros videos. Debe ser unica y adaptada al tema.
+  - Coloca esta frase INMEDIATAMENTE despues de enumerar los 3 puntos de la promesa, como cierre de la FASE 2.
 
 FASE 3 — PRIMERA REVELACION (0:45-1:30):
   - Suelta YA informacion fascinante y CONCRETA. No te la guardes para el final.

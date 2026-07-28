@@ -220,7 +220,16 @@ SCRIPT_HOOK_RULE = (
     "con un dolor de cabeza. 72 horas despues, 14 medicos de 3 paises "
     "seguian sin saber que tenia.'\n"
     "EJEMPLO INCORRECTO: 'Las enfermedades raras afectan a millones de "
-    "personas en todo el mundo y son un desafio para la medicina moderna...'"
+    "personas en todo el mundo y son un desafio para la medicina moderna...'.\n\n"
+    "RETENCION: Justo DESPUES del primer minuto del guion, DEBES incluir una "
+    "frase de retencion explicita que invite al espectador a quedarse hasta "
+    "el final del video. Debe ser CONTEXTUAL y DISTINTA en cada guion. "
+    "Ejemplos orientativos (NO los copies, el LLM debe generar uno nuevo): "
+    "'Si quieres saber que paso despues, quedate hasta el final', "
+    "'Si quieres conocer como termina esta historia, no te vayas', "
+    "'Quedate, porque lo que viene a continuacion es aun mas increible'. "
+    "Esta frase debe colocarse inmediatamente despues de enumerar lo que el "
+    "espectador va a descubrir, como cierre de la introduccion."
 )
 
 # 7-step structure with retention anchors

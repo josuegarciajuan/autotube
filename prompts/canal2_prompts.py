@@ -565,7 +565,7 @@ FASE 1 — EL GOLPE (0:00-0:15):
   - Si el contenido lo permite, incluye un número exacto: "El 14 de enero de 1998, 3 médicos..."
   - Esta frase es lo ÚNICO que muchos espectadores leerán/oirán antes de decidir.
 
-FASE 2 — LA PROMESA (0:15-0:45):
+FASE 2 — LA PROMESA (0:15-0:30):
   - Enumera EXPLÍCITAMENTE lo que el espectador va a descubrir si se queda.
   - Crea un "contrato narrativo" en 3 puntos:
     "En los próximos minutos vas a descubrir: 
@@ -573,6 +573,19 @@ FASE 2 — LA PROMESA (0:15-0:45):
     [2] qué mostraban los monitores que ningún médico se atrevió a documentar, y 
     [3] por qué el informe final fue clasificado."
   - El espectador YA sabe lo que gana. Esto dispara el Zeigarnik Effect: ahora NECESITA completar.
+
+FASE 2.5 — FRASE DE RETENCIÓN (0:30-0:45):
+  - AÑADE UNA frase explícita que invite al espectador a quedarse hasta el final del video.
+  - Debe ser CONTEXTUAL, distinta en cada video, conectada con la historia que estás contando.
+  - La frase debe sonar natural, como si se la dijeras a alguien que está a punto de irse.
+  - EJEMPLOS (NO los copies textualmente, inspírate y adáptalos):
+    "Si quieres saber qué pasó realmente esa noche, quédate hasta el final."
+    "Si quieres descubrir cómo termina esta historia, no te vayas."
+    "Quédate, porque lo que viene es aún más increíble."
+    "Quédate conmigo, porque en unos minutos vas a entenderlo todo."
+    "Si te vas ahora, te perderás lo más impactante de esta historia."
+  - NUNCA uses la misma frase que en otros videos. Debe ser única y adaptada al tema.
+  - Coloca esta frase INMEDIATAMENTE después de enumerar los 3 puntos de la promesa, como cierre de la FASE 2.
 
 FASE 3 — PRIMERA REVELACIÓN (0:45-1:30):
   - Suelta YA información fascinante y CONCRETA. No te la guardes para el final.

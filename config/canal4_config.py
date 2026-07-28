@@ -216,7 +216,16 @@ SCRIPT_HOOK_RULE = (
     "Inglaterra en dos barcos de ultima generacion. Ninguno volvio a ver "
     "a su familia jamas.'\n"
     "EJEMPLO INCORRECTO: 'Las expediciones polares del siglo XIX fueron "
-    "un periodo de intensa exploracion artica que...'"
+    "un periodo de intensa exploracion artica que...'.\n\n"
+    "RETENCION: Justo DESPUES del primer minuto del guion, DEBES incluir una "
+    "frase de retencion explicita que invite al espectador a quedarse hasta "
+    "el final del video. Debe ser CONTEXTUAL y DISTINTA en cada guion. "
+    "Ejemplos orientativos (NO los copies, el LLM debe generar uno nuevo): "
+    "'Si quieres saber que paso despues, quedate hasta el final', "
+    "'Si quieres conocer como termina esta historia, no te vayas', "
+    "'Quedate, porque lo que viene a continuacion es aun mas increible'. "
+    "Esta frase debe colocarse inmediatamente despues de enumerar lo que el "
+    "espectador va a descubrir, como cierre de la introduccion."
 )
 
 # 7-step structure with retention anchors

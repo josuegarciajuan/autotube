@@ -2063,10 +2063,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         Flags:
         - Weak opening phrases ("En este video vamos a...")
         - First sentence not impactful enough
+        - Missing retention phrase in introduction
         """
         issues = []
+        result = {"issues": issues}
         if not all_bloques:
-            return {"issues": issues}
+            return result
 
         first_block_text = all_bloques[0].get("texto", "") if all_bloques else ""
 
@@ -2092,7 +2094,32 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         if "?" not in early_texts and "!" not in early_texts:
             issues.append("Primeros bloques no contienen preguntas ni exclamaciones — posible falta de gancho emocional")
 
-        return {"issues": issues}
+        # Check for retention phrase in introduction blocks (first ~5 blocks)
+        intro_text = " ".join(b.get("texto", "") for b in all_bloques[:5]).lower()
+        retention_patterns = [
+            r"qu[eé]date",           # "quédate", "quedate"
+            r"no\s+te\s+vayas",      # "no te vayas"
+            r"sigue\s+conmigo",      # "sigue conmigo"
+            r"no\s+te\s+pierdas",    # "no te pierdas"
+            r"espera\s+a\s+ver",     # "espera a ver"
+            r"acomp[aá][ñn]ame",     # "acompañame", "acompaname"
+            r"no\s+te\s+lo\s+pierdas", # "no te lo pierdas"
+            r"descubre\s+(c[oó]mo|qu[eé]|por\s+qu[eé])", # "descubre cómo/que/por qué"
+            r"vas\s+a\s+(querer|necesitar)\s+(ver|saber)", # "vas a querer/necesitar ver/saber"
+            r"te\s+lo\s+vas\s+a\s+perder", # "te lo vas a perder"
+        ]
+        has_retention = any(re.search(p, intro_text) for p in retention_patterns)
+        if not has_retention:
+            issues.append(
+                "No se detecta frase de retencion explicita en los primeros bloques "
+                "— el gancho podria ser debil. Debe incluir una frase que invite al "
+                "espectador a quedarse (ej: 'quedate hasta el final', 'no te vayas', "
+                "'sigue conmigo', etc.)"
+            )
+            # Mark the first paragraph as weak to trigger regeneration
+            result["weak_hook_para"] = all_bloques[0].get("paragraph_idx", 0)
+
+        return result
 
     def _regenerate_problematic_paragraphs(
         self, enriched: dict, check_result: dict, content_item: dict,

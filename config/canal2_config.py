@@ -233,7 +233,16 @@ SCRIPT_HOOK_RULE = (
     "EJEMPLO CORRECTO: 'El 4 de diciembre de 1971, 300 personas se salvaron "
     "de morir porque una mujer soñó con un accidente aéreo tres días antes.'\n"
     "EJEMPLO INCORRECTO: 'Las casualidades son eventos que ocurren sin una "
-    "causa aparente y han fascinado a la humanidad durante siglos...'"
+    "causa aparente y han fascinado a la humanidad durante siglos...'.\n\n"
+    "RETENCIÓN: Justo DESPUÉS del primer minuto del guion, DEBES incluir una "
+    "frase de retención explícita que invite al espectador a quedarse hasta "
+    "el final del video. Debe ser CONTEXTUAL y DISTINTA en cada guion. "
+    "Ejemplos orientativos (NO los copies, el LLM debe generar uno nuevo): "
+    "'Si quieres saber qué pasó después, quédate hasta el final', "
+    "'Si quieres conocer cómo termina esta historia, no te vayas', "
+    "'Quédate, porque lo que viene a continuación es aún más increíble'. "
+    "Esta frase debe colocarse inmediatamente después de enumerar lo que el "
+    "espectador va a descubrir, como cierre de la introducción."
 )
 
 # 7-step structure with retention anchors
@@ -799,6 +808,16 @@ SHORTS_HASHTAGS = [
     "#Casualidades",
     "#LoInexplicable",
     "#HistoriasReales",
+]
+
+# ── Subscribe CTA variants (rotated, ~40% of native shorts) ──
+SHORTS_SUBSCRIBE_CTA_VARIANTS = [
+    "Suscríbete para más historias como esta",
+    "Dale like y suscríbete si quieres más",
+    "En nuestro canal hay muchas más como esta",
+    "Suscríbete y activa la campana para no perderte nada",
+    "Si te gustó, suscríbete. Publicamos a diario.",
+    "Únete al canal, cada día hay algo nuevo",
 ]
 
 # ── Cross-promotion ──────────────────────────────────────────
