@@ -47,3 +47,8 @@ CREATE INDEX IF NOT EXISTS idx_alerts_active ON pipeline_alerts(acknowledged, re
 CREATE INDEX IF NOT EXISTS idx_alerts_entity ON pipeline_alerts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON pipeline_alerts(severity, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_channel ON pipeline_alerts(channel_id, created_at);
+
+-- ── Guard: only one unresolved alert per entity+type ──────────
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_unique_active 
+ON pipeline_alerts(entity_type, entity_id, alert_type) 
+WHERE resolved = 0;

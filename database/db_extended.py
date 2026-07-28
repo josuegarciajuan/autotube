@@ -1189,6 +1189,34 @@ def _migrate_v18(conn, logger):
             conn.executescript(f.read())
         conn.commit()
         logger.info("Migration v18: lifecycle_events and pipeline_alerts tables created")
+
+        # ── Backfill suppression: seed acknowledged alerts for pre-existing error videos ──
+        # Without this, the health monitor would create a critical alert for every video
+        # that was already in error status before monitoring was deployed (backfill explosion).
+        existing_errors = conn.execute(
+            "SELECT id, channel_id FROM videos WHERE status = 'error'"
+        ).fetchall()
+        if existing_errors:
+            seeded = 0
+            for row in existing_errors:
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO pipeline_alerts
+                           (entity_type, entity_id, channel_id, alert_type, severity,
+                            title, message, acknowledged, resolved, resolved_at, created_at)
+                           VALUES ('video', ?, ?, 'failed', 'critical',
+                                   'Pre-existing error (seeded on v18 migration)',
+                                   'Video was already in error status before monitoring system deployment. '
+                                   'This alert is pre-seeded as resolved to prevent backfill noise.',
+                                   1, 1, datetime('now'), datetime('now'))""",
+                        (row["id"], row["channel_id"]),
+                    )
+                    seeded += conn.total_changes
+                except Exception:
+                    pass
+            conn.commit()
+            if seeded > 0:
+                logger.info("Migration v18: seeded %d acknowledged alerts for pre-existing error videos", seeded)
     else:
         logger.warning("Migration v18: schema_v18.sql not found")
 
