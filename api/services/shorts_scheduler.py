@@ -863,6 +863,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     Returns short_id or None on failure.
     """
     import json
+    import random
     import re
     import subprocess
     import time
@@ -959,6 +960,19 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
+    # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
+    has_subscribe_cta = False
+    cta_variants = getattr(ch_config, "SHORTS_SUBSCRIBE_CTA_VARIANTS", [])
+    if cta_variants and random.random() < 0.4:
+        cta_text = random.choice(cta_variants)
+        bloques.append({
+            "tipo": "subscribe_cta",
+            "texto": cta_text,
+            "search_query_en": "subscribe button youtube channel notification bell",
+        })
+        has_subscribe_cta = True
+        logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
+
     # 2. Segmented TTS
     output_dir = OUTPUT_DIR / "videos" / "shorts"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -988,7 +1002,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     theme_kw = script.get("theme_keywords_en", [])
     asset_items = []
     try:
-        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id)
+        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id, channel_slug=channel_slug)
         logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
@@ -1076,10 +1090,11 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     cursor = conn.execute(
         """INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text, topic,
-            status, file_path, youtube_id, youtube_url, published_at)
-           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
+            status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta)
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?)""",
         (channel_id, title, title[:60], hook_text, topic,
-         str(video_path), yt_id, result.get("url", "")),
+         str(video_path), yt_id, result.get("url", ""),
+         int(has_subscribe_cta)),
     )
     short_id = cursor.lastrowid
     conn.commit()

@@ -315,6 +315,14 @@ def migrate_v2(db_path: str = None):
         except sqlite3.OperationalError:
             pass
 
+    # Add has_subscribe_cta column to shorts for native short CTA tracking (idempotent)
+    if "has_subscribe_cta" not in existing_shorts:
+        try:
+            conn.execute("ALTER TABLE shorts ADD COLUMN has_subscribe_cta BOOLEAN DEFAULT 0")
+            logger.info("Migration: added has_subscribe_cta column to shorts")
+        except sqlite3.OperationalError:
+            pass
+
     # Add estimated_minutes_watched to channel_stats_history (idempotent)
     existing_csh = {row[1] for row in conn.execute("PRAGMA table_info(channel_stats_history)").fetchall()}
     if "estimated_minutes_watched" not in existing_csh:
@@ -4258,6 +4266,15 @@ class ExtendedDatabase(Database):
                    ORDER BY c.name"""
             ).fetchall():
                 per_channel.append(dict(row))
+        # ── Subscribe CTA stats ──
+        cta_count = conn.execute(
+            "SELECT COUNT(*) as c FROM shorts WHERE has_subscribe_cta = 1 AND status = 'published'"
+        ).fetchone()["c"]
+        native_published = conn.execute(
+            "SELECT COUNT(*) as c FROM shorts WHERE type = 'native' AND status = 'published'"
+        ).fetchone()["c"]
+        cta_pct = round(cta_count / max(native_published, 1) * 100, 1)
+
         return {
             "total": total,
             "published": published,
@@ -4268,6 +4285,9 @@ class ExtendedDatabase(Database):
             "total_likes": yt_stats["total_likes"] if yt_stats else 0,
             "total_comments": yt_stats["total_comments"] if yt_stats else 0,
             "per_channel": per_channel,
+            "cta_count": cta_count,
+            "native_published": native_published,
+            "cta_pct": cta_pct,
         }
 
     def get_channel_shorts_stats(self, channel_id: int) -> dict:
@@ -4291,6 +4311,17 @@ class ExtendedDatabase(Database):
                 (channel_id,)
             ).fetchone()
 
+            cta_count = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE channel_id = ? AND has_subscribe_cta = 1 AND status = 'published'",
+                (channel_id,)
+            ).fetchone()["c"]
+            native_published_count = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE channel_id = ? AND type = 'native' AND status = 'published'",
+                (channel_id,)
+            ).fetchone()["c"]
+
+        cta_pct = round(cta_count / max(native_published_count, 1) * 100, 1)
+
         return {
             "total": sum(counts.values()),
             "published": counts.get("published", 0),
@@ -4301,6 +4332,9 @@ class ExtendedDatabase(Database):
             "total_views": yt_stats["total_views"] if yt_stats else 0,
             "total_likes": yt_stats["total_likes"] if yt_stats else 0,
             "total_comments": yt_stats["total_comments"] if yt_stats else 0,
+            "cta_count": cta_count,
+            "native_published": native_published_count,
+            "cta_pct": cta_pct,
         }
     
     def get_channel_videos_aggregate(self, channel_id: int) -> dict:

@@ -66,9 +66,11 @@ _DEFAULT_RATES: dict[str, str] = {
     "desarrollo3": "-10%",
     "climax":      "-15%",
     "cierre":      "-5%",
+    "subscribe_cta": "-5%",
 }
 _DEFAULT_PITCHES: dict[str, str] = {
     "climax": "+2Hz",
+    "subscribe_cta": "+0Hz",
 }
 
 
@@ -220,8 +222,9 @@ async def _synthesize_block(
 def validate_short_script(script: dict) -> list[str]:
     """Verify that a Short script JSON is structurally sound.
 
-    Accepts 5-7 blocks: hook, desarrollo1, desarrollo2, [desarrollo3],
-    climax, cierre. The LLM decides how many desarrollo blocks to use.
+    Accepts 5-8 blocks: hook, desarrollo1, desarrollo2, [desarrollo3],
+    climax, cierre, [subscribe_cta]. The LLM decides how many desarrollo blocks
+    to use. subscribe_cta is appended programmatically ~40% of the time.
 
     Returns a list of error messages (empty = valid).
     """
@@ -235,22 +238,22 @@ def validate_short_script(script: dict) -> list[str]:
     found_types = [b.get("tipo") for b in bloques]
     n = len(found_types)
 
-    # Must have at least 5 blocks, at most 7
+    # Must have at least 5 blocks, at most 8 (with optional subscribe_cta)
     if n < 5:
-        errors.append(f"Expected 5-7 blocks, got {n} (too few)")
-    if n > 7:
-        errors.append(f"Expected 5-7 blocks, got {n} (too many)")
+        errors.append(f"Expected 5-8 blocks, got {n} (too few)")
+    if n > 8:
+        errors.append(f"Expected 5-8 blocks, got {n} (too many)")
 
     # First block must be hook
     if found_types and found_types[0] != "hook":
         errors.append(f"First block must be 'hook', got '{found_types[0]}'")
 
-    # Last block must be cierre
-    if found_types and found_types[-1] != "cierre":
-        errors.append(f"Last block must be 'cierre', got '{found_types[-1]}'")
+    # Last block must be cierre or subscribe_cta
+    if found_types and found_types[-1] not in ("cierre", "subscribe_cta"):
+        errors.append(f"Last block must be 'cierre' or 'subscribe_cta', got '{found_types[-1]}'")
 
     # All blocks must have valid types
-    valid_types = {"hook", "desarrollo1", "desarrollo2", "desarrollo3", "climax", "cierre"}
+    valid_types = {"hook", "desarrollo1", "desarrollo2", "desarrollo3", "climax", "cierre", "subscribe_cta"}
     for b in bloques:
         tipo = b.get("tipo", "?")
         texto = b.get("texto", "")

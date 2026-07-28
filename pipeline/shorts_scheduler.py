@@ -432,6 +432,17 @@ class ShortsScheduler:
 
         conn.close()
 
+        # ── Subscribe CTA stats ──
+        conn = self._get_conn()
+        cta_count = conn.execute(
+            "SELECT COUNT(*) as c FROM shorts WHERE has_subscribe_cta = 1 AND status = 'published'"
+        ).fetchone()["c"]
+        native_published = conn.execute(
+            "SELECT COUNT(*) as c FROM shorts WHERE type = 'native' AND status = 'published'"
+        ).fetchone()["c"]
+        cta_pct = round(cta_count / max(native_published, 1) * 100, 1)
+        conn.close()
+
         return {
             "total": total,
             "published": published,
@@ -444,4 +455,7 @@ class ShortsScheduler:
             "total_likes": yt_stats["total_likes"] if yt_stats else 0,
             "total_comments": yt_stats["total_comments"] if yt_stats else 0,
             "per_channel": per_channel,
+            "cta_count": cta_count,
+            "native_published": native_published,
+            "cta_pct": cta_pct,
         }

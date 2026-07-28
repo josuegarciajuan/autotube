@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS shorts (
     thumbnail_path TEXT,                  -- Thumbnail path
     ranking INTEGER,                      -- 1-5, impact rank (1 = most impactful)
     topic TEXT,                           -- Short topic/theme (for dedup across native shorts)
+    has_subscribe_cta BOOLEAN DEFAULT 0,  -- Whether this short includes a subscribe CTA block
     error_message TEXT,                   -- Error details if failed
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),

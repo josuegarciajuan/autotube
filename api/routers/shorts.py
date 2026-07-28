@@ -848,7 +848,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
 
     asset_items = []
     try:
-        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id)
+        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id, channel_slug=channel_slug)
         logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)

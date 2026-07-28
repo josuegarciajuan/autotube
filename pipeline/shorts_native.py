@@ -153,8 +153,15 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
 
         return []
 
-    def _phase_script_short(self, content_item: dict) -> Optional[dict]:
-        """Generate a 30-90 second script for a Short."""
+    def _phase_script_short(self, content_item: dict, include_subscribe_cta: bool = False) -> Optional[dict]:
+        """Generate a 30-90 second script for a Short.
+
+        Args:
+            content_item: dict with at least 'title' key
+            include_subscribe_cta: if True, cierre should NOT include subscription
+                                   language (a separate subscribe_cta block will be
+                                   appended programmatically by the caller).
+        """
         from config.llm_client import create_llm_client
         from config.settings import LLM_MODEL
 
@@ -162,6 +169,12 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
 
         niche = getattr(self.config, "CANAL_NARRATIVE_STYLE", "documental")
         display_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.channel_slug)
+
+        # Cierre: natural conclusion (no subscription text if caller will add subscribe_cta)
+        if include_subscribe_cta:
+            cierre_desc = "6. cierre (3-5 seg) — conclusión natural del short, SIN pedir suscripción"
+        else:
+            cierre_desc = "6. cierre (3-5 seg) — cierre natural"
 
         prompt = f"""Crea un guion para YouTube Shorts (~40-50 segundos de narración, ~55-70 palabras en español).
 
@@ -176,7 +189,7 @@ Usa entre 5 y 7 bloques narrativos:
 3. desarrollo2 (7-10 seg) — dato más impactante, comparaciones
 4. desarrollo3 (opcional, 5-8 seg) — detalle adicional si el tema lo justifica
 5. climax (5-8 seg) — consecuencia, revelación o misterio
-6. cierre (3-5 seg) — "suscríbete para más"
+{cierre_desc}
 
 IMPORTANTE — BÚSQUEDA DE ASSETS (imágenes y videos):
 - Para CADA bloque, genera "search_query_en" con 5-8 keywords EN INGLÉS que describan
@@ -272,7 +285,7 @@ NADA MAS fuera del JSON."""
             return []
 
         try:
-            assets = fetch_short_assets_exhaustive(bloques, self.config, theme_kw, channel_id)
+            assets = fetch_short_assets_exhaustive(bloques, self.config, theme_kw, channel_id, channel_slug=self.channel_slug)
             logger.info("Fetched %d assets for native Short (blocks=%d)", len(assets), len(bloques))
             return assets
         except Exception as e:

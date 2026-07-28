@@ -719,6 +719,7 @@ def fetch_short_assets_exhaustive(
     theme_keywords: list[str] | None = None,
     channel_id: int = 0,
     video_ratio: float | None = None,
+    channel_slug: str = "",
 ) -> list[dict[str, Any]]:
     """Fetch ONE asset per block with video/image mix strategy.
 
@@ -735,6 +736,7 @@ def fetch_short_assets_exhaustive(
         theme_keywords: Global theme keywords for query building.
         channel_id: Channel DB id (for flushing asset history).
         video_ratio: Override fraction of blocks that should get video (default 0.55).
+        channel_slug: Channel slug for avatar fallback (subscribe CTA blocks).
 
     Returns:
         List of asset dicts, one per block (1:1 mapping). Blocks that couldn't
@@ -840,6 +842,27 @@ def fetch_short_assets_exhaustive(
             style_modifiers=style_mod,
         )
         assets[i] = asset
+
+    # ── Subscribe CTA fallback: use channel avatar if no stock asset found ──
+    for i, block in enumerate(blocks):
+        if block.get("tipo") == "subscribe_cta" and assets[i] is None and channel_slug:
+            avatar_path = Path("output") / "thumbnails" / channel_slug / "avatar.jpg"
+            if avatar_path.exists():
+                assets[i] = {
+                    "path": str(avatar_path),
+                    "type": "image",
+                    "source": "local_avatar",
+                    "url": "",
+                    "img_id": f"avatar_{channel_slug}",
+                    "duration": block.get("duracion_sec", 4),
+                    "block_type": "subscribe_cta",
+                    "block_text": block.get("texto", []),
+                }
+                logger.info("  [%d/%d] subscribe_cta → channel avatar fallback: %s",
+                           i + 1, n_blocks, avatar_path)
+            else:
+                logger.warning("  [%d/%d] subscribe_cta → no avatar found at %s (will use solid bg)",
+                             i + 1, n_blocks, avatar_path)
 
     # ── Summary ───────────────────────────────────────────────
     success_count = sum(1 for a in assets if a is not None)
