@@ -1738,6 +1738,7 @@ class PipelineOrchestrator:
                     pass
 
             # ── Post-upload: schedule lifecycle promotion actions ──
+            channel_id_for_lifecycle = None  # init outside try — also used by playlist code below
             if not skip_lifecycle_scheduling:
                 try:
                     from pipeline.video_lifecycle import VideoLifecycleManager
@@ -1772,54 +1773,64 @@ class PipelineOrchestrator:
             else:
                 logger.debug("[%s] Lifecycle scheduling skipped (caller handles it)", self.canal)
 
+            # ── Fallback: get channel id if lifecycle block didn't set it ──
+            if channel_id_for_lifecycle is None:
+                try:
+                    channel_id_for_lifecycle = self._get_channel_id()
+                except Exception:
+                    pass
+
             # ── Post-upload: add video to the selected playlist ──
-            try:
-                db_vid = db_video_id or self.db_video_id
-                if db_vid:
-                    vid_record = self.db.get_video(db_vid)
-                    tgt_slug = vid_record.get("target_playlist_slug") if vid_record else None
-                    tgt_playlist_db_id = vid_record.get("target_playlist_id") if vid_record else None
-                    if tgt_slug and video_id:
-                        from pipeline.youtube_playlists import YouTubePlaylistManager
-                        pl_mgr = YouTubePlaylistManager(self.canal)
-                        pl_mgr.authenticate()
-                        result = pl_mgr.add_video_to_playlist_by_slug(
-                            video_id, tgt_slug,
-                            channel_id=channel_id_for_lifecycle
-                        )
-                        if result.get("was_already_present"):
-                            logger.info("[%s] Video %s already in playlist '%s'",
-                                       self.canal, video_id, tgt_slug)
-                        elif result.get("yt_playlist_item_id"):
-                            logger.info("[%s] Added video %s to playlist '%s' (item: %s)",
-                                       self.canal, video_id, tgt_slug,
-                                       result["yt_playlist_item_id"])
-                            # ── Record assignment in DB immediately ──
-                            if tgt_playlist_db_id:
-                                self.db.add_video_to_playlist_db(
-                                    db_vid, tgt_playlist_db_id,
-                                    yt_playlist_item_id=result["yt_playlist_item_id"],
+            if channel_id_for_lifecycle is None:
+                logger.warning("[%s] Skipping playlist assignment — channel_id not available", self.canal)
+            else:
+                    try:
+                        db_vid = db_video_id or self.db_video_id
+                        if db_vid:
+                            vid_record = self.db.get_video(db_vid)
+                            tgt_slug = vid_record.get("target_playlist_slug") if vid_record else None
+                            tgt_playlist_db_id = vid_record.get("target_playlist_id") if vid_record else None
+                            if tgt_slug and video_id:
+                                from pipeline.youtube_playlists import YouTubePlaylistManager
+                                pl_mgr = YouTubePlaylistManager(self.canal)
+                                pl_mgr.authenticate()
+                                result = pl_mgr.add_video_to_playlist_by_slug(
+                                    video_id, tgt_slug,
+                                    channel_id=channel_id_for_lifecycle
                                 )
-                                logger.info("[%s] ✅ DB recorded: video %d → playlist %d (slug='%s')",
-                                           self.canal, db_vid, tgt_playlist_db_id, tgt_slug)
-                            else:
-                                # Lookup playlist DB id from slug
-                                from database.db_extended import ExtendedDatabase
-                                ext_db2 = ExtendedDatabase()
-                                pl_cached = ext_db2.get_playlist_by_slug(channel_id_for_lifecycle, tgt_slug)
-                                if pl_cached:
-                                    self.db.add_video_to_playlist_db(
-                                        db_vid, pl_cached["id"],
-                                        yt_playlist_item_id=result["yt_playlist_item_id"],
-                                    )
-                                    logger.info("[%s] ✅ DB recorded (slug lookup): video %d → playlist '%s'",
-                                               self.canal, db_vid, tgt_slug)
-                        else:
-                            logger.warning("[%s] Could not add video %s to playlist '%s': %s",
-                                         self.canal, video_id, tgt_slug, result.get("error", "unknown"))
-            except Exception as pl_exc:
-                logger.warning("[%s] Playlist assignment failed (non-critical): %s",
-                             self.canal, pl_exc)
+                                if result.get("was_already_present"):
+                                    logger.info("[%s] Video %s already in playlist '%s'",
+                                               self.canal, video_id, tgt_slug)
+                                elif result.get("yt_playlist_item_id"):
+                                    logger.info("[%s] Added video %s to playlist '%s' (item: %s)",
+                                               self.canal, video_id, tgt_slug,
+                                               result["yt_playlist_item_id"])
+                                    # ── Record assignment in DB immediately ──
+                                    if tgt_playlist_db_id:
+                                        self.db.add_video_to_playlist_db(
+                                            db_vid, tgt_playlist_db_id,
+                                            yt_playlist_item_id=result["yt_playlist_item_id"],
+                                        )
+                                        logger.info("[%s] ✅ DB recorded: video %d → playlist %d (slug='%s')",
+                                                   self.canal, db_vid, tgt_playlist_db_id, tgt_slug)
+                                    else:
+                                        # Lookup playlist DB id from slug
+                                        from database.db_extended import ExtendedDatabase
+                                        ext_db2 = ExtendedDatabase()
+                                        pl_cached = ext_db2.get_playlist_by_slug(channel_id_for_lifecycle, tgt_slug)
+                                        if pl_cached:
+                                            self.db.add_video_to_playlist_db(
+                                                db_vid, pl_cached["id"],
+                                                yt_playlist_item_id=result["yt_playlist_item_id"],
+                                            )
+                                            logger.info("[%s] ✅ DB recorded (slug lookup): video %d → playlist '%s'",
+                                                       self.canal, db_vid, tgt_slug)
+                                else:
+                                    logger.warning("[%s] Could not add video %s to playlist '%s': %s",
+                                                 self.canal, video_id, tgt_slug, result.get("error", "unknown"))
+                    except Exception as pl_exc:
+                        logger.warning("[%s] Playlist assignment failed (non-critical): %s",
+                                     self.canal, pl_exc)
 
             return video_id
 

@@ -163,6 +163,11 @@ class YouTubeBrowser:
                 pass
             self._context = None
             self._owning_thread_id = None
+            # Reset playwright ref so _get_or_create_playwright() creates a clean instance
+            # for the current thread (prevents "cannot switch to a different thread"
+            # when old greenlet died with the previous thread)
+            self._playwright = None
+            time.sleep(1.5)  # let Singletons-lock fully release
 
         # ── Get a Playwright instance owned by THIS thread ──
         self._playwright = _get_or_create_playwright()
