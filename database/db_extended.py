@@ -306,12 +306,9 @@ def migrate_v2(db_path: str = None):
     """)
     conn.commit()
     
-    # ── v13: bump shorts targets to 10-15/day ──────────────────────
-    # Per-channel targets:
-    #   canal2, canal3 → 5 native + 5 clips_per_long
-    #   canal4, canal5 → 4 native + 5 clips_per_long
-    #   any other channel → 5 native + 5 clips_per_long
-    # Only updates rows that don't already match the target via JOIN on channels.slug.
+    # ── v13: bump shorts targets to 10-15/day (ONE-TIME, already applied) ──
+    # Only fills NULL values; no longer forces clips_per_long=5 on every startup.
+    # Set shorts_clips_per_long via planning API or direct DB update.
     conn.execute("""
         UPDATE shorts_planning_config
         SET shorts_native_per_day = CASE
@@ -321,22 +318,14 @@ def migrate_v2(db_path: str = None):
                      IN ('canal4', 'canal5') THEN 4
                 ELSE 5
             END,
-            shorts_clips_per_long = 5
-        WHERE shorts_native_per_day < (
-            CASE
-                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
-                     IN ('canal4', 'canal5') THEN 4
-                ELSE 5
-            END
-        )
-           OR shorts_clips_per_long < 5
+            shorts_clips_per_long = COALESCE(shorts_clips_per_long, 5)
+        WHERE shorts_native_per_day IS NULL
            OR shorts_clips_per_long IS NULL
     """)
     updated = conn.total_changes
     if updated:
         logger.info(
-            "Migration v13: bumped %d shorts_planning_config rows "
-            "to 10-15/day targets (5 native + 5 clips_per_long)", updated
+            "Migration v13: filled NULL shorts_planning_config rows with defaults", updated
         )
     conn.commit()
     
