@@ -3657,12 +3657,15 @@ class ExtendedDatabase(Database):
         
         Used by shorts scheduler to determine how many clip slots to create
         (2 clips per long-form video published yesterday).
+        
+        Counts by actual upload/publish date (v.uploaded_at), NOT by planning
+        date (planned_slots.date_key), because videos are often completed on a
+        different day than they were planned.
         """
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM videos v
-                   JOIN planned_slots p ON p.video_id = v.id
-                   WHERE p.channel_id = ? AND p.date_key = ?
+                   WHERE v.channel_id = ? AND date(v.uploaded_at) = ?
                    AND v.status IN ('uploaded', 'published', 'uploaded_private')""",
                 (channel_id, date_key),
             ).fetchone()
