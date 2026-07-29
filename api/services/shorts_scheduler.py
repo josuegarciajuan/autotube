@@ -950,13 +950,53 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
-    # ── Core dispatch loop (retries on clip cancellations) ──────
+    # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
+    _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
+    _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
+
     for _retry in range(_MAX_CLIP_RETRIES):
-        # 6. Get next pending short slot that is due
-        next_slot = db.get_next_pending_shorts_slot()
+        # 6. Get next pending short slot that is due (skip cooldown-blocked slots)
+        exclude_list = list(_skipped_slot_ids) if _skipped_slot_ids else None
+        next_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=exclude_list)
         if not next_slot:
-            logger.debug("No pending shorts slots due")
+            if _skipped_slot_ids:
+                logger.debug(
+                    "No dispatchable shorts: %d slot(s) skipped (cooldown/conflict), "
+                    "none remaining",
+                    len(_skipped_slot_ids),
+                )
+            else:
+                logger.debug("No pending shorts slots due")
             return None
+
+        slot_id = next_slot["id"]
+        channel_id = next_slot["channel_id"]
+        slug = next_slot.get("channel_slug", "")
+        short_type = next_slot.get("short_type", "native")
+        scheduled = next_slot.get("scheduled_at", "?")
+        slot_rank = next_slot.get("slot_rank", 0)
+
+        # 7. Per-channel cooldown guard — skip to next slot instead of failing
+        if not _channel_shorts_cooldown_ok(channel_id, db):
+            logger.info(
+                "Shorts slot #%d (%s) skipped: cooldown active "
+                "(last short < %d min ago) — trying next channel",
+                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
+
+        # 8. Same-type publish guard — skip to next slot instead of failing
+        target_upload = next_slot.get("target_upload_at")
+        if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
+                                            exclude_slot_id=slot_id):
+            logger.info(
+                "Shorts slot #%d (%s) skipped: same-type (%s) conflict "
+                "(another %s within %d min) — trying next channel",
+                slot_id, slug, short_type, short_type, SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
 
         slot_id = next_slot["id"]
         channel_id = next_slot["channel_id"]
@@ -1373,25 +1413,73 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     _update_short_job_progress(job_id, 25, "tts")
 
-    # 3. Fetch assets exhaustively (v2) — one distinct asset per block,
+    # 2b. Compute scene_ranges from TTS timestamps (v9 — sub-scene splitting)
+    #     Splits blocks longer than SCENE_DURATION_MAX (10s) into sub-scenes
+    #     so each sub-scene gets its own distinct visual asset.  Mirrors the
+    #     long-form pipeline logic in orchestrator.phase_media().
+    from pipeline.video_editor import VideoEditor
+    try:
+        editor = VideoEditor(ch_config)
+        scene_ranges = editor._compute_block_ranges(
+            bloques, tts_result.get("timestamps", [])
+        )
+        logger.info(
+            "[%s] Computed %d scene ranges from %d blocks (TTS=%.1fs)",
+            channel_slug, len(scene_ranges), len(bloques),
+            tts_result.get("duration_sec", 0),
+        )
+        # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
+        for sr in scene_ranges:
+            sr["duracion_sec"] = sr.get("duration", 5.0)
+    except Exception as e:
+        logger.warning(
+            "[%s] Scene range computation failed — falling back to raw blocks: %s",
+            channel_slug, e,
+        )
+        scene_ranges = None
+
+    # 3. Fetch assets exhaustively (v2) — one distinct asset per scene
+    #    (uses scene_ranges when available so sub-scenes each get their own asset).
     #    50-60% video mix, cross-short dedup, query pool with variations
     from pipeline.shorts_media import (
         fetch_short_assets_exhaustive, render_short_hybrid,
         flush_short_asset_history,
     )
     theme_kw = script.get("theme_keywords_en", [])
+
+    # Use scene_ranges as fetch list if available (one asset per sub-scene),
+    # otherwise fall back to raw bloques.
+    fetch_list = scene_ranges if scene_ranges else bloques
+
     asset_items = []
     try:
         asset_items = fetch_short_assets_exhaustive(
-            bloques, ch_config, theme_kw,
+            fetch_list, ch_config, theme_kw,
             theme_ctx=theme_context,  # v8: pass full ThemeContext
             channel_id=channel_id, channel_slug=channel_slug,
         )
-        logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
+        logger.info("Fetched %d assets for Short (fetch_list=%d)",
+                    len(asset_items), len(fetch_list))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
 
     _update_short_job_progress(job_id, 50, "media")
+
+    # 3b. Filter and align assets with scene_ranges for the renderer.
+    #     If scene_ranges were computed, pair each asset with its corresponding
+    #     range, skipping None entries (failed asset fetches).  Otherwise use
+    #     the legacy path: filter Nones and let renderer do uniform split.
+    if scene_ranges and len(scene_ranges) == len(asset_items):
+        paired = [(a, sr) for a, sr in zip(asset_items, scene_ranges) if a is not None]
+        render_assets = [p[0] for p in paired]
+        render_ranges = [p[1] for p in paired]
+        logger.info(
+            "[%s] Filtered to %d valid assets (from %d scene_ranges)",
+            channel_slug, len(render_assets), len(scene_ranges),
+        )
+    else:
+        render_assets = [a for a in asset_items if a is not None]
+        render_ranges = None
 
     # 4. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"sched_short_{channel_slug}_{ts}.mp4"
@@ -1405,12 +1493,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     try:
         render_short_hybrid(
-            asset_items=asset_items,
+            asset_items=render_assets,
             audio_path=audio_path,
             output_path=video_path,
             audio_duration=audio_duration,
             bg_color_hex=bg_color,
             srt_path=srt_path if srt_path.exists() else None,
+            scene_ranges=render_ranges,
         )
     except Exception as e:
         logger.warning("Hybrid render failed, falling back to solid bg: %s", e)
