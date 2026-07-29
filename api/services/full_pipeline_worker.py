@@ -255,6 +255,9 @@ def _kill_orphaned_ffmpeg() -> None:
         pass
 
     # Layer 3: edge-tts and yt-dlp orphans
+    # SAFE: checks parent PID before killing — only kills processes owned
+    # by init (true orphans) or this worker process. Prevents accidentally
+    # killing a concurrent short's yt-dlp download or edge-tts synthesis.
     for pattern in ("edge-tts", "yt-dlp"):
         try:
             r2 = subprocess.run(
@@ -264,9 +267,15 @@ def _kill_orphaned_ffmpeg() -> None:
             if r2.stdout.strip():
                 for opid in r2.stdout.strip().split():
                     try:
-                        os.kill(int(opid), signal.SIGKILL)
-                        killed += 1
-                    except ProcessLookupError:
+                        ppid = int(subprocess.run(
+                            ["ps", "-o", "ppid=", "-p", opid],
+                            capture_output=True, text=True, timeout=3,
+                        ).stdout.strip() or "0")
+                        # Only kill if parent is init (true orphan) or this worker
+                        if ppid in (1, os.getpid()):
+                            os.kill(int(opid), signal.SIGKILL)
+                            killed += 1
+                    except (ProcessLookupError, ValueError):
                         pass
         except Exception:
             pass

@@ -1609,7 +1609,7 @@ def process_planned_slots(db=None) -> dict | None:
     #     - If no render is active → dispatch any job (it will claim render slot).
     #     - If 1 render is active → allow dispatching 1 PREP worker (2 total).
     #     - If 2 jobs already active → defer dispatch.
-    active_count = db.count_active_jobs()
+    active_count = db.count_active_longform_jobs()
     render_count = db.count_render_phase_jobs()
     MAX_TOTAL_JOBS = 1
     MAX_RENDER_JOBS = 1
@@ -1671,7 +1671,7 @@ def process_planned_slots(db=None) -> dict | None:
     # dispatch entry points (manual click, due schedules, priority).
     with _DISPATCH_LOCK:
         # Re-check guard under lock (belts-and-suspenders for TOCTOU)
-        active_under = db.count_active_jobs()
+        active_under = db.count_active_longform_jobs()
         render_under = db.count_render_phase_jobs()
         if active_under >= MAX_TOTAL_JOBS:
             logger.info("Planned slot deferred (under lock): %d/%d jobs active",

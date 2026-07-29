@@ -2263,7 +2263,7 @@ async def _run_reassembly_job(job_id: int, video_id: int):
     # Phase pipelining disabled — all jobs run sequentially.
     # count=1 = only self = ok; count=2 = another job is active = blocked.
     db_guard = _get_db()
-    active_count = db_guard.count_active_jobs()
+    active_count = db_guard.count_active_longform_jobs()
     if active_count > 1:
         logger.warning(
             "Reassembly job %d blocked: %d active job(s) running globally",
@@ -3005,11 +3005,10 @@ async def start_generation_job_subprocess(
     # ── Global guard: strictly ONE job at a time ──
     # Prevents ffmpeg resource contention (concurrent renders cause timeouts).
     # Phase pipelining disabled — all jobs (long-form, shorts, clips, uploads)
-    # run sequentially, one at a time.
-    # Since process_planned_slots() sets status='running' BEFORE dispatching
-    # this async task, the current job is already counted.
-    # count=1 = only self = ok; count=2 = another job active = blocked.
-    active_count = db.count_active_jobs()
+    # run concurrently with shorts (2-column model). The current job is
+    # already counted by count_active_longform_jobs().
+    # count=1 = only self = ok; count=2 = another long-form job active = blocked.
+    active_count = db.count_active_longform_jobs()
     if active_count > 1:
         logger.warning(
             "Subprocess spawn blocked: %d active job(s) running globally",

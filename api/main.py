@@ -247,10 +247,10 @@ async def _queue_consumer():
                         next_job["channel_id"], active_for_channel["id"])
             return
         
-        # Global guard: don't dispatch if ANY generation is running
-        if db.count_active_jobs() > 0:
-            logger.debug("Queue consumer deferred: %d active job(s) — retrying next tick",
-                        db.count_active_jobs())
+        # Global guard: defer dispatch if a long-form job is running
+        if db.count_active_longform_jobs() > 0:
+            logger.debug("Queue consumer deferred: %d active long-form job(s) — retrying next tick",
+                        db.count_active_longform_jobs())
             return
         
         # RAM gate: need at least 4 GB free
@@ -509,12 +509,12 @@ async def _process_planned_slots():
         # start_generation_job_subprocess() still acts as safety net, but this
         # avoids creating records that would be immediately rejected.
         try:
-            active_count = _db.count_active_jobs()
+            active_count = _db.count_active_longform_jobs()
             if active_count >= 1:
                 avail_gb = _get_available_ram_gb()
                 if avail_gb < 3.0:
                     logger.debug(
-                        "Planner skip: %d active job(s) + %.1f GB free RAM (need >= 3 GB)",
+                        "Planner skip: %d active long-form job(s) + %.1f GB free RAM (need >= 3 GB)",
                         active_count, avail_gb,
                     )
                     return False
@@ -756,10 +756,10 @@ async def _process_due_schedules():
                 pass
             continue
         
-        # ── Global guard: skip if ANY generation is running ──
-        if db.count_active_jobs() > 0:
-            logger.debug("Schedule #%d deferred: %d active job(s) running globally",
-                        s["id"], db.count_active_jobs())
+        # ── Global guard: skip if a long-form job is running ──
+        if db.count_active_longform_jobs() > 0:
+            logger.debug("Schedule #%d deferred: %d active long-form job(s) running globally",
+                        s["id"], db.count_active_longform_jobs())
             try:
                 conn.execute(
                     "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
@@ -778,8 +778,8 @@ async def _process_due_schedules():
                 # Re-check global guard under lock (belts-and-suspenders)
                 from database.db_extended import ExtendedDatabase
                 _db2 = ExtendedDatabase()
-                if _db2.count_active_jobs() > 0:
-                    logger.debug("Schedule #%d deferred (under lock): active job detected", s["id"])
+                if _db2.count_active_longform_jobs() > 0:
+                    logger.debug("Schedule #%d deferred (under lock): active long-form job detected", s["id"])
                     try:
                         conn.execute(
                             "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "

@@ -4012,7 +4012,7 @@ class ExtendedDatabase(Database):
         """Check if any short generation job is running/queued. Returns it or None.
         
         Distinct from get_active_job() which blocks on ANY job. Shorts can run
-        concurrently with long-form videos (1 video + 1 short max at a time).
+        concurrently with long-form videos (2-column model: 1 video + 1 short).
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -4038,10 +4038,9 @@ class ExtendedDatabase(Database):
     def count_active_jobs(self) -> int:
         """Count ALL generation jobs currently running or queued.
         
-        Strictly sequential — one job at a time system-wide for ANY type
-        (long-form, shorts, clips, uploads). Prevents ffmpeg resource
-        contention, race conditions in preflight cleanup, and black-screen
-        renders caused by concurrent job interference.
+        Counts every job type (long-form, shorts, clips, uploads, reassemble).
+        Used for global checks: startup recovery, viral slot cancellation,
+        system stabilization, and progress monitoring.
         
         Counts both 'running' AND 'queued' to close the TOCTOU race window:
         a job created by process_planned_slots() may briefly be 'queued'
@@ -4052,6 +4051,23 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def count_active_longform_jobs(self) -> int:
+        """Count long-form generation jobs currently running or queued.
+        
+        Excludes shorts (native, clip) and upload_only jobs. Used by the
+        2-column dispatch model: up to 1 long-form + 1 short can run
+        concurrently without interfering with each other.
+        
+        Counts both 'running' AND 'queued' to close the TOCTOU race window.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status IN ('running', 'queued') "
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
     

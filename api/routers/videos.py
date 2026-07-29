@@ -108,7 +108,7 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
             raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
         
         # Guard 2: don't start if ANY generation is running globally
-        if db.count_active_jobs() > 0:
+        if db.count_active_longform_jobs() > 0:
             raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
         
         import sqlite3
@@ -750,8 +750,8 @@ def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
         raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
     # Guard 2: don't start if ANY generation is running globally
-    if db.count_active_jobs() > 0:
-        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
+    if db.count_active_longform_jobs() > 0:
+        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una video largo a la vez.")
     
     # Check we have checkpoint data to reassemble
     import json

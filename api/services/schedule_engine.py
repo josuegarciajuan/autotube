@@ -433,7 +433,7 @@ def dispatch_next_due_slot(db=None) -> dict | None:
         return None
 
     # 5c. Global guard: defer if ANY generation is running across all channels
-    active_count = db.count_active_jobs()
+    active_count = db.count_active_longform_jobs()
     if active_count > 0:
         logger.info("Smart dispatch deferred: %d active job(s) running — retrying next tick",
                     active_count)
@@ -442,7 +442,7 @@ def dispatch_next_due_slot(db=None) -> dict | None:
     # ── Enter dispatch critical section ──────────────────────────
     with _DISPATCH_LOCK:
         # Re-check global guard under lock (belts-and-suspenders)
-        if db.count_active_jobs() > 0:
+        if db.count_active_longform_jobs() > 0:
             logger.info("Smart dispatch deferred (under lock): active job detected")
             return None
 
