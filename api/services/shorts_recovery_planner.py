@@ -117,14 +117,22 @@ def _count_published_by_type(db, channel_id: int) -> tuple[int, int]:
 
 
 def _count_completed_longs_today(db, channel_id: int) -> int:
-    """Count long-form videos completed/published today."""
+    """Count long-form videos completed/published yesterday + today.
+    
+    Clips are sourced from BOTH yesterday's and today's completed longs
+    (initial schedule uses yesterday's, recovery planner adds today's as
+    they complete). Counting both prevents cancellation of valid clips.
+    
+    Uses actual upload date (uploaded_at), not record creation date (created_at),
+    and correct status values ('uploaded','published','uploaded_private').
+    """
     try:
         with db._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM videos
                    WHERE channel_id = ?
-                     AND status IN ('uploaded_public', 'uploaded_unlisted', 'uploaded_private')
-                     AND DATE(created_at) = DATE('now', 'localtime')""",
+                     AND status IN ('uploaded', 'published', 'uploaded_private')
+                     AND DATE(uploaded_at) >= DATE('now', 'localtime', '-1 day')""",
                 (channel_id,),
             ).fetchone()
             return row["cnt"] if row else 0
