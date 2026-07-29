@@ -629,6 +629,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v18: lifecycle_events + pipeline_alerts (unified monitoring) ──
     _migrate_v18(conn, logger)
+
+    # ── v19: planned_slots target_public_at + go_public_at columns ──
+    _migrate_v19(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1208,6 +1211,26 @@ def _migrate_v18(conn, logger):
                 logger.info("Migration v18: seeded %d acknowledged alerts for pre-existing error videos", seeded)
     else:
         logger.warning("Migration v18: schema_v18.sql not found")
+
+
+def _migrate_v19(conn, logger):
+    """Idempotent v19 migration: ensure planned_slots has target_public_at column.
+    
+    The upload_scheduler writes recalculated target_public_at to planned_slots
+    (line 445 in upload_scheduler.py). This column may be missing on older schemas.
+    Also adds go_public_at for lifecycle action reconciliation.
+    """
+    try:
+        conn.execute("ALTER TABLE planned_slots ADD COLUMN target_public_at TIMESTAMP")
+        logger.info("Migration v19: added target_public_at column to planned_slots")
+    except Exception:
+        pass  # column already exists
+    
+    try:
+        conn.execute("ALTER TABLE planned_slots ADD COLUMN go_public_at TIMESTAMP")
+        logger.info("Migration v19: added go_public_at column to planned_slots")
+    except Exception:
+        pass  # column already exists
 
 
 def _migrate_v10(conn, logger):

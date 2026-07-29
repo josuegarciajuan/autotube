@@ -237,6 +237,11 @@ class VideoLifecycleManager:
                                 new_proposed.strftime("%m-%d %H:%M"),
                             )
                             target_public_at = new_proposed.isoformat()
+                            # ── Sync videos.target_public_at with adjusted lifecycle time ──
+                            try:
+                                self.db.update_video(db_video_id, target_public_at=target_public_at)
+                            except Exception:
+                                pass
             except Exception as e:
                 logger.debug("[%s] Collision guard skipped: %s", self.slug, e)
 
@@ -298,6 +303,11 @@ class VideoLifecycleManager:
                         self.db.update_lifecycle_action_status(
                             action_row_id, "pending",
                             scheduled_for=target_public_at)
+                        # ── Sync videos.target_public_at ──
+                        try:
+                            self.db.update_video(db_video_id, target_public_at=target_public_at)
+                        except Exception:
+                            pass
                         logger.warning(
                             "[%s] POST-CHECK COLLISION: go_public for video %d "
                             "within %dh of action #%d (upload race). Pushed to %s.",
@@ -528,6 +538,13 @@ class VideoLifecycleManager:
                         scheduled_for=new_scheduled,
                         retry_count=action.get("retry_count", 0),
                     )
+                    # ── Sync videos.target_public_at with rescheduled lifecycle time ──
+                    try:
+                        video_id = action.get("video_id")
+                        if video_id:
+                            self.db.update_video(video_id, target_public_at=new_scheduled)
+                    except Exception:
+                        pass
                     logger.warning(
                         "[%s] COLLISION GUARD (batch): skipping go_public action #%d — "
                         "another go_public already executed in this batch. "

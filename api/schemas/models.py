@@ -161,6 +161,7 @@ class VideoUpdate(BaseModel):
     tags_json: Optional[str] = None
     title_options: Optional[str] = None
     privacy_status: Optional[str] = None
+    target_public_at: Optional[str] = None  # ISO8601 UTC — manual schedule override
 
 
 class VideoResponse(BaseModel):

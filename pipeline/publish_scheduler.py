@@ -256,13 +256,13 @@ def _avoid_channel_collision(
             window_start = (adjusted - min_gap).strftime("%Y-%m-%d %H:%M:%S")
             window_end = (adjusted + min_gap).strftime("%Y-%m-%d %H:%M:%S")
 
-            # Try videos table directly
-            collision_rows = None
+            # ── Check 1: videos table (target_public_at) ──
+            video_collisions = []
             conn = None
             try:
                 if hasattr(db, '_connect'):
                     conn = db._connect()
-                    collision_rows = conn.execute("""
+                    video_rows = conn.execute("""
                         SELECT v.id, v.target_public_at, v.titulo_final
                         FROM videos v
                         WHERE v.channel_id = ?
@@ -273,6 +273,13 @@ def _avoid_channel_collision(
                         ORDER BY v.target_public_at
                         LIMIT 5
                     """, (channel_id, window_start, window_end)).fetchall()
+                    for row in video_rows:
+                        video_collisions.append({
+                            "source": "video",
+                            "id": row["id"],
+                            "datetime_str": row["target_public_at"],
+                            "label": (row["titulo_final"] or "?")[:40],
+                        })
             except Exception:
                 pass
             finally:
@@ -282,33 +289,84 @@ def _avoid_channel_collision(
                     except Exception:
                         pass
 
-            if not collision_rows:
+            # ── Check 2: lifecycle go_public actions (scheduled_for) ──
+            # Catches desyncs where lifecycle collision guards adjusted
+            # scheduled_for but videos.target_public_at was not updated.
+            lifecycle_collisions = []
+            conn2 = None
+            try:
+                if hasattr(db, '_connect'):
+                    conn2 = db._connect()
+                    lifecycle_rows = conn2.execute("""
+                        SELECT vla.id as action_id, vla.video_id,
+                               vla.scheduled_for
+                        FROM video_lifecycle_actions vla
+                        JOIN videos v ON vla.video_id = v.id
+                        WHERE vla.channel_id = ?
+                          AND vla.action_type = 'go_public'
+                          AND vla.status = 'pending'
+                          AND vla.scheduled_for IS NOT NULL
+                          AND vla.scheduled_for >= ?
+                          AND vla.scheduled_for <= ?
+                        ORDER BY vla.scheduled_for
+                        LIMIT 5
+                    """, (channel_id, window_start, window_end)).fetchall()
+                    for row in lifecycle_rows:
+                        lifecycle_collisions.append({
+                            "source": "lifecycle",
+                            "id": row["video_id"],
+                            "datetime_str": row["scheduled_for"],
+                            "label": f"go_public #{row['action_id']}",
+                        })
+            except Exception:
+                pass
+            finally:
+                if conn2:
+                    try:
+                        conn2.close()
+                    except Exception:
+                        pass
+
+            # ── Merge collisions from both sources ──
+            all_collisions = video_collisions + lifecycle_collisions
+            if not all_collisions:
                 # No collision — we're good
                 conflict_found = False
                 break
 
-            # Collision found: push proposed time forward
-            last_collision = collision_rows[-1]
-            last_target_str = last_collision["target_public_at"] if isinstance(last_collision, dict) else last_collision[1]
-            try:
-                if isinstance(last_target_str, str):
-                    last_dt = datetime.fromisoformat(last_target_str.replace("Z", "+00:00").replace(" ", "T"))
-                else:
-                    last_dt = last_target_str
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                last_dt = adjusted
+            # Find the latest collision time across both sources
+            latest_collision = None
+            latest_dt = None
+            for c in all_collisions:
+                try:
+                    ts = c["datetime_str"]
+                    if isinstance(ts, str):
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00").replace(" ", "T"))
+                    else:
+                        dt = ts
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if latest_dt is None or dt > latest_dt:
+                        latest_dt = dt
+                        latest_collision = c
+                except (ValueError, TypeError):
+                    continue
 
-            adjusted = last_dt + min_gap
+            if latest_dt is None:
+                latest_dt = adjusted
+                latest_collision = {"id": "?", "label": "?"}
+
+            adjusted = latest_dt + min_gap
 
             logger.info(
-                "[%s] Collision detected: proposed %s conflicts with video #%s (%s). "
-                "Pushing to %s.",
+                "[%s] Collision detected [%s]: proposed %s conflicts with "
+                "#%s (%s) at %s. Pushing to %s.",
                 slug,
+                latest_collision["source"],
                 proposed_utc.strftime("%H:%M"),
-                last_collision["id"] if isinstance(last_collision, dict) else last_collision[0],
-                (last_collision["titulo_final"] or "?")[:40] if isinstance(last_collision, dict) else "",
+                latest_collision["id"],
+                latest_collision.get("label", "?")[:40],
+                latest_dt.strftime("%H:%M"),
                 adjusted.strftime("%H:%M"),
             )
 
@@ -323,6 +381,9 @@ def _avoid_channel_collision(
     except Exception as e:
         logger.debug("[%s] Collision check skipped: %s", slug, e)
         return proposed_utc
+
+
+def _pick_optimal_slot(db, channel_id: int, slug: str = None) -> Optional[dict]:
     """Pick the best optimal publish slot using epsilon-greedy strategy.
 
     Returns:
