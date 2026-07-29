@@ -1084,10 +1084,10 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
 
     try:
         if short_type == "native":
-            short_id = _dispatch_native_short(channel_id, channel_slug, slot_rank=slot_rank)
+            short_id = _dispatch_native_short(channel_id, channel_slug, slot_rank=slot_rank, job_id=job_id)
         else:
             short_id = _dispatch_clip_short(channel_id, channel_slug, source_video_id,
-                                            slot_rank=slot_rank)
+                                            slot_rank=slot_rank, job_id=job_id)
 
         if short_id:
             # Mark slot as completed
@@ -1147,10 +1147,35 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             pass
 
 
+# ── Short job progress helper ───────────────────────────────────
+
+def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
+    """Update progress and phase for a shorts generation_jobs record.
+    
+    Called at key milestones during short generation so the pipeline
+    view shows real-time progress instead of 0%. No-op when job_id is None
+    (manual generation endpoints don't create job records).
+    """
+    if not job_id:
+        return
+    try:
+        import sqlite3
+        from config.settings import DATABASE_PATH
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
+        conn.execute(
+            "UPDATE generation_jobs SET progress = ?, phase = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (progress, phase, job_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("Short job progress update failed for #%d: %s", job_id, e)
+
+
 # ── Native short generation ────────────────────────────────────
 
 def _dispatch_native_short(channel_id: int, channel_slug: str,
-                           slot_rank: int = 0) -> int | None:
+                           slot_rank: int = 0, job_id: int = None) -> int | None:
     """Generate and publish a native Short.
 
     Uses the existing native short generation pipeline (LLM script → TTS → render → upload).
@@ -1297,6 +1322,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Short script validation failed for %s: %s", channel_slug, errors)
         return None
 
+    _update_short_job_progress(job_id, 10, "script")
+
     title = (script.get("titulo") or script.get("title") or "Short")[:100]
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
@@ -1344,6 +1371,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Short TTS failed for %s: %s", channel_slug, e)
         return None
 
+    _update_short_job_progress(job_id, 25, "tts")
+
     # 3. Fetch assets exhaustively (v2) — one distinct asset per block,
     #    50-60% video mix, cross-short dedup, query pool with variations
     from pipeline.shorts_media import (
@@ -1361,6 +1390,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
+
+    _update_short_job_progress(job_id, 50, "media")
 
     # 4. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"sched_short_{channel_slug}_{ts}.mp4"
@@ -1403,6 +1434,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Render produced no output file for %s", channel_slug)
         return None
 
+    _update_short_job_progress(job_id, 75, "render")
+
     # 5. Upload
     from pipeline.youtube_uploader import YouTubeUploader
     uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
@@ -1426,6 +1459,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         longform_url=longform_url,
         channel_url=channel_url,
     )
+    _update_short_job_progress(job_id, 90, "upload")
     result = uploader.upload(
         video_path=video_path,
         title=title[:100],
@@ -1493,7 +1527,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 # ── Clip short generation ──────────────────────────────────────
 
 def _dispatch_clip_short(channel_id: int, channel_slug: str,
-                          source_video_id: int, slot_rank: int = 0) -> int | None:
+                          source_video_id: int, slot_rank: int = 0,
+                          job_id: int = None) -> int | None:
     """Extract a clip from a long video, render, and publish.
 
     Uses the ShortsExtractor pipeline pattern from api/routers/shorts.py
@@ -1562,6 +1597,8 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         logger.error("Source video #%d has no script text", source_video_id)
         return None
 
+    _update_short_job_progress(job_id, 10, "script")
+
     # ── Phase 2: LLM extracts best clip timecodes ──
     # Build approximate word-level timestamps from blocks
     from pipeline.shorts_extractor import ShortsExtractor
@@ -1603,6 +1640,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         return None
 
     best_clip = clips[0]
+    _update_short_job_progress(job_id, 20, "script")
 
     # ── Phase 3: Find or download source video ──
     source_path, clip_offset = _resolve_source_video(video, best_clip["start_time"],
@@ -1618,6 +1656,8 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         best_clip["start_time"] = clip_offset
         best_clip["end_time"] = clip_offset + clip_duration
 
+    _update_short_job_progress(job_id, 30, "media")
+
     # ── Phase 4: Render → Upload → Promote ──
     _downloaded_temp = source_path
     from pipeline.shorts_renderer import ShortsRenderer
@@ -1632,6 +1672,8 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         if not output_path or not output_path.exists():
             logger.error("Render produced no output for clip from video #%d", source_video_id)
             return None
+
+        _update_short_job_progress(job_id, 75, "render")
 
         ch_config = get_channel_config(channel_slug)
         hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
@@ -1660,6 +1702,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             longform_url=longform_url,
             channel_url=channel_url_value,
         )
+        _update_short_job_progress(job_id, 90, "upload")
         result = uploader.upload(
             video_path=output_path,
             title=title,
