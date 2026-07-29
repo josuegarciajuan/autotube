@@ -31,6 +31,8 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
     No end screens — YouTube doesn't support them on Shorts.
     """
     import time as _time
+    from pipeline.youtube_browser import cleanup_browser_thread
+    
     try:
         _time.sleep(20)  # Wait for YouTube to finish processing
         from pipeline.youtube_browser import get_browser
@@ -51,6 +53,8 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
             logger.warning("[%s] Failed to mark altered content for short %s", channel_slug, yt_id)
     except Exception as e:
         logger.warning("[%s] Auto-mark IA error for short %s: %s", channel_slug, yt_id, e)
+    finally:
+        cleanup_browser_thread()
 
 
 # ── Auto-link long-form video to short helper ──────────────────
@@ -168,6 +172,7 @@ def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: 
     """
     import sqlite3
     from config.settings import DATABASE_PATH
+    from pipeline.youtube_browser import cleanup_browser_thread
 
     try:
         # ── Poll API until the Short finishes processing ──────
@@ -214,6 +219,8 @@ def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: 
     except Exception as e:
         logger.warning("[%s] Auto-link longform error for short %s → source #%d: %s",
                        channel_slug, short_yt_id, source_video_id, e)
+    finally:
+        cleanup_browser_thread()
 
 
 # ── Timezone defaults ─────────────────────────────────────────

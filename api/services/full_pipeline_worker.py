@@ -80,53 +80,57 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
     wlog = logging.getLogger("autotube.worker")
     import time as _time
     import random
+    from pipeline.youtube_browser import cleanup_browser_thread
 
-    db = None
-
-    # ── Wait for YouTube to finish processing (60s, was 20s) ──
-    wlog.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
-    _time.sleep(60)
-
-    from pipeline.youtube_browser import get_browser
-    browser = get_browser(account)
-
-    # ── Step 1: Mark AI-generated content (best-effort, non-blocking) ──
     try:
-        success = browser.mark_altered_content(yt_video_id)
-        if success:
-            from database.db_extended import ExtendedDatabase
-            db = ExtendedDatabase()
-            db.update_video(video_id, manual_altered_content_done=1)
-            wlog.info("[%s] IA altered content marked for %s", canal, yt_video_id)
-        else:
-            wlog.warning("[%s] Failed to mark altered content for %s — continuing to end screens anyway", canal, yt_video_id)
-    except Exception as e:
-        wlog.warning("[%s] IA-mark error for %s: %s — continuing to end screens anyway", canal, yt_video_id, e)
+        db = None
 
-    # ── Step 2: Configure end screens (always attempted, with retries) ──
-    try:
-        from config.config_bridge import get_channel_config
-        channel_config = get_channel_config(canal)
-        if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
-            # Natural human delay between actions (5-12s)
-            delay = random.uniform(5, 12)
-            wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
-            _time.sleep(delay)
+        # ── Wait for YouTube to finish processing (60s, was 20s) ──
+        wlog.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
+        _time.sleep(60)
 
-            wlog.info("[%s] 🎬 Attempting end screens for %s (up to 3 retries)", canal, yt_video_id)
-            success2 = _retry_end_screens_worker(browser, yt_video_id, wlog, max_retries=3)
-            if success2:
-                if db is None:
-                    from database.db_extended import ExtendedDatabase
-                    db = ExtendedDatabase()
-                db.update_video(video_id, manual_end_screens_done=1)
-                wlog.info("[%s] ✅ End screens configured for %s", canal, yt_video_id)
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+
+        # ── Step 1: Mark AI-generated content (best-effort, non-blocking) ──
+        try:
+            success = browser.mark_altered_content(yt_video_id)
+            if success:
+                from database.db_extended import ExtendedDatabase
+                db = ExtendedDatabase()
+                db.update_video(video_id, manual_altered_content_done=1)
+                wlog.info("[%s] IA altered content marked for %s", canal, yt_video_id)
             else:
-                wlog.warning("[%s] ❌ Failed to configure end screens for %s after all retries", canal, yt_video_id)
-        else:
-            wlog.debug("[%s] AUTO_END_SCREENS disabled, skipping", canal)
-    except Exception as e:
-        wlog.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
+                wlog.warning("[%s] Failed to mark altered content for %s — continuing to end screens anyway", canal, yt_video_id)
+        except Exception as e:
+            wlog.warning("[%s] IA-mark error for %s: %s — continuing to end screens anyway", canal, yt_video_id, e)
+
+        # ── Step 2: Configure end screens (always attempted, with retries) ──
+        try:
+            from config.config_bridge import get_channel_config
+            channel_config = get_channel_config(canal)
+            if channel_config and getattr(channel_config, "AUTO_END_SCREENS", False):
+                # Natural human delay between actions (5-12s)
+                delay = random.uniform(5, 12)
+                wlog.info("[%s] Waiting %.1fs before end screen config...", canal, delay)
+                _time.sleep(delay)
+
+                wlog.info("[%s] 🎬 Attempting end screens for %s (up to 3 retries)", canal, yt_video_id)
+                success2 = _retry_end_screens_worker(browser, yt_video_id, wlog, max_retries=3)
+                if success2:
+                    if db is None:
+                        from database.db_extended import ExtendedDatabase
+                        db = ExtendedDatabase()
+                    db.update_video(video_id, manual_end_screens_done=1)
+                    wlog.info("[%s] ✅ End screens configured for %s", canal, yt_video_id)
+                else:
+                    wlog.warning("[%s] ❌ Failed to configure end screens for %s after all retries", canal, yt_video_id)
+            else:
+                wlog.debug("[%s] AUTO_END_SCREENS disabled, skipping", canal)
+        except Exception as e:
+            wlog.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
+    finally:
+        cleanup_browser_thread()
 
 
 # ── Shared state for graceful shutdown during critical phases ─────
@@ -554,6 +558,24 @@ def run_job(
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
     
+    # ── 2b. Ghost-worker guard: verify the job still exists in DB ──
+    # Job rows can be deleted externally (channel deletion cascade,
+    # manual DB cleanup) while the worker subprocess continues running.
+    # Without this check, the worker wastes resources doing work that
+    # will never be recorded, and the finally-block UPDATE silently
+    # matches zero rows.
+    job_row = db.get_job(job_id)
+    if job_row is None:
+        logger.error(
+            "GHOST WORKER DETECTED: job %d not found in generation_jobs table — "
+            "row was likely deleted externally. Self-terminating to avoid "
+            "wasting resources.", job_id
+        )
+        db.update_video(video_id, status="error",
+                        progress_phase="ghost_job",
+                        progress_message=f"Worker {os.getpid()} detected missing job row {job_id}")
+        return False
+    
     # ── 3. Load checkpoint (resume support) ───────────────────
     checkpoint, last_phase, last_idx = _load_checkpoint(video_id, db)
     
@@ -613,6 +635,17 @@ def run_job(
     def _global_heartbeat():
         while not _heartbeat_stop.is_set():
             try:
+                # Ghost-worker guard: check job still exists in DB.
+                # If row was deleted (e.g., channel deletion cascade),
+                # self-terminate immediately to stop wasting resources.
+                row = db.get_job(job_id)
+                if row is None:
+                    logger.error(
+                        "GHOST WORKER: job %d disappeared from DB during heartbeat — "
+                        "self-terminating", job_id
+                    )
+                    import os as _os
+                    _os._exit(1)  # hard exit, bypass finally blocks
                 db.update_heartbeat(job_id)
             except Exception:
                 pass  # heartbeat is best-effort; never crash the worker

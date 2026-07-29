@@ -881,10 +881,68 @@ async def _detect_and_clean_orphans():
         logger.error("Orphan detection failed: %s", exc)
 
 
+def _detect_ghost_workers(db, logger):
+    """Kill worker processes whose --job-id does not exist in generation_jobs.
+    
+    These are truly orphaned: the worker subprocess is alive but its job row
+    was deleted from the DB (channel deletion cascade, manual cleanup, etc).
+    Without this detector, they would run forever doing work that disappears.
+    """
+    import os as _os
+    import re as _re
+    import signal as _signal
+    import subprocess as _subprocess
+    
+    try:
+        result = _subprocess.run(
+            ["pgrep", "-f", "full_pipeline_worker.py"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        
+        for pid_str in result.stdout.strip().split('\n'):
+            pid_str = pid_str.strip()
+            if not pid_str:
+                continue
+            try:
+                pid = int(pid_str)
+                # Read cmdline to extract --job-id
+                with open(f'/proc/{pid}/cmdline', 'r') as f:
+                    cmdline = f.read().replace('\x00', ' ')
+                match = _re.search(r'--job-id (\d+)', cmdline)
+                if not match:
+                    continue
+                job_id = int(match.group(1))
+                
+                # Check if job exists in DB
+                job = db.get_job(job_id)
+                if job is None:
+                    # Also check if it exists in the running set (reconnect_active_workers
+                    # may have already marked it failed but row still exists)
+                    logger.warning(
+                        "GHOST WORKER DETECTED: PID %d (job %d) — "
+                        "job row deleted from DB. Killing...", pid, job_id
+                    )
+                    _os.kill(pid, _signal.SIGTERM)
+                    import time as _time
+                    _time.sleep(2)
+                    # Force kill if still alive
+                    try:
+                        _os.kill(pid, _signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            except (ValueError, ProcessLookupError, FileNotFoundError):
+                pass  # process already gone
+    except Exception as exc:
+        logger.debug("Ghost worker detection scan failed (non-critical): %s", exc)
+
+
 def _detect_and_clean_orphans_sync():
     """Synchronous orphan detection logic (runs in thread pool).
     
-    Also prunes old cancelled/skipped planned slots to keep the DB clean.
+    Also prunes old cancelled/skipped planned slots and detects ghost workers
+    (worker processes whose job_id was deleted from the DB).
     """
     import logging
     logger = logging.getLogger("autotube.orphans")
@@ -895,6 +953,12 @@ def _detect_and_clean_orphans_sync():
         
         if result["jobs_failed"] == 0 and result["videos_reset"] == 0:
             logger.debug("Orphan check: all clear")
+        
+        # ── Ghost worker detection ──
+        # Detect worker processes whose --job-id no longer exists in the DB.
+        # These are truly orphaned: the process is alive but its DB row was
+        # deleted (e.g., channel deletion cascade, manual cleanup).
+        _detect_ghost_workers(db, logger)
         
         # Prune old cancelled/skipped slots (older than yesterday)
         prune_result = db.prune_old_slots()

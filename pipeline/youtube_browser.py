@@ -10,10 +10,12 @@ Uses Playwright + Xvfb for headless operation.
 Persistent sessions stored in tokens/{account}_browser_session.json.
 """
 
+import atexit
 import logging
 import os
 import random
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -70,6 +72,60 @@ _xvfb_proc = None
 _thread_local = threading.local()
 _playwright_lock = threading.Lock()
 
+# ── Global Playwright registry (fix: prevent driver process leaks) ──
+# Every sync_playwright().start() spawns a Node.js driver child process.
+# Without explicit .stop(), the driver survives parent thread/process exit.
+# This registry tracks ALL created instances so they can be cleaned up.
+_playwright_registry: set = set()
+_registry_lock = threading.Lock()
+
+
+def _register_playwright(pw):
+    """Track a Playwright instance for eventual cleanup."""
+    with _registry_lock:
+        _playwright_registry.add(pw)
+
+
+def _unregister_playwright(pw):
+    """Remove a Playwright instance from the registry (after it was stopped)."""
+    with _registry_lock:
+        _playwright_registry.discard(pw)
+
+
+def _cleanup_all_playwrights():
+    """Stop ALL known Playwright instances and clear the registry.
+
+    Called by atexit and by close_all_browsers(). Safe to call multiple times.
+    """
+    with _registry_lock:
+        instances = list(_playwright_registry)
+        _playwright_registry.clear()
+    for pw in instances:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+
+def _cleanup_current_thread_playwright():
+    """Stop the Playwright instance owned by the CURRENT thread (if any).
+
+    Used in daemon thread finally blocks — each thread should clean up
+    its own instance to prevent leaked driver processes.
+    """
+    pw = getattr(_thread_local, "playwright", None)
+    if pw is not None:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        _unregister_playwright(pw)
+        _thread_local.playwright = None
+
+
+# ── Register cleanup on normal process exit ──
+atexit.register(_cleanup_all_playwrights)
+
 
 def _get_or_create_playwright():
     """Return a SyncPlaywright instance bound to the CURRENT thread.
@@ -89,6 +145,7 @@ def _get_or_create_playwright():
             return pw
         _ensure_xvfb()
         pw = sync_playwright().start()
+        _register_playwright(pw)  # track for global cleanup
         _thread_local.playwright = pw
         logger.debug("Playwright instance started for thread %s", str(threading.get_ident())[-6:])
         return pw
@@ -166,6 +223,13 @@ class YouTubeBrowser:
             # Reset playwright ref so _get_or_create_playwright() creates a clean instance
             # for the current thread (prevents "cannot switch to a different thread"
             # when old greenlet died with the previous thread)
+            # CRITICAL: stop the old instance first to prevent driver process leaks
+            if self._playwright is not None:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+                _unregister_playwright(self._playwright)
             self._playwright = None
             time.sleep(1.5)  # let Singletons-lock fully release
 
@@ -1190,15 +1254,20 @@ def close_all_browsers():
             try: b.close()
             except Exception: pass
         _browser_instances.clear()
-    # Clean up thread-local Playwright instances.
-    # Each thread must stop its own — we can only stop the current thread's.
-    pw = getattr(_thread_local, "playwright", None)
-    if pw is not None:
-        try:
-            pw.stop()
-        except Exception:
-            pass
-        _thread_local.playwright = None
+    # Clean up ALL Playwright driver processes via the global registry.
+    # This stops both the current thread's instance AND any instances
+    # leaked by daemon threads that already exited.
+    _cleanup_all_playwrights()
+
+
+def cleanup_browser_thread():
+    """Clean up the Playwright driver for the current thread only.
+    
+    Safe to call from daemon thread finally blocks — stops only the
+    current thread's driver without affecting shared browser contexts
+    used by other threads.
+    """
+    _cleanup_current_thread_playwright()
 
 
 def get_account_for_channel(channel_slug: str) -> Optional[str]:

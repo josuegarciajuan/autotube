@@ -24,6 +24,58 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+# ── Reasoning-content extraction (DeepSeek thinking-mode compatibility) ─
+
+def _extract_reasoning_content(response) -> str | None:
+    """Extract content from a chat completion response with thinking-mode fallback.
+
+    DeepSeek models with ``enable_thinking=True`` may route the actual JSON
+    response into ``reasoning_content`` while ``content`` remains empty.
+    The standard OpenAI SDK v2.x ``ChatCompletionMessage`` model does NOT
+    expose ``reasoning_content`` — it is available via ``model_extra`` dict
+    on newer SDK versions, or as a direct attribute on the raw response.
+
+    Returns the best available content string, preferring ``content`` over
+    ``reasoning_content``. Returns ``None`` if both are empty/missing.
+    """
+    msg = response.choices[0].message
+
+    # 1. Primary field (standard response)
+    content = msg.content
+    if content and content.strip():
+        return content.strip()
+
+    # 2. Direct attribute (works with some SDK versions)
+    reasoning = getattr(msg, 'reasoning_content', None)
+    if reasoning and reasoning.strip():
+        return reasoning.strip()
+
+    # 3. model_extra dict (OpenAI SDK v2.3+ stores unknown fields here)
+    try:
+        model_extra = getattr(msg, 'model_extra', None)
+        if isinstance(model_extra, dict):
+            reasoning = model_extra.get('reasoning_content', '')
+            if reasoning and reasoning.strip():
+                return reasoning.strip()
+    except Exception:
+        pass
+
+    # 4. Raw response fallback (access underlying dict for maximum compatibility)
+    try:
+        response_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+        choices = response_dict.get('choices', [])
+        if choices:
+            msg_dict = choices[0].get('message', {})
+            reasoning = msg_dict.get('reasoning_content', '')
+            if reasoning and reasoning.strip():
+                return reasoning.strip()
+    except Exception:
+        pass
+
+    return None
+
+
 # ── Retry wrapper ──────────────────────────────────────────────────────
 
 def llm_json_call(
@@ -50,7 +102,7 @@ def llm_json_call(
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(**call_kwargs)
-            content = response.choices[0].message.content
+            content = _extract_reasoning_content(response)
             if content is None or not content.strip():
                 raise ValueError(
                     "LLM returned empty content "

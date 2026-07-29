@@ -15,6 +15,7 @@ from difflib import SequenceMatcher
 from typing import Optional
 
 from config.llm_client import create_llm_client
+from config.llm_helpers import _extract_reasoning_content
 
 from config.settings import (
     LLM_MODEL,
@@ -152,6 +153,20 @@ class ScriptGenerator:
             try:
                 response = self.client.chat.completions.create(**call_kwargs)
                 content = response.choices[0].message.content
+                # DeepSeek thinking-mode fallback:
+                # When enable_thinking=True, the model may route the JSON
+                # response into reasoning_content and leave content empty.
+                # The OpenAI SDK does not expose reasoning_content in the
+                # standard ChatCompletionMessage model — we need to read it
+                # via model_extra or getattr.
+                if not content:
+                    reasoning = _extract_reasoning_content(response)
+                    if reasoning:
+                        content = reasoning
+                        logger.debug(
+                            "LLM fallback: using reasoning_content "
+                            "(thinking mode, %d chars)", len(content)
+                        )
                 if content is None or not content.strip():
                     raise ValueError(
                         "LLM returned empty content (attempt %d/%d)" % (
