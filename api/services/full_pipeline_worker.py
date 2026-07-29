@@ -34,9 +34,6 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Lifecycle monitoring ──
-from api.services.lifecycle_monitor import log_event as log_lifecycle
-
 # ── Ensure the project root is on sys.path BEFORE any project imports ──
 # When invoked as a script (python3 api/services/full_pipeline_worker.py),
 # Python places the script's directory on sys.path[0], NOT the CWD.
@@ -45,6 +42,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# ── Lifecycle monitoring (import AFTER sys.path fix) ──
+from api.services.lifecycle_monitor import log_event as log_lifecycle
 from api.utils import db_now
 
 

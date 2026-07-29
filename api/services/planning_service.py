@@ -2185,7 +2185,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
             max_retries=3,
             retry_delay=2.0,
             model=LLM_MODEL,
-            messages=[{"role": "user", "content": f"Genera un Short viral en español de ~45-50 segundos (~65-80 palabras totales, minimo 50). Canal: {display_name} — {niche}. Tagline: {tagline}.{topic_warning}Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. cierre debe ser una conclusion natural, SIN pedir suscripcion (se añadira un bloque separado si es necesario). PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"tema\": \"frase corta que identifica el tema (max 80 chars)\", \"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre natural\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
+            messages=[{"role": "user", "content": f"Genera un Short viral en español de ~35-45 segundos (~45-55 palabras totales, minimo 45). Canal: {display_name} — {niche}. Tagline: {tagline}.{topic_warning}Usa 5 bloques (hook, desarrollo1, desarrollo2, climax, cierre). IMPORTANTE: desarrollo1, desarrollo2 y climax deben tener 2-3 frases cada uno. Hook y cierre: 1-2 frases. Minimo 10 palabras por bloque. El total debe superar 50 palabras. cierre debe ser una conclusion natural, SIN pedir suscripcion (se añadira un bloque separado si es necesario). PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar imágenes de stock que coincidan con lo narrado. Sé muy concreto: incluye tema + detalles visuales (iluminación, tipo de plano, atmósfera). NO uses español. Además genera 'theme_keywords_en': 5-8 keywords EN INGLÉS del tema visual GLOBAL del short. Devuelve SOLO JSON: {{\"tema\": \"frase corta que identifica el tema (max 80 chars)\", \"titulo\": \"...\", \"hook_text\": \"frase de gancho 8-12 palabras\", \"theme_keywords_en\": [\"global\", \"theme\"], \"bloques\": [{{\"tipo\": \"hook\", \"texto\": \"1-2 frases\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo1\", \"texto\": \"2-3 frases con contexto y detalle\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"desarrollo2\", \"texto\": \"2-3 frases con dato impactante especifico\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"climax\", \"texto\": \"2-3 frases con la consecuencia o revelacion\", \"search_query_en\": \"english keywords\"}}, {{\"tipo\": \"cierre\", \"texto\": \"1-2 frases cierre natural\", \"search_query_en\": \"english keywords\"}}]}}. NADA MAS fuera del JSON."}],
             temperature=0.9, max_tokens=1200,
         )
     except Exception as e:
@@ -2209,13 +2209,22 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     cta_variants = getattr(ch_config, "SHORTS_SUBSCRIBE_CTA_VARIANTS", [])
     if cta_variants and random.random() < 0.4:
         cta_text = random.choice(cta_variants)
-        bloques.append({
-            "tipo": "subscribe_cta",
-            "texto": cta_text,
-            "search_query_en": "subscribe button youtube channel notification bell",
-        })
-        has_subscribe_cta = True
-        logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
+        # ── Word budget guard: skip CTA if script is already long ──
+        current_words = sum(len(b.get("texto", "").split()) for b in bloques)
+        cta_words = len(cta_text.split())
+        if current_words + cta_words > 100:  # 100 words ≈ 42-45s, safe under 55s
+            logger.info(
+                "[%s] Skipping subscribe CTA — script already %d words (+%d CTA would overflow)",
+                channel_slug, current_words, cta_words,
+            )
+        else:
+            bloques.append({
+                "tipo": "subscribe_cta",
+                "texto": cta_text,
+                "search_query_en": "subscribe button youtube channel notification bell",
+            })
+            has_subscribe_cta = True
+            logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
 
     # 2. Segmented TTS (block-by-block, no mid-phrase truncation)
     output_dir = OUTPUT_DIR / "videos" / "shorts"

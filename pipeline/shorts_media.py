@@ -867,7 +867,7 @@ def fetch_short_assets_exhaustive(
              ...]
     """
     from config import settings
-    from database.db_extended import DatabaseExtended
+    from database.db_extended import ExtendedDatabase
 
     # ── Reset module-level dedup state ────────────────────────
     _DEDUP_STATE["used_urls"] = set()
@@ -1229,9 +1229,9 @@ def flush_short_asset_history(
         Number of assets successfully recorded.
     """
     from config import settings
-    from database.db_extended import DatabaseExtended
+    from database.db_extended import ExtendedDatabase
 
-    db = DatabaseExtended(settings.DATABASE_PATH)
+    db = ExtendedDatabase(settings.DATABASE_PATH)
     recorded = 0
 
     for asset in asset_items:

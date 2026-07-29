@@ -1251,14 +1251,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             retry_delay=2.0,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~40-50 segundos (~55-70 palabras totales, minimo 45). "
+                f"Genera un Short viral en español de ~35-45 segundos (~45-55 palabras totales, minimo 45). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
                 f"{theme_block}"  # v8: visual theme context for query anchoring
                 f"Usa entre 5 y 7 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
                 f"IMPORTANTE: los bloques de desarrollo y climax deben tener 2-3 frases cada uno. "
                 f"Hook y cierre: 1-2 frases. Minimo 8 palabras por bloque, maximo 18. "
-                f"El total debe superar 45 palabras y no exceder 160. "
+                f"El total debe superar 45 palabras y no exceder 115. "
                 f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                 f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
                 f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
@@ -1307,13 +1307,22 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     cta_variants = getattr(ch_config, "SHORTS_SUBSCRIBE_CTA_VARIANTS", [])
     if cta_variants and random.random() < 0.4:
         cta_text = random.choice(cta_variants)
-        bloques.append({
-            "tipo": "subscribe_cta",
-            "texto": cta_text,
-            "search_query_en": "subscribe button youtube channel notification bell",
-        })
-        has_subscribe_cta = True
-        logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
+        # ── Word budget guard: skip CTA if script is already long ──
+        current_words = sum(len(b.get("texto", "").split()) for b in bloques)
+        cta_words = len(cta_text.split())
+        if current_words + cta_words > 100:  # 100 words ≈ 42-45s, safe under 55s
+            logger.info(
+                "[%s] Skipping subscribe CTA — script already %d words (+%d CTA would overflow)",
+                channel_slug, current_words, cta_words,
+            )
+        else:
+            bloques.append({
+                "tipo": "subscribe_cta",
+                "texto": cta_text,
+                "search_query_en": "subscribe button youtube channel notification bell",
+            })
+            has_subscribe_cta = True
+            logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
 
     # 2. Segmented TTS
     output_dir = OUTPUT_DIR / "videos" / "shorts"
