@@ -927,30 +927,65 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     except Exception as e:
         raise HTTPException(500, f"TTS failed: {str(e)[:200]}")
 
-    # 3b. Fetch assets exhaustively (v2) — one distinct asset per block
+    # 3c. Compute scene_ranges from TTS timestamps (v9 — sub-scene splitting)
+    #      Splits blocks longer than SCENE_DURATION_MAX (10s) into sub-scenes
+    from pipeline.video_editor import VideoEditor
+    try:
+        editor = VideoEditor(ch_config)
+        scene_ranges = editor._compute_block_ranges(
+            bloques, tts_result.get("timestamps", [])
+        )
+        # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
+        for sr in scene_ranges:
+            sr["duracion_sec"] = sr.get("duration", 5.0)
+        logger.info(
+            "Computed %d scene ranges from %d blocks (TTS=%.1fs)",
+            len(scene_ranges), len(bloques),
+            tts_result.get("duration_sec", 0),
+        )
+    except Exception as e:
+        logger.warning("Scene range computation failed — falling back to raw blocks: %s", e)
+        scene_ranges = None
+
+    # 3d. Fetch assets exhaustively (v2) — one distinct asset per scene
     from pipeline.shorts_media import (
         fetch_short_assets_exhaustive, render_short_hybrid, flush_short_asset_history,
     )
     theme_kw = script.get("theme_keywords_en", [])
 
+    fetch_list = scene_ranges if scene_ranges else bloques
+
     asset_items = []
     try:
-        asset_items = fetch_short_assets_exhaustive(bloques, ch_config, theme_kw, channel_id, channel_slug=channel_slug)
-        logger.info("Fetched %d assets for Short (blocks=%d)", len(asset_items), len(bloques))
+        asset_items = fetch_short_assets_exhaustive(
+            fetch_list, ch_config, theme_kw, channel_id, channel_slug=channel_slug,
+        )
+        logger.info("Fetched %d assets for Short (fetch_list=%d)",
+                    len(asset_items), len(fetch_list))
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
 
-    # 4. Render hybrid (video + Ken Burns images + xfade)
+    # 4. Filter and align assets with scene_ranges for the renderer
+    if scene_ranges and len(scene_ranges) == len(asset_items):
+        paired = [(a, sr) for a, sr in zip(asset_items, scene_ranges) if a is not None]
+        render_assets = [p[0] for p in paired]
+        render_ranges = [p[1] for p in paired]
+    else:
+        render_assets = [a for a in asset_items if a is not None]
+        render_ranges = None
+
+    # 5. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"native_short_{channel_slug}_{ts}.mp4"
 
     try:
         render_short_hybrid(
-            asset_items=asset_items,
+            asset_items=render_assets,
             audio_path=audio_path,
             output_path=video_path,
             audio_duration=audio_duration,
             bg_color_hex=bg_color,
             srt_path=srt_path if srt_path.exists() else None,
+            scene_ranges=render_ranges,
         )
     except Exception as e:
         logger.warning("Hybrid render failed, falling back to solid bg: %s", e)

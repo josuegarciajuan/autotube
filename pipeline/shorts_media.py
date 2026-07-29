@@ -1007,6 +1007,7 @@ def render_short_hybrid(
     bg_color_hex: str = "0a0a1a",
     crossfade_dur: float = 1.0,
     srt_path: Path | None = None,
+    scene_ranges: list[dict] | None = None,
 ) -> Path:
     """FFmpeg hybrid render: mix video clips and Ken Burns still images.
 
@@ -1024,6 +1025,12 @@ def render_short_hybrid(
     All clips are sequenced with xfade transitions. SRT subtitles are burned
     in if provided. Falls back to solid-colour background if no viable assets.
 
+    If ``scene_ranges`` is provided (must have same length as valid assets),
+    each segment is trimmed to match its actual narration duration instead of
+    a uniform split. This enables sub-scene splitting: a 20s block that gets
+    split into two 10s sub-scenes will render two distinct assets of ~10s each
+    instead of one stretched 20s asset.
+
     Args:
         asset_items: List of asset dicts from fetch_short_assets_exhaustive().
                      None entries are skipped (solid-bg filler).
@@ -1033,6 +1040,10 @@ def render_short_hybrid(
         bg_color_hex: Fallback background color (hex without #).
         crossfade_dur: Crossfade duration between scenes in seconds.
         srt_path: Optional SRT/VTT subtitle file path.
+        scene_ranges: Optional list of scene range dicts (from
+                      VideoEditor._compute_block_ranges) with "duration" key.
+                      When provided and length matches valid assets, each
+                      asset's visual duration matches its narration duration.
 
     Returns:
         The output Path on success.
@@ -1097,33 +1108,65 @@ def render_short_hybrid(
     # ── Hybrid render: mixed video + image scenes ─────────────
     n_assets = len(valid_assets)
     fade = crossfade_dur
-    # Each segment duration: total = n * seg_dur - (n-1) * fade
-    # → seg_dur = (total + (n-1) * fade) / n
-    segment_dur = (audio_duration + fade * (n_assets - 1)) / max(n_assets, 1)
+
+    # Determine whether to use variable scene durations from scene_ranges
+    # (enables sub-scene splitting: each split sub-scene gets its own distinct
+    #  visual asset with its actual narration duration)
+    use_variable_dur = (
+        scene_ranges is not None
+        and len(scene_ranges) == n_assets
+    )
+
+    # Pre-compute per-segment durations and xfade offsets
+    per_seg_dur: list[float] = []       # visual clip duration per segment
+    per_xfade_offset: list[float] = []   # xfade offset per transition step
+
+    if use_variable_dur:
+        # Variable durations from scene_ranges:
+        #   - Each segment gets visual_dur = narration_dur + fade
+        #   - xfade offset = narration_dur of the previous segment
+        for sr in scene_ranges:
+            narration_dur = float(sr.get("duration", 5.0))
+            per_seg_dur.append(narration_dur + fade)
+        for i in range(n_assets - 1):
+            per_xfade_offset.append(float(scene_ranges[i].get("duration", 5.0)))
+        logger.info(
+            "FFmpeg variable scene durations: %d assets, durations=%s",
+            n_assets, [f"{d:.1f}s" for d in per_seg_dur],
+        )
+    else:
+        # Uniform split (legacy behavior)
+        segment_dur = (audio_duration + fade * (n_assets - 1)) / max(n_assets, 1)
+        per_seg_dur = [segment_dur + fade] * n_assets
+        uniform_offset = segment_dur - fade
+        per_xfade_offset = [uniform_offset] * (n_assets - 1)
+        logger.info(
+            "FFmpeg uniform scene durations: %d assets, each %.1fs",
+            n_assets, segment_dur,
+        )
 
     inputs: list[str] = []
     filter_parts: list[str] = []
-    img_counter = 0  # separate counter for image zoompans
 
     for i, asset in enumerate(valid_assets):
         asset_type = asset.get("type", "image")
         asset_path = str(asset["path"])
+        visual_dur = per_seg_dur[i]
 
         if asset_type == "video":
-            # Video: use as-is (trimmed to segment_dur later in concat)
+            # Video: use as-is (trimmed to visual_dur)
             inputs.extend(["-i", asset_path])
             # Scale + crop to 9:16
             filter_parts.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,fps=30,"
-                f"trim=duration={segment_dur+fade:.3f},setpts=PTS-STARTPTS[v{i}]"
+                f"trim=duration={visual_dur:.3f},setpts=PTS-STARTPTS[v{i}]"
             )
         else:
             # Image: loop + Ken Burns zoompan
-            # Use a dedicated counter for the image-to-zoompan label chain
             inputs.extend(["-loop", "1", "-t",
-                          f"{segment_dur + fade:.2f}", "-i", asset_path])
-            frames = int((segment_dur + fade) * 30)
+                          f"{visual_dur:.2f}", "-i", asset_path])
+            frames = int(visual_dur * 30)
             zoompan = (
                 f"zoompan=z='min(zoom+0.0015,1.12)':"
                 f"d={frames}:s=1080x1920:"
@@ -1145,7 +1188,7 @@ def render_short_hybrid(
         final_label = "[v0]"
     else:
         for i in range(1, n_assets):
-            offset = segment_dur - fade
+            offset = per_xfade_offset[i - 1]
             if i == 1:
                 filter_parts.append(
                     f"[v0][v1]xfade=transition=fade:duration={fade}:offset={offset:.3f}[vf1]"

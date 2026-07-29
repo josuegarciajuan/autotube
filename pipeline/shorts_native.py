@@ -68,14 +68,41 @@ class NativeShortsPipeline:
                 logger.error(f"[{self.channel_slug}] TTS for short failed")
                 return None
 
-            # 4. Media (vertical-oriented)
-            media = self._phase_media_short(short_script)
+            # 3b. Compute scene_ranges from TTS timestamps (v9 — sub-scene splitting)
+            #     Splits blocks longer than SCENE_DURATION_MAX (10s) into sub-scenes
+            #     so each sub-scene gets its own distinct visual asset.
+            scene_ranges = None
+            try:
+                from pipeline.video_editor import VideoEditor
+                editor = VideoEditor(self.config)
+                bloques = short_script.get("bloques", [])
+                timestamps = audio_data.get("timestamps", [])
+                scene_ranges = editor._compute_block_ranges(bloques, timestamps)
+                # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
+                for sr in scene_ranges:
+                    sr["duracion_sec"] = sr.get("duration", 5.0)
+                logger.info(
+                    "[%s] Computed %d scene ranges from %d blocks (TTS=%.1fs)",
+                    self.channel_slug, len(scene_ranges), len(bloques),
+                    audio_data.get("duration_sec", 0),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%s] Scene range computation failed — falling back to raw blocks: %s",
+                    self.channel_slug, e,
+                )
+                scene_ranges = None
+
+            # 4. Media (vertical-oriented) — uses scene_ranges for sub-scene fetching
+            media = self._phase_media_short(short_script, scene_ranges=scene_ranges)
             if not media:
                 logger.error(f"[{self.channel_slug}] Media fetch for short failed")
                 return None
 
-            # 5. Vertical render
-            video_path = self._phase_render_short(short_script, audio_data, media)
+            # 5. Vertical render — uses scene_ranges for variable segment durations
+            video_path = self._phase_render_short(
+                short_script, audio_data, media, scene_ranges=scene_ranges,
+            )
             if not video_path:
                 logger.error(f"[{self.channel_slug}] Short render failed")
                 return None
@@ -355,11 +382,15 @@ NADA MAS fuera del JSON."""
             logger.error("Short TTS error: %s", e)
             return None
 
-    def _phase_media_short(self, script: dict) -> Optional[list]:
-        """Fetch assets exhaustively (v2) — one distinct asset per block.
+    def _phase_media_short(self, script: dict, scene_ranges: list | None = None) -> Optional[list]:
+        """Fetch assets exhaustively (v2) — one distinct asset per scene.
 
         Uses the new v2 exhaustive search with query pool, provider pagination,
         cross-short dedup, and 50-60% portrait video mix.
+
+        When ``scene_ranges`` is provided, fetches one asset per sub-scene
+        (enabling ~10s visual variety).  Falls back to ``script['bloques']``
+        otherwise.
         """
         from pipeline.shorts_media import fetch_short_assets_exhaustive
 
@@ -367,29 +398,37 @@ NADA MAS fuera del JSON."""
         bloques = script.get("bloques", [])
         channel_id = getattr(self, "channel_id", 0)
 
-        if not bloques:
+        fetch_list = scene_ranges if scene_ranges else bloques
+
+        if not fetch_list:
             return []
 
         try:
             assets = fetch_short_assets_exhaustive(
-                bloques, self.config, theme_kw,
+                fetch_list, self.config, theme_kw,
                 theme_ctx=self._theme_context,  # v8: pass full ThemeContext
                 channel_id=channel_id, channel_slug=self.channel_slug,
             )
-            logger.info("Fetched %d assets for native Short (blocks=%d)", len(assets), len(bloques))
+            logger.info("Fetched %d assets for native Short (fetch_list=%d)",
+                        len(assets), len(fetch_list))
             return assets
         except Exception as e:
             logger.error("Short media fetch failed: %s", e)
             return []
 
     def _phase_render_short(
-        self, script: dict, audio: dict, media: list
+        self, script: dict, audio: dict, media: list,
+        scene_ranges: list | None = None,
     ) -> Optional[Path]:
         """Render the short video using hybrid FFmpeg render (v2).
 
         Mixes video clips, Ken Burns still images, xfade transitions, and
         burned SRT subtitles. Falls back to solid-colour background if no
         valid assets are available.
+
+        When ``scene_ranges`` is provided, each segment uses its actual
+        narration duration instead of a uniform split — enabling sub-scene
+        splitting for ~10s visual variety.
         """
         from pipeline.shorts_media import render_short_hybrid
         from config.settings import OUTPUT_DIR
@@ -413,13 +452,27 @@ NADA MAS fuera del JSON."""
             return str(c).lstrip("#").replace("#", "")
         bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
 
+        # Filter and align assets with scene_ranges for the renderer
+        if scene_ranges and len(scene_ranges) == len(media):
+            paired = [(a, sr) for a, sr in zip(media, scene_ranges) if a is not None]
+            render_assets = [p[0] for p in paired]
+            render_ranges = [p[1] for p in paired]
+            logger.info(
+                "[%s] Filtered to %d valid assets (from %d scene_ranges)",
+                self.channel_slug, len(render_assets), len(scene_ranges),
+            )
+        else:
+            render_assets = [a for a in (media or []) if a is not None]
+            render_ranges = None
+
         try:
             render_short_hybrid(
-                asset_items=media or [],
+                asset_items=render_assets or [],
                 audio_path=audio_path,
                 output_path=output_path,
                 audio_duration=audio_duration,
                 bg_color_hex=bg_color,
+                scene_ranges=render_ranges,
             )
             return output_path
         except Exception as e:
