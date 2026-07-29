@@ -538,83 +538,6 @@ def get_video_stats_history(video_id: int, days: int = 30):
 # Scheduled Publishing endpoints
 # ═══════════════════════════════════════════════════════════════════
 
-@router.patch("/{video_id}/manual-checklist")
-def update_manual_checklist(video_id: int, data: dict):
-    """Mark a manual action as done or undone.
-
-    Body: {"item": "altered_content"|"end_screens", "done": true|false}
-    """
-    db = get_db()
-    v = db.get_video(video_id)
-    if not v:
-        raise HTTPException(404, "Video not found")
-
-    item = data.get("item", "")
-    done = data.get("done", False)
-
-    if item == "altered_content":
-        db.update_video(video_id, manual_altered_content_done=int(done))
-    elif item == "end_screens":
-        db.update_video(video_id, manual_end_screens_done=int(done))
-    else:
-        raise HTTPException(400, f"Unknown manual checklist item: {item}")
-
-    return {"ok": True, "item": item, "done": done}
-
-
-@router.get("/manual-actions/pending")
-def get_pending_manual_actions(channel_id: int = None):
-    """Get aggregate count of pending manual actions, optionally filtered by channel."""
-    db = get_db()
-    import sqlite3
-    conn = db._connect()
-    try:
-        params = []
-        where = "WHERE manual_altered_content_done = 0 OR manual_end_screens_done = 0"
-        if channel_id:
-            where += " AND channel_id = ?"
-            params.append(channel_id)
-
-        rows = conn.execute(
-            f"SELECT channel_id, "
-            f"SUM(CASE WHEN manual_altered_content_done = 0 THEN 1 ELSE 0 END) as pending_altered, "
-            f"SUM(CASE WHEN manual_end_screens_done = 0 THEN 1 ELSE 0 END) as pending_endscreens, "
-            f"COUNT(*) as affected_videos "
-            f"FROM videos {where} "
-            f"AND yt_video_id IS NOT NULL "
-            f"GROUP BY channel_id",
-            params,
-        ).fetchall()
-
-        channels = {}
-        total_pending = 0
-        total_affected = 0
-        for row in rows:
-            ch = db.get_channel(row["channel_id"])
-            channel_slug = ch["slug"] if ch else f"ch{row['channel_id']}"
-            channel_name = ch["name"] if ch else "Unknown"
-            pending = (row["pending_altered"] or 0) + (row["pending_endscreens"] or 0)
-            channels[channel_slug] = {
-                "channel_id": row["channel_id"],
-                "channel_name": channel_name,
-                "channel_slug": channel_slug,
-                "pending_altered": row["pending_altered"] or 0,
-                "pending_endscreens": row["pending_endscreens"] or 0,
-                "total_pending": pending,
-                "affected_videos": row["affected_videos"] or 0,
-            }
-            total_pending += pending
-            total_affected += max(total_affected, row["affected_videos"] or 0)
-
-        return {
-            "total_pending": total_pending,
-            "total_affected_videos": total_pending,
-            "channels": channels,
-        }
-    finally:
-        conn.close()
-
-
 @router.get("/publications/upcoming")
 def get_upcoming_publications(channel_id: int = None, days: int = 2):
     """Get upcoming scheduled publications (warming + scheduled status)."""
@@ -673,8 +596,6 @@ def get_upcoming_publications(channel_id: int = None, days: int = 2):
             "published_at": row.get("published_at"),
             "auto_playlist_name": row.get("auto_playlist_name"),
             "remaining_seconds": int(remaining_seconds),
-            "pending_altered": int(not row.get("manual_altered_content_done")),
-            "pending_endscreens": int(not row.get("manual_end_screens_done")),
             "yt_video_id": row.get("yt_video_id"),
             "yt_url": row.get("yt_url"),
             "uploaded_at": str(row["uploaded_at"]) if row.get("uploaded_at") else None,

@@ -149,7 +149,7 @@ class YouTubeBrowser:
         the underlying Playwright instance) so every caller thread owns its
         own greenlet.
         """
-        current_thread = threading.get_ident()
+        current_thread = threading.get_native_id()
 
         # ── Same thread — context is valid ──
         if self._context is not None and self._owning_thread_id == current_thread:

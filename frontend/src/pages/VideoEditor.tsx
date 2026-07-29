@@ -4,7 +4,6 @@ import { api, formatDuration, formatDate, formatDateTime, formatTimingMs, status
 import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2, CheckCircle, XCircle, Loader2, ExternalLink } from 'lucide-react'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import ScheduledPublishPanel from '../components/ScheduledPublishPanel'
-import ManualChecklistCard from '../components/ManualChecklistCard'
 
 export default function VideoEditor() {
   const { id } = useParams<{ id: string }>()
@@ -442,18 +441,6 @@ export default function VideoEditor() {
         video.status === 'scheduled' || video.status === 'published' ||
         video.target_public_at) && (
         <ScheduledPublishPanel videoId={videoId} onRefresh={loadVideo} />
-      )}
-
-      {/* ── Manual Checklist ── */}
-      {video.yt_video_id && (
-        <ManualChecklistCard
-          videoId={videoId}
-          channelId={video.channel_id}
-          ytVideoId={video.yt_video_id}
-          alteredContentDone={video.manual_altered_content_done}
-          endScreensDone={video.manual_end_screens_done}
-          onRefresh={loadVideo}
-        />
       )}
 
       {/* Scenes Editor */}

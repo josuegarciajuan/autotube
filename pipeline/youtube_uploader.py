@@ -464,19 +464,6 @@ class YouTubeUploader:
                 "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
                 "ready": False,
             })
-            warnings.append({
-                "field": "end_screens",
-                "reason": "Pantallas finales solo configurables en YouTube Studio. "
-                          "Recomendado: 2 elementos (vídeo recomendado 'mejor para el espectador' + botón suscribirse).",
-                "ready": False,
-            })
-            warnings.append({
-                "field": "altered_content",
-                "reason": "YouTube exige marcar 'contenido alterado' si se ha generado con IA. "
-                          "Márcalo en YouTube Studio > Contenido > ¿Contenido alterado o sintético? > Sí.",
-                "ready": False,
-            })
-
             if thumbnail_path and Path(thumbnail_path).exists():
                 self._set_thumbnail(service, video_id, Path(thumbnail_path))
 

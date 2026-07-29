@@ -85,13 +85,6 @@ export default function UpcomingPublications() {
               {statusLabel(pub.status)}
             </span>
 
-            {/* Manual pending indicator */}
-            {(pub.pending_altered || pub.pending_endscreens) && (
-              <span className="text-[10px] text-neon-red bg-neon-red/10 px-1.5 py-0.5 rounded-full flex-shrink-0">
-                {(pub.pending_altered + pub.pending_endscreens)}
-              </span>
-            )}
-
             <ChevronRight size={12} className="text-gray-600 group-hover:text-white transition-colors flex-shrink-0" />
           </a>
         ))}

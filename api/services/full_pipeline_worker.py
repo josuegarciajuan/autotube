@@ -81,6 +81,8 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
     import time as _time
     import random
 
+    db = None
+
     # ── Wait for YouTube to finish processing (60s, was 20s) ──
     wlog.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
     _time.sleep(60)
@@ -100,7 +102,6 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
             wlog.warning("[%s] Failed to mark altered content for %s — continuing to end screens anyway", canal, yt_video_id)
     except Exception as e:
         wlog.warning("[%s] IA-mark error for %s: %s — continuing to end screens anyway", canal, yt_video_id, e)
-        db = None
 
     # ── Step 2: Configure end screens (always attempted, with retries) ──
     try:

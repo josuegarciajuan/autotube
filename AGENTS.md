@@ -174,7 +174,7 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 - **Flujo:** sube el vídeo como `private` → período de "calentamiento" (warmup) → se publica automáticamente a la **hora pico** calculada (con ±X minutos de jitter).
 - **Hora pico:** heurística por nicho/palabras clave (tabla en `pipeline/publish_scheduler.py`) + auto-ajuste con histórico de rendimiento del canal (`video_stats_history`).
 - **Config relevante por canal:** `PUBLISH_MODE`, `PUBLISH_TIMEZONE`, `PUBLISH_TARGET_HOUR`, `PUBLISH_JITTER_MIN`, `PUBLISH_WARMUP_MIN`.
-- **Acciones manuales:** al subir en modo programado, el sistema muestra alertas para que completes manualmente: "marcar contenido alterado/IA" y "configurar pantallas finales". Haz check en la UI cuando estén hechas.
+- **Auto-marcado IA + pantallas finales:** tras cada subida, un daemon thread ejecuta automáticamente `pipeline/youtube_browser.py::mark_altered_content()` (marca "contenido alterado/IA" en YouTube Studio vía Playwright) y `add_end_screens()` (configura Suscribirse + Vídeo recomendado), controlado por `AUTO_MARK_ALTERED_CONTENT` y `AUTO_END_SCREENS` en la config del canal (activado en todos los canales).
 - **Playlist inteligente:** cada vídeo se asigna automáticamente a la playlist que mejor encaja con su contenido (clasificador LLM en `pipeline/youtube_playlists.py`).
 
 ## Stats collection

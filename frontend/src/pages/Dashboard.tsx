@@ -17,7 +17,7 @@ import RevenueOverview from '../components/RevenueOverview'
 import BossFight from '../components/BossFight'
 import Console from '../components/Console'
 import DeepDivePanel from '../components/DeepDivePanel'
-import PendingManualActions from '../components/PendingManualActions'
+
 import UpcomingPublications from '../components/UpcomingPublications'
 import type { StabilizeResult } from '../components/StabilizeProgress'
 
@@ -564,8 +564,7 @@ export default function Dashboard() {
 
       {/* ═══════ NIVEL 2: Scheduled Publishing ═══════ */}
       <CollapsibleSection title="Publicaciones Programadas" icon="📅" defaultOpen={false}>
-        <PendingManualActions />
-        <div className="mt-3">
+        <div className="mt-0">
           <UpcomingPublications />
         </div>
       </CollapsibleSection>

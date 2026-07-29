@@ -1564,7 +1564,6 @@ export default function ChannelDetail() {
               // overwrite it to 'error').
               const displayStatus = v.yt_video_id ? v.status === 'uploaded_private' || v.status === 'warming' || v.status === 'scheduled' || v.status === 'published' ? v.status : 'uploaded' : (v.status || 'draft');
               const hasScheduledInfo = v.target_public_at && ['uploaded_private', 'warming', 'scheduled'].includes(v.status);
-              const pendingManual = (v.manual_altered_content_done ? 0 : 1) + (v.manual_end_screens_done ? 0 : 1);
               return (
               <div key={v.id} className={`group cursor-pointer ${(v.source_mode === 'viral' || v.source_url) ? 'border-l-[3px] border-amber-500/70 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.15)]' : 'border-l-[3px] border-transparent'}`} onClick={() => navigate(`/videos/${v.id}/edit`)}>
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-dark-700 mb-2">
@@ -1626,11 +1625,6 @@ export default function ChannelDetail() {
                           <ListPlus size={10} className="text-neon-purple" />
                           <span className="text-[10px] text-neon-purple/70">{v.target_playlist_name}</span>
           </div>
-                      )}
-                      {pendingManual > 0 && (
-                        <span className="inline-flex items-center gap-1 text-[10px] text-neon-red bg-neon-red/10 px-1.5 py-0.5 rounded-full">
-                          <AlertTriangle size={10} /> {pendingManual}
-                        </span>
                       )}
                     </div>
                   )}

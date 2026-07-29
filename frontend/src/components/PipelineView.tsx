@@ -301,7 +301,7 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
 }
 
 // ── Card: Warming (uploaded unlisted) ────────────────────────
-function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualToggle: (videoId: number, item: string, done: boolean) => void }) {
+function WarmingCard({ video }: { video: WarmingVideo }) {
   const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
 
   // Calculate warmup progress
@@ -362,41 +362,11 @@ function WarmingCard({ video, onManualToggle }: { video: WarmingVideo; onManualT
       </div>
 
       {/* Countdown */}
-      <div className="flex items-center gap-1.5 mb-3 pt-2 border-t border-white/5">
+      <div className="flex items-center gap-1.5 pt-2 border-t border-white/5">
         <Clock size={11} className={isDue ? 'text-neon-cyan' : 'text-amber-400'} />
         <span className={`text-[10px] font-mono ${isDue ? 'text-neon-cyan' : 'text-amber-400'}`}>
           {isDue ? 'Publicando...' : `En ${countdown}`}
         </span>
-      </div>
-
-      {/* Manual checks */}
-      <div className="space-y-1.5 pt-2 border-t border-white/5">
-        <button
-          onClick={() => onManualToggle(video.video_id, 'altered_content', !video.manual_altered_content_done)}
-          className={`w-full flex items-center gap-2 text-[10px] px-2 py-1.5 rounded-md transition-colors ${
-            video.manual_altered_content_done
-              ? 'bg-green-400/10 text-green-400 border border-green-400/20'
-              : 'bg-red-400/10 text-red-400 border border-red-400/20 hover:bg-green-400/10 hover:text-green-400'
-          }`}
-        >
-          {video.manual_altered_content_done
-            ? <CheckCircle2 size={11} />
-            : <AlertTriangle size={11} />}
-          {video.manual_altered_content_done ? 'Contenido IA marcado' : 'Marcar contenido IA'}
-        </button>
-        <button
-          onClick={() => onManualToggle(video.video_id, 'end_screens', !video.manual_end_screens_done)}
-          className={`w-full flex items-center gap-2 text-[10px] px-2 py-1.5 rounded-md transition-colors ${
-            video.manual_end_screens_done
-              ? 'bg-green-400/10 text-green-400 border border-green-400/20'
-              : 'bg-red-400/10 text-red-400 border border-red-400/20 hover:bg-green-400/10 hover:text-green-400'
-          }`}
-        >
-          {video.manual_end_screens_done
-            ? <CheckCircle2 size={11} />
-            : <AlertTriangle size={11} />}
-          {video.manual_end_screens_done ? 'Pantallas finales OK' : 'Configurar pantallas finales'}
-        </button>
       </div>
     </div>
   )
@@ -615,15 +585,6 @@ export default function PipelineView() {
     return () => clearInterval(t)
   }, [load])
 
-  async function handleManualToggle(videoId: number, item: string, done: boolean) {
-    try {
-      await api.updateManualChecklist(videoId, item, done)
-      load()
-    } catch (e: any) {
-      console.error('Manual toggle error:', e)
-    }
-  }
-
   async function handleUploadNow(videoId: number) {
     try {
       await api.uploadVideo(videoId)
@@ -749,7 +710,7 @@ export default function PipelineView() {
         ) : (
           <div className="space-y-3">
             {warming.map((video) => (
-              <WarmingCard key={video.video_id} video={video} onManualToggle={handleManualToggle} />
+              <WarmingCard key={video.video_id} video={video} />
             ))}
           </div>
         )}

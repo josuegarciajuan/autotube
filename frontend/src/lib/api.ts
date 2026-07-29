@@ -290,18 +290,6 @@ export const api = {
     return request<any[]>(`/videos/publications/upcoming?${params}`);
   },
 
-  getPendingManualActions: (channelId?: number) => {
-    const params = new URLSearchParams();
-    if (channelId) params.set('channel_id', String(channelId));
-    return request<any>(`/videos/manual-actions/pending?${params}`);
-  },
-
-  updateManualChecklist: (videoId: number, item: string, done: boolean) =>
-    request<any>(`/videos/${videoId}/manual-checklist`, {
-      method: 'PATCH',
-      body: JSON.stringify({ item, done }),
-    }),
-
   publishNow: (videoId: number) =>
     request<any>(`/videos/${videoId}/publish-now`, { method: 'POST' }),
 
@@ -446,8 +434,6 @@ export interface WarmingVideo {
   peak_source: string;
   auto_playlist_id: number | null;
   auto_playlist_name: string | null;
-  manual_altered_content_done: number;
-  manual_end_screens_done: number;
   channel_name: string;
   channel_slug: string;
 }
@@ -648,20 +634,6 @@ export interface UpcomingPublication {
   yt_video_id: string | null;
   yt_url: string | null;
   uploaded_at: string | null;
-}
-
-export interface PendingManualSummary {
-  total_pending: number;
-  total_affected_videos: number;
-  channels: Record<string, {
-    channel_id: number;
-    channel_name: string;
-    channel_slug: string;
-    pending_altered: number;
-    pending_endscreens: number;
-    total_pending: number;
-    affected_videos: number;
-  }>;
 }
 
 // ═══════════════════════════════════════════════════════════════
