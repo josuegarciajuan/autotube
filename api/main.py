@@ -490,11 +490,13 @@ async def _schedule_checker_loop():
                         from database.db_extended import ExtendedDatabase
                         _mid_db = ExtendedDatabase()
                         from api.services.planning_service import compute_and_store_horizon
-                        result = compute_and_store_horizon(horizon_days=7, db=_mid_db)
+                        result = await asyncio.to_thread(
+                            compute_and_store_horizon, horizon_days=7, db=_mid_db
+                        )
                         logger.info("Midnight horizon replan: %d slots, %d days",
                                      result.get("total_slots", 0), result.get("days_planned", 0))
                         from api.services.shorts_scheduler import ensure_today_shorts_scheduled
-                        ensure_today_shorts_scheduled()
+                        await asyncio.to_thread(ensure_today_shorts_scheduled)
                         last_midnight_check = now
                     except Exception as exc:
                         logger.debug("Midnight schedule refresh: %s", exc)
@@ -567,7 +569,7 @@ async def _process_planned_slots():
         pass
     try:
         from api.services.planning_service import process_planned_slots as dispatch
-        result = dispatch()
+        result = await asyncio.to_thread(dispatch)
         if result:
             logger.info(
                 "Planning dispatched: slot=%d job=%d video=%d channel=%s",
@@ -590,7 +592,7 @@ async def _process_upload_slots():
     logger = logging.getLogger("autotube.upload")
     try:
         from api.services.upload_scheduler import dispatch_due_uploads
-        result = dispatch_due_uploads()
+        result = await asyncio.to_thread(dispatch_due_uploads)
         if result:
             logger.info(
                 "Upload dispatched: video=%d job=%d channel=%s pub=%s",
@@ -662,7 +664,7 @@ async def _process_smart_slots():
     logger = logging.getLogger("autotube.smart_slots")
     try:
         from api.services.schedule_engine import dispatch_next_due_slot
-        result = dispatch_next_due_slot()
+        result = await asyncio.to_thread(dispatch_next_due_slot)
         if result:
             logger.info(
                 "Smart slot dispatched: slot=%d job=%d video=%d channel=%s",
@@ -689,7 +691,7 @@ async def _process_shorts_slots():
         pass
     try:
         from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
-        result = dispatch_next_due_shorts_slot()
+        result = await asyncio.to_thread(dispatch_next_due_shorts_slot)
         if result:
             logger.info(
                 "Shorts slot dispatched: slot=%d channel=%s type=%s",
