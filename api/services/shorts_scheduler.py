@@ -981,11 +981,67 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         next_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=exclude_list)
         if not next_slot:
             if _skipped_slot_ids:
-                logger.info(
+                logger.warning(
                     "No dispatchable shorts: %d slot(s) skipped (cooldown/conflict) "
-                    "— none remaining in lookahead",
+                    "— all exhausted. Forcing dispatch of most urgent slot.",
                     len(_skipped_slot_ids),
                 )
+                # ── Fallback: all eligible slots are blocked by guards. ──────────
+                # Force-dispatch the most urgent pending slot regardless of
+                # cooldown, same-type conflict, or per-channel job guard.
+                # This prevents the queue from stalling when every slot is
+                # mutually blocked (common with 24h lookahead where many
+                # future slots have nearby target_upload_at).
+                force_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=None)
+                if force_slot:
+                    slot_id = force_slot["id"]
+                    channel_id = force_slot["channel_id"]
+                    slug = force_slot.get("channel_slug", "")
+                    short_type_f = force_slot.get("short_type", "native")
+                    scheduled_f = force_slot.get("scheduled_at", "?")
+                    slot_rank_f = force_slot.get("slot_rank", 0)
+                    source_video_id_f = None
+
+                    if short_type_f == "clip":
+                        source_video_id_f = _resolve_clip_source(channel_id,
+                            force_slot.get("long_slot_position"))
+                        if source_video_id_f is None:
+                            logger.info(
+                                "Force dispatch skipped: clip slot #%d has no source",
+                                slot_id,
+                            )
+                            return None
+
+                    logger.warning(
+                        "FORCE DISPATCH: slot #%d %s type=%s (scheduled %s) — "
+                        "all other slots blocked by guards",
+                        slot_id, slug, short_type_f, scheduled_f,
+                    )
+
+                    db.update_shorts_slot_status(slot_id, "running",
+                                                  source_video_id=source_video_id_f)
+                    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+                    job_action_f = "generate_native_short" if short_type_f == "native" else "generate_clip_short"
+                    job_id_f = db.create_job(channel_id, job_action_f)
+                    db.update_job(job_id_f, status="running")
+                    db.update_shorts_slot_status(slot_id, "running", job_id=job_id_f,
+                                                  source_video_id=source_video_id_f)
+                    conn.close()
+
+                    import asyncio as _asyncio_f
+                    _asyncio_f.create_task(
+                        _dispatch_short_async(
+                            slot_id=slot_id, job_id=job_id_f,
+                            channel_id=channel_id, channel_slug=slug,
+                            short_type=short_type_f,
+                            source_video_id=source_video_id_f,
+                            slot_rank=slot_rank_f,
+                        )
+                    )
+                    return {
+                        "slot_id": slot_id, "job_id": job_id_f,
+                        "channel_slug": slug, "short_type": short_type_f,
+                    }
             else:
                 # Check if there are any pending slots at all (even outside window)
                 try:
