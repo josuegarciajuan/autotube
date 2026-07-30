@@ -5291,8 +5291,8 @@ class ExtendedDatabase(Database):
                 """SELECT id, titulo_final, yt_video_id, created_at
                    FROM videos
                    WHERE channel_id = ?
-                     AND date(created_at) = date('now', 'localtime')
-                     AND status IN ('uploaded', 'public')
+                     AND COALESCE(date(uploaded_at), date(created_at)) = date('now', 'localtime')
+                     AND status IN ('uploaded', 'uploaded_private', 'published')
                    ORDER BY created_at ASC""",
                 (channel_id,),
             ).fetchall()
