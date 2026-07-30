@@ -9,7 +9,8 @@ import json
 import logging
 import sqlite3
 import os
-from datetime import datetime, timedelta
+import threading
+from datetime import datetime, timedelta, timezone as _dt_timezone
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,222 @@ from config.settings import DATABASE_PATH
 from database.db import Database, init_db as _init_db
 
 logger = logging.getLogger(__name__)
+
+# ── Published status verification (YouTube API check) ────────────
+# Videos uploaded with scheduledPublishTime (publishAt) are set to
+# 'uploaded_private' with a future target_public_at. When that time
+# passes, a background thread calls YouTube API to confirm the video
+# is now public, then updates the DB. This avoids continuous polling
+# and preserves YouTube API quota.
+_PUBLISH_VERIFY_LOCK = threading.Lock()
+_PUBLISH_VERIFY_INFLIGHT: set = set()   # video ids being verified right now
+_PUBLISH_MAX_RETRIES = 3                # max verification attempts
+_PUBLISH_RETRY_BASE_MINUTES = 10        # base retry delay
+_PUBLISH_RETRY_MAX_MINUTES = 60         # cap retry delay
+_PUBLISH_YOUTUBE_API_QUOTA_COST = 1     # videos.list(part="status") costs 1 unit
+
+
+def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: str):
+    """Background verification: check if YouTube has auto-published the video.
+    
+    Called from get_pipeline_status() when target_public_at has passed.
+    Runs in a daemon thread. Updates the DB with the result.
+    
+    Quota: 1 unit per verification (videos.list with part="status").
+    """
+    import time as _time
+    
+    vlog = logger.getChild("publish_verify")
+    
+    # ═══ Dedup guard ══════════════════════════════════════════════════
+    with _PUBLISH_VERIFY_LOCK:
+        if video_id in _PUBLISH_VERIFY_INFLIGHT:
+            vlog.debug("[%s] Verify #%d already in-flight — skipping", channel_slug, video_id)
+            return
+        _PUBLISH_VERIFY_INFLIGHT.add(video_id)
+    
+    try:
+        vlog.info("[%s] 📡 Verifying publish status for video #%d (yt=%s)...",
+                  channel_slug, video_id, yt_video_id)
+        
+        # ── Call YouTube API (1 quota unit) ──
+        try:
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(channel_slug)
+            if not uploader.authenticate():
+                vlog.warning("[%s] Auth failed for publish verification of #%d",
+                             channel_slug, video_id)
+                _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+                return
+            
+            service = uploader._get_service()
+            resp = service.videos().list(
+                part="status",
+                id=yt_video_id,
+            ).execute()
+            
+            items = resp.get("items", [])
+            if not items:
+                vlog.warning("[%s] Video %s not found via API — skipping",
+                             channel_slug, yt_video_id)
+                _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+                return
+            
+            privacy_status = items[0].get("status", {}).get("privacyStatus", "")
+            vlog.info("[%s] Video %s privacyStatus = %s", channel_slug, yt_video_id, privacy_status)
+            
+        except Exception as api_exc:
+            vlog.warning("[%s] YouTube API error: %s",
+                         channel_slug, str(api_exc)[:200])
+            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+            return
+        
+        # ── Update DB based on result ──
+        if privacy_status == "public":
+            _mark_video_published(video_id, channel_slug, yt_video_id)
+        else:
+            retry_count = _get_retry_count(video_id)
+            if retry_count >= _PUBLISH_MAX_RETRIES:
+                vlog.warning(
+                    "[%s] Video #%d still %s after %d retries — giving up",
+                    channel_slug, video_id, privacy_status, retry_count,
+                )
+            else:
+                delay = min(
+                    _PUBLISH_RETRY_BASE_MINUTES * (2 ** retry_count),
+                    _PUBLISH_RETRY_MAX_MINUTES,
+                )
+                vlog.info(
+                    "[%s] Video #%d still %s (retry %d/%d) — next in %dmin",
+                    channel_slug, video_id, privacy_status,
+                    retry_count + 1, _PUBLISH_MAX_RETRIES, delay,
+                )
+                _schedule_publish_retry(video_id, delay)
+    
+    finally:
+        with _PUBLISH_VERIFY_LOCK:
+            _PUBLISH_VERIFY_INFLIGHT.discard(video_id)
+
+
+def _mark_video_published(video_id: int, channel_slug: str, yt_video_id: str):
+    """Update DB: mark video as published after YouTube API confirms it's public."""
+    vlog = logger.getChild("publish_verify")
+    
+    db = ExtendedDatabase()
+    now_iso = datetime.now(_dt_timezone.utc).isoformat()
+    
+    try:
+        video = db.get_video(video_id)
+        target = video.get("target_public_at") if video else None
+        
+        db.update_video(
+            video_id,
+            status="published",
+            privacy_status="public",
+            published_at=target or now_iso,
+            published_verified_at=now_iso,
+        )
+        vlog.info(
+            "[%s] ✅ Video #%d confirmed public (yt=%s)",
+            channel_slug, video_id, yt_video_id,
+        )
+    except Exception as e:
+        vlog.error("[%s] Failed to update video #%d: %s",
+                   channel_slug, video_id, e)
+
+
+def _schedule_publish_retry(video_id: int, delay_minutes: int):
+    """Schedule a retry verification in `delay_minutes` minutes."""
+    db = ExtendedDatabase()
+    retry_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=delay_minutes)
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE videos SET published_retry_at = ?, published_retry_count = COALESCE(published_retry_count, 0) + 1 WHERE id = ?",
+            (retry_at.isoformat(), video_id),
+        )
+        conn.commit()
+
+
+def _get_retry_count(video_id: int) -> int:
+    """Count existing verification retries for this video."""
+    db = ExtendedDatabase()
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT published_retry_count FROM videos WHERE id = ?",
+            (video_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] else 0
+
+
+def _maybe_trigger_publish_verification(video: dict):
+    """Check if a warming video should trigger a YouTube API verification.
+    
+    Conditions:
+    - target_public_at is in the past (YouTube should have published by now)
+    - Not already being verified (in-flight set)
+    - No retry pending (published_retry_at is NULL or in the past)
+    - Has a valid yt_video_id
+    
+    If all conditions met, spawns a daemon thread to verify via YouTube API.
+    """
+    target_str = video.get("target_public_at")
+    yt_video_id = video.get("yt_video_id")
+    channel_slug = video.get("channel_slug", "")
+    video_id = video.get("video_id")
+    retry_at_str = video.get("published_retry_at")
+    verified_at_str = video.get("published_verified_at")
+    
+    if not target_str or not yt_video_id or not video_id:
+        return  # can't verify without these
+    
+    # Parse target_public_at
+    try:
+        # Handle ISO8601 with TZ offset
+        target_dt = datetime.fromisoformat(str(target_str).replace("Z", "+00:00").replace(" ", "T"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=_dt_timezone.utc)
+    except (ValueError, TypeError):
+        return
+    
+    # ── Only verify if target has passed ──
+    now_utc = datetime.now(_dt_timezone.utc)
+    if target_dt > now_utc:
+        return  # not time yet
+    
+    # ── Don't verify if already confirmed ──
+    if verified_at_str:
+        return
+    
+    # ── Respect retry schedule ──
+    if retry_at_str:
+        try:
+            retry_dt = datetime.fromisoformat(str(retry_at_str).replace("Z", "+00:00").replace(" ", "T"))
+            if retry_dt.tzinfo is None:
+                retry_dt = retry_dt.replace(tzinfo=_dt_timezone.utc)
+            if retry_dt > now_utc:
+                return  # retry not due yet
+        except (ValueError, TypeError):
+            pass
+    
+    # ── Don't verify if already in-flight ──
+    with _PUBLISH_VERIFY_LOCK:
+        if video_id in _PUBLISH_VERIFY_INFLIGHT:
+            return
+    
+    # ── Spawn daemon thread ──
+    vlog = logger.getChild("publish_verify")
+    vlog.info(
+        "[%s] Triggering publish verification for video #%d (target was %s, now %s)",
+        channel_slug, video_id,
+        target_dt.strftime("%H:%M"),
+        now_utc.strftime("%H:%M"),
+    )
+    t = threading.Thread(
+        target=_verify_published_status_bg,
+        args=(video_id, channel_slug, yt_video_id),
+        daemon=True,
+    )
+    t.start()
 
 
 SCHEMA_V2_PATH = Path(__file__).parent / "schema_v2.sql"
@@ -648,6 +865,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v22: script_generation_attempts + scripts.emergency_mode ──
     _migrate_v22(conn, logger)
+
+    # ── v23: videos.published_verified_at + published_retry_at ──
+    _migrate_v23(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1325,6 +1545,26 @@ def _migrate_v22(conn, logger):
     logger.info("Migration: v22 schema applied (script_generation_attempts + emergency_mode)")
 
 
+def _migrate_v23(conn, logger):
+    """Idempotent v23: videos.published_verified_at + published_retry_at columns.
+    
+    Supports the hybrid time+API verification system:
+    - When target_public_at has passed, a background thread verifies via YouTube API
+    - published_verified_at tracks last successful verification timestamp
+    - published_retry_at schedules the next retry if YouTube hasn't published yet
+    """
+    # Check columns exist before adding (SQLite ALTER TABLE is not idempotent)
+    existing = conn.execute("PRAGMA table_info('videos')").fetchall()
+    col_names = [row[1] for row in existing]
+    
+    for col in ["published_verified_at", "published_retry_at", "published_retry_count"]:
+        if col not in col_names:
+            default = "INTEGER NOT NULL DEFAULT 0" if col == "published_retry_count" else "TIMESTAMP"
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {default}")
+    
+    logger.info("Migration: v23 schema applied (published verification columns)")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -1581,6 +1821,9 @@ class ExtendedDatabase(Database):
                     "manual_altered_content_done", "manual_end_screens_done",
                     "generation_started_at", "generation_finished_at",
                     "scheduled_upload_at",
+                    # ── Published verification (v23) ──
+                    "published_verified_at", "published_retry_at",
+                    "published_retry_count",
                     # ── Cache-busting for frontend ──
                     "updated_at"]
         
@@ -5411,7 +5654,10 @@ class ExtendedDatabase(Database):
                 awaiting_list.append(d)
             result["awaiting_upload"] = awaiting_list
 
-            # ── 4. Warming (uploaded private, waiting for go_public) ──
+            # ── 4. Warming (uploaded private, waiting for YouTube auto-publish) ──
+            # Videos with scheduledPublishTime (publishAt) are uploaded as private.
+            # YouTube auto-publishes at target_public_at. We show them in "calentando"
+            # until the verification confirms they're public (published_at IS NULL).
             warming = conn.execute(
                 """SELECT
                     v.id as video_id,
@@ -5428,16 +5674,25 @@ class ExtendedDatabase(Database):
                     v.auto_playlist_name,
                     v.manual_altered_content_done,
                     v.manual_end_screens_done,
+                    v.published_verified_at,
+                    v.published_retry_at,
+                    v.published_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
                    WHERE v.status = 'uploaded_private'
-                     AND v.target_public_at IS NOT NULL
-                     AND datetime(v.target_public_at) > datetime('now')
+                     AND v.published_at IS NULL
                    ORDER BY v.target_public_at ASC""",
             ).fetchall()
             result["warming"] = [dict(r) for r in warming]
+
+            # ── Trigger verification for videos whose publishAt time has passed ──
+            # Only spawn verification threads from within get_pipeline_status() 
+            # (called every 60s by frontend polling). This ensures surgical, 
+            # on-demand verification without a persistent background loop.
+            for row in warming:
+                _maybe_trigger_publish_verification(dict(row))
 
             # ── 5. Shorts pending (slots for today, not dispatched yet) ──
             shorts_pending = conn.execute(
