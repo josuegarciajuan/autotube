@@ -422,11 +422,18 @@ def migrate_v2(db_path: str = None):
             source_video_id     INTEGER REFERENCES videos(id) ON DELETE SET NULL,
             short_id            INTEGER REFERENCES shorts(id) ON DELETE SET NULL,
             job_id              INTEGER REFERENCES generation_jobs(id) ON DELETE SET NULL,
+            retry_count         INTEGER DEFAULT 0,
             created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sps_date ON shorts_planned_slots(date_key, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sps_channel ON shorts_planned_slots(channel_id, date_key)")
+    # ── v22: retry_count for native short auto-retry on TTS/script failures ──
+    try:
+        conn.execute("ALTER TABLE shorts_planned_slots ADD COLUMN retry_count INTEGER DEFAULT 0")
+        logger.info("Migration: retry_count added to shorts_planned_slots")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     logger.info("Migration: shorts_planned_slots table ensured")
 
     # ── system_state: simple key-value persistence for in-memory state ──

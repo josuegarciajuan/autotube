@@ -1193,32 +1193,95 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             conn.close()
             logger.info("Shorts slot #%d completed: short_id=%d", slot_id, short_id)
         else:
-            # Mark slot as cancelled
+            # ── Retry logic: don't permanently cancel on first failure ──
+            # TTS or script failures are often transient (LLM word count,
+            # voice speed). Instead of cancelling, set back to 'pending'
+            # for up to 2 automatic retries. After 2 failures, cancel permanently.
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-            conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (slot_id,),
-            )
-            conn.execute(
-                "UPDATE generation_jobs SET status = 'failed', error_msg = 'No short_id returned' WHERE id = ?",
-                (job_id,),
-            )
-            conn.commit()
-            conn.close()
-            logger.warning("Shorts slot #%d returned no short_id", slot_id)
+            retries = 0
+            try:
+                row = conn.execute(
+                    "SELECT retry_count FROM shorts_planned_slots WHERE id = ?",
+                    (slot_id,),
+                ).fetchone()
+                retries = (int(row[0]) if row and row[0] else 0)
+            except Exception:
+                pass
+
+            if retries < 2:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
+                    "error_message = 'Auto-retry after failure (attempt ' || ? || '/2)', "
+                    "job_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (retries + 1, retries + 1, slot_id),
+                )
+                conn.execute(
+                    "UPDATE generation_jobs SET status = 'failed', "
+                    "error_msg = 'No short_id returned (retry ' || ? || '/2)' WHERE id = ?",
+                    (retries + 1, job_id),
+                )
+                conn.commit()
+                conn.close()
+                logger.warning(
+                    "Shorts slot #%d failed (retry %d/2) — rescheduled as pending",
+                    slot_id, retries + 1,
+                )
+            else:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                    "error_message = 'Exhausted retries (2/2)', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (slot_id,),
+                )
+                conn.execute(
+                    "UPDATE generation_jobs SET status = 'failed', "
+                    "error_msg = 'No short_id returned (exhausted retries)' WHERE id = ?",
+                    (job_id,),
+                )
+                conn.commit()
+                conn.close()
+                logger.warning("Shorts slot #%d exhausted retries — cancelled", slot_id)
     except Exception as e:
         logger.error("Shorts dispatch error for slot #%d: %s", slot_id, e)
         try:
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
-            conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (slot_id,),
-            )
-            conn.execute(
-                "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
-                (str(e)[:500], job_id),
-            )
-            conn.commit()
+            retries = 0
+            try:
+                row = conn.execute(
+                    "SELECT retry_count FROM shorts_planned_slots WHERE id = ?",
+                    (slot_id,),
+                ).fetchone()
+                retries = (int(row[0]) if row and row[0] else 0)
+            except Exception:
+                pass
+
+            if retries < 2:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
+                    "error_message = ?, job_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (retries + 1, f"Auto-retry after error (attempt {retries+1}/2): {str(e)[:200]}", slot_id),
+                )
+                conn.execute(
+                    "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                    (f"Exception (retry {retries+1}/2): {str(e)[:300]}", job_id),
+                )
+                conn.commit()
+                logger.warning(
+                    "Shorts slot #%d crashed (retry %d/2) — rescheduled as pending: %s",
+                    slot_id, retries + 1, str(e)[:100],
+                )
+            else:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                    "error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (f"Exhausted retries after error: {str(e)[:300]}", slot_id),
+                )
+                conn.execute(
+                    "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                    (f"Exception (exhausted retries): {str(e)[:300]}", job_id),
+                )
+                conn.commit()
+                logger.warning("Shorts slot #%d exhausted retries after crash — cancelled: %s", slot_id, str(e)[:100])
             conn.close()
         except Exception:
             pass
@@ -1239,6 +1302,14 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
         # Without this, the next short waits for the schedule checker
         # tick (1-5 min). By triggering now, we chain shorts back-to-back
         # and clear the backlog faster.
+        #
+        # ── Cleanup: sync running slots before chaining, to prevent ──
+        #     orphaned 'running' slots from blocking the dispatch loop.
+        try:
+            _sync_running_shorts_slots(None)  # creates its own db connection
+        except Exception:
+            pass
+
         try:
             import asyncio as _asyncio
             async def _chain_next():
@@ -1252,8 +1323,10 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                             next_result["slot_id"], next_result["channel_slug"],
                             next_result["short_type"],
                         )
+                    else:
+                        logger.debug("Chain dispatch: no due slots within lookahead window")
                 except Exception as _chain_err:
-                    logger.debug("Chain dispatch skipped: %s", _chain_err)
+                    logger.warning("Chain dispatch error: %s", _chain_err)
             _asyncio.create_task(_chain_next())
         except Exception:
             pass  # best-effort, never crash the finally block
@@ -1388,14 +1461,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             retry_delay=2.0,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~50-58 segundos (~80-100 palabras totales, minimo 80). "
+                f"Genera un Short viral en español de ~50-58 segundos (~70-85 palabras totales, minimo 70). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
                 f"{theme_block}"  # v8: visual theme context for query anchoring
                 f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
                 f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
-                f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 22. "
-                f"El total debe superar 80 palabras y no exceder 110. "
+                f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 18. "
+                f"El total debe superar 70 palabras y no exceder 90. "
                 f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                 f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
                 f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
@@ -1492,7 +1565,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         # ── Word budget guard: skip CTA if script is already long ──
         current_words = sum(len(b.get("texto", "").split()) for b in bloques)
         cta_words = len(cta_text.split())
-        if current_words + cta_words > 100:  # 100 words ≈ 42-45s, safe under 55s
+        if current_words + cta_words > 85:  # 85 words ≈ 42s safe under 58s max (aligned with MAX_WORD_COUNT=105)
             logger.info(
                 "[%s] Skipping subscribe CTA — script already %d words (+%d CTA would overflow)",
                 channel_slug, current_words, cta_words,
@@ -1505,6 +1578,45 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             })
             has_subscribe_cta = True
             logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
+
+    # ── Pre-TTS duration estimation ──────────────────────────
+    # Avoid wasting TTS time on scripts that will definitely fail
+    # the audio length check. Worst-case voice speed: 0.50 s/word.
+    pre_tts_words = sum(len(b.get("texto", "").split()) for b in bloques)
+    pre_tts_est = pre_tts_words * 0.50  # worst case for slow voices
+    if pre_tts_est > 53.0:  # 5s margin under 58s SHORTS_MAX_DURATION_SEC
+        # Re-trim aggressively to ~90 words (safe under 45s)
+        target_words = 90
+        words_to_remove = pre_tts_words - target_words
+        logger.warning(
+            "[%s] Pre-TTS: estimated %.1fs from %d words (> 53s) — "
+            "re-trimming to ~%d words",
+            channel_slug, pre_tts_est, pre_tts_words, target_words,
+        )
+        trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
+        for block_type in trim_order:
+            if words_to_remove <= 0:
+                break
+            for b in bloques:
+                if b.get("tipo") == block_type:
+                    words = b.get("texto", "").split()
+                    if len(words) > 5:
+                        remove = min(words_to_remove, len(words) - 5)
+                        b["texto"] = " ".join(words[:len(words) - remove])
+                        words_to_remove -= remove
+
+        new_total = sum(len(b.get("texto", "").split()) for b in bloques)
+        new_est = new_total * 0.50
+        logger.info(
+            "[%s] Re-trimmed: %d → %d words (est %.1fs → %.1fs)",
+            channel_slug, pre_tts_words, new_total, pre_tts_est, new_est,
+        )
+        if new_est > 55.0:
+            logger.error(
+                "[%s] Still too long after re-trim (est %.1fs > 55s) — aborting",
+                channel_slug, new_est,
+            )
+            return None  # will be caught by retry mechanism
 
     # 2. Segmented TTS
     output_dir = OUTPUT_DIR / "videos" / "shorts"
