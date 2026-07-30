@@ -955,6 +955,7 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
     _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
     _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
+    _failed_force_ids: set[int] = set()  # force-dispatch: clip slots without source
 
     # ── Pre-filter: cache which channels have completed long videos today ──
     # Clip shorts need a source long video. Pre-computing this avoids wasting
@@ -992,8 +993,17 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
                 # This prevents the queue from stalling when every slot is
                 # mutually blocked (common with 24h lookahead where many
                 # future slots have nearby target_upload_at).
-                force_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=None)
-                if force_slot:
+                #
+                # Iterate: skip clip slots without source and retry up to
+                # _MAX_CLIP_RETRIES times to find a viable slot.
+                for _force_retry in range(_MAX_CLIP_RETRIES):
+                    force_slot = db.get_next_pending_shorts_slot(
+                        exclude_slot_ids=list(_failed_force_ids) if _failed_force_ids else None
+                    )
+                    if not force_slot:
+                        logger.warning("Force dispatch: no viable slots after %d attempts", _force_retry)
+                        return None
+
                     slot_id = force_slot["id"]
                     channel_id = force_slot["channel_id"]
                     slug = force_slot.get("channel_slug", "")
@@ -1007,10 +1017,11 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
                             force_slot.get("long_slot_position"))
                         if source_video_id_f is None:
                             logger.info(
-                                "Force dispatch skipped: clip slot #%d has no source",
-                                slot_id,
+                                "Force dispatch #%d: clip slot #%d (%s) has no source — skipping",
+                                _force_retry + 1, slot_id, slug,
                             )
-                            return None
+                            _failed_force_ids.add(slot_id)
+                            continue
 
                     logger.warning(
                         "FORCE DISPATCH: slot #%d %s type=%s (scheduled %s) — "
@@ -1042,6 +1053,9 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
                         "slot_id": slot_id, "job_id": job_id_f,
                         "channel_slug": slug, "short_type": short_type_f,
                     }
+
+                logger.warning("Force dispatch: exhausted %d attempts", _MAX_CLIP_RETRIES)
+                return None
             else:
                 # Check if there are any pending slots at all (even outside window)
                 try:
