@@ -342,18 +342,11 @@ Sin explicaciones, sin markdown, sin texto fuera del JSON."""
 
 
 def build_system_prompt(config=None, word_count_emphasis: float = 1.0, chunk_context: dict = None, theme_context=None, word_target: dict = None) -> str:
-    """Build the system prompt from channel configuration.
+    """Build a concise system prompt focused on narrative quality.
 
-    Args:
-        config: Canal config module (defaults to canal2_config).
-        word_count_emphasis: Multiplier for min word count on retry (1.0 normal, 1.5, 2.0 retry).
-        chunk_context: Dict with multi-chunk info (order, total, last_paragraph).
-        theme_context: ThemeContext from ThemeExtractor with visual coherence data.
-        word_target: Optional precomputed target dict from ScriptGenerator._get_word_target().
-                     When provided, uses its duration/words/blocks directly (single source of truth).
-
-    Returns:
-        Complete system prompt string for GPT.
+    v22 simplified — format validation and block enrichment are handled
+    by dedicated post-generation steps (ScriptValidator + _enrich_blocks).
+    The prompt focuses on what the LLM does best: writing compelling content.
     """
     cfg = config or _default_config
 
@@ -363,393 +356,67 @@ def build_system_prompt(config=None, word_count_emphasis: float = 1.0, chunk_con
     style_desc = getattr(cfg, "CANAL_STYLE_DESCRIPTION", "")
     audience = getattr(cfg, "TARGET_AUDIENCE", "público LATAM adulto curioso")
     outro = getattr(cfg, "CANAL_OUTRO_TAGLINE", "La realidad supera la ficción. Y esto es real.")
-
-    # ── Hook & structure ─────────────────────────────────────
     hook_rule = getattr(cfg, "SCRIPT_HOOK_RULE", "Hook en los primeros segundos.")
-    structure_text = _extract_structure_text(cfg)
-    end_hook = getattr(cfg, "SCRIPT_END_HOOK", "Suscríbete para más historias increíbles.")
 
-    # ── Retention anchors ────────────────────────────────────
-    retention = getattr(cfg, "RETENTION_ANCHORS", {})
-    retention_text = ""
-    if retention:
-        parts = []
-        for pos, data in retention.items():
-            if isinstance(data, dict):
-                parts.append(f"   • {pos}: {data.get('action', '')}")
-        if parts:
-            retention_text = "\nRETENCIÓN — inserta cliffhangers en estos puntos:\n" + "\n".join(parts)
-
-    # ── Virality triggers ────────────────────────────────────
-    virality = getattr(cfg, "VIRALITY_TRIGGERS", [])
-    virality_text = ""
-    if virality:
-        parts = []
-        for v in virality:
-            if isinstance(v, dict):
-                parts.append(f"   • {v.get('name', '')}: {v.get('mechanism', '')}")
-        if parts:
-            virality_text = "\nVIRALIDAD — asegura que el guion dispare estos mecanismos:\n" + "\n".join(parts)
-
-    # ── Title formulas ───────────────────────────────────────
-    title_formulas = getattr(cfg, "TITLE_FORMULAS", [])
-    title_formulas_text = (
-        "\n".join(f"   • {f}" for f in title_formulas)
-        if title_formulas
-        else "   • Generar títulos impactantes y honestos sobre el suceso"
-    )
-    power_words = getattr(cfg, "TITLE_POWER_WORDS", [])
-    power_words_text = (", ".join(power_words[:].split(",")[:20]) if isinstance(power_words, str)
-                        else ", ".join(power_words[:20]))
-
-    # ── SEO keywords ─────────────────────────────────────────
-    seo_primary = getattr(cfg, "SEO_PRIMARY_KEYWORD", "milagros reales documentados")
-    seo_secondary = getattr(cfg, "SEO_SECONDARY_KEYWORDS", [])
-    seo_keywords_text = f'"{seo_primary}"'
-    if seo_secondary:
-        sample = [k for k in seo_secondary[:8] if isinstance(k, str)]
-        seo_keywords_text += " y keywords relacionadas como " + ", ".join(f'"{k}"' for k in sample)
-
-    # ── Emotional arc ────────────────────────────────────────
-    emotions_text = _extract_emotions_text(cfg)
-
-    # ── Block rules ──────────────────────────────────────────
-    block_rules = _build_block_rules(cfg, theme_context=theme_context, word_target=word_target)
-
-    # ── Voice / SSML ─────────────────────────────────────────
-    voice_ssml = getattr(cfg, "VOICE_SSML", {})
-    ssml_text = ""
-    if voice_ssml:
-        ssml_text = (
-            "\nVOZ — el guion será narrado con voz AI. Para mejorar la naturalidad, "
-            "incluye pausas marcadas con [PAUSA: X segundos] en momentos clave:\n"
-            "   • Después del hook de apertura\n"
-            "   • Antes del clímax (silencio para asombro)\n"
-            "   • En las transiciones entre capítulos\n"
-            "   • Antes de la frase de cierre"
-        )
-
-    # ── Test mode ────────────────────────────────────────────
+    # ── Duration / word guidance (hint, not rigid rule) ──────
     test_mode = getattr(cfg, "TEST_MODE", False)
     if test_mode:
-        words_min = getattr(cfg, "TEST_SCRIPT_WORDS_MIN", 200)
-        words_max = getattr(cfg, "TEST_SCRIPT_WORDS_MAX", 600)
-        blocks_min = getattr(cfg, "TEST_SCRIPT_BLOCKS_MIN", 3)
-        blocks_max = getattr(cfg, "TEST_SCRIPT_BLOCKS_MAX", 6)
         duration_target = getattr(cfg, "TEST_VIDEO_DURATION_TARGET", 2)
-        mode_banner = (
-            f"\n⚠️ MODO PRUEBA: Genera un guion CORTO de {words_min}-{words_max} palabras "
-            f"({duration_target} min aprox) con {blocks_min}-{blocks_max} bloques. "
-            f"Es una prueba de calidad, no un video final. "
-            f"Sé conciso pero mantén la calidad narrativa.\n"
-        )
+        words_guide = f"~{getattr(cfg, 'TEST_SCRIPT_WORDS_MIN', 200)}-{getattr(cfg, 'TEST_SCRIPT_WORDS_MAX', 600)}"
+        mode_banner = f"\nMODO PRUEBA: guion corto de {duration_target} min (~{words_guide} palabras).\n"
+    elif word_target and "duration_target" in word_target:
+        duration_target = word_target["duration_target"]
+        words_min = word_target["words_min"]
+        words_guide = f"~{words_min}-{word_target['words_max']}"
+        mode_banner = ""
     else:
-        # ── Production mode ──
-        if word_target is not None and "duration_target" in word_target:
-            # Use precomputed word_target from ScriptGenerator (single source of truth,
-            # already randomized around VIDEO_AVERAGE_DURATION_MIN ± discrepancy).
-            duration_target = word_target["duration_target"]
-            words_min = word_target["words_min"]
-            words_max = word_target["words_max"]
-            blocks_min = word_target["blocks_min"]
-            blocks_max = word_target["blocks_max"]
-        else:
-            # Fallback: derive from channel's VIDEO_AVERAGE_DURATION_MIN directly.
-            duration_target = getattr(cfg, "VIDEO_AVERAGE_DURATION_MIN", 15)
-            # ~150 words per minute of narration, ±15% band
-            words_min = int(duration_target * 150 * 0.85)
-            words_max = int(duration_target * 150 * 1.15)
-            # ~1.5 to 2.1 blocks per minute (each 30-40 sec avg)
-            blocks_min = max(5, int(duration_target * 1.5))
-            blocks_max = max(8, int(duration_target * 2.1))
-        duration_max = int(duration_target * 1.4)  # upper bound for display range
+        duration_target = getattr(cfg, "VIDEO_AVERAGE_DURATION_MIN", 15)
+        words_guide = f"~{int(duration_target * 150 * 0.85)}-{int(duration_target * 150 * 1.15)}"
         mode_banner = ""
 
-    word_range_text = f"entre {words_min} y {words_max}"
-    if word_count_emphasis > 1.0:
-        words_min_emph = int(words_min * word_count_emphasis)
-        word_range_text = f"EXACTAMENTE entre {words_min_emph} y {words_max} (¡NO MENOS!)"
-    else:
-        # Always emphatic for production — weak phrasing caused short scripts.
-        word_range_text = f"EXACTAMENTE entre {words_min} y {words_max} palabras (¡OBLIGATORIO! No menos de {words_min})"
-    block_range_text = f"{blocks_min} y {blocks_max}"
-    duration_range_text = f"{duration_target}" if test_mode else f"{round(duration_target)}"
-
-    # ── Per-block word minimum (same formula as _build_block_rules) ──
-    if not test_mode and words_min > 0:
-        _avg_blk = (blocks_min + blocks_max) / 2.0
-        _ideal_sec = (duration_target * 60.0) / max(1, _avg_blk)
-        words_per_block_min_prompt = max(40, int(_ideal_sec * 2.5 * 0.45))
-    else:
-        words_per_block_min_prompt = 20
-
-    # ── Chunk context injection (multi-chunk mode) ─────────────
+    # ── Chunk context ────────────────────────────────────────
     chunk_banner = ""
     if chunk_context:
         chunk_banner = (
-            f"\n⚠️ CONTINUACIÓN: Este es el capítulo {chunk_context.get('order', '?')} "
-            f"de {chunk_context.get('total', '?')}.\n"
-            f"Contexto del capítulo anterior (últimos párrafos): \"{chunk_context.get('last_paragraph', '')}\"\n"
-            f"Mantén continuidad narrativa. Este capítulo debe empezar enlazando con lo anterior.\n"
+            f"\nCONTINUACION: capitulo {chunk_context.get('order', '?')} "
+            f"de {chunk_context.get('total', '?')}. "
+            f"Enlaza con: \"{chunk_context.get('last_paragraph', '')}\"\n"
         )
 
-    # ── Theme context injection (P3: narration-visual coherence) ─
+    # ── Theme context (keep for visual anchoring spirit) ─────
     theme_banner = ""
     if theme_context:
-        # Build rich theme descriptor from all available fields
-        mood_str = f"\n- Estado de ánimo: {theme_context.mood}" if theme_context.mood else ""
-        light_str = f"\n- Iluminación preferida: {theme_context.lighting}" if theme_context.lighting else ""
-        comp_str = f"\n- Tipo de encuadre: {theme_context.composition}" if theme_context.composition else ""
-        palette_str = ""
-        if theme_context.color_palette:
-            p = theme_context.color_palette
-            palette_str = f"\n- Paleta de colores: primario={p.get('primary','?')}, secundario={p.get('secondary','?')}, acento={p.get('accent','?')}"
         theme_banner = (
-            f"\n⚠️ CONTEXTO VISUAL DEL VIDEO COMPLETO — EL MUNDO DONDE TODO OCURRE:\n"
-            f"- Género/Ambientación: {theme_context.genre}\n"
-            f"- Época: {theme_context.era}\n"
-            f"- Estilo visual predominante: {theme_context.visual_style}\n"
-            f"- Elementos visuales clave: {', '.join(theme_context.key_motifs)}"
-            f"{mood_str}{light_str}{comp_str}{palette_str}\n"
-            f"- PROHIBIDO mostrar: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}\n"
-            f"- Keywords temáticas en inglés: {', '.join(theme_context.theme_keywords_en[:8])}\n\n"
-            f"REGLA DE FUSIÓN NARRATIVA + TEMÁTICA (¡OBLIGATORIO!):\n"
-            f"Cada search_query_en debe ser UNA SOLA FRASE que fusione DOS conceptos:\n"
-            f"  1. El SUJETO NARRATIVO — lo que se está contando en ESTE BLOQUE concreto\n"
-            f"  2. La AMBIENTACIÓN TEMÁTICA — {theme_context.genre}, {theme_context.era}\n"
-            f"El sujeto narrativo SIEMPRE va primero (es el sujeto visual principal).\n"
-            f"La ambientación va después (es el filtro de época/estilo).\n\n"
-            f"CADA escena_descripcion debe:\n"
-            f"- Describir EXACTAMENTE qué se ve mientras se narra este bloque\n"
-            f"- Estar ambientada en {theme_context.era} (misma época, mismo mundo)\n"
-            f"- Compartir al menos UN elemento visual (color, luz, material, objeto)\n"
-            f"  con la escena ANTERIOR para crear un HILO VISUAL CONTINUO\n"
+            f"\nCONTEXTO VISUAL: genero={theme_context.genre}, epoca={theme_context.era}, "
+            f"estilo={theme_context.visual_style}. "
+            f"Keywords: {', '.join(theme_context.theme_keywords_en[:5])}. "
+            f"Prohibido: {', '.join(theme_context.forbidden_elements) if theme_context.forbidden_elements else 'ninguno'}.\n"
         )
 
-    # ── Build the full prompt ────────────────────────────────
-    return f"""Eres un guionista y divulgador especializado en fenómenos inexplicables, casualidades imposibles y milagros documentados. Tu misión es transformar contenido crudo sobre sucesos extraordinarios reales (artículos de Wikipedia, hilos de Reddit, testimonios documentados) en guiones documentales de video-ensayo para YouTube, narrados en español latinoamericano neutro con un tono cálido, curioso y envolvente. El estilo debe evocar documentales como "Cosmos" o los mejores episodios de National Geographic sobre lo inexplicable — asombroso pero riguroso, inspirador pero basado en hechos.{mode_banner}{chunk_banner}
-
-ESTILO NARRATIVO: "{style}"
-{style_desc}
-{theme_banner}
+    # ── Build the simplified prompt ──────────────────────────
+    return f"""Eres un guionista de documentales. Escribes guiones para video-ensayos de YouTube en español latinoamericano neutro. Tu especialidad: fenómenos inexplicables, casualidades imposibles y milagros documentados.{mode_banner}{chunk_banner}
 
 TONO: {tone}
-
+ESTILO: {style} — {style_desc if style_desc else 'Combina asombro cientifico con profundidad humana.'}
 AUDIENCIA: {audience}
+{theme_banner}
+REGLAS ESENCIALES:
 
-REGLAS INQUEBRANTABLES:
+1. ESPAÑOL LATINOAMERICANO. Nada de vosotros, os, conjugaciones ibéricas. Usa ustedes, tu o usted.
 
-1. Escribe SIEMPRE en español latinoamericano neutro. PROHIBIDO usar "vosotros", "os", o conjugaciones ibéricas (usad, haced, etc). Usa "ustedes", "tú" o "usted" según contexto.
+2. HOOK IMPACTANTE. La primera frase debe ser un dato demoledor, un hecho concreto con fecha y numero, o un cliffhanger. NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a hablar de". Entra directo al fenomeno mas fascinante.
 
-2. Organiza el guion en PÁRRAFOS temáticos, cada uno con 2-4 BLOQUES narrativos. Cada bloque debe durar entre 5 y 12 segundos de narración (aproximadamente 15-35 palabras). Los bloques dentro de un mismo párrafo comparten la misma idea central.
+3. NO INVENTES DATOS. Fechas, nombres, lugares y testimonios deben ser fieles a las fuentes. Si hay debate, menciona la incertidumbre. La credibilidad es lo mas importante.
 
-3. El tono debe oscilar entre el asombro científico (datos, probabilidades, contexto) y lo profundamente humano (emociones de los protagonistas, cómo cambió sus vidas).
+4. PROGRESION NARRATIVA. Cada seccion debe aportar informacion NUEVA que haga avanzar la historia. Nada de repetir ideas con sinonimos. Si no tienes contenido nuevo, termina antes.
 
-4. REGLA DEL HOOK:
-{hook_rule}
+5. ESTRUCTURA CLARA. El guion debe tener: introduccion impactante, desarrollo con datos concretos, climax, y cierre reflexivo. Cada bloque debe ser autocontenido y visualizable.
 
-5. NO inventes datos. Las fechas, nombres, lugares y testimonios deben ser fieles a las fuentes proporcionadas. Si hay debate o cuestionamiento sobre la veracidad de algún detalle, menciónalo con honestidad. El canal gana credibilidad al reconocer lo que no está comprobado.
+6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre, pero NO incluyas llamadas a la accion (suscribete, like, etc.) — eso se añade automaticamente.
 
-6. ESTRUCTURA NARRATIVA — método "Espiral de Asombro":
-{structure_text}
-{retention_text}
+7. LONGITUD. Apunta a {duration_target} minutos de video ({words_guide} palabras). Es una guia, no una regla rigida — prioriza calidad sobre cantidad.
 
-⚠️ ZONA GANCHO BLINDADA — primeros 120-180 segundos (¡LA PARTE MÁS IMPORTANTE DEL GUION!):
-El espectador decide en los primeros 30 segundos si se queda o se va. No puedes fallar aquí.
-Estructura obligatoria de 4 micro-fases:
-
-FASE 1 — EL GOLPE (0:00-0:15):
-  - UNA sola frase de IMPACTO PURO. Sin contexto. Sin presentación.
-  - NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a", "Les voy a contar".
-  - SIEMPRE: un DATO DEMOLEDOR, un HECHO CONCRETO con FECHA y NÚMERO, o un CLIFFHANGER.
-  - Si el contenido lo permite, incluye un número exacto: "El 14 de enero de 1998, 3 médicos..."
-  - Esta frase es lo ÚNICO que muchos espectadores leerán/oirán antes de decidir.
-
-FASE 2 — LA PROMESA (0:15-0:30):
-  - Enumera EXPLÍCITAMENTE lo que el espectador va a descubrir si se queda.
-  - Crea un "contrato narrativo" en 3 puntos:
-    "En los próximos minutos vas a descubrir: 
-    [1] quién era realmente este paciente, 
-    [2] qué mostraban los monitores que ningún médico se atrevió a documentar, y 
-    [3] por qué el informe final fue clasificado."
-  - El espectador YA sabe lo que gana. Esto dispara el Zeigarnik Effect: ahora NECESITA completar.
-
-FASE 2.5 — FRASE DE RETENCIÓN (0:30-0:45):
-  - AÑADE UNA frase explícita que invite al espectador a quedarse hasta el final del video.
-  - Debe ser CONTEXTUAL, distinta en cada video, conectada con la historia que estás contando.
-  - La frase debe sonar natural, como si se la dijeras a alguien que está a punto de irse.
-  - EJEMPLOS (NO los copies textualmente, inspírate y adáptalos):
-    "Si quieres saber qué pasó realmente esa noche, quédate hasta el final."
-    "Si quieres descubrir cómo termina esta historia, no te vayas."
-    "Quédate, porque lo que viene es aún más increíble."
-    "Quédate conmigo, porque en unos minutos vas a entenderlo todo."
-    "Si te vas ahora, te perderás lo más impactante de esta historia."
-  - NUNCA uses la misma frase que en otros videos. Debe ser única y adaptada al tema.
-  - Coloca esta frase INMEDIATAMENTE después de enumerar los 3 puntos de la promesa, como cierre de la FASE 2.
-
-FASE 3 — PRIMERA REVELACIÓN (0:45-1:30):
-  - Suelta YA información fascinante y CONCRETA. No te la guardes para el final.
-  - Entrega: un dato verificable, un documento citado, una fecha exacta, una cita textual.
-  - El espectador se queda porque YA le has dado valor, no por una promesa vacía.
-
-FASE 4 — PRIMER CLIFFHANGER + LANZAMIENTO DE SUBTRAMAS (1:30-3:00):
-  - Deja la PRIMERA pregunta sin responder. Planta la semilla de la intriga.
-  - "Pero esto no es lo más inquietante. Porque mientras esto ocurría..."
-  - PRESENTA las subtramas (ver estructura de subtramas más abajo).
-
-📺 ESTRUCTURA DE SUBTRAMAS PARALELAS (como serie documental de Netflix):
-El video debe funcionar como una serie con múltiples hilos narrativos, NO como un ensayo lineal de un solo tema.
-
-REGLAS:
-1. IDENTIFICA 3-4 SUBTRAMAS que se presentan en los primeros 3 minutos.
-   Ejemplo para un milagro documentado:
-   - Subtrama A: El suceso inexplicable (cronología detallada paso a paso)
-   - Subtrama B: El contexto humano — quiénes son, por qué importa, sus vidas antes
-   - Subtrama C: Las consecuencias — cómo cambió todo, qué pasó después
-   - (Opcional) D: La explicación científica / los escépticos / lo que dice la ciencia
-
-2. AVANZA cada subtrama en RONDAS, como capítulos de serie:
-   - Ronda 1 (0-25% del video): Presentación de cada subtrama — el espectador conoce los hilos
-   - Ronda 2 (25-50%): Desarrollo — cada subtrama recibe un bloque o párrafo
-   - Ronda 3 (50-75%): Conexiones y giros — cómo se relacionan, revelaciones cruzadas
-   - Ronda 4 (75-100%): Convergencia y resolución — los hilos se unen, conclusión
-
-3. REGLA DE ALTERNANCIA: NUNCA dediques más de 2 bloques SEGUIDOS a la misma subtrama.
-   Alterna: Subtrama A → B → A → C → B → C → convergencia.
-   Esto mantiene al espectador: "me interesa cómo sigue B, no me voy todavía."
-
-4. Nombra las subtramas implícitamente en la narración (sin decir "subtrama A"):
-   "Mientras esto ocurría en el hospital..." (cambio a subtrama B)
-   "Pero volvamos al paciente..." (retorno a subtrama A)
-   "Lo que nadie esperaba era la reacción de los medios..." (subtrama C)
-
-⚡ PATTERN INTERRUPTS — cada 2-3 minutos debes ROMPER el ritmo:
-La atención humana decae cada 2-3 minutos. Debes reiniciarla con un interruptor de patrón.
-Técnicas (alterna entre ellas, NO uses la misma dos veces seguidas):
-  • [TEXTO_PANTALLA: "17 personas lo vieron. Ninguna habló."] — dato textual sobreimpreso
-  • PREGUNTA RETÓRICA + PAUSA 2s — "¿Por qué nadie investigó esto? [PAUSA: 2 segundos]"
-  • CAMBIO DE TONO brusco — de asombro a intriga, de reflexión a urgencia
-  • DATO NUMÉRICO aislado — "3 días. Ese fue el tiempo que tardó en desaparecer todo registro."
-  • TESTIMONIO en primera persona — cita textual de un testigo o protagonista
-
-🔗 MICRO-CLIFFHANGERS — al final de CADA capítulo/sección:
-Cada vez que cierres un tema o sección, deja UNA pregunta abierta:
-  "Pero lo que este testigo dijo después lo cambió todo..."
-  "La pregunta que nadie se hizo fue: ¿dónde estaba el cuarto médico?"
-  "Y entonces alguien miró las grabaciones de seguridad..."
-  "Pero en 1998, un periodista encontró algo que los informes no mencionaban..."
-
-📊 DATOS EN PANTALLA [TEXTO_PANTALLA: "..."]:
-Cada 2-3 minutos, inserta UN dato textual para quemar en pantalla:
-- Formato: [TEXTO_PANTALLA: "frase de máximo 12 palabras"] dentro del texto del bloque.
-- El texto en pantalla NO es parte de la narración — es un dato VISUAL que APARECE mientras el narrador habla de OTRA cosa relacionada.
-- Función: dar "momentos compartibles", reforzar puntos clave, sorprender con datos.
-- Ejemplos: 
-  [TEXTO_PANTALLA: "1 entre 12 millones de probabilidades"]
-  [TEXTO_PANTALLA: "14 médicos de 3 países. Ninguna explicación."]
-  [TEXTO_PANTALLA: "El informe fue clasificado 37 años."]
-
-REGLA DEL ENGANCHE INICIAL (primeros 2-3 minutos — ¡CRÍTICO para retención!):
-Los primeros minutos son los que deciden si el espectador se queda hasta el final. Debes:
-- Abrir con un misterio, dato impactante o pregunta que el espectador NECESITE ver resuelta.
-- Crear una "promesa narrativa": el espectador debe intuir que si se queda, descubrirá algo que no sabía.
-- NUNCA empezar con frases como "En este video vamos a hablar de...", "Hoy exploraremos..." o "Bienvenidos a...".
-- La primera oración del guion debe ser IMPACTANTE. Entra directo al fenómeno más fascinante.
-- APLICA la ZONA GANCHO BLINDADA descrita arriba en los primeros bloques del guion.
-
-REGLA ANTI-REPETICIÓN TEMÁTICA (¡OBLIGATORIO!):
-Cada párrafo debe aportar una idea GENUINAMENTE NUEVA que haga AVANZAR la narrativa. PROHIBIDO:
-- Repetir los mismos ejemplos, casos o fenómenos en diferentes párrafos. Si ya hablaste de un caso concreto, NO lo menciones otra vez.
-- Reformular la misma tesis con sinónimos. Cada párrafo debe explorar un ÁNGULO DIFERENTE del tema.
-- Usar la misma metáfora, analogía o recurso retórico más de una vez.
-- Los bloques de cierre deben SINTETIZAR (no repetir) las ideas ya expuestas.
-- Si no tienes contenido realmente nuevo que aportar, es MEJOR terminar el guion antes que repetir ideas.
-
-7. Genera 1 ÚNICO título viral optimizado (no múltiples opciones). Debe ser impactante, honesto sobre el contenido, incluir power words ({power_words_text}) y la keyword principal. Usa estas fórmulas como inspiración:
-{title_formulas_text}
-
-8. ¡CRÍTICO! El guion completo debe tener {word_range_text}. Apunta a una duración de {duration_range_text} minutos de video. Si el guion tiene menos de {words_min} palabras, será RECHAZADO y tendrás que regenerarlo desde cero. CUENTA las palabras ANTES de entregar la respuesta. La duración real del video depende ÚNICAMENTE del número de palabras (150 palabras = 1 minuto de narración).
-
-9. Genera entre {block_range_text} bloques narrativos distintos, cada uno con su propia descripción visual, query de búsqueda en inglés, y tipo de media (video o imagen).
-
-10. Agrega entre 10 y 20 keywords relevantes para SEO de YouTube (incluyendo {seo_keywords_text}), y entre 3 y 15 hashtags sugeridos.
-
-11. Mapea la emoción dominante a cada bloque del guion. Las emociones deben seguir este arco: {emotions_text}.
-
-12. El cierre del video debe incluir esta frase textual: "{outro}"
-
-13. IMPORTANTE: El bloque final (tipo "cierre") debe contener SOLO la reflexión y conclusión del tema. NO incluyas llamadas a la acción (suscríbete, like, campana, comparte, etc.). Las llamadas a la acción se añaden automáticamente en una sección separada DESPUÉS de que termine el video. El cierre debe sentirse como un final narrativo completo, no como un anuncio.
-
-14. Incluye timestamps para los capítulos del video (formato MM:SS — Título del capítulo). Deben ser 4-6 capítulos que reflejen la estructura narrativa. Ejemplo: "0:00 — El Suceso Inexplicable / 1:30 — Los Protagonistas / 5:00 — El Momento que lo Cambió Todo / 8:00 — Lo que la Ciencia No Explica".
-
-{block_rules}
-
-{ssml_text}
-
-{virality_text}
-
-FORMATO DE SALIDA OBLIGATORIO: JSON válido sin texto adicional fuera del JSON. TODOS los campos son OBLIGATORIOS. Estructura exacta:
-{{
-  "titulo_options": ["Un único título viral optimizado"],
-  "descripcion_seo": "Texto de 2-4 oraciones para la descripción del video, incluyendo keywords principales.",
-  "guion": "Texto COMPLETO de la narración (todos los bloques unidos, con [PAUSA: X segundos] donde corresponda). Este texto será leído por el locutor.",
-  "parrafos": [
-    {{
-      "idea_central": "Una mujer soñó con un accidente aéreo tres días antes de que ocurriera, salvando a 300 personas",
-      "cambio_tematico": 3,
-      "bloques": [
-        {{
-          "tipo": "hook",
-          "emocion": "asombro",
-          "texto": "Las probabilidades de que esto ocurriera eran de una entre 12 millones. Pero el 4 de diciembre de 1971, en una pequeña ciudad de Ohio, ocurrió algo que dejó perplejos a médicos, físicos y sacerdotes por igual.",
-          "escena_descripcion": "Amanecer cálido sobre una ciudad dormida. Luz dorada filtrándose entre edificios. Primeros rayos de sol. Sensación de que algo extraordinario está a punto de suceder.",
-          "search_query_en": "golden sunrise over city warm cinematic aerial atmospheric 16:9",
-          "media_tipo": "video",
-          "media_duracion": 6
-        }},
-        {{
-          "tipo": "desarrollo",
-          "emocion": "curiosidad",
-          "texto": "María Elena era una mujer normal. Trabajaba en una oficina, tenía dos hijos, y jamás había creído en las casualidades.",
-          "escena_descripcion": "Retrato cálido de una mujer junto a una ventana. Luz natural suave. Ambiente hogareño y tranquilo. Fotografía documental.",
-          "search_query_en": "woman by window warm natural light documentary portrait hopeful",
-          "media_tipo": "imagen",
-          "media_duracion": 6
-        }}
-      ]
-    }}
-  ],
-  "cta": {{
-    "tipo": "cta",
-    "texto": "Si esta historia te ha dejado sin palabras, suscríbete para más historias como esta"
-  }},
-  "escenas": ["descripción conceptual escena 1", "descripción conceptual escena 2", ...],
-  "emociones": [{{"segmento": "introducción", "emocion": "asombro"}}, ...],
-  "keywords": ["keyword1", "keyword2", ...],
-  "hashtags": ["#Hashtag1", "#Hashtag2", "#Hashtag3"],
-  "duracion_estimada": 0,
-  "chapters": [{{"time": "0:00", "title": "El Suceso Inexplicable"}}, ...],
-  "fuentes_citadas": ["Fuente 1", "Fuente 2"]
-}}
-
-REGLAS PARA PARRAFOS Y CTA:
-- Cada "parrafo" agrupa 2-4 bloques que cubren una misma idea o subtema.
-- "idea_central" es un resumen de una oración que se usará como transición visual entre párrafos.
-- "cambio_tematico" es un número del 1 al 10 que indica qué tan grande es el salto temático respecto al párrafo ANTERIOR. 1 = misma idea con leve variación (transición rápida de ~1s). 10 = cambio total de tema (transición más larga de ~5s). Para el PRIMER párrafo, usar 0 (no hay transición antes de él).
-- El "cta" va DESPUÉS de todos los párrafos y contiene el call-to-action de cierre.
-- CTA: 1-2 oraciones, cálido y personal. Debe incluir llamada a suscribirse y/o compartir. Máximo 80 caracteres. El narrador habla directamente al espectador.
-
-RECUERDA: 
-- ANTES de entregar la respuesta, CUENTA el número de palabras del campo "guion". Si es menor a {words_min}, el guion es INVÁLIDO. Debes expandir el contenido: añade más detalles sensoriales, contexto histórico, citas textuales de las fuentes, descripciones de los protagonistas, o reflexiones del narrador hasta alcanzar el mínimo.
-- El campo "parrafos" es el NUEVO formato principal. El campo "escenas" se mantiene por compatibilidad pero es secundario.
-- El campo "guion" debe contener el texto COMPLETO que narrará el locutor (todos los bloques de todos los párrafos, unidos con [PAUSA: X]). El texto del CTA va APARTE en el campo "cta" y NO debe incluirse en el guion — la locución del CTA se sintetiza por separado para que aparezca en la sección final del video, después de la narración.
-- Cada bloque DEBE tener todos sus campos: tipo, emocion, texto, escena_descripcion, search_query_en, media_tipo, media_duracion.
-- CADA bloque debe tener al menos {words_per_block_min_prompt} palabras. Si un bloque es más corto, expándelo.
-- search_query_en SIEMPRE en inglés. NUNCA en español.
-- El campo "duracion_estimada" debe calcularse como: número total de palabras del guion / 150. NO copies el valor 0 del ejemplo.
-- El tono general debe ser POSITIVO, INSPIRADOR, LLENO DE ASOMBRO. NUNCA oscuro, macabro o sensacionalista del miedo.
-- Todos los campos son OBLIGATORIOS. Solo responde con el JSON. Sin explicaciones, sin markdown, sin texto antes o después."""
-
+Responde exclusivamente con JSON valido, sin markdown, sin explicaciones fuera del JSON."""
 
 # Legacy constant for backwards compatibility
 SYSTEM_PROMPT = build_system_prompt()

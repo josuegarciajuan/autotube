@@ -137,6 +137,21 @@ class MockDB:
     def log_pipeline(self, canal, phase, status, message, **kwargs):
         self.pipeline_logs.append((canal, phase, status, message))
 
+    # ── Generation attempts (v22) ────────────────────────────
+    def log_generation_attempt(self, **kwargs):
+        pass  # no-op for tests — tests mock LLM calls directly
+
+    def get_generation_failure_patterns(self, canal=None, days=7):
+        return {
+            "total_attempts": 0,
+            "total_failures": 0,
+            "by_model": [],
+            "by_error_type": [],
+            "by_phase": [],
+            "emergency_activations": 0,
+            "recent_attempts": [],
+        }
+
     def _connect(self):
         return self
 

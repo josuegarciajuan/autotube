@@ -168,3 +168,23 @@ def get_channel_watch_time(channel_id: int):
     summary["channel_name"] = ch["name"]
     summary["channel_slug"] = ch["slug"]
     return summary
+
+
+@router.get("/channels/{channel_id}/generation-failures")
+def get_generation_failures(channel_id: int, days: int = 7):
+    """Get script generation failure patterns for failover analysis.
+
+    Returns aggregated stats: total attempts, failures by model and error type,
+    emergency mode activations, and recent attempt history.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    patterns = db.get_generation_failure_patterns(canal=ch["slug"], days=days)
+    patterns["channel_id"] = channel_id
+    patterns["channel_name"] = ch["name"]
+    patterns["channel_slug"] = ch["slug"]
+    patterns["days"] = days
+    return patterns

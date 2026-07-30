@@ -14,12 +14,13 @@ import time
 from difflib import SequenceMatcher
 from typing import Optional
 
-from config.llm_client import create_llm_client
 from config.llm_helpers import _extract_reasoning_content
+from config.model_pool import ModelPool
 
 from config.settings import (
     LLM_MODEL,
     LLM_MODEL_SCRIPT,
+    LLM_POOL_RETRIES_PER_MODEL,
     LLM_PROVIDER,
     OPENAI_MAX_TOKENS,
     OPENAI_TEMPERATURE,
@@ -107,18 +108,34 @@ class ScriptGenerator:
         self.db = db
         self.canal_config = canal_config
         self.canal = canal_config.CANAL_NAME
-        self.client = create_llm_client(
-            enable_thinking=True,
-            timeout=120.0,   # 2 min for LLM calls
-            max_retries=2,
-        )
-        self._client_no_thinking = create_llm_client(
-            enable_thinking=False,
-            timeout=60.0,    # mechanical calls are faster without reasoning
-            max_retries=2,
-        )
-        self._llm_retries = 3        # max retries for empty/broken JSON responses
+
+        # Multi-model pool with automatic failover (v22)
+        self.model_pool = ModelPool.from_env()
+        self._llm_retries = max(1, min(10, int(LLM_POOL_RETRIES_PER_MODEL)))
         self._llm_retry_delay = 2.0  # initial backoff seconds (doubles each retry)
+
+        # Test harness: inject a mock client to bypass the pool in unit tests
+        self._test_client = None
+        self._test_client_no_thinking = None
+
+        # Legacy clients kept for backward compat with non-pool callers (ThemeExtractor etc.)
+        # These are used by _llm_json_call when no explicit client is passed.
+        self._legacy_client = None
+        self._legacy_client_no_thinking = None
+        try:
+            # Create a thinking client from the first pool entry as fallback
+            first_entry = next(self.model_pool.iter_models())
+            self._legacy_client = first_entry[1]  # client
+        except (StopIteration, Exception):
+            pass
+        try:
+            # Create a no-thinking client from the last pool entry as fallback
+            # (use last entry since it's likely a fast/non-thinking model)
+            all_entries = list(self.model_pool.iter_models())
+            if all_entries:
+                self._legacy_client_no_thinking = all_entries[-1][1]
+        except Exception:
+            pass
 
         # P2/P3: multi-chunk, theme context, word count emphasis
         self._theme_context = None
@@ -146,7 +163,7 @@ class ScriptGenerator:
             self.canal,
         )
 
-    def _llm_json_call(self, thinking: bool = True, **call_kwargs):
+    def _llm_json_call(self, thinking: bool = True, client=None, model_name: str = None, **call_kwargs):
         """Call LLM chat.completions.create and parse JSON with retry.
 
         Handles empty/invalid JSON responses from the API by retrying up
@@ -154,22 +171,28 @@ class ScriptGenerator:
         the parsed dict, or raises the last exception on total failure.
 
         Args:
-            thinking: If True (default), use the thinking-enabled client
-                (self.client). If False, use the no-thinking client
-                (self._client_no_thinking) for mechanical tasks.
+            thinking: If True (default), prefer thinking-enabled client.
+                If False, prefer no-thinking client.
+            client: Explicit OpenAI client (from ModelPool). If None, uses
+                legacy self.client / self._client_no_thinking.
+            model_name: Name of the model being called (for logging).
         """
-        client = self.client if thinking else self._client_no_thinking
+        if client is not None:
+            effective_client = client
+        elif thinking:
+            effective_client = self._legacy_client
+        else:
+            effective_client = self._legacy_client_no_thinking
+
+        if effective_client is None:
+            raise RuntimeError("No LLM client available for JSON call")
+
         last_exc = None
         for attempt in range(self._llm_retries):
             try:
-                response = client.chat.completions.create(**call_kwargs)
+                response = effective_client.chat.completions.create(**call_kwargs)
                 content = response.choices[0].message.content
-                # DeepSeek thinking-mode fallback:
-                # When enable_thinking=True, the model may route the JSON
-                # response into reasoning_content and leave content empty.
-                # The OpenAI SDK does not expose reasoning_content in the
-                # standard ChatCompletionMessage model — we need to read it
-                # via model_extra or getattr.
+                # DeepSeek thinking-mode fallback
                 if not content:
                     reasoning = _extract_reasoning_content(response)
                     if reasoning:
@@ -190,8 +213,8 @@ class ScriptGenerator:
                 if attempt < self._llm_retries - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
-                        "LLM JSON parse failed (attempt %d/%d): %s — retrying in %.1fs",
-                        attempt + 1, self._llm_retries, exc, delay,
+                        "LLM JSON parse failed (%s, attempt %d/%d): %s — retrying in %.1fs",
+                        model_name or "unknown", attempt + 1, self._llm_retries, exc, delay,
                     )
                     time.sleep(delay)
             except ValueError as exc:
@@ -199,7 +222,8 @@ class ScriptGenerator:
                 if attempt < self._llm_retries - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
-                        "%s — retrying in %.1fs", exc, delay,
+                        "%s (%s) — retrying in %.1fs",
+                        exc, model_name or "unknown", delay,
                     )
                     time.sleep(delay)
             except Exception as exc:
@@ -207,11 +231,272 @@ class ScriptGenerator:
                 if attempt < self._llm_retries - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
-                        "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
-                        attempt + 1, self._llm_retries, exc, delay,
+                        "LLM call failed (%s, attempt %d/%d): %s — retrying in %.1fs",
+                        model_name or "unknown", attempt + 1, self._llm_retries, exc, delay,
                     )
                     time.sleep(delay)
         raise last_exc
+
+    # ── Model pool failover (v22) ───────────────────────────────────
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> str:
+        """Classify an exception into a standard error_type for logging."""
+        exc_name = type(exc).__name__
+        msg = str(exc).lower()
+
+        if isinstance(exc, json.JSONDecodeError):
+            return "json_parse"
+        if "empty content" in msg:
+            return "empty_content"
+        if exc_name in ("APITimeoutError", "Timeout", "ReadTimeout"):
+            return "timeout"
+        if exc_name in ("RateLimitError", "RateLimit"):
+            return "rate_limit"
+        if "validation" in msg:
+            return "validation_failed"
+        if exc_name in ("ConnectionError", "APIConnectionError"):
+            return "connection_error"
+        if exc_name == "ValidationError" or "schema" in msg:
+            return "schema_error"
+        return "exception"
+
+    def _call_with_failover(
+        self,
+        phase: str = "blocks",
+        thinking: bool = True,
+        video_id: int = None,
+        content_id: int = None,
+        **call_kwargs,
+    ) -> dict:
+        """Call LLM with automatic model-pool failover and structured logging.
+
+        Iterates over the model pool. For each model, retries up to
+        ``self._llm_retries`` times. On failure, logs the attempt and
+        moves to the next model. If all models fail, raises the last
+        exception.
+
+        Test mode: if ``self._test_client`` is set, bypasses the pool
+        entirely and uses the injected mock client.
+        """
+        # ── Test harness bypass ──────────────────────────────
+        test_client = self._test_client or getattr(self, 'client', None)
+        test_client_no_thinking = self._test_client_no_thinking or getattr(self, '_client_no_thinking', None)
+        if test_client is not None or test_client_no_thinking is not None:
+            client = test_client if thinking else (test_client_no_thinking or test_client)
+            return self._llm_json_call(
+                thinking=thinking,
+                client=client,
+                model_name="test-mock",
+                **call_kwargs,
+            )
+
+        pool_position = 0
+        last_error = None
+
+        for entry, client in self.model_pool.iter_models():
+            model_name = entry.display_name
+            logger.info(
+                "Failover: trying model %s (position %d, phase=%s)",
+                model_name, pool_position, phase,
+            )
+
+            for attempt_num in range(1, self._llm_retries + 1):
+                t0 = time.time()
+                try:
+                    result = self._llm_json_call(
+                        thinking=thinking,
+                        client=client,
+                        model_name=model_name,
+                        **call_kwargs,
+                    )
+                    duration_ms = int((time.time() - t0) * 1000)
+
+                    # Log success
+                    try:
+                        self.db.log_generation_attempt(
+                            canal=self.canal,
+                            model_name=entry.model_id,
+                            attempt_number=attempt_num,
+                            pool_position=pool_position,
+                            success=True,
+                            phase=phase,
+                            video_id=video_id,
+                            content_id=content_id,
+                            duration_ms=duration_ms,
+                        )
+                    except Exception:
+                        pass
+
+                    logger.info(
+                        "Failover: %s succeeded (attempt %d, %.1fs)",
+                        model_name, attempt_num, duration_ms / 1000.0,
+                    )
+                    return result
+
+                except Exception as exc:
+                    duration_ms = int((time.time() - t0) * 1000)
+                    error_type = self._classify_error(exc)
+                    error_msg = str(exc)[:500]
+                    last_error = exc
+
+                    # Log failure
+                    try:
+                        self.db.log_generation_attempt(
+                            canal=self.canal,
+                            model_name=entry.model_id,
+                            attempt_number=attempt_num,
+                            pool_position=pool_position,
+                            success=False,
+                            error_type=error_type,
+                            error_message=error_msg,
+                            phase=phase,
+                            video_id=video_id,
+                            content_id=content_id,
+                            duration_ms=duration_ms,
+                        )
+                    except Exception:
+                        pass
+
+                    logger.warning(
+                        "Failover: %s attempt %d/%d FAILED (%s): %s",
+                        model_name, attempt_num, self._llm_retries,
+                        error_type, error_msg[:120],
+                    )
+
+            # Model exhausted — move to next
+            logger.warning(
+                "Failover: %s exhausted (%d attempts) — model FAILED",
+                model_name, self._llm_retries,
+            )
+            pool_position += 1
+
+        raise RuntimeError(
+            f"All {len(self.model_pool)} model(s) in pool failed for phase '{phase}'. "
+            f"Last error: {last_error}"
+        )
+
+    # ── Emergency script generation ─────────────────────────────────
+
+    def _generate_emergency_script(
+        self, content_item: dict, word_target: dict
+    ) -> Optional[dict]:
+        """Generate a minimal script from source content when all LLM models fail.
+
+        Produces a basic but complete script that ensures the video pipeline
+        continues. Quality is lower but publishable. Marked with
+        ``emergency_mode=True`` in the scripts table.
+
+        Args:
+            content_item: Raw content dict (title, text).
+            word_target: Word target dict.
+
+        Returns:
+            Script dict ready for enrichment, or None if content is too poor.
+        """
+        logger.warning(
+            "EMERGENCY MODE: generating minimal script for content_id=%s",
+            content_item.get("id"),
+        )
+
+        title = content_item.get("title", "Historia Increíble")
+        text = content_item.get("text", "")
+        source_name = content_item.get("source", "fuente documentada")
+        target_words = word_target.get("palabras_objetivo", 1500) if word_target else 1500
+
+        if not title and not text:
+            logger.error("EMERGENCY: no title or text in content — cannot generate")
+            return None
+
+        # Build a minimal narrative from the source text
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        intro = " ".join(sentences[:2]) if len(sentences) >= 2 else text[:300]
+        body = " ".join(sentences[2:min(8, len(sentences))]) if len(sentences) > 2 else ""
+        if not body:
+            body = text[:800] if len(text) > 300 else ""
+
+        # Build blocks
+        bloques = []
+
+        # Hook block
+        hook_text = intro[:250]
+        bloques.append({"texto": hook_text})
+
+        # Body blocks — split into ~80-word chunks
+        body_words = body.split()
+        chunk_size = max(60, min(120, target_words // 6))
+        for i in range(0, len(body_words), chunk_size):
+            chunk = " ".join(body_words[i:i + chunk_size])
+            if chunk.strip():
+                bloques.append({"texto": chunk})
+
+        # Total word estimate
+        total_words = sum(len(b.get("texto", "").split()) for b in bloques)
+
+        # If still too short, pad with generic content
+        canal_config = self.canal_config
+        channel_name = getattr(canal_config, "CANAL_NAME", self.canal)
+        if total_words < 300:
+            bloques.append({
+                "texto": (
+                    f"Este es uno de los casos más fascinantes documentados "
+                    f"sobre este tema. Las fuentes confirman los hechos "
+                    f"principales, aunque algunos detalles siguen siendo "
+                    f"motivo de debate entre expertos."
+                ),
+            })
+            bloques.append({
+                "texto": (
+                    f"Lo que hace único este caso es la combinación de "
+                    f"factores que lo rodean. Cada elemento, por separado, "
+                    f"podría tener una explicación convencional. Pero juntos "
+                    f"forman un patrón que desafía las probabilidades."
+                ),
+            })
+
+        # CTA block
+        outro = getattr(canal_config, "CANAL_OUTRO_TAGLINE",
+                        "Suscríbete para más historias increíbles.")
+        bloques.append({"texto": outro})
+
+        total_words = sum(len(b.get("texto", "").split()) for b in bloques)
+        logger.info(
+            "EMERGENCY: generated %d blocks, %d words for '%s'",
+            len(bloques), total_words, title[:60],
+        )
+
+        # Enrich blocks (with failover — if enrichment also fails, use raw blocks)
+        script = self._enrich_blocks(bloques, content_item, word_target)
+        if script:
+            script["emergency_mode"] = True
+            return script
+
+        # Fallback: return raw blocks without enrichment
+        return self._build_raw_script(bloques, content_item, title, word_target)
+
+    def _build_raw_script(
+        self, bloques: list[dict], content_item: dict, title: str, word_target: dict
+    ) -> dict:
+        """Build a minimal script dict from raw blocks (no enrichment)."""
+        guion = "\n\n".join(b.get("texto", "") for b in bloques)
+        duration = max(2, round(len(guion.split()) / 150))
+        return {
+            "titulo_options": [title[:100]],
+            "titulo_selected": title[:100],
+            "guion": guion,
+            "bloques": bloques,
+            "bloques_json": bloques,
+            "escenas": [],
+            "escenas_json": [],
+            "emociones": [],
+            "keywords": [],
+            "hashtags": [],
+            "duracion_estimada": duration,
+            "chapters": [],
+            "fuentes_citadas": [],
+            "palabras_reales": len(guion.split()),
+            "emergency_mode": True,
+        }
 
     def set_theme_context(self, ctx):
         """Set visual theme context for the next generation."""
@@ -306,7 +591,9 @@ class ScriptGenerator:
         )
 
         try:
-            data = self._llm_json_call(
+            data = self._call_with_failover(
+                phase="outline",
+                thinking=True,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -361,7 +648,9 @@ class ScriptGenerator:
         user_prompt = f"Fuente: {content_title}\n\nContinúa la narración documental."
 
         try:
-            data = self._llm_json_call(
+            data = self._call_with_failover(
+                phase="blocks",
+                thinking=True,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -712,7 +1001,9 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(thinking=False,
+            data = self._call_with_failover(
+                phase="enrich",
+                thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -854,7 +1145,9 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(thinking=False,
+            data = self._call_with_failover(
+                phase="metadata",
+                thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -1101,61 +1394,72 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
 
         enriched = self._enrich_blocks(all_bloques, content_item, word_target)
 
-        # Step 3.5: Narrative quality check (anti-repetition + coherence + hook)
+        # Step 3.5: Script validation (v22 — dedicated validator)
         if enriched and enriched.get("bloques"):
             try:
-                check = self._check_narrative_quality(enriched)
-                if not check.get("passes", True):
-                    logger.warning(
-                        "Narrative quality check found issues: %s (score: rep=%.2f coh=%.2f hook=%.2f)",
-                        check.get("issues", []),
-                        check.get("repetition_score", 0),
-                        check.get("coherence_score", 0),
-                        check.get("hook_score", 0),
-                    )
-                    # Attempt regeneration
-                    regenerated = self._regenerate_problematic_paragraphs(
-                        enriched, check, content_item
-                    )
-                    if regenerated:
-                        # Re-check regenerated script (single retry)
-                        check2 = self._check_narrative_quality(regenerated)
-                        if check2.get("passes", True):
-                            logger.info(
-                                "Narrative quality check PASSED after regeneration "
-                                "(was: rep=%.2f coh=%.2f hook=%.2f → rep=%.2f coh=%.2f hook=%.2f)",
-                                check.get("repetition_score", 0),
-                                check.get("coherence_score", 0),
-                                check.get("hook_score", 0),
-                                check2.get("repetition_score", 0),
-                                check2.get("coherence_score", 0),
-                                check2.get("hook_score", 0),
-                            )
-                        enriched = regenerated
-                    else:
-                        logger.warning(
-                            "Regeneration failed or returned no changes — "
-                            "proceeding with original script"
-                        )
-                else:
+                from pipeline.script_validator import ScriptValidator
+                validator = ScriptValidator(self.canal_config)
+                val_result = validator.validate(enriched, word_target, content_item)
+
+                if val_result.passes:
                     logger.info(
-                        "Narrative quality check PASSED (rep=%.2f coh=%.2f hook=%.2f)",
-                        check.get("repetition_score", 0),
-                        check.get("coherence_score", 0),
-                        check.get("hook_score", 0),
+                        "ScriptValidator: PASS (score=%.2f) — rep=%.2f coh=%.2f hook=%.2f",
+                        val_result.score,
+                        val_result.repetition_score,
+                        val_result.coherence_score,
+                        val_result.hook_score,
                     )
+                    if val_result.warnings:
+                        logger.info("ScriptValidator warnings: %s", "; ".join(val_result.warnings[:3]))
+                elif not val_result.is_grave:
+                    # Minor issues — try regeneration without failover
+                    logger.warning(
+                        "ScriptValidator: minor issues (score=%.2f): %s",
+                        val_result.score,
+                        "; ".join(val_result.issues[:3]),
+                    )
+                    try:
+                        regenerated = self._regenerate_problematic_paragraphs(
+                            enriched, {"issues": val_result.issues}, content_item
+                        )
+                        if regenerated:
+                            val2 = validator.validate(regenerated, word_target, content_item)
+                            if val2.passes:
+                                logger.info("ScriptValidator: PASS after regeneration (score=%.2f)", val2.score)
+                                enriched = regenerated
+                    except Exception:
+                        pass  # keep original enriched
+                else:
+                    # Grave issues — would trigger model failover, but we're past generation
+                    logger.warning(
+                        "ScriptValidator: GRAVE issues (score=%.2f): %s",
+                        val_result.score,
+                        "; ".join(val_result.issues[:5]),
+                    )
+                    # Still try to salvage with regeneration
+                    try:
+                        regenerated = self._regenerate_problematic_paragraphs(
+                            enriched, {"issues": val_result.issues}, content_item
+                        )
+                        if regenerated:
+                            val2 = validator.validate(regenerated, word_target, content_item)
+                            if val2.passes:
+                                enriched = regenerated
+                            else:
+                                logger.warning("ScriptValidator: still failing after regeneration — keeping original")
+                    except Exception:
+                        pass
+
             except Exception as exc:
                 logger.warning(
-                    "Narrative quality check failed with exception: %s — "
-                    "proceeding with original script",
-                    exc,
+                    "ScriptValidator: exception during validation — proceeding: %s", exc
                 )
 
         # Step 3.6: Extract onscreen text tags from blocks
         if enriched and enriched.get("bloques"):
             enriched = self._extract_onscreen_text(enriched)
 
-        # Step 4: Save to DB
+        # Step 4: Save to DB (or emergency mode)
         if hasattr(self, '_progress_cb') and self._progress_cb:
             try:
                 self._progress_cb(25, "script", f"Guion completo: {total_words} palabras")
@@ -1166,19 +1470,48 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         result = self._save_and_return(
             content_id=content_item.get("id"),
             data=enriched,
-            total_tokens=0,  # not tracked per-batch in v2
+            total_tokens=0,
             cost=0.0,
             elapsed_ms=0,
             word_target=word_target,
         )
 
-        logger.info(
-            "generate_v2: saved script id=%s, %d words, %d blocks",
-            result.get("id") if result else "FAILED",
-            total_words,
-            len(all_bloques),
+        if result:
+            logger.info(
+                "generate_v2: saved script id=%s, %d words, %d blocks%s",
+                result.get("id") if result else "FAILED",
+                total_words,
+                len(all_bloques),
+                " [EMERGENCY]" if result.get("emergency_mode") else "",
+            )
+            return result
+
+        # ── Emergency mode: all LLM generation + enrichment failed ──
+        logger.warning(
+            "generate_v2: enrichment/DB save failed — activating emergency mode "
+            "for content_id=%s",
+            content_id,
         )
-        return result
+        emergency = self._generate_emergency_script(content_item, word_target)
+        if emergency:
+            result = self._save_and_return(
+                content_id=content_item.get("id"),
+                data=emergency,
+                total_tokens=0,
+                cost=0.0,
+                elapsed_ms=0,
+                word_target=word_target,
+            )
+            if result:
+                logger.warning(
+                    "generate_v2: EMERGENCY script saved (id=%s, %d words)",
+                    result.get("id"),
+                    len(emergency.get("guion", "").split()),
+                )
+                return result
+
+        logger.error("generate_v2: ALL modes failed — returning None")
+        return None
 
     def _get_word_target(self) -> dict:
         """Return word/block target using the channel's duration objective.
@@ -1303,7 +1636,9 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             f'{{"chapters": [{{"title": "...", "word_target": N, "order": 1}}, ...]}}'
         )
         try:
-            outline_data = self._llm_json_call(
+            outline_data = self._call_with_failover(
+                phase="outline",
+                thinking=True,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": outline_system},
@@ -1372,10 +1707,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 f"CONTENIDO:\n{content_text[:3000]}"
             )
 
-            # Generate chapter with retry (via _llm_json_call)
+            # Generate chapter with model-pool failover
             ch_data = None
             try:
-                ch_data = self._llm_json_call(
+                ch_data = self._call_with_failover(
+                    phase="blocks",
+                    thinking=True,
                     model=LLM_MODEL_SCRIPT,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -1638,6 +1975,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 duracion_estimada=data.get("duracion_estimada"),
                 token_count=total_tokens,
                 cost_estimate=cost,
+                emergency_mode=data.get("emergency_mode", False),
             )
         except Exception as exc:
             logger.error(
@@ -1795,7 +2133,9 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             )
 
             try:
-                expanded = self._llm_json_call(
+                expanded = self._call_with_failover(
+                    phase="expand",
+                    thinking=True,
                     model=LLM_MODEL_SCRIPT,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -2316,7 +2656,9 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(thinking=False,
+            data = self._call_with_failover(
+                phase="quality_check",
+                thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},

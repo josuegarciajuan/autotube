@@ -77,6 +77,18 @@ LLM_MODEL_CREATIVE = os.getenv("LLM_MODEL_CREATIVE", "deepseek-v4-flash")
 # Tier 4: Insights / AI self-optimization (multi-pass analysis) — thinking enabled
 LLM_MODEL_INSIGHTS = os.getenv("LLM_MODEL_INSIGHTS", LLM_MODEL_SCRIPT)
 
+# ── Multi-model pool for script generation (v21 failover) ────
+# Comma-separated list of provider:model_id entries in priority order.
+# Each model is tried with up to LLM_POOL_RETRIES_PER_MODEL attempts
+# before failing over to the next. If all models fail, emergency mode
+# generates a minimal script from the source content.
+# Format: "deepseek:deepseek-v4-pro,openai:gpt-4o-mini,deepseek:deepseek-v4-flash"
+LLM_POOL_MODELS = os.getenv(
+    "LLM_POOL_MODELS",
+    "deepseek:deepseek-v4-pro,openai:gpt-4o-mini",
+)
+LLM_POOL_RETRIES_PER_MODEL = os.getenv("LLM_POOL_RETRIES_PER_MODEL", "3")
+
 # OpenAI (legacy / fallback) ────────────────────────────────────
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.8"))

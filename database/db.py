@@ -253,15 +253,16 @@ class Database:
     @_with_db_lock_retry
     def insert_script(self, raw_content_id, canal, titulo_options,
                       guion, escenas, bloques=None, emociones=None, keywords=None,
-                      duracion_estimada=None, token_count=0, cost_estimate=0.0):
+                      duracion_estimada=None, token_count=0, cost_estimate=0.0,
+                      emergency_mode=False):
         """Insert a generated script. Returns row id."""
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO scripts
                    (raw_content_id, canal, titulo_options, guion,
                     escenas_json, bloques_json, emociones_json, keywords_json,
-                    duracion_estimada, token_count, cost_estimate)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    duracion_estimada, token_count, cost_estimate, emergency_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     raw_content_id, canal,
                     json.dumps(titulo_options, ensure_ascii=False),
@@ -271,6 +272,7 @@ class Database:
                     json.dumps(emociones or [], ensure_ascii=False),
                     json.dumps(keywords or [], ensure_ascii=False),
                     duracion_estimada, token_count, cost_estimate,
+                    1 if emergency_mode else 0,
                 ),
             )
             conn.commit()
