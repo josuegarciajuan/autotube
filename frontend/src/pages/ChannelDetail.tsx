@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2 } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
@@ -221,7 +221,9 @@ export default function ChannelDetail() {
   const [channelYtStats, setChannelYtStats] = useState<any>(null)
   const [channelShortsStats, setChannelShortsStats] = useState<any>(null)
   const [channelVideosAggregate, setChannelVideosAggregate] = useState<any>(null)
-  const [showConfig, setShowConfig] = useState(false)
+  const [showConfigModal, setShowConfigModal] = useState(false)
+  const [showTemplatesModal, setShowTemplatesModal] = useState(false)
+  const [showSocialModal, setShowSocialModal] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [refreshingStats, setRefreshingStats] = useState(false)
   const [statsRefreshMsg, setStatsRefreshMsg] = useState<string | null>(null)
@@ -850,107 +852,117 @@ export default function ChannelDetail() {
             <div className="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-xs text-gray-400 mt-0.5 flex-wrap">
               <span className="flex items-center gap-1"><Users size={11} />{uploadedCount} videos</span>
               <span className="flex items-center gap-1"><Video size={11} />{videos.length} total</span>
-              <span className="hidden sm:inline">·</span>
-              <span className="hidden sm:inline">{channel.slug}</span>
+              <span className="hidden sm:inline text-gray-600">·</span>
+              <span className="hidden sm:inline text-gray-500">{channel.slug}</span>
             </div>
-            {/* Channel YouTube Stats */}
+            {/* Channel YouTube Stats — pills mejoradas */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-2">
             {channelYtStats && (
-              <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-1 flex-wrap">
-                <span className="flex items-center gap-1 text-neon-cyan">
+              <>
+                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan border border-neon-cyan/10">
                   <Eye size={11} />
-                  <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.viewCount || '0')}</span> vistas totales
+                  <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.viewCount || '0')}</span> vistas
                 </span>
-                <span className="flex items-center gap-1 text-neon-pink">
+                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink border border-neon-pink/10">
                   <Users size={11} />
-                  <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.subscriberCount || '0')}</span> suscriptores
+                  <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.subscriberCount || '0')}</span> subs
                 </span>
-                  {channelYtStats.estimatedHoursWatched > 0 && (
-                    <span className="flex items-center gap-1 text-neon-gold">
-                      <Clock size={11} />
-                      <span className="font-mono tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas
-                    </span>
-                  )}
-                </div>
-              )}
-              {/* Shorts aggregate stats + total likes */}
-              {channelShortsStats && channelShortsStats.total > 0 && (
-                <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-0.5 flex-wrap">
-                  <span className="flex items-center gap-1 text-neon-purple">
-                    <Zap size={11} />
-                    <span className="font-mono tabular-nums">{channelShortsStats.published || 0}</span> shorts
+                {channelYtStats.estimatedHoursWatched > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-gold border border-neon-gold/10">
+                    <Clock size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas
                   </span>
-                  {channelShortsStats.total_views > 0 && (
-                    <span className="flex items-center gap-1 text-neon-cyan">
-                      <Eye size={11} />
-                      <span className="font-mono tabular-nums">{formatShortNumber(channelShortsStats.total_views)}</span> vistas shorts
-                    </span>
-                  )}
-                  {channelShortsStats.total_likes > 0 && (
-                    <span className="flex items-center gap-1 text-neon-pink">
-                      <Heart size={11} />
-                      <span className="font-mono tabular-nums">{formatShortNumber(channelShortsStats.total_likes)}</span> likes shorts
-                    </span>
-                  )}
-                </div>
-              )}
-              {/* Long-form videos aggregate + combined total */}
-              {channelVideosAggregate && (channelVideosAggregate.video_count > 0 || channelVideosAggregate.total_views > 0) && (
-                <div className="flex items-center gap-3 text-[11px] sm:text-xs mt-0.5 flex-wrap">
-                  <span className="flex items-center gap-1 text-neon-gold">
-                    <Video size={11} />
-                    <span className="font-mono tabular-nums">{channelVideosAggregate.video_count || 0}</span> vídeos largos
+                )}
+              </>
+            )}
+            </div>
+            {/* Shorts aggregate stats */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {channelShortsStats && channelShortsStats.total > 0 && (
+              <>
+                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-purple border border-neon-purple/10">
+                  <Zap size={11} />
+                  <span className="font-mono font-semibold tabular-nums">{channelShortsStats.published || 0}</span> shorts
+                </span>
+                {channelShortsStats.total_views > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70 border border-neon-cyan/10">
+                    <Eye size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelShortsStats.total_views)}</span> vistas shorts
                   </span>
-                  {channelVideosAggregate.total_views > 0 && (
-                    <span className="flex items-center gap-1 text-neon-cyan">
-                      <Eye size={11} />
-                      <span className="font-mono tabular-nums">{formatShortNumber(channelVideosAggregate.total_views)}</span> vistas vídeos
-                    </span>
-                  )}
-                  {channelVideosAggregate.total_likes > 0 && (
-                    <span className="flex items-center gap-1 text-neon-pink">
-                      <Heart size={11} />
-                      <span className="font-mono tabular-nums">{formatShortNumber(channelVideosAggregate.total_likes)}</span> likes vídeos
-                    </span>
-                  )}
-                </div>
-              )}
-              {/* Combined total: videos DB + shorts DB */}
-              {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
-                <div className="flex items-center gap-2 text-[11px] sm:text-xs mt-0.5 pt-0.5 border-t border-surface-border/40">
-                  <span className="flex items-center gap-1 text-neon-red font-semibold">
-                    <Eye size={12} />
-                    <span className="font-mono tabular-nums text-xs sm:text-sm">
-                      {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
-                    </span>
-                    vistas combinadas (vídeos + shorts)
+                )}
+                {channelShortsStats.total_likes > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink/70 border border-neon-pink/10">
+                    <Heart size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelShortsStats.total_likes)}</span> likes shorts
                   </span>
-                </div>
-              )}
-              {channel.description && (
-                <p className="text-xs text-gray-400 mt-1.5 line-clamp-2">{channel.description}</p>
-              )}
+                )}
+              </>
+            )}
+            </div>
+            {/* Long-form videos aggregate */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {channelVideosAggregate && (channelVideosAggregate.video_count > 0 || channelVideosAggregate.total_views > 0) && (
+              <>
+                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-gold/80 border border-neon-gold/10">
+                  <Video size={11} />
+                  <span className="font-mono font-semibold tabular-nums">{channelVideosAggregate.video_count || 0}</span> vídeos largos
+                </span>
+                {channelVideosAggregate.total_views > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70 border border-neon-cyan/10">
+                    <Eye size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelVideosAggregate.total_views)}</span> vistas
+                  </span>
+                )}
+                {channelVideosAggregate.total_likes > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink/70 border border-neon-pink/10">
+                    <Heart size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelVideosAggregate.total_likes)}</span> likes
+                  </span>
+                )}
+              </>
+            )}
+            </div>
+            {/* Combined total */}
+            {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
+              <div className="flex items-center gap-2 text-xs sm:text-sm mt-1.5 pt-1.5 border-t border-surface-border/40">
+                <span className="inline-flex items-center gap-1.5 bg-neon-red/10 rounded-md px-2.5 py-1 text-neon-red font-semibold border border-neon-red/20">
+                  <Eye size={13} />
+                  <span className="font-mono tabular-nums">
+                    {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
+                  </span>
+                  vistas totales
+                </span>
+              </div>
+            )}
+            {channel.description && (
+              <p className="text-xs text-gray-400 mt-1.5 line-clamp-2">{channel.description}</p>
+            )}
             </div>
 
           <div className="flex gap-1.5 sm:gap-2 pb-1 shrink-0 mt-1 sm:mt-0 w-full sm:w-auto">
             {channel.yt_channel_url && (
               <a href={channel.yt_channel_url} target="_blank" rel="noopener noreferrer"
+                title="Ver canal en YouTube"
                 className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-red-600 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
                 <Youtube size={14} /> YouTube
               </a>
             )}
             {channel.yt_studio_url && (
               <a href={channel.yt_studio_url} target="_blank" rel="noopener noreferrer"
+                title="Abrir YouTube Studio"
                 className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs font-medium hover:bg-neon-cyan/20 transition-colors">
                 <ExternalLink size={14} /> <span className="hidden sm:inline">YT Studio</span>
               </a>
             )}
             <button onClick={() => setEditingProfile(true)}
+              title="Editar nombre, descripción y enlaces del canal"
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-surface-border text-gray-300 rounded-full text-xs hover:bg-dark-600 transition-colors">
               <Edit3 size={12} /> <span className="hidden sm:inline">Editar perfil</span><span className="sm:hidden">Editar</span>
             </button>
-            <button onClick={() => setShowConfig(!showConfig)}
+            <button onClick={() => setShowConfigModal(true)}
+              title="Configurar canal (IA, fuentes, SEO, visual...)"
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs hover:bg-dark-600 transition-colors">
-              <Settings size={12} /> <span className="hidden sm:inline">{showConfig ? 'Ocultar' : 'Config'}</span><Zap size={12} className="sm:hidden" />
+              <Settings size={12} /> <span className="hidden sm:inline">Config</span><Zap size={12} className="sm:hidden" />
             </button>
           </div>
         </div>
@@ -959,10 +971,12 @@ export default function ChannelDetail() {
       {/* --- Quick actions bar --- */}
       <div className="flex items-center gap-1.5 sm:gap-2 mt-4 mb-6 flex-wrap">
         <Link to="/scheduling"
+          title="Ir a planificación de publicaciones"
           className="flex items-center gap-1.5 px-3 py-2 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs sm:text-sm font-medium hover:bg-neon-gold/20 transition-colors">
           <Calendar size={14} /> Programar
         </Link>
         <button onClick={handleStartAuth} disabled={authLoading}
+          title="Autenticar canal con Google OAuth"
           className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
             authStatus?.authenticated 
               ? 'bg-green-600/10 border border-green-600/30 text-green-400' 
@@ -971,6 +985,7 @@ export default function ChannelDetail() {
           <Key size={14} /> <span className="hidden sm:inline">{authStatus?.authenticated ? 'Conectado' : 'Conectar YouTube'}</span><span className="sm:hidden">{authStatus?.authenticated ? 'YT ✓' : 'Conectar'}</span>
         </button>
         <button onClick={handleSyncYouTube} disabled={syncing}
+          title="Sincronizar keywords y metadata con YouTube"
           className="flex items-center gap-1.5 px-3 py-2 bg-red-600/10 border border-red-600/30 text-red-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-red-600/20 transition-colors">
           <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> <span className="hidden sm:inline">{syncing ? 'Syncing...' : 'Sync YouTube'}</span><span className="sm:hidden">Sync</span>
         </button>
@@ -985,7 +1000,18 @@ export default function ChannelDetail() {
             {statsRefreshMsg}
           </span>
         )}
+        <button onClick={() => setShowTemplatesModal(true)}
+          title="Gestionar templates de intro, CTA y outro"
+          className="flex items-center gap-1.5 px-3 py-2 bg-purple-500/10 border border-purple-500/30 text-purple-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-purple-500/20 transition-colors">
+          <Film size={14} /> <span className="hidden sm:inline">Templates</span><span className="sm:hidden">Tmpl</span>
+        </button>
+        <button onClick={() => setShowSocialModal(true)}
+          title="Configurar cuentas de redes sociales"
+          className="flex items-center gap-1.5 px-3 py-2 bg-green-500/10 border border-green-500/30 text-green-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-green-500/20 transition-colors">
+          <Share2 size={14} /> <span className="hidden sm:inline">Redes</span><span className="sm:hidden">Red</span>
+        </button>
         <button onClick={handleGetManualSetup}
+          title="Ver instrucciones de configuración manual"
           className="flex items-center gap-1.5 px-3 py-2 bg-dark-600 border border-surface-border text-gray-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-dark-500 transition-colors">
           <Clipboard size={14} /> <span className="hidden sm:inline">Setup Manual</span><span className="sm:hidden">Setup</span>
         </button>
@@ -1038,12 +1064,15 @@ export default function ChannelDetail() {
             </div>
           </div>
         ) : (
+          <div className="flex justify-center">
           <button
             onClick={videoTab === 'shorts' ? handleGenerateNativeShort : () => setShowSourceModeModal(true)}
             disabled={videoTab === 'shorts' ? generatingNativeShort : busy}
-            className="w-full py-4 bg-gradient-to-r from-neon-red to-red-600 text-white rounded-xl font-display font-semibold text-lg hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3">
-            <Wand2 size={22} /> {videoTab === 'shorts' ? 'Generar Short' : channel?.slug === 'test' ? 'Generar video de pruebas' : 'Generar Video'}
+            className="px-5 py-2 bg-gradient-to-r from-neon-red/80 to-red-600/80 text-white rounded-lg font-display font-semibold text-sm hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center gap-2"
+            title="Generar video con IA y publicar en YouTube (automático)">
+            <Wand2 size={16} /> {videoTab === 'shorts' ? 'Generar Short' : 'Generar Video'}
           </button>
+          </div>
         )}
         <p className="text-xs text-gray-500 text-center">
           {videoTab === 'shorts'
@@ -1064,52 +1093,6 @@ export default function ChannelDetail() {
         )}
       </div>
       )}
-
-      {/* --- Templates Panel --- */}
-      <div className="glass rounded-xl p-5 space-y-4 mb-6">
-        <h3 className="text-lg font-semibold">🎬 Templates del Canal</h3>
-        <p className="text-sm text-slate-400">Genera los mini-videos de intro, CTA y outro para tus videos.</p>
-        
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-          {['intro', 'cta', 'outro'].map(segment => {
-            const data = templates?.[segment];
-            return (
-              <div key={segment} className="bg-white/5 rounded-lg p-3 text-center space-y-2 flex flex-col">
-                <div className="text-sm font-medium capitalize">{segment}</div>
-                {data ? (
-                  <>
-                    <video
-                      controls
-                      muted
-                      preload="metadata"
-                      poster=""
-                      className="w-full rounded-md aspect-video bg-black object-cover"
-                      src={apiUrl(`/channels/${channel.id}/templates/${segment}/file?v=${data.generated_at || '0'}`)}
-                    />
-                    <div className="text-xs text-green-400">✅ Generado</div>
-                    {data.generated_at && (
-                      <div className="text-[10px] text-gray-500">
-                        {new Date(data.generated_at).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="flex-1 flex items-center justify-center">
-                    <div className="text-xs text-yellow-400">⚠️ No generado</div>
-                  </div>
-                )}
-                <button
-                  onClick={() => handleRegenerateTemplate(segment)}
-                  disabled={regeneratingTemplate === segment}
-                  className="w-full px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 rounded-lg transition disabled:opacity-50 mt-auto"
-                >
-                  {regeneratingTemplate === segment ? 'Generando...' : 'Regenerar'}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
 
       {/* --- Video Grid --- */}
       <section>
@@ -1827,74 +1810,6 @@ export default function ChannelDetail() {
         </div>
       )}
 
-      {/* --- Config Viewer Panel --- */}
-      {showConfig && channel?.config_json && typeof channel.config_json === 'object' && (
-        <div className="glass rounded-xl p-5 mt-6 space-y-4 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
-              <Settings size={20} className="text-neon-cyan" /> Configuración del Canal
-            </h3>
-            <div className="flex gap-2">
-              {editingConfig ? (
-                <>
-                  <button onClick={handleSaveConfig} disabled={syncing}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-neon-gold text-dark-900 rounded-lg text-xs font-bold hover:bg-neon-gold/80 disabled:opacity-50">
-                    <Save size={12} /> {syncing ? 'Guardando...' : 'Guardar'}
-                  </button>
-                  <button onClick={() => setEditingConfig(false)}
-                    className="px-3 py-1.5 bg-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-500">Cancelar</button>
-                </>
-              ) : (
-                <>
-                  <button onClick={startEditingConfig}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs font-medium hover:bg-neon-gold/20">
-                    <Edit3 size={12} /> Editar
-                  </button>
-                  <button onClick={handleSyncConfig} disabled={syncing}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-neon-cyan text-dark-900 rounded-lg text-xs font-bold hover:bg-neon-cyan/80 disabled:opacity-50">
-                    <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} /> {syncing ? 'Sync...' : 'Sync Python'}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {CONFIG_SECTIONS.map((section: ConfigSection) => (
-              <div key={section.key} className="bg-dark-700/50 rounded-lg p-3 border border-surface-border">
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{section.label}</h4>
-                <div className="space-y-1.5">
-                  {section.fields.map((field: ConfigField) => (
-                    <div key={field.key} className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-1 min-w-0">
-                        {field.affectsVideo && <Zap size={10} className="text-neon-gold shrink-0" />}
-                        <span className="text-xs text-gray-400 truncate">{field.label}</span>
-                      </div>
-                      <div className="text-right shrink-0 max-w-[60%] overflow-hidden">
-                        {editingConfig 
-                          ? renderEditField(field, editConfig[field.key])
-                          : renderConfigValue(field, channel.config_json)
-                        }
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <p className="text-[10px] text-gray-600 flex items-center gap-1">
-            <Zap size={10} className="text-neon-gold" /> = afecta a la generación de video.
-            {editingConfig ? ' Editando configuración. Guarda los cambios al terminar.' : ' Para editar, haz clic en "Editar". O modifica config.py y haz "Sync Python".'}
-          </p>
-        </div>
-      )}
-
-      {/* Social Media Accounts */}
-      {showConfig && channel?.id && (
-        <SocialAccountsPanel channelId={channel.id} />
-      )}
-
       {/* --- Auth Modal --- */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowAuthModal(false)}>
@@ -2025,6 +1940,151 @@ export default function ChannelDetail() {
                 <Trash2 size={14} /> Eliminar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Config Modal --- */}
+      {showConfigModal && channel?.config_json && typeof channel.config_json === 'object' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setShowConfigModal(false); setEditingConfig(false); }}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-y-auto space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+                <Settings size={20} className="text-neon-cyan" /> Configuración del Canal
+              </h3>
+              <div className="flex gap-2">
+                {editingConfig ? (
+                  <>
+                    <button onClick={handleSaveConfig} disabled={syncing}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-neon-gold text-dark-900 rounded-lg text-xs font-bold hover:bg-neon-gold/80 disabled:opacity-50">
+                      <Save size={12} /> {syncing ? 'Guardando...' : 'Guardar'}
+                    </button>
+                    <button onClick={() => setEditingConfig(false)}
+                      className="px-3 py-1.5 bg-dark-600 text-gray-300 rounded-lg text-xs hover:bg-dark-500">Cancelar</button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={startEditingConfig}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-neon-gold/10 border border-neon-gold/30 text-neon-gold rounded-lg text-xs font-medium hover:bg-neon-gold/20">
+                      <Edit3 size={12} /> Editar
+                    </button>
+                    <button onClick={handleSyncConfig} disabled={syncing}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-neon-cyan text-dark-900 rounded-lg text-xs font-bold hover:bg-neon-cyan/80 disabled:opacity-50">
+                      <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} /> {syncing ? 'Sync...' : 'Sync Python'}
+                    </button>
+                  </>
+                )}
+                <button onClick={() => { setShowConfigModal(false); setEditingConfig(false); }}
+                  className="px-3 py-1.5 bg-dark-600 text-gray-400 rounded-lg text-xs hover:bg-dark-500 ml-1">
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {CONFIG_SECTIONS.map((section: ConfigSection) => (
+                <div key={section.key} className="bg-dark-700/50 rounded-lg p-3 border border-surface-border">
+                  <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{section.label}</h4>
+                  <div className="space-y-1.5">
+                    {section.fields.map((field: ConfigField) => (
+                      <div key={field.key} className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1 min-w-0">
+                          {field.affectsVideo && <Zap size={10} className="text-neon-gold shrink-0" />}
+                          <span className="text-xs text-gray-400 truncate">{field.label}</span>
+                        </div>
+                        <div className="text-right shrink-0 max-w-[60%] overflow-hidden">
+                          {editingConfig 
+                            ? renderEditField(field, editConfig[field.key])
+                            : renderConfigValue(field, channel.config_json)
+                          }
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-[10px] text-gray-600 flex items-center gap-1">
+              <Zap size={10} className="text-neon-gold" /> = afecta a la generación de video.
+              {editingConfig ? ' Editando configuración. Guarda los cambios al terminar.' : ' Para editar, haz clic en "Editar". O modifica config.py y haz "Sync Python".'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* --- Templates Modal --- */}
+      {showTemplatesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowTemplatesModal(false)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+                <Film size={20} className="text-purple-400" /> 🎬 Templates del Canal
+              </h3>
+              <button onClick={() => setShowTemplatesModal(false)}
+                className="px-3 py-1.5 bg-dark-600 text-gray-400 rounded-lg text-xs hover:bg-dark-500">
+                <X size={14} />
+              </button>
+            </div>
+            <p className="text-sm text-slate-400">Genera los mini-videos de intro, CTA y outro para tus videos.</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+              {['intro', 'cta', 'outro'].map(segment => {
+                const data = templates?.[segment];
+                return (
+                  <div key={segment} className="bg-white/5 rounded-lg p-3 text-center space-y-2 flex flex-col">
+                    <div className="text-sm font-medium capitalize">{segment}</div>
+                    {data ? (
+                      <>
+                        <video
+                          controls
+                          muted
+                          preload="metadata"
+                          poster=""
+                          className="w-full rounded-md aspect-video bg-black object-cover"
+                          src={apiUrl(`/channels/${channel.id}/templates/${segment}/file?v=${data.generated_at || '0'}`)}
+                        />
+                        <div className="text-xs text-green-400">✅ Generado</div>
+                        {data.generated_at && (
+                          <div className="text-[10px] text-gray-500">
+                            {new Date(data.generated_at).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex-1 flex items-center justify-center">
+                        <div className="text-xs text-yellow-400">⚠️ No generado</div>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => handleRegenerateTemplate(segment)}
+                      disabled={regeneratingTemplate === segment}
+                      className="w-full px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 rounded-lg transition disabled:opacity-50 mt-auto"
+                    >
+                      {regeneratingTemplate === segment ? 'Generando...' : 'Regenerar'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Social Media Modal --- */}
+      {showSocialModal && channel?.id && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSocialModal(false)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+                <Share2 size={20} className="text-green-400" /> 🌐 Redes Sociales
+              </h3>
+              <button onClick={() => setShowSocialModal(false)}
+                className="px-3 py-1.5 bg-dark-600 text-gray-400 rounded-lg text-xs hover:bg-dark-500">
+                <X size={14} />
+              </button>
+            </div>
+            <SocialAccountsPanel channelId={channel.id} />
           </div>
         </div>
       )}
