@@ -929,8 +929,6 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     import sqlite3
     from config.settings import DATABASE_PATH
 
-    _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
-
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -1004,33 +1002,6 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
             )
             _skipped_slot_ids.add(slot_id)
             continue
-
-        slot_id = next_slot["id"]
-        channel_id = next_slot["channel_id"]
-        slug = next_slot.get("channel_slug", "")
-        short_type = next_slot.get("short_type", "native")
-        scheduled = next_slot.get("scheduled_at", "?")
-        slot_rank = next_slot.get("slot_rank", 0)
-
-        # 7. Per-channel cooldown guard
-        if not _channel_shorts_cooldown_ok(channel_id, db):
-            logger.debug(
-                "Shorts dispatch skipped for %s: cooldown active "
-                "(last short < %d min ago)",
-                slug, SHORTS_COOLDOWN_MINUTES,
-            )
-            return None
-
-        # 8. Same-type publish guard (catch-up bypass for past-due slots)
-        target_upload = next_slot.get("target_upload_at")
-        if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
-                                            exclude_slot_id=slot_id):
-            logger.debug(
-                "Shorts dispatch skipped for %s: same-type (%s) conflict "
-                "(another %s publishing within %d min)",
-                slug, short_type, short_type, SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
-            )
-            return None
 
         logger.info(
             "Dispatching shorts slot #%d: %s type=%s (scheduled %s)",
@@ -1942,7 +1913,8 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
 
     try:
         last_time = datetime.strptime(last_completed, "%Y-%m-%d %H:%M:%S")
-        elapsed = (datetime.now(UTC) - last_time.replace(tzinfo=UTC)).total_seconds()
+        last_utc = last_time.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
+        elapsed = (datetime.now(UTC) - last_utc).total_seconds()
         return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
     except (ValueError, TypeError):
         return True  # Can't parse — let it proceed
@@ -1974,7 +1946,7 @@ def _same_type_shorts_slot_conflict(
         target_dt = datetime.fromisoformat(
             target_upload_at.replace("Z", "+00:00").replace(" ", "T"))
         if target_dt.tzinfo is None:
-            target_dt = target_dt.replace(tzinfo=timezone.utc)
+            target_dt = target_dt.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
     except (ValueError, TypeError):
         return False
 
@@ -2116,7 +2088,7 @@ def _cancel_stale_shorts_slots(db):
     cancelled = 0
     for s in all_pending:
         try:
-            sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+            sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
         except (ValueError, TypeError):
             continue
         if (now_utc - sched).total_seconds() > STALE_HOURS * 3600:
