@@ -214,6 +214,29 @@ def resolve_alert(db, alert_id: int) -> bool:
         return False
 
 
+def resolve_all_alerts(db, severity: Optional[str] = None) -> int:
+    """Bulk-resolve unresolved alerts, optionally filtered by severity.
+    Returns the number of rows updated."""
+    try:
+        with db._connect() as conn:
+            if severity:
+                sql = """UPDATE pipeline_alerts
+                         SET resolved = 1, resolved_at = datetime('now'),
+                             acknowledged = 1
+                         WHERE resolved = 0 AND severity = ?"""
+                cur = conn.execute(sql, (severity,))
+            else:
+                sql = """UPDATE pipeline_alerts
+                         SET resolved = 1, resolved_at = datetime('now'),
+                             acknowledged = 1
+                         WHERE resolved = 0"""
+                cur = conn.execute(sql)
+            conn.commit()
+            return cur.rowcount
+    except Exception:
+        return 0
+
+
 # ═══════════════════════════════════════════════════════════════
 # Internal health checks
 # ═══════════════════════════════════════════════════════════════

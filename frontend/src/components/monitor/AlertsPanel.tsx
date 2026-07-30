@@ -47,6 +47,12 @@ export default function AlertsPanel() {
     fetchAlerts()
   }
 
+  async function handleResolveAll() {
+    if (!confirm('¿Resolver TODAS las alertas activas?')) return
+    await api.resolveAllMonitorAlerts()
+    fetchAlerts()
+  }
+
   function severityBadge(s: string) {
     const map: Record<string, string> = {
       critical: 'bg-red-500/20 text-red-400 border-red-500/30',
@@ -92,6 +98,15 @@ export default function AlertsPanel() {
               {f === 'active' ? 'Activas' : 'Todas'}
             </button>
           ))}
+          {unacked > 0 && (
+            <button
+              onClick={handleResolveAll}
+              className="px-2 py-0.5 rounded text-[10px] font-medium text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors"
+              title="Resolver todas las alertas activas"
+            >
+              ✓ Todas
+            </button>
+          )}
         </div>
       </div>
 

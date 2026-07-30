@@ -365,6 +365,10 @@ export const api = {
     request<any>(`/monitor/alerts/${alertId}/acknowledge`, { method: 'POST' }),
   resolveMonitorAlert: (alertId: number) =>
     request<any>(`/monitor/alerts/${alertId}/resolve`, { method: 'POST' }),
+  resolveAllMonitorAlerts: (severity?: string) => {
+    const params = severity ? `?severity=${severity}` : ''
+    return request<any>(`/monitor/alerts/resolve-all${params}`, { method: 'POST' })
+  },
   triggerHealthCheck: () =>
     request<any>('/monitor/health-check', { method: 'POST' }),
   getSystemMetrics: () => request<any>('/monitor/system'),

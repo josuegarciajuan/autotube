@@ -13,6 +13,7 @@ from api.deps import get_db
 from api.services.lifecycle_monitor import (
     acknowledge_alert,
     resolve_alert,
+    resolve_all_alerts,
     check_all_health,
 )
 
@@ -351,6 +352,16 @@ def res_alert(alert_id: int):
     db = get_db()
     success = resolve_alert(db, alert_id)
     return {"ok": success, "alert_id": alert_id}
+
+
+@router.post("/monitor/alerts/resolve-all")
+def res_all_alerts(
+    severity: Optional[str] = Query(None, description="Filter: critical, warning, info"),
+):
+    """Bulk-resolve all unresolved alerts, optionally filtered by severity."""
+    db = get_db()
+    count = resolve_all_alerts(db, severity=severity)
+    return {"ok": True, "resolved": count}
 
 
 @router.get("/monitor/events")
