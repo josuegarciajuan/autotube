@@ -26,6 +26,7 @@ from api.routers import auth, planning, shorts
 from api.routers import monetization, milestones, analytics
 from api.routers import promotion, gamification, social_accounts
 from api.routers import monitor as monitor_router
+from api.routers import insights
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
@@ -1283,6 +1284,7 @@ app.include_router(promotion.router, tags=["Promotion"])
 app.include_router(gamification.router, prefix="/api", tags=["Gamification"])
 app.include_router(social_accounts.router, prefix="/api/channels", tags=["Social Media"])
 app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
+app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

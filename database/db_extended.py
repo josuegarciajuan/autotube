@@ -632,6 +632,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v19: planned_slots target_public_at + go_public_at columns ──
     _migrate_v19(conn, logger)
+
+    # ── v20: channel_insights (AI self-optimization analysis) ──
+    _migrate_v20(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1231,6 +1234,15 @@ def _migrate_v19(conn, logger):
         logger.info("Migration v19: added go_public_at column to planned_slots")
     except Exception:
         pass  # column already exists
+
+
+def _migrate_v20(conn, logger):
+    """Idempotent v20: channel_insights table for AI analysis results."""
+    schema_v20 = Path(__file__).parent / "schema_v20.sql"
+    if schema_v20.exists():
+        with open(schema_v20) as f:
+            conn.executescript(f.read())
+    logger.info("Migration: v20 schema applied (channel_insights)")
 
 
 def _migrate_v10(conn, logger):
@@ -5499,3 +5511,111 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
             return cursor.rowcount
+
+    # ── channel_insights (v20 — AI self-optimization) ──────────
+
+    def create_insight(self, channel_id: int) -> int:
+        """Create a new analysis row with status='processing'. Returns the ID."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO channel_insights (channel_id, status) VALUES (?, 'processing')",
+                (channel_id,),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_insight_phase(self, insight_id: int, phase: str,
+                             raw_patterns: str = None,
+                             raw_hypotheses: str = None) -> None:
+        """Update current phase and optionally store intermediate LLM output."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET current_phase = ? WHERE id = ?",
+                (phase, insight_id),
+            )
+            if raw_patterns is not None:
+                conn.execute(
+                    "UPDATE channel_insights SET raw_patterns = ? WHERE id = ?",
+                    (raw_patterns, insight_id),
+                )
+            if raw_hypotheses is not None:
+                conn.execute(
+                    "UPDATE channel_insights SET raw_hypotheses = ? WHERE id = ?",
+                    (raw_hypotheses, insight_id),
+                )
+            conn.commit()
+
+    def complete_insight(self, insight_id: int, insights_json: str,
+                         raw_patterns: str, raw_hypotheses: str,
+                         model: str, tokens_in: int, tokens_out: int,
+                         duration_ms: int) -> None:
+        """Mark analysis as completed and store final results."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE channel_insights SET
+                   status = 'completed',
+                   current_phase = 'done',
+                   insights_json = ?,
+                   raw_patterns = ?,
+                   raw_hypotheses = ?,
+                   model_used = ?,
+                   tokens_input = ?,
+                   tokens_output = ?,
+                   generation_time_ms = ?,
+                   generated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?""",
+                (insights_json, raw_patterns, raw_hypotheses,
+                 model, tokens_in, tokens_out, duration_ms,
+                 insight_id),
+            )
+            conn.commit()
+
+    def fail_insight(self, insight_id: int, error_msg: str) -> None:
+        """Mark analysis as failed."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET status = 'failed', error_msg = ? WHERE id = ?",
+                (error_msg, insight_id),
+            )
+            conn.commit()
+
+    def get_latest_insight(self, channel_id: int) -> dict | None:
+        """Return the most recent analysis for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM channel_insights
+                   WHERE channel_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_insight(self, insight_id: int) -> dict | None:
+        """Return a specific analysis by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM channel_insights WHERE id = ?",
+                (insight_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def mark_insight_applied(self, insight_id: int,
+                             applied_by: str = "system") -> None:
+        """Mark an insight's recommendations as applied."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET applied_at = CURRENT_TIMESTAMP, applied_by = ? WHERE id = ?",
+                (applied_by, insight_id),
+            )
+            conn.commit()
+
+    def get_channel_insights(self, channel_id: int, limit: int = 10) -> list[dict]:
+        """Return recent analyses for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM channel_insights
+                   WHERE channel_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (channel_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]

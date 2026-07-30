@@ -395,3 +395,106 @@ export interface LifecycleActionItem {
   config_json: string | null
   video_title?: string
 }
+
+// ── Insights AI (v20 — AI self-optimization) ───────────────────
+
+export type InsightCategory =
+  | 'duracion'
+  | 'hora_publicacion'
+  | 'keywords'
+  | 'contenido'
+  | 'errores'
+
+export interface InsightRecommendation {
+  id: string
+  category: InsightCategory
+  title: string
+  detail: string
+  confidence: number
+  expected_impact: 'alta' | 'media' | 'baja'
+  config_changes: Record<string, any>
+  data_cited: Record<string, string>
+  requires_code?: boolean
+  opencode_prompt?: string
+  rationale_brief?: string
+  applied?: boolean
+  discarded?: boolean
+}
+
+export interface KeyMetric {
+  label: string
+  value: string
+  sparkline: number[]
+  delta: string
+  delta_positive: boolean
+}
+
+export interface ChannelInsight {
+  id: number
+  channel_id: number
+  status: 'processing' | 'completed' | 'failed'
+  current_phase: string | null
+  insights_json: {
+    analysis_summary: string
+    recommendations: InsightRecommendation[]
+    health_score?: number
+    key_metrics?: KeyMetric[]
+  }
+  raw_patterns: any | null
+  raw_hypotheses: any | null
+  error_msg: string | null
+  model_used: string | null
+  tokens_input: number
+  tokens_output: number
+  generation_time_ms: number
+  generated_at: string | null
+  applied_at: string | null
+  applied_by: string | null
+}
+
+export const INSIGHT_CATEGORY_META: Record<
+  InsightCategory,
+  { label: string; icon: string; color: string; bg: string; border: string }
+> = {
+  duracion: {
+    label: 'Duracion',
+    icon: '⏱',
+    color: 'text-neon-cyan',
+    bg: 'bg-neon-cyan/10',
+    border: 'border-neon-cyan/30',
+  },
+  hora_publicacion: {
+    label: 'Hora pub.',
+    icon: '🕐',
+    color: 'text-neon-gold',
+    bg: 'bg-neon-gold/10',
+    border: 'border-neon-gold/30',
+  },
+  keywords: {
+    label: 'Keywords',
+    icon: '🔑',
+    color: 'text-purple-400',
+    bg: 'bg-purple-400/10',
+    border: 'border-purple-400/30',
+  },
+  contenido: {
+    label: 'Contenido',
+    icon: '📝',
+    color: 'text-green-400',
+    bg: 'bg-green-400/10',
+    border: 'border-green-400/30',
+  },
+  errores: {
+    label: 'Errores',
+    icon: '⚠️',
+    color: 'text-neon-red',
+    bg: 'bg-neon-red/10',
+    border: 'border-neon-red/30',
+  },
+}
+
+export function getCategoryMeta(
+  category: InsightCategory
+): (typeof INSIGHT_CATEGORY_META)[InsightCategory] {
+  return INSIGHT_CATEGORY_META[category] || INSIGHT_CATEGORY_META.contenido
+}

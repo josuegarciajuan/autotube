@@ -3,14 +3,15 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
 import WatchTimeChart from '../components/WatchTimeChart'
 import HorariosTab from '../components/HorariosTab'
-import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType, SOCIAL_PLATFORMS } from '../types/channel'
+import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType, SOCIAL_PLATFORMS, type ChannelInsight } from '../types/channel'
 import SocialAccountsPanel from '../components/SocialAccountsPanel'
+import InsightsTab from '../components/InsightsTab'
 
 // ── PromotionTab (inline component) ─────────────────────────
 
@@ -261,7 +262,7 @@ export default function ChannelDetail() {
   const [nativeShortResult, setNativeShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
   
   // Tab state for Videos/Shorts/Live/Growth/Promotion/Slots
-  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion' | 'slots'>('videos')
+  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion' | 'slots' | 'insights'>('videos')
   const [shorts, setShorts] = useState<any[]>([])
   const [loadingShorts, setLoadingShorts] = useState(false)
 
@@ -289,6 +290,8 @@ export default function ChannelDetail() {
   const [loadingLifecycle, setLoadingLifecycle] = useState(false)
   const [selectedVideoId, setSelectedVideoId] = useState<number | null>(null)
   const [promoActionResult, setPromoActionResult] = useState<string | null>(null)
+  const [insights, setInsights] = useState<ChannelInsight | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
 
   const { addJob, removeJob, activeJobs, isChannelBusy } = useGeneration()
   // Find active job for THIS channel (for inline progress display)
@@ -446,6 +449,14 @@ export default function ChannelDetail() {
     }
     loadGrowth()
   }, [videoTab, channelId, growthDays])
+
+  // Load insights when tab selected
+  useEffect(() => {
+    if (videoTab === 'insights' && !insights) {
+      api.getLatestInsight(channelId).then(setInsights).catch(() => {})
+    }
+  }, [videoTab, channelId])
+
   useEffect(() => {
     const ytIds = shorts.filter((s: any) => s.youtube_id).map((s: any) => s.youtube_id)
     if (ytIds.length === 0) return
@@ -1139,6 +1150,12 @@ export default function ChannelDetail() {
             }`}
             onClick={() => setVideoTab('slots')}
           ><Clock size={14} className="inline mr-1" />Horarios</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'insights' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('insights')}
+          ><Brain size={14} className="inline mr-1" />Insights AI</button>
           
           {/* ── Filters: playlists + error toggle ── */}
           {videoTab === 'videos' && (
@@ -1443,6 +1460,16 @@ export default function ChannelDetail() {
           />
         ) : videoTab === 'slots' ? (
           <HorariosTab channelId={channelId} />
+        ) : videoTab === 'insights' ? (
+          <InsightsTab
+            channelId={channelId}
+            insights={insights}
+            setInsights={setInsights}
+            analyzing={analyzing}
+            setAnalyzing={setAnalyzing}
+            channel={channel}
+            setChannel={setChannel}
+          />
         ) : videoTab === 'shorts' ? (
           <div>
           {nativeShortResult && (

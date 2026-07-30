@@ -74,6 +74,8 @@ LLM_MODEL_SCRIPT = os.getenv("LLM_MODEL_SCRIPT", "deepseek-v4-pro")
 LLM_MODEL_CREATIVE = os.getenv("LLM_MODEL_CREATIVE", "deepseek-v4-flash")
 # Tier 3: Default (theme extraction, comments, classification) — no thinking
 # (uses LLM_MODEL above — currently deepseek-v4-flash)
+# Tier 4: Insights / AI self-optimization (multi-pass analysis) — thinking enabled
+LLM_MODEL_INSIGHTS = os.getenv("LLM_MODEL_INSIGHTS", LLM_MODEL_SCRIPT)
 
 # OpenAI (legacy / fallback) ────────────────────────────────────
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

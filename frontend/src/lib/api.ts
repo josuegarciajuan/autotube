@@ -371,6 +371,17 @@ export const api = {
   getActiveWorkers: () => request<any>('/monitor/workers'),
   getStatusBar: () => request<any>('/monitor/status-bar'),
   getJobEta: (jobId: number) => request<any>(`/monitor/eta/${jobId}`),
+
+  // ── Insights AI (v20 — AI self-optimization) ──
+  analyzeChannel: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analyze`, { method: 'POST' }),
+  getLatestInsight: (channelId: number) =>
+    request<any>(`/channels/${channelId}/insights/latest`),
+  applyInsight: (channelId: number, insightId: number, recId: string) =>
+    request<any>(
+      `/channels/${channelId}/insights/${insightId}/apply?rec_id=${encodeURIComponent(recId)}`,
+      { method: 'POST' }
+    ),
 };
 
 // ── Pipeline status types ────────────────────────────────────
