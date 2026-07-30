@@ -1306,21 +1306,22 @@ def _migrate_v22(conn, logger):
     if schema_v22.exists():
         with open(schema_v22) as f:
             sql = f.read()
-        # Run only CREATE TABLE / CREATE INDEX statements (already idempotent).
-        # ALTER TABLE ADD COLUMN is NOT idempotent in SQLite — handle separately.
-        for stmt in sql.split(";"):
-            stmt = stmt.strip()
-            if not stmt:
+        # Run CREATE TABLE / CREATE INDEX (already idempotent)
+        # ALTER TABLE ADD COLUMN is NOT idempotent in SQLite — check first.
+        for stmt_text in sql.split(";"):
+            stmt_text = stmt_text.strip()
+            if not stmt_text or stmt_text.startswith("--"):
                 continue
-            if stmt.upper().startswith("ALTER TABLE"):
-                # Check if column already exists before adding
-                try:
-                    conn.execute(stmt)
-                except Exception:
-                    # Column already exists — silence the duplicate error
-                    pass
+            if stmt_text.upper().startswith("ALTER TABLE"):
+                col_name = "emergency_mode"
+                existing = conn.execute(
+                    f"PRAGMA table_info('scripts')"
+                ).fetchall()
+                col_names = [row[1] for row in existing]
+                if col_name not in col_names:
+                    conn.execute(stmt_text)
             else:
-                conn.execute(stmt)
+                conn.execute(stmt_text)
     logger.info("Migration: v22 schema applied (script_generation_attempts + emergency_mode)")
 
 
