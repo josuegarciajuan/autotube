@@ -5417,9 +5417,10 @@ class ExtendedDatabase(Database):
         Slots older than 24h are excluded to prevent truly obsolete slots
         from blocking the dispatch queue.
         
-        Lookahead: includes slots scheduled within the next 10 minutes so
-        the dispatcher can pre-generate before the deadline instead of
-        waiting until slots are already past-due.
+        Lookahead: includes slots scheduled within the next 24 hours so
+        the dispatcher never runs dry. The ORDER BY ensures the most
+        urgent slots (closest deadline) are dispatched first. Per-channel
+        cooldown and per-channel short job guards maintain natural spacing.
         
         Args:
             exclude_slot_ids: Optional list of slot IDs to skip. Used by the
@@ -5431,7 +5432,7 @@ class ExtendedDatabase(Database):
                        JOIN channels c ON sps.channel_id = c.id
                        WHERE sps.status = 'pending'
                            AND sps.scheduled_at >= datetime('now','-24 hours')
-                           AND sps.scheduled_at <= datetime('now','+10 minutes')"""
+                           AND sps.scheduled_at <= datetime('now','+1 day')"""
             params: list = []
             if exclude_slot_ids:
                 placeholders = ",".join("?" for _ in exclude_slot_ids)
@@ -5848,6 +5849,28 @@ class ExtendedDatabase(Database):
                      AND sps.date_key = date('now', 'localtime')""",
             ).fetchall()
         return [int(r["channel_id"]) for r in rows]
+
+    def count_shorts_by_status(self, status: str = "pending") -> int:
+        """Count ALL short planned slots by status across all dates."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shorts_planned_slots WHERE status = ?",
+                (status,),
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_earliest_pending_short(self) -> dict | None:
+        """Get the earliest pending short slot (by scheduled_at), regardless of lookahead.
+        Used for diagnostics: shows how far away the next slot is."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT sps.id, sps.scheduled_at, c.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels c ON sps.channel_id = c.id
+                   WHERE sps.status = 'pending'
+                   ORDER BY sps.scheduled_at ASC LIMIT 1""",
+            ).fetchone()
+        return dict(row) if row else None
 
     # ── system_state helpers ───────────────────────────────────
 

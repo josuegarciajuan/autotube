@@ -981,13 +981,29 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         next_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=exclude_list)
         if not next_slot:
             if _skipped_slot_ids:
-                logger.debug(
-                    "No dispatchable shorts: %d slot(s) skipped (cooldown/conflict), "
-                    "none remaining",
+                logger.info(
+                    "No dispatchable shorts: %d slot(s) skipped (cooldown/conflict) "
+                    "— none remaining in lookahead",
                     len(_skipped_slot_ids),
                 )
             else:
-                logger.debug("No pending shorts slots due")
+                # Check if there are any pending slots at all (even outside window)
+                try:
+                    total_pending = db.count_shorts_by_status("pending")
+                    if total_pending > 0:
+                        next_due = db.get_earliest_pending_short()
+                        if next_due:
+                            logger.info(
+                                "No shorts due yet — next slot: #%d at %s (%d total pending)",
+                                next_due["id"], next_due.get("scheduled_at", "?")[:16],
+                                total_pending,
+                            )
+                        else:
+                            logger.info("No shorts due — %d pending but none in lookahead", total_pending)
+                    else:
+                        logger.info("No pending shorts slots at all")
+                except Exception:
+                    logger.info("No pending shorts slots due")
             return None
 
         slot_id = next_slot["id"]
@@ -1324,7 +1340,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                             next_result["short_type"],
                         )
                     else:
-                        logger.debug("Chain dispatch: no due slots within lookahead window")
+                        logger.info("Chain dispatch: no due slots within 24h lookahead")
                 except Exception as _chain_err:
                     logger.warning("Chain dispatch error: %s", _chain_err)
             _asyncio.create_task(_chain_next())
