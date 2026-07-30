@@ -743,8 +743,9 @@ AUTO_END_SCREENS = True
 # ── Scheduled Publishing ──────────────────────────────────────────
 PUBLISH_MODE = "scheduled"
 PUBLISH_TIMEZONE = "Europe/Madrid"
-PUBLISH_JITTER_MIN = 20
-PUBLISH_WARMUP_MIN = 120
+PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
+PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
+PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
 # PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (historia_documental → 20:00)
 
 # ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
@@ -754,7 +755,6 @@ UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},   # Mañana: 10:00-13:00
     {"start": 20, "end": 22},   # Tarde: 20:00-22:00
 ]
-PUBLISH_WINDOW_SPREAD_MIN = 90     # ±90min alrededor del peak = ventana de publicación de 3h
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)

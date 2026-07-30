@@ -409,19 +409,77 @@ def _pick_optimal_slot(db, channel_id: int, slug: str = None) -> Optional[dict]:
     return None
 
 
+def _snap_to_next_target_hour(
+    target_hour: int,
+    timezone_str: str,
+    warmup_min: int,
+    slug: str,
+) -> tuple[datetime, datetime]:
+    """Snap to exactly HH:00 in the given timezone, respecting warmup.
+
+    If now + warmup_min is past target_hour today, schedules for tomorrow.
+
+    Returns:
+        (target_utc: datetime (UTC), target_local: datetime (local tz))
+    """
+    try:
+        tz = pytz.timezone(timezone_str)
+    except pytz.UnknownTimeZoneError:
+        logger.warning("[%s] Unknown timezone '%s', falling back to UTC", slug, timezone_str)
+        tz = pytz.UTC
+
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(tz)
+
+    # Build target at HH:00:00 today (local time)
+    target_local = now_local.replace(
+        hour=target_hour, minute=0, second=0, microsecond=0,
+    )
+
+    # If now + warmup is already past the target, push to tomorrow
+    warmup_deadline = now_local + timedelta(minutes=warmup_min)
+    if target_local <= warmup_deadline:
+        target_local += timedelta(days=1)
+        logger.info(
+            "[%s] Warmup deadline (%s) >= target %02d:00 today → scheduling for tomorrow %s",
+            slug,
+            warmup_deadline.strftime("%H:%M"),
+            target_hour,
+            target_local.strftime("%Y-%m-%d %H:%M"),
+        )
+    else:
+        logger.info(
+            "[%s] Warmup OK: now=%s + %dmin=%s < target=%02d:00 → scheduling for today",
+            slug,
+            now_local.strftime("%H:%M"),
+            warmup_min,
+            warmup_deadline.strftime("%H:%M"),
+            target_hour,
+        )
+
+    target_utc = target_local.astimezone(pytz.UTC)
+    return target_utc, target_local
+
+
 def calculate_target_public_time(
     slug: str,
     primary_keyword: str = "",
     secondary_keywords: list[str] = None,
     timezone_str: str = "Europe/Madrid",
     target_hour: Optional[int] = None,
-    jitter_min: int = 20,
-    jitter_after: int = 30,
-    warmup_min: int = 120,
+    jitter_min: int = 0,
+    jitter_after: int = 0,
+    warmup_min: int = 60,
     db=None,
     channel_id: Optional[int] = None,
 ) -> dict:
     """Calcula la hora objetivo de publicación para un vídeo.
+
+    Lógica determinista (no jitter): se ajusta exactamente a HH:00 en la zona
+    horaria del canal. Si no queda suficiente warmup (warmup_min) hasta esa hora
+    hoy, se programa para la misma hora del día siguiente.
+
+    La publicación se materializa vía YouTube API `scheduledPublishTime` (publishAt).
 
     Args:
         slug: Canal slug
@@ -429,19 +487,21 @@ def calculate_target_public_time(
         secondary_keywords: Keywords SEO secundarias
         timezone_str: Zona horaria del canal (ej: 'Europe/Madrid')
         target_hour: Hora semilla (de config). Si es None, se usa la heurística.
-        jitter_min: ±N minutos de variación aleatoria
-        warmup_min: Minutos mínimos en 'private' antes de publicar
-        db: Database para consultar histórico
-        channel_id: ID del canal en BD para consultar histórico
+        jitter_min: Ignorado (mantenido por compatibilidad de firma).
+        jitter_after: Ignorado (mantenido por compatibilidad de firma).
+        warmup_min: Minutos mínimos entre la subida y la publicación (default 60).
+        db: Database para consultar histórico y optimal slots.
+        channel_id: ID del canal en BD.
 
     Returns:
         {
             "target_public_at": str (ISO8601 UTC),
+            "target_public_at_local": str (ISO8601 local tz),
             "peak_hour_local": int,
-            "peak_source": "heuristic" | "history",
+            "peak_source": "optimal_slots" | "history" | "heuristic",
             "niche": str,
-            "jitter_applied": int (minutos, positivo o negativo),
-            "warmup_until": str (ISO8601 UTC) — momento en que acaba el warmup,
+            "jitter_applied": 0 (siempre),
+            "warmup_min": int,
         }
     """
     all_keywords = [primary_keyword] if primary_keyword else []
@@ -449,6 +509,7 @@ def calculate_target_public_time(
         all_keywords.extend(secondary_keywords)
 
     # ── 0. Intentar usar franjas óptimas calculadas (v10) ──
+    optimal_slot_rank = None
     if db is not None and channel_id is not None:
         try:
             optimal_slot = _pick_optimal_slot(db, channel_id, slug)
@@ -456,9 +517,10 @@ def calculate_target_public_time(
                 seed_hour = optimal_slot["target_hour"]
                 peak_source = "optimal_slots"
                 niche = "data_driven"
+                optimal_slot_rank = optimal_slot["slot_rank"]
                 logger.info(
                     "[%s] Using optimal slot #%d: %02d:%02d (confidence=%.2f, focus=%s)",
-                    slug, optimal_slot["slot_rank"], optimal_slot["target_hour"],
+                    slug, optimal_slot_rank, optimal_slot["target_hour"],
                     optimal_slot.get("target_minute", 0),
                     optimal_slot.get("confidence", 0),
                     optimal_slot.get("audience_focus", "blend"),
@@ -466,53 +528,36 @@ def calculate_target_public_time(
                 # Record usage for epsilon-greedy strategy
                 try:
                     db.record_slot_usage(
-                        channel_id, "long", optimal_slot["slot_rank"]
+                        channel_id, "long", optimal_slot_rank,
                     )
                 except Exception:
                     pass
-                # Skip niche/heuristic steps
-                jitter = random.randint(-jitter_min, jitter_after)
-                effective_hour = seed_hour + (jitter / 60.0)
-                try:
-                    tz = pytz.timezone(timezone_str)
-                except pytz.UnknownTimeZoneError:
-                    logger.warning("[%s] Unknown timezone '%s', falling back to UTC", slug, timezone_str)
-                    tz = pytz.UTC
-                now_utc = datetime.now(timezone.utc)
-                now_local = now_utc.astimezone(tz)
-                hour_int = int(effective_hour)
-                minute_int = int((effective_hour - hour_int) * 60)
-                target_local = now_local.replace(hour=hour_int, minute=minute_int, second=0, microsecond=0)
-                if target_local <= now_local:
-                    target_local += timedelta(days=1)
-                warmup_until_utc = now_utc + timedelta(minutes=warmup_min)
-                target_utc = target_local.astimezone(pytz.UTC)
-                if target_utc < warmup_until_utc:
-                    target_utc = warmup_until_utc
 
-                # ── v10.1: Avoid same-channel publish time collisions ──
-                original_utc = target_utc
+                # ── Snap to exactly HH:00, respecting warmup ──
+                target_utc, target_local = _snap_to_next_target_hour(
+                    seed_hour, timezone_str, warmup_min, slug,
+                )
+
+                # ── Avoid same-channel publish time collisions ──
                 target_utc = _avoid_channel_collision(
                     channel_id, target_utc, db=db, slug=slug,
                 )
-                warmup_until_utc = max(warmup_until_utc, now_utc + timedelta(minutes=warmup_min))
-                if target_utc < warmup_until_utc:
-                    target_utc = warmup_until_utc
 
                 logger.info(
                     "[%s] Scheduled publish via optimal slots: slot_rank=%d, "
-                    "peak=%02d:%02d (local), jitter=%+dmin, target=%s UTC",
-                    slug, optimal_slot["slot_rank"], hour_int, minute_int, jitter,
+                    "peak=%02d:00 (local), target=%s UTC",
+                    slug, optimal_slot_rank, seed_hour,
                     target_utc.isoformat(),
                 )
                 return {
                     "target_public_at": target_utc.isoformat(),
+                    "target_public_at_local": target_local.isoformat(),
                     "peak_hour_local": seed_hour,
                     "peak_source": peak_source,
                     "niche": niche,
-                    "jitter_applied": jitter,
-                    "warmup_until": warmup_until_utc.isoformat(),
-                    "optimal_slot_rank": optimal_slot["slot_rank"],
+                    "jitter_applied": 0,
+                    "warmup_min": warmup_min,
+                    "optimal_slot_rank": optimal_slot_rank,
                 }
         except Exception as e:
             logger.debug("[%s] Optimal slots lookup skipped: %s", slug, e)
@@ -544,70 +589,31 @@ def calculate_target_public_time(
         except Exception as e:
             logger.debug("[%s] History adjustment skipped: %s", slug, e)
 
-    # ── 3. Aplicar spread aleatorio dentro de la ventana de publicación ──
-    # PUBLISH_WINDOW_SPREAD_MIN define minutos ANTES del peak (ej. 90 min).
-    # PUBLISH_JITTER_AFTER_MIN define minutos DESPUÉS del peak (ej. 30 min).
-    jitter = random.randint(-jitter_min, jitter_after)
-    effective_hour = seed_hour + (jitter / 60.0)  # hora decimal
-
-    # ── 4. Determinar la próxima ocurrencia de esa hora en la zona local ──
-    try:
-        tz = pytz.timezone(timezone_str)
-    except pytz.UnknownTimeZoneError:
-        logger.warning("[%s] Unknown timezone '%s', falling back to UTC", slug, timezone_str)
-        tz = pytz.UTC
-
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(tz)
-
-    # Siguiente ocurrencia de la hora objetivo HOY (en hora local)
-    hour_int = int(effective_hour)
-    minute_int = int((effective_hour - hour_int) * 60)
-
-    target_local = now_local.replace(
-        hour=hour_int, minute=minute_int, second=0, microsecond=0,
+    # ── 3. Snap determinista: HH:00 exacto, sin jitter ──
+    target_utc, target_local = _snap_to_next_target_hour(
+        seed_hour, timezone_str, warmup_min, slug,
     )
 
-    # Si ya pasó hoy, mover a mañana
-    if target_local <= now_local:
-        target_local += timedelta(days=1)
-
-    # ── 5. Asegurar warmup mínimo ──
-    # El warmup empieza DESDE AHORA (cuando se sube el vídeo).
-    # La hora de publicación no puede ser antes de now + warmup_min.
-    warmup_until_utc = now_utc + timedelta(minutes=warmup_min)
-    target_utc = target_local.astimezone(pytz.UTC)
-
-    if target_utc < warmup_until_utc:
-        logger.info(
-            "[%s] Target time (%s UTC) is before warmup end (%s UTC). "
-            "Pushing to warmup end.",
-            slug, target_utc.isoformat(), warmup_until_utc.isoformat(),
-        )
-        target_utc = warmup_until_utc
-
-    # ── v10.1: Avoid same-channel publish time collisions ──
+    # ── 4. Avoid same-channel publish time collisions ──
     target_utc = _avoid_channel_collision(
         channel_id, target_utc, db=db, slug=slug,
     )
-    warmup_until_utc = max(warmup_until_utc, now_utc + timedelta(minutes=warmup_min))
-    if target_utc < warmup_until_utc:
-        target_utc = warmup_until_utc
 
     logger.info(
-        "[%s] Scheduled publish: niche=%s, peak=%02d:%02d (local), "
-        "source=%s, jitter=%+dmin, target=%s UTC",
-        slug, niche, hour_int, minute_int, peak_source, jitter,
+        "[%s] Scheduled publish: niche=%s, peak=%02d:00 (local), "
+        "source=%s, target=%s UTC",
+        slug, niche, seed_hour, peak_source,
         target_utc.isoformat(),
     )
 
     return {
         "target_public_at": target_utc.isoformat(),
+        "target_public_at_local": target_local.isoformat(),
         "peak_hour_local": seed_hour,
         "peak_source": peak_source,
         "niche": niche,
-        "jitter_applied": jitter,
-        "warmup_until": warmup_until_utc.isoformat(),
+        "jitter_applied": 0,
+        "warmup_min": warmup_min,
     }
 
 
@@ -837,8 +843,8 @@ def ensure_future_target_public_at(
     primary_keyword: str = "",
     secondary_keywords: list[str] = None,
     target_hour: Optional[int] = None,
-    jitter_min: int = 20,
-    warmup_min: int = 120,
+    jitter_min: int = 0,
+    warmup_min: int = 60,
     db=None,
     channel_id: Optional[int] = None,
 ) -> str:

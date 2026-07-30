@@ -205,8 +205,9 @@ class TestCalculateTargetPublicTime:
             timezone_str="Europe/Madrid",
             warmup_min=60,
         )
-        for key in ("target_public_at", "peak_hour_local", "peak_source",
-                     "niche", "jitter_applied", "warmup_until"):
+        for key in ("target_public_at", "target_public_at_local",
+                     "peak_hour_local", "peak_source",
+                     "niche", "jitter_applied", "warmup_min"):
             assert key in result, f"Missing key: {key}"
 
     def test_different_niches_produce_different_hours(self):

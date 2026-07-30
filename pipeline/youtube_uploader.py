@@ -337,6 +337,7 @@ class YouTubeUploader:
         progress_callback=None,
         suggested_video_filename: str = None,
         suggested_thumb_filename: str = None,
+        publish_at: str = None,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -353,6 +354,10 @@ class YouTubeUploader:
           YouTube uses the filename for SEO — a keyword-rich stem helps ranking.
         - suggested_thumb_filename: if provided, the thumbnail is copied to a
           temp file with this name (preserving .jpg extension) before setting.
+        - publish_at: ISO 8601 datetime (UTC) for scheduled publishing.
+          When set, privacy is forced to "private" (YouTube requirement)
+          and YouTube will auto-publish at the specified time.
+          e.g. "2026-07-31T19:00:00.000Z"
 
         Returns {video_id: str, url: str, warnings: list}
         """
@@ -418,12 +423,20 @@ class YouTubeUploader:
                     "defaultAudioLanguage": language,
                 },
                 "status": {
-                    "privacyStatus": privacy,
+                    "privacyStatus": "private" if publish_at else privacy,
                     "selfDeclaredMadeForKids": False,
                     "embeddable": True,
                     "publicStatsViewable": True,
                 },
             }
+
+            # ── Scheduled publishing via YouTube API (publishAt) ──
+            if publish_at:
+                body["status"]["publishAt"] = publish_at
+                logger.info(
+                    "Scheduled publish: video will auto-publish at %s UTC",
+                    publish_at,
+                )
 
             media = MediaFileUpload(
                 str(video_path),

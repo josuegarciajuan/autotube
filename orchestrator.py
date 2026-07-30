@@ -1401,35 +1401,25 @@ class PipelineOrchestrator:
                 secondary_kws = getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])
                 tz = getattr(self.config, "PUBLISH_TIMEZONE", "Europe/Madrid")
                 target_h = getattr(self.config, "PUBLISH_TARGET_HOUR", None)
-                # PUBLISH_WINDOW_SPREAD_MIN (v11) → PUBLISH_JITTER_MIN (legacy fallback)
-                spread = getattr(self.config, "PUBLISH_WINDOW_SPREAD_MIN", None)
-                if spread is None:
-                    spread = getattr(self.config, "PUBLISH_JITTER_MIN", 20)
-                jitter_after = getattr(self.config, "PUBLISH_JITTER_AFTER_MIN", 30)
-                warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 120)
+                warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 60)
                 channel_id = self._get_channel_id()
 
                 # ── If the planning system provided a target, use it ──
                 if planned_public_at:
                     from datetime import datetime as _dt, timezone as _tz
-                    warmup_until = (_dt.now(_tz.utc) + timedelta(minutes=warmup)).isoformat()
                     target_dt = _dt.fromisoformat(planned_public_at.replace("Z", "+00:00"))
                     if target_dt.tzinfo is None:
-                        # Planning provides local (Europe/Madrid) time without tzinfo.
-                        # Localize to the channel's configured timezone, then convert to UTC.
                         import pytz
                         local_tz = pytz.timezone(tz)
                         target_dt = local_tz.localize(target_dt).astimezone(_tz.utc)
 
                     now_utc_dt = _dt.now(_tz.utc)
 
-                    # ── Publish immediately only if the planned time has ALREADY PASSED ──
-                    # (video generation took longer than expected and missed the window)
-                    if target_dt < now_utc_dt:
+                    # Recalculate if planned time has already passed
+                    if target_dt < now_utc_dt + timedelta(minutes=warmup):
                         logger.info(
-                            "[%s] Planned public time ALREADY PASSED (%s < now %s). "
-                            "Recalculating next peak to avoid same-time collision.",
-                            self.canal, target_dt.isoformat(), now_utc_dt.isoformat(),
+                            "[%s] Planned public time within warmup or past (%s). Recalculating.",
+                            self.canal, target_dt.isoformat(),
                         )
                         try:
                             fallback_info = calculate_target_public_time(
@@ -1438,47 +1428,27 @@ class PipelineOrchestrator:
                                 secondary_keywords=secondary_kws,
                                 timezone_str=tz,
                                 target_hour=target_h,
-                                jitter_min=spread,
-                                jitter_after=jitter_after,
+                                jitter_min=0,
                                 warmup_min=warmup,
                                 db=self.db,
                                 channel_id=channel_id,
                             )
-                            fallback_str = fallback_info["target_public_at"]
-                            target_dt = _dt.fromisoformat(fallback_str.replace("Z", "+00:00"))
+                            target_dt = _dt.fromisoformat(
+                                fallback_info["target_public_at"].replace("Z", "+00:00")
+                            )
                             if target_dt.tzinfo is None:
                                 target_dt = target_dt.replace(tzinfo=_tz.utc)
+                            # Persist recalculated target
+                            try:
+                                if self.db and self.db_video_id:
+                                    self.db.update_video(
+                                        self.db_video_id,
+                                        target_public_at=target_dt.isoformat(),
+                                    )
+                            except Exception:
+                                pass
                         except Exception:
                             target_dt = now_utc_dt + timedelta(minutes=warmup)
-                        was_already_past = True
-                        # Persist recalculated target to DB so UI + collision
-                        # detection stay in sync with the actual publish time.
-                        try:
-                            if self.db and self.db_video_id:
-                                # Store as ISO8601 UTC — consistent with planning_service
-                                self.db.update_video(self.db_video_id, target_public_at=target_dt.isoformat())
-                                logger.info(
-                                    "[%s] DB target_public_at updated → %s (video #%d)",
-                                    self.canal, target_dt.isoformat()[:19], self.db_video_id,
-                                )
-                        except Exception as _persist_exc:
-                            logger.debug(
-                                "[%s] Failed to persist recalculated target_public_at: %s",
-                                self.canal, _persist_exc,
-                            )
-                    elif target_dt < now_utc_dt + timedelta(minutes=warmup):
-                        # Target is in the future but within the warmup window.
-                        # RESPECT the planned time — do NOT override it.
-                        # The lifecycle scheduler will execute go_public at target_dt.
-                        logger.info(
-                            "[%s] Planned public time is within warmup window (%s). "
-                            "Respecting planned target (no override).",
-                            self.canal, target_dt.isoformat(),
-                        )
-                        was_already_past = False
-                    else:
-                        # Target is far enough in the future — keep it as-is.
-                        was_already_past = False
 
                     publish_schedule_info = {
                         "target_public_at": target_dt.isoformat(),
@@ -1486,10 +1456,10 @@ class PipelineOrchestrator:
                         "peak_source": "planning",
                         "niche": "planning",
                         "jitter_applied": 0,
-                        "warmup_until": warmup_until,
+                        "warmup_min": warmup,
                     }
-                    logger.info("[%s] Using planned public time: %s (already_past=%s)",
-                                self.canal, target_dt.isoformat(), was_already_past)
+                    logger.info("[%s] Using planned public time: %s",
+                                self.canal, target_dt.isoformat())
                 else:
                     publish_schedule_info = calculate_target_public_time(
                         slug=self.canal,
@@ -1497,16 +1467,20 @@ class PipelineOrchestrator:
                         secondary_keywords=secondary_kws,
                         timezone_str=tz,
                         target_hour=target_h,
-                        jitter_min=spread,
-                        jitter_after=jitter_after,
+                        jitter_min=0,
+                        jitter_after=0,
                         warmup_min=warmup,
                         db=self.db,
                         channel_id=channel_id,
                     )
-                upload_privacy = "unlisted"
-                # ── Log resumido para el log principal ──
+
                 target_utc = publish_schedule_info["target_public_at"]
-                # Calculate local time equivalent
+
+                # ── Upload as private with scheduledPublishTime ──
+                # YouTube will auto-publish at the target time. No go_public needed.
+                upload_privacy = "private"
+
+                # ── Format local time for logging ──
                 local_info = ""
                 try:
                     import pytz
@@ -1516,31 +1490,45 @@ class PipelineOrchestrator:
                     local_info = f" ({target_local.strftime('%d/%m %H:%M')} {tz})"
                 except Exception:
                     pass
+
                 logger.info(
-                    "[%s] 📤 SUBIDO COMO NO LISTADO | público programado: %s%s | "
-                    "peak=%d (src=%s) | warmup=%dmin | jitter=%+dmin",
+                    "[%s] 📤 SUBIDA PROGRAMADA | público: %s%s | "
+                    "peak=%d (src=%s) | warmup=%dmin",
                     self.canal,
                     target_utc[:19], local_info,
                     publish_schedule_info["peak_hour_local"],
                     publish_schedule_info["peak_source"],
                     warmup,
-                    publish_schedule_info["jitter_applied"],
                 )
-                # ── Also log to dedicated scheduled_publish log ──
+                # ── Audit log ──
                 try:
                     from api.services.scheduled_publish_logger import log_publish_event
+                    from datetime import datetime as _dt3, timezone as _tz3
+                    uploaded_at = _dt3.now(_tz3.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    scheduled_for_local = ""
+                    try:
+                        import pytz as _pytz
+                        local_tz2 = _pytz.timezone(tz)
+                        target_dt = _dt3.fromisoformat(target_utc.replace("Z", "+00:00"))
+                        if target_dt.tzinfo is None:
+                            target_dt = target_dt.replace(tzinfo=_tz3.utc)
+                        local_dt = target_dt.astimezone(local_tz2)
+                        scheduled_for_local = local_dt.strftime("%d/%m %H:%M") + f" {tz}"
+                    except Exception:
+                        pass
                     video_title = video_data.get("titulo", "?") if video_data else "?"
                     log_publish_event(
-                        event="uploaded_unlisted",
+                        event="uploaded_scheduled",
                         slug=self.canal,
                         video_title=video_title[:80],
                         yt_video_id="(pending)",
                         db_video_id=self.db_video_id,
-                        target_public_at=target_utc,
+                        uploaded_at=uploaded_at,
+                        scheduled_for_utc=target_utc,
+                        scheduled_for_local=scheduled_for_local,
                         peak_hour=publish_schedule_info["peak_hour_local"],
                         peak_source=publish_schedule_info["peak_source"],
                         warmup_min=warmup,
-                        jitter_min=publish_schedule_info["jitter_applied"],
                     )
                 except Exception:
                     pass
@@ -1613,6 +1601,11 @@ class PipelineOrchestrator:
                         pass
                 upload_heartbeat = _pulse
             
+            # ── Build publish_at for scheduled publishing ──
+            upload_publish_at = None
+            if publish_mode == "scheduled" and publish_schedule_info:
+                upload_publish_at = publish_schedule_info["target_public_at"]
+
             result = self.uploader.upload(
                 video_path=Path(video_data["video_path"]),
                 title=title,
@@ -1624,6 +1617,7 @@ class PipelineOrchestrator:
                 heartbeat_callback=upload_heartbeat,
                 suggested_video_filename=filename_slug,
                 suggested_thumb_filename=filename_slug,
+                publish_at=upload_publish_at,
             )
 
             video_id = result.get("video_id")
@@ -1738,6 +1732,8 @@ class PipelineOrchestrator:
                     pass
 
             # ── Post-upload: schedule lifecycle promotion actions ──
+            # NOTE: In scheduled mode with publishAt, YouTube auto-publishes; 
+            # no go_public lifecycle action is needed.
             channel_id_for_lifecycle = None  # init outside try — also used by playlist code below
             if not skip_lifecycle_scheduling:
                 try:
@@ -1748,17 +1744,17 @@ class PipelineOrchestrator:
                     channel_id_for_lifecycle = self._get_channel_id()
                     
                     if publish_mode == "scheduled" and publish_schedule_info:
-                        # Scheduled mode: schedule warmup + go_public timeline
+                        # Scheduled mode via publishAt: schedule comments/social/CTR
+                        # relative to target_public_at. No go_public needed.
                         lifecycle.on_video_uploaded_scheduled(
                             db_video_id=db_vid_for_lifecycle,
                             yt_video_id=video_id,
                             channel_id=channel_id_for_lifecycle,
                             script_text=script_text,
                             target_public_at=publish_schedule_info["target_public_at"],
-                            warmup_until=publish_schedule_info["warmup_until"],
                         )
                         logger.info(f"[{self.canal}] Scheduled lifecycle actions for video {video_id} "
-                                   f"(target public: {publish_schedule_info['target_public_at']})")
+                                   f"(YouTube auto-publish at: {publish_schedule_info['target_public_at']})")
                     else:
                         # Immediate mode: standard lifecycle from upload time
                         lifecycle.on_video_published(

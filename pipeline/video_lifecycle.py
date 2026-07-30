@@ -164,299 +164,160 @@ class VideoLifecycleManager:
                                      channel_id: int, script_text: str = None,
                                      target_public_at: str = None,
                                      warmup_until: str = None) -> int:
-        """Schedule the scheduled-publishing lifecycle for a video uploaded as private.
+        """Schedule post-upload lifecycle actions for a video with YouTube scheduled publishing.
 
-        Unlike on_video_published (immediate mode), the actions are timed relative
-        to the target PUBLIC time, not the upload time. The key action is 'go_public'
-        which sets privacy=public at the peak target hour.
+        Uses YouTube's native `scheduledPublishTime` (publishAt) — no go_public
+        lifecycle action is created since YouTube auto-publishes at the target time.
+
+        All other lifecycle actions (playlist_add, comments, social, CTR check, etc.)
+        are scheduled relative to the target_public_at.
+
+        Args:
+            db_video_id: Local DB video ID.
+            yt_video_id: YouTube video ID.
+            channel_id: Local DB channel ID.
+            script_text: Video script text (for LLM context).
+            target_public_at: ISO8601 UTC when YouTube will auto-publish.
+            warmup_until: Deprecated — kept for signature compatibility.
         """
         if not LIFECYCLE_ENABLED:
             logger.debug("[%s] Lifecycle disabled — skipping for video %d", self.slug, db_video_id)
             return 0
 
-        now_iso = datetime.now(timezone.utc).isoformat()
         scheduled_count = 0
 
-        # ── v10.1: Collision guard — avoid same-channel same-hour go_public ──
-        SAME_CHANNEL_GAP_HOURS = 3
-        if target_public_at:
-            try:
-                from datetime import datetime as _dt2, timedelta as _td2
-                proposed_dt = _dt2.fromisoformat(
-                    target_public_at.replace("Z", "+00:00").replace(" ", "T")
-                )
-                if proposed_dt.tzinfo is None:
-                    proposed_dt = proposed_dt.replace(tzinfo=timezone.utc)
+        if not target_public_at:
+            logger.warning("[%s] No target_public_at — skipping lifecycle scheduling", self.slug)
+            return 0
 
-                # Check for existing pending go_public actions for this channel
-                # using a direct query since get_due_lifecycle_actions doesn't filter
-                with self.db._connect() as conn:
-                    existing_rows = conn.execute(
-                        """SELECT vla.scheduled_for
-                           FROM video_lifecycle_actions vla
-                           WHERE vla.channel_id = ?
-                             AND vla.action_type = 'go_public'
-                             AND vla.status = 'pending'
-                           ORDER BY vla.scheduled_for DESC
-                           LIMIT 10""",
-                        (channel_id,),
-                    ).fetchall()
+        # ── Parse target_public_at for relative scheduling ──
+        from datetime import datetime as _dt, timedelta as _td
+        try:
+            target_dt = _dt.fromisoformat(
+                target_public_at.replace("Z", "+00:00").replace(" ", "T"))
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            target_dt = _dt.now(timezone.utc) + _td(hours=2)
+            logger.warning("[%s] Could not parse target_public_at — using now+2h", self.slug)
 
-                if existing_rows:
-                    # Find the latest go_public time for this channel
-                    latest_go_public = None
-                    for (sf,) in existing_rows:
-                        if sf:
-                            try:
-                                sf_dt = _dt2.fromisoformat(
-                                    sf.replace("Z", "+00:00")
-                                )
-                                if sf_dt.tzinfo is None:
-                                    sf_dt = sf_dt.replace(tzinfo=timezone.utc)
-                                if latest_go_public is None or sf_dt > latest_go_public:
-                                    latest_go_public = sf_dt
-                            except (ValueError, TypeError):
-                                pass
+        # ── 2. Playlist add: 1 min after public ──
+        playlist_at = (target_dt + _td(minutes=1)).isoformat()
+        self.db.create_lifecycle_action(
+            video_id=db_video_id,
+            action_type="playlist_add",
+            channel_id=channel_id,
+            yt_video_id=yt_video_id,
+            scheduled_for=playlist_at,
+        )
+        scheduled_count += 1
 
-                    if latest_go_public is not None:
-                        gap = proposed_dt - latest_go_public
-                        min_gap = _td2(hours=SAME_CHANNEL_GAP_HOURS)
-                        if abs(gap) < min_gap:
-                            # Collision! Push forward
-                            new_proposed = latest_go_public + min_gap
-                            # Also check against now + warmup
-                            warmup_dt = datetime.now(timezone.utc) + timedelta(minutes=120)
-                            new_proposed = max(new_proposed, warmup_dt)
-                            logger.warning(
-                                "[%s] COLLISION GUARD: proposed go_public %s is within %dh of "
-                                "existing go_public at %s. Pushing to %s.",
-                                self.slug,
-                                proposed_dt.strftime("%m-%d %H:%M"),
-                                SAME_CHANNEL_GAP_HOURS,
-                                latest_go_public.strftime("%m-%d %H:%M"),
-                                new_proposed.strftime("%m-%d %H:%M"),
-                            )
-                            target_public_at = new_proposed.isoformat()
-                            # ── Sync videos.target_public_at with adjusted lifecycle time ──
-                            try:
-                                self.db.update_video(db_video_id, target_public_at=target_public_at)
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger.debug("[%s] Collision guard skipped: %s", self.slug, e)
-
-        # ── 1. go_public: set video to public at target time ──
-        if target_public_at:
-            action_row_id = self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="go_public",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=target_public_at,
-                config_json=None,
-            )
-            scheduled_count += 1
-            logger.info("[%s] Scheduled go_public for video %d at %s",
-                        self.slug, db_video_id, target_public_at)
-
-            # ── v11.x: Post-creation re-check — close the upload race window.
-            #     Re-query for same-channel go_public collisions now that our
-            #     action is committed. If another upload raced in and created
-            #     a go_public within SAME_CHANNEL_GAP_HOURS of ours, push ours.
-            try:
-                from datetime import datetime as _dt3, timedelta as _td3
-                target_dt3 = _dt3.fromisoformat(
-                    target_public_at.replace("Z", "+00:00").replace(" ", "T"))
-                if target_dt3.tzinfo is None:
-                    target_dt3 = target_dt3.replace(tzinfo=timezone.utc)
-                min_gap = _td3(hours=SAME_CHANNEL_GAP_HOURS)
-                with self.db._connect() as conn:
-                    nearby_rows = conn.execute(
-                        """SELECT vla.id, vla.scheduled_for
-                           FROM video_lifecycle_actions vla
-                           WHERE vla.channel_id = ?
-                             AND vla.action_type = 'go_public'
-                             AND vla.status = 'pending'
-                             AND vla.id != ?
-                           ORDER BY vla.scheduled_for DESC
-                           LIMIT 5""",
-                        (channel_id, action_row_id),
-                    ).fetchall()
-
-                adjusted = False
-                for (other_id, other_sf) in nearby_rows:
-                    if not other_sf:
-                        continue
-                    try:
-                        other_dt = _dt3.fromisoformat(
-                            other_sf.replace("Z", "+00:00"))
-                        if other_dt.tzinfo is None:
-                            other_dt = other_dt.replace(tzinfo=timezone.utc)
-                    except Exception:
-                        continue
-                    gap = target_dt3 - other_dt
-                    if abs(gap) < min_gap:
-                        new_target = other_dt + min_gap
-                        warmup_dt3 = datetime.now(timezone.utc) + timedelta(minutes=120)
-                        new_target = max(new_target, warmup_dt3)
-                        target_public_at = new_target.isoformat()
-                        self.db.update_lifecycle_action_status(
-                            action_row_id, "pending",
-                            scheduled_for=target_public_at)
-                        # ── Sync videos.target_public_at ──
-                        try:
-                            self.db.update_video(db_video_id, target_public_at=target_public_at)
-                        except Exception:
-                            pass
-                        logger.warning(
-                            "[%s] POST-CHECK COLLISION: go_public for video %d "
-                            "within %dh of action #%d (upload race). Pushed to %s.",
-                            self.slug, db_video_id,
-                            SAME_CHANNEL_GAP_HOURS, other_id,
-                            target_public_at)
-                        adjusted = True
-                        break
-            except Exception as e:
-                logger.debug("[%s] Post-creation collision re-check skipped: %s",
-                             self.slug, e)
-
-            # ── 2. Playlist add: 1 min after go_public (i.e., after public) ──
-            from datetime import datetime as _dt, timedelta as _td
-            try:
-                target_dt = _dt.fromisoformat(target_public_at)
-            except (ValueError, TypeError):
-                target_dt = _dt.now() + _td(hours=2)  # fallback — uses Europe/Madrid local time
-            playlist_at = (target_dt + _td(minutes=1)).isoformat()
-            self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="playlist_add",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=playlist_at,
-            )
-            scheduled_count += 1
-
-            # ── 3. First comment: 5 min after public ──
-            if FIRST_COMMENT_ENABLED:
-                comment_at = (target_dt + _td(minutes=5)).isoformat()
-                config_json = None
-                if script_text:
-                    import json
-                    config_json = json.dumps({"script_snippet": script_text[:2000]})
-                self.db.create_lifecycle_action(
-                    video_id=db_video_id,
-                    action_type="first_comment",
-                    channel_id=channel_id,
-                    yt_video_id=yt_video_id,
-                    scheduled_for=comment_at,
-                    config_json=config_json,
-                )
-                scheduled_count += 1
-
-            # ── 4-5. Comment replies at 12h and 24h after public ──
-            reply1_at = (target_dt + _td(hours=12)).isoformat()
-            self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="comment_reply_1",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=reply1_at,
-            )
-            scheduled_count += 1
-
-            reply2_at = (target_dt + _td(hours=24)).isoformat()
-            self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="comment_reply_2",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=reply2_at,
-            )
-            scheduled_count += 1
-
-            # ── 6. CTR check at 48h after public ──
-            ctr_at = (target_dt + _td(hours=48)).isoformat()
-            self.db.create_lifecycle_action(
-                video_id=db_video_id,
-                action_type="ctr_check",
-                channel_id=channel_id,
-                yt_video_id=yt_video_id,
-                scheduled_for=ctr_at,
-            )
-            scheduled_count += 1
-
-            # ── 7. Metadata reoptimize at 72h after public ──
-            meta_at = (target_dt + _td(hours=72)).isoformat()
-            meta_config = None
+        # ── 3. First comment: 5 min after public ──
+        if FIRST_COMMENT_ENABLED:
+            comment_at = (target_dt + _td(minutes=5)).isoformat()
+            config_json = None
             if script_text:
                 import json
-                meta_config = json.dumps({"script_snippet": script_text[:2500]})
+                config_json = json.dumps({"script_snippet": script_text[:2000]})
             self.db.create_lifecycle_action(
                 video_id=db_video_id,
-                action_type="metadata_reoptimize",
+                action_type="first_comment",
                 channel_id=channel_id,
                 yt_video_id=yt_video_id,
-                scheduled_for=meta_at,
-                config_json=meta_config,
+                scheduled_for=comment_at,
+                config_json=config_json,
             )
             scheduled_count += 1
 
-            # ── 8-12: Social media promotion actions ──
-            # Read per-platform timing from channel config
-            social_timing = self._get_social_timing()
+        # ── 4-5. Comment replies at 12h and 24h after public ──
+        reply1_at = (target_dt + _td(hours=12)).isoformat()
+        self.db.create_lifecycle_action(
+            video_id=db_video_id,
+            action_type="comment_reply_1",
+            channel_id=channel_id,
+            yt_video_id=yt_video_id,
+            scheduled_for=reply1_at,
+        )
+        scheduled_count += 1
 
-            social_actions = [
-                ("social_clip_tiktok", "tiktok"),
-                ("social_thread_twitter", "twitter"),
-                ("social_reel_instagram", "instagram"),
-                ("social_post_facebook", "facebook"),
-                ("social_post_reddit", "reddit"),
-            ]
+        reply2_at = (target_dt + _td(hours=24)).isoformat()
+        self.db.create_lifecycle_action(
+            video_id=db_video_id,
+            action_type="comment_reply_2",
+            channel_id=channel_id,
+            yt_video_id=yt_video_id,
+            scheduled_for=reply2_at,
+        )
+        scheduled_count += 1
 
-            social_config = None
-            if script_text:
-                import json
-                social_config = json.dumps({
-                    "script_text": script_text,
-                    "db_video_id": db_video_id,
-                })
+        # ── 6. CTR check at 48h after public ──
+        ctr_at = (target_dt + _td(hours=48)).isoformat()
+        self.db.create_lifecycle_action(
+            video_id=db_video_id,
+            action_type="ctr_check",
+            channel_id=channel_id,
+            yt_video_id=yt_video_id,
+            scheduled_for=ctr_at,
+        )
+        scheduled_count += 1
 
-            for action_type, platform_key in social_actions:
-                delay_min = social_timing.get(platform_key, 0)
-                if delay_min <= 0:
-                    # Platform not configured or disabled — skip
-                    continue
+        # ── 7. Metadata reoptimize at 72h after public ──
+        meta_at = (target_dt + _td(hours=72)).isoformat()
+        meta_config = None
+        if script_text:
+            import json
+            meta_config = json.dumps({"script_snippet": script_text[:2500]})
+        self.db.create_lifecycle_action(
+            video_id=db_video_id,
+            action_type="metadata_reoptimize",
+            channel_id=channel_id,
+            yt_video_id=yt_video_id,
+            scheduled_for=meta_at,
+            config_json=meta_config,
+        )
+        scheduled_count += 1
 
-                # Check if channel has an enabled account for this platform
-                if not self._has_social_account(platform_key):
-                    logger.debug("[%s] No enabled %s account — skipping %s",
-                                 self.slug, platform_key, action_type)
-                    continue
+        # ── 8-12: Social media promotion actions ──
+        social_timing = self._get_social_timing()
 
-                social_at = (target_dt + _td(minutes=delay_min)).isoformat()
-                self.db.create_lifecycle_action(
-                    video_id=db_video_id,
-                    action_type=action_type,
-                    channel_id=channel_id,
-                    yt_video_id=yt_video_id,
-                    scheduled_for=social_at,
-                    config_json=social_config,
-                )
-                scheduled_count += 1
-                logger.debug("[%s] Scheduled %s at T+%dmin (%s)",
-                             self.slug, action_type, delay_min, social_at)
+        social_actions = [
+            ("social_clip_tiktok", "tiktok"),
+            ("social_thread_twitter", "twitter"),
+            ("social_reel_instagram", "instagram"),
+            ("social_post_facebook", "facebook"),
+            ("social_post_reddit", "reddit"),
+        ]
 
-        else:
-            # No target time provided — fallback to wrap-up now
-            logger.warning("[%s] No target_public_at — scheduling go_public with warmup only", self.slug)
+        social_config = None
+        if script_text:
+            import json
+            social_config = json.dumps({
+                "script_text": script_text,
+                "db_video_id": db_video_id,
+            })
+
+        for action_type, platform_key in social_actions:
+            delay_min = social_timing.get(platform_key, 0)
+            if delay_min <= 0:
+                continue
+
+            if not self._has_social_account(platform_key):
+                logger.debug("[%s] No enabled %s account — skipping %s",
+                             self.slug, platform_key, action_type)
+                continue
+
+            social_at = (target_dt + _td(minutes=delay_min)).isoformat()
             self.db.create_lifecycle_action(
                 video_id=db_video_id,
-                action_type="go_public",
+                action_type=action_type,
                 channel_id=channel_id,
                 yt_video_id=yt_video_id,
-                scheduled_for=warmup_until or now_iso,
+                scheduled_for=social_at,
+                config_json=social_config,
             )
             scheduled_count += 1
+            logger.debug("[%s] Scheduled %s at T+%dmin (%s)",
+                         self.slug, action_type, delay_min, social_at)
 
         logger.info("[%s] Lifecycle (scheduled): %d actions for video %d (target: %s)",
                      self.slug, scheduled_count, db_video_id, target_public_at or "N/A")
@@ -470,6 +331,11 @@ class VideoLifecycleManager:
         """Find and execute all due lifecycle actions for this channel.
 
         Called periodically by the scheduler (every 15 min).
+
+        NOTES:
+        - go_public actions are AUTO-SKIPPED since YouTube now uses native
+          scheduledPublishTime (publishAt). This also serves as migration
+          for any pending go_public actions from older videos.
 
         Returns {processed: N, succeeded: N, failed: N}.
         """
@@ -494,10 +360,6 @@ class VideoLifecycleManager:
         processed, succeeded, failed = 0, 0, 0
         by_type = {}  # action_type → {succeeded, failed}
         now_iso = datetime.now(timezone.utc).isoformat()
-        # Track go_public executed in this batch to prevent same-channel
-        # simultaneous publishing (two videos going public at the same instant).
-        go_public_executed_this_batch = False  # per-channel singleton
-        SAME_CHANNEL_PUBLISH_GAP_HOURS = 3
 
         logger.info("[%s] 📋 Procesando %d acciones lifecycle pendientes", self.slug, len(due_actions))
 
@@ -505,6 +367,30 @@ class VideoLifecycleManager:
             action_id = action["id"]
             action_type = action["action_type"]
             yt_video_id = action.get("yt_video_id")
+
+            # ── MIGRATION: Auto-skip go_public actions ──
+            # YouTube now uses native scheduledPublishTime (publishAt) on upload.
+            # Any pending go_public actions are from old videos uploaded before
+            # this migration. We skip them gracefully.
+            if action_type == "go_public":
+                import json
+                self.db.update_lifecycle_action_status(
+                    action_id, "skipped",
+                    result_json=json.dumps({
+                        "skipped": True,
+                        "reason": "YouTube now uses native publishAt scheduling. "
+                                  "The video will publish automatically at its scheduled time.",
+                    }),
+                )
+                logger.info(
+                    "[%s] SKIPPED go_public action #%d for video %s "
+                    "(migrated: YouTube uses publishAt now)",
+                    self.slug, action_id, yt_video_id or "?",
+                )
+                processed += 1
+                by_type.setdefault("go_public", {"succeeded": 0, "failed": 0})
+                by_type["go_public"]["succeeded"] += 1
+                continue
 
             if not yt_video_id:
                 self.db.update_lifecycle_action_status(
@@ -515,46 +401,6 @@ class VideoLifecycleManager:
                 failed += 1
                 continue
 
-            # ── go_public collision guard: prevent two same-channel videos
-            #     from going public simultaneously in this same batch.
-            if action_type == "go_public":
-                if go_public_executed_this_batch:
-                    # Another go_public for this channel already executed in
-                    # this batch. Reschedule this one to +3h later.
-                    other_scheduled = action.get("scheduled_for")
-                    try:
-                        if other_scheduled:
-                            other_dt = datetime.fromisoformat(
-                                other_scheduled.replace("Z", "+00:00").replace(" ", "T"))
-                            if other_dt.tzinfo is None:
-                                other_dt = other_dt.replace(tzinfo=timezone.utc)
-                        else:
-                            other_dt = datetime.now(timezone.utc)
-                    except Exception:
-                        other_dt = datetime.now(timezone.utc)
-                    new_scheduled = (other_dt + timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)).isoformat()
-                    self.db.update_lifecycle_action_status(
-                        action_id, "pending",
-                        scheduled_for=new_scheduled,
-                        retry_count=action.get("retry_count", 0),
-                    )
-                    # ── Sync videos.target_public_at with rescheduled lifecycle time ──
-                    try:
-                        video_id = action.get("video_id")
-                        if video_id:
-                            self.db.update_video(video_id, target_public_at=new_scheduled)
-                    except Exception:
-                        pass
-                    logger.warning(
-                        "[%s] COLLISION GUARD (batch): skipping go_public action #%d — "
-                        "another go_public already executed in this batch. "
-                        "Rescheduled to %s.",
-                        self.slug, action_id, new_scheduled,
-                    )
-                    # Count as skipped (not failed)
-                    processed += 1
-                    continue
-
             try:
                 success = self._dispatch(action)
                 if success:
@@ -562,8 +408,6 @@ class VideoLifecycleManager:
                         action_id, "executed", executed_at=now_iso,
                     )
                     succeeded += 1
-                    if action_type == "go_public":
-                        go_public_executed_this_batch = True
                     by_type[action_type] = by_type.get(action_type, {"succeeded": 0, "failed": 0})
                     by_type[action_type]["succeeded"] += 1
                 else:

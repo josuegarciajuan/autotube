@@ -425,7 +425,7 @@ def dispatch_due_uploads(db=None) -> dict | None:
     try:
         from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
         ch_cfg_raw = ch_cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
-        if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=120):
+        if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=60):
             logger.warning(
                 "[%s] Video #%d: target_public_at is stale (%s). Recalculating...",
                 slug, video_id, str(effective_target)[:19] if effective_target else "None"
@@ -436,7 +436,7 @@ def dispatch_due_uploads(db=None) -> dict | None:
                 timezone_str=ch_cfg_raw,
                 db=db,
                 channel_id=channel_id,
-                warmup_min=120,
+                warmup_min=60,
             )
             # Persist to both tables
             db.update_video(video_id, target_public_at=effective_target)

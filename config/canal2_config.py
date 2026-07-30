@@ -725,9 +725,9 @@ UPLOAD_WINDOWS = [
 ]
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_TARGET_HOUR = 21           # 9 PM — peak para contenido de misterio
-PUBLISH_JITTER_MIN = 20            # ±20 min de variación aleatoria (legacy, reemplazado por PUBLISH_WINDOW_SPREAD_MIN)
-PUBLISH_WARMUP_MIN = 120           # Mínimo 2h en 'private' antes de publicar
-PUBLISH_WINDOW_SPREAD_MIN = 90     # ±90min alrededor del peak = ventana de publicación de 3h
+PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
+PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
+PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)

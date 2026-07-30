@@ -1107,14 +1107,14 @@ def run_job(
                             except Exception:
                                 pass
 
-                        if _target_is_stale(tpa, timezone_str=tz_str, warmup_min=120):
+                        if _target_is_stale(tpa, timezone_str=tz_str, warmup_min=60):
                             stale_public_at = True
                             # Recalculate instead of nullifying
                             try:
                                 recalculated_target = ensure_future_target_public_at(
                                     tpa, slug=canal, timezone_str=tz_str,
                                     db=db, channel_id=channel_id,
-                                    warmup_min=120, jitter_min=20,
+                                    warmup_min=60, jitter_min=0,
                                 )
                                 logger.info(
                                     "[%s] Recalculated stale target_public_at: %s → %s",
@@ -1162,12 +1162,12 @@ def run_job(
                                 tz_str2 = cfg2.get("PUBLISH_TIMEZONE", "Europe/Madrid")
                             except Exception:
                                 pass
-                        if _target_is_stale(planned_public_at, timezone_str=tz_str2, warmup_min=120):
+                        if _target_is_stale(planned_public_at, timezone_str=tz_str2, warmup_min=60):
                             logger.info("[%s] target_public_at is stale before upload — recalculating", canal)
                             planned_public_at = ensure_future_target_public_at(
                                 planned_public_at, slug=canal, timezone_str=tz_str2,
                                 db=db, channel_id=channel_id,
-                                warmup_min=120,
+                                warmup_min=60,
                             )
                             # Persist recalculation immediately
                             db.update_video(video_id, target_public_at=planned_public_at)
