@@ -419,6 +419,25 @@ export interface InsightRecommendation {
   rationale_brief?: string
   applied?: boolean
   discarded?: boolean
+  // ── v20.1: validation & refinement ──
+  validation?: ValidationResult
+  refined_versions?: RefinedVersion[]
+}
+
+export interface ValidationResult {
+  status: 'resolved' | 'partial' | 'not_resolved'
+  summary: string
+  evidence: string[]
+  confidence: number
+  validated_at: string
+  validated_by: string
+}
+
+export interface RefinedVersion {
+  revised_config_changes: Record<string, any>
+  explanation: string
+  triggered_by: string
+  refined_at: string
 }
 
 export interface KeyMetric {

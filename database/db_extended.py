@@ -5619,3 +5619,35 @@ class ExtendedDatabase(Database):
                 (channel_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def update_insight_recommendation(self, insight_id: int, rec_id: str,
+                                      updates: dict) -> bool:
+        """Update a single recommendation inside insights_json. Returns True on success."""
+        import json as _json
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT insights_json FROM channel_insights WHERE id = ?",
+                (insight_id,),
+            ).fetchone()
+            if not row:
+                return False
+            raw = row[0]
+            try:
+                data = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except (_json.JSONDecodeError, TypeError):
+                return False
+            recs = data.get("recommendations", [])
+            found = False
+            for rec in recs:
+                if rec.get("id") == rec_id:
+                    rec.update(updates)
+                    found = True
+                    break
+            if not found:
+                return False
+            conn.execute(
+                "UPDATE channel_insights SET insights_json = ? WHERE id = ?",
+                (_json.dumps(data, ensure_ascii=False), insight_id),
+            )
+            conn.commit()
+            return True

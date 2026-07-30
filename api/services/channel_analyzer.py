@@ -498,3 +498,235 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
     except Exception as e:
         logger.exception("Analysis failed for %s (insight %d)", slug, insight_id)
         db.fail_insight(insight_id, str(e))
+
+
+# ── Validation prompt for code-change recommendations ────────────────
+
+_VALIDATION_SYSTEM = """\
+You are a senior YouTube analytics auditor. Your task is to verify whether a
+previously diagnosed problem on a YouTube channel has been resolved.
+
+You will receive:
+1. The original recommendation (title, detail, expected impact, symptoms)
+2. Current channel data (freshly queried, same structure as the original analysis)
+
+Your job: compare the symptoms described in the recommendation against the
+current data. Has the problem been resolved? Is there evidence of improvement?
+
+Return a JSON verdict with:
+- status: "resolved" | "partial" | "not_resolved"
+- summary: 2-3 sentence explanation in Spanish of what you found
+- evidence: list of 1-3 specific data points that support your verdict
+- confidence: 0-100 how confident you are in this verdict
+
+Be honest. If you cannot determine, say so and set confidence low.
+"""
+
+_VALIDATION_USER = """\
+## Original recommendation (the problem that was supposed to be fixed)
+
+Title: {title}
+Category: {category}
+Detail: {detail}
+Expected impact: {expected_impact}
+
+## Current channel data (after the fix was supposedly applied)
+
+{current_data_json}
+
+## Task
+
+Compare the original symptoms against current data. Has the problem been resolved?
+Return only valid JSON.
+"""
+
+
+def run_validation_check(insight_id: int, channel_id: int, slug: str,
+                         rec_id: str, recommendation: dict) -> dict:
+    """Focused LLM pass: check if a code-change recommendation's symptoms have resolved.
+
+    Returns:
+        { status: "resolved"|"partial"|"not_resolved",
+          summary, evidence: [...], confidence: 0-100 }
+    """
+    db = ExtendedDatabase()
+    logger.info("Running validation for rec %s on channel %s", rec_id, slug)
+
+    try:
+        # Aggregate current data (same sources as analysis)
+        data = _aggregate_channel_data(db, channel_id, slug)
+        data_json = json.dumps(data, ensure_ascii=False, default=str)
+
+        client = create_llm_client(
+            enable_thinking=True,
+            reasoning_effort="high",
+            timeout=120,
+            max_retries=1,
+        )
+        model = LLM_MODEL_INSIGHTS
+
+        user_prompt = _VALIDATION_USER.format(
+            title=recommendation.get("title", ""),
+            category=recommendation.get("category", ""),
+            detail=recommendation.get("detail", ""),
+            expected_impact=recommendation.get("expected_impact", ""),
+            current_data_json=data_json,
+        )
+
+        result = llm_json_call(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": _VALIDATION_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=2000,
+            temperature=0.3,
+            max_retries=1,
+        )
+
+        validation = {
+            "status": result.get("status", "not_resolved"),
+            "summary": result.get("summary", ""),
+            "evidence": result.get("evidence", []),
+            "confidence": result.get("confidence", 0),
+            "validated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "validated_by": "llm",
+        }
+
+        # Persist to DB
+        db.update_insight_recommendation(insight_id, rec_id, {"validation": validation})
+        logger.info("Validation complete for rec %s: %s (conf %d)",
+                     rec_id, validation["status"], validation["confidence"])
+        return validation
+
+    except Exception as e:
+        logger.exception("Validation failed for rec %s", rec_id)
+        return {
+            "status": "not_resolved",
+            "summary": f"No se pudo validar automaticamente: {e}",
+            "evidence": [],
+            "confidence": 0,
+            "validated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "validated_by": "error",
+        }
+
+
+# ── Refinement prompt for config-change recommendations ─────────────
+
+_REFINE_SYSTEM = """\
+You are a YouTube channel optimization assistant. A user wants to refine
+a suggested config change before applying it to their channel.
+
+You will receive:
+1. The original recommendation (title, detail, config_changes proposed)
+2. The user's feedback (what they want changed)
+3. The current channel config values
+4. Optional conversation history
+
+Your task: produce a REVISED version of the config_changes that incorporates
+the user's feedback while still optimizing for the original goal.
+
+Rules:
+- Only use config keys from the allowed list
+- NEVER remove a key from config_changes that the user didn't mention
+- If the user asks for a more conservative change, adjust values but keep the direction
+- If the user asks for something that contradicts the goal, explain why and offer alternatives
+- Return the revised config_changes WITH an explanation of what you changed and why
+"""
+
+_REFINE_USER = """\
+## Original recommendation
+
+Title: {title}
+Category: {category}
+Detail: {detail}
+Original config_changes: {original_changes}
+
+## Current channel config
+{current_config}
+
+## User feedback
+{user_feedback}
+
+## Conversation history
+{history}
+
+## Allowed config keys
+{config_keys}
+
+Return ONLY valid JSON:
+{{
+  "explanation": "What you changed and why (Spanish, conversational, 2-4 sentences)",
+  "revised_config_changes": {{"KEY": "new_value", ...}},
+  "cannot_fulfill": false,
+  "cannot_fulfill_reason": ""
+}}
+"""
+
+
+def run_refine_recommendation(rec_id: str, recommendation: dict,
+                              user_feedback: str,
+                              current_config: dict,
+                              conversation_history: list[dict] | None = None
+                              ) -> dict:
+    """Refine a config-change recommendation based on user feedback.
+
+    Returns:
+        { explanation, revised_config_changes, cannot_fulfill, cannot_fulfill_reason }
+    """
+    logger.info("Refining rec %s: user feedback length=%d", rec_id, len(user_feedback))
+
+    try:
+        client = create_llm_client(
+            enable_thinking=True,
+            reasoning_effort="medium",
+            timeout=120,
+            max_retries=1,
+        )
+        model = LLM_MODEL_INSIGHTS
+
+        history_str = ""
+        if conversation_history:
+            history_str = "\n".join(
+                f"[{m['role']}]: {m['content']}" for m in conversation_history
+            )
+
+        user_prompt = _REFINE_USER.format(
+            title=recommendation.get("title", ""),
+            category=recommendation.get("category", ""),
+            detail=recommendation.get("detail", ""),
+            original_changes=json.dumps(recommendation.get("config_changes", {}), ensure_ascii=False),
+            current_config=json.dumps(current_config, ensure_ascii=False, default=str),
+            user_feedback=user_feedback,
+            history=history_str or "(primer mensaje — no hay historial previo)",
+            config_keys=json.dumps(_CONFIG_KEYS, ensure_ascii=False),
+        )
+
+        result = llm_json_call(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": _REFINE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=3000,
+            temperature=0.5,
+            max_retries=1,
+        )
+
+        return {
+            "explanation": result.get("explanation", ""),
+            "revised_config_changes": result.get("revised_config_changes", {}),
+            "cannot_fulfill": result.get("cannot_fulfill", False),
+            "cannot_fulfill_reason": result.get("cannot_fulfill_reason", ""),
+        }
+
+    except Exception as e:
+        logger.exception("Refine failed for rec %s", rec_id)
+        return {
+            "explanation": f"Error al refinar: {e}",
+            "revised_config_changes": {},
+            "cannot_fulfill": True,
+            "cannot_fulfill_reason": str(e),
+        }

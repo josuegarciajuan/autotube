@@ -381,10 +381,35 @@ export const api = {
     request<any>(`/channels/${channelId}/analyze`, { method: 'POST' }),
   getLatestInsight: (channelId: number) =>
     request<any>(`/channels/${channelId}/insights/latest`),
-  applyInsight: (channelId: number, insightId: number, recId: string) =>
+  applyInsight: (channelId: number, insightId: number, recId: string, refinedVersionIndex?: number) => {
+    let url = `/channels/${channelId}/insights/${insightId}/apply?rec_id=${encodeURIComponent(recId)}`
+    if (refinedVersionIndex !== undefined && refinedVersionIndex >= 0) {
+      url += `&refined_version_index=${refinedVersionIndex}`
+    }
+    return request<any>(url, { method: 'POST' })
+  },
+  validateInsight: (channelId: number, insightId: number, recId: string) =>
     request<any>(
-      `/channels/${channelId}/insights/${insightId}/apply?rec_id=${encodeURIComponent(recId)}`,
+      `/channels/${channelId}/insights/${insightId}/validate?rec_id=${encodeURIComponent(recId)}`,
       { method: 'POST' }
+    ),
+  refineInsight: (
+    channelId: number,
+    insightId: number,
+    recId: string,
+    userFeedback: string,
+    conversationHistory?: { role: string; content: string }[]
+  ) =>
+    request<any>(
+      `/channels/${channelId}/insights/${insightId}/refine`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          rec_id: recId,
+          user_feedback: userFeedback,
+          conversation_history: conversationHistory,
+        }),
+      }
     ),
 };
 

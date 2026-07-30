@@ -90,15 +90,14 @@ def get_latest_insight(channel_id: int):
 
 
 @router.post("/{channel_id}/insights/{insight_id}/apply")
-def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query("")):
+def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
+                  refined_version_index: int = Query(-1)):
     """Apply one recommendation from an analysis to the channel config.
 
     Query params:
-        rec_id:  the recommendation UUID to apply (from insights_json.recommendations[].id)
-
-    Reads the recommendation's ``config_changes`` dict, merges them into the
-    channel's ``config_json``, saves to DB, and invalidates the config bridge cache.
-    Marks the insight row as applied.
+        rec_id:                  the recommendation UUID to apply
+        refined_version_index:   if >= 0, use refined_versions[index].revised_config_changes
+                                 instead of the original config_changes
     """
     db = get_db()
 
@@ -134,7 +133,20 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query("")):
             f"Available: {[r.get('id') for r in recs]}",
         )
 
-    changes = rec.get("config_changes", {})
+    # Determine which config_changes to use
+    if refined_version_index >= 0:
+        refined_versions = rec.get("refined_versions", [])
+        if refined_version_index >= len(refined_versions):
+            raise HTTPException(
+                400,
+                f"refined_version_index {refined_version_index} out of range "
+                f"(0-{len(refined_versions) - 1})"
+            )
+        changes = refined_versions[refined_version_index].get("revised_config_changes", {})
+        logger.info("Using refined version %d for rec %s", refined_version_index, rec_id)
+    else:
+        changes = rec.get("config_changes", {})
+
     if not changes:
         raise HTTPException(400, "Recommendation has no config_changes to apply")
 
@@ -171,4 +183,195 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query("")):
         "ok": True,
         "applied_changes": changes,
         "recommendation_title": rec.get("title", ""),
+    }
+
+
+# ── Validate (code-change recommendations) ───────────────────────────
+
+_VALIDATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="autotube-validate-",
+)
+
+
+@router.post("/{channel_id}/insights/{insight_id}/validate")
+def validate_insight(channel_id: int, insight_id: int, rec_id: str = Query("")):
+    """Validate whether a code-change recommendation's symptoms have been resolved.
+
+    Runs a focused LLM check comparing the original recommendation against
+    current channel data. Returns a verdict with evidence.
+
+    Query params:
+        rec_id:  the recommendation UUID to validate
+    """
+    db = get_db()
+
+    # Validate channel
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    # Validate insight
+    insight = db.get_insight(insight_id)
+    if not insight:
+        raise HTTPException(404, "Insight not found")
+    if insight["channel_id"] != channel_id:
+        raise HTTPException(400, "Insight does not belong to this channel")
+
+    # Parse insights
+    insights_raw = insight.get("insights_json", "{}")
+    if isinstance(insights_raw, str):
+        try:
+            insights_data = json.loads(insights_raw)
+        except json.JSONDecodeError:
+            raise HTTPException(500, "Invalid insights_json in DB")
+    else:
+        insights_data = insights_raw
+
+    # Find the recommendation
+    recs = insights_data.get("recommendations", [])
+    rec = next((r for r in recs if r.get("id") == rec_id), None)
+    if not rec:
+        raise HTTPException(
+            404,
+            f"Recommendation '{rec_id}' not found. "
+            f"Available: {[r.get('id') for r in recs]}",
+        )
+
+    # Run validation in background thread
+    from api.services.channel_analyzer import run_validation_check
+
+    future = _VALIDATION_EXECUTOR.submit(
+        run_validation_check, insight_id, channel_id, ch["slug"], rec_id, rec
+    )
+
+    try:
+        validation = future.result(timeout=120)
+    except concurrent.futures.TimeoutError:
+        raise HTTPException(504, "Validation timed out")
+
+    return {"ok": True, "validation": validation, "rec_id": rec_id}
+
+
+# ── Refine (config-change recommendations) ───────────────────────────
+
+from pydantic import BaseModel
+
+
+class RefineRequest(BaseModel):
+    rec_id: str
+    user_feedback: str
+    conversation_history: list[dict] | None = None
+
+
+@router.post("/{channel_id}/insights/{insight_id}/refine")
+def refine_insight(channel_id: int, insight_id: int, body: RefineRequest):
+    """Refine a config-change recommendation based on user feedback.
+
+    Takes the original recommendation + user feedback and asks the LLM
+    to produce revised config_changes. Stores the refined version back
+    into the insight's JSON.
+
+    Body:
+        rec_id:                 the recommendation UUID to refine
+        user_feedback:          what the user wants changed
+        conversation_history:   optional list of prior messages [{role, content}, ...]
+    """
+    db = get_db()
+
+    # Validate channel
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    # Validate insight
+    insight = db.get_insight(insight_id)
+    if not insight:
+        raise HTTPException(404, "Insight not found")
+    if insight["channel_id"] != channel_id:
+        raise HTTPException(400, "Insight does not belong to this channel")
+
+    # Parse insights
+    insights_raw = insight.get("insights_json", "{}")
+    if isinstance(insights_raw, str):
+        try:
+            insights_data = json.loads(insights_raw)
+        except json.JSONDecodeError:
+            raise HTTPException(500, "Invalid insights_json in DB")
+    else:
+        insights_data = insights_raw
+
+    # Find the recommendation
+    recs = insights_data.get("recommendations", [])
+    rec = next((r for r in recs if r.get("id") == body.rec_id), None)
+    if not rec:
+        raise HTTPException(
+            404,
+            f"Recommendation '{body.rec_id}' not found. "
+            f"Available: {[r.get('id') for r in recs]}",
+        )
+
+    if rec.get("requires_code"):
+        raise HTTPException(400, "Cannot refine a code-change recommendation")
+
+    if not rec.get("config_changes"):
+        raise HTTPException(400, "Recommendation has no config_changes to refine")
+
+    # Get current config for context
+    try:
+        from config.config_bridge import get_channel_config
+        config_ns = get_channel_config(ch["slug"], force_reload=True)
+        from api.services.channel_analyzer import _serialize_config
+        current_config = _serialize_config(config_ns)
+    except Exception:
+        current_config = {}
+
+    # Run refinement
+    from api.services.channel_analyzer import run_refine_recommendation
+
+    result = run_refine_recommendation(
+        rec_id=body.rec_id,
+        recommendation=rec,
+        user_feedback=body.user_feedback,
+        current_config=current_config,
+        conversation_history=body.conversation_history,
+    )
+
+    if result.get("cannot_fulfill"):
+        return {
+            "ok": True,
+            "cannot_fulfill": True,
+            "cannot_fulfill_reason": result.get("cannot_fulfill_reason", ""),
+            "rec_id": body.rec_id,
+        }
+
+    # Store the refined version in the insight's JSON
+    refined_entry = {
+        "revised_config_changes": result["revised_config_changes"],
+        "explanation": result["explanation"],
+        "triggered_by": body.user_feedback,
+        "refined_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                  __import__("time").gmtime()),
+    }
+
+    existing_refined = rec.setdefault("refined_versions", [])
+    existing_refined.append(refined_entry)
+
+    db.update_insight_recommendation(
+        insight_id, body.rec_id,
+        {"refined_versions": existing_refined}
+    )
+
+    logger.info(
+        "Refined rec %s for channel %d: %s",
+        body.rec_id, channel_id,
+        json.dumps(result["revised_config_changes"], ensure_ascii=False)[:200],
+    )
+
+    return {
+        "ok": True,
+        "explanation": result["explanation"],
+        "revised_config_changes": result["revised_config_changes"],
+        "rec_id": body.rec_id,
+        "refined_at": refined_entry["refined_at"],
     }
