@@ -17,10 +17,15 @@ Usage:
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger("autotube.lifecycle")
+
+# ── UTC timestamp helper ──────────────────────────────────────
+def _utcnow():
+    """Return current UTC datetime as naive (consistent with SQLite CURRENT_TIMESTAMP)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # ── Phase timeout thresholds (minutes) ──────────────────────────
 PHASE_TIMEOUTS = {
@@ -248,7 +253,7 @@ def _check_video_phase_stuck(db) -> int:
                     if row["last_heartbeat_at"]:
                         try:
                             hb = datetime.strptime(row["last_heartbeat_at"], "%Y-%m-%d %H:%M:%S")
-                            stuck_min = (datetime.utcnow() - hb).total_seconds() / 60
+                            stuck_min = (_utcnow() - hb).total_seconds() / 60
                             if stuck_min > timeout:
                                 created += _maybe_create_alert(
                                     db, conn, "video", row["id"], row["channel_id"],
@@ -263,7 +268,7 @@ def _check_video_phase_stuck(db) -> int:
                     # Check if start was too long ago
                     try:
                         started_at = datetime.strptime(last_event["created_at"][:19], "%Y-%m-%d %H:%M:%S")
-                        elapsed_min = (datetime.utcnow() - started_at).total_seconds() / 60
+                        elapsed_min = (_utcnow() - started_at).total_seconds() / 60
                         if elapsed_min > timeout and last_event["status"] == "started":
                             created += _maybe_create_alert(
                                 db, conn, "video", row["id"], row["channel_id"],
@@ -314,7 +319,7 @@ def _check_short_stuck(db) -> int:
                 if last_event:
                     try:
                         started_at = datetime.strptime(last_event["created_at"][:19], "%Y-%m-%d %H:%M:%S")
-                        elapsed_min = (datetime.utcnow() - started_at).total_seconds() / 60
+                        elapsed_min = (_utcnow() - started_at).total_seconds() / 60
                         if elapsed_min > timeout and last_event["status"] == "started":
                             created += _maybe_create_alert(
                                 db, conn, "short", row["id"], row["channel_id"],

@@ -5,6 +5,8 @@ const titles: Record<string, string> = {
   '/': 'Dashboard',
   '/channels': 'Gestión de Canales',
   '/content': 'Contenido Disponible',
+  '/scheduling': 'Programación',
+  '/monitor': 'Monitor de Pipeline',
 }
 
 interface Props {

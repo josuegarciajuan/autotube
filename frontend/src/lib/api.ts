@@ -367,6 +367,10 @@ export const api = {
     request<any>(`/monitor/alerts/${alertId}/resolve`, { method: 'POST' }),
   triggerHealthCheck: () =>
     request<any>('/monitor/health-check', { method: 'POST' }),
+  getSystemMetrics: () => request<any>('/monitor/system'),
+  getActiveWorkers: () => request<any>('/monitor/workers'),
+  getStatusBar: () => request<any>('/monitor/status-bar'),
+  getJobEta: (jobId: number) => request<any>(`/monitor/eta/${jobId}`),
 };
 
 // ── Pipeline status types ────────────────────────────────────

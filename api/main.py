@@ -292,7 +292,8 @@ async def _queue_consumer():
 
 
 async def _health_monitor_loop():
-    """Periodic health check: scans for stuck/failed entities and generates alerts."""
+    """Periodic health check: scans for stuck/failed entities and generates alerts.
+    Also broadcasts system snapshots to monitor WebSocket clients."""
     await asyncio.sleep(30)  # Give API time to fully start before first scan
     logger.info("Health monitor loop started (interval: 90s)")
     while True:
@@ -302,16 +303,20 @@ async def _health_monitor_loop():
             result = check_all_health(db)
             if result.get("alerts_created", 0) > 0:
                 logger.info("Health check: %d new alerts created", result["alerts_created"])
-                # Broadcast to WS clients
-                try:
-                    from api.routers.monitor import broadcast_monitor_update
+            # Always broadcast system snapshot to monitor WS clients
+            try:
+                from api.routers.monitor import broadcast_status_snapshot, broadcast_monitor_update
+                # Health alert broadcast
+                if result.get("alerts_created", 0) > 0:
                     await broadcast_monitor_update({
                         "type": "health_update",
                         "alerts_created": result["alerts_created"],
                         "alerts_resolved": result.get("alerts_resolved", 0),
                     })
-                except Exception:
-                    pass
+                # Periodic system snapshot
+                await broadcast_status_snapshot()
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("Health monitor error: %s", exc)
         await asyncio.sleep(90)  # Check every 90 seconds

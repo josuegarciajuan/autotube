@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom'
 import { AlertTriangle, ExternalLink } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Header from './Header'
+import StatusBar from './StatusBar'
 import { api } from '../../lib/api'
 
 export default function Shell() {
@@ -70,6 +71,7 @@ export default function Shell() {
         )}
 
         <Header onMenuToggle={() => setMobileMenuOpen(v => !v)} />
+        <StatusBar />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           <Outlet />
         </main>

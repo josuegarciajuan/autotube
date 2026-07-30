@@ -1,10 +1,14 @@
-"""Monitor router — lifecycle events, alerts, and health dashboard."""
+"""Monitor router — lifecycle events, alerts, health dashboard, system metrics, and live logs."""
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from typing import Optional
+from pathlib import Path
 import json
+import time
 import asyncio
 import logging
+import shutil
 from api.deps import get_db
 from api.services.lifecycle_monitor import (
     acknowledge_alert,
@@ -15,6 +19,92 @@ from api.services.lifecycle_monitor import (
 router = APIRouter()
 logger = logging.getLogger("autotube.monitor")
 ws_clients: list[WebSocket] = []
+
+# ── System metrics helpers ─────────────────────────────────────
+
+def _get_system_metrics() -> dict:
+    """Collect CPU, RAM, disk, and uptime metrics."""
+    import os
+    metrics: dict = {}
+
+    try:
+        import psutil
+        # CPU
+        metrics["cpu_percent"] = psutil.cpu_percent(interval=0.3)
+        metrics["cpu_count"] = psutil.cpu_count()
+        metrics["cpu_per_core"] = psutil.cpu_percent(interval=None, percpu=True)
+        # RAM
+        mem = psutil.virtual_memory()
+        metrics["ram_total_mb"] = mem.total // (1024 * 1024)
+        metrics["ram_used_mb"] = mem.used // (1024 * 1024)
+        metrics["ram_available_mb"] = mem.available // (1024 * 1024)
+        metrics["ram_percent"] = mem.percent
+        # Load
+        metrics["load_1m"], metrics["load_5m"], metrics["load_15m"] = psutil.getloadavg()
+    except ImportError:
+        # Fallback: /proc parsing (no psutil)
+        try:
+            with open("/proc/loadavg") as f:
+                parts = f.read().strip().split()
+                metrics["load_1m"] = float(parts[0])
+                metrics["load_5m"] = float(parts[1])
+                metrics["load_15m"] = float(parts[2])
+        except Exception:
+            metrics["cpu_percent"] = -1
+        try:
+            with open("/proc/meminfo") as f:
+                meminfo = {}
+                for line in f:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meminfo[k.strip()] = int(v.strip().split()[0])
+                total_kb = meminfo.get("MemTotal", 0)
+                avail_kb = meminfo.get("MemAvailable", 0)
+                metrics["ram_total_mb"] = total_kb // 1024
+                metrics["ram_available_mb"] = avail_kb // 1024
+                metrics["ram_used_mb"] = (total_kb - avail_kb) // 1024
+                metrics["ram_percent"] = round(((total_kb - avail_kb) / total_kb) * 100, 1) if total_kb else 0
+        except Exception:
+            metrics["ram_total_mb"] = metrics["ram_available_mb"] = metrics["ram_used_mb"] = 0
+            metrics["ram_percent"] = 0
+
+    # Disk
+    try:
+        du_output = shutil.disk_usage("output")
+        metrics["disk_output_free_gb"] = round(du_output.free / (1024**3), 1)
+        metrics["disk_output_total_gb"] = round(du_output.total / (1024**3), 1)
+    except Exception:
+        metrics["disk_output_free_gb"] = -1
+        metrics["disk_output_total_gb"] = -1
+    try:
+        du_logs = shutil.disk_usage("logs")
+        metrics["disk_logs_free_gb"] = round(du_logs.free / (1024**3), 1)
+        metrics["disk_logs_total_gb"] = round(du_logs.total / (1024**3), 1)
+    except Exception:
+        metrics["disk_logs_free_gb"] = -1
+        metrics["disk_logs_total_gb"] = -1
+
+    # Uptime
+    try:
+        with open("/proc/uptime") as f:
+            metrics["uptime_seconds"] = float(f.read().split()[0])
+    except Exception:
+        metrics["uptime_seconds"] = -1
+
+    metrics["collected_at"] = time.time()
+    return metrics
+
+
+def _get_worker_process_ram_mb(pid: Optional[int]) -> Optional[int]:
+    """Get RSS memory of a process by PID in MB."""
+    if not pid:
+        return None
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        return proc.memory_info().rss // (1024 * 1024)
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -107,6 +197,47 @@ def get_monitor_dashboard():
                 ).fetchall()
             ]
 
+            # Quick stats
+            generated_today = conn.execute(
+                """SELECT COUNT(*) as c FROM videos
+                   WHERE created_at >= datetime('now', 'start of day')
+                     AND status IN ('uploaded', 'published', 'ready', 'uploaded_private', 'uploading')"""
+            ).fetchone()["c"]
+
+            # Success rate (last 7 days)
+            total_7d = conn.execute(
+                "SELECT COUNT(*) as c FROM videos WHERE created_at > datetime('now', '-7 days')"
+            ).fetchone()["c"]
+            success_7d = conn.execute(
+                """SELECT COUNT(*) as c FROM videos
+                   WHERE created_at > datetime('now', '-7 days')
+                     AND status IN ('uploaded', 'published', 'ready', 'uploaded_private')"""
+            ).fetchone()["c"]
+            success_rate = round(success_7d / total_7d * 100, 1) if total_7d > 0 else 0
+
+            # Average generation time
+            avg_gen = conn.execute(
+                """SELECT AVG(
+                       (julianday(generation_finished_at) - julianday(generation_started_at)) * 1440
+                   ) as avg_min
+                   FROM videos
+                   WHERE generation_started_at IS NOT NULL
+                     AND generation_finished_at IS NOT NULL
+                     AND timing_data IS NOT NULL"""
+            ).fetchone()
+            avg_gen_min = round(avg_gen["avg_min"]) if avg_gen and avg_gen["avg_min"] else None
+
+            # Next scheduled slot
+            next_slot = conn.execute(
+                """SELECT ps.channel_id, c.name as channel_name, c.slug,
+                          ps.target_upload_at, ps.target_public_at
+                   FROM planned_slots ps
+                   JOIN channels c ON c.id = ps.channel_id
+                   WHERE ps.status = 'pending'
+                   ORDER BY COALESCE(ps.target_upload_at, ps.target_public_at, ps.scheduled_at) ASC
+                   LIMIT 1"""
+            ).fetchone()
+
             return {
                 "health_score": health,
                 "videos": {
@@ -130,6 +261,17 @@ def get_monitor_dashboard():
                     "unacknowledged": alerts_unacknowledged,
                 },
                 "recent_events": recent_events,
+                "quick_stats": {
+                    "generated_today": generated_today,
+                    "success_rate_7d": success_rate,
+                    "total_7d": total_7d,
+                    "avg_generation_minutes": avg_gen_min,
+                    "next_slot": {
+                        "channel": next_slot["channel_name"] if next_slot else None,
+                        "slug": next_slot["slug"] if next_slot else None,
+                        "at": (next_slot["target_upload_at"] or next_slot["target_public_at"]) if next_slot else None,
+                    } if next_slot else None,
+                },
             }
     except Exception as exc:
         logger.error("Monitor dashboard error: %s", exc)
@@ -265,6 +407,292 @@ def trigger_health_check():
 
 
 # ═══════════════════════════════════════════════════════════════
+# System metrics endpoint
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/system")
+def get_system_metrics_endpoint():
+    """Real-time system metrics: CPU, RAM, disk, uptime."""
+    try:
+        metrics = _get_system_metrics()
+        return {"ok": True, **metrics}
+    except Exception as exc:
+        logger.error("System metrics error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Status bar (lightweight — what the fixed header bar polls)
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/status-bar")
+def get_status_bar():
+    """Lightweight endpoint for the fixed header status bar."""
+    db = get_db()
+    try:
+        with db._connect() as conn:
+            active_long = conn.execute(
+                "SELECT COUNT(*) as c FROM generation_jobs WHERE status = 'running'"
+            ).fetchone()["c"]
+            active_shorts = conn.execute(
+                "SELECT COUNT(*) as c FROM shorts WHERE status IN ('extracting','rendering','uploading')"
+            ).fetchone()["c"]
+            critical_alerts = conn.execute(
+                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'critical' AND resolved = 0"
+            ).fetchone()["c"]
+            # RAM (quick)
+            from pipeline.ram_governor import available_mb
+            ram_available = available_mb()
+            from pipeline.ram_governor import available_mb
+            ram_free = ram_available if ram_available > 0 else None
+
+            return {
+                "workers": active_long + active_shorts,
+                "long_running": active_long,
+                "shorts_running": active_shorts,
+                "ram_available_mb": ram_free,
+                "critical_alerts": critical_alerts,
+            }
+    except Exception as exc:
+        logger.error("Status bar error: %s", exc)
+        return {"workers": 0, "ram_available_mb": None, "critical_alerts": 0, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Active workers endpoint
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/workers")
+def get_active_workers():
+    """Detailed info on all active generation workers (long-form + shorts)."""
+    db = get_db()
+    try:
+        workers = []
+        with db._connect() as conn:
+            # Long-form jobs
+            long_rows = conn.execute(
+                """SELECT g.id as job_id, g.video_id, g.status, g.progress, g.phase,
+                          g.pipeline_phase, g.started_at, g.last_heartbeat_at, g.retry_count,
+                          g.worker_pid, g.action, g.error_msg,
+                          v.canal, v.titulo_final, v.progress_phase, v.progress as video_progress,
+                          v.timing_data, v.channel_id
+                   FROM generation_jobs g
+                   LEFT JOIN videos v ON v.id = g.video_id
+                   WHERE g.status = 'running'
+                   ORDER BY g.id DESC"""
+            ).fetchall()
+
+            for row in long_rows:
+                elapsed_s = 0
+                if row["started_at"]:
+                    try:
+                        from datetime import datetime
+                        started = datetime.strptime(row["started_at"][:19], "%Y-%m-%d %H:%M:%S")
+                        elapsed_s = max(0, (datetime.utcnow() - started).total_seconds())
+                    except Exception:
+                        pass
+
+                workers.append({
+                    "type": "long",
+                    "job_id": row["job_id"],
+                    "video_id": row["video_id"],
+                    "channel": row["canal"],
+                    "channel_id": row["channel_id"],
+                    "title": row["titulo_final"],
+                    "status": row["status"],
+                    "progress": row["progress"] or row["video_progress"] or 0,
+                    "phase": row["phase"] or row["progress_phase"] or "unknown",
+                    "pipeline_phase": row["pipeline_phase"],
+                    "action": row["action"],
+                    "started_at": row["started_at"],
+                    "elapsed_seconds": int(elapsed_s),
+                    "worker_pid": row["worker_pid"],
+                    "worker_ram_mb": _get_worker_process_ram_mb(row["worker_pid"]),
+                    "retry_count": row["retry_count"],
+                    "error_msg": row["error_msg"],
+                })
+
+            # Shorts jobs
+            short_rows = conn.execute(
+                """SELECT s.id, s.title, s.status, s.type, s.channel_id,
+                          ss.job_id, ss.scheduled_at,
+                          c.slug as canal
+                   FROM shorts s
+                   LEFT JOIN shorts_planned_slots ss ON ss.short_id = s.id AND ss.status = 'running'
+                   LEFT JOIN channels c ON c.id = s.channel_id
+                   WHERE s.status IN ('extracting', 'rendering', 'uploading')
+                   ORDER BY s.id DESC"""
+            ).fetchall()
+
+            for row in short_rows:
+                workers.append({
+                    "type": "short",
+                    "short_id": row["id"],
+                    "job_id": row["job_id"],
+                    "channel": row["canal"],
+                    "channel_id": row["channel_id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "short_type": row["type"],
+                    "progress": 0,
+                    "phase": row["status"],
+                    "started_at": row["scheduled_at"],
+                    "elapsed_seconds": 0,
+                    "worker_pid": None,
+                    "worker_ram_mb": None,
+                })
+
+        return {"ok": True, "workers": workers}
+    except Exception as exc:
+        logger.error("Active workers error: %s", exc)
+        return {"ok": False, "workers": [], "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Live log streaming (SSE)
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/logs/{job_id}/stream")
+async def stream_worker_logs(job_id: int, since_line: int = 0, tail_lines: int = 200):
+    """SSE stream of worker_{job_id}.log in real time (tail -f style)."""
+    log_path = Path(f"logs/worker_{job_id}.log")
+
+    async def event_stream():
+        line_no = since_line
+        if not log_path.exists():
+            yield f"data: {json.dumps({'line': f'[monitor] Log file not found: {log_path}', 'line_no': 0, 'level': 'WARNING'})}\n\n"
+            return
+
+        try:
+            # Read existing tail lines first
+            with open(log_path, "r") as f:
+                lines = f.readlines()
+                start = max(0, len(lines) - tail_lines)
+                for i, line in enumerate(lines[start:], start=start):
+                    ln = i - (len(lines) - tail_lines) if len(lines) > tail_lines else i
+                    parsed = _parse_log_line(line)
+                    yield f"data: {json.dumps({'line': line.rstrip(), 'line_no': ln, **parsed})}\n\n"
+                    line_no = i + 1
+
+            # Tail new lines
+            with open(log_path, "r") as f:
+                f.seek(0, 2)  # end of file
+                while True:
+                    line = f.readline()
+                    if line:
+                        parsed = _parse_log_line(line)
+                        yield f"data: {json.dumps({'line': line.rstrip(), 'line_no': line_no, **parsed})}\n\n"
+                        line_no += 1
+                    else:
+                        await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            yield f"data: {json.dumps({'line': f'[monitor] Stream error: {exc}', 'line_no': line_no, 'level': 'ERROR'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _parse_log_line(line: str) -> dict:
+    """Extract log level from a line if present."""
+    result = {"level": "INFO"}
+    for lvl in ("CRITICAL", "ERROR", "WARNING", "DEBUG"):
+        if lvl in line:
+            result["level"] = lvl
+            break
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# ETA estimation endpoint
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/eta/{job_id}")
+def get_job_eta(job_id: int):
+    """Estimate remaining time for an active job based on historical phase timings."""
+    db = get_db()
+    try:
+        with db._connect() as conn:
+            job = conn.execute(
+                "SELECT video_id, phase, progress, started_at FROM generation_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                return {"ok": False, "error": "Job not found"}
+
+            # Get current phase timing_data if available
+            video = conn.execute(
+                "SELECT timing_data, progress_phase, progress FROM videos WHERE id = ?",
+                (job["video_id"],),
+            ).fetchone()
+
+            eta_seconds = None
+            current_phase = job["phase"] or (video["progress_phase"] if video else None)
+            current_progress = job["progress"] or (video["progress"] if video else 0)
+
+            if video and video["timing_data"]:
+                try:
+                    timing = json.loads(video["timing_data"])
+                    if isinstance(timing, dict) and "phases" in timing:
+                        history = timing["phases"]
+                        # Look at average phase durations from historical data
+                        avg_total_min = 0
+                        phase_count = 0
+                        for pname, pdata in history.items():
+                            dur = pdata.get("duration_ms", 0) if isinstance(pdata, dict) else pdata
+                            if isinstance(dur, (int, float)) and dur > 0:
+                                avg_total_min += dur / 1000 / 60
+                                phase_count += 1
+                        if avg_total_min > 0:
+                            # Rough ETA based on remaining progress
+                            remaining_pct = max(0, 100 - current_progress) / 100
+                            eta_seconds = int(avg_total_min * 60 * remaining_pct)
+                except Exception:
+                    pass
+
+            # Fallback: average all completed video times
+            if eta_seconds is None:
+                avg = conn.execute(
+                    """SELECT AVG(
+                           (julianday(COALESCE(generation_finished_at, datetime('now')))
+                          - julianday(generation_started_at)) * 86400
+                       ) as avg_s
+                       FROM videos
+                       WHERE status IN ('uploaded', 'published', 'ready', 'uploaded_private')
+                         AND generation_started_at IS NOT NULL
+                         AND generation_finished_at IS NOT NULL
+                         AND timing_data IS NOT NULL"""
+                ).fetchone()
+                if avg and avg["avg_s"] and avg["avg_s"] > 0:
+                    remaining_pct = max(0, 100 - current_progress) / 100
+                    eta_seconds = int(avg["avg_s"] * remaining_pct)
+
+            # Calculate elapsed
+            elapsed_s = 0
+            if job["started_at"]:
+                try:
+                    from datetime import datetime
+                    started = datetime.strptime(job["started_at"][:19], "%Y-%m-%d %H:%M:%S")
+                    elapsed_s = max(0, (datetime.utcnow() - started).total_seconds())
+                except Exception:
+                    pass
+
+            return {
+                "ok": True,
+                "job_id": job_id,
+                "current_phase": current_phase,
+                "current_progress": current_progress,
+                "elapsed_seconds": int(elapsed_s),
+                "eta_seconds": eta_seconds,
+                "eta_minutes": round(eta_seconds / 60, 1) if eta_seconds else None,
+            }
+    except Exception as exc:
+        logger.error("ETA error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════
 # WebSocket
 # ═══════════════════════════════════════════════════════════════
 
@@ -279,13 +707,27 @@ async def ws_monitor(websocket: WebSocket):
             try:
                 # Keep alive — ping every 30s
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-                # Client can send commands if needed
+                # Client can request specific data via commands
                 if data == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
+                elif data == "status":
+                    # Client requested a fresh status snapshot
+                    await websocket.send_text(json.dumps({
+                        "type": "status_snapshot",
+                        "data": get_status_bar(),
+                    }))
+                    await websocket.send_text(json.dumps({
+                        "type": "system_snapshot",
+                        "data": _get_system_metrics(),
+                    }))
             except asyncio.TimeoutError:
-                # Send keepalive ping
+                # Send keepalive + lightweight status snapshot
                 try:
-                    await websocket.send_text(json.dumps({"type": "keepalive"}))
+                    status = get_status_bar()
+                    await websocket.send_text(json.dumps({
+                        "type": "keepalive",
+                        "status": status,
+                    }))
                 except Exception:
                     break
     except (WebSocketDisconnect, Exception):
@@ -307,3 +749,23 @@ async def broadcast_monitor_update(data: dict):
     for ws in disconnected:
         if ws in ws_clients:
             ws_clients.remove(ws)
+
+
+async def broadcast_status_snapshot():
+    """Periodic status snapshot broadcast for all WS clients."""
+    try:
+        status = get_status_bar()
+        system = _get_system_metrics()
+        await broadcast_monitor_update({
+            "type": "snapshot",
+            "status": status,
+            "system": {
+                "cpu_percent": system.get("cpu_percent"),
+                "ram_available_mb": system.get("ram_available_mb"),
+                "ram_percent": system.get("ram_percent"),
+                "disk_output_free_gb": system.get("disk_output_free_gb"),
+                "uptime_seconds": system.get("uptime_seconds"),
+            },
+        })
+    except Exception:
+        pass
