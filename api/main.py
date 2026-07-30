@@ -60,40 +60,63 @@ async def lifespan(app: FastAPI):
     # which would create orphan videos/jobs on every failed restart.
     # Abort BEFORE touching the DB so a doomed restart leaves no garbage.
     #
-    # NEW: retry with backoff instead of immediate crash.  The old process may
-    # still be in TIME_WAIT (especially after SIGTERM).  Waiting avoids the
-    # StatReload crash loop where the reloader keeps detecting the same file
-    # change and spawning doomed instances.
+    # DETOUR: Skip the guard when running under uvicorn's StatReload.
+    # During hot-reload, uvicorn spawns a new child process while the parent
+    # still holds the port. The parent is guaranteed to release it before the
+    # child's uvicorn server starts accepting connections. Running the port
+    # probe in the child causes a false-positive crash loop.
+    #
+    # Detection: StatReload sets WERKZEUG_RUN_MAIN=true OR starts the child
+    # via multiprocessing, which sets _UVICORN_RELOADING=1 in some versions.
+    # We probe the general case: if the parent process is a uvicorn instance
+    # AND the current process is a direct child (reload child), skip the guard.
     import os as _os
     import time as _time
     import socket as _socket
-    _bind_host = _os.getenv("API_HOST", "0.0.0.0")
-    _bind_port = int(_os.getenv("API_PORT", "8000"))
-    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    _probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    _bound = False
-    for _attempt in range(10):
-        try:
-            _probe.bind((_bind_host, _bind_port))
-            _bound = True
-            break
-        except OSError:
-            if _attempt < 9:
-                _wait = 0.5 * (2 ** _attempt)  # 0.5, 1, 2, 4, 8, 16, 32, 64, 128
-                logging.getLogger("autotube.startup").warning(
-                    "Port %s:%d still in use (attempt %d/10) — retrying in %.1fs...",
-                    _bind_host, _bind_port, _attempt + 1, _wait,
-                )
-                _time.sleep(_wait)
-    if not _bound:
-        logging.getLogger("autotube.startup").critical(
-            "Port %s:%d still in use after 10 retries — another instance is running. "
-            "Aborting startup BEFORE DB/slot init to avoid orphan jobs.",
-            _bind_host, _bind_port,
-        )
-    _probe.close()
-    if not _bound:
-        raise SystemExit(1)
+    import psutil as _psutil
+
+    _skip_guard = False
+    try:
+        _parent = _psutil.Process(_os.getppid())
+        _parent_cmd = " ".join(_parent.cmdline())
+        # Check if parent is uvicorn with reload AND we are a direct child
+        if "uvicorn" in _parent_cmd and "--reload" in _parent_cmd:
+            _skip_guard = True
+            logging.getLogger("autotube.startup").info(
+                "Port guard SKIPPED — running under uvicorn StatReload (parent=%s %s)",
+                _parent.pid, _parent_cmd[:80],
+            )
+    except Exception:
+        pass
+
+    if not _skip_guard:
+        _bind_host = _os.getenv("API_HOST", "0.0.0.0")
+        _bind_port = int(_os.getenv("API_PORT", "8000"))
+        _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        _bound = False
+        for _attempt in range(10):
+            try:
+                _probe.bind((_bind_host, _bind_port))
+                _bound = True
+                break
+            except OSError:
+                if _attempt < 9:
+                    _wait = 0.5 * (2 ** _attempt)  # 0.5, 1, 2, 4, 8, 16, 32, 64, 128
+                    logging.getLogger("autotube.startup").warning(
+                        "Port %s:%d still in use (attempt %d/10) — retrying in %.1fs...",
+                        _bind_host, _bind_port, _attempt + 1, _wait,
+                    )
+                    _time.sleep(_wait)
+        if not _bound:
+            logging.getLogger("autotube.startup").critical(
+                "Port %s:%d still in use after 10 retries — another instance is running. "
+                "Aborting startup BEFORE DB/slot init to avoid orphan jobs.",
+                _bind_host, _bind_port,
+            )
+        _probe.close()
+        if not _bound:
+            raise SystemExit(1)
 
     # Startup
     init_db()
@@ -161,33 +184,47 @@ async def lifespan(app: FastAPI):
         )
     
     if not _scheduler_paused:
-        # ── Dynamic daily schedule generation (planning_service) ──
-        # 3-phase horizon planning: generates slots for all days at once,
-        # with cross-day generation chaining and per-channel durations.
-        try:
-            from api.services.planning_service import compute_and_store_horizon
-            from database.db_extended import ExtendedDatabase
-            _db = ExtendedDatabase()
-            result = compute_and_store_horizon(horizon_days=7, db=_db)
-            logger = logging.getLogger("autotube.startup")
-            logger.info("Planning engine: 7-day horizon planned (%d slots, %d days)",
-                         result.get("total_slots", 0), result.get("days_planned", 0))
-        except Exception as exc:
-            logging.getLogger("autotube.startup").warning(
-                "Planning engine init skipped: %s", exc
-            )
+        # ── Defer heavy startup work to background threads ──
+        # Planning and shorts generation do synchronous I/O (DB, ffmpeg,
+        # Kokoro TTS, DeepSeek API) which blocks the asyncio event loop.
+        # Running them in the lifespan prevents uvicorn from accepting HTTP
+        # connections for minutes.  Defer to run_in_executor so the API
+        # starts responding immediately while startup work proceeds in parallel.
+        import asyncio as _asyncio
+        
+        async def _startup_heavy_tasks():
+            await _asyncio.sleep(5)  # Brief pause to let API stabilize first
+            _loop = _asyncio.get_running_loop()
+            _logger = logging.getLogger("autotube.startup")
+            
+            # Planning engine
+            try:
+                from api.services.planning_service import compute_and_store_horizon
+                from database.db_extended import ExtendedDatabase
+                _db = ExtendedDatabase()
+                result = await _loop.run_in_executor(
+                    None, lambda: compute_and_store_horizon(horizon_days=7, db=_db)
+                )
+                _logger.info("Planning engine: 7-day horizon planned (%d slots, %d days)",
+                             result.get("total_slots", 0), result.get("days_planned", 0))
+            except Exception as exc:
+                _logger.warning("Planning engine init skipped: %s", exc)
 
-        # ── Shorts scheduler: dynamic clip scaling (3 clips/long + 3 native/day) ──
-        try:
-            from api.services.shorts_scheduler import generate_upcoming_shorts
-            result = generate_upcoming_shorts(days=7)
-            logger = logging.getLogger("autotube.startup")
-            total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
-            logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
-        except Exception as exc:
-            logging.getLogger("autotube.startup").warning(
-                "Shorts scheduler init skipped: %s", exc
-            )
+            # Shorts scheduler
+            try:
+                from api.services.shorts_scheduler import generate_upcoming_shorts
+                result = await _loop.run_in_executor(
+                    None, lambda: generate_upcoming_shorts(days=7)
+                )
+                total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
+                _logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
+            except Exception as exc:
+                _logger.warning("Shorts scheduler init skipped: %s", exc)
+        
+        _startup_tasks = _asyncio.create_task(_startup_heavy_tasks())
+        logging.getLogger("autotube.startup").info(
+            "Deferred startup tasks: planning + shorts will run in background"
+        )
     else:
         logging.getLogger("autotube.startup").warning(
             "SCHEDULER PAUSED — auto-recovery, planning, and shorts scheduling skipped"
