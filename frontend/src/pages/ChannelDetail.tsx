@@ -964,6 +964,11 @@ export default function ChannelDetail() {
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs hover:bg-dark-600 transition-colors">
               <Settings size={12} /> <span className="hidden sm:inline">Config</span><Zap size={12} className="sm:hidden" />
             </button>
+            <button onClick={() => setShowSourceModeModal(true)}
+              title="Generar video con IA y publicar en YouTube"
+              className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-red-600/80 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
+              <Wand2 size={12} /> <span className="hidden sm:inline">Generar</span>
+            </button>
           </div>
         </div>
       </div>
@@ -1022,76 +1027,51 @@ export default function ChannelDetail() {
         </Link>
       </div>
 
-      {/* --- Generation Panel --- */}
-      {videoTab !== 'live' && videoTab !== 'slots' && (
-      <div className="glass rounded-xl p-5 space-y-4 mb-6">
-        <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
-          <Wand2 size={20} className="text-neon-gold" /> {videoTab === 'shorts' ? 'Generar Short' : 'Generar Video'}
-        </h3>
-        {(videoTab === 'shorts' ? generatingNativeShort : busy) ? (
-          <div className="flex items-center gap-3 p-4 bg-dark-700/50 rounded-lg">
-            <Loader2 size={20} className="text-neon-gold animate-spin" />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white">
-                {videoTab === 'shorts'
-                  ? 'Generando y publicando Short...'
-                  : (progress?.message || 'Generando y subiendo video...')}
-              </p>
-              {videoTab !== 'shorts' && (
-                <>
-                  <div className="flex items-center gap-2 mt-1">
-                    <div className="flex-1 h-1.5 bg-dark-900 rounded-full overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-neon-red to-neon-gold rounded-full transition-all duration-500"
-                           style={{ width: `${progress?.progress || 0}%` }} />
-                    </div>
-                    <span className="text-xs text-neon-red font-mono tabular-nums">
-                      {progress?.progress || 0}%
-                    </span>
-                  </div>
-                  {progress?.phase && (
-                    <p className="text-xs text-neon-cyan mt-0.5 capitalize">{progress.phase}</p>
-                  )}
-                  {progress?.detail && (
-                    <p className="text-xs text-slate-400 mt-0.5">{progress.detail}</p>
-                  )}
+      {/* --- Progress Banner (slim, solo durante generación) --- */}
+      {videoTab !== 'live' && videoTab !== 'slots' && (videoTab === 'shorts' ? generatingNativeShort : busy) && (
+        <div className="mb-6">
+          {videoTab !== 'shorts' ? (
+            <div className="glass rounded-lg px-4 py-2.5 space-y-1.5 animate-fade-in">
+              <div className="flex items-center gap-2">
+                <Loader2 size={14} className="text-neon-gold animate-spin shrink-0" />
+                <span className="text-xs font-medium text-white truncate">{progress?.message || 'Generando video...'}</span>
+                <span className="text-xs text-neon-red font-mono tabular-nums ml-auto shrink-0">{progress?.progress || 0}%</span>
+              </div>
+              <div className="h-1.5 bg-dark-900 rounded-full overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-neon-red to-neon-gold rounded-full transition-all duration-500"
+                     style={{ width: `${progress?.progress || 0}%` }} />
+              </div>
+              {(progress?.phase || progress?.detail || progress?.current !== undefined) && (
+                <div className="flex items-center gap-2 text-[10px] text-gray-400 flex-wrap">
+                  {progress?.phase && <span className="text-neon-cyan capitalize">{progress.phase}</span>}
+                  {progress?.detail && <span className="text-slate-500">· {progress.detail}</span>}
                   {progress?.current !== undefined && progress?.total !== undefined && (
-                    <p className="text-xs text-slate-500">
-                      {progress.current}/{progress.total}
-                    </p>
+                    <span className="text-slate-600 ml-auto">{progress.current}/{progress.total}</span>
                   )}
-                </>
+                </div>
               )}
             </div>
-          </div>
-        ) : (
-          <div className="flex justify-center">
-          <button
-            onClick={videoTab === 'shorts' ? handleGenerateNativeShort : () => setShowSourceModeModal(true)}
-            disabled={videoTab === 'shorts' ? generatingNativeShort : busy}
-            className="px-5 py-2 bg-gradient-to-r from-neon-red/80 to-red-600/80 text-white rounded-lg font-display font-semibold text-sm hover:shadow-lg hover:shadow-neon-red/20 transition-all duration-300 disabled:opacity-50 flex items-center gap-2"
-            title="Generar video con IA y publicar en YouTube (automático)">
-            <Wand2 size={16} /> {videoTab === 'shorts' ? 'Generar Short' : 'Generar Video'}
-          </button>
-          </div>
-        )}
-        <p className="text-xs text-gray-500 text-center">
-          {videoTab === 'shorts'
-            ? 'Genera un Short nativo con IA y lo publica automáticamente en YouTube.'
-            : 'Genera y sube automáticamente a YouTube. Recibirás una notificación al terminar.'}
-        </p>
-        {videoTab === 'shorts' && nativeShortResult && (
-          <div className={`p-3 rounded-lg text-sm flex items-center gap-2 ${
-            nativeShortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
-          }`}>
-            <span>{nativeShortResult.ok ? '✅' : '❌'}</span>
-            <span>{nativeShortResult.message}</span>
-            {nativeShortResult.url && (
-              <a href={nativeShortResult.url} target="_blank" rel="noopener noreferrer"
-                 className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
-            )}
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="flex items-center gap-3 p-3 bg-glass rounded-lg animate-fade-in">
+              <Loader2 size={18} className="text-neon-gold animate-spin" />
+              <span className="text-sm text-white">Generando y publicando Short...</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* --- Short result (inline, after generation) --- */}
+      {videoTab === 'shorts' && nativeShortResult && (
+        <div className={`mb-6 p-2.5 rounded-lg text-xs flex items-center gap-2 animate-fade-in ${
+          nativeShortResult.ok ? 'bg-green-600/10 border border-green-600/30 text-green-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'
+        }`}>
+          <span>{nativeShortResult.ok ? '✅' : '❌'}</span>
+          <span>{nativeShortResult.message}</span>
+          {nativeShortResult.url && (
+            <a href={nativeShortResult.url} target="_blank" rel="noopener noreferrer"
+               className="ml-auto text-neon-red underline text-xs">Ver en YouTube →</a>
+          )}
+        </div>
       )}
 
       {/* --- Video Grid --- */}
