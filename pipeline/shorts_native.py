@@ -452,17 +452,20 @@ NADA MAS fuera del JSON."""
             return str(c).lstrip("#").replace("#", "")
         bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
 
-        # Filter and align assets with scene_ranges for the renderer
+        # Pass the FULL lists (including None entries) so the renderer can
+        # insert solid-bg filler segments where assets failed — this keeps
+        # the xfade timeline contiguous and offsets cumulative.
         if scene_ranges and len(scene_ranges) == len(media):
-            paired = [(a, sr) for a, sr in zip(media, scene_ranges) if a is not None]
-            render_assets = [p[0] for p in paired]
-            render_ranges = [p[1] for p in paired]
+            render_assets = media
+            render_ranges = scene_ranges
+            valid_count = sum(1 for a in (media or []) if a is not None)
             logger.info(
-                "[%s] Filtered to %d valid assets (from %d scene_ranges)",
-                self.channel_slug, len(render_assets), len(scene_ranges),
+                "[%s] %d valid assets + %d filler (from %d scene_ranges)",
+                self.channel_slug, valid_count, len(scene_ranges) - valid_count,
+                len(scene_ranges),
             )
         else:
-            render_assets = [a for a in (media or []) if a is not None]
+            render_assets = media or []
             render_ranges = None
 
         try:

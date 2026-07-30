@@ -1443,20 +1443,21 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     _update_short_job_progress(job_id, 50, "media")
 
-    # 3b. Filter and align assets with scene_ranges for the renderer.
-    #     If scene_ranges were computed, pair each asset with its corresponding
-    #     range, skipping None entries (failed asset fetches).  Otherwise use
-    #     the legacy path: filter Nones and let renderer do uniform split.
+    # 3b. Align assets with scene_ranges for the renderer.
+    #     Pass the FULL lists (including None entries) so the renderer can
+    #     insert solid-bg filler segments where assets failed — this keeps
+    #     the xfade timeline contiguous and offsets cumulative.
     if scene_ranges and len(scene_ranges) == len(asset_items):
-        paired = [(a, sr) for a, sr in zip(asset_items, scene_ranges) if a is not None]
-        render_assets = [p[0] for p in paired]
-        render_ranges = [p[1] for p in paired]
+        render_assets = asset_items
+        render_ranges = scene_ranges
+        valid_count = sum(1 for a in asset_items if a is not None)
         logger.info(
-            "[%s] Filtered to %d valid assets (from %d scene_ranges)",
-            channel_slug, len(render_assets), len(scene_ranges),
+            "[%s] %d valid assets + %d filler (from %d scene_ranges)",
+            channel_slug, valid_count, len(scene_ranges) - valid_count,
+            len(scene_ranges),
         )
     else:
-        render_assets = [a for a in asset_items if a is not None]
+        render_assets = asset_items
         render_ranges = None
 
     # 4. Render hybrid (video + Ken Burns images + xfade)

@@ -1053,21 +1053,6 @@ def render_short_hybrid(
     """
     from config import settings
 
-    # Filter to valid assets (non-None, with existing path)
-    valid_assets: list[dict[str, Any]] = []
-    for a in asset_items:
-        if a is None:
-            continue
-        p = a.get("path")
-        if p is None:
-            continue
-        if isinstance(p, str):
-            p = Path(p)
-        if not p.exists():
-            logger.warning("Asset path does not exist, skipping: %s", p)
-            continue
-        valid_assets.append(a)
-
     # ── Audio duration ────────────────────────────────────────
     if audio_duration is None and audio_path.exists():
         dur_out = subprocess.run(
@@ -1082,8 +1067,30 @@ def render_short_hybrid(
     elif audio_duration is None:
         audio_duration = 20.0
 
-    # ── No valid assets → solid colour background fallback ────
-    if not valid_assets:
+    # ── Utility: check if an asset is renderable ──────────────
+    def _asset_valid(a: dict[str, Any] | None) -> bool:
+        if a is None:
+            return False
+        p = a.get("path")
+        if p is None:
+            return False
+        if isinstance(p, str):
+            p = Path(p)
+        if not p.exists():
+            logger.warning("Asset path does not exist, skipping: %s", p)
+            return False
+        return True
+
+    # Build list of booleans matching asset_items length
+    asset_valid_flags = [_asset_valid(a) for a in asset_items]
+    # Count valid assets for logging / stats
+    valid_assets: list[dict[str, Any]] = [
+        a for a, ok in zip(asset_items, asset_valid_flags) if ok
+    ]
+    has_any_valid = any(asset_valid_flags)
+
+    # ── No renderable assets → solid colour background fallback ──
+    if not has_any_valid:
         filter_str = _build_solid_bg_filter(bg_color_hex, srt_path)
         cmd = [
             "ffmpeg", "-y",
@@ -1106,7 +1113,7 @@ def render_short_hybrid(
         return output_path
 
     # ── Hybrid render: mixed video + image scenes ─────────────
-    n_assets = len(valid_assets)
+    n_assets = len(asset_items)  # total positions including None fillers
     fade = crossfade_dur
 
     # Determine whether to use variable scene durations from scene_ranges
@@ -1118,45 +1125,59 @@ def render_short_hybrid(
     )
 
     # Pre-compute per-segment durations and xfade offsets
+    #   - Each segment gets visual_dur = narration_dur + fade
+    #   - xfade offsets MUST be CUMULATIVE for chained FFmpeg xfade:
+    #     offset[i] = sum of narration durations 0..i (the time in the
+    #     output stream when the transition to scene i+1 should begin).
     per_seg_dur: list[float] = []       # visual clip duration per segment
     per_xfade_offset: list[float] = []   # xfade offset per transition step
 
     if use_variable_dur:
-        # Variable durations from scene_ranges:
-        #   - Each segment gets visual_dur = narration_dur + fade
-        #   - xfade offset = narration_dur of the previous segment
-        for sr in scene_ranges:
+        cumulative = 0.0
+        for i, sr in enumerate(scene_ranges):
             narration_dur = float(sr.get("duration", 5.0))
             per_seg_dur.append(narration_dur + fade)
-        for i in range(n_assets - 1):
-            per_xfade_offset.append(float(scene_ranges[i].get("duration", 5.0)))
+            if i < n_assets - 1:
+                cumulative += narration_dur
+                per_xfade_offset.append(cumulative)
         logger.info(
-            "FFmpeg variable scene durations: %d assets, durations=%s",
-            n_assets, [f"{d:.1f}s" for d in per_seg_dur],
+            "FFmpeg variable scene durations: %d assets, durations=%s, offsets=%s",
+            n_assets,
+            [f"{d:.1f}s" for d in per_seg_dur],
+            [f"{o:.1f}s" for o in per_xfade_offset],
         )
     else:
-        # Uniform split (legacy behavior)
+        # Uniform split (legacy behavior) — offsets are also cumulative
         segment_dur = (audio_duration + fade * (n_assets - 1)) / max(n_assets, 1)
         per_seg_dur = [segment_dur + fade] * n_assets
-        uniform_offset = segment_dur - fade
-        per_xfade_offset = [uniform_offset] * (n_assets - 1)
+        for i in range(n_assets - 1):
+            per_xfade_offset.append((i + 1) * segment_dur - fade)
         logger.info(
-            "FFmpeg uniform scene durations: %d assets, each %.1fs",
+            "FFmpeg uniform scene durations: %d assets, each %.1fs, offsets=%s",
             n_assets, segment_dur,
+            [f"{o:.1f}s" for o in per_xfade_offset],
         )
 
+    # ── Build inputs: valid assets use their file; None/invalid → solid-bg ──
     inputs: list[str] = []
     filter_parts: list[str] = []
 
-    for i, asset in enumerate(valid_assets):
-        asset_type = asset.get("type", "image")
-        asset_path = str(asset["path"])
+    for i, (asset, ok) in enumerate(zip(asset_items, asset_valid_flags)):
         visual_dur = per_seg_dur[i]
 
+        if not ok:
+            # Solid-bg placeholder — preserves timeline position
+            inputs.extend(["-f", "lavfi", "-i",
+                f"color=c=0x{bg_color_hex}:s=1080x1920:d={visual_dur:.3f}:r=30"])
+            filter_parts.append(f"[{i}:v]null[v{i}]")
+            continue
+
+        asset_type = asset.get("type", "image")
+        asset_path = str(asset["path"])
+
         if asset_type == "video":
-            # Video: use as-is (trimmed to visual_dur)
+            # Video: scale + crop to 9:16, trim to visual_dur
             inputs.extend(["-i", asset_path])
-            # Scale + crop to 9:16
             filter_parts.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,fps=30,"
@@ -1172,7 +1193,6 @@ def render_short_hybrid(
                 f"d={frames}:s=1080x1920:"
                 f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':fps=30"
             )
-            # First scale/crop, then apply Ken Burns zoompan
             filter_parts.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,"
@@ -1225,10 +1245,12 @@ def render_short_hybrid(
         str(output_path),
     ]
 
-    logger.info("FFmpeg hybrid render: %d assets (%d video, %d image)",
+    logger.info("FFmpeg hybrid render: %d segments (%d valid, %d video, %d image, %d filler)",
                 n_assets,
+                sum(asset_valid_flags),
                 sum(1 for a in valid_assets if a.get("type") == "video"),
-                sum(1 for a in valid_assets if a.get("type") == "image"))
+                sum(1 for a in valid_assets if a.get("type") == "image"),
+                n_assets - sum(asset_valid_flags))
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:

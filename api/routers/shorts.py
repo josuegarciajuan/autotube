@@ -965,13 +965,19 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     except Exception as e:
         logger.warning("Exhaustive asset fetch failed (will use solid bg): %s", e)
 
-    # 4. Filter and align assets with scene_ranges for the renderer
+    # 4. Align assets with scene_ranges for the renderer.
+    #     Pass the FULL lists (including None entries) so the renderer can
+    #     insert solid-bg filler segments where assets failed.
     if scene_ranges and len(scene_ranges) == len(asset_items):
-        paired = [(a, sr) for a, sr in zip(asset_items, scene_ranges) if a is not None]
-        render_assets = [p[0] for p in paired]
-        render_ranges = [p[1] for p in paired]
+        render_assets = asset_items
+        render_ranges = scene_ranges
+        valid_count = sum(1 for a in asset_items if a is not None)
+        logger.info(
+            "%d valid assets + %d filler (from %d scene_ranges)",
+            valid_count, len(scene_ranges) - valid_count, len(scene_ranges),
+        )
     else:
-        render_assets = [a for a in asset_items if a is not None]
+        render_assets = asset_items
         render_ranges = None
 
     # 5. Render hybrid (video + Ken Burns images + xfade)
