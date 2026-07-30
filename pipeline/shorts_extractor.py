@@ -94,6 +94,7 @@ class ShortsExtractor:
         timestamps: list[dict],
         max_clips: int = 5,
         min_clips: int = 3,
+        exclude_ranges: list[tuple[float, float]] = None,
     ) -> list[dict]:
         """Extract high-impact clip specifications from a video script.
 
@@ -102,6 +103,8 @@ class ShortsExtractor:
             timestamps: List of word-level timestamps [{word, start, end}, ...].
             max_clips: Maximum number of clips to extract.
             min_clips: Minimum number of clips to extract.
+            exclude_ranges: Optional list of (start, end) time ranges to avoid.
+                            Already-published clips from the same source video.
 
         Returns:
             List of clip specs: [{start_time, end_time, hook_title, hook_text, ranking}, ...]
@@ -109,11 +112,22 @@ class ShortsExtractor:
         # Convert timestamps to a condensed text format for the LLM
         ts_text = self._format_timestamps(timestamps)
 
+        # Build exclude_ranges warning for the prompt
+        exclude_warning = ""
+        if exclude_ranges:
+            exclude_str = ", ".join(
+                f"{s:.0f}s–{e:.0f}s" for s, e in sorted(exclude_ranges)
+            )
+            exclude_warning = (
+                f"\n⚠️  RANGOS YA PUBLICADOS (NO uses estos segmentos): {exclude_str}\n"
+                f"   Estos segmentos ya fueron extraídos como Shorts. Elige otros distintos.\n"
+            )
+
         prompt = EXTRACTION_PROMPT.format(
             min_clips=min_clips,
             max_clips=max_clips,
             script_text=script_text[:12000],  # Truncate for token limits
-            timestamps_text=ts_text[:8000],
+            timestamps_text=(ts_text[:8000] + exclude_warning),
         )
 
         client = self._get_client()
@@ -150,6 +164,24 @@ class ShortsExtractor:
                 if duration < 8 or duration > 180:
                     logger.debug("Clip rejected: duration %.1fs outside 8-180 range", duration)
                     continue
+                # ── v21: Reject clips overlapping with already-published ranges ──
+                if exclude_ranges:
+                    clip_start = clip["start_time"]
+                    clip_end = clip["end_time"]
+                    overlap_margin = 5.0  # 5s margin to account for LLM approximation
+                    overlapping = False
+                    for er_start, er_end in exclude_ranges:
+                        # Check if clips overlap (with margin)
+                        if clip_start < (er_end + overlap_margin) and clip_end > (er_start - overlap_margin):
+                            logger.info(
+                                "Clip rejected: overlaps with already-published range %.0fs-%.0fs "
+                                "(candidate: %.0fs-%.0fs)",
+                                er_start, er_end, clip_start, clip_end,
+                            )
+                            overlapping = True
+                            break
+                    if overlapping:
+                        continue
                 clip["ranking"] = clip.get("ranking", 5)
                 valid_clips.append(clip)
 

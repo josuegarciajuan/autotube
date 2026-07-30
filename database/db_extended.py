@@ -635,6 +635,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v20: channel_insights (AI self-optimization analysis) ──
     _migrate_v20(conn, logger)
+
+    # ── v21: UNIQUE partial index on shorts(source_video_id, start_time, end_time) ──
+    _migrate_v21(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1243,6 +1246,43 @@ def _migrate_v20(conn, logger):
         with open(schema_v20) as f:
             conn.executescript(f.read())
     logger.info("Migration: v20 schema applied (channel_insights)")
+
+
+def _migrate_v21(conn, logger):
+    """Idempotent v21: UNIQUE partial index on shorts(source_video_id, start_time, end_time)
+    
+    Prevents duplicate clip shorts from the same source video at the same time range.
+    The WHERE clause ensures NULL source_video_id (native shorts) are excluded.
+    """
+    try:
+        # Clean any pre-existing duplicates before creating the constraint.
+        # Keep the oldest short and delete newer duplicates for each (source_video_id, start_time, end_time).
+        conn.execute("""
+            DELETE FROM shorts
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM shorts
+                WHERE source_video_id IS NOT NULL
+                GROUP BY source_video_id, start_time, end_time
+            )
+            AND source_video_id IS NOT NULL
+        """)
+        deleted = conn.total_changes
+        if deleted > 0:
+            logger.warning(
+                "Migration v21: cleaned %d duplicate clip short(s) before adding UNIQUE constraint",
+                deleted,
+            )
+
+        # Create partial UNIQUE index (SQLite 3.8.0+ supports WHERE on indexes)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shorts_unique_clip
+            ON shorts(source_video_id, start_time, end_time)
+            WHERE source_video_id IS NOT NULL
+        """)
+        logger.info("Migration v21: UNIQUE partial index on shorts(source_video_id, start_time, end_time) created")
+    except Exception as e:
+        logger.error("Migration v21 failed: %s", e)
+        raise
 
 
 def _migrate_v10(conn, logger):

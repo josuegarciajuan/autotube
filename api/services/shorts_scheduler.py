@@ -1075,19 +1075,50 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
     long_slot_position 2 = second completed video today
     
     Returns video_id or None if not available.
+    
+    v21: Excludes source videos that already have clip shorts published/pending
+    today to prevent duplicate clips from the same long-form video.
     """
+    import sqlite3
     from database.db_extended import ExtendedDatabase
+    from config.settings import DATABASE_PATH
     db = ExtendedDatabase()
 
     videos = db.get_completed_videos_today(channel_id)
     if not videos:
         return None
 
+    # ── v21: Exclude source videos that already have clip shorts today ──
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+    already_used_ids = set()
+    try:
+        used_rows = conn.execute(
+            """SELECT DISTINCT source_video_id FROM shorts
+               WHERE channel_id = ?
+                 AND type = 'clip'
+                 AND source_video_id IS NOT NULL
+                 AND status IN ('published', 'uploading', 'ready', 'rendering', 'extracted')
+                 AND date(created_at) = date('now', 'localtime')""",
+            (channel_id,),
+        ).fetchall()
+        already_used_ids = {row[0] for row in used_rows}
+    finally:
+        conn.close()
+
+    # Find the first available video that hasn't been used for clips today
     pos = long_slot_position or 1
-    # Map to 0-indexed: position 1 -> index 0, position 2 -> index 1
-    idx = pos - 1
-    if idx < len(videos):
-        return videos[idx]["id"]
+    found = None
+    for video in videos:
+        if video["id"] not in already_used_ids:
+            found = video
+            break
+
+    if found:
+        logger.info(
+            "_resolve_clip_source: selected video #%d (skipped %d already-used today)",
+            found["id"], len(already_used_ids),
+        )
+        return found["id"]
 
     return None
 
@@ -1698,8 +1729,31 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         pass
 
     extractor = ShortsExtractor()
+
+    # ── v21: Query existing clip shorts for this source_video to exclude ──
+    exclude_ranges = []
+    try:
+        existing_clips = conn.execute(
+            """SELECT start_time, end_time FROM shorts
+               WHERE source_video_id = ?
+                 AND type = 'clip'
+                 AND status IN ('published', 'uploading', 'ready', 'rendering', 'extracted')
+               ORDER BY start_time""",
+            (source_video_id,),
+        ).fetchall()
+        exclude_ranges = [(float(r["start_time"]), float(r["end_time"])) for r in existing_clips]
+        if exclude_ranges:
+            logger.info(
+                "Dedup: excluding %d already-published clip ranges for source_video #%d: %s",
+                len(exclude_ranges), source_video_id,
+                ", ".join(f"{s:.0f}-{e:.0f}s" for s, e in exclude_ranges),
+            )
+    except Exception as e:
+        logger.warning("Dedup query failed (non-fatal): %s", e)
+
     clips = extractor.extract(script_text=script_text, timestamps=timestamps,
-                              max_clips=3, min_clips=1)
+                              max_clips=3, min_clips=1,
+                              exclude_ranges=exclude_ranges)
 
     conn.close()
 
@@ -1717,10 +1771,14 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         logger.error("Cannot access source video file for #%d", source_video_id)
         return None
 
+    # ── v21: Save original clip times BEFORE clip_offset adjustment for DB ──
+    # The DB stores the original time range from the long-form video (used for dedup).
+    # best_clip may be modified in-place by clip_offset adjustment for rendering.
+    db_start_time = best_clip["start_time"]
+    db_end_time = best_clip["end_time"]
+
     if clip_offset > 0:
-        original_start = best_clip["start_time"]
-        original_end = best_clip["end_time"]
-        clip_duration = original_end - original_start
+        clip_duration = best_clip["end_time"] - best_clip["start_time"]
         best_clip["start_time"] = clip_offset
         best_clip["end_time"] = clip_offset + clip_duration
 
@@ -1733,7 +1791,80 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
     output_path = None
 
     try:
-        render_word_ts = tts_word_ts if clip_offset == 0 else None
+        # ── v21: Subtitle fallback ──────────────────────────────────────
+        # Build proper word-level timestamps for SRT subtitle rendering.
+        # Strategy:
+        #   1. Use TTS word timestamps from timing_data if available (best quality)
+        #   2. When clip_offset > 0 (YouTube download), adjust coordinates
+        #   3. Fallback: use block-based approximate timestamps (interpolated)
+        render_word_ts = None
+
+        if tts_word_ts:
+            # TTS timestamps available — normalize to start_ms/end_ms format
+            normalized = []
+            for ts in tts_word_ts:
+                start_val = float(ts.get("start_ms", ts.get("start", 0)))
+                end_val = float(ts.get("end_ms", ts.get("end", 0)))
+                normalized.append({
+                    "word": ts.get("word", ""),
+                    "start_ms": start_val,
+                    "end_ms": end_val,
+                })
+
+            if clip_offset == 0:
+                render_word_ts = normalized
+                logger.debug("Subtitle: using TTS timestamps (local file, offset=0)")
+            else:
+                # Adjust timestamps for downloaded file with padding
+                shift_s = clip_offset - db_start_time
+                shift_ms = shift_s * 1000
+                adjusted = []
+                for ts in normalized:
+                    new_start = ts["start_ms"] + shift_ms
+                    new_end = ts["end_ms"] + shift_ms
+                    adjusted.append({
+                        "word": ts["word"],
+                        "start_ms": new_start,
+                        "end_ms": new_end,
+                    })
+                render_word_ts = adjusted
+                logger.info(
+                    "Subtitle: adjusted %d TTS timestamps by +%.0fms (offset=%.1f, original=%.1f)",
+                    len(adjusted), shift_ms, clip_offset, db_start_time,
+                )
+        else:
+            # ── v21 Fallback: use block-based approximate timestamps ──
+            # Convert from {"start": seconds} to {"start_ms": millis} format
+            if timestamps:
+                block_ts = []
+                for ts in timestamps:
+                    block_ts.append({
+                        "word": ts.get("word", ""),
+                        "start_ms": ts["start"] * 1000,
+                        "end_ms": ts["end"] * 1000,
+                    })
+                # If using downloaded file with offset, adjust coordinates
+                if clip_offset > 0:
+                    shift_s = clip_offset - db_start_time
+                    shift_ms = shift_s * 1000
+                    adjusted = []
+                    for ts in block_ts:
+                        new_start = ts["start_ms"] + shift_ms
+                        new_end = ts["end_ms"] + shift_ms
+                        adjusted.append({
+                            "word": ts["word"],
+                            "start_ms": new_start,
+                            "end_ms": new_end,
+                        })
+                    block_ts = adjusted
+                render_word_ts = block_ts
+                logger.info(
+                    "Subtitle: using block-based approximate timestamps (%d words, adjusted=%s)",
+                    len(block_ts), clip_offset > 0,
+                )
+            else:
+                logger.warning("Subtitle: no timestamps available — clip short will have NO subtitles")
+
         output_path = renderer.render(
             source_path, best_clip, word_timestamps=render_word_ts,
         )
@@ -1793,7 +1924,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
                 start_time, end_time, status, file_path, youtube_id, youtube_url, published_at)
                VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
             (channel_id, source_video_id, title, title[:60], hook_text,
-             best_clip.get("start_time"), best_clip.get("end_time"),
+             db_start_time, db_end_time,
              str(output_path), yt_id, result.get("url", "")),
         )
         short_id = cursor.lastrowid
