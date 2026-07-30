@@ -57,10 +57,10 @@ class MediaFetcher:
       4. YouTube Creative Commons (yt-dlp) → download .mp4
 
     Image fallback chain (when video fails or media_tipo is "imagen"):
-      1. Unsplash Photos API → download .jpg
-      2. Pexels Photos API → download .jpg
-      3. [POLLO_AI_HOOK] → Pollo AI image generation (Agent 2B)
-      4. Retry with simplified query (first 3 keywords only)
+      1. Pixabay Photos API → download .jpg
+      2. Unsplash Photos API → download .jpg
+      3. Retry with simplified query (first 3 keywords only)
+      4. Pollo AI image generation (rescue only when stock exhausted)
       5. Type-specific pre-baked fallback query
       6. Generic fallback query
       7. Return placeholder info
@@ -356,10 +356,6 @@ class MediaFetcher:
         if result:
             return result
 
-        # [POLLO_AI_HOOK] ─ Agent 2B: Insert Pollo AI image generation fallback here
-        # result = self._try_pollo_ai(query)
-        # if result: return result
-
         # ── Step 4: Retry with simplified query (Pixabay + Unsplash) ──
         simple_query = self._simplify_query(query)
         if simple_query != query:
@@ -576,7 +572,6 @@ class MediaFetcher:
             want_video = i in video_assigned
             target_dur = scene.get("duration", 5)
             scene_tipo = scene.get("tipo", "desarrollo")
-            is_hook = (scene_tipo == "hook")
 
             # ── Transition scenes always use image (Ken Burns) ─
             if scene.get("is_transition"):
@@ -603,15 +598,10 @@ class MediaFetcher:
 
             asset = None
 
-            # ── Pollo AI: hook siempre (si está activo y bajo cap) ─
-            if is_hook and ai_enabled and ai_used < ai_max:
-                query = scene.get("search_query_en", "")
-                logger.info("Scene %d [HOOK]: using Pollo AI (%d/%d)", i + 1, ai_used + 1, ai_max)
-                asset = self._try_pollo_scene(query, scene_tipo, ctx)
-                if asset:
-                    ai_used += 1
-
             # ── v10: Exhaustive search with cross-rotation + pagination ─
+            # Hook scenes go through the normal provider chain (video → Pixabay
+            # → Unsplash → simplified retry) like any other scene. Pollo AI is
+            # only invoked as rescue (below) when ALL stock providers fail.
             if asset is None:
                 query_pool = self._build_query_pool(scene, ctx)
                 logger.info(

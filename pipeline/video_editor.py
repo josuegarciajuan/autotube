@@ -622,6 +622,26 @@ class VideoEditor:
                 _n_placeholder, len(segment_paths), _placeholder_pct,
             )
 
+        # ── Consecutive placeholder gate (beginning) ──────────────
+        # If the first 3+ consecutive segments are black/placeholders,
+        # the video opens with a black screen — abort before spending
+        # CPU on xfade concat. Common causes: dedup rejected all hook
+        # assets, or Pollo AI returned identical images for different
+        # prompts (all rejected by dedup).
+        _consecutive_start = 0
+        for sp in segment_paths:
+            if "_black" in Path(sp).stem or "_placeholder" in Path(sp).stem:
+                _consecutive_start += 1
+            else:
+                break
+        if _consecutive_start >= 3:
+            raise RuntimeError(
+                f"BLACK-SCREEN START: first {_consecutive_start} consecutive segments "
+                f"are placeholders — video would open with black screen. "
+                f"Likely cause: hook assets rejected by dedup or all stock providers exhausted. "
+                f"Aborting to prevent publishing bad video."
+            )
+
         # ── v6: merge consecutive gradient placeholders ──────────
         # When many consecutive scenes fail to get media (e.g. due to
         # off-niche theme poisoning), the concat gets overloaded with
