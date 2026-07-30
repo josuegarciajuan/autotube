@@ -209,14 +209,14 @@ class VideoEditor:
 
     INTRO_DURATION: float = 3.0
     OUTRO_DURATION: float = 5.0
-    SCENE_DURATION_MIN: float = 6.0   # Enforced — scenes shorter than this are merged
-    SCENE_DURATION_MAX: float = 10.0  # Enforced — ~10s scenes for dynamic visual rotation (Oct 2025)
+    SCENE_DURATION_MIN: float = 8.0   # Enforced — scenes shorter than this are merged
+    SCENE_DURATION_MAX: float = 16.0  # Enforced — ~16s scenes ceiling (Jul 2026)
     # Legacy aliases kept for backward compatibility
     MIN_SCENE_DURATION: float = SCENE_DURATION_MIN
     MAX_SCENE_DURATION: float = SCENE_DURATION_MAX
     # Hard cap: when accumulated clip duration exceeds this, force a new clip
     # from the fallback pool instead of extending the same image indefinitely.
-    MAX_CLIP_EXTEND_SEC: float = 15.0  # lowered 25→15 (Oct 2025) to match ~10s scene ceiling
+    MAX_CLIP_EXTEND_SEC: float = 16.0  # matched to SCENE_DURATION_MAX (Jul 2026)
 
     DEFAULT_FONT: str = "DejaVu-Sans"
 
@@ -3425,6 +3425,21 @@ class VideoEditor:
         if not segment_paths:
             raise RuntimeError("No segments to concatenate")
 
+        # For very large segment counts, the O(N²) xfade filter_complex
+        # can exhaust ffmpeg filter buffers and fail with rc=-9. Split
+        # into batches of ~50 segments, xfade each batch separately, then
+        # concat the batch outputs (stream copy, near-zero CPU).
+        n = len(segment_paths)
+        BATCH_SIZE = 60
+        if n > 150:
+            self.logger.info(
+                "xfade batching: %d segments → %d batches of ~%d for safer concat",
+                n, (n + BATCH_SIZE - 1) // BATCH_SIZE, BATCH_SIZE,
+            )
+            return self._xfade_concat_batched(
+                segment_paths, block_ranges, output_path, BATCH_SIZE,
+            )
+
         crossfade_duration = random.uniform(
             self.canal.get("CROSSFADE_MIN", 0.3),
             self.canal.get("CROSSFADE_MAX", 0.7),
@@ -3442,6 +3457,41 @@ class VideoEditor:
         # Build ffmpeg filter_complex for xfade chain
         # Each segment is an input, chained with xfade
         n = len(segment_paths)
+
+        # Pre-validate all segments exist and have valid video streams.
+        # A single corrupt segment can cause the entire xfade chain to fail
+        # with rc=-9 (broken pipe) after minutes of ffmpeg processing.
+        if n > 50:  # validate large batches to prevent late-stage failures
+            bad_segments: list[str] = []
+            for seg_path in segment_paths:
+                if not os.path.exists(seg_path):
+                    bad_segments.append(f"{seg_path} (missing)")
+                    continue
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=codec_type:format=duration",
+                         "-of", "csv=p=0", str(seg_path)],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if probe.returncode != 0 or not probe.stdout.strip():
+                        bad_segments.append(f"{seg_path} (invalid: {probe.stderr.strip()[-80:]})")
+                except Exception as exc:
+                    bad_segments.append(f"{seg_path} (probe error: {exc})")
+            if bad_segments:
+                self.logger.warning(
+                    "%d of %d segments failed ffprobe validation: %s...",
+                    len(bad_segments), n, ", ".join(bad_segments[:3]),
+                )
+                # Remove bad segments from the list so xfade can proceed
+                bad_paths = {bs.split(" (")[0] for bs in bad_segments}
+                segment_paths = [s for s in segment_paths if os.path.abspath(s) not in bad_paths and str(s) not in bad_paths]
+                n = len(segment_paths)
+                if n == 0:
+                    raise RuntimeError(f"All {len(bad_segments)} segments failed validation — nothing to concat")
+                # Recompute block_ranges to match remaining segments
+                block_ranges = block_ranges[:n]
+
         ff_args = ["ffmpeg", "-y", "-v", "error"]
 
         for sp in segment_paths:
@@ -3541,6 +3591,75 @@ class VideoEditor:
             )
 
         return str(output_path)
+
+    def _xfade_concat_batched(
+        self, segment_paths: list[str], block_ranges: list[dict],
+        output_path: str, batch_size: int = 60,
+    ) -> str:
+        """Split large segment lists into batches, xfade each batch, then concat.
+
+        Avoids the O(N²) filter_complex explosion that crashes ffmpeg with
+        rc=-9 when N > 150. Each batch produces a standalone body MP4;
+        the batch outputs are then concatenated with the ffmpeg concat
+        demuxer (stream copy — near-zero CPU, no re-encoding).
+        """
+        import tempfile
+        import uuid
+
+        n = len(segment_paths)
+        batches: list[str] = []  # paths to batch output files
+
+        tmpdir = Path(tempfile.gettempdir()) / f"autotube_xfade_{uuid.uuid4().hex[:8]}"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            for batch_idx in range(0, n, batch_size):
+                batch_end = min(batch_idx + batch_size, n)
+                batch_segs = segment_paths[batch_idx:batch_end]
+                batch_ranges = block_ranges[batch_idx:batch_end]
+                batch_output = str(tmpdir / f"batch_{batch_idx:04d}.mp4")
+
+                self.logger.info(
+                    "Batch %d/%d: xfading %d segments (%d–%d)",
+                    batch_idx // batch_size + 1,
+                    (n + batch_size - 1) // batch_size,
+                    len(batch_segs), batch_idx, batch_end - 1,
+                )
+                # Recursive call: xfade this batch normally
+                result = self._concat_body_with_crossfades(
+                    batch_segs, batch_ranges, batch_output,
+                )
+                batches.append(result)
+
+            # Concat all batch outputs via concat demuxer (no re-encoding)
+            concat_list = tmpdir / "concat_list.txt"
+            with open(concat_list, "w") as f:
+                for bp in batches:
+                    f.write(f"file '{os.path.abspath(bp)}'\n")
+
+            ff_args = [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+            result = subprocess.run(ff_args, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Batch concat failed (rc={result.returncode}): {result.stderr[-300:]}"
+                )
+
+            self.logger.info("Batched xfade complete: %d batches → %s", len(batches), output_path)
+            return str(output_path)
+        finally:
+            # Clean up temp batch files
+            import shutil
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _merge_consecutive_placeholders(

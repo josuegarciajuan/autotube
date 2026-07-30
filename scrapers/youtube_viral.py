@@ -1592,6 +1592,21 @@ class YouTubeViralScraper(BaseScraper):
         target_words_min = words_for_duration(self.config, target_min)
         target_words_max = words_for_duration(self.config, target_max)
 
+        # Pre-check: if the source script is drastically shorter than the
+        # target, the LLM cannot expand it sufficiently. Skip early instead
+        # of wasting an API call (and ~30s including retries) on a guaranteed
+        # failure. Guard: input must have at least 40% of the target words
+        # for a plausible 2.5x expansion.
+        min_feasible_input = max(50, int(target_words_min * 0.4))
+        if word_count < min_feasible_input:
+            logger.warning(
+                "[%s] Adapt duration SKIPPED: input %d words < %d feasible minimum "
+                "(target range %d-%d words). Gap too large for LLM expansion.",
+                self.canal, word_count, min_feasible_input,
+                target_words_min, target_words_max,
+            )
+            return None
+
         system_prompt = _ADAPT_DURATION_SYSTEM_PROMPT.format(
             target_minutes=target_min,
             target_max=str(target_max),

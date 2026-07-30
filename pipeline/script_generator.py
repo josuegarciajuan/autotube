@@ -112,6 +112,11 @@ class ScriptGenerator:
             timeout=120.0,   # 2 min for LLM calls
             max_retries=2,
         )
+        self._client_no_thinking = create_llm_client(
+            enable_thinking=False,
+            timeout=60.0,    # mechanical calls are faster without reasoning
+            max_retries=2,
+        )
         self._llm_retries = 3        # max retries for empty/broken JSON responses
         self._llm_retry_delay = 2.0  # initial backoff seconds (doubles each retry)
 
@@ -141,17 +146,23 @@ class ScriptGenerator:
             self.canal,
         )
 
-    def _llm_json_call(self, **call_kwargs):
+    def _llm_json_call(self, thinking: bool = True, **call_kwargs):
         """Call LLM chat.completions.create and parse JSON with retry.
 
         Handles empty/invalid JSON responses from the API by retrying up
         to ``self._llm_retries`` times with exponential backoff.  Returns
         the parsed dict, or raises the last exception on total failure.
+
+        Args:
+            thinking: If True (default), use the thinking-enabled client
+                (self.client). If False, use the no-thinking client
+                (self._client_no_thinking) for mechanical tasks.
         """
+        client = self.client if thinking else self._client_no_thinking
         last_exc = None
         for attempt in range(self._llm_retries):
             try:
-                response = self.client.chat.completions.create(**call_kwargs)
+                response = client.chat.completions.create(**call_kwargs)
                 content = response.choices[0].message.content
                 # DeepSeek thinking-mode fallback:
                 # When enable_thinking=True, the model may route the JSON
@@ -701,7 +712,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(
+            data = self._llm_json_call(thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -843,7 +854,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(
+            data = self._llm_json_call(thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -1068,6 +1079,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             len(all_bloques), total_words,
         )
 
+        # Safety net: if the LLM massively overshoots the configured block
+        # limit (e.g. thinking mode + stale DB target), cap gracefully
+        # instead of producing a 40+min video that takes 7h to render.
+        max_blocks = getattr(self.canal_config, "PROD_SCRIPT_BLOCKS_MAX", 18)
+        if len(all_bloques) > max_blocks * 1.5:
+            capped = max_blocks
+            logger.warning(
+                "generate_v2: bloques generados (%d) exceden 1.5x el máximo (%d). "
+                "Posible word_target inflado. Usando los primeros %d bloques.",
+                len(all_bloques), max_blocks, capped,
+            )
+            all_bloques = all_bloques[:capped]
+
         # Step 3: Enrich blocks with structural fields
         if hasattr(self, '_progress_cb') and self._progress_cb:
             try:
@@ -1175,6 +1199,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             duration_target = round(
                 random.uniform(max(0.5, mean - disc), mean + disc), 1
             )
+            # Guard: never exceed PROD_VIDEO_DURATION_MAX regardless of
+            # what the panel "Duración media" is set to. Prevents runaway
+            # durations (e.g. panel set to 40 min) from producing 7h pipelines.
+            max_dur = getattr(cfg, "PROD_VIDEO_DURATION_MAX", None)
+            if max_dur is not None:
+                duration_target = min(duration_target, float(max_dur))
 
         return self._compute_word_target(duration_target)
 
@@ -2286,7 +2316,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         try:
-            data = self._llm_json_call(
+            data = self._llm_json_call(thinking=False,
                 model=LLM_MODEL_SCRIPT,
                 messages=[
                     {"role": "system", "content": system_prompt},

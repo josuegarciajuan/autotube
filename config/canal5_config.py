@@ -106,17 +106,17 @@ QUICK_TEST_IMAGES_PER_SCENE = 3
 PROD_SCRIPT_WORDS_MIN = 900
 PROD_SCRIPT_WORDS_MAX = 1200
 PROD_SCRIPT_SCENES_MIN = 6
-PROD_SCRIPT_SCENES_MAX = 10
-PROD_SCRIPT_BLOCKS_MIN = 5
-PROD_SCRIPT_BLOCKS_MAX = 10
-PROD_VIDEO_DURATION_MIN = 4
-PROD_VIDEO_DURATION_MAX = 7
+PROD_SCRIPT_SCENES_MAX = 12
+PROD_SCRIPT_BLOCKS_MIN = 6
+PROD_SCRIPT_BLOCKS_MAX = 12
+PROD_VIDEO_DURATION_MIN = 6
+PROD_VIDEO_DURATION_MAX = 10
 
 # ── Average video duration target (in minutes) ──
 # These are the single source of truth for production — read via the
 # panel "Duración — Objetivo" and used by _get_word_target().
-VIDEO_AVERAGE_DURATION_MIN = 5
-VIDEO_DURATION_DISCREPANCY_MIN = 1
+VIDEO_AVERAGE_DURATION_MIN = 8
+VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 # ═══════════════════════════════════════════════════════════════════
 # NARRATIVE TONE
@@ -596,8 +596,8 @@ KEN_BURNS_ZOOM_MAX = 10
 # ── Scene pacing ────────────────────────────────────────────────
 # ─ Oct 2025: reduced MAX from 20 → 10 for more dynamic visual rotation (~10s scenes).
 #   MIN lowered from 8 → 5 to avoid excessive TTS block merging with the tighter MAX.
-SCENE_DURATION_MIN = 5.0
-SCENE_DURATION_MAX = 10.0
+SCENE_DURATION_MIN = 8.0
+SCENE_DURATION_MAX = 16.0
 
 # ── Render resolution ──────────────────────────────────────────
 VIDEO_RESOLUTION = (1280, 720)

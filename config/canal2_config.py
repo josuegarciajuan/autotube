@@ -106,23 +106,22 @@ PROD_SCRIPT_SCENES_MIN = 10
 PROD_SCRIPT_SCENES_MAX = 18
 PROD_SCRIPT_BLOCKS_MIN = 10
 PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 8
+PROD_VIDEO_DURATION_MIN = 10
 PROD_VIDEO_DURATION_MAX = 14
 
 # ── Scene duration enforcement (overrides video_editor defaults) ──
 # Scenes shorter than MIN are merged with neighbors.
 # Scenes longer than MAX are split into sub-scenes (each with its own media asset).
-# ─ Oct 2025: reduced MAX from 15 → 10 for more dynamic visual rotation (~10s scenes).
-#   MIN raised from 4 → 5 to reduce merge pressure (TTS blocks under 5s get merged).
-SCENE_DURATION_MIN = 3.0
-SCENE_DURATION_MAX = 10.0
+# ─ Jul 2026: raised MIN from 3→8, MAX from 10→16 for faster generation.
+SCENE_DURATION_MIN = 8.0
+SCENE_DURATION_MAX = 16.0
 
 # ── Hard cap: maximum accumulated duration for any composited clip ──
 # When a clip has been extended (via scene merges) beyond this limit,
 # the next scene with no media forces a NEW clip from the fallback pool
 # instead of further extending the same image. Prevents "same image for 200s".
-# ─ Reduced from 25 → 15 to match the ~10s scene ceiling.
-MAX_CLIP_EXTEND_SEC = 15.0
+# ─ Jul 2026: raised from 15→16 to match SCENE_DURATION_MAX.
+MAX_CLIP_EXTEND_SEC = 16.0
 
 # ── Image reuse: STRICTLY FORBIDDEN (Jul 2026) ──
 # Images are NEVER reused within the same video to prevent YouTube
@@ -135,7 +134,7 @@ MAX_CLIP_EXTEND_SEC = 15.0
 # These are the single source of truth for production — read via the
 # panel "Duración — Objetivo" and used by _get_word_target().
 VIDEO_AVERAGE_DURATION_MIN = 12
-VIDEO_DURATION_DISCREPANCY_MIN = 3
+VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 # ═══════════════════════════════════════════════════════════════════
 # NARRATIVE TONE
