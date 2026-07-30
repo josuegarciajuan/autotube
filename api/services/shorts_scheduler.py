@@ -1325,14 +1325,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             retry_delay=2.0,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~50-58 segundos (~90-110 palabras totales, minimo 80). "
+                f"Genera un Short viral en español de ~50-58 segundos (~80-100 palabras totales, minimo 80). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
                 f"{theme_block}"  # v8: visual theme context for query anchoring
                 f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
                 f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
                 f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 22. "
-                f"El total debe superar 80 palabras y no exceder 125. "
+                f"El total debe superar 80 palabras y no exceder 110. "
                 f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                 f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
                 f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
@@ -1364,12 +1364,55 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
         return None
 
-    # 1b. Validate script completeness
-    from pipeline.shorts_tts import validate_short_script
+    # 1b. Validate script completeness (with smart truncation for over-long scripts)
+    from pipeline.shorts_tts import validate_short_script, MAX_WORD_COUNT as _MAX_WORDS, MIN_WORD_COUNT as _MIN_WORDS
     errors = validate_short_script(script)
     if errors:
-        logger.error("Short script validation failed for %s: %s", channel_slug, errors)
-        return None
+        # Separate structural errors from word-count issues
+        structural_errors = [e for e in errors if "too long" not in e and "too short" not in e
+                             and "words" not in e and "Blocks" not in e and "blocks" not in e]
+        if structural_errors:
+            logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
+            return None
+
+        bloques_for_trim = script.get("bloques", [])
+        total_words = sum(len(b.get("texto", "").split()) for b in bloques_for_trim)
+
+        if total_words > _MAX_WORDS:
+            # Trim words from blocks: desarrollo → climax → cierre → hook (last resort)
+            trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
+            words_to_remove = total_words - _MAX_WORDS
+
+            for block_type in trim_order:
+                if words_to_remove <= 0:
+                    break
+                for b in bloques_for_trim:
+                    if b.get("tipo") == block_type:
+                        words = b.get("texto", "").split()
+                        min_words = 5 if block_type not in ("hook", "cierre") else 7
+                        if len(words) > min_words:
+                            remove_from_block = min(words_to_remove, len(words) - min_words)
+                            b["texto"] = " ".join(words[:len(words) - remove_from_block])
+                            words_to_remove -= remove_from_block
+
+            logger.warning(
+                "[%s] Script trimmed from %d to ~%d words (LLM exceeded limit of %d)",
+                channel_slug, total_words, _MAX_WORDS, _MAX_WORDS,
+            )
+
+            # Re-validate after trimming
+            errors2 = validate_short_script(script)
+            if errors2:
+                logger.error(
+                    "Short script still invalid after trimming for %s: %s",
+                    channel_slug, errors2,
+                )
+                return None
+        elif total_words < _MIN_WORDS:
+            logger.warning(
+                "[%s] Script has only %d words (< %d min) — proceeding anyway",
+                channel_slug, total_words, _MIN_WORDS,
+            )
 
     _update_short_job_progress(job_id, 10, "script")
 
