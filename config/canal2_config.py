@@ -114,7 +114,7 @@ PROD_VIDEO_DURATION_MAX = 14
 # Scenes longer than MAX are split into sub-scenes (each with its own media asset).
 # ─ Oct 2025: reduced MAX from 15 → 10 for more dynamic visual rotation (~10s scenes).
 #   MIN raised from 4 → 5 to reduce merge pressure (TTS blocks under 5s get merged).
-SCENE_DURATION_MIN = 5.0
+SCENE_DURATION_MIN = 3.0
 SCENE_DURATION_MAX = 10.0
 
 # ── Hard cap: maximum accumulated duration for any composited clip ──

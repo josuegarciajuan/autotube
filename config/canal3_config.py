@@ -615,7 +615,7 @@ KEN_BURNS_ZOOM_MAX = 10
 # ── Scene pacing ────────────────────────────────────────────────
 # ─ Oct 2025: reduced MAX from 20 → 10 for more dynamic visual rotation (~10s scenes).
 #   MIN stays at 6.0 — provides margin for TTS blocks under 6s to be merged with neighbors.
-SCENE_DURATION_MIN = 6.0
+SCENE_DURATION_MIN = 3.0
 SCENE_DURATION_MAX = 10.0
 
 # ── Subtitle style ─────────────────────────────────────────────

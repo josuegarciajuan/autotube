@@ -1323,14 +1323,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             retry_delay=2.0,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~35-45 segundos (~45-55 palabras totales, minimo 45). "
+                f"Genera un Short viral en español de ~50-58 segundos (~90-110 palabras totales, minimo 80). "
                 f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                 f"{topic_warning}"
                 f"{theme_block}"  # v8: visual theme context for query anchoring
-                f"Usa entre 5 y 7 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
-                f"IMPORTANTE: los bloques de desarrollo y climax deben tener 2-3 frases cada uno. "
-                f"Hook y cierre: 1-2 frases. Minimo 8 palabras por bloque, maximo 18. "
-                f"El total debe superar 45 palabras y no exceder 115. "
+                f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
+                f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
+                f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 22. "
+                f"El total debe superar 80 palabras y no exceder 125. "
                 f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                 f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
                 f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "

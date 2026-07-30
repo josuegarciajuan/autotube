@@ -290,7 +290,7 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
         else:
             cierre_desc = "6. cierre (3-5 seg) — cierre natural"
 
-        prompt = f"""Crea un guion para YouTube Shorts (~40-50 segundos de narración, ~55-70 palabras en español).
+        prompt = f"""Crea un guion para YouTube Shorts (~50-58 segundos de narración, ~90-110 palabras en español).
 
 CANAL: {display_name}
 ESTILO: {niche}
