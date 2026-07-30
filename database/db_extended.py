@@ -645,6 +645,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v21: UNIQUE partial index on shorts(source_video_id, start_time, end_time) ──
     _migrate_v21(conn, logger)
+
+    # ── v22: script_generation_attempts + scripts.emergency_mode ──
+    _migrate_v22(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1292,6 +1295,35 @@ def _migrate_v21(conn, logger):
         raise
 
 
+def _migrate_v22(conn, logger):
+    """Idempotent v22: script_generation_attempts table + scripts.emergency_mode column.
+    
+    - script_generation_attempts: structured failure logging per model/attempt
+    - scripts.emergency_mode: flag for scripts generated in emergency mode (all models failed)
+    """
+    # ── Create table (idempotent via CREATE TABLE IF NOT EXISTS) ──
+    schema_v22 = Path(__file__).parent / "schema_v22.sql"
+    if schema_v22.exists():
+        with open(schema_v22) as f:
+            sql = f.read()
+        # Run only CREATE TABLE / CREATE INDEX statements (already idempotent).
+        # ALTER TABLE ADD COLUMN is NOT idempotent in SQLite — handle separately.
+        for stmt in sql.split(";"):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            if stmt.upper().startswith("ALTER TABLE"):
+                # Check if column already exists before adding
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    # Column already exists — silence the duplicate error
+                    pass
+            else:
+                conn.execute(stmt)
+    logger.info("Migration: v22 schema applied (script_generation_attempts + emergency_mode)")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -1841,6 +1873,159 @@ class ExtendedDatabase(Database):
                 (canal, phase, status, message, content_id, duration_ms),
             )
             conn.commit()
+
+    # ── Script Generation Attempts (v22 model pool failover logging) ──
+
+    def log_generation_attempt(
+        self,
+        canal: str,
+        model_name: str,
+        attempt_number: int,
+        pool_position: int,
+        success: bool,
+        error_type: str = None,
+        error_message: str = None,
+        phase: str = "blocks",
+        video_id: int = None,
+        content_id: int = None,
+        tokens_input: int = None,
+        tokens_output: int = None,
+        cost_estimate: float = None,
+        duration_ms: int = None,
+    ):
+        """Log a single script generation attempt for failover pattern analysis."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO script_generation_attempts
+                   (video_id, content_id, canal, model_name, attempt_number,
+                    pool_position, success, error_type, error_message, phase,
+                    tokens_input, tokens_output, cost_estimate, duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    video_id, content_id, canal, model_name,
+                    attempt_number, pool_position,
+                    1 if success else 0,
+                    error_type,
+                    (error_message or "")[:500],
+                    phase,
+                    tokens_input, tokens_output, cost_estimate, duration_ms,
+                ),
+            )
+            conn.commit()
+
+    def get_generation_failure_patterns(self, canal: str = None, days: int = 7) -> dict:
+        """Aggregate script generation failures for pattern analysis.
+
+        Returns:
+            dict with total_attempts, total_failures, by_model, by_error_type,
+            emergency_activations, and recent_attempts.
+        """
+        canal_filter = "AND canal = ?" if canal else ""
+        params = (canal,) if canal else ()
+
+        with self._connect() as conn:
+            # Totals
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM script_generation_attempts WHERE 1=1 {canal_filter}",
+                params,
+            ).fetchone()[0]
+            failed = conn.execute(
+                f"SELECT COUNT(*) FROM script_generation_attempts WHERE success = 0 {canal_filter}",
+                params,
+            ).fetchone()[0]
+
+            # By model
+            by_model_rows = conn.execute(
+                f"""SELECT model_name,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failures
+                    FROM script_generation_attempts
+                    WHERE 1=1 {canal_filter}
+                    GROUP BY model_name
+                    ORDER BY failures DESC""",
+                params,
+            ).fetchall()
+            by_model = [
+                {
+                    "model": r[0],
+                    "total_attempts": r[1],
+                    "failures": r[2],
+                    "rate": round(r[2] / max(1, r[1]), 2),
+                }
+                for r in by_model_rows
+            ]
+
+            # By error type
+            by_error_rows = conn.execute(
+                f"""SELECT error_type, COUNT(*) as cnt
+                    FROM script_generation_attempts
+                    WHERE success = 0 AND error_type IS NOT NULL {canal_filter}
+                    GROUP BY error_type
+                    ORDER BY cnt DESC""",
+                params,
+            ).fetchall()
+            by_error_type = [
+                {"type": r[0], "count": r[1]} for r in by_error_rows
+            ]
+
+            # By phase
+            by_phase_rows = conn.execute(
+                f"""SELECT phase, COUNT(*) as total,
+                           SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failures
+                    FROM script_generation_attempts
+                    WHERE 1=1 {canal_filter}
+                    GROUP BY phase
+                    ORDER BY failures DESC""",
+                params,
+            ).fetchall()
+            by_phase = [
+                {
+                    "phase": r[0],
+                    "total_attempts": r[1],
+                    "failures": r[2],
+                    "rate": round(r[2] / max(1, r[1]), 2),
+                }
+                for r in by_phase_rows
+            ]
+
+            # Emergency activations (scripts with emergency_mode=1)
+            emergency_count = conn.execute(
+                "SELECT COUNT(*) FROM scripts WHERE emergency_mode = 1"
+            ).fetchone()[0]
+
+            # Recent attempts (last 50)
+            recent_rows = conn.execute(
+                f"""SELECT model_name, attempt_number, success, error_type,
+                           error_message, phase, duration_ms, created_at
+                    FROM script_generation_attempts
+                    WHERE 1=1 {canal_filter}
+                    ORDER BY created_at DESC LIMIT 50""",
+                params,
+            ).fetchall()
+            recent_attempts = [
+                {
+                    "model": r[0],
+                    "attempt": r[1],
+                    "success": bool(r[2]),
+                    "error_type": r[3],
+                    "error_message": r[4],
+                    "phase": r[5],
+                    "duration_ms": r[6],
+                    "created_at": r[7],
+                }
+                for r in recent_rows
+            ]
+
+        return {
+            "total_attempts": total,
+            "total_failures": failed,
+            "failure_rate": round(failed / max(1, total), 3),
+            "by_model": by_model,
+            "by_error_type": by_error_type,
+            "by_phase": by_phase,
+            "emergency_activations": emergency_count,
+            "recent_attempts": recent_attempts,
+        }
     
     # ── Orphan Detection ─────────────────────────────────────
     
