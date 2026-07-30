@@ -64,6 +64,17 @@ function impactBadge(impact: string) {
   return map[impact] || map.baja
 }
 
+/** Reconstruct chat history from refined_versions array. */
+function restoreHistoryFromVersions(versions: { triggered_by: string; explanation: string }[]): { role: string; content: string }[] {
+  if (!versions || !versions.length) return []
+  const history: { role: string; content: string }[] = []
+  for (const v of versions) {
+    if (v.triggered_by) history.push({ role: 'user', content: v.triggered_by })
+    if (v.explanation) history.push({ role: 'assistant', content: v.explanation })
+  }
+  return history
+}
+
 // ── Sparkline mini component ───────────────────────────────────────
 
 function MiniSparkline({ data, positive }: { data: number[]; positive: boolean }) {
@@ -244,6 +255,7 @@ function RecommendationCard({
   const [refineHistory, setRefineHistory] = useState<{role: string; content: string}[]>([])
   const [activeRefinedIndex, setActiveRefinedIndex] = useState<number | null>(null)
   const [applyingRefined, setApplyingRefined] = useState(false)
+  const [resumeChat, setResumeChat] = useState(false) // re-enter chat from applied/discarded state
   const meta = getCategoryMeta(rec.category)
 
   const refinedVersions: (RefinedVersion & { _index: number })[] =
@@ -253,13 +265,23 @@ function RecommendationCard({
   const validation: ValidationResult | undefined = rec.validation
   const showValidationBadge = !!validation
 
+  // Resume chat mode: skip discard/applied returns, show full card with chat open
+  // (refineMode + resumeChat are set together in the onClick handlers below)
+
   // Discarded state
-  if (rec.discarded) {
+  if (!resumeChat && rec.discarded) {
     return (
       <div className="flex items-center gap-3 px-4 py-2 bg-dark-800/30 rounded-lg border border-dashed border-gray-700/50">
         <span className="text-xs text-gray-600">
           ✕ Descartada: <span className="text-gray-500">{rec.title}</span>
         </span>
+        <button
+          onClick={() => { setResumeChat(true); setRefineMode(true); setExpanded(true); setRefineHistory(restoreHistoryFromVersions(refinedVersions)) }}
+          className="text-xs text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1"
+          title="Comentar esta sugerencia con la IA"
+        >
+          <MessageSquare size={12} /> Comentar
+        </button>
         <button
           onClick={() => onRestore(rec.id)}
           className="ml-auto text-xs text-gray-500 hover:text-gray-300 transition-colors"
@@ -271,17 +293,24 @@ function RecommendationCard({
   }
 
   // Applied state
-  if (rec.applied || applying) {
+  if (!resumeChat && (rec.applied || applying)) {
     return (
       <div className="glass rounded-xl p-4 border border-green-500/20">
         <div className="flex items-center gap-3">
           <Check size={18} className="text-green-400 flex-shrink-0" />
-          <div>
+          <div className="flex-1">
             <p className="text-sm font-medium text-green-300">{rec.title}</p>
             <p className="text-xs text-green-400/60">
               {applying ? 'Aplicando...' : 'Cambio aplicado al canal'}
             </p>
           </div>
+          <button
+            onClick={() => { setResumeChat(true); setRefineMode(true); setExpanded(true); setRefineHistory(restoreHistoryFromVersions(refinedVersions)) }}
+            className="text-xs text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1"
+            title="Comenta esta sugerencia con la IA aunque ya este aplicada"
+          >
+            <MessageSquare size={12} /> Comentar
+          </button>
         </div>
       </div>
     )
@@ -342,6 +371,28 @@ function RecommendationCard({
             >
               <X size={16} />
             </button>
+            {/* Comentar button (available for all recommendation types) */}
+            <button
+              onClick={() => {
+                const newMode = !refineMode
+                setRefineMode(newMode)
+                if (newMode) {
+                  setExpanded(true)
+                  // Restore chat history from existing refined_versions
+                  const restored = restoreHistoryFromVersions(refinedVersions)
+                  if (restored.length > 0) setRefineHistory(restored)
+                }
+              }}
+              className={`px-2.5 py-1.5 text-xs rounded-lg transition-colors flex items-center gap-1 ${
+                refineMode
+                  ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                  : 'bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20'
+              }`}
+              title="Comenta esta sugerencia con la IA para discutirla o refinarla"
+            >
+              <MessageSquare size={12} />
+              <span className="hidden sm:inline">Comentar</span>
+            </button>
             {rec.requires_code ? (
               <>
                 <button
@@ -401,29 +452,12 @@ function RecommendationCard({
                 </button>
               </>
             ) : (
-              <>
-                <button
-                  onClick={() => {
-                    setRefineMode(!refineMode)
-                    if (!refineMode) setExpanded(true)
-                  }}
-                  className={`px-2.5 py-1.5 text-xs rounded-lg transition-colors flex items-center gap-1 ${
-                    refineMode
-                      ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
-                      : 'bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20'
-                  }`}
-                  title="Refinar sugerencia antes de aplicar"
-                >
-                  <MessageSquare size={12} />
-                  <span className="hidden sm:inline">Refinar</span>
-                </button>
-                <button
-                  onClick={() => onApply(rec.id)}
-                  className="px-2.5 py-1.5 text-xs bg-neon-red/10 text-neon-red border border-neon-red/30 rounded-lg hover:bg-neon-red/20 transition-colors flex items-center gap-1"
-                >
-                  <Check size={12} /> Aplicar
-                </button>
-              </>
+              <button
+                onClick={() => onApply(rec.id)}
+                className="px-2.5 py-1.5 text-xs bg-neon-red/10 text-neon-red border border-neon-red/30 rounded-lg hover:bg-neon-red/20 transition-colors flex items-center gap-1"
+              >
+                <Check size={12} /> Aplicar
+              </button>
             )}
           </div>
         </div>
@@ -478,64 +512,76 @@ function RecommendationCard({
           {refineMode && activeRefinedIndex !== null && onApplyRefined ? (
             <div className="space-y-3">
               {/* Already refined — show the refined version */}
-              {refinedVersions.length > 0 && refinedVersions.filter(v => v._index === activeRefinedIndex).map(rv => (
+              {refinedVersions.length > 0 && refinedVersions.filter(v => v._index === activeRefinedIndex).map(rv => {
+                const hasConfigChanges = rv.revised_config_changes && Object.keys(rv.revised_config_changes).length > 0
+                return (
                 <div key={rv._index} className="space-y-3">
-                  <div className="flex items-start gap-2 bg-purple-500/5 rounded-lg p-3 border border-purple-500/20">
-                    <MessageSquare size={14} className="text-purple-400 mt-0.5 flex-shrink-0" />
+                  <div className={`flex items-start gap-2 rounded-lg p-3 border ${
+                    rv.explanation?.startsWith('⚠️')
+                      ? 'bg-amber-500/5 border-amber-500/20'
+                      : 'bg-purple-500/5 border-purple-500/20'
+                  }`}>
+                    <MessageSquare size={14} className={rv.explanation?.startsWith('⚠️') ? 'text-amber-400 mt-0.5 flex-shrink-0' : 'text-purple-400 mt-0.5 flex-shrink-0'} />
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs text-purple-400 font-medium mb-1">Version refinada</p>
+                      <p className={`text-xs font-medium mb-1 ${rv.explanation?.startsWith('⚠️') ? 'text-amber-400' : 'text-purple-400'}`}>
+                        {hasConfigChanges ? 'Version refinada' : 'Respuesta'}
+                      </p>
                       <p className="text-xs text-gray-300">{rv.explanation}</p>
-                      <div className="mt-2">
-                        <p className="text-xs font-semibold text-green-400 mb-1">Cambios propuestos</p>
-                        <div className="overflow-x-auto">
-                          <table className="text-xs w-full">
-                            <thead>
-                              <tr className="text-gray-500 border-b border-surface-border">
-                                <th className="text-left py-1 pr-3">Config key</th>
-                                <th className="text-left py-1">Nuevo valor</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {Object.entries(rv.revised_config_changes).map(([k, v]) => (
-                                <tr key={k} className="border-b border-surface-border/30">
-                                  <td className="py-1 pr-3 text-gray-400 font-mono">{k}</td>
-                                  <td className="py-1 text-gray-200 font-mono">
-                                    {typeof v === 'object' ? JSON.stringify(v) : String(v)}
-                                  </td>
+                      {hasConfigChanges && (
+                        <div className="mt-2">
+                          <p className="text-xs font-semibold text-green-400 mb-1">Cambios propuestos</p>
+                          <div className="overflow-x-auto">
+                            <table className="text-xs w-full">
+                              <thead>
+                                <tr className="text-gray-500 border-b border-surface-border">
+                                  <th className="text-left py-1 pr-3">Config key</th>
+                                  <th className="text-left py-1">Nuevo valor</th>
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                              </thead>
+                              <tbody>
+                                {Object.entries(rv.revised_config_changes).map(([k, v]) => (
+                                  <tr key={k} className="border-b border-surface-border/30">
+                                    <td className="py-1 pr-3 text-gray-400 font-mono">{k}</td>
+                                    <td className="py-1 text-gray-200 font-mono">
+                                      {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
                         </div>
-                      </div>
+                      )}
                       <div className="flex items-center gap-2 mt-3">
-                        <button
-                          onClick={async () => {
-                            setApplyingRefined(true)
-                            try {
-                              await onApplyRefined(rec.id, rv._index)
-                            } finally {
-                              setApplyingRefined(false)
-                            }
-                          }}
-                          disabled={applyingRefined}
-                          className="px-3 py-1.5 text-xs bg-green-600/20 text-green-400 border border-green-500/30 rounded-lg hover:bg-green-600/30 transition-colors flex items-center gap-1"
-                        >
-                          {applyingRefined ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <Check size={12} />
-                          )}
-                          Aplicar esta version
-                        </button>
+                        {hasConfigChanges && !rec.requires_code && (
+                          <button
+                            onClick={async () => {
+                              setApplyingRefined(true)
+                              try {
+                                await onApplyRefined(rec.id, rv._index)
+                              } finally {
+                                setApplyingRefined(false)
+                              }
+                            }}
+                            disabled={applyingRefined}
+                            className="px-3 py-1.5 text-xs bg-green-600/20 text-green-400 border border-green-500/30 rounded-lg hover:bg-green-600/30 transition-colors flex items-center gap-1"
+                          >
+                            {applyingRefined ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <Check size={12} />
+                            )}
+                            Aplicar esta version
+                          </button>
+                        )}
                         <button
                           onClick={() => setActiveRefinedIndex(null)}
                           className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-300 transition-colors flex items-center gap-1"
                         >
-                          <RotateCcw size={12} /> Seguir refinando
+                          <RotateCcw size={12} /> Seguir comentando
                         </button>
                         <button
-                          onClick={() => { setRefineMode(false); setRefineInput(''); setRefineHistory([]); setActiveRefinedIndex(null) }}
+                          onClick={() => { setRefineMode(false); setRefineInput(''); setRefineHistory([]); setActiveRefinedIndex(null); setResumeChat(false) }}
                           className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-400 transition-colors"
                         >
                           Cancelar
@@ -544,7 +590,7 @@ function RecommendationCard({
                     </div>
                   </div>
                 </div>
-              ))}
+              )})}
             </div>
           ) : refineMode ? (
             <div className="space-y-4">
@@ -596,25 +642,30 @@ function RecommendationCard({
               ))}
 
               {/* Latest refine response (if we just got one) */}
-              {refinedVersions.length > 0 && !activeRefinedIndex && (
+              {refinedVersions.length > 0 && !activeRefinedIndex && (() => {
+                const latest = refinedVersions[refinedVersions.length - 1]
+                const hasChanges = latest.revised_config_changes && Object.keys(latest.revised_config_changes).length > 0
+                return (
                 <div className="flex items-start gap-2">
                   <div className="w-6 h-6 rounded-full bg-purple-500/10 border border-purple-500/20 flex items-center justify-center flex-shrink-0">
                     <MessageSquare size={10} className="text-purple-400" />
                   </div>
                   <div className="bg-purple-500/5 rounded-lg p-3 border border-purple-500/20 flex-1">
-                    <p className="text-[11px] text-gray-500 mb-1">Respuesta (ultima version)</p>
-                    <p className="text-xs text-gray-300">{refinedVersions[refinedVersions.length - 1].explanation}</p>
-                    <div className="mt-2">
-                      <p className="text-[10px] text-gray-500 mb-1">Cambios revisados:</p>
-                      {Object.entries(refinedVersions[refinedVersions.length - 1].revised_config_changes).map(([k, v]) => (
-                        <span key={k} className="text-[10px] bg-dark-700 px-1.5 py-0.5 rounded mr-1">
-                          {k}: <span className="text-gray-300">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
-                        </span>
-                      ))}
-                    </div>
+                    <p className="text-[11px] text-gray-500 mb-1">Respuesta</p>
+                    <p className="text-xs text-gray-300">{latest.explanation}</p>
+                    {hasChanges && (
+                      <div className="mt-2">
+                        <p className="text-[10px] text-gray-500 mb-1">Cambios revisados:</p>
+                        {Object.entries(latest.revised_config_changes).map(([k, v]) => (
+                          <span key={k} className="text-[10px] bg-dark-700 px-1.5 py-0.5 rounded mr-1">
+                            {k}: <span className="text-gray-300">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
+              )})()}
 
               {/* Input for refinement */}
               <div className="flex items-start gap-2">
@@ -659,7 +710,7 @@ function RecommendationCard({
 
               {/* Cancel refine */}
               <button
-                onClick={() => { setRefineMode(false); setRefineInput(''); setRefineHistory([]); setActiveRefinedIndex(null) }}
+                onClick={() => { setRefineMode(false); setRefineInput(''); setRefineHistory([]); setActiveRefinedIndex(null); setResumeChat(false) }}
                 className="text-xs text-gray-500 hover:text-gray-400 transition-colors flex items-center gap-1"
               >
                 <X size={12} /> Salir del modo refinar

@@ -358,10 +358,9 @@ def refine_insight(channel_id: int, insight_id: int, body: RefineRequest):
             f"Available: {[r.get('id') for r in recs]}",
         )
 
-    if rec.get("requires_code"):
-        raise HTTPException(400, "Cannot refine a code-change recommendation")
+    is_code_change = rec.get("requires_code", False)
 
-    if not rec.get("config_changes"):
+    if not is_code_change and not rec.get("config_changes"):
         raise HTTPException(400, "Recommendation has no config_changes to refine")
 
     # Get current config for context
@@ -382,6 +381,7 @@ def refine_insight(channel_id: int, insight_id: int, body: RefineRequest):
         user_feedback=body.user_feedback,
         current_config=current_config,
         conversation_history=body.conversation_history,
+        is_code_change=is_code_change,
     )
 
     if result.get("cannot_fulfill"):

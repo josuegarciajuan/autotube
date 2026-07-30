@@ -664,18 +664,75 @@ Return ONLY valid JSON:
 }}
 """
 
+_REFINE_DISCUSS_SYSTEM = """\
+You are a YouTube channel strategy assistant. A user wants to discuss
+a code-change suggestion — a new feature or module they're considering implementing.
+
+The user will ask questions, raise concerns, or want to explore tradeoffs.
+Your job: have a natural, helpful conversation about this suggestion.
+
+Guidelines:
+- Answer the user's questions directly and honestly
+- If the suggestion could harm the channel (e.g., violate YouTube policies, spam behaviors, algorithm risks), SAY SO clearly
+- If the suggestion is beneficial, explain why and suggest implementation priorities
+- Propose concrete alternatives if the suggestion has issues
+- Keep responses conversational (Spanish, 2-5 sentences)
+- Use the current channel config for context when relevant
+- If you agree the suggestion should be DISCARDED, set cannot_fulfill=true and explain why clearly
+- If the suggestion could work with modifications, explain what needs to change
+"""
+
+_REFINE_DISCUSS_USER = """\
+## Original code-change suggestion
+
+Title: {title}
+Category: {category}
+Detail: {detail}
+Implementation prompt (truncated): {opencode_prompt}
+
+## Current channel config (for context)
+{current_config}
+
+## User message
+{user_feedback}
+
+## Conversation history
+{history}
+
+Return ONLY valid JSON:
+{{
+  "explanation": "Your conversational response to the user (Spanish, 2-5 sentences). Answer their question, discuss tradeoffs, suggest alternatives if needed.",
+  "revised_config_changes": {{}},
+  "cannot_fulfill": false,
+  "cannot_fulfill_reason": ""
+}}
+
+If you believe the suggestion should be ABANDONED (e.g., it violates YouTube policies, creates spam patterns, or would harm the channel), set:
+{{
+  "explanation": "Clear explanation of why this is a bad idea",
+  "revised_config_changes": {{}},
+  "cannot_fulfill": true,
+  "cannot_fulfill_reason": "Short tagline: e.g. 'Puede penalizar el canal en YouTube'"
+}}
+"""
+
 
 def run_refine_recommendation(rec_id: str, recommendation: dict,
                               user_feedback: str,
                               current_config: dict,
-                              conversation_history: list[dict] | None = None
+                              conversation_history: list[dict] | None = None,
+                              is_code_change: bool = False
                               ) -> dict:
-    """Refine a config-change recommendation based on user feedback.
+    """Refine or discuss a recommendation based on user feedback.
+
+    For config-change recommendations: produces revised config_changes.
+    For code-change recommendations (is_code_change=True): acts as a
+    discussion partner to help the user decide on the suggestion.
 
     Returns:
         { explanation, revised_config_changes, cannot_fulfill, cannot_fulfill_reason }
     """
-    logger.info("Refining rec %s: user feedback length=%d", rec_id, len(user_feedback))
+    logger.info("Refining rec %s (code_change=%s): user feedback length=%d", rec_id, is_code_change, len(user_feedback))
 
     try:
         client = create_llm_client(
@@ -692,22 +749,35 @@ def run_refine_recommendation(rec_id: str, recommendation: dict,
                 f"[{m['role']}]: {m['content']}" for m in conversation_history
             )
 
-        user_prompt = _REFINE_USER.format(
-            title=recommendation.get("title", ""),
-            category=recommendation.get("category", ""),
-            detail=recommendation.get("detail", ""),
-            original_changes=json.dumps(recommendation.get("config_changes", {}), ensure_ascii=False),
-            current_config=json.dumps(current_config, ensure_ascii=False, default=str),
-            user_feedback=user_feedback,
-            history=history_str or "(primer mensaje — no hay historial previo)",
-            config_keys=json.dumps(_CONFIG_KEYS, ensure_ascii=False),
-        )
+        if is_code_change:
+            system_prompt = _REFINE_DISCUSS_SYSTEM
+            user_prompt = _REFINE_DISCUSS_USER.format(
+                title=recommendation.get("title", ""),
+                category=recommendation.get("category", ""),
+                detail=recommendation.get("detail", ""),
+                opencode_prompt=recommendation.get("opencode_prompt", "")[:1500],
+                current_config=json.dumps(current_config, ensure_ascii=False, default=str),
+                user_feedback=user_feedback,
+                history=history_str or "(primer mensaje — no hay historial previo)",
+            )
+        else:
+            system_prompt = _REFINE_SYSTEM
+            user_prompt = _REFINE_USER.format(
+                title=recommendation.get("title", ""),
+                category=recommendation.get("category", ""),
+                detail=recommendation.get("detail", ""),
+                original_changes=json.dumps(recommendation.get("config_changes", {}), ensure_ascii=False),
+                current_config=json.dumps(current_config, ensure_ascii=False, default=str),
+                user_feedback=user_feedback,
+                history=history_str or "(primer mensaje — no hay historial previo)",
+                config_keys=json.dumps(_CONFIG_KEYS, ensure_ascii=False),
+            )
 
         result = llm_json_call(
             client,
             model=model,
             messages=[
-                {"role": "system", "content": _REFINE_SYSTEM},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=3000,
