@@ -166,6 +166,9 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
     db.update_channel(channel_id, config=current_config)
     db.mark_insight_applied(insight_id, applied_by="system")
 
+    # Persist applied flag on the individual recommendation so it survives reloads
+    db.update_insight_recommendation(insight_id, rec_id, {"applied": True})
+
     # Invalidate config bridge cache so next pipeline run picks up changes
     try:
         from config.config_bridge import _config_cache
@@ -250,7 +253,51 @@ def validate_insight(channel_id: int, insight_id: int, rec_id: str = Query("")):
     except concurrent.futures.TimeoutError:
         raise HTTPException(504, "Validation timed out")
 
+    # Persist validation result so it survives reloads
+    db.update_insight_recommendation(insight_id, rec_id, {"validation": validation})
+
     return {"ok": True, "validation": validation, "rec_id": rec_id}
+
+
+# ── Discard / restore recommendation ──────────────────────────────────
+
+@router.post("/{channel_id}/insights/{insight_id}/discard")
+def discard_insight_recommendation(channel_id: int, insight_id: int,
+                                   rec_id: str = Query(""),
+                                   discarded: bool = Query(True)):
+    """Persist discarded/restored state for one recommendation inside an insight.
+
+    Query params:
+        rec_id:     the recommendation UUID to discard or restore
+        discarded:  True to discard, False to restore (default True)
+    """
+    db = get_db()
+
+    # Validate channel
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    # Validate insight
+    insight = db.get_insight(insight_id)
+    if not insight:
+        raise HTTPException(404, "Insight not found")
+    if insight["channel_id"] != channel_id:
+        raise HTTPException(400, "Insight does not belong to this channel")
+
+    ok = db.update_insight_recommendation(insight_id, rec_id, {"discarded": discarded})
+    if not ok:
+        raise HTTPException(
+            404,
+            f"Recommendation '{rec_id}' not found in insight {insight_id}",
+        )
+
+    logger.info(
+        "Recommendation %s in insight %d %s",
+        rec_id, insight_id,
+        "discarded" if discarded else "restored",
+    )
+    return {"ok": True, "rec_id": rec_id, "discarded": discarded}
 
 
 # ── Refine (config-change recommendations) ───────────────────────────

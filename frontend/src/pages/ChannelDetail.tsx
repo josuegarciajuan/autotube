@@ -311,6 +311,10 @@ export default function ChannelDetail() {
         setHasMoreVideos(true)
         setShowErrors(false)
 
+        // Reset insights and analysis state for the new channel
+        setInsights(null)
+        setAnalyzing(false)
+
         const [ch, vids] = await Promise.all([
           api.getChannel(channelId),
           api.getChannelVideos(channelId),

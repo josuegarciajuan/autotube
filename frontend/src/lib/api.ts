@@ -411,6 +411,11 @@ export const api = {
         }),
       }
     ),
+  discardInsight: (channelId: number, insightId: number, recId: string, discarded: boolean) =>
+    request<any>(
+      `/channels/${channelId}/insights/${insightId}/discard?rec_id=${encodeURIComponent(recId)}&discarded=${discarded}`,
+      { method: 'POST' }
+    ),
 };
 
 // ── Pipeline status types ────────────────────────────────────

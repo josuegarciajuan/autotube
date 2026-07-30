@@ -865,8 +865,10 @@ export default function InsightsTab({
     })
   }
 
-  function handleDiscard(recId: string) {
+  async function handleDiscard(recId: string) {
     if (!insights) return
+    // Optimistic update
+    const prevInsights = insights
     const recs = insights.insights_json.recommendations.map(r =>
       r.id === recId ? { ...r, discarded: true } : r
     )
@@ -874,10 +876,19 @@ export default function InsightsTab({
       ...insights,
       insights_json: { ...insights.insights_json, recommendations: recs },
     })
+    try {
+      await api.discardInsight(channelId, insights.id, recId, true)
+    } catch (e: any) {
+      console.error('Discard failed:', e)
+      // Revert on failure
+      setInsights(prevInsights)
+    }
   }
 
-  function handleRestore(recId: string) {
+  async function handleRestore(recId: string) {
     if (!insights) return
+    // Optimistic update
+    const prevInsights = insights
     const recs = insights.insights_json.recommendations.map(r =>
       r.id === recId ? { ...r, discarded: false } : r
     )
@@ -885,6 +896,13 @@ export default function InsightsTab({
       ...insights,
       insights_json: { ...insights.insights_json, recommendations: recs },
     })
+    try {
+      await api.discardInsight(channelId, insights.id, recId, false)
+    } catch (e: any) {
+      console.error('Restore failed:', e)
+      // Revert on failure
+      setInsights(prevInsights)
+    }
   }
 
   // ── Validate (code-change recommendations) ─────────────────────
