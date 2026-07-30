@@ -941,16 +941,13 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
 
     # 3. Allowed concurrency: shorts coexist with long-form generation and uploads.
     #    Per AGENTS.md, shorts are excluded from the sequential-only limit.
-    #    Guards #4 (one short at a time), #5 (min 1GB RAM), and #6 (per-channel
+    #    Guards #4 (per-channel short job check), #5 (min 1GB RAM), and #6 (per-channel
     #    cooldown) provide sufficient resource protection for low-footprint shorts.
+    #
+    #    NOTE: Guard #4 moved INSIDE the retry loop (per-channel check) instead of
+    #    globally, so different channels can generate shorts in parallel.
 
-    # 4. Guard: only one SHORT at a time
-    active = db.get_active_shorts_job()
-    if active:
-        logger.debug("Shorts dispatch skipped: short job #%d is %s", active["id"], active["status"])
-        return None
-
-    # 5. Memory gate (shorts use minimal RAM — 1 GB is enough)
+    # 4. Memory gate (shorts use minimal RAM — 1 GB is enough)
     if not _memory_ok(min_free_gb=1.0):
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
@@ -958,6 +955,25 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
     _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
     _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
+
+    # ── Pre-filter: cache which channels have completed long videos today ──
+    # Clip shorts need a source long video. Pre-computing this avoids wasting
+    # retry iterations on clip slots that will never succeed.
+    _channels_with_source: set[int] = set()
+    _channels_without_source: set[int] = set()
+    try:
+        today_long = db.get_completed_videos_today_all_channels()
+        if today_long:
+            for row in today_long:
+                _channels_with_source.add(row.get("channel_id", 0))
+        # Get all channel IDs that have ANY pending clip slot today
+        # to mark channels that are known to lack a source video.
+        pending_clip_channels = db.get_channels_with_pending_clip_slots_today()
+        for ch_id in pending_clip_channels or []:
+            if ch_id not in _channels_with_source:
+                _channels_without_source.add(int(ch_id))
+    except Exception:
+        pass  # non-critical optimization
 
     for _retry in range(_MAX_CLIP_RETRIES):
         # 6. Get next pending short slot that is due (skip cooldown-blocked slots)
@@ -981,7 +997,20 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         scheduled = next_slot.get("scheduled_at", "?")
         slot_rank = next_slot.get("slot_rank", 0)
 
-        # 7. Per-channel cooldown guard — skip to next slot instead of failing
+        # 4. Per-channel short job guard — skip to next slot instead of failing.
+        #    Different channels can generate shorts in parallel since each has
+        #    its own API keys, TTS resources, and render pipeline.
+        active_channel_short = db.get_active_shorts_job_for_channel(channel_id)
+        if active_channel_short:
+            logger.info(
+                "Shorts slot #%d (%s) skipped: channel already has active "
+                "short job #%d — trying next channel",
+                slot_id, slug, active_channel_short["id"],
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
+
+        # 5. Per-channel cooldown guard — skip to next slot instead of failing
         if not _channel_shorts_cooldown_ok(channel_id, db):
             logger.info(
                 "Shorts slot #%d (%s) skipped: cooldown active "
@@ -1008,9 +1037,20 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
             slot_id, slug, short_type, scheduled,
         )
 
-        # 9. For clip slots: check source video dependency
+        # 9. For clip slots: check source video dependency (with pre-filter)
         source_video_id = None
         if short_type == "clip":
+            # Pre-filter: skip clip slots for channels with no completed long videos today.
+            # This avoids wasting retry iterations on slots that can never succeed.
+            if channel_id in _channels_without_source:
+                logger.info(
+                    "Shorts slot #%d (%s) skipped: clip type but channel has "
+                    "no completed long videos today — trying next channel",
+                    slot_id, slug,
+                )
+                _skipped_slot_ids.add(slot_id)
+                continue
+
             long_pos = next_slot.get("long_slot_position")
             source_video_id = _resolve_clip_source(channel_id, long_pos)
             if source_video_id is None:
@@ -1194,6 +1234,29 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
             pass
+
+        # ── Dispatch-on-completion: immediately try next due short ──
+        # Without this, the next short waits for the schedule checker
+        # tick (1-5 min). By triggering now, we chain shorts back-to-back
+        # and clear the backlog faster.
+        try:
+            import asyncio as _asyncio
+            async def _chain_next():
+                await _asyncio.sleep(2)  # let DB changes settle
+                try:
+                    from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
+                    next_result = dispatch_next_due_shorts_slot()
+                    if next_result:
+                        logger.info(
+                            "Chained next short: slot=%d channel=%s type=%s",
+                            next_result["slot_id"], next_result["channel_slug"],
+                            next_result["short_type"],
+                        )
+                except Exception as _chain_err:
+                    logger.debug("Chain dispatch skipped: %s", _chain_err)
+            _asyncio.create_task(_chain_next())
+        except Exception:
+            pass  # best-effort, never crash the finally block
 
 
 # ── Short job progress helper ───────────────────────────────────

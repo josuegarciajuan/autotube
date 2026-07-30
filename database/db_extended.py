@@ -4080,11 +4080,32 @@ class ExtendedDatabase(Database):
         
         Distinct from get_active_job() which blocks on ANY job. Shorts can run
         concurrently with long-form videos (2-column model: 1 video + 1 short).
+        
+        DEPRECATED for dispatch gating: use get_active_shorts_job_for_channel()
+        instead to allow per-channel parallelism. Still used by monitoring/UI.
         """
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM generation_jobs WHERE status IN ('running','queued') "
                 "AND action IN ('generate_native_short', 'generate_clip_short') LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    
+    def get_active_shorts_job_for_channel(self, channel_id: int) -> dict | None:
+        """Check if a short job is active for a SPECIFIC channel.
+        
+        Per-channel gating allows different channels to generate shorts in parallel,
+        since each channel has its own API keys, TTS resources, and render pipeline.
+        Only blocks the SAME channel to prevent double-dispatch and resource collision.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT gj.* FROM generation_jobs gj "
+                "JOIN shorts_planned_slots sps ON sps.job_id = gj.id "
+                "WHERE gj.status IN ('running','queued') "
+                "AND gj.action IN ('generate_native_short', 'generate_clip_short') "
+                "AND sps.channel_id = ? LIMIT 1",
+                (channel_id,),
             ).fetchone()
         return dict(row) if row else None
     
@@ -4947,7 +4968,7 @@ class ExtendedDatabase(Database):
         return [dict(r) for r in rows]
 
     def get_next_pending_shorts_slot(self, exclude_slot_ids: list[int] | None = None) -> dict | None:
-        """Get the next pending short slot that is due (scheduled_at <= now),
+        """Get the next pending short slot that is due (scheduled_at <= now + 10min),
         ordered by target_upload_at ASC (nearest upload date first). Returns
         None if none.
 
@@ -4960,6 +4981,10 @@ class ExtendedDatabase(Database):
         Slots older than 24h are excluded to prevent truly obsolete slots
         from blocking the dispatch queue.
         
+        Lookahead: includes slots scheduled within the next 10 minutes so
+        the dispatcher can pre-generate before the deadline instead of
+        waiting until slots are already past-due.
+        
         Args:
             exclude_slot_ids: Optional list of slot IDs to skip. Used by the
                 dispatch loop to skip past channels blocked by cooldown.
@@ -4970,7 +4995,7 @@ class ExtendedDatabase(Database):
                        JOIN channels c ON sps.channel_id = c.id
                        WHERE sps.status = 'pending'
                            AND sps.scheduled_at >= datetime('now','-24 hours')
-                           AND sps.scheduled_at <= datetime('now')"""
+                           AND sps.scheduled_at <= datetime('now','+10 minutes')"""
             params: list = []
             if exclude_slot_ids:
                 placeholders = ",".join("?" for _ in exclude_slot_ids)
@@ -5349,6 +5374,32 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+    
+    def get_completed_videos_today_all_channels(self) -> list[dict]:
+        """Get today's completed videos for ALL channels. Returns [{channel_id, id}, ...].
+        Used by shorts dispatcher to pre-filter which channels have source videos for clips."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, channel_id
+                   FROM videos
+                   WHERE COALESCE(date(uploaded_at), date(created_at)) = date('now', 'localtime')
+                     AND status IN ('uploaded', 'uploaded_private', 'published')
+                   ORDER BY channel_id""",
+            ).fetchall()
+        return [dict(r) for r in rows]
+    
+    def get_channels_with_pending_clip_slots_today(self) -> list[int]:
+        """Get channel IDs that have pending clip slots scheduled for today.
+        Used to pre-mark channels that definitely lack source videos for clips."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT sps.channel_id
+                   FROM shorts_planned_slots sps
+                   WHERE sps.status = 'pending'
+                     AND sps.short_type = 'clip'
+                     AND sps.date_key = date('now', 'localtime')""",
+            ).fetchall()
+        return [int(r["channel_id"]) for r in rows]
 
     # ── system_state helpers ───────────────────────────────────
 
