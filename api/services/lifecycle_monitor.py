@@ -50,6 +50,11 @@ PUBLISH_DELAY_THRESHOLD_HOURS = 48  # warn if uploaded_private > 48h
 # Shorts stuck without progressing
 SHORT_STUCK_THRESHOLD_MIN = 60
 
+# Cooldown: don't re-create alerts that were recently resolved by the user.
+# After bulk-resolving alerts, the health check will suppress recreation
+# for this many hours. After cooldown expires, stale alerts will reappear.
+ALERT_RESOLVE_COOLDOWN_HOURS = 24
+
 
 # ═══════════════════════════════════════════════════════════════
 # Public API
@@ -148,10 +153,23 @@ def create_alert(db, *,
     """Create a pipeline alert. Returns alert id or None if duplicate."""
     try:
         with db._connect() as conn:
+            # ── Cooldown: suppress alert if recently resolved by user ──
+            recently_resolved = conn.execute(
+                """SELECT id FROM pipeline_alerts
+                   WHERE entity_type = ? AND entity_id IS ? AND alert_type = ?
+                     AND resolved = 1
+                     AND resolved_at > datetime('now', ?)
+                   LIMIT 1""",
+                (entity_type, entity_id, alert_type,
+                 f'-{ALERT_RESOLVE_COOLDOWN_HOURS} hours'),
+            ).fetchone()
+            if recently_resolved:
+                return None
+
             # Dedup: don't create same alert for same entity if unresolved
             existing = conn.execute(
                 """SELECT id FROM pipeline_alerts
-                   WHERE entity_type = ? AND entity_id = ?
+                   WHERE entity_type = ? AND entity_id IS ?
                      AND alert_type = ? AND resolved = 0
                    ORDER BY created_at DESC LIMIT 1""",
                 (entity_type, entity_id, alert_type),
@@ -514,9 +532,23 @@ def _auto_resolve_completed(db) -> int:
 def _maybe_create_alert(db, conn, entity_type, entity_id, channel_id,
                         alert_type, severity, title, message, metadata) -> int:
     """Create alert if not already existing for this entity+type. Returns 1 if created, 0 if dup."""
+    # ── Cooldown: suppress alert if recently resolved by user ──
+    recently_resolved = conn.execute(
+        """SELECT id FROM pipeline_alerts
+           WHERE entity_type = ? AND entity_id IS ? AND alert_type = ?
+             AND resolved = 1
+             AND resolved_at > datetime('now', ?)
+           LIMIT 1""",
+        (entity_type, entity_id, alert_type,
+         f'-{ALERT_RESOLVE_COOLDOWN_HOURS} hours'),
+    ).fetchone()
+    if recently_resolved:
+        return 0
+
+    # Dedup: don't create same alert for same entity if unresolved
     existing = conn.execute(
         """SELECT id FROM pipeline_alerts
-           WHERE entity_type = ? AND entity_id = ? AND alert_type = ? AND resolved = 0
+           WHERE entity_type = ? AND entity_id IS ? AND alert_type = ? AND resolved = 0
            LIMIT 1""",
         (entity_type, entity_id, alert_type),
     ).fetchone()
