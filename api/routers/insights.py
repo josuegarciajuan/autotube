@@ -56,18 +56,38 @@ def analyze_channel(channel_id: int):
         raise HTTPException(404, "Channel not found")
 
     # ── Dedup: if there is already a running analysis for this channel,
-    # return it instead of creating a duplicate that will just queue up.
+    # check whether it's truly alive or a stale orphan (e.g. thread killed
+    # during a server restart).  Stale rows are cleaned up on the fly so
+    # the user never sees a phantom "processing" stuck forever.
+    import datetime as _dt
     existing = db.get_latest_insight(channel_id)
     if existing and existing.get("status") == "processing":
-        logger.info(
-            "Analysis for channel %d already running (insight %d) — skipping new launch",
-            channel_id, existing["id"],
-        )
-        return {
-            "insight_id": existing["id"],
-            "status": "processing",
-            "already_running": True,
-        }
+        generated_at = existing.get("generated_at")
+        if generated_at:
+            try:
+                gen_dt = _dt.datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+                age_seconds = (_dt.datetime.utcnow() - gen_dt).total_seconds()
+            except (ValueError, TypeError):
+                age_seconds = 0
+        else:
+            age_seconds = 0
+        if age_seconds > 300:  # >5 min → stale orphan, auto-clean
+            logger.warning(
+                "Stale processing insight %d for channel %d (%.0fs old) — "
+                "auto-failing and launching new analysis",
+                existing["id"], channel_id, age_seconds,
+            )
+            db.fail_insight(existing["id"], "Auto-cleaned: thread killed (stale >5 min)")
+        else:
+            logger.info(
+                "Analysis for channel %d already running (insight %d, %.0fs) — skipping new launch",
+                channel_id, existing["id"], age_seconds,
+            )
+            return {
+                "insight_id": existing["id"],
+                "status": "processing",
+                "already_running": True,
+            }
 
     insight_id = db.create_insight(channel_id)
 

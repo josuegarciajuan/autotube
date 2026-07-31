@@ -1089,7 +1089,7 @@ async def _detect_and_clean_orphans():
 
 
 # ── Stuck insight detection config ────────────────────────
-INSIGHT_ORPHAN_TIMEOUT_MINUTES = 30  # Insights stuck >30min without completion are declared orphaned
+INSIGHT_ORPHAN_TIMEOUT_MINUTES = 10  # Insights stuck >10min without completion are declared orphaned (server restarts kill threads)
 
 
 def _cleanup_orphaned_insights(db, logger, timeout_minutes=INSIGHT_ORPHAN_TIMEOUT_MINUTES):
