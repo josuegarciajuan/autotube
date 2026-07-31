@@ -6674,6 +6674,17 @@ class ExtendedDatabase(Database):
             ).fetchone()
             return dict(row) if row else None
 
+    def get_latest_completed_insight(self, channel_id: int) -> dict | None:
+        """Return the most recent completed analysis for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM channel_insights
+                   WHERE channel_id = ? AND status = 'completed'
+                   ORDER BY id DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_insight(self, insight_id: int) -> dict | None:
         """Return a specific analysis by ID."""
         with self._connect() as conn:

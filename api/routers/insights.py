@@ -103,13 +103,15 @@ def analyze_channel(channel_id: int):
 
 @router.get("/{channel_id}/insights/latest")
 def get_latest_insight(channel_id: int):
-    """Return the most recent analysis for this channel.
+    """Return the most recent relevant analysis for this channel.
 
-    While ``status == "processing"``, intermediate results (raw_patterns,
-    raw_hypotheses) may be populated as each phase completes.  The frontend
-    polls this endpoint every 3 seconds during analysis.
+    - If an analysis is currently ``processing``, return it (so the frontend
+      shows live progress).
+    - If the latest analysis is ``failed``, return the most recent
+      ``completed`` instead (don't show a failed state when there's
+      a perfectly good completed analysis available).
 
-    Returns 404 if no analysis has ever been run for this channel.
+    Returns 404 if no analysis — completed or in-progress — exists.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
@@ -119,6 +121,14 @@ def get_latest_insight(channel_id: int):
     insight = db.get_latest_insight(channel_id)
     if not insight:
         raise HTTPException(404, "No analysis found. Run POST /analyze first.")
+
+    # If the latest row is failed, try to fall back to the last completed one
+    if insight.get("status") == "failed":
+        completed = db.get_latest_completed_insight(channel_id)
+        if completed:
+            return _format_insight(completed)
+        # No completed analysis at all — return the failed one so the frontend
+        # can show the error and offer "Generar análisis".
 
     return _format_insight(insight)
 
