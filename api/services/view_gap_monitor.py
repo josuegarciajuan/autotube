@@ -84,7 +84,7 @@ class ViewGapMonitor:
             # Per-channel opt-out
             try:
                 cfg = get_channel_config(slug)
-                if getattr(cfg, "ENABLE_DAILY_VIEW_GAP_CHECK", False) is False:
+                if getattr(cfg, "ENABLE_DAILY_VIEW_GAP_CHECK", True) is False:
                     logger.debug("View gap check disabled for %s via config", slug)
                     continue
             except Exception:
