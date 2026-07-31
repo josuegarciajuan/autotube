@@ -1536,7 +1536,7 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     return score
 
 
-def process_planned_slots(db=None) -> dict | None:
+def process_planned_slots(db=None, loop=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
     Called every 5 min by the API checker loop.
@@ -1545,6 +1545,13 @@ def process_planned_slots(db=None) -> dict | None:
       - Scheduled channels: dispatch with generate_only (F1), upload later (F2)
       - Pull-forward: dispatch early if worker is idle and target_public_at 
         is within the channel's lead window.
+
+    Args:
+        db: ExtendedDatabase instance (created if None).
+        loop: asyncio event loop for scheduling the async worker. Required
+              when called from a thread pool (e.g. via asyncio.to_thread).
+              If None, falls back to asyncio.create_task (must be called
+              from an active event loop thread).
     
     Returns:
         dict with dispatched slot info, or None if nothing to do.
@@ -1733,7 +1740,12 @@ def process_planned_slots(db=None) -> dict | None:
     # ── End dispatch critical section ────────────────────────────
     
     # 9. Fire and forget the generation
-    import asyncio
+    # ── Schedule async worker safely ──
+    # asyncio.create_task fails with RuntimeError when called from a
+    # thread-pool thread (no running event loop). Use
+    # run_coroutine_threadsafe when a loop is provided by the caller
+    # (main.py passes it via asyncio.get_running_loop).
+    import asyncio as _asyncio_plan
     from api.services.generation_service import (
         start_generation_job,
         start_generation_job_subprocess,
@@ -1741,25 +1753,26 @@ def process_planned_slots(db=None) -> dict | None:
     )
     
     if USE_SUBPROCESS_WORKER:
-        asyncio.create_task(
-            start_generation_job_subprocess(
-                job_id=job_id,
-                channel_id=channel_id,
-                video_id=video_id,
-                action=action,
-                source_mode=source_mode,
-            )
+        _gen_coro = start_generation_job_subprocess(
+            job_id=job_id,
+            channel_id=channel_id,
+            video_id=video_id,
+            action=action,
+            source_mode=source_mode,
         )
     else:
-        asyncio.create_task(
-            start_generation_job(
-                job_id=job_id,
-                channel_id=channel_id,
-                video_id=video_id,
-                action=action,
-                source_mode=source_mode,
-            )
+        _gen_coro = start_generation_job(
+            job_id=job_id,
+            channel_id=channel_id,
+            video_id=video_id,
+            action=action,
+            source_mode=source_mode,
         )
+    
+    if loop is not None:
+        _asyncio_plan.run_coroutine_threadsafe(_gen_coro, loop)
+    else:
+        _asyncio_plan.create_task(_gen_coro)
     
     return {
         "slot_id": slot_id,

@@ -910,7 +910,7 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
 
 # ── Smart shorts slot dispatcher ───────────────────────────────
 
-def dispatch_next_due_shorts_slot(db=None) -> dict | None:
+def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
     Called every 5 min by the API checker loop.
@@ -922,6 +922,13 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
     - For clip slots: check if source long video exists (today, completed)
       If not, cancel the slot and retry with the next candidate (up to
       _MAX_CLIP_RETRIES times to avoid wasting scheduler ticks).
+
+    Args:
+        db: ExtendedDatabase instance (created if None).
+        loop: asyncio event loop for scheduling the async worker. Required
+              when called from a thread pool (e.g. via asyncio.to_thread).
+              If None, falls back to asyncio.create_task (must be called
+              from an active event loop thread).
 
     Returns:
         dict with dispatched slot info, or None if nothing to do.
@@ -1039,16 +1046,24 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
                                                   source_video_id=source_video_id_f)
                     conn.close()
 
-                    import asyncio as _asyncio_f
-                    _asyncio_f.create_task(
-                        _dispatch_short_async(
-                            slot_id=slot_id, job_id=job_id_f,
-                            channel_id=channel_id, channel_slug=slug,
-                            short_type=short_type_f,
-                            source_video_id=source_video_id_f,
-                            slot_rank=slot_rank_f,
-                        )
+                    # ── Schedule async worker safely ──
+                    # asyncio.create_task fails with RuntimeError when called
+                    # from a thread-pool thread (no running event loop). Use
+                    # run_coroutine_threadsafe when a loop is provided by the
+                    # caller (main.py passes it via asyncio.get_running_loop).
+                    _short_async_coro = _dispatch_short_async(
+                        slot_id=slot_id, job_id=job_id_f,
+                        channel_id=channel_id, channel_slug=slug,
+                        short_type=short_type_f,
+                        source_video_id=source_video_id_f,
+                        slot_rank=slot_rank_f,
                     )
+                    if loop is not None:
+                        import asyncio as _asyncio_f
+                        _asyncio_f.run_coroutine_threadsafe(_short_async_coro, loop)
+                    else:
+                        import asyncio as _asyncio_f
+                        _asyncio_f.create_task(_short_async_coro)
                     return {
                         "slot_id": slot_id, "job_id": job_id_f,
                         "channel_slug": slug, "short_type": short_type_f,
@@ -1169,18 +1184,25 @@ def dispatch_next_due_shorts_slot(db=None) -> dict | None:
         conn.close()
 
         # 12. Dispatch the actual generation (fire and forget)
-        import asyncio
-        asyncio.create_task(
-            _dispatch_short_async(
-                slot_id=slot_id,
-                job_id=job_id,
-                channel_id=channel_id,
-                channel_slug=slug,
-                short_type=short_type,
-                source_video_id=source_video_id,
-                slot_rank=slot_rank,
-            )
+        # ── Schedule async worker safely ──
+        # asyncio.create_task fails with RuntimeError when called
+        # from a thread-pool thread (no running event loop). Use
+        # run_coroutine_threadsafe when a loop is provided.
+        _short_async_coro = _dispatch_short_async(
+            slot_id=slot_id,
+            job_id=job_id,
+            channel_id=channel_id,
+            channel_slug=slug,
+            short_type=short_type,
+            source_video_id=source_video_id,
+            slot_rank=slot_rank,
         )
+        if loop is not None:
+            import asyncio as _asyncio2
+            _asyncio2.run_coroutine_threadsafe(_short_async_coro, loop)
+        else:
+            import asyncio
+            asyncio.create_task(_short_async_coro)
 
         return {
             "slot_id": slot_id,

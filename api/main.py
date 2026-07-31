@@ -569,7 +569,13 @@ async def _process_planned_slots():
         pass
     try:
         from api.services.planning_service import process_planned_slots as dispatch
-        result = await asyncio.to_thread(dispatch)
+        # Capture the event loop BEFORE entering the thread pool.
+        # process_planned_slots runs via asyncio.to_thread (thread pool
+        # has no event loop), but internally schedules async tasks via
+        # asyncio.create_task. Passing the main loop lets it use
+        # run_coroutine_threadsafe instead.
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(dispatch, loop=loop)
         if result:
             logger.info(
                 "Planning dispatched: slot=%d job=%d video=%d channel=%s",
@@ -691,7 +697,13 @@ async def _process_shorts_slots():
         pass
     try:
         from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
-        result = await asyncio.to_thread(dispatch_next_due_shorts_slot)
+        # Capture the event loop BEFORE entering the thread pool.
+        # dispatch_next_due_shorts_slot runs via asyncio.to_thread (thread pool
+        # has no event loop), but internally calls asyncio.create_task which
+        # requires one. Passing the main loop lets it use
+        # run_coroutine_threadsafe instead.
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(dispatch_next_due_shorts_slot, loop=loop)
         if result:
             logger.info(
                 "Shorts slot dispatched: slot=%d channel=%s type=%s",
