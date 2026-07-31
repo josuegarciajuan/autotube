@@ -237,17 +237,25 @@ async def lifespan(app: FastAPI):
     # Launch health monitor checker in background
     health_monitor_task = asyncio.create_task(_health_monitor_loop())
     
+    # Launch publish verification checker in background
+    publish_verify_task = asyncio.create_task(_publish_verify_loop())
+    
     yield
     
     # Shutdown
     schedule_task.cancel()
     health_monitor_task.cancel()
+    publish_verify_task.cancel()
     try:
         await schedule_task
     except asyncio.CancelledError:
         pass
     try:
         await health_monitor_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await publish_verify_task
     except asyncio.CancelledError:
         pass
 
@@ -327,6 +335,46 @@ async def _queue_consumer():
         
     except Exception as e:
         logger.error("Queue consumer error: %s", e)
+
+
+async def _publish_verify_loop():
+    """Background loop: check if warming videos have been auto-published by YouTube.
+    
+    Runs every 5 minutes independently of frontend polling. Each invocation calls
+    get_pipeline_status() which triggers _maybe_trigger_publish_verification() for
+    any video whose target_public_at has passed.
+    
+    This ensures videos transition from 'warming' → 'published' even when nobody
+    has the PipelineView open in the frontend.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.publish_verify")
+    
+    await asyncio.sleep(60)  # Let API stabilize first
+    
+    logger.info("Publish verify loop started (interval: 5 min)")
+    
+    while True:
+        try:
+            # Pause gate: skip when scheduler is paused
+            try:
+                from database.db_extended import ExtendedDatabase
+                _db = ExtendedDatabase()
+                if _db.get_system_state("scheduler_paused") == "true":
+                    await asyncio.sleep(60)
+                    continue
+            except Exception:
+                pass
+            
+            db = get_db()
+            data = db.get_pipeline_status()
+            warming = data.get("warming", [])
+            if warming:
+                logger.debug("Publish verify ping: %d warming video(s)", len(warming))
+        except Exception as exc:
+            logger.warning("Publish verify error: %s", exc)
+        
+        await asyncio.sleep(300)  # Every 5 minutes
 
 
 async def _health_monitor_loop():
