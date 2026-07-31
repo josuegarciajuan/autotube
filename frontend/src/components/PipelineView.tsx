@@ -495,6 +495,50 @@ function ShortsCompletedCard({ slot }: { slot: ShortsPipelineSlot }) {
   )
 }
 
+// ── Card: Shorts ready to upload (pre-rendered clip, v25) ───
+function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
+  const colors = CHANNEL_STYLES[short.channel_slug] || DEFAULT_STYLE
+  const countdown = formatCountdown(short.target_upload_at || short.scheduled_at)
+
+  return (
+    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/80 border-l-2 border-green-500/40 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
+        <span className={`text-xs font-semibold ${colors.text}`}>
+          {CHANNEL_SHORT[short.channel_slug] || short.channel_name}
+        </span>
+        <ContentTypeBadge type="clip" />
+        <span className="text-[10px] text-green-400 font-mono ml-auto flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+          Listo para subir
+        </span>
+      </div>
+
+      {/* Timeline */}
+      {short.target_upload_at && (
+        <div className="flex items-center gap-2 text-xs">
+          <Upload size={11} className="text-gray-500" />
+          <span className="text-gray-400">Subida:</span>
+          <span className="text-white font-mono">{toLocalTime(short.target_upload_at)}</span>
+        </div>
+      )}
+      <div className="flex items-center gap-2 text-xs mt-1">
+        <Smartphone size={11} className="text-gray-500" />
+        <span className="text-gray-400">Clip pre-renderizado</span>
+      </div>
+
+      {/* Countdown */}
+      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
+        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-blue-400'} />
+        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-blue-400'}`}>
+          {countdown === 'Ahora' ? 'Inminente' : `Subida en ${countdown}`}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 // ── Card: Published in last 24h ──────────────────────────────
 function PublishedCard({ item }: { item: PublishedItem }) {
   const colors = CHANNEL_STYLES[item.channel_slug] || DEFAULT_STYLE
@@ -556,7 +600,7 @@ export default function PipelineView() {
   // Use memo to compute derived state from the cached query result
   const {
     planned, generating, awaitingUpload, warming, published24h,
-    shortsPending, shortsGenerating, shortsCompleted,
+    shortsPending, shortsGenerating, shortsCompleted, shortsReady,
   } = useMemo(() => {
     if (!data) {
       return {
@@ -565,6 +609,7 @@ export default function PipelineView() {
         published24h: [] as PublishedItem[],
         shortsPending: [] as ShortsPipelineSlot[], shortsGenerating: [] as ShortsPipelineSlot[],
         shortsCompleted: [] as ShortsPipelineSlot[],
+        shortsReady: [] as ShortsPipelineSlot[],
       }
     }
     return {
@@ -576,6 +621,7 @@ export default function PipelineView() {
       shortsPending: data.shorts?.pending || [],
       shortsGenerating: data.shorts?.generating || [],
       shortsCompleted: data.shorts?.completed || [],
+      shortsReady: data.shorts?.ready_to_upload || [],
     }
   }, [data])
 
@@ -590,6 +636,7 @@ export default function PipelineView() {
 
   const totalItems = planned.length + generating.length + awaitingUpload.length + warming.length
     + published24h.length + shortsPending.length + shortsGenerating.length + shortsCompleted.length
+    + shortsReady.length
 
   if (loading) {
     return (
@@ -684,11 +731,16 @@ export default function PipelineView() {
 
       {/* ── Column 3: Awaiting Upload ─────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={awaitingUpload.length} colorClass="text-blue-400" />
-        {awaitingUpload.length === 0 ? (
+        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={awaitingUpload.length + shortsReady.length} colorClass="text-blue-400" />
+        {awaitingUpload.length === 0 && shortsReady.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos esperando subida</p>
         ) : (
           <div className="space-y-3">
+            {/* ── Pre-rendered clip shorts (v25) ── */}
+            {shortsReady.map((short) => (
+              <ShortsReadyUploadCard key={`ready-${short.slot_id}`} short={short} />
+            ))}
+            {/* ── Long-form videos awaiting upload ── */}
             {awaitingUpload.map((video) => (
               <AwaitingUploadCard key={`await-${video.video_id}`} video={video} onUploadNow={handleUploadNow} />
             ))}

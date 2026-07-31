@@ -1280,8 +1280,29 @@ def run_job(
                         logger.warning("[%s] Failed to schedule lifecycle actions: %s", canal, lc_exc)
                 else:
                     logger.info("📤 PUBLICADO: %s", yt_url)
-                
+
+                # ── v25: Pre-render clip shorts BEFORE deleting the source MP4 ──
+                # This avoids expensive yt-dlp re-downloads later. The source MP4
+                # is still on disk, so we can extract all clip shorts in one pass
+                # (1 LLM call for all clips). Pre-rendered clips are saved as
+                # shorts.status='ready' and uploaded later at their scheduled times.
                 vp = video_data.get("video_path", "") if video_data else ""
+                if vp and Path(vp).exists():
+                    try:
+                        from api.services.shorts_scheduler import pre_render_clip_shorts_for_video
+                        pre_render_clip_shorts_for_video(
+                            video_id=video_id,
+                            channel_id=channel_id,
+                            channel_slug=canal,
+                            video_path=vp,
+                            script_id=video_data.get("script_id") if video_data else None,
+                        )
+                    except Exception as _pre_render_err:
+                        logger.warning(
+                            "[%s] Pre-render clip shorts failed (non-fatal): %s",
+                            canal, _pre_render_err,
+                        )
+
                 if vp and Path(vp).exists():
                     try:
                         Path(vp).unlink()

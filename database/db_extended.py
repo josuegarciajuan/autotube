@@ -6030,7 +6030,7 @@ class ExtendedDatabase(Database):
         result = {
             "planned": [], "generating": [], "awaiting_upload": [], "warming": [],
             "published_24h": [],
-            "shorts": {"pending": [], "generating": [], "completed": []},
+            "shorts": {"pending": [], "generating": [], "completed": [], "ready_to_upload": []},
         }
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
@@ -6242,6 +6242,37 @@ class ExtendedDatabase(Database):
                    ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
             result["shorts"]["completed"] = [dict(r) for r in shorts_completed]
+
+            # ── 6b. Shorts ready to upload (pre-rendered clips waiting for publication time) ──
+            # v25: Clips pre-rendered by pre_render_clip_shorts_for_video() after long-form upload.
+            # These have a rendered MP4 on disk and need only uploading.
+            shorts_ready = conn.execute(
+                """SELECT
+                    sps.id as slot_id,
+                    sps.channel_id,
+                    sps.date_key,
+                    sps.scheduled_at,
+                    sps.target_upload_at,
+                    sps.short_type,
+                    sps.slot_position,
+                    sps.long_slot_position,
+                    sps.source_video_id,
+                    sps.status,
+                    sps.short_id,
+                    s.title,
+                    s.file_path,
+                    s.status as short_status,
+                    ch.name as channel_name,
+                    ch.slug as channel_slug
+                   FROM shorts_planned_slots sps
+                   JOIN channels ch ON ch.id = sps.channel_id
+                   JOIN shorts s ON s.id = sps.short_id
+                    WHERE sps.status = 'pending'
+                      AND s.status = 'ready'
+                      AND sps.short_id IS NOT NULL
+                    ORDER BY sps.target_upload_at ASC""",
+            ).fetchall()
+            result["shorts"]["ready_to_upload"] = [dict(r) for r in shorts_ready]
 
             # ── 7. Published in last 24h (both long-form videos & shorts) ──
             published = conn.execute(

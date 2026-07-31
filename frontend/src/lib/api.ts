@@ -313,7 +313,7 @@ export const api = {
       awaiting_upload: AwaitingUploadVideo[];
       warming: WarmingVideo[];
       published_24h: PublishedItem[];
-      shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[]; completed: ShortsPipelineSlot[] };
+      shorts: { pending: ShortsPipelineSlot[]; generating: ShortsPipelineSlot[]; completed: ShortsPipelineSlot[]; ready_to_upload: ShortsPipelineSlot[] };
     }>('/planning/pipeline-status'),
 
   // ── Gamification v3 ─────────────────────────────────
@@ -521,6 +521,10 @@ export interface ShortsPipelineSlot {
   job_progress: number | null;
   job_phase: string | null;
   actual_completed_at: string | null;  // Real publish time (from shorts table)
+  short_id?: number | null;           // v25: for pre-rendered clips
+  title?: string | null;              // v25: short title (for ready clips)
+  file_path?: string | null;          // v25: local MP4 path (for ready clips)
+  short_status?: string | null;       // v25: shorts.status ('ready' for pre-rendered)
   channel_name: string;
   channel_slug: string;
 }

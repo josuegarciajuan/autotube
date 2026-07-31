@@ -1162,32 +1162,61 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         # 9. For clip slots: check source video dependency (with pre-filter)
         source_video_id = None
         if short_type == "clip":
-            # Pre-filter: skip clip slots for channels with no completed long videos today.
-            # This avoids wasting retry iterations on slots that can never succeed.
-            if channel_id in _channels_without_source:
-                logger.info(
-                    "Shorts slot #%d (%s) skipped: clip type but channel has "
-                    "no completed long videos today — trying next channel",
-                    slot_id, slug,
-                )
-                _skipped_slot_ids.add(slot_id)
-                continue
+            # ── v25: Pre-rendered clip check ──
+            # If this slot already has a pre-rendered short linked (status='ready',
+            # file on disk), skip source resolution entirely. The dispatch path
+            # will detect it and upload directly.
+            slot_short_id = next_slot.get("short_id")
+            if slot_short_id:
+                # Verify the short exists and file is on disk
+                conn_check = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+                conn_check.row_factory = sqlite3.Row
+                pre_row = conn_check.execute(
+                    "SELECT id, status, file_path FROM shorts WHERE id = ? AND status = 'ready'",
+                    (slot_short_id,),
+                ).fetchone()
+                conn_check.close()
+                if pre_row and pre_row["file_path"] and Path(pre_row["file_path"]).exists():
+                    source_video_id = next_slot.get("source_video_id")
+                    if source_video_id:
+                        logger.info(
+                            "Shorts slot #%d (%s): pre-rendered clip short #%d ready — "
+                            "skipping source resolution, will upload directly",
+                            slot_id, slug, slot_short_id,
+                        )
+                        # Skip the source resolve block below, go directly to dispatch
+                    else:
+                        logger.warning(
+                            "Shorts slot #%d (%s): pre-rendered short #%d but "
+                            "no source_video_id on slot — will try normal resolve",
+                            slot_id, slug, slot_short_id,
+                        )
+                        source_video_id = None  # reset, fall through to normal resolve
 
-            long_pos = next_slot.get("long_slot_position")
-            source_video_id = _resolve_clip_source(channel_id, long_pos)
+            # If source_video_id is still None (no pre-render or pre-render check
+            # failed), do the normal source resolution.
             if source_video_id is None:
-                # No source video available for this clip — skip (don't cancel).
-                # Keeping it pending allows it to be retried later when a long-form
-                # video becomes available (e.g. still generating). Only cancel
-                # slots that already exhausted all retries.
-                logger.info(
-                    "Shorts slot #%d (%s) skipped: clip type but no completed source "
-                    "long video available yet (channel=%s, long_slot=%s) — "
-                    "keeping pending, retrying later",
-                    slot_id, slug, channel_id, long_pos,
-                )
-                _skipped_slot_ids.add(slot_id)
-                continue  # ← retry with next candidate
+                # Pre-filter: skip clip slots for channels with no completed long videos today.
+                if channel_id in _channels_without_source:
+                    logger.info(
+                        "Shorts slot #%d (%s) skipped: clip type but channel has "
+                        "no completed long videos today — trying next channel",
+                        slot_id, slug,
+                    )
+                    _skipped_slot_ids.add(slot_id)
+                    continue
+
+                long_pos = next_slot.get("long_slot_position")
+                source_video_id = _resolve_clip_source(channel_id, long_pos)
+                if source_video_id is None:
+                    logger.info(
+                        "Shorts slot #%d (%s) skipped: clip type but no completed source "
+                        "long video available yet (channel=%s, long_slot=%s) — "
+                        "keeping pending, retrying later",
+                        slot_id, slug, channel_id, long_pos,
+                    )
+                    _skipped_slot_ids.add(slot_id)
+                    continue  # ← retry with next candidate
 
         # All guards passed — this is a dispatchable slot. Only NOW do we
         # consume a retry count (predictable skips like no-source don't count).
@@ -1303,14 +1332,46 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                                  slot_rank: int = 0):
     """Async wrapper that dispatches the actual short generation and updates DB."""
     import sqlite3
+    from pathlib import Path
     from config.settings import DATABASE_PATH
 
     try:
         if short_type == "native":
             short_id = _dispatch_native_short(channel_id, channel_slug, slot_rank=slot_rank, job_id=job_id)
         else:
-            short_id = _dispatch_clip_short(channel_id, channel_slug, source_video_id,
-                                            slot_rank=slot_rank, job_id=job_id)
+            # ── v25: Check for pre-rendered clip ──
+            pre_rendered_short_id = None
+            pre_rendered_status = None
+            try:
+                conn_check = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+                conn_check.row_factory = sqlite3.Row
+                row = conn_check.execute(
+                    """SELECT s.id, s.status, s.file_path
+                       FROM shorts s
+                       JOIN shorts_planned_slots sps ON sps.short_id = s.id
+                       WHERE sps.id = ?
+                         AND s.type = 'clip'
+                         AND s.status = 'ready'""",
+                    (slot_id,),
+                ).fetchone()
+                conn_check.close()
+                if row and row["file_path"] and Path(row["file_path"]).exists():
+                    pre_rendered_short_id = row["id"]
+                    pre_rendered_status = row["status"]
+                    logger.info(
+                        "Shorts slot #%d: found pre-rendered clip short #%d (status=%s) — "
+                        "skipping render, uploading directly",
+                        slot_id, pre_rendered_short_id, pre_rendered_status,
+                    )
+            except Exception as _pr_check_err:
+                logger.debug("Pre-render check for slot #%d failed (non-fatal): %s",
+                             slot_id, _pr_check_err)
+
+            short_id = _dispatch_clip_short(
+                channel_id, channel_slug, source_video_id,
+                slot_rank=slot_rank, job_id=job_id,
+                pre_rendered_short_id=pre_rendered_short_id,
+            )
 
         if short_id:
             # Mark slot as completed
@@ -1992,11 +2053,16 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
 def _dispatch_clip_short(channel_id: int, channel_slug: str,
                           source_video_id: int, slot_rank: int = 0,
-                          job_id: int = None) -> int | None:
+                          job_id: int = None,
+                          pre_rendered_short_id: int = None) -> int | None:
     """Extract a clip from a long video, render, and publish.
 
     Uses the ShortsExtractor pipeline pattern from api/routers/shorts.py
     (extract-and-publish endpoint).
+
+    v25: If pre_rendered_short_id is provided, skips the LLM extraction and
+    rendering phases (the clip was pre-rendered by pre_render_clip_shorts_for_video()
+    right after the long-form upload). Only uploads the existing file.
 
     Returns short_id or None on failure.
     """
@@ -2008,6 +2074,135 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
     from pathlib import Path
     from config.settings import DATABASE_PATH, OUTPUT_DIR
     from config.config_bridge import get_channel_config
+
+    # ── v25: Fast path for pre-rendered clips ──
+    if pre_rendered_short_id:
+        conn_pre = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+        conn_pre.row_factory = sqlite3.Row
+        short_row = conn_pre.execute(
+            "SELECT * FROM shorts WHERE id = ? AND type = 'clip' AND status = 'ready'",
+            (pre_rendered_short_id,),
+        ).fetchone()
+        conn_pre.close()
+
+        if short_row and short_row["file_path"] and Path(short_row["file_path"]).exists():
+            short_data = dict(short_row)
+            output_path = Path(short_data["file_path"])
+            logger.info(
+                "Clip short #%d: pre-rendered file ready — uploading directly (%s)",
+                pre_rendered_short_id, output_path.name,
+            )
+
+            # Upload phase (same as original _dispatch_clip_short upload section)
+            _update_short_job_progress(job_id, 75, "upload")
+            ch_config = get_channel_config(channel_slug)
+            hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
+
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
+            if not uploader.authenticate():
+                logger.error("YouTube auth failed for %s (pre-rendered clip)", channel_slug)
+                return None
+
+            title = (short_data.get("hook_title") or short_data.get("title") or "Short")[:100]
+            hook_text = short_data.get("hook_text", "")
+
+            from pipeline.shorts_cross_promote import (
+                get_best_longform_link, build_short_description, run_post_publish_promotion,
+                should_cross_promote,
+            )
+            longform_url = None
+            if should_cross_promote(ch_config):
+                longform_url = get_best_longform_link(channel_id, source_video_id=short_data.get("source_video_id"))
+
+            channel_url_value = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
+            description = build_short_description(
+                hook_text=hook_text, hashtags=hashtags,
+                longform_url=longform_url, channel_url=channel_url_value,
+            )
+            _update_short_job_progress(job_id, 90, "upload")
+            result = uploader.upload(
+                video_path=output_path,
+                title=title,
+                description=description[:5000],
+                tags=hashtags[:60],
+                category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+                privacy="public",
+            )
+
+            yt_id = result.get("video_id")
+            if not yt_id:
+                logger.error("Upload failed for pre-rendered clip short #%d", pre_rendered_short_id)
+                return None
+
+            # Update shorts table: mark as published
+            conn_upd = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+            conn_upd.execute(
+                """UPDATE shorts SET status = 'published', youtube_id = ?,
+                   youtube_url = ?, published_at = datetime('now','localtime'),
+                   updated_at = datetime('now','localtime')
+                   WHERE id = ?""",
+                (yt_id, result.get("url", ""), pre_rendered_short_id),
+            )
+            conn_upd.commit()
+            conn_upd.close()
+
+            # Auto-mark altered content (IA) via browser
+            try:
+                if getattr(ch_config, "AUTO_MARK_ALTERED_CONTENT", False):
+                    from pipeline.youtube_browser import get_account_for_channel
+                    account = get_account_for_channel(channel_slug)
+                    if account:
+                        import threading
+                        threading.Thread(
+                            target=_auto_mark_ia_for_short,
+                            args=(yt_id, channel_slug, account, pre_rendered_short_id),
+                            daemon=True
+                        ).start()
+            except Exception as e_mark:
+                logger.warning("[%s] Failed to trigger auto-mark IA: %s", channel_slug, e_mark)
+
+            # Auto-link long-form video
+            try:
+                from pipeline.youtube_browser import get_account_for_channel
+                account = get_account_for_channel(channel_slug)
+                if account and short_data.get("source_video_id"):
+                    import threading
+                    threading.Thread(
+                        target=_auto_link_longform_for_short,
+                        args=(yt_id, channel_slug, account, pre_rendered_short_id,
+                              short_data["source_video_id"]),
+                        daemon=True
+                    ).start()
+            except Exception as e_link:
+                logger.warning("[%s] Failed to trigger longform link: %s", channel_slug, e_link)
+
+            run_post_publish_promotion(
+                channel_slug=channel_slug, short_yt_id=yt_id,
+                channel_id=channel_id,
+                source_yt_id=longform_url.split("v=")[-1] if longform_url else None,
+            )
+
+            # v25: Delete pre-rendered clip MP4 after upload (no longer needed)
+            try:
+                output_path.unlink(missing_ok=True)
+                logger.info("Deleted pre-rendered clip MP4 after upload: %s", output_path)
+            except Exception:
+                pass
+
+            logger.info("Pre-rendered clip Short published: %s → %s",
+                        title[:40], result.get("url", ""))
+            return pre_rendered_short_id
+
+        else:
+            logger.warning(
+                "Pre-rendered short #%d not found or file missing — "
+                "falling back to full clip generation",
+                pre_rendered_short_id,
+            )
+            # Fall through to normal flow
+
+    # ── Normal flow (no pre-render, or pre-render failed) ──
 
     logger.info("Clip extraction: channel=%s source_video=%d", channel_slug, source_video_id)
 
@@ -2343,6 +2538,264 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
                 _downloaded_temp.unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def pre_render_clip_shorts_for_video(
+    video_id: int, channel_id: int, channel_slug: str,
+    video_path: str, script_id: int = None,
+) -> list[int]:
+    """Pre-render all clip shorts for a long-form video right after upload.
+
+    Called from full_pipeline_worker.py after successful upload, BEFORE the
+    source MP4 is deleted. Renders all clip shorts for this video's upcoming
+    slots in one pass (1 LLM call for all clips) and saves them as status='ready'.
+
+    The pre-rendered clips wait in the 'Pendiente subida' pipeline column until
+    their scheduled upload time, at which point _dispatch_clip_short() detects
+    the ready file and skips directly to uploading.
+
+    Returns list of short_ids created, or empty list on failure.
+    """
+    import sqlite3
+    import json as _json
+    import time
+    from pathlib import Path
+    from config.settings import DATABASE_PATH, OUTPUT_DIR
+
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+
+    try:
+        # 1. Find pending clip slots for this source video
+        pending_slots = conn.execute(
+            """SELECT ssp.*, c.slug as channel_slug
+               FROM shorts_planned_slots ssp
+               JOIN channels c ON c.id = ssp.channel_id
+               WHERE ssp.source_video_id = ?
+                 AND ssp.short_type = 'clip'
+                 AND ssp.status = 'pending'
+                 AND ssp.short_id IS NULL
+               ORDER BY ssp.long_slot_position ASC""",
+            (video_id,),
+        ).fetchall()
+
+        if not pending_slots:
+            logger.info(
+                "pre_render: no pending clip slots for video #%d (channel=%s) — skipping",
+                video_id, channel_slug,
+            )
+            return []
+
+        logger.info(
+            "pre_render: video #%d → %d clip slot(s) to pre-render (channel=%s)",
+            video_id, len(pending_slots), channel_slug,
+        )
+
+        # 2. Load source video metadata (script + blocks + timing)
+        source_video = Path(video_path)
+        if not source_video.exists():
+            logger.error(
+                "pre_render: source video file not found: %s — cannot pre-render",
+                video_path,
+            )
+            return []
+
+        # Fetch video metadata from DB
+        video_row = conn.execute(
+            "SELECT * FROM videos WHERE id = ?", (video_id,),
+        ).fetchone()
+        if not video_row:
+            logger.error("pre_render: video #%d not found in DB", video_id)
+            return []
+        video = dict(video_row)
+
+        # Script + blocks
+        script_text = ""
+        bloques = []
+        if video.get("script_id"):
+            script_row = conn.execute(
+                "SELECT guion, bloques_json FROM scripts WHERE id = ?",
+                (video["script_id"],),
+            ).fetchone()
+            if script_row:
+                script_text = script_row["guion"] or ""
+                try:
+                    bloques = _json.loads(script_row["bloques_json"] or "[]") if script_row["bloques_json"] else []
+                except Exception:
+                    bloques = []
+
+        if not script_text and bloques:
+            script_text = " ".join(b.get("texto", "") for b in bloques if b.get("texto"))
+        if not script_text:
+            bloques_raw = video.get("title_options") or "{}"
+            try:
+                fallback = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
+            except Exception:
+                fallback = {}
+            script_text = str(fallback.get("script", "")) or script_text
+
+        if not script_text:
+            logger.error("pre_render: video #%d has no script text", video_id)
+            return []
+
+        # 3. Build approximate word-level timestamps from blocks
+        from pipeline.shorts_extractor import ShortsExtractor
+        total_duration = video.get("duracion_seg") or 0
+        n_blocks = len(bloques) if bloques else 1
+        timestamps = []
+        for idx, block in enumerate(bloques if bloques else [{"texto": script_text}]):
+            texto = block.get("texto", "")
+            if not texto:
+                continue
+            words = texto.split()
+            block_start = (idx / n_blocks) * total_duration
+            block_end = ((idx + 1) / n_blocks) * total_duration
+            word_dur = (block_end - block_start) / max(len(words), 1)
+            for wi, word in enumerate(words):
+                ts_start = round(block_start + wi * word_dur, 1)
+                ts_end = round(ts_start + word_dur, 1)
+                timestamps.append({"word": word, "start": ts_start, "end": ts_end})
+
+        # TTS word timestamps for subtitle rendering
+        tts_word_ts = []
+        try:
+            td_raw = video.get("timing_data") or "{}"
+            td = _json.loads(td_raw) if isinstance(td_raw, str) else td_raw
+            tts_word_ts = td.get("phases", {}).get("tts_timestamps", [])
+            if not isinstance(tts_word_ts, list):
+                tts_word_ts = []
+        except Exception:
+            pass
+
+        # 4. Run LLM extraction ONCE — get up to 3 clips
+        extractor = ShortsExtractor()
+
+        # Query existing clips for this video (in case of retry)
+        exclude_ranges = []
+        existing_clips = conn.execute(
+            """SELECT start_time, end_time FROM shorts
+               WHERE source_video_id = ?
+                 AND type = 'clip'
+                 AND status IN ('published', 'uploading', 'ready', 'rendering', 'extracted')
+               ORDER BY start_time""",
+            (video_id,),
+        ).fetchall()
+        exclude_ranges = [(float(r["start_time"]), float(r["end_time"])) for r in existing_clips]
+
+        clips = extractor.extract(
+            script_text=script_text, timestamps=timestamps,
+            max_clips=min(len(pending_slots), 3), min_clips=1,
+            exclude_ranges=exclude_ranges,
+        )
+
+        if not clips:
+            logger.error("pre_render: LLM returned no clips for video #%d", video_id)
+            return []
+
+        logger.info(
+            "pre_render: LLM returned %d clip(s) for video #%d — rendering now",
+            len(clips), video_id,
+        )
+
+        # 5. Render each clip and save as 'ready'
+        from pipeline.shorts_renderer import ShortsRenderer
+        renderer = ShortsRenderer()
+        short_ids = []
+
+        for clip_idx, clip in enumerate(clips):
+            if clip_idx >= len(pending_slots):
+                break  # no more slots to fill
+
+            slot = dict(pending_slots[clip_idx])
+
+            # Build subtitle timestamps for this clip
+            render_word_ts = None
+            if tts_word_ts:
+                normalized = []
+                for ts in tts_word_ts:
+                    start_val = float(ts.get("start_ms", ts.get("start", 0)))
+                    end_val = float(ts.get("end_ms", ts.get("end", 0)))
+                    normalized.append({
+                        "word": ts.get("word", ""),
+                        "start_ms": start_val,
+                        "end_ms": end_val,
+                    })
+                render_word_ts = normalized
+            elif timestamps:
+                block_ts = []
+                for ts in timestamps:
+                    block_ts.append({
+                        "word": ts.get("word", ""),
+                        "start_ms": ts["start"] * 1000,
+                        "end_ms": ts["end"] * 1000,
+                    })
+                render_word_ts = block_ts
+
+            try:
+                output_path = renderer.render(
+                    source_video, clip, word_timestamps=render_word_ts,
+                )
+            except Exception as render_err:
+                logger.error(
+                    "pre_render: render failed for clip %d of video #%d: %s",
+                    clip_idx + 1, video_id, render_err,
+                )
+                continue
+
+            if not output_path or not output_path.exists():
+                logger.error(
+                    "pre_render: no output for clip %d of video #%d",
+                    clip_idx + 1, video_id,
+                )
+                continue
+
+            # Save to shorts table as 'ready'
+            cursor = conn.execute(
+                """INSERT INTO shorts
+                   (channel_id, source_video_id, type, title, hook_title, hook_text,
+                    start_time, end_time, status, file_path, scheduled_date)
+                   VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'ready', ?, ?)""",
+                (
+                    channel_id, video_id,
+                    clip.get("hook_title", "Short")[:100],
+                    clip.get("hook_title", "Short")[:60],
+                    clip.get("hook_text", ""),
+                    clip.get("start_time", 0),
+                    clip.get("end_time", 0),
+                    str(output_path),
+                    slot.get("date_key", ""),
+                ),
+            )
+            short_id = cursor.lastrowid
+
+            # Link short to planned slot
+            conn.execute(
+                """UPDATE shorts_planned_slots
+                   SET short_id = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (short_id, slot["id"]),
+            )
+
+            short_ids.append(short_id)
+            logger.info(
+                "pre_render: clip %d/%d rendered → short #%d (slot #%d) for %s",
+                clip_idx + 1, len(clips), short_id, slot["id"], channel_slug,
+            )
+
+        conn.commit()
+        logger.info(
+            "pre_render: video #%d → %d clip shorts pre-rendered (status=ready)",
+            video_id, len(short_ids),
+        )
+        return short_ids
+
+    except Exception as e:
+        logger.error("pre_render: unexpected error for video #%d: %s", video_id, e,
+                     exc_info=True)
+        return []
+    finally:
+        conn.close()
 
 
 def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
