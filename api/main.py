@@ -1737,20 +1737,40 @@ STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
 
 if STATIC_DIR.exists():
-    # Static files with no-cache headers
-    class NoCacheStaticFiles(StaticFiles):
+    import mimetypes as _mimetypes
+    
+    # Content-hashed file extensions — safe to cache indefinitely
+    _IMMUTABLE_EXTS = frozenset({".js", ".css", ".mjs", ".woff", ".woff2", ".ttf", ".otf", ".png", ".svg", ".webp", ".ico", ".avif"})
+    _IMMUTABLE_CACHE = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+    }
+    
+    class SmartCacheStaticFiles(StaticFiles):
+        """Serve static files with appropriate cache headers.
+
+        Content-hashed assets (JS, CSS, fonts, images) get immutable
+        1-year cache.  Everything else (HTML fragments, robots.txt, etc.)
+        gets no-cache to ensure freshness.
+        """
         async def __call__(self, scope, receive, send):
+            # Determine cache policy from the requested path
+            raw_path = scope.get("path", "")
+            _, ext = os.path.splitext(raw_path)
+            if ext.lower() in _IMMUTABLE_EXTS:
+                cache_headers = _IMMUTABLE_CACHE
+            else:
+                cache_headers = NO_CACHE
+            
             async def send_wrapper(message):
                 if message["type"] == "http.response.start":
                     headers = dict(message.get("headers", []))
-                    headers[b"cache-control"] = b"no-cache, no-store, must-revalidate"
-                    headers[b"pragma"] = b"no-cache"
-                    headers[b"expires"] = b"0"
+                    for k, v in cache_headers.items():
+                        headers[k.encode()] = v.encode()
                     message["headers"] = [(k, v) for k, v in headers.items()]
                 await send(message)
             await super().__call__(scope, receive, send_wrapper)
     
-    app.mount("/assets", NoCacheStaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+    app.mount("/assets", SmartCacheStaticFiles(directory=STATIC_DIR / "assets"), name="assets")
     
     @app.get("/{path:path}")
     async def spa_fallback(path: str):

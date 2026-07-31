@@ -9,7 +9,7 @@
  *    - Discarded state (collapsed gray bar, restorable)
  */
 
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, useReducer } from 'react'
 import { api } from '../lib/api'
 import type { ChannelInsight, InsightRecommendation, InsightCategory, KeyMetric, RefinedVersion, ValidationResult } from '../types/channel'
 import { getCategoryMeta } from '../types/channel'
@@ -832,6 +832,11 @@ export default function InsightsTab({
   // Local state for the phase stepper — decoupled from props so
   // the AnalysisLoadingScreen re-renders immediately on every poll.
   const [localPhase, setLocalPhase] = useState<string>('exploration')
+  // Ref-backed source of truth + force render: ensures the stepper
+  // updates even if React batches or skips a useState re-render during
+  // the polling interval callback.
+  const phaseRef = useRef<string>('exploration')
+  const [, forceRender] = useReducer((x: number) => x + 1, 0)
 
   // ── Load / poll ──────────────────────────────────────────────
   const loadInsight = useCallback(async (opts?: { signal?: AbortSignal }) => {
@@ -839,7 +844,13 @@ export default function InsightsTab({
       const data = await api.getLatestInsight(channelId, opts?.signal)
       if (opts?.signal?.aborted) return
       setInsights(data)
-      setLocalPhase(data.current_phase || 'exploration')
+      // Update stepper phase — use ref to detect change and force re-render
+      const newPhase = data.current_phase || 'exploration'
+      if (newPhase !== phaseRef.current) {
+        phaseRef.current = newPhase
+        setLocalPhase(newPhase)
+        forceRender()
+      }
       setError(null)
       if (data.status === 'completed' || data.status === 'failed') {
         setAnalyzing(false)
@@ -908,6 +919,7 @@ export default function InsightsTab({
   async function handleGenerate() {
     setAnalyzing(true)
     setLocalPhase('exploration')
+    phaseRef.current = 'exploration'
     // Clear previous recommendations so the loading screen renders
     // (hasExistingData would otherwise hide it) — new data replaces on completion.
     if (!insights) {
