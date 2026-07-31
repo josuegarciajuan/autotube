@@ -1420,14 +1420,25 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                                  channel_slug: str, short_type: str,
                                  source_video_id: int = None,
                                  slot_rank: int = 0):
-    """Async wrapper that dispatches the actual short generation and updates DB."""
+    """Async wrapper that dispatches the actual short generation and updates DB.
+
+    IMPORTANT: _dispatch_native_short() and _dispatch_clip_short() are
+    synchronous functions that block for 5+ minutes (LLM, TTS, ffmpeg).
+    They MUST be called via asyncio.to_thread() to avoid blocking the
+    uvicorn event loop thread. DO NOT call them synchronously here.
+    """
+    import asyncio
     import sqlite3
     from pathlib import Path
     from config.settings import DATABASE_PATH
 
     try:
         if short_type == "native":
-            short_id = _dispatch_native_short(channel_id, channel_slug, slot_rank=slot_rank, job_id=job_id)
+            short_id = await asyncio.to_thread(
+                _dispatch_native_short,
+                channel_id, channel_slug,
+                slot_rank=slot_rank, job_id=job_id,
+            )
         else:
             # ── v25: Check for pre-rendered clip ──
             pre_rendered_short_id = None
@@ -1457,7 +1468,8 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 logger.debug("Pre-render check for slot #%d failed (non-fatal): %s",
                              slot_id, _pr_check_err)
 
-            short_id = _dispatch_clip_short(
+            short_id = await asyncio.to_thread(
+                _dispatch_clip_short,
                 channel_id, channel_slug, source_video_id,
                 slot_rank=slot_rank, job_id=job_id,
                 pre_rendered_short_id=pre_rendered_short_id,
