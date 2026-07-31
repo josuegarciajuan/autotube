@@ -5897,12 +5897,13 @@ class ExtendedDatabase(Database):
                 dispatch loop to skip past channels blocked by cooldown.
         """
         with self._connect() as conn:
-            query = """SELECT sps.*, c.name as channel_name, c.slug as channel_slug
+            query = """SELECT sps.*, c.name as channel_name, c.slug as channel_slug, c.active as channel_active
                        FROM shorts_planned_slots sps
                        JOIN channels c ON sps.channel_id = c.id
                        WHERE sps.status = 'pending'
-                           AND sps.scheduled_at >= datetime('now','-24 hours')
-                           AND sps.scheduled_at <= datetime('now','+1 day')"""
+                            AND c.active = 1
+                            AND sps.scheduled_at >= datetime('now','-24 hours')
+                            AND sps.scheduled_at <= datetime('now','+1 day')"""
             params: list = []
             if exclude_slot_ids:
                 placeholders = ",".join("?" for _ in exclude_slot_ids)

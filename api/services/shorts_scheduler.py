@@ -851,8 +851,8 @@ def _inject_compensation_native_slots(date_str: str, db) -> int:
         future_windows.append((h, 15))
         future_windows.append((h, 45))
     
-    # Get enabled channels
-    channels = db.get_channels()
+    # Get enabled channels (only active)
+    channels = db.get_channels(active_only=True)
     
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     inserted = 0
@@ -1132,6 +1132,15 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     slot_rank_f = force_slot.get("slot_rank", 0)
                     source_video_id_f = None
 
+                    # Safety guard: skip inactive channels in force dispatch too.
+                    if not force_slot.get("channel_active", 1):
+                        logger.warning(
+                            "Force dispatch: slot #%d (%s) — channel inactive, skipping",
+                            slot_id, slug,
+                        )
+                        _failed_force_ids.add(slot_id)
+                        continue
+
                     if short_type_f == "clip":
                         # Skip clips for channels known to lack completed long videos today.
                         if channel_id in _channels_without_source:
@@ -1221,6 +1230,17 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         short_type = next_slot.get("short_type", "native")
         scheduled = next_slot.get("scheduled_at", "?")
         slot_rank = next_slot.get("slot_rank", 0)
+        channel_active = next_slot.get("channel_active", 1)   # channels.active column from JOIN
+
+        # Safety guard: skip inactive channels (should be filtered by
+        # get_next_pending_shorts_slot SQL but belt-and-suspenders).
+        if not channel_active:
+            logger.warning(
+                "Shorts slot #%d (%s): channel is inactive — skipping",
+                slot_id, slug,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
 
         # 4. Per-channel short job guard — skip to next slot instead of failing.
         #    Different channels can generate shorts in parallel since each has
