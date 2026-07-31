@@ -751,13 +751,6 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         native_count = sc.get("shorts_native_per_day", 3)
         clips_per_long = sc.get("shorts_clips_per_long", 3)
 
-        # ── v25: One-day native short compensation (2026-07-31 only) ──
-        # All clip shorts for today were cancelled (switching to pre-render model).
-        # Add 2 extra native shorts per channel to compensate, surviving any
-        # scheduler regeneration (baked into compute_daily_shorts_slots).
-        if date_str == '2026-07-31':
-            native_count += 2
-
         if native_count == 0 and clips_per_long == 0:
             continue
 
@@ -830,6 +823,90 @@ def persist_daily_shorts_slots(date_str: str, slots: list[dict], db=None) -> int
     return count
 
 
+def _inject_compensation_native_slots(date_str: str, db) -> int:
+    """Inject 2 extra native short slots per channel for today only.
+    
+    Called from generate_upcoming_shorts() when today's slots already exist
+    and would normally be skipped by the early-return guard.
+    
+    v25: One-day compensation for cancelled clip shorts (2026-07-31).
+    Distributes slots across remaining future time windows.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+    from config.settings import DATABASE_PATH
+    
+    if date_str != '2026-07-31':
+        return 0
+    
+    now_utc = datetime.now(timezone.utc)
+    # Future windows from now until 04:00 CEST (02:00 UTC next day)
+    # Hour:minute tuples in UTC (CEST = UTC+2)
+    future_windows = []
+    current_hour = now_utc.hour
+    for h in range(current_hour + 1, 24):
+        future_windows.append((h, 15))  # hh:15
+        future_windows.append((h, 45))  # hh:45
+    for h in range(0, 3):  # 00:00–02:00 UTC = 02:00–04:00 CEST
+        future_windows.append((h, 15))
+        future_windows.append((h, 45))
+    
+    # Get enabled channels
+    channels = db.get_channels()
+    
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+    inserted = 0
+    slot_idx = 0
+    
+    for ch in channels:
+        ch_id = ch['id']
+        slug = ch.get('slug', 'unknown')
+        
+        # Check if channel already has native slots pending for today
+        existing_pending = conn.execute(
+            """SELECT COUNT(*) FROM shorts_planned_slots
+               WHERE channel_id = ? AND date_key = ? AND short_type = 'native' AND status = 'pending'""",
+            (ch_id, date_str),
+        ).fetchone()[0]
+        
+        if existing_pending >= 2:
+            continue  # already has enough
+        
+        needed = 2 - existing_pending
+        for n in range(needed):
+            if slot_idx >= len(future_windows):
+                break
+            h, m = future_windows[slot_idx]
+            slot_idx += 1
+            
+            scheduled = f'{date_str} {h:02d}:{m:02d}:00'
+            target = f'{date_str} {h:02d}:{m + 5:02d}:00'
+            
+            # Get max slot_position for this channel+date
+            max_pos = conn.execute(
+                """SELECT COALESCE(MAX(slot_position), 0) FROM shorts_planned_slots
+                   WHERE channel_id = ? AND date_key = ?""",
+                (ch_id, date_str),
+            ).fetchone()[0]
+            
+            conn.execute(
+                """INSERT INTO shorts_planned_slots
+                   (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                    status, slot_position, slot_rank, source_mode)
+                   VALUES (?, ?, ?, ?, 'native', 'pending', ?, ?, 'original')""",
+                (ch_id, date_str, scheduled, target, max_pos + 1, 9999),
+            )
+            inserted += 1
+    
+    conn.commit()
+    conn.close()
+    logger.info(
+        "One-day native compensation: injected %d extra native slots for %s across %d channels",
+        inserted, date_str, len(channels),
+    )
+    return inserted
+
+
 def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
     """Generate and persist shorts slots for the next N days (including today).
 
@@ -850,6 +927,12 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
             # which would cause all past-due slots to fire back-to-back.
             existing = db.get_shorts_planned_slots(date_key=day_str)
             if existing and len(existing) > 0:
+                # ── v25: One-day native compensation (2026-07-31 only) ──
+                # All clip shorts for today were cancelled (pre-render switch).
+                # Inject 2 extra native short slots per channel for today,
+                # distributed across remaining future windows.
+                if day_str == '2026-07-31':
+                    _inject_compensation_native_slots(day_str, db)
                 results[day_str] = f"{len(existing)} slots (existing, skipped)"
                 logger.debug("Shorts slots for %s: %d existing — skipping regeneration", day_str, len(existing))
                 continue
