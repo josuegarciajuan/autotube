@@ -55,6 +55,31 @@ async def lifespan(app: FastAPI):
         root_logger.addHandler(fh)
     logging.getLogger("autotube").info("File logging enabled → logs/api.log")
     
+    # ── Systemd watchdog ping ─────────────────────────────────
+    # If running under systemd with WatchdogSec set, send periodic
+    # pings so systemd knows the process is alive. Without this,
+    # WatchdogSec would kill the service after 90s even if healthy.
+    _watchdog_task = None
+    try:
+        from systemd import daemon as _sd
+        import asyncio as _asyncio_wd
+        if _sd.booted():
+            _sd.notify("READY=1")
+            _wlogger = logging.getLogger("autotube.watchdog")
+            _wlogger.info("systemd watchdog initialized (interval=30s)")
+            
+            async def _watchdog_ping():
+                while True:
+                    await _asyncio_wd.sleep(30)
+                    try:
+                        _sd.notify("WATCHDOG=1")
+                    except Exception:
+                        pass
+            
+            _watchdog_task = _asyncio_wd.create_task(_watchdog_ping())
+    except ImportError:
+        pass  # not running under systemd or python3-systemd not installed
+    
     # ── Port pre-flight guard ─────────────────────────────────
     # If port 8000 is already bound (a previous instance still holds it),
     # uvicorn will crash with [Errno 98] AFTER the lifespan startup runs —
@@ -258,6 +283,12 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    if _watchdog_task is not None:
+        _watchdog_task.cancel()
+        try:
+            await _watchdog_task
+        except asyncio.CancelledError:
+            pass
     schedule_task.cancel()
     health_monitor_task.cancel()
     publish_verify_task.cancel()
