@@ -422,7 +422,7 @@ TTS_STRATEGY = {
     "voice_secondary": "es-MX-DaliaNeural",
 
     # ── Base (default) ───────────────────────────────────
-    "rate_base": "-15%",         # moderately slow, documentary gravitas
+    "rate_base": "+0%",           # neutral speed — voz más pausada
     "pitch_base": "+0Hz",        # natural pitch, authoritative
 
     # ── Hook (opening impact) ────────────────────────────
