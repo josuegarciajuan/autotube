@@ -27,15 +27,22 @@ echo "║  Autotube — Zero-Downtime Change Application        ║"
 echo "╚═════════════════════════════════════════════════════╝"
 echo ""
 
-# ── Check if subprocess worker mode is enabled ──
-WORKER_MODE=$(python3 -c "
-from api.services.generation_service import USE_SUBPROCESS_WORKER
-print('ON' if USE_SUBPROCESS_WORKER else 'OFF')
-" 2>/dev/null || echo "UNKNOWN")
+# ── Python syntax check ── prevent IndentationError/syntax regressions
+echo "🔍 Checking Python syntax..."
+SYNTAX_ERRORS=0
+for f in $(find pipeline api database config -name "*.py" -not -path "*/__pycache__/*" 2>/dev/null); do
+    if ! python3 -c "import py_compile; py_compile.compile('$f', doraise=True)" 2>/dev/null; then
+        echo "   ❌ SYNTAX ERROR in $f"
+        SYNTAX_ERRORS=$((SYNTAX_ERRORS + 1))
+    fi
+done
+if [ $SYNTAX_ERRORS -gt 0 ]; then
+    echo "❌ $SYNTAX_ERRORS file(s) with syntax errors — aborting deploy"
+    exit 1
+fi
+echo "   ✅ All Python files pass syntax check"
+echo ""
 
-echo "🔧 Subprocess worker mode: $WORKER_MODE"
-
-# ── Check for active generation ──
 echo "🔍 Checking for active generation..."
 ACTIVE_JOBS=$(python3 -c "
 from database.db_extended import ExtendedDatabase
