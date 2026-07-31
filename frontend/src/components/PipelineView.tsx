@@ -477,36 +477,6 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
   )
 }
 
-// ── Card: Shorts completed (done today) ──────────────────────
-function ShortsCompletedCard({ slot }: { slot: ShortsPipelineSlot }) {
-  const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
-  const isNative = slot.short_type === 'native'
-  const actualTime = slot.actual_completed_at || slot.scheduled_at
-
-  return (
-    <div className="pipeline-card rounded-xl p-3 border bg-dark-800/40 border-l-2 border-l-green-500/30 opacity-60 hover:opacity-80 transition-opacity">
-      <div className="flex items-center gap-2">
-        <span className={`w-2 h-2 rounded-full ${colors.dot} opacity-50`} />
-        <span className={`text-xs font-semibold ${colors.text} opacity-70`}>
-          {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
-        </span>
-        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
-        <span className="text-[10px] text-green-400 font-mono ml-auto flex items-center gap-1">
-          <CheckCircle2 size={10} />
-          Completado
-        </span>
-      </div>
-      <div className="flex items-center gap-2 text-[10px] mt-1.5">
-        <Smartphone size={10} className="text-gray-500" />
-        <span className="text-gray-500">Publicado:</span>
-        <span className="text-gray-400 font-mono">
-          {toLocalTime(actualTime)} {toLocalDate(actualTime)}
-        </span>
-      </div>
-    </div>
-  )
-}
-
 // ── Card: Shorts ready to upload (pre-rendered clip, v25) ───
 function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
   const colors = CHANNEL_STYLES[short.channel_slug] || DEFAULT_STYLE
@@ -595,7 +565,6 @@ function PublishedCard({ item }: { item: PublishedItem }) {
 type PlannedItem =
   | { _type: 'video'; data: PlannedSlot }
   | { _type: 'shorts-pending'; data: ShortsPipelineSlot }
-  | { _type: 'shorts-completed'; data: ShortsPipelineSlot }
 
 type GeneratingItem =
   | { _type: 'video'; data: GeneratingVideo }
@@ -656,7 +625,6 @@ export default function PipelineView() {
     const mergedPlannedVal: PlannedItem[] = [
       ...p.map(s => ({ _type: 'video' as const, data: s })),
       ...sp.map(s => ({ _type: 'shorts-pending' as const, data: s })),
-      ...sc.map(s => ({ _type: 'shorts-completed' as const, data: s })),
     ].sort((a, b) => new Date(a.data.scheduled_at).getTime() - new Date(b.data.scheduled_at).getTime())
 
     const mergedGeneratingVal: GeneratingItem[] = [
@@ -740,8 +708,6 @@ export default function PipelineView() {
                   return <PlannedCard key={`vid-${item.data.slot_id}`} slot={item.data as PlannedSlot} />
                 case 'shorts-pending':
                   return <ShortsPlannedCard key={`short-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
-                case 'shorts-completed':
-                  return <ShortsCompletedCard key={`short-done-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
               }
             })}
           </div>
