@@ -1479,12 +1479,12 @@ def _migrate_v20(conn, logger):
     """Idempotent v20: channel_insights table for AI analysis results.
 
     Also applies v20.1 additions (heartbeat, retry, phase_detail) if missing.
+    NOTE: ALTER TABLE must run BEFORE executescript() — schema_v20.sql's
+    CREATE INDEX references heartbeat_at which may not exist yet on tables
+    created by a previous migration run without the column.
     """
-    schema_v20 = Path(__file__).parent / "schema_v20.sql"
-    if schema_v20.exists():
-        with open(schema_v20) as f:
-            conn.executescript(f.read())
-    # v20.1: add resilience columns if missing (idempotent)
+    # v20.1: add resilience columns BEFORE executescript (idempotent)
+    # so CREATE INDEX doesn't fail on missing columns in pre-existing tables.
     for col, col_type in [
         ("heartbeat_at", "TIMESTAMP"),
         ("retry_count", "INTEGER DEFAULT 0"),
@@ -1496,7 +1496,7 @@ def _migrate_v20(conn, logger):
             )
         except Exception:
             pass  # column already exists
-    # v20.1: add heartbeat index
+    # v20.1: add heartbeat index — safe now columns exist
     try:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ci_heartbeat "
@@ -1504,6 +1504,11 @@ def _migrate_v20(conn, logger):
         )
     except Exception:
         pass
+
+    schema_v20 = Path(__file__).parent / "schema_v20.sql"
+    if schema_v20.exists():
+        with open(schema_v20) as f:
+            conn.executescript(f.read())
     logger.info("Migration: v20 schema applied (channel_insights)")
 
 
