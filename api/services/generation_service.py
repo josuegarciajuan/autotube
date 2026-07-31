@@ -3527,8 +3527,12 @@ async def _monitor_worker_progress(
                     "Worker pid=%d exited with code %d before DB update — marking as failed",
                     proc.pid, exit_code,
                 )
+                log_tail = _read_worker_log_tail(job_id)
+                error_detail = f"Worker exited with code {exit_code}"
+                if log_tail:
+                    error_detail += f"\n--- worker log tail ---\n{log_tail}"
                 db.update_job(job_id, status="failed",
-                              error_msg=f"Worker exited with code {exit_code}")
+                              error_msg=error_detail[:1000])
                 db.update_video(video_id, status="error", progress_phase="worker_died")
                 await _broadcast_progress(
                     job_id, last_progress, "error",
@@ -3827,5 +3831,16 @@ async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str
         logger.info("DB updated: job #%d → cancelled, video #%d → error", job_id, video_id)
     except Exception as exc:
         logger.error("DB update after cancel failed for job #%d: %s", job_id, exc)
+
+
+def _read_worker_log_tail(job_id: int, lines: int = 12) -> str:
+    """Read last N lines from worker log for diagnostic context in failed alerts."""
+    log_path = os.path.join(settings.LOGS_DIR, f"worker_{job_id}.log")
+    try:
+        with open(log_path, "r") as f:
+            all_lines = f.readlines()
+            return "".join(all_lines[-lines:]).rstrip()
+    except Exception:
+        return ""
 
     return result

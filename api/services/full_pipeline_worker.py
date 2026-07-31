@@ -1432,7 +1432,9 @@ def run_job(
 
     except Exception as exc:
         tb = traceback.format_exc()
-        error_msg = f"{type(exc).__name__}: {exc}"
+        tb_lines = tb.strip().split('\n')
+        tb_tail = '\n'.join(tb_lines[-3:]) if len(tb_lines) >= 3 else tb
+        error_msg = f"{type(exc).__name__}: {exc} (trace: {tb_tail})"
         logger.error("Pipeline crashed: %s\n%s", exc, tb)
         db.update_job(job_id, status="failed", error_msg=error_msg[:500])
         db.update_video(video_id, status="error", progress_phase="error")

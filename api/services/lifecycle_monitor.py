@@ -398,8 +398,8 @@ def _check_video_failed_unalerted(db) -> int:
 
             for row in rows:
                 error_msg = row["error_msg"] or "Unknown error"
-                # Truncate for title
-                short_msg = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
+                first_line = error_msg.split('\n')[0].strip()
+                short_msg = first_line[:100] + "..." if len(first_line) > 100 else first_line
                 created += _maybe_create_alert(
                     db, conn, "video", row["id"], row["channel_id"],
                     "failed", "critical",
