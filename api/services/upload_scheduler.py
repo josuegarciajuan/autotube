@@ -199,7 +199,7 @@ def _recover_stuck_uploading_videos(db) -> int:
     return recovered
 
 
-def dispatch_due_uploads(db=None) -> dict | None:
+def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     """Check for awaiting_upload videos and dispatch upload jobs.
 
     A video is ready for upload when:
@@ -492,13 +492,27 @@ def dispatch_due_uploads(db=None) -> dict | None:
     except Exception:
         pass
 
-    asyncio.create_task(
-        start_upload_job_from_scheduler(
-            job_id=job_id,
-            video_id=video_id,
-            channel_id=channel_id,
+    try:
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        asyncio.run_coroutine_threadsafe(
+            start_upload_job_from_scheduler(
+                job_id=job_id,
+                video_id=video_id,
+                channel_id=channel_id,
+            ),
+            loop,
         )
-    )
+    except Exception as e:
+        logger.error(
+            "Failed to schedule upload task for job %d (video %d): %s — cleaning up",
+            job_id, video_id, e,
+        )
+        db.update_job(job_id, status="failed",
+                       error_msg=f"Upload scheduling failed: {e}"[:500])
+        db.update_video(video_id, status="awaiting_upload",
+                         progress_phase="upload",
+                         scheduled_upload_at=None)
 
     return {
         "video_id": video_id,

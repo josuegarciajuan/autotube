@@ -604,7 +604,8 @@ async def _process_upload_slots():
     logger = logging.getLogger("autotube.upload")
     try:
         from api.services.upload_scheduler import dispatch_due_uploads
-        result = await asyncio.to_thread(dispatch_due_uploads)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(dispatch_due_uploads, loop)
         if result:
             logger.info(
                 "Upload dispatched: video=%d job=%d channel=%s pub=%s",
