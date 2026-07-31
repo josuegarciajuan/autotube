@@ -1049,6 +1049,19 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
+    # 5. Global concurrency guard: only ONE short at a time globally.
+    #    Shorts rendering runs in thread pool threads (via asyncio.to_thread),
+    #    each consuming significant CPU/RAM (ffmpeg, Kokoro TTS, LLM).
+    #    Multiple concurrent shorts exhaust the thread pool and cause system
+    #    contention. Limit to 1 globally, regardless of channel.
+    active_global = db.get_active_shorts_job()
+    if active_global:
+        logger.debug(
+            "Shorts dispatch deferred: short job #%d already running (channel=%s)",
+            active_global.get("id"), active_global.get("channel_slug", "?"),
+        )
+        return None
+
     # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
     # v25: Changed from fixed for-loop (3 retries) to while-loop where predictable
     # skips (no source channel / no resolved source video) do NOT consume retries.
