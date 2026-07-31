@@ -201,8 +201,9 @@ def get_monitor_dashboard():
             # Quick stats
             generated_today = conn.execute(
                 """SELECT COUNT(*) as c FROM videos
-                   WHERE created_at >= datetime('now', 'start of day')
-                     AND status IN ('uploaded', 'published', 'ready', 'uploaded_private', 'uploading')"""
+                   WHERE date(created_at) = date('now', 'localtime')
+                     AND status IN ('generating', 'awaiting_upload', 'uploading',
+                                    'uploaded', 'uploaded_private', 'published', 'ready')"""
             ).fetchone()["c"]
 
             # Success rate (last 7 days)
