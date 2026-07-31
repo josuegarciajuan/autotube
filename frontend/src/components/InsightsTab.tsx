@@ -829,6 +829,9 @@ export default function InsightsTab({
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pollCountRef = useRef(0)
+  // Local state for the phase stepper — decoupled from props so
+  // the AnalysisLoadingScreen re-renders immediately on every poll.
+  const [localPhase, setLocalPhase] = useState<string>('exploration')
 
   // ── Load / poll ──────────────────────────────────────────────
   const loadInsight = useCallback(async (opts?: { signal?: AbortSignal }) => {
@@ -836,6 +839,7 @@ export default function InsightsTab({
       const data = await api.getLatestInsight(channelId, opts?.signal)
       if (opts?.signal?.aborted) return
       setInsights(data)
+      setLocalPhase(data.current_phase || 'exploration')
       setError(null)
       if (data.status === 'completed' || data.status === 'failed') {
         setAnalyzing(false)
@@ -903,16 +907,17 @@ export default function InsightsTab({
   // ── Actions ──────────────────────────────────────────────────
   async function handleGenerate() {
     setAnalyzing(true)
-    // Don't clear existing insights — preserve them while enrichment runs
-    // Only clear if there's nothing to preserve
+    setLocalPhase('exploration')
+    // Clear previous recommendations so the loading screen renders
+    // (hasExistingData would otherwise hide it) — new data replaces on completion.
     if (!insights) {
       setInsights(null)
     } else {
-      // Keep existing insights visible; new analysis will replace on completion
       setInsights({
         ...insights,
         status: 'processing',
         current_phase: 'exploration',
+        insights_json: { ...insights.insights_json, recommendations: [] },
       })
     }
     try {
@@ -1121,7 +1126,7 @@ export default function InsightsTab({
           </div>
         </div>
         <AnalysisLoadingScreen
-          phase={insights?.current_phase || 'exploration'}
+          phase={localPhase}
           rawPatterns={insights?.raw_patterns}
         />
       </div>
