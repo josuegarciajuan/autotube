@@ -281,6 +281,72 @@ def _build_portrait_query(
 # v2: Query pool builder
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _extract_narrative_keywords_short(query: str, theme_ctx) -> str:
+    """Extract only the narrative keywords from a search query for shorts.
+
+    Strips theme keywords (from ThemeContext.theme_keywords_en, key_motifs,
+    and derived words) while preserving the narrative subject keywords
+    that describe what is actually being narrated in this specific block.
+
+    Then appends exactly ONE theme anchoring keyword to maintain visual
+    context without letting the theme dominate the query.
+
+    Returns a narrative-heavy query string, or empty string if no narrative
+    keywords remain after stripping.
+    """
+    if not query:
+        return ""
+
+    # Gather all theme-related words to strip
+    theme_words: set[str] = set()
+    if theme_ctx:
+        if theme_ctx.theme_keywords_en:
+            for kw in theme_ctx.theme_keywords_en:
+                for w in kw.lower().split():
+                    theme_words.add(w)
+        if theme_ctx.key_motifs:
+            for motif in theme_ctx.key_motifs:
+                for w in motif.lower().split():
+                    theme_words.add(w)
+        if theme_ctx.primary_subject:
+            for w in theme_ctx.primary_subject.lower().split():
+                theme_words.add(w)
+        if theme_ctx.genre and theme_ctx.genre != "documental":
+            for w in theme_ctx.genre.lower().replace("_", " ").split():
+                theme_words.add(w)
+        if theme_ctx.era_decade and theme_ctx.era_decade not in ("atemporal", "presente", ""):
+            theme_words.add(theme_ctx.era_decade.lower())
+        elif theme_ctx.era and theme_ctx.era not in ("atemporal", "presente", ""):
+            for w in theme_ctx.era.lower().replace("_", " ").split():
+                theme_words.add(w)
+
+    # Separate narrative words from theme/style words
+    words = query.split()
+    narrative_words = []
+    theme_words_found = []
+
+    for w in words:
+        wl = w.lower().strip(",.!?;:")
+        if wl in _STYLE_WORDS:
+            continue
+        if wl in theme_words:
+            theme_words_found.append(w)
+        else:
+            narrative_words.append(w)
+
+    if not narrative_words:
+        return ""  # query was entirely thematic
+
+    # Build: narrative keywords + at most 1 theme anchoring word
+    result = " ".join(narrative_words[:6])
+
+    if theme_words_found:
+        anchor = theme_words_found[0]
+        if len(result) + len(anchor) + 1 <= 100:
+            result = f"{result} {anchor}"
+
+    return result[:100]
+
 def _build_query_pool(
     block: dict[str, Any],
     theme_keywords: list[str] | None = None,
@@ -288,21 +354,15 @@ def _build_query_pool(
     theme_ctx = None,  # v8: full ThemeContext for richer anchoring
     fallback_queries: list[str] | None = None,
 ) -> list[str]:
-    """Build ~6-8 ordered query variations for exhaustive search per block.
+    """Build ~7-9 ordered query variations for exhaustive search per block.
 
-    Strategy:
-      1. Primary: LLM's ``search_query_en`` via ``_build_portrait_query``
-      2. Directional variations: wide shot, close-up, alternative angle,
-         low angle dramatic, distant view atmospheric — each built by
-         appending one modifier word to the primary query.
-      3. Simplified: first 4 content words of the query (stripped).
-      4. Theme-clean: LLM query without style modifiers (raw keywords).
-      5. Type-specific fallback from _FALLBACK_BY_TYPE.
-      6. Themed fallback: built dynamically from ThemeContext (v8).
-      7. Generic fallbacks from SHORTS_FALLBACK_QUERIES.
+    Order (narrative priority): narrative-first queries try first,
+    theme-anchored queries are fallbacks. This ensures that what you
+    SEE matches what you HEAR in shorts, while maintaining visual context.
 
     Returns a deduplicated ordered list of non-empty queries, each ≤100 chars.
     """
+    import re
     from config.settings import SHORTS_FALLBACK_QUERIES
 
     search_en = block.get("search_query_en", "")
@@ -311,6 +371,7 @@ def _build_query_pool(
     pool: list[str] = []
 
     # 1. Primary query: scene + theme context + style (v8)
+    #    With the improved LLM prompt, this should already be ~60-70% narrative.
     if search_en and search_en.strip():
         primary = _build_portrait_query(
             search_en, theme_keywords, style_modifiers, theme_ctx=theme_ctx,
@@ -318,38 +379,46 @@ def _build_query_pool(
         if primary.strip():
             pool.append(primary.strip()[:100])
 
-    # 2. Directional variations — add one modifier word at a time
+    # 2. Narrative-heavy variant: strip most theme words, keep 1 anchor.
+    #    Prioritizes narrative content with minimal theme anchoring.
+    #    Comes BEFORE directional variations so narrative specificity wins.
+    if search_en and search_en.strip():
+        narrative_heavy = _extract_narrative_keywords_short(search_en, theme_ctx)
+        if narrative_heavy and narrative_heavy.strip():
+            # Also check it's different from the primary query
+            primary_str = pool[0] if pool else ""
+            nh_str = narrative_heavy.strip()
+            if nh_str and nh_str not in pool:
+                pool.append(nh_str[:100])
+
+    # 3. Directional variations — reduced to 3 from 5 (most distinct angles)
     directional_modifiers = [
         "wide shot establishing",
         "close-up detail",
-        "alternative angle composition",
-        "low angle dramatic",
         "distant view atmospheric",
     ]
     if search_en and search_en.strip():
         base_words = search_en.split()
-        # take up to 6 content words as base
         base = " ".join(base_words[:6])
         for mod in directional_modifiers:
             cand = f"{base} {mod}"[:100]
             if cand not in pool:
                 pool.append(cand)
 
-    # 3. Simplified: first 4 content words (no style fluff)
+    # 4. Simplified: first 4 content words (no style fluff)
     if search_en and search_en.strip():
         words = [w for w in search_en.split() if w.lower() not in _STYLE_WORDS]
         simple = " ".join(words[:4])
         if simple and simple not in pool:
             pool.append(simple[:100])
 
-    # 4. Theme-clean: just the LLM query keywords, no channel style
+    # 5. Theme-clean: just the LLM query keywords, no channel style
     if search_en and search_en.strip():
         theme_clean = _build_portrait_query(search_en, theme_keywords, "")
         if theme_clean.strip() and theme_clean not in pool:
             pool.append(theme_clean.strip()[:100])
 
-    # 5. Type-specific fallback
-    # Try exact type match first, then strip trailing digits (desarrollo2 → desarrollo)
+    # 6. Type-specific fallback (moved later — lower priority)
     type_fb = _FALLBACK_BY_TYPE.get(block_type)
     if type_fb is None:
         stem = re.sub(r"\d+$", "", block_type)
@@ -357,13 +426,13 @@ def _build_query_pool(
     if type_fb and type_fb not in pool:
         pool.append(type_fb[:100])
 
-    # 6. Themed fallback (v8): built dynamically from ThemeContext
+    # 7. Themed fallback (v8): built dynamically from ThemeContext
     if theme_ctx and theme_ctx.primary_subject:
         themed_fb = _build_themed_short_fallback(block_type, theme_ctx)
         if themed_fb and themed_fb not in pool:
             pool.append(themed_fb[:100])
 
-    # 7. Generic fallbacks
+    # 8. Generic fallbacks (absolute last resort)
     gen_fb = fallback_queries or SHORTS_FALLBACK_QUERIES
     for fb in gen_fb:
         if fb and fb not in pool:
