@@ -479,6 +479,14 @@ class MediaFetcher:
                     "RAM governor: only %.1f GB free → capping videos at %d",
                     free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
                 )
+            elif free_ram_mb > 12000:
+                # 12+ GB free → high-RAM mode: raise cap to 70 for 80% video ratio
+                MAX_ABSOLUTE_VIDEOS = 70
+                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
+                logger.info(
+                    "RAM governor: %.1f GB free → high-RAM mode: video cap raised to %d",
+                    free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
+                )
         except Exception:
             pass  # ram_governor unavailable (non-critical)
         video_ok = 0  # declared early for hard-cap check in the fetch loop
@@ -1509,8 +1517,9 @@ class MediaFetcher:
         This guarantees that we only give up after exhausting:
           ~11 queries × ~6 providers × ~10 pages each ≈ 660 candidate evaluations
         """
-        providers = self._interleaved_providers(want_video, scene, force_images=force_images)
+        providers, sparing_providers = self._interleaved_providers(want_video, scene, force_images=force_images)
 
+        # ── First pass: exhaustive search across all primary providers ──
         for query in query_pool:
             if not query or not query.strip():
                 continue
@@ -1542,13 +1551,45 @@ class MediaFetcher:
                     page += 1
                     time.sleep(0.15)
 
+        # ── Second pass (last resort): sparing providers (Unsplash) across all queries ──
+        # This only runs when primary providers (Pixabay + video) found nothing.
+        # Preserves the Unsplash 45 req/hour budget for scenes that truly need it.
+        if sparing_providers:
+            logger.debug("Primary providers exhausted — falling back to sparing providers (Unsplash)")
+            for query in query_pool:
+                if not query or not query.strip():
+                    continue
+                for provider in sparing_providers:
+                    page = 1
+                    while True:
+                        asset_candidates = self._search_provider_page(
+                            provider, query, target_dur, page, want_video,
+                        )
+                        if not asset_candidates:
+                            break
+                        for candidate in asset_candidates:
+                            if not self._is_asset_duplicate(candidate):
+                                downloaded = self._download_candidate(provider, candidate)
+                                if downloaded and downloaded.get("path"):
+                                    self._record_asset_used(candidate)
+                                    self._record_asset_for_history(downloaded)
+                                    return downloaded
+                        total = asset_candidates[0].get("_total_available", 0)
+                        per_page = asset_candidates[0].get("_per_page", 20)
+                        if total <= 0 or page * per_page >= total:
+                            break
+                        page += 1
+                        time.sleep(0.15)
+
         return None
 
-    def _interleaved_providers(self, want_video: bool, scene: dict, force_images: bool = False) -> list:
-        """Return providers in interleaved order: preferred type first, then the other.
+    def _interleaved_providers(self, want_video: bool, scene: dict, force_images: bool = False) -> tuple[list, list]:
+        """Return (primary_providers, sparing_providers) ordered by preference.
 
-        This ensures that even when a scene wants an image, video providers are
-        tried after image providers are exhausted (cross-rotation).
+        Primary providers are searched exhaustively across all queries first.
+        Sparing providers (rate-limited services like Unsplash) are only tried
+        as a last resort after primary providers are exhausted across all queries.
+        This preserves the Unsplash 45-req/hour budget for scenes that truly need it.
 
         When force_images is True (RAM safety cap), video providers are excluded
         entirely to prevent OOM from too many downloaded video assets.
@@ -1556,23 +1597,27 @@ class MediaFetcher:
         is_transition = scene.get("is_transition", False)
         if is_transition:
             # Transitions always use images (Ken Burns)
-            return self._get_all_image_providers()
+            return (self._get_all_image_providers(), [])
 
-        image_providers_list = self._get_all_image_providers()
+        # Separate Pixabay (primary, high capacity) from Unsplash (sparing, 45 req/hr)
+        pixabay_only = [self._pixabay_img] if self._pixabay_img else []
+        unsplash_only = [self._unsplash] if self._unsplash else []
 
         if force_images:
             # RAM safety cap: only image providers, no video fallback
-            return image_providers_list
+            return (pixabay_only, unsplash_only)
 
         video_providers_list = list(self.video_providers) if self.video_providers else []
 
         if want_video:
-            return video_providers_list + image_providers_list
+            # Video-first: exhaust all video providers, then Pixabay, Unsplash as last resort
+            return (video_providers_list + pixabay_only, unsplash_only)
         else:
-            return image_providers_list + video_providers_list
+            # Image-first: exhaust Pixabay + video providers, Unsplash as last resort
+            return (pixabay_only + video_providers_list, unsplash_only)
 
     def _get_all_image_providers(self) -> list:
-        """Return all active image providers as a list for iteration."""
+        """Return all active image providers (Pixabay + Unsplash) as a list."""
         providers = []
         if self._pixabay_img:
             providers.append(self._pixabay_img)

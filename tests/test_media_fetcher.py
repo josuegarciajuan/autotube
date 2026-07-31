@@ -199,7 +199,6 @@ class TestSceneRangesSync:
     @patch("pipeline.media_fetcher.time.sleep", return_value=None)
     def test_media_tipo_synced_after_fetch(self, mock_sleep):
         """scene_ranges[i]["media_tipo"] = results[i]["type"] after fetch."""
-        import importlib
         from pipeline.media_fetcher import MediaFetcher
 
         cfg = _make_config(
@@ -214,15 +213,13 @@ class TestSceneRangesSync:
             _make_scene_range(start=5, duration=5, media_tipo="video", asset_idx=1),
         ]
 
-        # All providers fail → fallback to image
-        fetcher._try_video_providers = MagicMock(return_value=None)
-        fetcher._try_all_video_providers = MagicMock(return_value=None)
-
-        def mock_try_image(query, skip_urls=None):
+        # Mock _fetch_asset_exhaustive (v2 path) to return image results
+        # The v2 path uses _interleaved_providers → _search_provider_page, not
+        # the legacy _try_* methods.
+        def mock_fetch_exhaustive(scene, query_pool, want_video, target_dur, ctx, force_images=False):
             return _make_image_result()
 
-        fetcher._try_image_unsplash = MagicMock(side_effect=mock_try_image)
-        fetcher._try_image_pexels = MagicMock(return_value=None)
+        fetcher._fetch_asset_exhaustive = MagicMock(side_effect=mock_fetch_exhaustive)
 
         results = fetcher.fetch_for_script(
             bloques=[{"texto": "test", "tipo": "desarrollo"}] * 2,

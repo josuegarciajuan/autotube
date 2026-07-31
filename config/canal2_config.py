@@ -619,8 +619,8 @@ SUBTITLE_PHRASE_GAP = 0.4
 MEDIA_STRATEGY = {
     "media_per_block": 1,
     "prefer_video": True,
-    "max_video_blocks_pct": 50,
-    "target_video_pct": 60,            # governor target: ~60% video scenes (antes 50)
+    "max_video_blocks_pct": 80,
+    "target_video_pct": 80,            # governor target: ~80% video scenes (antes 60)
     "max_placeholder_pct": 0,          # governor: 0% placeholder scenes tolerated
     "video_fallback_to_image": True,
     "video_min_duration": 4,

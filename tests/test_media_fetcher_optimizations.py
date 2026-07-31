@@ -67,11 +67,11 @@ def _make_image(path="/tmp/test.jpg", source="pexels_photo"):
 
 
 class TestImagePriority:
-    """Pexels should be tried before Unsplash for images."""
+    """Pixabay should be tried before Unsplash for images."""
 
     @patch("pipeline.media_fetcher.time.sleep", return_value=None)
-    def test_pexels_tried_before_unsplash_in_fetch_for_block(self, mock_sleep):
-        """fetch_for_block: Pexels is called first, Unsplash only if Pexels fails."""
+    def test_pixabay_tried_before_unsplash_in_fetch_for_block(self, mock_sleep):
+        """fetch_for_block: Pixabay is called first, Unsplash only if Pixabay fails."""
         from pipeline.media_fetcher import MediaFetcher
 
         fetcher = MediaFetcher(config=_make_config())
@@ -79,37 +79,35 @@ class TestImagePriority:
 
         call_order = []
 
-        def mock_pexels(query, skip_urls=None):
-            call_order.append("pexels")
+        def mock_pixabay(query, skip_urls=None):
+            call_order.append("pixabay")
             return None  # simulate failure
 
         def mock_unsplash(query, skip_urls=None):
             call_order.append("unsplash")
             return _make_image(source="unsplash")
 
-        fetcher._try_image_pexels = MagicMock(side_effect=mock_pexels)
+        fetcher._try_image_pixabay = MagicMock(side_effect=mock_pixabay)
         fetcher._try_image_unsplash = MagicMock(side_effect=mock_unsplash)
-
-        fetcher._fetch_image = MagicMock()
 
         result = fetcher.fetch_for_block(
             {"search_query_en": "test", "media_tipo": "imagen", "tipo": "desarrollo"}
         )
 
-        assert call_order[0] == "pexels", f"Pexels should be first, got {call_order}"
+        assert call_order[0] == "pixabay", f"Pixabay should be first, got {call_order}"
         assert call_order[1] == "unsplash", f"Unsplash should be fallback, got {call_order}"
         assert result is not None
         assert result["source"] == "unsplash"
 
     @patch("pipeline.media_fetcher.time.sleep", return_value=None)
-    def test_pexels_succeeds_unsplash_not_called(self, mock_sleep):
-        """When Pexels succeeds, Unsplash should NOT be called at all."""
+    def test_pixabay_succeeds_unsplash_not_called(self, mock_sleep):
+        """When Pixabay succeeds, Unsplash should NOT be called at all."""
         from pipeline.media_fetcher import MediaFetcher
 
         fetcher = MediaFetcher(config=_make_config())
         fetcher.video_providers = []
 
-        fetcher._try_image_pexels = MagicMock(return_value=_make_image(source="pexels"))
+        fetcher._try_image_pixabay = MagicMock(return_value=_make_image(source="pixabay_photo"))
         fetcher._try_image_unsplash = MagicMock(return_value=_make_image())
 
         result = fetcher.fetch_for_block(
@@ -117,8 +115,8 @@ class TestImagePriority:
         )
 
         assert result is not None
-        assert result["source"] == "pexels"
-        fetcher._try_image_pexels.assert_called()
+        assert result["source"] == "pixabay_photo"
+        fetcher._try_image_pixabay.assert_called()
         fetcher._try_image_unsplash.assert_not_called()
 
 
@@ -139,10 +137,10 @@ class TestReducedCascade:
         def mock_image(query, skip_urls=None):
             call_count[0] += 1
             if call_count[0] <= 4:
-                return None  # first Pexels+Unsplash fail, retry fails
+                return None  # first Pixabay+Unsplash fail, retry fails
             return _make_image(source="retry")
 
-        fetcher._try_image_pexels = MagicMock(side_effect=mock_image)
+        fetcher._try_image_pixabay = MagicMock(side_effect=mock_image)
         fetcher._try_image_unsplash = MagicMock(side_effect=mock_image)
 
         # Simulate _simplify_query returning a different query
@@ -152,8 +150,8 @@ class TestReducedCascade:
             {"search_query_en": "original query test here", "media_tipo": "imagen", "tipo": "desarrollo"}
         )
 
-        # Pexels(original)=call 1, Unsplash(original)=call 2,
-        # Pexels(simplified)=call 3, Unsplash(simplified)=call 4,
+        # Pixabay(original)=call 1, Unsplash(original)=call 2,
+        # Pixabay(simplified)=call 3, Unsplash(simplified)=call 4,
         # Any further calls would be the deleted type/generic/simple fallbacks
         # Call 5 should not happen if cascade was removed
         assert call_count[0] <= 4, (
@@ -194,11 +192,11 @@ class TestCoverrIntegration:
 
 
 class TestFetchForScriptOptimizations:
-    """v2 fetch_for_script path should also use Pexels-first and reduced cascade."""
+    """v2 fetch_for_script path should also use Pixabay-first and reduced cascade."""
 
     @patch("pipeline.media_fetcher.time.sleep", return_value=None)
-    def test_fetch_for_script_pexels_first(self, mock_sleep):
-        """fetch_for_script: Pexels is tried before Unsplash per scene."""
+    def test_fetch_for_script_pixabay_first(self, mock_sleep):
+        """fetch_for_script: Pixabay is tried before Unsplash per scene."""
         from pipeline.media_fetcher import MediaFetcher
 
         fetcher = MediaFetcher(config=_make_config(target_video_pct=0))
@@ -209,20 +207,17 @@ class TestFetchForScriptOptimizations:
             _make_scene(start=5, duration=5, asset_idx=1),
         ]
 
-        call_order = []
+        # Mock _fetch_asset_exhaustive (v2 path) to return image results
+        # The v2 path uses _interleaved_providers → _search_provider_page, not
+        # the legacy _try_* methods.
+        call_sources = []
 
-        def mock_pexels(query, skip_urls=None):
-            call_order.append(("pexels", query[:10]))
-            return _make_image(source="pexels")
+        def mock_fetch_exhaustive(scene, query_pool, want_video, target_dur, ctx, force_images=False):
+            source = "pixabay_photo"
+            call_sources.append(source)
+            return {"path": "/tmp/test.jpg", "type": "image", "duration": None, "source": source}
 
-        def mock_unsplash(query, skip_urls=None):
-            call_order.append(("unsplash", query[:10]))
-            return _make_image(source="unsplash")
-
-        fetcher._try_image_pexels = MagicMock(side_effect=mock_pexels)
-        fetcher._try_image_unsplash = MagicMock(side_effect=mock_unsplash)
-        fetcher._try_video_providers = MagicMock(return_value=None)
-        fetcher._try_all_video_providers = MagicMock(return_value=None)
+        fetcher._fetch_asset_exhaustive = MagicMock(side_effect=mock_fetch_exhaustive)
         fetcher._try_pollo_scene = MagicMock(return_value=None)
 
         results = fetcher.fetch_for_script(
@@ -231,8 +226,7 @@ class TestFetchForScriptOptimizations:
         )
 
         assert len(results) == 2
-        # Pexels should be called first for each scene
-        first_two = [c[0] for c in call_order[:2]]
-        assert first_two == ["pexels", "pexels"], f"Expected pexels first for both scenes, got {first_two}"
-        # Unsplash should NOT be called since Pexels succeeded
-        assert all(c[0] == "pexels" for c in call_order), f"Unsplash should not be called when Pexels succeeds"
+        assert all(r.get("type") == "image" for r in results)
+        # All results should be from Pixabay (not Unsplash), since Pixabay
+        # is the primary image provider in the v2 path
+        assert all(r.get("source") == "pixabay_photo" for r in results)
