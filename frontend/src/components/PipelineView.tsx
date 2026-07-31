@@ -657,7 +657,7 @@ export default function PipelineView() {
       ...p.map(s => ({ _type: 'video' as const, data: s })),
       ...sp.map(s => ({ _type: 'shorts-pending' as const, data: s })),
       ...sc.map(s => ({ _type: 'shorts-completed' as const, data: s })),
-    ].sort((a, b) => new Date(b.data.scheduled_at).getTime() - new Date(a.data.scheduled_at).getTime())
+    ].sort((a, b) => new Date(a.data.scheduled_at).getTime() - new Date(b.data.scheduled_at).getTime())
 
     const mergedGeneratingVal: GeneratingItem[] = [
       ...g.map(v => ({ _type: 'video' as const, data: v })),
@@ -665,7 +665,7 @@ export default function PipelineView() {
     ].sort((a, b) => {
       const at = a._type === 'video' ? (a.data as GeneratingVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
       const bt = b._type === 'video' ? (b.data as GeneratingVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
-      return new Date(bt).getTime() - new Date(at).getTime()
+      return new Date(at).getTime() - new Date(bt).getTime()
     })
 
     const mergedAwaitingUploadVal: AwaitingUploadItem[] = [
@@ -674,7 +674,7 @@ export default function PipelineView() {
     ].sort((a, b) => {
       const at = a._type === 'video' ? (a.data as AwaitingUploadVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
       const bt = b._type === 'video' ? (b.data as AwaitingUploadVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
-      return new Date(bt).getTime() - new Date(at).getTime()
+      return new Date(at).getTime() - new Date(bt).getTime()
     })
 
     return {
