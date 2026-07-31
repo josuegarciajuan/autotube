@@ -17,7 +17,7 @@ import {
   Brain, Clock, Loader2, AlertCircle, ChevronDown, ChevronUp,
   Check, X, Copy, ExternalLink, TrendingUp, Zap, BarChart3,
   Eye, EyeOff, Sparkles, Send, MessageSquare, RotateCcw, ThumbsUp,
-  ThumbsDown, AlertTriangle, Search,
+  ThumbsDown, AlertTriangle, Search, Ban,
 } from 'lucide-react'
 
 // ── Props ──────────────────────────────────────────────────────────
@@ -37,11 +37,12 @@ interface Props {
 const PHASE_LABELS: Record<string, string> = {
   exploration: 'Explorando datos del canal...',
   hypothesis: 'Formulando hipotesis...',
+  hypothesis_recommendations: 'Generando hipotesis y recomendaciones...',
   recommendations: 'Generando recomendaciones...',
   done: 'Analisis completado',
 }
 
-const PHASE_ORDER = ['exploration', 'hypothesis', 'recommendations', 'done']
+const PHASE_ORDER = ['exploration', 'hypothesis_recommendations', 'done']
 
 function getPhaseIndex(phase: string | null): number {
   if (!phase) return 0
@@ -108,13 +109,17 @@ function MiniSparkline({ data, positive }: { data: number[]; positive: boolean }
 
 /** The 3-phase loading screen shown during analysis. */
 function AnalysisLoadingScreen({
-  phase, rawPatterns,
+  phase, rawPatterns, phaseDetail, elapsedSeconds, onCancel, retryCount,
 }: {
   phase: string | null
   rawPatterns: any | null
+  phaseDetail?: string | null
+  elapsedSeconds?: number
+  onCancel?: () => void
+  retryCount?: number
 }) {
   const idx = getPhaseIndex(phase)
-  const dots = PHASE_ORDER.slice(0, 4).map((p, i) => ({
+  const dots = PHASE_ORDER.slice(0, 3).map((p, i) => ({
     label: PHASE_LABELS[p],
     done: i < idx,
     active: i === idx,
@@ -127,8 +132,11 @@ function AnalysisLoadingScreen({
     discoveries = patterns.slice(0, 5).map((p: any) => p.finding || p.name || '')
   }
 
+  // Format elapsed time
+  const elapsed = elapsedSeconds ? `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s` : null
+
   return (
-    <div className="space-y-8 animate-fade-in">
+    <div className="space-y-6 animate-fade-in">
       {/* Phase stepper */}
       <div className="flex items-center justify-center gap-2 sm:gap-4">
         {dots.map((d, i) => (
@@ -160,16 +168,38 @@ function AnalysisLoadingScreen({
         ))}
       </div>
 
-      {/* Current phase label */}
-      <p className="text-center text-gray-400 text-sm">
-        {phase ? PHASE_LABELS[phase] || phase : 'Iniciando analisis...'}
-      </p>
+      {/* Status bar: phase label + elapsed time + retry count */}
+      <div className="flex items-center justify-center gap-4">
+        <p className="text-center text-gray-400 text-sm">
+          {phase ? PHASE_LABELS[phase] || phase : 'Iniciando analisis...'}
+          {retryCount != null && retryCount > 0 && (
+            <span className="ml-2 text-neon-gold text-xs">
+              (Intento {retryCount + 1}/3)
+            </span>
+          )}
+        </p>
+        {elapsed && (
+          <span className="text-xs text-gray-500 flex items-center gap-1">
+            <Clock size={10} />
+            {elapsed}
+          </span>
+        )}
+      </div>
+
+      {/* Live phase detail (streaming feedback from backend) */}
+      {phaseDetail && (
+        <div className="max-w-2xl mx-auto">
+          <div className="glass rounded-lg p-3 border border-neon-cyan/5 bg-dark-800/50 text-xs text-gray-400 font-mono truncate">
+            {phaseDetail}
+          </div>
+        </div>
+      )}
 
       {/* Progress bar */}
       <div className="w-full max-w-md mx-auto h-1 bg-dark-600 rounded-full overflow-hidden">
         <div
           className="h-full bg-gradient-to-r from-neon-cyan to-neon-purple rounded-full transition-all duration-700"
-          style={{ width: `${((idx + 1) / 4) * 100}%` }}
+          style={{ width: `${((idx + 1) / 3) * 100}%` }}
         />
       </div>
 
@@ -190,9 +220,18 @@ function AnalysisLoadingScreen({
         </div>
       )}
 
-      {/* Spinner at bottom */}
-      <div className="flex justify-center">
+      {/* Cancel button + spinner */}
+      <div className="flex justify-center items-center gap-4">
         <Loader2 size={20} className="animate-spin text-neon-cyan/60" />
+        {onCancel && (
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 bg-dark-600 hover:bg-neon-red/20 text-gray-400 hover:text-neon-red rounded-lg text-xs transition-colors flex items-center gap-1.5 border border-dark-500 hover:border-neon-red/30"
+          >
+            <Ban size={12} />
+            Cancelar analisis
+          </button>
+        )}
       </div>
     </div>
   )
@@ -826,15 +865,26 @@ export default function InsightsTab({
   const [applyingIds, setApplyingIds] = useState<Set<string>>(new Set())
   const [validatingIds, setValidatingIds] = useState<Set<string>>(new Set())
   const [refiningIds, setRefiningIds] = useState<Set<string>>(new Set())
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pollCountRef = useRef(0)
-  // Ref-backed phase for the stepper — read directly in render, updated
-  // unconditionally on every poll.  Using renderTick as a force-update
-  // ensures the component always re-renders after each poll regardless
-  // of whether React detects the ref change.
+  const startedAtRef = useRef<Date | null>(null)
   const phaseRef = useRef<string>('exploration')
   const [renderTick, setRenderTick] = useState(0)
+
+  // ── Stale heartbeat detection ──────────────────────────────────
+  // Check if a processing insight's heartbeat is > 3 min old (dead thread)
+  function isHeartbeatStale(insight: ChannelInsight): boolean {
+    if (!insight.heartbeat_at) return false
+    try {
+      const hb = new Date(insight.heartbeat_at).getTime()
+      const now = Date.now()
+      return (now - hb) > 180 * 1000 // 3 min
+    } catch {
+      return false
+    }
+  }
 
   // ── Load / poll ──────────────────────────────────────────────
   const loadInsight = useCallback(async (opts?: { signal?: AbortSignal }) => {
@@ -842,19 +892,31 @@ export default function InsightsTab({
       const data = await api.getLatestInsight(channelId, opts?.signal)
       if (opts?.signal?.aborted) return
       setInsights(data)
-      // Unconditionally update phase and force re-render so the
-      // stepper advances immediately on every poll.
       phaseRef.current = data.current_phase || 'exploration'
       setRenderTick(t => t + 1)
       setError(null)
+
       if (data.status === 'completed' || data.status === 'failed') {
         setAnalyzing(false)
+        setElapsedSeconds(0)
+        startedAtRef.current = null
       }
+
+      // Auto-recovery: if processing but heartbeat is stale, auto-trigger re-analysis
+      if (data.status === 'processing' && isHeartbeatStale(data)) {
+        console.warn('Stale heartbeat detected — analysis thread died, auto-failing...')
+        // The backend orphan detector will mark it failed within a few minutes.
+        // We show the user a message and offer retry.
+        setError('El analisis parece haberse detenido (sin latido del servidor). Puedes volver a intentarlo.')
+        setAnalyzing(false)
+        return data
+      }
+
       return data
     } catch (e: any) {
       if (e.name === 'AbortError') return
       if (e.message?.includes('404') || e.message?.includes('No analysis')) {
-        setError(null) // not an error, just no analysis yet
+        setError(null)
       } else {
         setError(e.message)
       }
@@ -867,7 +929,6 @@ export default function InsightsTab({
   // Initial load
   useEffect(() => {
     setLoading(true)
-    // Abort any in-flight request from previous mount
     if (abortRef.current) abortRef.current.abort()
     const controller = new AbortController()
     abortRef.current = controller
@@ -878,21 +939,12 @@ export default function InsightsTab({
     }
   }, [channelId])
 
-  // Poll while processing — with timeout guard
+  // Poll indefinitely while processing (no timeout limit — the backend
+  // heartbeat/orphan detection handles dead threads)
   useEffect(() => {
     if (insights?.status === 'processing' || analyzing) {
       pollRef.current = setInterval(() => {
         pollCountRef.current++
-        // After 200 polls (10 min), give up and show timeout
-        // Analysis typically takes 3-6 min for 3 LLM passes; 10 min is a safe ceiling.
-        if (pollCountRef.current > 200) {
-          if (pollRef.current) clearInterval(pollRef.current)
-          pollRef.current = null
-          setAnalyzing(false)
-          setError('El analisis esta tardando mas de lo esperado. El servidor de IA puede estar ocupado — puedes cerrar esta ventana, el analisis seguira ejecutandose en segundo plano.')
-          return
-        }
-        // Use a fresh AbortController per poll so we don't cancel the wrong one
         if (abortRef.current) abortRef.current.abort()
         const controller = new AbortController()
         abortRef.current = controller
@@ -911,13 +963,45 @@ export default function InsightsTab({
     }
   }, [insights?.status, analyzing, loadInsight])
 
+  // ── Elapsed time tracker ─────────────────────────────────────
+  useEffect(() => {
+    if (insights?.status === 'processing' || analyzing) {
+      if (!startedAtRef.current && insights?.generated_at) {
+        startedAtRef.current = new Date(insights.generated_at)
+      } else if (analyzing && !startedAtRef.current) {
+        startedAtRef.current = new Date()
+      }
+      const timer = setInterval(() => {
+        if (startedAtRef.current) {
+          setElapsedSeconds(Math.floor((Date.now() - startedAtRef.current.getTime()) / 1000))
+        }
+      }, 1000)
+      return () => clearInterval(timer)
+    } else {
+      startedAtRef.current = null
+      setElapsedSeconds(0)
+    }
+  }, [insights?.status, analyzing, insights?.generated_at])
+
+  // ── Cancel handler ───────────────────────────────────────────
+  async function handleCancel() {
+    if (!insights) return
+    try {
+      await api.cancelAnalysis(channelId)
+      setAnalyzing(false)
+      setError('Analisis cancelado.')
+    } catch (e: any) {
+      console.error('Cancel failed:', e)
+    }
+  }
+
   // ── Actions ──────────────────────────────────────────────────
   async function handleGenerate() {
     setAnalyzing(true)
     phaseRef.current = 'exploration'
     setRenderTick(0)
+    setError(null)
     // Clear previous recommendations so the loading screen renders
-    // (hasExistingData would otherwise hide it) — new data replaces on completion.
     if (!insights) {
       setInsights(null)
     } else {
@@ -925,23 +1009,28 @@ export default function InsightsTab({
         ...insights,
         status: 'processing',
         current_phase: 'exploration',
+        phase_detail: null,
         insights_json: { ...insights.insights_json, recommendations: [] },
       })
     }
     try {
       const { insight_id } = await api.analyzeChannel(channelId)
-      // Start polling immediately; use a placeholder if no existing insights
       if (!insights) {
         setInsights({
           id: insight_id, channel_id: channelId,
           status: 'processing', current_phase: 'exploration',
+          phase_detail: null,
           insights_json: { analysis_summary: '', recommendations: [] },
           raw_patterns: null, raw_hypotheses: null,
           error_msg: null, model_used: null,
           tokens_input: 0, tokens_output: 0, generation_time_ms: 0,
+          retry_count: 0,
+          heartbeat_at: null,
           generated_at: null, applied_at: null, applied_by: null,
         })
       }
+      startedAtRef.current = new Date()
+      setElapsedSeconds(0)
     } catch (e: any) {
       setError(e.message)
       setAnalyzing(false)
@@ -1133,10 +1222,14 @@ export default function InsightsTab({
             </div>
           </div>
         </div>
-        <AnalysisLoadingScreen
-          phase={phaseRef.current}
-          rawPatterns={insights?.raw_patterns}
-        />
+      <AnalysisLoadingScreen
+        phase={phaseRef.current}
+        rawPatterns={insights?.raw_patterns}
+        phaseDetail={insights?.phase_detail}
+        elapsedSeconds={elapsedSeconds}
+        onCancel={handleCancel}
+        retryCount={insights?.retry_count}
+      />
       </div>
     )
   }

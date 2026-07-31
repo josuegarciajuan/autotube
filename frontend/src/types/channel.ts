@@ -453,6 +453,7 @@ export interface ChannelInsight {
   channel_id: number
   status: 'processing' | 'completed' | 'failed'
   current_phase: string | null
+  phase_detail: string | null
   insights_json: {
     analysis_summary: string
     recommendations: InsightRecommendation[]
@@ -466,6 +467,8 @@ export interface ChannelInsight {
   tokens_input: number
   tokens_output: number
   generation_time_ms: number
+  retry_count: number
+  heartbeat_at: string | null
   generated_at: string | null
   applied_at: string | null
   applied_by: string | null

@@ -1476,11 +1476,34 @@ def _migrate_v19(conn, logger):
 
 
 def _migrate_v20(conn, logger):
-    """Idempotent v20: channel_insights table for AI analysis results."""
+    """Idempotent v20: channel_insights table for AI analysis results.
+
+    Also applies v20.1 additions (heartbeat, retry, phase_detail) if missing.
+    """
     schema_v20 = Path(__file__).parent / "schema_v20.sql"
     if schema_v20.exists():
         with open(schema_v20) as f:
             conn.executescript(f.read())
+    # v20.1: add resilience columns if missing (idempotent)
+    for col, col_type in [
+        ("heartbeat_at", "TIMESTAMP"),
+        ("retry_count", "INTEGER DEFAULT 0"),
+        ("phase_detail", "TEXT"),
+    ]:
+        try:
+            conn.execute(
+                f"ALTER TABLE channel_insights ADD COLUMN {col} {col_type}"
+            )
+        except Exception:
+            pass  # column already exists
+    # v20.1: add heartbeat index
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ci_heartbeat "
+            "ON channel_insights(heartbeat_at)"
+        )
+    except Exception:
+        pass
     logger.info("Migration: v20 schema applied (channel_insights)")
 
 
@@ -6747,3 +6770,64 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
             return True
+
+    # ── v20.1: resilience methods ──────────────────────────────────
+
+    def update_insight_heartbeat(self, insight_id: int) -> None:
+        """Update heartbeat_at to CURRENT_TIMESTAMP — called every 15s by analysis thread."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET heartbeat_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (insight_id,),
+            )
+            conn.commit()
+
+    def update_insight_phase_detail(self, insight_id: int, detail: str) -> None:
+        """Store sub-phase description text for frontend feedback."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET phase_detail = ? WHERE id = ?",
+                (detail, insight_id),
+            )
+            conn.commit()
+
+    def update_insight_retry(self, insight_id: int, retry_count: int) -> None:
+        """Update retry_count for the current analysis attempt."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channel_insights SET retry_count = ? WHERE id = ?",
+                (retry_count, insight_id),
+            )
+            conn.commit()
+
+    def fail_all_processing_insights(self, reason: str = "Server restart — all threads killed") -> int:
+        """Fail ALL rows with status='processing' (called on startup).
+
+        All in-memory threads die on server restart, so any processing row
+        is guaranteed dead. Returns number of rows marked as failed.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE channel_insights SET status = 'failed', error_msg = ? "
+                "WHERE status = 'processing'",
+                (reason,),
+            )
+            count = cursor.rowcount
+            conn.commit()
+            return count
+
+    def is_insight_heartbeat_stale(self, insight_id: int,
+                                   stale_seconds: int = 180) -> bool:
+        """Check if the insight's heartbeat is older than stale_seconds.
+
+        Returns True if heartbeat is stale (or nonexistent) — meaning the
+        analysis thread has died or hung.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT heartbeat_at FROM channel_insights
+                   WHERE id = ? AND heartbeat_at IS NOT NULL
+                     AND heartbeat_at > datetime('now', ?)""",
+                (insight_id, f'-{stale_seconds} seconds'),
+            ).fetchone()
+            return row is None  # stale if no recent heartbeat found

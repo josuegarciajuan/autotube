@@ -1,9 +1,16 @@
 """Multi-pass LLM analysis for channel optimization.
 
-3-phase pipeline running in background thread:
+2-phase pipeline running in background thread:
   1. EXPLORATION — find ALL patterns, anomalies, correlations in raw data
-  2. HYPOTHESIS  — formulate causal explanations for each pattern
-  3. RECOMMENDATIONS — convert hypotheses into actionable config changes
+  2. HYPOTHESIS+RECOMMENDATIONS — unified pass: causal explanations → actionable config changes
+
+Resilience features (v20.1):
+  - Streaming LLM calls with dead-man switch (120s no-token = hung)
+  - Heartbeat thread updates DB every 15s while analysis is alive
+  - Auto-retry up to 3 attempts on recoverable failures
+  - Configurable cancel flag for user-initiated stop
+  - Data summarization for faster LLM processing (top 20 videos, 15 growth points)
+  - Granular phase_detail for frontend feedback
 
 Progress is written to the ``channel_insights`` table after each phase.
 The frontend polls ``GET /api/channels/{id}/insights/latest`` for updates.
@@ -13,16 +20,41 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 import time
 from typing import Any
 
 from config.llm_client import create_llm_client
-from config.llm_helpers import llm_json_call
 from config.settings import LLM_MODEL_INSIGHTS
 from database.db_extended import ExtendedDatabase
 from config.config_bridge import get_channel_config
 
 logger = logging.getLogger(__name__)
+
+# ── Cancel flags (populated by router, checked by analysis thread) ──
+
+_CANCEL_FLAGS: dict[int, bool] = {}
+_cancel_lock = threading.Lock()
+
+
+def request_cancel(insight_id: int) -> None:
+    """Set cancel flag for an in-progress analysis."""
+    with _cancel_lock:
+        _CANCEL_FLAGS[insight_id] = True
+
+
+def _is_cancelled(insight_id: int) -> bool:
+    """Check if the analysis has been cancelled."""
+    with _cancel_lock:
+        return _CANCEL_FLAGS.pop(insight_id, False)
+
+
+# ── Streaming constants ─────────────────────────────────────────────
+
+DEAD_MAN_INTERVAL = 120   # seconds without a token → API hung
+TOTAL_TIMEOUT = 1200       # absolute ceiling per LLM call (20 min)
+HEARTBEAT_INTERVAL = 15    # seconds between DB heartbeat updates
 
 # ── Config keys the LLM can propose changes for ──────────────────────
 
@@ -99,53 +131,13 @@ Return JSON:
 }}
 </task>"""
 
-_HYPOTHESIS_SYSTEM = """\
-You are a YouTube growth strategist. You have discovered patterns in channel data.
-Now formulate causal hypotheses for each pattern.
+# ── Unified Phase 2: hypothesis + recommendations in one LLM call ──
 
-For each pattern, answer:
-- WHY does this pattern exist? (causal mechanism)
-- What would happen if we changed the variable?
-- How confident are you in this explanation? (0-100)
-- What is the counter-argument (why might this NOT work)?
-
-Base confidence on: sample size, consistency across time, statistical significance.
-
-Return ONLY valid JSON. No markdown."""
-
-_HYPOTHESIS_USER = """\
-<patterns>
-{patterns_json}
-</patterns>
-
-<data>
-{data_json}
-</data>
-
-<task>
-For each pattern, formulate a causal hypothesis.
-Filter out patterns with weak evidence (confidence < 30).
-
-Return JSON:
-{{
-  "hypotheses": [
-    {{
-      "pattern_name": "<match pattern name exactly>",
-      "category": "duracion|hora_publicacion|keywords|contenido|errores",
-      "explanation": "causal mechanism (Spanish, 2-3 sentences)",
-      "proposed_change": "what specific change to make",
-      "expected_outcome": "quantified prediction (e.g. '+30% views in 24h')",
-      "confidence": 85,
-      "counter_argument": "why this might NOT work (Spanish, 1 sentence)",
-      "evidence_strength": "fuerte|moderado|debil"
-    }}
-  ]
-}}
-</task>"""
-
-_RECOMMENDATIONS_SYSTEM = """\
-You are a channel optimization engineer. Convert validated hypotheses into
-concrete, actionable recommendations with exact config key → value mappings.
+_UNIFIED_SYSTEM = """\
+You are a YouTube channel optimization engineer. You have discovered patterns in channel data.
+Now you must do TWO things in ONE response:
+  1. Formulate causal hypotheses for each pattern (why it exists, confidence, counter-argument)
+  2. Convert the strongest hypotheses into concrete, actionable recommendations with exact config key → value mappings.
 
 RULES:
 - Every recommendation must map to specific config keys from the provided list.
@@ -154,17 +146,19 @@ RULES:
   and provide an opencode_prompt with instructions for the developer.
 - Write all titles, details, and summaries in SPANISH.
 - Cite specific data in every recommendation.
+- Filter out patterns with weak evidence (confidence < 30).
+- All recommendations should BUILD UPON and ENRICH any previous analysis, not replace it.
 
 Return ONLY valid JSON. No markdown."""
 
-_RECOMMENDATIONS_USER = """\
+_UNIFIED_USER = """\
 <patterns>
 {patterns_json}
 </patterns>
 
-<hypotheses>
-{hypotheses_json}
-</hypotheses>
+<data>
+{data_json}
+</data>
 
 <current_config>
 {config_json}
@@ -187,14 +181,23 @@ The following recommendations were made in a PREVIOUS analysis of this channel.
 </previous_recommendations>
 
 <task>
-Convert the strongest hypotheses into actionable recommendations.
-For each recommendation, specify EXACTLY which config keys to change and their new values.
-
-If a recommendation requires code changes (not just config), set requires_code=true
-and provide a detailed opencode_prompt in Spanish.
+Step 1: For each pattern, formulate a causal hypothesis. Filter out patterns with confidence < 30.
+Step 2: Convert the strongest hypotheses into actionable recommendations with exact config changes.
 
 Return JSON:
 {{
+  "hypotheses": [
+    {{
+      "pattern_name": "<match pattern name exactly>",
+      "category": "duracion|hora_publicacion|keywords|contenido|errores",
+      "explanation": "causal mechanism (Spanish, 2-3 sentences)",
+      "proposed_change": "what specific change to make",
+      "expected_outcome": "quantified prediction (e.g. '+30% views in 24h')",
+      "confidence": 85,
+      "counter_argument": "why this might NOT work (Spanish, 1 sentence)",
+      "evidence_strength": "fuerte|moderado|debil"
+    }}
+  ],
   "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 opportunities, and biggest risks. Reference the previous analysis if applicable (e.g., 'Since the last analysis...').",
   "health_score": 72,
   "key_metrics": [
@@ -226,7 +229,13 @@ Each sparkline must be an array of 7 integers representing the last 7 data point
 
 def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
                             slug: str) -> dict[str, Any]:
-    """Collect all relevant data for LLM analysis in one structured dict."""
+    """Collect all relevant data for LLM analysis in one structured dict.
+
+    v20.1: Summarizes data to speed up LLM processing without losing signal.
+      - Top 20 videos by recency (not 50)
+      - Last 15 channel growth points (not all)
+      - Last 20 content patterns (not 30)
+    """
     data: dict[str, Any] = {}
 
     # Channel identity
@@ -247,12 +256,10 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
     except Exception:
         data["current_config"] = {}
 
-    # ── Title power words inventory ──────────────────────────────────
-    # Include the current power words list so the LLM can analyze
-    # which ones appear in top-performing titles
+    # Title power words inventory
     data["title_power_words"] = data["current_config"].get("title_power_words", [])
 
-    # ── Video performance (JOIN videos + video_stats_history) ──
+    # ── Video performance — top 20 by recency ──
     with db._connect() as conn:
         rows = conn.execute("""
             SELECT
@@ -273,24 +280,24 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             ) vsh ON v.id = vsh.video_id AND vsh.rn = 1
             WHERE v.channel_id = ? AND v.status NOT IN ('draft', 'error_deleted')
             ORDER BY v.uploaded_at DESC
-            LIMIT 50
+            LIMIT 20
         """, (channel_id,)).fetchall()
         data["video_performance"] = [dict(r) for r in rows]
 
-    # ── Channel growth ──
+    # ── Channel growth — last 15 data points ──
     with db._connect() as conn:
         rows = conn.execute("""
             SELECT subscribers, total_views, video_count,
                    estimated_minutes_watched, fetched_at
             FROM channel_stats_history
             WHERE channel_id = ?
-            ORDER BY fetched_at ASC
+            ORDER BY fetched_at DESC
+            LIMIT 15
         """, (channel_id,)).fetchall()
-        data["channel_growth"] = [dict(r) for r in rows]
+        data["channel_growth"] = list(reversed([dict(r) for r in rows]))
 
     # ── Pipeline health ──
     with db._connect() as conn:
-        # Errors by phase
         rows = conn.execute("""
             SELECT phase, status, COUNT(*) as count
             FROM pipeline_log
@@ -299,16 +306,15 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         """, (slug,)).fetchall()
         data["pipeline_errors_by_phase"] = [dict(r) for r in rows]
 
-        # Recent alerts
         rows = conn.execute("""
             SELECT alert_type, severity, title, message, created_at
             FROM pipeline_alerts
             WHERE channel_id = ? AND resolved = 0
-            ORDER BY created_at DESC LIMIT 50
+            ORDER BY created_at DESC LIMIT 20
         """, (channel_id,)).fetchall()
         data["pipeline_alerts"] = [dict(r) for r in rows]
 
-    # ── Content patterns (keywords, pillars) ──
+    # ── Content patterns — last 20 ──
     with db._connect() as conn:
         rows = conn.execute("""
             SELECT s.keywords_json, s.bloques_json, s.titulo_selected,
@@ -317,7 +323,7 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             JOIN videos v ON v.script_id = s.id
             WHERE v.channel_id = ? AND s.keywords_json IS NOT NULL
             ORDER BY s.created_at DESC
-            LIMIT 30
+            LIMIT 20
         """, (channel_id,)).fetchall()
         data["content_patterns"] = []
         for r in rows:
@@ -328,7 +334,7 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
                 row_dict["keywords"] = []
             data["content_patterns"].append(row_dict)
 
-    # ── Timing data ──
+    # ── Timing data — last 20 ──
     with db._connect() as conn:
         rows = conn.execute("""
             SELECT v.id, v.titulo_final, v.timing_data, v.uploaded_at,
@@ -337,7 +343,7 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             WHERE v.channel_id = ? AND v.timing_data IS NOT NULL
               AND v.timing_data != '{}'
             ORDER BY v.uploaded_at DESC
-            LIMIT 30
+            LIMIT 20
         """, (channel_id,)).fetchall()
         data["timing_data"] = [dict(r) for r in rows]
 
@@ -357,203 +363,372 @@ def _serialize_config(config_ns) -> dict[str, Any]:
     return d
 
 
-# ── Phase runner ────────────────────────────────────────────────────
+# ── Streaming LLM phase runner with dead-man switch ──────────────────
 
-def _run_phase(client, model: str, data: dict, phase: str,
-               system_prompt: str, user_template: str,
-               extra_context: dict | list | None = None) -> dict:
-    """Execute one LLM pass and return {content, tokens_in, tokens_out, duration_ms}."""
-    t0 = time.monotonic()
+def _extract_json_from_content(content: str) -> dict:
+    """Robust JSON extraction from LLM streaming output.
 
-    # Build user prompt with context
-    if phase == "exploration":
-        user_prompt = _EXPLORATION_USER.replace(
-            "{data_json}", json.dumps(data, ensure_ascii=False, default=str))
-    elif phase == "hypothesis":
-        user_prompt = _HYPOTHESIS_USER.replace(
-            "{patterns_json}", json.dumps(extra_context, ensure_ascii=False, default=str))
-        user_prompt = user_prompt.replace(
-            "{data_json}", json.dumps(data, ensure_ascii=False, default=str))
-    elif phase == "recommendations":
-        user_prompt = _RECOMMENDATIONS_USER.replace(
-            "{patterns_json}", json.dumps(extra_context.get("patterns", []), ensure_ascii=False, default=str))
-        user_prompt = user_prompt.replace(
-            "{hypotheses_json}", json.dumps(extra_context.get("hypotheses", []), ensure_ascii=False, default=str))
-        user_prompt = user_prompt.replace(
-            "{config_json}", json.dumps(extra_context.get("current_config", {}), ensure_ascii=False, default=str))
-        user_prompt = user_prompt.replace(
-            "{config_keys}", json.dumps(extra_context.get("config_keys", _CONFIG_KEYS), ensure_ascii=False))
-        prev_recs = extra_context.get("previous_recommendations", [])
-        user_prompt = user_prompt.replace(
-            "{prev_recommendations_json}",
-            json.dumps(prev_recs, ensure_ascii=False, default=str) if prev_recs
-            else "(no hay analisis previo — este es el primer analisis del canal)")
+    Handles markdown fences, thinking-mode preamble text, and other
+    common LLM response wrapping patterns.
+    """
+    text = content.strip()
+
+    # 1. Try markdown code fence extraction (anywhere in the text)
+    m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if m:
+        text = m.group(1).strip()
     else:
-        user_prompt = user_template
+        # 2. Try to extract the first JSON object { ... } from anywhere
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+
+    return json.loads(text)
+
+
+def _run_phase_streaming(
+    client,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    insight_id: int,
+    phase_label: str,
+) -> dict:
+    """Execute one LLM pass with streaming and dead-man switch.
+
+    Streaming enables:
+    - Dead-man switch: if no token arrives for DEAD_MAN_INTERVAL seconds,
+      the API is considered hung and a TimeoutError is raised.
+    - Total timeout: TOTAL_TIMEOUT seconds absolute ceiling.
+    - Live phase_detail updates to the DB for frontend feedback.
+
+    Args:
+        client: OpenAI-compatible client (with thinking mode configured).
+        model: Model name string.
+        messages: Chat messages list.
+        max_tokens: Max tokens for the completion.
+        temperature: Temperature for the completion.
+        insight_id: Insight row ID for DB updates.
+        phase_label: Human-readable label for phase_detail (e.g. "Phase 1: Exploration").
+
+    Returns:
+        {content: dict, tokens_in: int, tokens_out: int, duration_ms: int}
+    """
+    db = ExtendedDatabase()
+    t0 = time.monotonic()
+    content_parts: list[str] = []
+    last_token_at = t0
+    token_count = 0
+    reasoning_count = 0
+
+    db.update_insight_phase_detail(
+        insight_id,
+        f"{phase_label} — iniciando streaming (max {max_tokens} tokens)...",
+    )
 
     try:
-        result = llm_json_call(
-            client,
+        stream = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=16000,
-            temperature=0.7 if phase == "exploration" else 0.5,
-            max_retries=2,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+        )
+
+        for chunk in stream:
+            now = time.monotonic()
+
+            # Dead-man check
+            if now - last_token_at > DEAD_MAN_INTERVAL:
+                db.update_insight_phase_detail(
+                    insight_id,
+                    f"{phase_label} — TIMEOUT: sin tokens durante {DEAD_MAN_INTERVAL}s",
+                )
+                raise TimeoutError(
+                    f"LLM stalled: no tokens for {DEAD_MAN_INTERVAL}s "
+                    f"({token_count} content, {reasoning_count} reasoning tokens received)"
+                )
+
+            # Total timeout check
+            if now - t0 > TOTAL_TIMEOUT:
+                db.update_insight_phase_detail(
+                    insight_id,
+                    f"{phase_label} — TIMEOUT: excedido limite de {TOTAL_TIMEOUT}s",
+                )
+                raise TimeoutError(
+                    f"LLM exceeded total timeout of {TOTAL_TIMEOUT}s"
+                )
+
+            # Collect content
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            if getattr(delta, "reasoning_content", None):
+                reasoning_count += 1
+                last_token_at = now
+                # Update DB with reasoning progress every ~50 reasoning tokens
+                if reasoning_count % 50 == 0:
+                    db.update_insight_phase_detail(
+                        insight_id,
+                        f"{phase_label} — razonando... ({reasoning_count} tokens de pensamiento, "
+                        f"{token_count} tokens de contenido)",
+                    )
+                continue
+
+            if delta.content:
+                content_parts.append(delta.content)
+                token_count += 1
+                last_token_at = now
+                # Update DB every ~100 content tokens
+                if token_count % 100 == 0:
+                    db.update_insight_phase_detail(
+                        insight_id,
+                        f"{phase_label} — generando respuesta... ({token_count} tokens)",
+                    )
+
+        # ── Streaming complete ────────────────────────
+        full_content = "".join(content_parts)
+        db.update_insight_phase_detail(
+            insight_id,
+            f"{phase_label} — completo: {token_count} tokens en "
+            f"{int(now - t0)}s",
+        )
+
+        if not full_content.strip():
+            raise ValueError(
+                f"LLM returned empty content after streaming "
+                f"({token_count} tokens, {reasoning_count} reasoning)"
+            )
+
+        # Parse JSON
+        result = _extract_json_from_content(full_content)
+
+        # Rough token estimates
+        user_messages_text = " ".join(
+            m["content"] for m in messages if isinstance(m.get("content"), str)
+        )
+        tokens_in = len(user_messages_text) // 4
+        tokens_out = len(full_content) // 4
+
+        return {
+            "content": result,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        }
+
+    except TimeoutError:
+        raise
+    except Exception as e:
+        db.update_insight_phase_detail(
+            insight_id,
+            f"{phase_label} — ERROR: {e}",
+        )
+        raise
+
+
+def _run_phase_streaming_with_retry(
+    client,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    insight_id: int,
+    phase_label: str,
+    max_retries: int = 1,
+) -> dict:
+    """Streaming LLM call with one retry on empty/broken content.
+
+    If thinking mode produces empty content (reasoning consumed all tokens),
+    retries once with thinking disabled and doubled max_tokens.
+    """
+    db = ExtendedDatabase()
+
+    try:
+        return _run_phase_streaming(
+            client, model, messages, max_tokens, temperature,
+            insight_id, phase_label,
         )
     except (ValueError, json.JSONDecodeError) as e:
-        # Thinking mode may consume all tokens for reasoning_content,
-        # leaving content empty.  Retry once with thinking disabled
-        # and a larger token budget as a fallback.
         logger.warning(
-            "Phase %s: LLM returned empty/broken content (thinking mode) — "
-            "retrying with thinking=disabled, max_tokens=32000", phase,
+            "%s: LLM returned empty/broken content — "
+            "retrying with thinking=disabled, max_tokens=%d",
+            phase_label, max_tokens * 2,
+        )
+        db.update_insight_phase_detail(
+            insight_id,
+            f"{phase_label} — reintentando sin thinking mode...",
         )
         try:
             no_thinking_client = create_llm_client(
                 enable_thinking=False,
-                timeout=180,
-                max_retries=1,
+                timeout=float(TOTAL_TIMEOUT),
+                max_retries=0,
             )
-            result = llm_json_call(
-                no_thinking_client,
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=32000,
-                temperature=0.7 if phase == "exploration" else 0.5,
-                max_retries=1,
+            return _run_phase_streaming(
+                no_thinking_client, model, messages, max_tokens * 2,
+                temperature, insight_id,
+                f"{phase_label} (sin thinking)",
             )
-            logger.info("Phase %s: thinking-disabled fallback succeeded", phase)
         except Exception as e2:
-            logger.error("Phase %s failed after fallback: %s", phase, e2)
+            logger.error("%s: thinking-disabled fallback also failed: %s", phase_label, e2)
             raise
-    except Exception as e:
-        logger.error("Phase %s failed: %s", phase, e)
-        raise
-
-    # Estimate tokens (conservative heuristic — actual usage from API if available)
-    content_str = json.dumps(result, ensure_ascii=False)
-    tokens_in = len(user_prompt) // 4  # rough estimate
-    tokens_out = len(content_str) // 4
-
-    return {
-        "content": result,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "duration_ms": int((time.monotonic() - t0) * 1000),
-    }
 
 
-# ── Main entry point (called from background thread) ───────────────
+# ── Heartbeat management ─────────────────────────────────────────────
+
+def _start_heartbeat(insight_id: int, stop_event: threading.Event) -> threading.Thread:
+    """Launch a daemon thread that updates heartbeat_at every HEARTBEAT_INTERVAL seconds.
+
+    Args:
+        insight_id: Insight row ID to heartbeat.
+        stop_event: Set this event to stop the heartbeat thread.
+
+    Returns:
+        The heartbeat thread (already started, daemon=True).
+    """
+    def _heartbeat_loop():
+        db = ExtendedDatabase()
+        while not stop_event.is_set():
+            try:
+                db.update_insight_heartbeat(insight_id)
+            except Exception:
+                logger.debug("Heartbeat update failed (non-critical)", exc_info=True)
+            stop_event.wait(HEARTBEAT_INTERVAL)
+
+    t = threading.Thread(
+        target=_heartbeat_loop,
+        name=f"autotube-heartbeat-{insight_id}",
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+# ── Main entry point (called from background thread) ─────────────────
+
+MAX_RETRY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
+
 
 def run_channel_analysis_sync(insight_id: int, channel_id: int,
                               slug: str) -> None:
-    """Run the full 3-pass LLM analysis. Designed for ThreadPoolExecutor.
+    """Run the 2-phase LLM analysis with streaming, heartbeat, and retry.
 
-    Updates the ``channel_insights`` row after each phase so the frontend
-    can poll and show real-time progress.
+    Designed for ThreadPoolExecutor. Updates ``channel_insights`` row
+    after each phase so the frontend can poll for real-time progress.
     """
     db = ExtendedDatabase()
     t0 = time.monotonic()
-    logger.info("Starting analysis for channel %s (insight %d)", slug, insight_id)
+    logger.info("Starting analysis for channel %s (insight %d, max %d attempts)",
+                slug, insight_id, MAX_RETRY_ATTEMPTS)
 
+    # ── Load previous analysis context (shared across retries) ──
+    prev_recommendations = []
     try:
-        # ── Phase 0: Aggregate all data ──────────────────────────
-        db.update_insight_phase(insight_id, "exploration")
-        data = _aggregate_channel_data(db, channel_id, slug)
-        logger.info("Data aggregated: %d videos, %d growth points",
-                     len(data.get("video_performance", [])),
-                     len(data.get("channel_growth", [])))
+        prev_insight = db.get_latest_insight(channel_id)
+        if (prev_insight
+                and prev_insight.get("status") == "completed"
+                and prev_insight.get("id") != insight_id):
+            prev_json = prev_insight.get("insights_json", {})
+            if isinstance(prev_json, str):
+                try:
+                    prev_json = json.loads(prev_json)
+                except json.JSONDecodeError:
+                    prev_json = {}
+            prev_recommendations = prev_json.get("recommendations", [])
+            logger.info("Loaded %d previous recommendations as context", len(prev_recommendations))
+    except Exception as e:
+        logger.warning("Failed to load previous insights: %s", e)
 
-        # ── Load previous analysis for context and enrichment ────
-        prev_recommendations = []
+    # ── Retry loop ──────────────────────────────────────────────
+    for attempt in range(MAX_RETRY_ATTEMPTS):
+        if _is_cancelled(insight_id):
+            logger.info("Analysis %d cancelled by user before attempt %d", insight_id, attempt + 1)
+            db.fail_insight(insight_id, "Cancelado por el usuario")
+            return
+
+        db.update_insight_retry(insight_id, attempt)
+
+        # ── Heartbeat ──────────────────────────────────────────
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = _start_heartbeat(insight_id, heartbeat_stop)
+
         try:
-            prev_insight = db.get_latest_insight(channel_id)
-            if (prev_insight
-                    and prev_insight.get("status") == "completed"
-                    and prev_insight.get("id") != insight_id):
-                prev_json = prev_insight.get("insights_json", {})
-                if isinstance(prev_json, str):
-                    try:
-                        prev_json = json.loads(prev_json)
-                    except json.JSONDecodeError:
-                        prev_json = {}
-                prev_recommendations = prev_json.get("recommendations", [])
-                # Include previous context in aggregated data for exploration phase
-                data["previous_analysis"] = {
-                    "summary": prev_json.get("analysis_summary", ""),
-                    "health_score": prev_json.get("health_score"),
-                    "recommendations_count": len(prev_recommendations),
-                    "applied_count": sum(1 for r in prev_recommendations if r.get("applied")),
-                    "discarded_count": sum(1 for r in prev_recommendations if r.get("discarded")),
-                }
-                logger.info("Loaded %d previous recommendations from insight %d as context",
-                           len(prev_recommendations), prev_insight["id"])
-        except Exception as e:
-            logger.warning("Failed to load previous insights: %s", e)
+            # ── Phase 0: Aggregate data ────────────────────────
+            phase_label = f"Intento {attempt + 1}/{MAX_RETRY_ATTEMPTS}"
+            db.update_insight_phase(insight_id, "exploration")
+            db.update_insight_phase_detail(
+                insight_id, f"{phase_label} — agregando datos del canal...",
+            )
+            data = _aggregate_channel_data(db, channel_id, slug)
+            logger.info("Data aggregated: %d videos, %d growth points",
+                         len(data.get("video_performance", [])),
+                         len(data.get("channel_growth", [])))
 
-        # ── Create LLM client with thinking mode ─────────────────
-        client = create_llm_client(
-            enable_thinking=True,
-            reasoning_effort="medium",
-            timeout=180,
-            max_retries=1,
-        )
-        model = LLM_MODEL_INSIGHTS
-        total_tokens_in = 0
-        total_tokens_out = 0
+            # Check cancel flag after data aggregation
+            if _is_cancelled(insight_id):
+                logger.info("Analysis %d cancelled after data aggregation", insight_id)
+                db.fail_insight(insight_id, "Cancelado por el usuario")
+                return
 
-        # ── Phase 1: Exploration ────────────────────────────────
-        logger.info("Phase 1/3: exploration for %s", slug)
-        db.update_insight_phase(insight_id, "exploration")
-        patterns = _run_phase(client, model, data, "exploration",
-                              _EXPLORATION_SYSTEM, _EXPLORATION_USER)
-        total_tokens_in += patterns["tokens_in"]
-        total_tokens_out += patterns["tokens_out"]
-        db.update_insight_phase(
-            insight_id, "hypothesis",
-            raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
-        )
-        logger.info("Phase 1 done: %d patterns found",
-                     len(patterns["content"].get("patterns", [])))
+            # ── Create LLM client with thinking mode ───────────
+            client = create_llm_client(
+                enable_thinking=True,
+                reasoning_effort="medium",
+                timeout=float(TOTAL_TIMEOUT),
+                max_retries=0,  # our retry logic handles this
+            )
+            model = LLM_MODEL_INSIGHTS
+            total_tokens_in = 0
+            total_tokens_out = 0
 
-        # ── Phase 2: Hypothesis ─────────────────────────────────
-        logger.info("Phase 2/3: hypothesis for %s", slug)
-        hypotheses = _run_phase(
-            client, model, data, "hypothesis",
-            _HYPOTHESIS_SYSTEM, _HYPOTHESIS_USER,
-            extra_context=patterns["content"].get("patterns", []),
-        )
-        total_tokens_in += hypotheses["tokens_in"]
-        total_tokens_out += hypotheses["tokens_out"]
-        db.update_insight_phase(
-            insight_id, "recommendations",
-            raw_hypotheses=json.dumps(hypotheses["content"], ensure_ascii=False),
-        )
-        logger.info("Phase 2 done: %d hypotheses",
-                     len(hypotheses["content"].get("hypotheses", [])))
+            # ── Phase 1: Exploration ──────────────────────────
+            logger.info("%s: exploration for %s", phase_label, slug)
+            db.update_insight_phase(insight_id, "exploration")
 
-        # ── Phase 3: Recommendations ────────────────────────────
-        logger.info("Phase 3/3: recommendations for %s", slug)
-        try:
-            config = get_channel_config(slug, force_reload=True)
-            current_config = _serialize_config(config)
-        except Exception:
-            current_config = {}
-        recommendations = _run_phase(
-            client, model, data, "recommendations",
-            _RECOMMENDATIONS_SYSTEM, _RECOMMENDATIONS_USER,
-            extra_context={
-                "patterns": patterns["content"].get("patterns", []),
-                "hypotheses": hypotheses["content"].get("hypotheses", []),
-                "current_config": current_config,
-                "config_keys": _CONFIG_KEYS,
-                "previous_recommendations": [
+            exploration_messages = [
+                {"role": "system", "content": _EXPLORATION_SYSTEM},
+                {"role": "user", "content": _EXPLORATION_USER.replace(
+                    "{data_json}", json.dumps(data, ensure_ascii=False, default=str),
+                )},
+            ]
+            patterns = _run_phase_streaming_with_retry(
+                client, model, exploration_messages,
+                max_tokens=8000, temperature=0.7,
+                insight_id=insight_id,
+                phase_label=f"{phase_label} · Fase 1/2: Exploración",
+            )
+            total_tokens_in += patterns["tokens_in"]
+            total_tokens_out += patterns["tokens_out"]
+
+            db.update_insight_phase(
+                insight_id, "hypothesis_recommendations",
+                raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
+            )
+            logger.info("Phase 1 done: %d patterns found",
+                         len(patterns["content"].get("patterns", [])))
+
+            # Check cancel flag
+            if _is_cancelled(insight_id):
+                logger.info("Analysis %d cancelled after phase 1", insight_id)
+                db.fail_insight(insight_id, "Cancelado por el usuario")
+                return
+
+            # ── Phase 2: Hypothesis + Recommendations unified ──
+            logger.info("%s: hypothesis+recommendations for %s", phase_label, slug)
+
+            try:
+                config = get_channel_config(slug, force_reload=True)
+                current_config = _serialize_config(config)
+            except Exception:
+                current_config = {}
+
+            # Build previous context summary
+            prev_context = (
+                json.dumps([
                     {
                         "title": r.get("title"), "category": r.get("category"),
                         "applied": r.get("applied"), "discarded": r.get("discarded"),
@@ -561,65 +736,160 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                         "detail": r.get("detail", "")[:300],
                     }
                     for r in prev_recommendations
-                ],
-            },
-        )
-        total_tokens_in += recommendations["tokens_in"]
-        total_tokens_out += recommendations["tokens_out"]
-        logger.info("Phase 3 done: %d recommendations",
-                     len(recommendations["content"].get("recommendations", [])))
+                ], ensure_ascii=False, default=str)
+                if prev_recommendations
+                else "(no hay analisis previo — este es el primer analisis del canal)"
+            )
 
-        # ── Merge: carry over applied/discarded/validated recs from previous analysis ──
-        if prev_recommendations:
-            carried_over = [
-                r for r in prev_recommendations
-                if r.get("applied") or r.get("discarded") or r.get("validation")
+            unified_user = _UNIFIED_USER.replace(
+                "{patterns_json}",
+                json.dumps(patterns["content"].get("patterns", []),
+                           ensure_ascii=False, default=str),
+            ).replace(
+                "{data_json}",
+                json.dumps(data, ensure_ascii=False, default=str),
+            ).replace(
+                "{config_json}",
+                json.dumps(current_config, ensure_ascii=False, default=str),
+            ).replace(
+                "{config_keys}",
+                json.dumps(_CONFIG_KEYS, ensure_ascii=False),
+            ).replace(
+                "{prev_recommendations_json}",
+                prev_context,
+            )
+
+            unified_messages = [
+                {"role": "system", "content": _UNIFIED_SYSTEM},
+                {"role": "user", "content": unified_user},
             ]
-            if carried_over:
-                new_recs = recommendations["content"].get("recommendations", [])
-                # Dedup: skip previously applied recs whose config_changes are
-                # already reflected in the current config (no need to show them again)
-                deduped_carried = []
-                new_config_changes_sets = []
-                for nr in new_recs:
-                    ncc = nr.get("config_changes", {})
-                    if ncc:
-                        new_config_changes_sets.append(set(ncc.keys()))
-                for cr in carried_over:
-                    if cr.get("applied") and cr.get("config_changes"):
-                        cr_keys = set(cr["config_changes"].keys())
-                        # Check if any new recommendation covers the same config keys
-                        if any(cr_keys & nccs for nccs in new_config_changes_sets):
-                            continue  # Already addressed by a new rec, skip
-                    if cr.get("discarded"):
-                        # Mark as from previous analysis for the frontend
-                        cr["from_previous"] = True
-                    deduped_carried.append(cr)
-                if deduped_carried:
-                    recommendations["content"]["recommendations"] = (
-                        new_recs + deduped_carried
-                    )
-                    logger.info("Merged %d carried-over recommendations (was %d before dedup)",
-                               len(deduped_carried), len(carried_over))
 
-        # ── Save final result ───────────────────────────────────
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        db.complete_insight(
-            insight_id,
-            insights_json=json.dumps(recommendations["content"], ensure_ascii=False),
-            raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
-            raw_hypotheses=json.dumps(hypotheses["content"], ensure_ascii=False),
-            model=model,
-            tokens_in=total_tokens_in,
-            tokens_out=total_tokens_out,
-            duration_ms=duration_ms,
-        )
-        logger.info("Analysis complete for %s: %dms, %d tokens",
-                     slug, duration_ms, total_tokens_in + total_tokens_out)
+            unified_result = _run_phase_streaming_with_retry(
+                client, model, unified_messages,
+                max_tokens=12000, temperature=0.5,
+                insight_id=insight_id,
+                phase_label=f"{phase_label} · Fase 2/2: Recomendaciones",
+            )
+            total_tokens_in += unified_result["tokens_in"]
+            total_tokens_out += unified_result["tokens_out"]
 
-    except Exception as e:
-        logger.exception("Analysis failed for %s (insight %d)", slug, insight_id)
-        db.fail_insight(insight_id, str(e))
+            # Store raw_hypotheses for backward compatibility
+            raw_hypotheses = json.dumps(
+                unified_result["content"].get("hypotheses", []),
+                ensure_ascii=False,
+            )
+            db.update_insight_phase(
+                insight_id, "done",
+                raw_hypotheses=raw_hypotheses,
+                raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
+            )
+            logger.info("Phase 2 done: %d hypotheses, %d recommendations",
+                         len(unified_result["content"].get("hypotheses", [])),
+                         len(unified_result["content"].get("recommendations", [])))
+
+            # ── Check cancel flag ─────────────────────────────
+            if _is_cancelled(insight_id):
+                logger.info("Analysis %d cancelled after phase 2", insight_id)
+                db.fail_insight(insight_id, "Cancelado por el usuario")
+                return
+
+            # ── Merge: carry over applied/discarded/validated from previous ──
+            if prev_recommendations:
+                carried_over = [
+                    r for r in prev_recommendations
+                    if r.get("applied") or r.get("discarded") or r.get("validation")
+                ]
+                if carried_over:
+                    new_recs = unified_result["content"].get("recommendations", [])
+                    new_config_keys = [
+                        set(nr.get("config_changes", {}).keys())
+                        for nr in new_recs
+                    ]
+                    deduped_carried = []
+                    for cr in carried_over:
+                        if cr.get("applied") and cr.get("config_changes"):
+                            cr_keys = set(cr["config_changes"].keys())
+                            if any(cr_keys & nck for nck in new_config_keys):
+                                continue
+                        if cr.get("discarded"):
+                            cr["from_previous"] = True
+                        deduped_carried.append(cr)
+                    if deduped_carried:
+                        unified_result["content"]["recommendations"] = (
+                            new_recs + deduped_carried
+                        )
+                        logger.info("Merged %d carried-over recommendations",
+                                     len(deduped_carried))
+
+            # ── Save final result ───────────────────────────────
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            db.complete_insight(
+                insight_id,
+                insights_json=json.dumps(unified_result["content"],
+                                         ensure_ascii=False),
+                raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
+                raw_hypotheses=raw_hypotheses,
+                model=model,
+                tokens_in=total_tokens_in,
+                tokens_out=total_tokens_out,
+                duration_ms=duration_ms,
+            )
+            db.update_insight_phase_detail(
+                insight_id,
+                f"Analisis completado en {duration_ms / 1000:.0f}s "
+                f"({total_tokens_in + total_tokens_out} tokens, "
+                f"{attempt + 1} intento{'s' if attempt > 0 else ''})",
+            )
+            logger.info("Analysis complete for %s: %dms, %d tokens (attempt %d)",
+                         slug, duration_ms, total_tokens_in + total_tokens_out, attempt + 1)
+            return  # Success — exit retry loop
+
+        except TimeoutError as e:
+            heartbeat_stop.set()
+            db.update_insight_phase_detail(
+                insight_id,
+                f"Intento {attempt + 1}: TIMEOUT — {e}",
+            )
+            logger.warning("Analysis %s attempt %d/%d timed out: %s",
+                            slug, attempt + 1, MAX_RETRY_ATTEMPTS, e)
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                logger.info("Retrying in %ds...", RETRY_DELAY_SECONDS)
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            else:
+                db.fail_insight(
+                    insight_id,
+                    f"Timeout tras {MAX_RETRY_ATTEMPTS} intentos: {e}"
+                )
+
+        except Exception as e:
+            heartbeat_stop.set()
+            db.update_insight_phase_detail(
+                insight_id,
+                f"Intento {attempt + 1}: ERROR — {e}",
+            )
+            logger.exception(
+                "Analysis %s attempt %d/%d failed",
+                slug, attempt + 1, MAX_RETRY_ATTEMPTS,
+            )
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                logger.info("Retrying in %ds...", RETRY_DELAY_SECONDS)
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            else:
+                db.fail_insight(
+                    insight_id,
+                    f"Failed after {MAX_RETRY_ATTEMPTS} attempts: {e}"
+                )
+
+        finally:
+            heartbeat_stop.set()
+            # heartbeat thread will die within HEARTBEAT_INTERVAL seconds
+            # (daemon thread, no need to join)
+
+    # If we get here, all retries exhausted
+    logger.error("All %d attempts exhausted for %s (insight %d)",
+                 MAX_RETRY_ATTEMPTS, slug, insight_id)
 
 
 # ── Validation prompt for code-change recommendations ────────────────
@@ -675,7 +945,6 @@ def run_validation_check(insight_id: int, channel_id: int, slug: str,
     logger.info("Running validation for rec %s on channel %s", rec_id, slug)
 
     try:
-        # Aggregate current data (same sources as analysis)
         data = _aggregate_channel_data(db, channel_id, slug)
         data_json = json.dumps(data, ensure_ascii=False, default=str)
 
@@ -683,24 +952,23 @@ def run_validation_check(insight_id: int, channel_id: int, slug: str,
             enable_thinking=True,
             reasoning_effort="high",
             timeout=120,
-            max_retries=1,
+            max_retries=0,
         )
         model = LLM_MODEL_INSIGHTS
 
-        user_prompt = _VALIDATION_USER.format(
-            title=recommendation.get("title", ""),
-            category=recommendation.get("category", ""),
-            detail=recommendation.get("detail", ""),
-            expected_impact=recommendation.get("expected_impact", ""),
-            current_data_json=data_json,
-        )
-
+        from config.llm_helpers import llm_json_call
         result = llm_json_call(
             client,
             model=model,
             messages=[
                 {"role": "system", "content": _VALIDATION_SYSTEM},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": _VALIDATION_USER.format(
+                    title=recommendation.get("title", ""),
+                    category=recommendation.get("category", ""),
+                    detail=recommendation.get("detail", ""),
+                    expected_impact=recommendation.get("expected_impact", ""),
+                    current_data_json=data_json,
+                )},
             ],
             max_tokens=2000,
             temperature=0.3,
@@ -716,7 +984,6 @@ def run_validation_check(insight_id: int, channel_id: int, slug: str,
             "validated_by": "llm",
         }
 
-        # Persist to DB
         db.update_insight_recommendation(insight_id, rec_id, {"validation": validation})
         logger.info("Validation complete for rec %s: %s (conf %d)",
                      rec_id, validation["status"], validation["confidence"])
@@ -734,7 +1001,7 @@ def run_validation_check(insight_id: int, channel_id: int, slug: str,
         }
 
 
-# ── Refinement prompt for config-change recommendations ─────────────
+# ── Refinement prompts ───────────────────────────────────────────────
 
 _REFINE_SYSTEM = """\
 You are a YouTube channel optimization assistant. A user wants to refine
@@ -854,14 +1121,15 @@ def run_refine_recommendation(rec_id: str, recommendation: dict,
     Returns:
         { explanation, revised_config_changes, cannot_fulfill, cannot_fulfill_reason }
     """
-    logger.info("Refining rec %s (code_change=%s): user feedback length=%d", rec_id, is_code_change, len(user_feedback))
+    logger.info("Refining rec %s (code_change=%s): user feedback length=%d",
+                 rec_id, is_code_change, len(user_feedback))
 
     try:
         client = create_llm_client(
             enable_thinking=True,
             reasoning_effort="medium",
             timeout=120,
-            max_retries=1,
+            max_retries=0,
         )
         model = LLM_MODEL_INSIGHTS
 
@@ -895,6 +1163,7 @@ def run_refine_recommendation(rec_id: str, recommendation: dict,
                 config_keys=json.dumps(_CONFIG_KEYS, ensure_ascii=False),
             )
 
+        from config.llm_helpers import llm_json_call
         result = llm_json_call(
             client,
             model=model,

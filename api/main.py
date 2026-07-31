@@ -181,18 +181,23 @@ async def lifespan(app: FastAPI):
         logging.getLogger("autotube.startup").warning("Orphan cleanup skipped: %s", exc)
     
     # ── Clean up stuck channel_insights from prior runs ──
-    # If the server was restarted mid-analysis, insight rows remain 'processing'
-    # and the frontend polls them infinitely. Fail them on startup.
+    # If the server was restarted, all in-memory threads are killed.
+    # Any processing row is guaranteed dead — fail them immediately.
     try:
         from database.db_extended import ExtendedDatabase
         _insight_db = ExtendedDatabase()
-        _cleanup_orphaned_insights(
-            _insight_db,
-            logging.getLogger("autotube.startup"),
-            timeout_minutes=10,  # shorter on startup: anything still processing is definitely dead
+        count = _insight_db.fail_all_processing_insights(
+            "Server restart — all analysis threads killed"
         )
+        if count > 0:
+            _startup_logger.warning(
+                "Insight orphan cleanup: %d processing rows force-failed "
+                "(server restart killed all threads)", count
+            )
+        else:
+            _startup_logger.info("Insight orphan check: no stale processing rows")
     except Exception as exc:
-        logging.getLogger("autotube.startup").warning("Insight orphan cleanup skipped: %s", exc)
+        _startup_logger.warning("Insight orphan cleanup skipped: %s", exc)
 
     # ── PAUSE GATE: skip all auto-planning/dispatch when operator paused scheduling ──
     _scheduler_paused = False
@@ -1120,37 +1125,58 @@ async def _detect_and_clean_orphans():
 
 
 # ── Stuck insight detection config ────────────────────────
-INSIGHT_ORPHAN_TIMEOUT_MINUTES = 10  # Insights stuck >10min without completion are declared orphaned (server restarts kill threads)
+# v20.1: use heartbeat-based detection (3 min stale = dead)
+INSIGHT_ORPHAN_HEARTBEAT_SECONDS = 180  # 3 min without heartbeat → orphan
+INSIGHT_ORPHAN_LEGACY_MINUTES = 15      # fallback for rows without heartbeat column
 
+def _cleanup_orphaned_insights(db, logger,
+                                heartbeat_seconds=INSIGHT_ORPHAN_HEARTBEAT_SECONDS,
+                                legacy_minutes=INSIGHT_ORPHAN_LEGACY_MINUTES):
+    """Mark stuck channel_insights rows as failed.
 
-def _cleanup_orphaned_insights(db, logger, timeout_minutes=INSIGHT_ORPHAN_TIMEOUT_MINUTES):
-    """Mark stuck channel_insights rows as failed if they've been 'processing' too long.
-    
-    Threads in the single-thread _INSIGHTS_EXECUTOR can hang on LLM API calls
-    or get killed on server restart, leaving rows with status='processing' forever.
-    The frontend polls these rows every 3s with no timeout, so a stuck row
-    causes an infinite loading screen.
+    Uses heartbeat-based detection (v20.1): if heartbeat_at is older than
+    heartbeat_seconds, the analysis thread is dead/hung.
+    Falls back to generated_at for legacy rows without heartbeat column.
     """
     import logging as _log_mod
     if logger is None:
         logger = _log_mod.getLogger("autotube.insights")
-    
+
     try:
         with db._connect() as conn:
+            # Primary: heartbeat-based detection
             cursor = conn.execute(
                 """UPDATE channel_insights
                    SET status = 'failed',
-                       error_msg = 'Analysis timed out — auto-cleaned by orphan detector (' || ? || ' min timeout)'
+                       error_msg = 'Analysis timed out — no heartbeat for ' || ? || 's'
                    WHERE status = 'processing'
-                     AND generated_at < datetime('now', ?)""",
-                (str(timeout_minutes), f'-{timeout_minutes} minutes')
+                     AND heartbeat_at IS NOT NULL
+                     AND heartbeat_at < datetime('now', ?)""",
+                (str(heartbeat_seconds), f'-{heartbeat_seconds} seconds'),
             )
-            count = cursor.rowcount
+            count_hb = cursor.rowcount
+
+            # Fallback: legacy rows without heartbeat_at (use generated_at)
+            cursor = conn.execute(
+                """UPDATE channel_insights
+                   SET status = 'failed',
+                       error_msg = 'Analysis timed out — auto-cleaned (legacy, ' || ? || ' min)'
+                   WHERE status = 'processing'
+                     AND heartbeat_at IS NULL
+                     AND generated_at < datetime('now', ?)""",
+                (str(legacy_minutes), f'-{legacy_minutes} minutes'),
+            )
+            count_legacy = cursor.rowcount
             conn.commit()
-            if count > 0:
-                logger.warning("Orphaned insights cleaned: %d stale processing rows → failed", count)
+
+            total = count_hb + count_legacy
+            if total > 0:
+                logger.warning(
+                    "Orphaned insights cleaned: %d (heartbeat) + %d (legacy) → failed",
+                    count_hb, count_legacy,
+                )
             else:
-                logger.info("Orphan check: no stale insights found (timeout=%d min)", timeout_minutes)
+                logger.debug("Orphan check: no stale insights found")
     except Exception as exc:
         logger.error("Insight orphan cleanup failed: %s", exc, exc_info=True)
 

@@ -397,6 +397,8 @@ export const api = {
   // ── Insights AI (v20 — AI self-optimization) ──
   analyzeChannel: (channelId: number) =>
     request<any>(`/channels/${channelId}/analyze`, { method: 'POST' }),
+  cancelAnalysis: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analyze`, { method: 'DELETE' }),
   getLatestInsight: (channelId: number, signal?: AbortSignal) =>
     request<any>(`/channels/${channelId}/insights/latest`, signal ? { signal } : undefined),
   applyInsight: (channelId: number, insightId: number, recId: string, refinedVersionIndex?: number) => {

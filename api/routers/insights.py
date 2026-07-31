@@ -1,9 +1,13 @@
 """AI Self-Optimization router — channel analysis and insight management.
 
 Endpoints:
-  POST /{channel_id}/analyze              — launch async multi-pass LLM analysis
-  GET  /{channel_id}/insights/latest       — poll for latest analysis results
-  POST /{channel_id}/insights/{id}/apply   — apply a recommendation to channel config
+  POST   /{channel_id}/analyze              — launch async multi-pass LLM analysis
+  DELETE /{channel_id}/analyze              — cancel an in-progress analysis
+  GET    /{channel_id}/insights/latest       — poll for latest analysis results
+  POST   /{channel_id}/insights/{id}/apply   — apply a recommendation to channel config
+  POST   /{channel_id}/insights/{id}/validate — validate a code-change recommendation
+  POST   /{channel_id}/insights/{id}/discard  — discard/restore a recommendation
+  POST   /{channel_id}/insights/{id}/refine   — refine a recommendation via LLM chat
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ def _format_insight(row: dict) -> dict:
 def analyze_channel(channel_id: int):
     """Launch a multi-pass LLM analysis of channel performance data.
 
-    The analysis runs in a background thread and takes 30-60 seconds.
+    The analysis runs in a background thread with streaming LLM calls.
     Poll ``GET /{channel_id}/insights/latest`` to track progress.
 
     Returns ``{insight_id, status: "processing"}`` immediately.
@@ -56,32 +60,47 @@ def analyze_channel(channel_id: int):
         raise HTTPException(404, "Channel not found")
 
     # ── Dedup: if there is already a running analysis for this channel,
-    # check whether it's truly alive or a stale orphan (e.g. thread killed
-    # during a server restart).  Stale rows are cleaned up on the fly so
-    # the user never sees a phantom "processing" stuck forever.
+    # check whether it's truly alive or a stale orphan.
     import datetime as _dt
     existing = db.get_latest_insight(channel_id)
     if existing and existing.get("status") == "processing":
-        generated_at = existing.get("generated_at")
-        if generated_at:
+        # Check heartbeat-based freshness (v20.1)
+        is_stale = True
+        if existing.get("heartbeat_at"):
             try:
-                gen_dt = _dt.datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
-                age_seconds = (_dt.datetime.utcnow() - gen_dt).total_seconds()
+                hb_dt = _dt.datetime.strptime(
+                    existing["heartbeat_at"], "%Y-%m-%d %H:%M:%S"
+                )
+                age_seconds = (_dt.datetime.utcnow() - hb_dt).total_seconds()
+                is_stale = age_seconds > 180  # 3 min without heartbeat = dead
             except (ValueError, TypeError):
-                age_seconds = 0
-        else:
-            age_seconds = 0
-        if age_seconds > 300:  # >5 min → stale orphan, auto-clean
+                pass  # can't parse heartbeat_at → treat as stale
+
+        # Fallback: check generated_at if no heartbeat column (legacy rows)
+        if is_stale and existing.get("generated_at"):
+            try:
+                gen_dt = _dt.datetime.strptime(
+                    existing["generated_at"], "%Y-%m-%d %H:%M:%S"
+                )
+                age_seconds = (_dt.datetime.utcnow() - gen_dt).total_seconds()
+                is_stale = age_seconds > 300  # 5 min fallback for legacy rows
+            except (ValueError, TypeError):
+                is_stale = True
+
+        if is_stale:
             logger.warning(
-                "Stale processing insight %d for channel %d (%.0fs old) — "
+                "Stale processing insight %d for channel %d — "
                 "auto-failing and launching new analysis",
-                existing["id"], channel_id, age_seconds,
+                existing["id"], channel_id,
             )
-            db.fail_insight(existing["id"], "Auto-cleaned: thread killed (stale >5 min)")
+            db.fail_insight(
+                existing["id"],
+                "Auto-cleaned: analysis thread died (stale heartbeat)",
+            )
         else:
             logger.info(
-                "Analysis for channel %d already running (insight %d, %.0fs) — skipping new launch",
-                channel_id, existing["id"], age_seconds,
+                "Analysis for channel %d already running (insight %d, heartbeat active) — skipping",
+                channel_id, existing["id"],
             )
             return {
                 "insight_id": existing["id"],
@@ -101,12 +120,45 @@ def analyze_channel(channel_id: int):
     return {"insight_id": insight_id, "status": "processing", "already_running": False}
 
 
+@router.delete("/{channel_id}/analyze")
+def cancel_analysis(channel_id: int):
+    """Cancel an in-progress analysis for this channel.
+
+    Sets a cancel flag that the analysis thread checks before each
+    LLM call and at phase boundaries. The row will be marked as
+    'failed' with "Cancelado por el usuario".
+
+    Returns 404 if no running analysis found.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    existing = db.get_latest_insight(channel_id)
+    if not existing or existing.get("status") != "processing":
+        raise HTTPException(404, "No running analysis to cancel")
+
+    from api.services.channel_analyzer import request_cancel
+
+    request_cancel(existing["id"])
+    logger.info(
+        "Cancel requested for channel %d analysis (insight %d)",
+        channel_id, existing["id"],
+    )
+    return {
+        "ok": True,
+        "insight_id": existing["id"],
+        "message": "Cancel requested — analysis will stop at next checkpoint",
+    }
+
+
 @router.get("/{channel_id}/insights/latest")
 def get_latest_insight(channel_id: int):
     """Return the most recent relevant analysis for this channel.
 
     - If an analysis is currently ``processing``, return it (so the frontend
-      shows live progress).
+      shows live progress), but annotate if the heartbeat is stale.
     - If the latest analysis is ``failed``, return the most recent
       ``completed`` instead (don't show a failed state when there's
       a perfectly good completed analysis available).
@@ -127,11 +179,11 @@ def get_latest_insight(channel_id: int):
         completed = db.get_latest_completed_insight(channel_id)
         if completed:
             return _format_insight(completed)
-        # No completed analysis at all — return the failed one so the frontend
-        # can show the error and offer "Generar análisis".
 
     return _format_insight(insight)
 
+
+# ── Apply [unchanged] ──────────────────────────────────────────────────
 
 @router.post("/{channel_id}/insights/{insight_id}/apply")
 def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
@@ -141,7 +193,7 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
     Query params:
         rec_id:                  the recommendation UUID to apply
         refined_version_index:   if >= 0, use refined_versions[index].revised_config_changes
-                                 instead of the original config_changes
+                                  instead of the original config_changes
     """
     db = get_db()
 
@@ -442,7 +494,7 @@ def refine_insight(channel_id: int, insight_id: int, body: RefineRequest):
         "explanation": result["explanation"],
         "triggered_by": body.user_feedback,
         "refined_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                  __import__("time").gmtime()),
+                                                   __import__("time").gmtime()),
     }
 
     existing_refined = rec.setdefault("refined_versions", [])
