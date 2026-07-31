@@ -451,7 +451,7 @@ def _preflight_cleanup(logger):
 
 # ── Phase order (for checkpoint resume) ──────────────────────────
 
-_PHASE_ORDER = ["scrape", "script", "tts", "media", "video", "metadata", "upload"]
+_PHASE_ORDER = ["scrape", "script", "pre_validate", "tts", "media", "video", "metadata", "post_validate", "upload"]
 
 _PHASE_INDEX = {p: i for i, p in enumerate(_PHASE_ORDER)}
 
@@ -842,6 +842,25 @@ def run_job(
                     len(script.get("guion", "").split()) if script else 0)
 
         # ═══════════════════════════════════════════════════════
+        # Phase 1.5: Pre-validation (early gate)
+        # ═══════════════════════════════════════════════════════
+        if _phase_index("pre_validate") < start_idx:
+            logger.info("Skipping pre-validation (loaded from checkpoint)")
+        else:
+            db.update_video(video_id, progress=27, progress_phase="pre_validate")
+            logger.info("Phase 1.5/7: Pre-validating script quality...")
+            try:
+                orch.phase_pre_validate(script)
+                db.update_video(video_id, progress=27, progress_phase="pre_validate")
+                _save_checkpoint(video_id, "pre_validate", {"passed": True}, db)
+            except RuntimeError as ve:
+                error_msg = str(ve)
+                logger.error("Pre-validation FAILED: %s", error_msg)
+                db.update_job(job_id, status="failed", error_msg=error_msg[:500])
+                db.update_video(video_id, status="error", progress_phase="pre_validate")
+                return False
+
+        # ═══════════════════════════════════════════════════════
         # Phase 2: TTS
         # ═══════════════════════════════════════════════════════
         if _phase_index("tts") < start_idx:
@@ -934,7 +953,7 @@ def run_job(
                 return False
             
             db.update_video(video_id, progress=60, progress_phase="video")
-            logger.info("Phase 4/6: Assembling video...")
+            logger.info("Phase 4/7: Assembling video...")
             
             # ── Memory guard: wait if system is critically low on RAM ──
             # ffmpeg xfade concat of 200+ segments with crossfades consumes
@@ -1005,7 +1024,7 @@ def run_job(
             logger.info("Skipping metadata (loaded from checkpoint)")
         else:
             db.update_video(video_id, progress=78, progress_phase="metadata")
-            logger.info("Phase 5/6: Generating SEO metadata...")
+            logger.info("Phase 5/7: Generating SEO metadata...")
             
             try:
                 metadata = orch.phase_metadata(script, video_data)
@@ -1071,12 +1090,51 @@ def run_job(
                 logger.warning("Scene saving failed (non-fatal): %s", exc)
 
         # ═══════════════════════════════════════════════════════
+        # Phase 5.5: Post-validation (quality gate before upload)
+        # ═══════════════════════════════════════════════════════
+        if _phase_index("post_validate") < start_idx:
+            logger.info("Skipping post-validation (loaded from checkpoint)")
+        else:
+            db.update_video(video_id, progress=87, progress_phase="post_validate")
+            logger.info("Phase 5.5/7: Post-validating video & metadata quality...")
+            try:
+                val_result = orch.phase_post_validate(video_data, metadata, script)
+                # Auto-fixes may have updated metadata — sync to DB
+                if val_result.auto_fixes_applied:
+                    logger.info(
+                        "Post-validate auto-fixes: %s",
+                        ", ".join(val_result.auto_fixes_applied),
+                    )
+                    try:
+                        db.update_video(
+                            video_id,
+                            titulo_final=val_result.title,
+                            description=val_result.description,
+                            tags_json=json.dumps(val_result.tags, ensure_ascii=False),
+                        )
+                    except Exception as _sync_exc:
+                        logger.warning("Failed to sync auto-fixed metadata to DB: %s", _sync_exc)
+                if val_result.warnings:
+                    logger.warning(
+                        "Post-validate warnings: %s",
+                        "; ".join(val_result.warnings),
+                    )
+                db.update_video(video_id, progress=87, progress_phase="post_validate")
+                _save_checkpoint(video_id, "post_validate", {"passed": True}, db)
+            except RuntimeError as ve:
+                error_msg = str(ve)
+                logger.error("Post-validation FAILED: %s", error_msg)
+                db.update_job(job_id, status="failed", error_msg=error_msg[:500])
+                db.update_video(video_id, status="validation_failed", progress_phase="post_validate")
+                return False
+
+        # ═══════════════════════════════════════════════════════
         # Phase 6: Upload
         # ═══════════════════════════════════════════════════════
         skip_upload = not upload or test_mode or action == "generate_only"
         if skip_upload:
             skip_reason = "Test mode" if test_mode else ("Phase 1 only (generate_only)" if action == "generate_only" else "Upload disabled")
-            logger.info("Phase 6/6: %s — skipping upload (video stays local)", skip_reason)
+            logger.info("Phase 7/7: %s — skipping upload (video stays local)", skip_reason)
             # ── generate_only: mark as awaiting_upload for later upload dispatch ──
             gen_status = "awaiting_upload" if action == "generate_only" else "ready"
             # ── Seed scheduled_upload_at from planned slot's target_upload_at ──
@@ -1134,7 +1192,7 @@ def run_job(
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")
-            logger.info("Phase 6/6: Uploading to YouTube...")
+            logger.info("Phase 7/7: Uploading to YouTube...")
             
             # ── Log lifecycle: upload started ──
             try:

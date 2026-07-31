@@ -1255,6 +1255,179 @@ class PipelineOrchestrator:
         except Exception:
             return None
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase 1.5: Pre-validation (after script, before TTS)
+    # ═══════════════════════════════════════════════════════════════════
+
+    def phase_pre_validate(self, script: dict) -> 'PreValidationResult':
+        """Early gate: sanity-checks before investing compute in TTS/media/render.
+
+        BLOCKING: empty title, empty script body → raises RuntimeError.
+        WARNING: duration estimate outside config range → logs warning.
+
+        Raises:
+            RuntimeError: If a blocking check fails. The caller should
+                abort the pipeline without wasting further resources.
+        """
+        from pipeline.video_validator import VideoValidator
+
+        validator = VideoValidator(self.config)
+        result = validator.pre_validate(script)
+
+        # Log each check
+        for check in result.checks:
+            level = logging.WARNING if not check.passed else logging.INFO
+            logger.log(
+                level,
+                "[%s] Pre-validate [%s]: %s %s",
+                self.canal,
+                check.name,
+                "✓" if check.passed else "✗",
+                check.message,
+            )
+
+        # Log summary
+        if result.warnings:
+            logger.warning(
+                "[%s] Pre-validate WARNINGS (%d): %s",
+                self.canal,
+                len(result.warnings),
+                "; ".join(result.warnings),
+            )
+
+        if not result.passed:
+            error_report = "\n".join(f"  - {e}" for e in result.blocking_errors)
+            logger.error(
+                "[%s] PRE-VALIDATION FAILED — aborting before TTS/render:\n%s",
+                self.canal,
+                error_report,
+            )
+            raise RuntimeError(
+                f"Pre-validation failed for {self.canal}: {result.blocking_errors[0]}"
+            )
+
+        logger.info(
+            "[%s] Pre-validation PASSED (%d checks)",
+            self.canal,
+            len(result.checks),
+        )
+        return result
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase 5.5: Post-validation (after metadata, before upload)
+    # ═══════════════════════════════════════════════════════════════════
+
+    def phase_post_validate(
+        self,
+        video_data: dict,
+        metadata: dict,
+        script: dict = None,
+    ) -> 'PostValidationResult':
+        """Late gate: quality check before upload. Never discards.
+
+        BLOCKING: file missing, file corrupt → raises RuntimeError.
+        WARNING: duration out of range → logs warning (never blocks).
+        AUTO-FIX: missing description/tags → LLM regenerate.
+        BELT+SUSPENDERS: verify title power word guarantee.
+
+        Args:
+            video_data: Dict from phase_video (video_path, etc.)
+            metadata: Dict from phase_metadata (selected_title, description, tags)
+            script: Original script dict for LLM re-generation context
+
+        Returns:
+            PostValidationResult with checks and possibly updated metadata.
+
+        Raises:
+            RuntimeError: If a blocking check fails (file missing/corrupt).
+                The video record is preserved for diagnosis — never deleted.
+        """
+        from pipeline.video_validator import VideoValidator, PostValidationResult
+
+        video_path = video_data.get("video_path", "")
+        title = metadata.get("selected_title", video_data.get("titulo", ""))
+        description = metadata.get("description", "")
+        tags = metadata.get("tags", [])
+
+        validator = VideoValidator(self.config)
+        result = validator.post_validate(
+            video_path=video_path,
+            title=title,
+            description=description,
+            tags=tags,
+            metadata_gen=self.metadata_gen,
+            script=script,
+        )
+
+        # Log each check
+        for check in result.checks:
+            if not check.passed and check.severity == "blocking":
+                logger.error(
+                    "[%s] Post-validate [%s] ✗ %s",
+                    self.canal, check.name, check.message,
+                )
+            elif not check.passed:
+                logger.warning(
+                    "[%s] Post-validate [%s] ⚠ %s",
+                    self.canal, check.name, check.message,
+                )
+            elif check.auto_fixed:
+                logger.info(
+                    "[%s] Post-validate [%s] ↻ %s",
+                    self.canal, check.name, check.message,
+                )
+            else:
+                logger.info(
+                    "[%s] Post-validate [%s] ✓ %s",
+                    self.canal, check.name, check.message,
+                )
+
+        # ── Apply auto-fix updates to metadata dict ────────────────
+        if result.auto_fixes_applied:
+            if result.updated_title and result.updated_title != title:
+                metadata["selected_title"] = result.updated_title
+            if result.updated_description and result.updated_description != description:
+                metadata["description"] = result.updated_description
+            if result.updated_tags and result.updated_tags != tags:
+                metadata["tags"] = result.updated_tags
+            logger.info(
+                "[%s] Post-validate auto-fixes applied: %s",
+                self.canal, ", ".join(result.auto_fixes_applied),
+            )
+
+        # ── Handle blocking errors ─────────────────────────────────
+        if not result.passed:
+            error_report = "\n".join(f"  - {e}" for e in result.blocking_errors)
+            logger.error(
+                "[%s] POST-VALIDATION FAILED — blocking upload:\n%s\n"
+                "Video record preserved for diagnosis.",
+                self.canal,
+                error_report,
+            )
+            raise RuntimeError(
+                f"Post-validation blocked upload for {self.canal}: "
+                f"{result.blocking_errors[0]}"
+            )
+
+        # ── Log warnings ───────────────────────────────────────────
+        if result.warnings:
+            logger.warning(
+                "[%s] Post-validate WARNINGS (%d) — uploading anyway, "
+                "monitor should investigate:\n  • %s",
+                self.canal,
+                len(result.warnings),
+                "\n  • ".join(result.warnings),
+            )
+
+        logger.info(
+            "[%s] Post-validation PASSED (%d checks, %d auto-fixes, %d warnings)",
+            self.canal,
+            len(result.checks),
+            len(result.auto_fixes_applied),
+            len(result.warnings),
+        )
+        return result
+
     def phase_metadata(self, script: dict, video_data: dict,
                         source_content: dict = None) -> Optional[dict]:
         """Generate SEO metadata via AI and regenerate thumbnail with overlay text.
@@ -1993,6 +2166,14 @@ class PipelineOrchestrator:
             return False
         logger.info(f"[{self.canal}] Script ready (ID: {script.get('id')})")
 
+        # Phase 1.5: Pre-validation (early gate — saves compute if script is broken)
+        logger.info(f"[{self.canal}] Phase 1.5/6: Pre-validating script quality...")
+        try:
+            self.phase_pre_validate(script)
+        except RuntimeError as ve:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: Pre-validation failed: {ve}")
+            return False
+
         # Phase 2: TTS
         logger.info(f"[{self.canal}] Phase 2/6: Generating TTS audio...")
         audio_data = self.phase_tts(script, job_id=job_id)
@@ -2027,6 +2208,35 @@ class PipelineOrchestrator:
                 f"[{self.canal}] Metadata ready: '{metadata['selected_title'][:60]}' "
                 f"({len(metadata['titles'])} titles, {len(metadata['tags'])} tags)"
             )
+
+        # Phase 5.5: Post-validation (quality gate — never discards)
+        logger.info(f"[{self.canal}] Phase 5.5/6: Post-validating video & metadata quality...")
+        try:
+            val_result = self.phase_post_validate(video_data, metadata, script)
+            # Auto-fixes may have updated metadata in-place — log them
+            if val_result.auto_fixes_applied:
+                logger.info(
+                    f"[{self.canal}] Auto-fixes applied: {', '.join(val_result.auto_fixes_applied)}"
+                )
+            if val_result.warnings:
+                logger.warning(
+                    f"[{self.canal}] Post-validate warnings (%d): see log above",
+                    len(val_result.warnings),
+                )
+        except RuntimeError as ve:
+            logger.error(f"[{self.canal}] PIPELINE ABORTED: Post-validation failed: {ve}")
+            # Save video record with validation_failed status before returning
+            vid_db = video_data.get("video_id")
+            if vid_db:
+                try:
+                    self.db.update_video(
+                        vid_db,
+                        status="validation_failed",
+                        progress_phase="post_validate",
+                    )
+                except Exception:
+                    pass
+            return False
 
         # Phase 6: Upload (optional)
         if not skip_upload:

@@ -440,10 +440,12 @@ _TTS_PHASE_TIMEOUT = int(os.environ.get("TTS_PHASE_TIMEOUT_SEC", "21600"))  # 6h
 PHASE_TIMEOUTS = {
     "scrape":   None,   # no global limit — each scraper has its own 8s timeout
     "script":   3600,   # 60 min (sequential block generation with stop_event)
+    "pre_validate": 30, # 30s (cheap sanity checks, no LLM calls)
     "tts":      _TTS_PHASE_TIMEOUT,   # configurable, default 6h (Kokoro CPU)
     "media":    1800,   # 30 min (multi-provider + Pollo AI) — raised from 900
     "video":    None,   # infinite (no ceiling for MoviePy rendering)
     "metadata": 300,    # 5 min (LLM)
+    "post_validate": 180,  # 3 min (ffprobe checks + possible LLM auto-fix regen)
     "upload":   3600,   # 60 min (YouTube resumable upload) — raised from 1800
 }
 
@@ -466,7 +468,7 @@ import threading
 _DISPATCH_LOCK = threading.Lock()
 
 # Phase order for resume logic (must match execution order)
-_PHASE_ORDER = ["scrape", "script", "tts", "media", "video", "metadata", "upload"]
+_PHASE_ORDER = ["scrape", "script", "pre_validate", "tts", "media", "video", "metadata", "post_validate", "upload"]
 
 
 # ── Helper functions ──────────────────────────────────────────
@@ -1311,6 +1313,27 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                  "titulo_options": script.get("titulo_options", [])})
             db.update_video(video_id, timing_data=orch.collect_timing_json())
         
+        # ── Phase 1.5: Pre-validation (early gate) ─────────────
+        if _phase_index("pre_validate") < start_idx:
+            logger.info("Skipping pre-validation (loaded from checkpoint)")
+        else:
+            await _broadcast_progress(job_id, 27, "pre_validate",
+                "Validando calidad del guion...",
+                video_id=video_id, detail="Verificando titulo, estructura y duracion estimada")
+            ok, val_result = await _run_in_executor(
+                orch.phase_pre_validate, script,
+                timeout=PHASE_TIMEOUTS["pre_validate"],
+            )
+            if not ok:
+                await _broadcast_progress(job_id, 27, "pre_validate",
+                    f"Pre-validacion fallida: {val_result}",
+                    "failed", video_id,
+                    detail="El guion no paso los checks de calidad minimos")
+                db.update_video(video_id, status="error", progress_phase="pre_validate",
+                                timing_data=orch.collect_timing_json())
+                return
+            _save_checkpoint(video_id, "pre_validate", {"passed": True})
+
         # ── Phase 2: TTS ─────────────────────────────────────
         if _phase_index("tts") < start_idx:
             logger.info("Skipping TTS (loaded from checkpoint)")
@@ -1658,6 +1681,58 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                     f"{len(scenes_data)} escenas guardadas", video_id=video_id)
         except Exception as e:
             logger.error(f"Error saving scenes: {e}")
+        
+        # ── Phase 5.5: Post-validation (quality gate — never discards) ──
+        if _phase_index("post_validate") < start_idx:
+            logger.info("Skipping post-validation (loaded from checkpoint)")
+        else:
+            await _broadcast_progress(job_id, 87, "post_validate",
+                "Validando calidad del video y metadatos...",
+                video_id=video_id,
+                detail="Verificando archivo, duracion, titulo, descripcion y tags")
+            ok, val_result = await _run_in_executor(
+                orch.phase_post_validate, video_data, metadata, script,
+                timeout=PHASE_TIMEOUTS["post_validate"],
+            )
+            if not ok:
+                # Phase threw RuntimeError → blocking error
+                error_detail = str(val_result)
+                await _broadcast_progress(job_id, 87, "post_validate",
+                    f"Post-validacion bloqueada: {error_detail[:100]}",
+                    "failed", video_id,
+                    detail="Video preservado para diagnostico — error irrecuperable")
+                db.update_video(video_id, status="validation_failed",
+                                progress_phase="post_validate",
+                                timing_data=orch.collect_timing_json())
+                return
+            
+            # Validation passed (possibly with auto-fixes/warnings)
+            if val_result.auto_fixes_applied:
+                # Sync auto-fixed metadata back to DB
+                try:
+                    db.update_video(
+                        video_id,
+                        titulo_final=val_result.title,
+                        description=val_result.description,
+                        tags_json=json.dumps(val_result.tags, ensure_ascii=False),
+                    )
+                except Exception as _sync_exc:
+                    logger.warning("Failed to sync auto-fixed metadata: %s", _sync_exc)
+                # Update local metadata dict for downstream use (upload, etc.)
+                if metadata and isinstance(metadata, dict):
+                    metadata["selected_title"] = val_result.title
+                    metadata["description"] = val_result.description
+                    metadata["tags"] = val_result.tags
+                logger.info(
+                    "Post-validation auto-fixes: %s",
+                    ", ".join(val_result.auto_fixes_applied),
+                )
+            if val_result.warnings:
+                logger.warning(
+                    "Post-validation warnings: %s",
+                    "; ".join(val_result.warnings),
+                )
+            _save_checkpoint(video_id, "post_validate", {"passed": True})
         
         await _broadcast_progress(job_id, 88, "thumbnail", "Miniatura generada",
                                     video_id=video_id,
