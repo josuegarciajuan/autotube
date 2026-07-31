@@ -591,6 +591,20 @@ function PublishedCard({ item }: { item: PublishedItem }) {
   )
 }
 
+// ── Merged slot types for interleaved pipeline columns ────────
+type PlannedItem =
+  | { _type: 'video'; data: PlannedSlot }
+  | { _type: 'shorts-pending'; data: ShortsPipelineSlot }
+  | { _type: 'shorts-completed'; data: ShortsPipelineSlot }
+
+type GeneratingItem =
+  | { _type: 'video'; data: GeneratingVideo }
+  | { _type: 'shorts'; data: ShortsPipelineSlot }
+
+type AwaitingUploadItem =
+  | { _type: 'video'; data: AwaitingUploadVideo }
+  | { _type: 'shorts-ready'; data: ShortsPipelineSlot }
+
 // ── Column header ────────────────────────────────────────────
 function ColumnHeader({ icon: Icon, title, count, colorClass }: {
   icon: any; title: string; count: number; colorClass: string
@@ -613,6 +627,7 @@ export default function PipelineView() {
   const {
     planned, generating, awaitingUpload, warming, published24h,
     shortsPending, shortsGenerating, shortsCompleted, shortsReady,
+    mergedPlanned, mergedGenerating, mergedAwaitingUpload,
   } = useMemo(() => {
     if (!data) {
       return {
@@ -622,18 +637,52 @@ export default function PipelineView() {
         shortsPending: [] as ShortsPipelineSlot[], shortsGenerating: [] as ShortsPipelineSlot[],
         shortsCompleted: [] as ShortsPipelineSlot[],
         shortsReady: [] as ShortsPipelineSlot[],
+        mergedPlanned: [] as PlannedItem[],
+        mergedGenerating: [] as GeneratingItem[],
+        mergedAwaitingUpload: [] as AwaitingUploadItem[],
       }
     }
+    const p: PlannedSlot[] = data.planned || []
+    const g: GeneratingVideo[] = data.generating || []
+    const a: AwaitingUploadVideo[] = data.awaiting_upload || []
+    const w: WarmingVideo[] = data.warming || []
+    const pub: PublishedItem[] = data.published_24h || []
+    const sp: ShortsPipelineSlot[] = data.shorts?.pending || []
+    const sg: ShortsPipelineSlot[] = data.shorts?.generating || []
+    const sc: ShortsPipelineSlot[] = data.shorts?.completed || []
+    const sr: ShortsPipelineSlot[] = data.shorts?.ready_to_upload || []
+
+    // Merge and sort by scheduled_at / timestamp (most recent first)
+    const mergedPlannedVal: PlannedItem[] = [
+      ...p.map(s => ({ _type: 'video' as const, data: s })),
+      ...sp.map(s => ({ _type: 'shorts-pending' as const, data: s })),
+      ...sc.map(s => ({ _type: 'shorts-completed' as const, data: s })),
+    ].sort((a, b) => new Date(b.data.scheduled_at).getTime() - new Date(a.data.scheduled_at).getTime())
+
+    const mergedGeneratingVal: GeneratingItem[] = [
+      ...g.map(v => ({ _type: 'video' as const, data: v })),
+      ...sg.map(s => ({ _type: 'shorts' as const, data: s })),
+    ].sort((a, b) => {
+      const at = a._type === 'video' ? (a.data as GeneratingVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
+      const bt = b._type === 'video' ? (b.data as GeneratingVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
+      return new Date(bt).getTime() - new Date(at).getTime()
+    })
+
+    const mergedAwaitingUploadVal: AwaitingUploadItem[] = [
+      ...a.map(v => ({ _type: 'video' as const, data: v })),
+      ...sr.map(s => ({ _type: 'shorts-ready' as const, data: s })),
+    ].sort((a, b) => {
+      const at = a._type === 'video' ? (a.data as AwaitingUploadVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
+      const bt = b._type === 'video' ? (b.data as AwaitingUploadVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
+      return new Date(bt).getTime() - new Date(at).getTime()
+    })
+
     return {
-      planned: data.planned || [],
-      generating: data.generating || [],
-      awaitingUpload: data.awaiting_upload || [],
-      warming: data.warming || [],
-      published24h: data.published_24h || [],
-      shortsPending: data.shorts?.pending || [],
-      shortsGenerating: data.shorts?.generating || [],
-      shortsCompleted: data.shorts?.completed || [],
-      shortsReady: data.shorts?.ready_to_upload || [],
+      planned: p, generating: g, awaitingUpload: a, warming: w, published24h: pub,
+      shortsPending: sp, shortsGenerating: sg, shortsCompleted: sc, shortsReady: sr,
+      mergedPlanned: mergedPlannedVal,
+      mergedGenerating: mergedGeneratingVal,
+      mergedAwaitingUpload: mergedAwaitingUploadVal,
     }
   }, [data])
 
@@ -680,82 +729,59 @@ export default function PipelineView() {
     <div className="pipeline-grid">
       {/* ── Column 1: Planned ─────────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Clock} title="Planificado" count={planned.length + shortsPending.length + shortsCompleted.length} colorClass="text-amber-400" />
-        {planned.length === 0 && shortsPending.length === 0 && shortsCompleted.length === 0 ? (
+        <ColumnHeader icon={Clock} title="Planificado" count={mergedPlanned.length} colorClass="text-amber-400" />
+        {mergedPlanned.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay pendientes</p>
         ) : (
           <div className="space-y-3">
-            {planned.map((slot) => (
-              <PlannedCard key={`vid-${slot.slot_id}`} slot={slot} />
-            ))}
-            {shortsPending.length > 0 && planned.length > 0 && (
-              <div className="flex items-center gap-2 py-1">
-                <div className="flex-1 h-px bg-surface-border/30" />
-                <Smartphone size={11} className="text-gray-600" />
-                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts pendientes</span>
-                <div className="flex-1 h-px bg-surface-border/30" />
-              </div>
-            )}
-            {shortsPending.map((slot) => (
-              <ShortsPlannedCard key={`short-${slot.slot_id}`} slot={slot} />
-            ))}
-            {shortsCompleted.length > 0 && (
-              <div className="flex items-center gap-2 py-1">
-                <div className="flex-1 h-px bg-green-500/15" />
-                <CheckCircle2 size={11} className="text-green-500/60" />
-                <span className="text-[9px] text-green-500/80 uppercase tracking-wider">
-                  Shorts completados ({shortsCompleted.length})
-                </span>
-                <div className="flex-1 h-px bg-green-500/15" />
-              </div>
-            )}
-            {shortsCompleted.map((slot) => (
-              <ShortsCompletedCard key={`short-done-${slot.slot_id}`} slot={slot} />
-            ))}
+            {mergedPlanned.map((item) => {
+              switch (item._type) {
+                case 'video':
+                  return <PlannedCard key={`vid-${item.data.slot_id}`} slot={item.data as PlannedSlot} />
+                case 'shorts-pending':
+                  return <ShortsPlannedCard key={`short-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
+                case 'shorts-completed':
+                  return <ShortsCompletedCard key={`short-done-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
+              }
+            })}
           </div>
         )}
       </div>
 
       {/* ── Column 2: Generating ──────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={Loader2} title="Generando" count={generating.length + shortsGenerating.length} colorClass="text-neon-cyan animate-spin" />
-        {generating.length === 0 && shortsGenerating.length === 0 ? (
+        <ColumnHeader icon={Loader2} title="Generando" count={mergedGenerating.length} colorClass="text-neon-cyan animate-spin" />
+        {mergedGenerating.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay generaciones activas</p>
         ) : (
           <div className="space-y-3">
-            {generating.map((video) => (
-              <GeneratingCard key={`vid-${video.video_id}`} video={video} />
-            ))}
-            {shortsGenerating.length > 0 && generating.length > 0 && (
-              <div className="flex items-center gap-2 py-1">
-                <div className="flex-1 h-px bg-surface-border/30" />
-                <Smartphone size={11} className="text-gray-600" />
-                <span className="text-[9px] text-gray-600 uppercase tracking-wider">Shorts</span>
-                <div className="flex-1 h-px bg-surface-border/30" />
-              </div>
-            )}
-            {shortsGenerating.map((slot) => (
-              <ShortsGeneratingCard key={`short-${slot.slot_id}`} slot={slot} />
-            ))}
+            {mergedGenerating.map((item) => {
+              switch (item._type) {
+                case 'video':
+                  return <GeneratingCard key={`vid-${(item.data as GeneratingVideo).video_id}`} video={item.data as GeneratingVideo} />
+                case 'shorts':
+                  return <ShortsGeneratingCard key={`short-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
+              }
+            })}
           </div>
         )}
       </div>
 
       {/* ── Column 3: Awaiting Upload ─────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={awaitingUpload.length + shortsReady.length} colorClass="text-blue-400" />
-        {awaitingUpload.length === 0 && shortsReady.length === 0 ? (
+        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={mergedAwaitingUpload.length} colorClass="text-blue-400" />
+        {mergedAwaitingUpload.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos esperando subida</p>
         ) : (
           <div className="space-y-3">
-            {/* ── Pre-rendered clip shorts (v25) ── */}
-            {shortsReady.map((short) => (
-              <ShortsReadyUploadCard key={`ready-${short.slot_id}`} short={short} />
-            ))}
-            {/* ── Long-form videos awaiting upload ── */}
-            {awaitingUpload.map((video) => (
-              <AwaitingUploadCard key={`await-${video.video_id}`} video={video} onUploadNow={handleUploadNow} />
-            ))}
+            {mergedAwaitingUpload.map((item) => {
+              switch (item._type) {
+                case 'video':
+                  return <AwaitingUploadCard key={`await-${(item.data as AwaitingUploadVideo).video_id}`} video={item.data as AwaitingUploadVideo} onUploadNow={handleUploadNow} />
+                case 'shorts-ready':
+                  return <ShortsReadyUploadCard key={`ready-${item.data.slot_id}`} short={item.data as ShortsPipelineSlot} />
+              }
+            })}
           </div>
         )}
       </div>
