@@ -1324,7 +1324,9 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 conn.execute(
                     "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
                     "error_message = 'Auto-retry after failure (attempt ' || ? || '/2)', "
-                    "job_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "job_id = NULL, "
+                    "scheduled_at = datetime('now', '+10 minutes'), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (retries + 1, retries + 1, slot_id),
                 )
                 conn.execute(
@@ -1370,7 +1372,9 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             if retries < 2:
                 conn.execute(
                     "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
-                    "error_message = ?, job_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "error_message = ?, job_id = NULL, "
+                    "scheduled_at = datetime('now', '+10 minutes'), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (retries + 1, f"Auto-retry after error (attempt {retries+1}/2): {str(e)[:200]}", slot_id),
                 )
                 conn.execute(
@@ -2354,11 +2358,15 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
              "-f", "best[height<=720]/best",
              "--no-playlist",
              "--socket-timeout", "30",
+             "--retries", "5",
+             "--fragment-retries", "5",
+             "--extractor-retries", "3",
+             "--file-access-retries", "3",
              "--force-overwrites",
              "--no-warnings",
              "-o", tmp_path,
              yt_url],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0 or not Path(tmp_path).exists():
             logger.error("yt-dlp failed (code %d): %s",

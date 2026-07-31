@@ -664,16 +664,35 @@ class PipelineOrchestrator:
         keywords = list(getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])[:5])
 
         # Insert script into DB
-        script_id = self.db.insert_script(
-            raw_content_id=viral_content.get("id") or None,
-            canal=self.canal,
-            titulo_options=alt_titles,
-            guion=guion,
-            escenas=blocks,
-            bloques=blocks,
-            keywords=keywords,
-            duracion_estimada=duracion_estimada,
-        )
+        raw_content_id = viral_content.get("id") or None
+        try:
+            script_id = self.db.insert_script(
+                raw_content_id=raw_content_id,
+                canal=self.canal,
+                titulo_options=alt_titles,
+                guion=guion,
+                escenas=blocks,
+                bloques=blocks,
+                keywords=keywords,
+                duracion_estimada=duracion_estimada,
+            )
+        except Exception:
+            # Race condition: raw_content row was deleted between selection and insert.
+            # Fall back with no FK reference so the script can still proceed.
+            logger.warning(
+                "[%s] FK constraint failed for raw_content_id=%s — retrying with NULL reference",
+                self.canal, raw_content_id,
+            )
+            script_id = self.db.insert_script(
+                raw_content_id=None,
+                canal=self.canal,
+                titulo_options=alt_titles,
+                guion=guion,
+                escenas=blocks,
+                bloques=blocks,
+                keywords=keywords,
+                duracion_estimada=duracion_estimada,
+            )
 
         # Build result dict
         result = {
