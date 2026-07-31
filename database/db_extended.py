@@ -6071,25 +6071,22 @@ class ExtendedDatabase(Database):
         return [dict(r) for r in rows]
     
     def get_completed_videos_today_all_channels(self) -> list[dict]:
-        """Get completed videos for ALL channels. Searches today first;
-        falls back to yesterday if none found today. Returns [{channel_id, id}, ...].
+        """Get completed videos for ALL channels (today + yesterday as fallback).
+        Returns one row per video (earliest created_at per channel wins) so
+        the pre-filter correctly marks channels that have ANY recent source video.
         Used by shorts dispatcher to pre-filter which channels have source videos for clips."""
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT id, channel_id
-                   FROM videos
-                   WHERE COALESCE(date(uploaded_at), date(created_at)) = date('now', 'localtime')
-                     AND status IN ('uploaded', 'uploaded_private', 'published')
-                   ORDER BY channel_id""",
-            ).fetchall()
-        if rows:
-            return [dict(r) for r in rows]
-        with self._connect() as conn:
-            rows = conn.execute(
-                """SELECT id, channel_id
-                   FROM videos
-                   WHERE COALESCE(date(uploaded_at), date(created_at)) = date('now', '-1 day', 'localtime')
-                     AND status IN ('uploaded', 'uploaded_private', 'published')
+                   FROM (
+                       SELECT id, channel_id, created_at,
+                              ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY created_at ASC) AS rn
+                       FROM videos
+                       WHERE COALESCE(date(uploaded_at), date(created_at))
+                             IN (date('now', 'localtime'), date('now', '-1 day', 'localtime'))
+                         AND status IN ('uploaded', 'uploaded_private', 'published')
+                   )
+                   WHERE rn = 1
                    ORDER BY channel_id""",
             ).fetchall()
         return [dict(r) for r in rows]
