@@ -871,6 +871,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v24: raw_content UNIQUE(url, canal) instead of global UNIQUE(url) ──
     _migrate_v24(conn, logger)
+
+    # ── v25: performance indexes for dashboard/monitor/pipeline queries ──
+    _migrate_v25(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1687,6 +1690,52 @@ def _migrate_v24(conn, logger):
     conn.execute("PRAGMA foreign_keys = 1")
 
     logger.info("Migration: v24 schema applied (raw_content UNIQUE(url, canal))")
+
+
+def _migrate_v25(conn, logger):
+    """Idempotent v25: Add performance indexes for dashboard, monitor, and pipeline queries.
+
+    These indexes eliminate full table scans on videos, generation_jobs, shorts,
+    and video_stats_history — the three most expensive tables for the dashboard.
+    """
+    indexes = [
+        # P0: videos by status+channel — eliminates full scan on every dashboard/monitor/pipeline load
+        ("idx_videos_status_channel", "videos", "(status, channel_id)"),
+        # P0: videos by created_at — time-range filters in dashboard, cleanup, monitor
+        ("idx_videos_created_at", "videos", "(created_at)"),
+        # P1: scheduled publishing queries (target_public_at IS NOT NULL)
+        ("idx_videos_target_public",
+         "videos", "(target_public_at) WHERE target_public_at IS NOT NULL"),
+        # P1: generation_jobs by status — count_active_jobs, count_active_longform_jobs
+        ("idx_jobs_status", "generation_jobs", "(status)"),
+        # P2: shorts by channel+type — native short topic dedup
+        ("idx_shorts_channel_type", "shorts", "(channel_id, type)"),
+        # P2: video_stats_history partial index — accelerates MAX(id) WHERE views>0 pattern
+        ("idx_vsh_video_views",
+         "video_stats_history", "(video_id, views) WHERE views > 0"),
+        # P3: channel_stats_history by fetched_at for delta calculation in channel row loop
+        ("idx_csh_fetched_at", "channel_stats_history", "(channel_id, fetched_at)"),
+    ]
+
+    created = 0
+    for idx_name, table, columns in indexes:
+        # Check if index already exists
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name = ?",
+            (idx_name,)
+        ).fetchone()
+        if existing:
+            continue
+        try:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}{columns}")
+            created += 1
+        except Exception as exc:
+            logger.warning("Migration v25: failed to create %s: %s", idx_name, exc)
+
+    if created:
+        logger.info("Migration: v25 created %d performance indexes", created)
+    else:
+        logger.info("Migration: v25 already applied (all indexes exist)")
 
 
 def _migrate_v10(conn, logger):
@@ -3677,61 +3726,92 @@ class ExtendedDatabase(Database):
             ).fetchall()
 
             # ── Sparkline data for KPI cards (last 8 days) ──
+            # Replaced 8-day × 3-query loop (24 queries) with 3 UNION ALL batch queries
             sparkline_subscribers = []
             sparkline_views = []
             sparkline_engagement = []
             sparkline_watch_hours = []
+
             spark_ch_filter = "AND csh.channel_id = ?" if channel_id else ""
+
+            # Build 8 date-point UNION ALL blocks for each metric type
+            spark_union_blocks = []
+            spark_day_indexes = []
             for days_ago in range(7, -1, -1):
-                date_point = f"datetime('now', '-{days_ago} days')"
-                aggr = conn.execute(
-                    f"""SELECT SUM(csh.subscribers) as subs, SUM(csh.total_views) as views,
-                               SUM(csh.estimated_minutes_watched) as watch_minutes
-                        FROM channel_stats_history csh
-                        INNER JOIN (
-                            SELECT channel_id, MAX(id) as max_id
-                            FROM channel_stats_history
-                            WHERE fetched_at <= {date_point}
-                            GROUP BY channel_id
-                        ) latest ON csh.id = latest.max_id
-                        WHERE 1=1 {spark_ch_filter}""",
-                    ch_params,
-                ).fetchone()
-                eng_where = "AND v.channel_id = ?" if channel_id else ""
-                eng_aggr = conn.execute(
-                    f"""SELECT COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
-                        FROM videos v
-                        JOIN video_stats_history vsh ON vsh.id = (
-                            SELECT MAX(vsh2.id) FROM video_stats_history vsh2
-                            WHERE vsh2.video_id = v.id
-                              AND (vsh2.likes > 0 OR vsh2.comments > 0)
-                              AND vsh2.fetched_at <= {date_point}
-                        )
-                        WHERE v.yt_video_id IS NOT NULL {eng_where}""",
-                    ch_params,
-                ).fetchone()
-                shorts_eng_where = "AND s.channel_id = ?" if channel_id else ""
-                shorts_eng_aggr = conn.execute(
-                    f"""SELECT COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
-                        FROM shorts s
-                        JOIN short_stats ss ON ss.id = (
-                            SELECT MAX(ss2.id) FROM short_stats ss2
-                            WHERE ss2.short_id = s.id
-                              AND (ss2.likes > 0 OR ss2.comments > 0)
-                              AND ss2.fetched_at <= {date_point}
-                        )
-                        WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {shorts_eng_where}""",
-                    ch_params,
-                ).fetchone()
-                if aggr:
-                    sparkline_subscribers.append(aggr["subs"] or 0)
-                    sparkline_views.append(aggr["views"] or 0)
-                    sparkline_engagement.append(
-                        (eng_aggr["engagement"] or 0) + (shorts_eng_aggr["engagement"] or 0)
-                    )
-                    sparkline_watch_hours.append(
-                        round((aggr["watch_minutes"] or 0) / 60.0, 1)
-                    )
+                spark_day_indexes.append(days_ago)
+                spark_union_blocks.append(f"""SELECT {days_ago} as days_ago,
+                        SUM(csh.subscribers) as subs, SUM(csh.total_views) as views,
+                        SUM(csh.estimated_minutes_watched) as watch_minutes
+                 FROM channel_stats_history csh
+                 INNER JOIN (
+                     SELECT channel_id, MAX(id) as max_id
+                     FROM channel_stats_history
+                     WHERE fetched_at <= datetime('now', '-{days_ago} days')
+                     GROUP BY channel_id
+                 ) latest ON csh.id = latest.max_id
+                 WHERE 1=1 {spark_ch_filter}""")
+
+            spark_sql = "\nUNION ALL\n".join(spark_union_blocks)
+            spark_rows = conn.execute(spark_sql, ch_params * 8).fetchall()
+            spark_data: dict = {}
+            for r in spark_rows:
+                da = r["days_ago"]
+                spark_data[da] = {
+                    "subs": r["subs"] or 0,
+                    "views": r["views"] or 0,
+                    "watch_minutes": r["watch_minutes"] or 0,
+                }
+
+            # Longform engagement per day
+            eng_union_blocks = []
+            eng_where = "AND v.channel_id = ?" if channel_id else ""
+            for days_ago in range(7, -1, -1):
+                eng_union_blocks.append(f"""SELECT {days_ago} as days_ago,
+                        COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
+                 FROM videos v
+                 JOIN video_stats_history vsh ON vsh.id = (
+                     SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                     WHERE vsh2.video_id = v.id
+                       AND (vsh2.likes > 0 OR vsh2.comments > 0)
+                       AND vsh2.fetched_at <= datetime('now', '-{days_ago} days')
+                 )
+                 WHERE v.yt_video_id IS NOT NULL {eng_where}""")
+            eng_sql = "\nUNION ALL\n".join(eng_union_blocks)
+            eng_rows = conn.execute(eng_sql, ch_params * 8).fetchall()
+            eng_data: dict = {}
+            for r in eng_rows:
+                eng_data[r["days_ago"]] = r["engagement"] or 0
+
+            # Shorts engagement per day
+            shorts_eng_union_blocks = []
+            shorts_eng_where = "AND s.channel_id = ?" if channel_id else ""
+            for days_ago in range(7, -1, -1):
+                shorts_eng_union_blocks.append(f"""SELECT {days_ago} as days_ago,
+                        COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
+                 FROM shorts s
+                 JOIN short_stats ss ON ss.id = (
+                     SELECT MAX(ss2.id) FROM short_stats ss2
+                     WHERE ss2.short_id = s.id
+                       AND (ss2.likes > 0 OR ss2.comments > 0)
+                       AND ss2.fetched_at <= datetime('now', '-{days_ago} days')
+                 )
+                 WHERE s.status = 'published' AND s.youtube_id IS NOT NULL {shorts_eng_where}""")
+            shorts_eng_sql = "\nUNION ALL\n".join(shorts_eng_union_blocks)
+            shorts_eng_rows = conn.execute(shorts_eng_sql, ch_params * 8).fetchall()
+            shorts_eng_data: dict = {}
+            for r in shorts_eng_rows:
+                shorts_eng_data[r["days_ago"]] = r["engagement"] or 0
+
+            for days_ago in range(7, -1, -1):
+                sd = spark_data.get(days_ago, {})
+                sparkline_subscribers.append(sd.get("subs", 0))
+                sparkline_views.append(sd.get("views", 0))
+                sparkline_engagement.append(
+                    (eng_data.get(days_ago, 0)) + (shorts_eng_data.get(days_ago, 0))
+                )
+                sparkline_watch_hours.append(
+                    round(sd.get("watch_minutes", 0) / 60.0, 1)
+                )
 
             # ── Helper: build action history from timestamps ──
             def _build_action_history(row_dict: dict) -> list:
@@ -3808,31 +3888,43 @@ class ExtendedDatabase(Database):
             ).fetchall()
 
             # ── Heatmap data: daily views last 30 days per channel ──
+            # Replaced per-day × per-channel loop (~120 queries) with single batch query
+            heatmap_sql = f"""WITH day_latest AS (
+                SELECT vsh.video_id, MAX(vsh.fetched_at) as max_fetched
+                FROM video_stats_history vsh
+                JOIN videos v ON v.id = vsh.video_id
+                WHERE vsh.fetched_at >= datetime('now', '-30 days')
+                  AND v.yt_video_id IS NOT NULL
+                  {ch_filter.replace('v.channel_id', 'v.channel_id')}
+                GROUP BY vsh.video_id, date(vsh.fetched_at)
+            )
+            SELECT v.channel_id,
+                   date(vsh.fetched_at) as day,
+                   COALESCE(SUM(vsh.views), 0) as total_views
+            FROM day_latest dl
+            JOIN video_stats_history vsh ON vsh.video_id = dl.video_id AND vsh.fetched_at = dl.max_fetched
+            JOIN videos v ON v.id = vsh.video_id
+            GROUP BY v.channel_id, day
+            ORDER BY day"""
+            heatmap_rows = conn.execute(heatmap_sql, ch_params).fetchall()
+
+            # Build heatmap_data: ensure all 30 days present, even if no data
             heatmap_data = []
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            # Group by day for fast lookup
+            day_map: dict = {}
+            for row in heatmap_rows:
+                d = row["day"]
+                if d not in day_map:
+                    day_map[d] = {}
+                day_map[d][str(row["channel_id"])] = row["total_views"]
             for days_back in range(29, -1, -1):
                 target = today - timedelta(days=days_back)
-                day_start = target.strftime("%Y-%m-%d")
-                day_end   = (target + timedelta(days=1)).strftime("%Y-%m-%d")
-                day_date  = target.strftime("%Y-%m-%d")
-                per_channel = {}
-                hd_channels = conn.execute("SELECT id FROM channels WHERE active = 1").fetchall()
-                for hch in hd_channels:
-                    total_day = conn.execute(
-                        """SELECT COALESCE(SUM(vsh.views), 0) as v
-                           FROM videos v
-                           JOIN video_stats_history vsh ON vsh.id = (
-                               SELECT MAX(vsh2.id) FROM video_stats_history vsh2
-                               WHERE vsh2.video_id = v.id
-                                 AND vsh2.fetched_at >= ? AND vsh2.fetched_at < ?
-                           )
-                           WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL""",
-                        (day_start, day_end, hch["id"]),
-                    ).fetchone()
-                    per_channel[str(hch["id"])] = total_day["v"] or 0
+                day_date = target.strftime("%Y-%m-%d")
+                per_channel = day_map.get(day_date, {})
                 heatmap_data.append({
                     "date": day_date,
-                    "total_views": sum(per_channel.values()),
+                    "total_views": sum(per_channel.values()) if per_channel else 0,
                     "channels": per_channel,
                 })
 

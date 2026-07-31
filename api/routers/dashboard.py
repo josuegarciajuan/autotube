@@ -1,13 +1,39 @@
 """Dashboard router — unified data for the main dashboard."""
+import time
+import threading
 from fastapi import APIRouter, Query
 from typing import Optional
 from api.deps import get_db
 
 router = APIRouter()
 
+# In-memory TTL cache for dashboard responses
+_CACHE: dict = {}
+_CACHE_TTL = 60  # seconds
+_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_dashboard_cache(channel_id: Optional[int] = None):
+    """Invalidate cached dashboard data (called after state-changing operations)."""
+    with _CACHE_LOCK:
+        if channel_id is not None:
+            # Invalidate both the specific channel key and the 'all' key
+            _CACHE.pop(f"dashboard:{channel_id}", None)
+            _CACHE.pop("dashboard:all", None)
+        else:
+            _CACHE.clear()
+
 
 @router.get("/dashboard")
 def get_dashboard(channel_id: Optional[int] = Query(None, description="Filter by channel ID")):
+    cache_key = f"dashboard:{channel_id or 'all'}"
+
+    with _CACHE_LOCK:
+        if cache_key in _CACHE:
+            entry = _CACHE[cache_key]
+            if time.time() - entry["ts"] < _CACHE_TTL:
+                return entry["data"]
+
     db = get_db()
     data = db.get_dashboard_data(channel_id=channel_id)
 
@@ -46,5 +72,8 @@ def get_dashboard(channel_id: Optional[int] = Query(None, description="Filter by
         data["upcoming_milestones"] = get_upcoming_milestones(db, limit=6)
     except Exception:
         data["upcoming_milestones"] = []
+
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = {"data": data, "ts": time.time()}
 
     return data

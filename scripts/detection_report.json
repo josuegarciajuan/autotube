@@ -1,0 +1,279 @@
+{
+  "scan_date": "2026-07-26T06:16:45",
+  "total_analyzed": 17,
+  "confirmed_count": 4,
+  "suspected_count": 0,
+  "clean_count": 13,
+  "confirmed": [
+    {
+      "video_id": 474,
+      "canal": "canal5",
+      "yt_video_id": "Idn3pSNM5xc",
+      "yt_url": "https://youtube.com/watch?v=Idn3pSNM5xc",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-19 15:00:47",
+      "verdict": "confirmed",
+      "analysis": {
+        "total_dur": 778.100667,
+        "worst_black_pct": 38.04135024600872,
+        "worst_start_pct": 61.94031446576308,
+        "worst_end_pct": 99.98166471177178
+      }
+    },
+    {
+      "video_id": 917,
+      "canal": "canal4",
+      "yt_video_id": "KoqaSkRdfY8",
+      "yt_url": "https://youtube.com/watch?v=KoqaSkRdfY8",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-23 05:15:14",
+      "verdict": "confirmed",
+      "analysis": {
+        "total_dur": 1476.278239,
+        "worst_black_pct": 32.229154872748886,
+        "worst_start_pct": 67.76026182419398,
+        "worst_end_pct": 99.98928122112622
+      }
+    },
+    {
+      "video_id": 920,
+      "canal": "canal2",
+      "yt_video_id": "s1CdW1auYWA",
+      "yt_url": "https://youtube.com/watch?v=s1CdW1auYWA",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-23 07:16:33",
+      "verdict": "confirmed",
+      "analysis": {
+        "total_dur": 806.382568,
+        "worst_black_pct": 48.942898279517365,
+        "worst_start_pct": 51.0355774456672,
+        "worst_end_pct": 99.97835171456731
+      }
+    },
+    {
+      "video_id": 928,
+      "canal": "canal4",
+      "yt_video_id": "4Njhw9wk6E4",
+      "yt_url": "https://youtube.com/watch?v=4Njhw9wk6E4",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-23 10:40:21",
+      "verdict": "confirmed",
+      "analysis": {
+        "total_dur": 2326.407227,
+        "worst_black_pct": 40.00984819842979,
+        "worst_start_pct": 59.981760020555505,
+        "worst_end_pct": 99.99152224951371
+      }
+    }
+  ],
+  "suspected": [],
+  "clean": [
+    {
+      "video_id": 286,
+      "canal": "canal2",
+      "yt_video_id": "Xe1rqPd_NOE",
+      "yt_url": "https://youtube.com/watch?v=Xe1rqPd_NOE",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-13 15:39:06",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 405.699056,
+        "worst_black_pct": 71.06055479705134,
+        "worst_start_pct": 28.900732763844537,
+        "worst_end_pct": 99.96128756089587
+      }
+    },
+    {
+      "video_id": 294,
+      "canal": "canal5",
+      "yt_video_id": "5tu05u6HICQ",
+      "yt_url": "https://youtube.com/watch?v=5tu05u6HICQ",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-13 23:00:59",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 2163.078125,
+        "worst_black_pct": 1.9493840519514292,
+        "worst_start_pct": 91.04109450508173,
+        "worst_end_pct": 92.9906311174036
+      }
+    },
+    {
+      "video_id": 317,
+      "canal": "canal5",
+      "yt_video_id": "e4usN6Q_3U0",
+      "yt_url": "https://youtube.com/watch?v=e4usN6Q_3U0",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-15 11:01:37",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 2495.820068,
+        "worst_black_pct": 7.6895366962006495,
+        "worst_start_pct": 92.30272764999661,
+        "worst_end_pct": 99.99198387726082
+      }
+    },
+    {
+      "video_id": 471,
+      "canal": "canal3",
+      "yt_video_id": "yKe8-R8CkI0",
+      "yt_url": "https://youtube.com/watch?v=yKe8-R8CkI0",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-19 11:09:50",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 480.327962,
+        "worst_black_pct": 11.155565413449738,
+        "worst_start_pct": 88.81077799922046,
+        "worst_end_pct": 99.96648914643032
+      }
+    },
+    {
+      "video_id": 473,
+      "canal": "canal3",
+      "yt_video_id": "nVPWg61OO_c",
+      "yt_url": "https://youtube.com/watch?v=nVPWg61OO_c",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-19 12:48:59",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 495.188721,
+        "worst_black_pct": 10.097160512668463,
+        "worst_start_pct": 89.86472856274932,
+        "worst_end_pct": 99.96188907541777
+      }
+    },
+    {
+      "video_id": 475,
+      "canal": "canal5",
+      "yt_video_id": "RqX62z1wYyY",
+      "yt_url": "https://youtube.com/watch?v=RqX62z1wYyY",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-19 19:57:28",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 967.99349,
+        "worst_black_pct": 26.22259370773248,
+        "worst_start_pct": 73.76082663531136,
+        "worst_end_pct": 99.98342034304383
+      }
+    },
+    {
+      "video_id": 476,
+      "canal": "canal2",
+      "yt_video_id": "7jKGe1GYMss",
+      "yt_url": "https://youtube.com/watch?v=7jKGe1GYMss",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-19 21:18:19",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 964.789144,
+        "worst_black_pct": 16.113158089183475,
+        "worst_start_pct": 83.86982845238151,
+        "worst_end_pct": 99.98298654156498
+      }
+    },
+    {
+      "video_id": 518,
+      "canal": "canal2",
+      "yt_video_id": "hxOEIbT6ZLs",
+      "yt_url": "https://youtube.com/watch?v=hxOEIbT6ZLs",
+      "status": "private_quality_issue",
+      "privacy_status": "private",
+      "created_at": "2026-07-22 03:44:48",
+      "verdict": "clean",
+      "analysis": null
+    },
+    {
+      "video_id": 541,
+      "canal": "canal5",
+      "yt_video_id": "av14YjZMxvE",
+      "yt_url": "https://youtube.com/watch?v=av14YjZMxvE",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-22 15:14:05",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 1373.692546,
+        "worst_black_pct": 75.89907967659599,
+        "worst_start_pct": 24.08653966737037,
+        "worst_end_pct": 99.98598332643206
+      }
+    },
+    {
+      "video_id": 640,
+      "canal": "canal3",
+      "yt_video_id": "zMjKw3fP0Bc",
+      "yt_url": "https://youtube.com/watch?v=zMjKw3fP0Bc",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-22 17:19:31",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 1516.541667,
+        "worst_black_pct": 1.7941017112851936,
+        "worst_start_pct": 98.19512595033764,
+        "worst_end_pct": 99.98933975877368
+      }
+    },
+    {
+      "video_id": 785,
+      "canal": "canal4",
+      "yt_video_id": "moBYVTVc0Ww",
+      "yt_url": "https://youtube.com/watch?v=moBYVTVc0Ww",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-22 19:59:44",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 1950.708415,
+        "worst_black_pct": 1.8134437585844936,
+        "worst_start_pct": 91.09716174572405,
+        "worst_end_pct": 92.91086182144757
+      }
+    },
+    {
+      "video_id": 887,
+      "canal": "canal2",
+      "yt_video_id": "VWAtZnLT1U4",
+      "yt_url": "https://youtube.com/watch?v=VWAtZnLT1U4",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-22 22:10:03",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 979.696289,
+        "worst_black_pct": 23.889240229632023,
+        "worst_start_pct": 76.09072407132493,
+        "worst_end_pct": 99.97996430095695
+      }
+    },
+    {
+      "video_id": 914,
+      "canal": "canal5",
+      "yt_video_id": "s7AiA4RkXeI",
+      "yt_url": "https://youtube.com/watch?v=s7AiA4RkXeI",
+      "status": "unlisted_quality_issue",
+      "privacy_status": "unlisted",
+      "created_at": "2026-07-23 04:17:27",
+      "verdict": "clean",
+      "analysis": {
+        "total_dur": 1168.149495,
+        "worst_black_pct": 11.103715796238905,
+        "worst_start_pct": 88.88331540133912,
+        "worst_end_pct": 99.98720240854105
+      }
+    }
+  ]
+}

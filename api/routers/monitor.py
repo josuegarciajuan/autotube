@@ -21,6 +21,18 @@ router = APIRouter()
 logger = logging.getLogger("autotube.monitor")
 ws_clients: list[WebSocket] = []
 
+# In-memory TTL cache for monitor dashboard
+_MONITOR_CACHE: dict = {}
+_MONITOR_CACHE_TTL = 15  # seconds — monitor needs more freshness than dashboard
+_MONITOR_CACHE_LOCK = None  # lazy import to avoid issues at module level
+
+def _get_monitor_lock():
+    global _MONITOR_CACHE_LOCK
+    if _MONITOR_CACHE_LOCK is None:
+        import threading
+        _MONITOR_CACHE_LOCK = threading.Lock()
+    return _MONITOR_CACHE_LOCK
+
 # ── System metrics helpers ─────────────────────────────────────
 
 def _get_system_metrics() -> dict:
@@ -115,6 +127,14 @@ def _get_worker_process_ram_mb(pid: Optional[int]) -> Optional[int]:
 @router.get("/monitor/dashboard")
 def get_monitor_dashboard():
     """Overall monitoring dashboard — active counts + alert summary."""
+    import time as time_mod
+    lock = _get_monitor_lock()
+    with lock:
+        if "dashboard" in _MONITOR_CACHE:
+            entry = _MONITOR_CACHE["dashboard"]
+            if time_mod.time() - entry["ts"] < _MONITOR_CACHE_TTL:
+                return entry["data"]
+
     db = get_db()
     try:
         with db._connect() as conn:
@@ -240,7 +260,7 @@ def get_monitor_dashboard():
                    LIMIT 1"""
             ).fetchone()
 
-            return {
+            result = {
                 "health_score": health,
                 "videos": {
                     "generating": videos_generating,
@@ -275,6 +295,9 @@ def get_monitor_dashboard():
                     } if next_slot else None,
                 },
             }
+            with _get_monitor_lock():
+                _MONITOR_CACHE["dashboard"] = {"data": result, "ts": time_mod.time()}
+            return result
     except Exception as exc:
         logger.error("Monitor dashboard error: %s", exc)
         return {"health_score": 0, "error": str(exc)}

@@ -1,0 +1,12 @@
+output/
+tokens/
+logs/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+autotube.db
+autotube.db.bak
+autotube.db.bak-*
+autotube.db.backup.*
+assets/generated/
