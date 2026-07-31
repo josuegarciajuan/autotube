@@ -80,22 +80,24 @@ export default function QuickStats() {
         label="Tracking Coverage"
         value={`${avgCoverage}%`}
         suffix={coverageSuffix}
+        tooltip="% de vistas rastreadas vs total real. 100% = GAP 0, todas las vistas contabilizadas."
       />
     </div>
   )
 }
 
-function StatCard({ icon, label, value, suffix }: {
+function StatCard({ icon, label, value, suffix, tooltip }: {
   icon: React.ReactNode
   label: string
   value: string | number
   suffix: string
+  tooltip?: string
 }) {
   return (
     <div className="glass rounded-xl p-3 border border-surface-border">
       <div className="flex items-center gap-2 mb-1">
         {icon}
-        <span className="text-[10px] text-gray-500">{label}</span>
+        <span className="text-[10px] text-gray-500" title={tooltip}>{label}</span>
       </div>
       <div className="text-xl font-bold font-mono text-white">{value}</div>
       <div className="text-[10px] text-gray-600">{suffix}</div>

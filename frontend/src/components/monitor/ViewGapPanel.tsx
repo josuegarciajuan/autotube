@@ -110,7 +110,7 @@ export default function ViewGapPanel() {
   return (
     <div className="glass rounded-xl p-5 border border-surface-border">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
           <Radar size={14} className="text-neon-cyan" />
           View Gap Monitor
@@ -130,6 +130,17 @@ export default function ViewGapPanel() {
           </button>
         </div>
       </div>
+
+      {/* Subtitle: qué es GAP y qué significa 0 */}
+      <p className="text-[10px] text-gray-500 leading-relaxed mb-4">
+        Gap ={' '}
+        <span className="text-gray-400">vistas totales (YouTube)</span>
+        {' − '}
+        <span className="text-gray-400">vistas rastreadas (DB Autotube)</span>
+        .{' '}
+        <span className="text-emerald-400 font-medium">Gap = 0 → todo OK</span>
+        <span className="text-gray-600"> — cada vista está contabilizada.</span>
+      </p>
 
       {error && (
         <div className="text-red-400 text-xs mb-3 flex items-center gap-1">
@@ -170,7 +181,10 @@ export default function ViewGapPanel() {
 
               {/* Coverage bar */}
               <div className="flex items-center gap-2 mb-2">
-                <div className="flex-1 h-2 bg-dark-700 rounded-full overflow-hidden">
+                <div
+                  className="flex-1 h-2 bg-dark-700 rounded-full overflow-hidden cursor-help"
+                  title={`Cobertura: ${ch.coverage_pct.toFixed(1)}%. ${ch.coverage_pct >= 100 ? 'GAP = 0 — todas las vistas están contabilizadas.' : `Falta rastrear ${formatNum(ch.gap)} vistas.`}`}
+                >
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${coverageBarColor(ch.coverage_pct)}`}
                     style={{ width: `${Math.min(100, ch.coverage_pct)}%` }}
@@ -184,31 +198,31 @@ export default function ViewGapPanel() {
               {/* Details grid */}
               <div className="grid grid-cols-3 gap-x-3 gap-y-1 text-[10px]">
                 <div>
-                  <span className="text-gray-600">YT total</span>
+                  <span className="text-gray-600 cursor-help" title="Total de visualizaciones del canal según YouTube (fuente oficial)">YT total</span>
                   <div className="text-gray-300 font-mono">{formatNum(ch.yt_total)}</div>
                 </div>
                 <div>
-                  <span className="text-gray-600">DB tracked</span>
+                  <span className="text-gray-600 cursor-help" title="Suma de visualizaciones de todos los videos registrados en la base de datos de Autotube">DB tracked</span>
                   <div className="text-gray-300 font-mono">{formatNum(ch.db_total)}</div>
                 </div>
                 <div>
-                  <span className="text-gray-600">Gap</span>
+                  <span className="text-gray-600 cursor-help" title="Diferencia entre YT total y DB tracked. GAP = 0 significa que todas las vistas están contabilizadas.">Gap</span>
                   <div className={`font-mono ${ch.gap > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
                     {formatNum(ch.gap)}
                   </div>
                 </div>
                 <div>
-                  <span className="text-gray-600">Δ24h</span>
+                  <span className="text-gray-600 cursor-help" title="Crecimiento del GAP en las últimas 24 horas. Si sube rápido, puede haber un video viral no registrado.">Δ24h</span>
                   <div className={`font-mono ${ch.delta_24h > 0 ? 'text-orange-400' : 'text-gray-400'}`}>
                     +{formatNum(ch.delta_24h)}
                   </div>
                 </div>
                 <div>
-                  <span className="text-gray-600">Long-form</span>
+                  <span className="text-gray-600 cursor-help" title="Vistas de videos long-form (más de 60s) rastreadas en DB">Long-form</span>
                   <div className="text-gray-400 font-mono">{formatNum(ch.db_longform)}</div>
                 </div>
                 <div>
-                  <span className="text-gray-600">Shorts</span>
+                  <span className="text-gray-600 cursor-help" title="Vistas de shorts rastreadas en DB">Shorts</span>
                   <div className="text-gray-400 font-mono">{formatNum(ch.db_shorts)}</div>
                 </div>
               </div>
