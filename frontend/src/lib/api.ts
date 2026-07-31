@@ -376,6 +376,24 @@ export const api = {
   getStatusBar: () => request<any>('/monitor/status-bar'),
   getJobEta: (jobId: number) => request<any>(`/monitor/eta/${jobId}`),
 
+  // ── View Gap Monitor ──
+  getViewGapCoverage: (channelId?: number) => {
+    const qs = channelId ? `?channel_id=${channelId}` : ''
+    return request<any>(`/monitor/view-gap/coverage${qs}`)
+  },
+  getUnregisteredVideos: (channelId?: number, limit = 50) => {
+    const params = new URLSearchParams()
+    if (channelId) params.set('channel_id', String(channelId))
+    params.set('limit', String(limit))
+    return request<any>(`/monitor/view-gap/unregistered?${params}`)
+  },
+  triggerViewGapScan: (channelId: number) =>
+    request<any>(`/monitor/view-gap/scan/${channelId}`, { method: 'POST' }),
+  triggerViewGapScanAll: () =>
+    request<any>('/monitor/view-gap/scan-all', { method: 'POST' }),
+  getChannelViewGap: (channelId: number) =>
+    request<any>(`/channels/${channelId}/view-gap`),
+
   // ── Insights AI (v20 — AI self-optimization) ──
   analyzeChannel: (channelId: number) =>
     request<any>(`/channels/${channelId}/analyze`, { method: 'POST' }),

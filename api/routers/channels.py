@@ -458,6 +458,53 @@ def get_channel_youtube_stats(channel_id: int):
     return {"ok": True, "stats": stats}
 
 
+@router.get("/{channel_id}/view-gap")
+def get_channel_view_gap(channel_id: int):
+    """Get view gap data for a specific channel.
+
+    Returns coverage %, gap vs YouTube total, and DB-tracked breakdown
+    (long-form views + shorts views). Falls back to latest stats snapshot
+    if the ViewGapMonitor has not yet persisted state.
+    """
+    import json
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    slug = ch.get("slug", "")
+    stored = db.get_system_state(f"view_gap_{slug}")
+
+    if stored:
+        try:
+            data = json.loads(stored)
+            return {"ok": True, **data}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Fallback: compute from latest stats
+    known = db.get_db_known_views_sum(channel_id)
+    latest = db.get_channel_latest_stats(channel_id)
+    if latest:
+        yt_t = int(latest.get("total_views", 0))
+        coverage = round(known["total"] / yt_t * 100, 1) if yt_t > 0 else 100.0
+        return {
+            "ok": True,
+            "gap": max(0, yt_t - known["total"]),
+            "delta": 0,
+            "yt_total_views": yt_t,
+            "yt_video_count": int(latest.get("video_count", 0)),
+            "db_total_views": known["total"],
+            "db_longform_views": known["longform_views"],
+            "db_shorts_views": known["shorts_views"],
+            "db_video_count": known["video_count"],
+            "coverage_pct": coverage,
+            "last_checked": latest.get("fetched_at", ""),
+        }
+
+    return {"ok": True, "error": "No data available"}
+
+
 @router.get("/{channel_id}/shorts-stats")
 def get_channel_shorts_stats(channel_id: int):
     """Estadísticas agregadas de Shorts del canal (conteos + métricas YouTube)."""

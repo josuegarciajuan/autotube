@@ -1,4 +1,4 @@
-import { TrendingUp, Clock, Target, Zap, ShieldCheck } from 'lucide-react'
+import { TrendingUp, Clock, Target, Zap, ShieldCheck, Radar } from 'lucide-react'
 import { useMonitorDashboard } from '../../hooks/useQueries'
 
 interface QuickStatsData {
@@ -30,8 +30,21 @@ export default function QuickStats() {
     ? `${sh.failures_24h} fallos 24h${sh.emergency_24h ? ` / ${sh.emergency_24h} emerg.` : ''}`
     : ''
 
+  // View gap coverage — average across all channels
+  const viewGap = (monitorData as any)?.view_gap as Record<string, any> | undefined
+  let avgCoverage = 100
+  let totalGap = 0
+  if (viewGap && Object.keys(viewGap).length > 0) {
+    const values = Object.values(viewGap)
+    avgCoverage = Math.round(values.reduce((s, v) => s + (v.coverage_pct ?? 100), 0) / values.length)
+    totalGap = values.reduce((s, v) => s + (v.gap ?? 0), 0)
+  }
+  const coverageSuffix = totalGap > 0
+    ? `${totalGap.toLocaleString()} untracked views`
+    : 'all tracked'
+
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
       <StatCard
         icon={<TrendingUp size={14} className="text-emerald-400" />}
         label="Generados hoy"
@@ -61,6 +74,12 @@ export default function QuickStats() {
         label="Script Gen 7d"
         value={scriptHealthPct}
         suffix={scriptHealthSuffix}
+      />
+      <StatCard
+        icon={<Radar size={14} className={avgCoverage >= 95 ? 'text-emerald-400' : avgCoverage >= 80 ? 'text-amber-400' : 'text-red-400'} />}
+        label="Tracking Coverage"
+        value={`${avgCoverage}%`}
+        suffix={coverageSuffix}
       />
     </div>
   )

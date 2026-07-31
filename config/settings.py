@@ -242,6 +242,15 @@ PROXY_CHANNELS = [
 # ── YouTube Stats collection ───────────────────────────────────
 STATS_ENABLED = os.getenv("STATS_ENABLED", "true").lower() == "true"
 
+# ── View Gap Monitor ─────────────────────────────────────────────
+# Daily check comparing YT channel total views vs DB-tracked views.
+# When the gap grows beyond the threshold in 24h, an alert is raised
+# and (optionally) unregistered video IDs are auto-scanned via YT API.
+ENABLE_DAILY_VIEW_GAP_CHECK = os.getenv("ENABLE_DAILY_VIEW_GAP_CHECK", "true").lower() == "true"
+VIEW_GAP_THRESHOLD = int(os.getenv("VIEW_GAP_THRESHOLD", "500"))
+VIEW_GAP_SCAN_UNREGISTERED = os.getenv("VIEW_GAP_SCAN_UNREGISTERED", "true").lower() == "true"
+VIEW_GAP_INTERVAL_HOURS = int(os.getenv("VIEW_GAP_INTERVAL_HOURS", "24"))
+
 # ── Video Lifecycle (post-upload promotion) ────────────────────
 LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "true").lower() == "true"
 LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15"))

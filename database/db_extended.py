@@ -5543,7 +5543,134 @@ class ExtendedDatabase(Database):
                 (video_id,),
             )
             conn.commit()
-            return cursor.rowcount
+            return cursor.lastrowid
+
+    # ── View Gap Monitor ────────────────────────────────────────────
+    # Compares YouTube channel total views vs DB-tracked views to
+    # detect untracked viral content.
+
+    def get_db_known_views_sum(self, channel_id: int) -> dict:
+        """Sum of latest known views for all videos + shorts of a channel.
+
+        Returns dict with longform_views, shorts_views, total, and video_count.
+        Includes all privacy statuses except deleted_on_yt so that unlisted
+        and private videos are accounted for in the comparison.
+        """
+        with self._connect() as conn:
+            # Long-form: latest view count per video
+            longform = conn.execute(
+                """SELECT COALESCE(SUM(vsh.views), 0) FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id
+                   )
+                   WHERE v.channel_id = ?
+                     AND v.yt_video_id IS NOT NULL
+                     AND v.status != 'deleted_on_yt'""",
+                (channel_id,),
+            ).fetchone()[0]
+
+            # Shorts: latest view count per short
+            shorts = conn.execute(
+                """SELECT COALESCE(SUM(ss.views), 0) FROM shorts s
+                   JOIN short_stats ss ON ss.id = (
+                       SELECT MAX(ss2.id) FROM short_stats ss2
+                       WHERE ss2.short_id = s.id
+                   )
+                   WHERE s.channel_id = ?
+                     AND s.youtube_id IS NOT NULL
+                     AND s.status = 'published'""",
+                (channel_id,),
+            ).fetchone()[0]
+
+            # Known video count
+            video_count = conn.execute(
+                """SELECT COUNT(*) FROM videos
+                   WHERE channel_id = ? AND yt_video_id IS NOT NULL
+                   AND status != 'deleted_on_yt'""",
+                (channel_id,),
+            ).fetchone()[0]
+
+            return {
+                "longform_views": int(longform or 0),
+                "shorts_views": int(shorts or 0),
+                "total": int((longform or 0) + (shorts or 0)),
+                "video_count": video_count,
+            }
+
+    def get_known_yt_ids(self, channel_id: int) -> set[str]:
+        """All YouTube video IDs known to the system for a channel.
+
+        Covers both videos.yt_video_id and shorts.youtube_id.
+        """
+        with self._connect() as conn:
+            video_rows = conn.execute(
+                "SELECT yt_video_id FROM videos WHERE channel_id = ? AND yt_video_id IS NOT NULL",
+                (channel_id,),
+            ).fetchall()
+            short_rows = conn.execute(
+                "SELECT youtube_id FROM shorts WHERE channel_id = ? AND youtube_id IS NOT NULL",
+                (channel_id,),
+            ).fetchall()
+        return {r[0] for r in video_rows} | {r[0] for r in short_rows}
+
+    def register_unregistered_video(self, channel_id: int, video_data: dict,
+                                     slug: str = "") -> int | None:
+        """Create a minimal video row for a YT-discovered video not in our system.
+
+        Args:
+            channel_id: The channel DB id.
+            video_data: Dict with yt_video_id, title, published_at, thumbnail_url,
+                        privacy_status, thumbnail_path.
+            slug: Channel slug for the 'canal' legacy column.
+
+        Returns the new video id, or None if already registered.
+        """
+        with self._connect() as conn:
+            # Skip if already registered
+            existing = conn.execute(
+                "SELECT id FROM videos WHERE yt_video_id = ? AND channel_id = ?",
+                (video_data["yt_video_id"], channel_id),
+            ).fetchone()
+            if existing:
+                return None
+
+            cursor = conn.execute(
+                """INSERT INTO videos
+                   (canal, channel_id, video_path, yt_video_id,
+                    titulo_final, status, source_mode, created_at,
+                    privacy_status, thumbnail_path)
+                   VALUES (?, ?, '', ?, ?, 'unregistered', 'yt_scan',
+                           datetime('now'), ?, ?)""",
+                (
+                    slug,
+                    channel_id,
+                    video_data["yt_video_id"],
+                    video_data.get("title", f"YT Scan: {video_data['yt_video_id']}"),
+                    video_data.get("privacy_status", "public"),
+                    video_data.get("thumbnail_path", ""),
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_unregistered_videos(self, channel_id: int = None,
+                                 limit: int = 50) -> list[dict]:
+        """List videos discovered via YT scan that aren't in our pipeline."""
+        with self._connect() as conn:
+            q = """SELECT v.*, c.name as channel_name, c.slug as channel_slug
+                   FROM videos v
+                   LEFT JOIN channels c ON v.channel_id = c.id
+                   WHERE v.source_mode = 'yt_scan'
+                   AND v.status = 'unregistered'"""
+            params = []
+            if channel_id is not None:
+                q += " AND v.channel_id = ?"
+                params.append(channel_id)
+            q += " ORDER BY v.created_at DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
 
     def get_channel_latest_lifecycle(self, channel_id: int,
                                       limit: int = 30) -> list[dict]:

@@ -509,6 +509,102 @@ class YouTubeStatsFetcher:
             logger.debug("Analytics API unavailable for channel %s: %s", self.slug, exc)
 
         return {}
+ 
+    # ── Channel video listing ──────────────────────────────────
+ 
+    def get_upload_playlist_id(self) -> str | None:
+        """Get the channel's uploads playlist ID from contentDetails.
+
+        The uploads playlist contains every video ever uploaded to
+        the channel (public, unlisted, private — those accessible
+        to the authenticated user).
+        """
+        if not self._service:
+            if not self.authenticate():
+                return None
+        try:
+            resp = (
+                self._service.channels()
+                .list(part="contentDetails", mine=True)
+                .execute()
+            )
+            items = resp.get("items", [])
+            if items:
+                return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        except HttpError as exc:
+            logger.warning("Failed to get upload playlist for %s: %s", self.slug, exc)
+        except Exception as exc:
+            logger.warning("Upload playlist fetch error for %s: %s", self.slug, exc)
+        return None
+
+    def list_channel_videos(self, max_results: int = 200) -> list[dict]:
+        """List all videos from the channel's uploads playlist.
+
+        Uses playlistItems().list() — 1 quota unit per 50 items.
+
+        Returns list of dicts with keys:
+          yt_video_id, title, published_at, thumbnail_url, privacy_status
+        """
+        if not self._service:
+            if not self.authenticate():
+                return []
+
+        playlist_id = self.get_upload_playlist_id()
+        if not playlist_id:
+            logger.warning("No upload playlist found for %s", self.slug)
+            return []
+
+        videos: list[dict] = []
+        page_token: str | None = None
+
+        while len(videos) < max_results:
+            try:
+                resp = (
+                    self._service.playlistItems()
+                    .list(
+                        playlistId=playlist_id,
+                        part="snippet,status",
+                        maxResults=min(50, max_results - len(videos)),
+                        pageToken=page_token,
+                    )
+                    .execute()
+                )
+            except HttpError as exc:
+                logger.error("playlistItems API failed for %s: %s", self.slug, exc)
+                break
+            except Exception as exc:
+                logger.error("playlistItems unexpected error for %s: %s", self.slug, exc)
+                break
+
+            for item in resp.get("items", []):
+                snippet = item.get("snippet", {})
+                resource = snippet.get("resourceId", {})
+                thumbnails = snippet.get("thumbnails", {})
+                thumb_url = (
+                    thumbnails.get("medium", {}).get("url", "")
+                    or thumbnails.get("default", {}).get("url", "")
+                    or thumbnails.get("high", {}).get("url", "")
+                )
+
+                videos.append({
+                    "yt_video_id": resource.get("videoId", ""),
+                    "title": snippet.get("title", ""),
+                    "published_at": snippet.get("publishedAt", ""),
+                    "thumbnail_url": thumb_url,
+                    "privacy_status": item.get("status", {}).get(
+                        "privacyStatus", "public"
+                    ),
+                })
+
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+        logger.info(
+            "list_channel_videos: %d videos for %s (limit %d)",
+            len(videos), self.slug, max_results,
+        )
+        return videos
 
     # ── Batch collection ───────────────────────────────────────
 

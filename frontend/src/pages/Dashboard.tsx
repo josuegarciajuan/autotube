@@ -21,6 +21,7 @@ import Console from '../components/Console'
 import DeepDivePanel from '../components/DeepDivePanel'
 
 import UpcomingPublications from '../components/UpcomingPublications'
+import ViewGapPanel from '../components/monitor/ViewGapPanel'
 import type { StabilizeResult } from '../components/StabilizeProgress'
 
 // Collapsible section wrapper
@@ -493,7 +494,12 @@ export default function Dashboard() {
         channelNames={channelNames}
         channelColors={channelColors}
       />
-
+     
+      {/* ═══════ NIVEL 1: View Gap Monitor ═══════ */}
+      <CollapsibleSection title="View Gap Monitor" icon="🔍" defaultOpen={false}>
+        <ViewGapPanel />
+      </CollapsibleSection>
+ 
       {/* ═══════ NIVEL 2: Pipeline Activo ═══════ */}
       {(pipeline.length > 0 || Object.keys(shortsPipeline).length > 0) && (
         <CollapsibleSection title="Pipeline Activo" icon="⚙️">

@@ -27,6 +27,7 @@ from api.routers import monetization, milestones, analytics
 from api.routers import promotion, gamification, social_accounts
 from api.routers import monitor as monitor_router
 from api.routers import insights
+from api.routers import view_gap as view_gap_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
@@ -449,7 +450,16 @@ async def _schedule_checker_loop():
     last_smart_replan = 0
     last_slot_calculation = 0
     last_power_word_analysis = 0
+    last_view_gap_check = 0
     first_run = True
+
+    # Restore last_view_gap_check from DB
+    try:
+        stored = _sched_db.get_system_state("last_view_gap_check")
+        if stored:
+            last_view_gap_check = float(stored)
+    except Exception:
+        pass
 
     while True:
         try:
@@ -613,6 +623,45 @@ async def _schedule_checker_loop():
                         logger.info("Weekly power word analysis: no channels processed")
                 except Exception as e:
                     logger.warning("Weekly power word analysis failed: %s", e)
+
+            # ── Daily view gap monitor ──────────────────────────
+            # Compares YouTube total channel views vs DB-tracked
+            # views and alerts when untracked views grow beyond
+            # the VIEW_GAP_THRESHOLD in a 24h period.
+            if STATS_ENABLED and now - last_view_gap_check > 86400:  # 24 hours
+                try:
+                    from api.services.view_gap_monitor import ViewGapMonitor
+                    logger.info("Starting daily view gap check...")
+                    monitor = ViewGapMonitor()
+                    db = get_db()
+                    results = await asyncio.to_thread(monitor.check_all_channels, db)
+                    last_view_gap_check = now
+                    try:
+                        _sched_db.set_system_state("last_view_gap_check", str(int(now)))
+                    except Exception:
+                        pass
+                    if results:
+                        checked = results.get("channels_checked", 0)
+                        gaps = results.get("gaps_detected", 0)
+                        registered = results.get("videos_registered", 0)
+                        logger.info(
+                            "View gap check: %d channels, %d gaps detected, %d videos auto-registered",
+                            checked, gaps, registered,
+                        )
+                        # Broadcast to monitor WebSocket if gaps found
+                        if gaps > 0:
+                            try:
+                                from api.routers.monitor import broadcast_monitor_update
+                                await broadcast_monitor_update({
+                                    "type": "view_gap_alert",
+                                    "gaps_detected": gaps,
+                                    "channels_checked": checked,
+                                    "videos_registered": registered,
+                                })
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.warning("Daily view gap check failed: %s", e)
                 
         except asyncio.CancelledError:
             raise
@@ -1977,6 +2026,7 @@ app.include_router(gamification.router, prefix="/api", tags=["Gamification"])
 app.include_router(social_accounts.router, prefix="/api/channels", tags=["Social Media"])
 app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
+app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

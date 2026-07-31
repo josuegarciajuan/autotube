@@ -62,6 +62,19 @@ export default function AlertsPanel() {
     return map[s] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'
   }
 
+  /** Highlight view_gap_detected alerts with a distinctive color */
+  function alertTypeBadge(a: Alert): string {
+    if (a.alert_type === 'view_gap_detected') {
+      return 'bg-orange-500/20 text-orange-400 border-orange-500/30'
+    }
+    return severityBadge(a.severity)
+  }
+
+  function alertTypeIcon(a: Alert): string {
+    if (a.alert_type === 'view_gap_detected') return 'view_gap'
+    return a.alert_type
+  }
+
   function fmtTime(iso: string) {
     try {
       const d = new Date(iso + 'Z')
@@ -139,8 +152,8 @@ export default function AlertsPanel() {
                 <span className={`shrink-0 w-1 h-1 rounded-full ${
                   a.severity === 'critical' ? 'bg-red-400' : a.severity === 'warning' ? 'bg-amber-400' : 'bg-blue-400'
                 }`} />
-                <span className={`shrink-0 text-[10px] px-1 rounded font-medium border ${severityBadge(a.severity)}`}>
-                  {a.alert_type}
+                <span className={`shrink-0 text-[10px] px-1 rounded font-medium border ${alertTypeBadge(a)}`}>
+                  {alertTypeIcon(a)}
                 </span>
                 <button
                   className="text-gray-300 font-medium truncate text-left flex-1 hover:underline"

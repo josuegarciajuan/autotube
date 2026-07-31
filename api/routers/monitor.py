@@ -217,6 +217,36 @@ def _get_script_health(conn) -> dict:
         }
 
 
+def _get_view_gap_summary(conn) -> dict:
+    """Read latest gap data from system_state for all channels.
+
+    Returns a dict keyed by channel slug with coverage and gap info
+    for the monitor dashboard.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM system_state WHERE key LIKE 'view_gap_%'"
+        ).fetchall()
+        result = {}
+        for row in rows:
+            slug = row["key"].replace("view_gap_", "")
+            try:
+                data = json.loads(row["value"])
+                result[slug] = {
+                    "gap": data.get("gap", 0),
+                    "delta_24h": data.get("delta", 0),
+                    "yt_total": data.get("yt_total_views", 0),
+                    "db_total": data.get("db_total_views", 0),
+                    "coverage_pct": data.get("coverage_pct", 0),
+                    "last_checked": data.get("last_checked", ""),
+                }
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+    except Exception:
+        return {}
+
+
 # ═══════════════════════════════════════════════════════════════
 # REST Endpoints
 # ═══════════════════════════════════════════════════════════════
@@ -392,6 +422,7 @@ def get_monitor_dashboard():
                     } if next_slot else None,
                 },
                 "script_health": _get_script_health(conn),
+                "view_gap": _get_view_gap_summary(conn),
             }
             with _get_monitor_lock():
                 _MONITOR_CACHE["dashboard"] = {"data": result, "ts": time_mod.time()}
