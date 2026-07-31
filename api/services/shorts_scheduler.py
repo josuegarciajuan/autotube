@@ -420,66 +420,13 @@ def _build_shorts_slots_for_channel(
         except Exception:
             pass
 
-    # ── 2. Clip slots: anchored to source long videos, prefer optimal short hours ──
-    if clip_count > 0:
-        # Default long publish anchors if no real data
-        effective_long_hours = long_target_hours if long_target_hours else [16, 19, 22]
-
-        # Build a set of optimal short hours for clip preference
-        optimal_short_hours = set(h for h, _, _ in optimal_franjas)
-
-        for long_idx in range(long_video_count):
-            # Get the expected publish hour for this long video
-            long_h = (
-                effective_long_hours[long_idx]
-                if long_idx < len(effective_long_hours)
-                else effective_long_hours[long_idx % len(effective_long_hours)]
-            )
-
-            # Clips start 45 min after long video publishes
-            clip_window_start = max(
-                (long_h + 1) * 60,
-                long_h * 60 + CLIP_DELAY_AFTER_LONG_MINUTES,
-            )
-            # Latest clip time: 23:45
-            clip_window_end = CLIP_END_OF_DAY * 60 + CLIP_END_MIN
-
-            if clip_window_start >= clip_window_end:
-                clip_window_start = max(DAY_START_MINUTES, clip_window_end - 90)
-
-            window_minutes = clip_window_end - clip_window_start
-            if window_minutes <= 0:
-                window_minutes = 60  # safety: at least 1h
-
-            # Spread the clips for this long video evenly
-            for c in range(clips_per_long):
-                if clips_per_long > 1:
-                    offset = c * window_minutes // (clips_per_long - 1)
-                else:
-                    offset = window_minutes // 2
-
-                total_min_center = clip_window_start + offset
-
-                # Prefer optimal short hours within the clip window
-                clip_hour = total_min_center // 60
-                if clip_hour in optimal_short_hours:
-                    # Snap to the optimal short hour's exact minute
-                    matching = [m for h, m, r in optimal_franjas if h == clip_hour]
-                    if matching:
-                        total_min_center = clip_hour * 60 + matching[0]
-
-                # Jitter: asymmetric around the spread point
-                seed = _day_seed(date_str, f"{slug}_clip_{long_idx}_{c}",
-                                long_idx * clips_per_long + c)
-                jitter = (seed % 31) - 25  # -25..+5 asymmetric
-                total_min = total_min_center + jitter
-                total_min = max(clip_window_start + 5, min(total_min, clip_window_end - 5))
-
-                # long_slot_position: 1-indexed position of source long video
-                long_slot_pos = long_idx + 1
-
-                # Clip's slot_rank = 0 (not tied to an optimal short slot)
-                all_slots.append((int(total_min), "clip", long_slot_pos, 0))
+    # ── 2. Clip slots: NO LONGER PRE-PLANNED ─────────────────────────
+    # v26: Clip shorts are generated ad-hoc right after long video generation
+    # (before cleanup), and go directly to "Pendiente subida" column with
+    # scheduled upload times. They do NOT appear in "Planificado".
+    # The old pre-planning logic (lines below) is removed.
+    # clip_count is kept at 0 — only native slots are pre-planned.
+    _clip_count = 0  # explicitly zero
 
     # ── 3. Sort all slots by time and resolve collisions ──
     #    Same-type (native↔native, clip↔clip) → 60min publish gap enforced
@@ -535,10 +482,9 @@ def _build_shorts_slots_for_channel(
         slots.append(slot)
 
     logger.debug(
-        "[%s] Built %d shorts slots: %d native + %d clip "
-        "(longs=%d, clips_per_long=%d)",
-        slug, len(slots), native_count, clip_count,
-        long_video_count, clips_per_long,
+        "[%s] Built %d shorts slots: %d native + 0 clip "
+        "(clips generated ad-hoc after long video)",
+        slug, len(slots), native_count,
     )
 
     return slots, pos
@@ -766,8 +712,9 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         )
 
         # ── Filler: guarantee MIN_DAILY_SHORTS floor ──────────────
-        clip_count = clips_per_long * yesterday_count
-        total_planned = native_count + clip_count
+        # v26: Clip shorts are generated ad-hoc (not pre-planned), so only
+        # native shorts count toward the daily floor.
+        total_planned = native_count
 
         if total_planned < MIN_DAILY_SHORTS:
             fillers_needed = min(
@@ -777,9 +724,9 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             if fillers_needed > 0:
                 logger.info(
                     "[%s] Adding %d filler shorts to reach floor (%d < %d): "
-                    "planned=%d native + %d clips",
+                    "planned=%d native",
                     slug, fillers_needed, total_planned, MIN_DAILY_SHORTS,
-                    native_count, clip_count,
+                    native_count,
                 )
                 filler_slots, global_pos = _build_filler_slots_for_channel(
                     ch, date_str, fillers_needed, channel_slots, global_pos,
@@ -2680,11 +2627,12 @@ def pre_render_clip_shorts_for_video(
     video_id: int, channel_id: int, channel_slug: str,
     video_path: str, script_id: int = None,
 ) -> list[int]:
-    """Pre-render all clip shorts for a long-form video right after upload.
+    """Pre-render all clip shorts for a long-form video right after generation.
 
-    Called from full_pipeline_worker.py after successful upload, BEFORE the
-    source MP4 is deleted. Renders all clip shorts for this video's upcoming
-    slots in one pass (1 LLM call for all clips) and saves them as status='ready'.
+    v26: No longer depends on pre-existing shorts_planned_slots entries.
+    Instead reads shorts_clips_per_long from channel config, extracts clips
+    via LLM (1 call for all), renders them, and CREATES new shorts_planned_slots
+    entries with calculated target_upload_at times.
 
     The pre-rendered clips wait in the 'Pendiente subida' pipeline column until
     their scheduled upload time, at which point _dispatch_clip_short() detects
@@ -2695,6 +2643,7 @@ def pre_render_clip_shorts_for_video(
     import sqlite3
     import json as _json
     import time
+    from datetime import datetime, timezone as _timezone, timedelta as _timedelta
     from pathlib import Path
     from config.settings import DATABASE_PATH, OUTPUT_DIR
 
@@ -2703,30 +2652,49 @@ def pre_render_clip_shorts_for_video(
     conn.execute("PRAGMA busy_timeout=30000")
 
     try:
-        # 1. Find pending clip slots for this source video
-        pending_slots = conn.execute(
-            """SELECT ssp.*, c.slug as channel_slug
-               FROM shorts_planned_slots ssp
-               JOIN channels c ON c.id = ssp.channel_id
-               WHERE ssp.source_video_id = ?
-                 AND ssp.short_type = 'clip'
-                 AND ssp.status = 'pending'
-                 AND ssp.short_id IS NULL
-               ORDER BY ssp.long_slot_position ASC""",
+        # 0. Guard: skip if this video already has ready clips on disk
+        existing_ready = conn.execute(
+            """SELECT COUNT(*) as cnt FROM shorts
+               WHERE source_video_id = ?
+                 AND type = 'clip'
+                 AND status = 'ready'""",
             (video_id,),
-        ).fetchall()
-
-        if not pending_slots:
+        ).fetchone()
+        if existing_ready and existing_ready["cnt"] > 0:
             logger.info(
-                "pre_render: no pending clip slots for video #%d (channel=%s) — skipping",
-                video_id, channel_slug,
+                "pre_render: video #%d already has %d ready clips — skipping (already pre-rendered)",
+                video_id, existing_ready["cnt"],
             )
             return []
 
+        # 1. Determine how many clips to generate from channel config
+        max_clips = 3  # default
+        try:
+            sc_row = conn.execute(
+                "SELECT shorts_clips_per_long FROM shorts_planning_config WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            if sc_row and sc_row["shorts_clips_per_long"]:
+                max_clips = int(sc_row["shorts_clips_per_long"])
+        except Exception:
+            pass
+
         logger.info(
-            "pre_render: video #%d → %d clip slot(s) to pre-render (channel=%s)",
-            video_id, len(pending_slots), channel_slug,
+            "pre_render: video #%d → up to %d clip(s) (channel=%s)",
+            video_id, max_clips, channel_slug,
         )
+
+        # Get channel timezone for date calculations
+        channel_tz = _timezone.utc
+        try:
+            from config.config_bridge import get_channel_config
+            ch_config = get_channel_config(channel_slug)
+            tz_str = getattr(ch_config, "PUBLISH_TIMEZONE", None)
+            if tz_str:
+                from zoneinfo import ZoneInfo
+                channel_tz = ZoneInfo(tz_str)
+        except Exception:
+            pass
 
         # 2. Load source video metadata (script + blocks + timing)
         source_video = Path(video_path)
@@ -2745,6 +2713,42 @@ def pre_render_clip_shorts_for_video(
             logger.error("pre_render: video #%d not found in DB", video_id)
             return []
         video = dict(video_row)
+
+        # ── v26: Calculate clip upload schedule ──
+        # If the long video has target_public_at, clips are scheduled after it.
+        # Otherwise (immediate mode), schedule from now.
+        target_public_at = video.get("target_public_at")
+        now_utc = datetime.now(_timezone.utc)
+        if target_public_at:
+            try:
+                if isinstance(target_public_at, str):
+                    anchor = datetime.fromisoformat(target_public_at.replace("Z", "+00:00"))
+                    if anchor.tzinfo is None:
+                        anchor = anchor.replace(tzinfo=_timezone.utc)
+                else:
+                    anchor = target_public_at
+                    if hasattr(anchor, 'tzinfo') and anchor.tzinfo is None:
+                        anchor = anchor.replace(tzinfo=_timezone.utc)
+                logger.info(
+                    "pre_render: anchoring clip uploads to target_public_at=%s",
+                    anchor.isoformat(),
+                )
+            except Exception:
+                anchor = now_utc
+                logger.debug("pre_render: failed to parse target_public_at, using now")
+        else:
+            anchor = now_utc
+            logger.info("pre_render: no target_public_at — using now as anchor")
+
+        # Calculate target upload times: first clip at anchor + 60min,
+        # subsequent clips spaced 60min apart.
+        upload_times = []
+        for i in range(max_clips):
+            target_upload = anchor + _timedelta(minutes=60 * (i + 1))
+            # Ensure target_upload is not in the past (for immediate mode)
+            if target_upload < now_utc:
+                target_upload = now_utc + _timedelta(minutes=5 + 60 * i)
+            upload_times.append(target_upload)
 
         # Script + blocks
         script_text = ""
@@ -2804,7 +2808,7 @@ def pre_render_clip_shorts_for_video(
         except Exception:
             pass
 
-        # 4. Run LLM extraction ONCE — get up to 3 clips
+        # 4. Run LLM extraction ONCE — get up to max_clips clips
         extractor = ShortsExtractor()
 
         # Query existing clips for this video (in case of retry)
@@ -2821,7 +2825,7 @@ def pre_render_clip_shorts_for_video(
 
         clips = extractor.extract(
             script_text=script_text, timestamps=timestamps,
-            max_clips=min(len(pending_slots), 3), min_clips=1,
+            max_clips=max_clips, min_clips=1,
             exclude_ranges=exclude_ranges,
         )
 
@@ -2840,10 +2844,8 @@ def pre_render_clip_shorts_for_video(
         short_ids = []
 
         for clip_idx, clip in enumerate(clips):
-            if clip_idx >= len(pending_slots):
-                break  # no more slots to fill
-
-            slot = dict(pending_slots[clip_idx])
+            if clip_idx >= max_clips:
+                break
 
             # Build subtitle timestamps for this clip
             render_word_ts = None
@@ -2886,6 +2888,11 @@ def pre_render_clip_shorts_for_video(
                 )
                 continue
 
+            # Calculate schedule for this clip
+            target_upload = upload_times[clip_idx]
+            scheduled_at = target_upload - _timedelta(minutes=5)  # upload lead time
+            date_key = scheduled_at.astimezone(channel_tz).strftime("%Y-%m-%d")
+
             # Save to shorts table as 'ready'
             cursor = conn.execute(
                 """INSERT INTO shorts
@@ -2900,23 +2907,38 @@ def pre_render_clip_shorts_for_video(
                     clip.get("start_time", 0),
                     clip.get("end_time", 0),
                     str(output_path),
-                    slot.get("date_key", ""),
+                    date_key,
                 ),
             )
             short_id = cursor.lastrowid
 
-            # Link short to planned slot
+            # ── v26: Create new shorts_planned_slots entry for scheduling ──
+            # This slot acts as the upload trigger — the dispatcher picks it up
+            # when target_upload_at is due and uploads the pre-rendered clip.
             conn.execute(
-                """UPDATE shorts_planned_slots
-                   SET short_id = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (short_id, slot["id"]),
+                """INSERT INTO shorts_planned_slots
+                   (channel_id, date_key, scheduled_at, target_upload_at,
+                    short_type, status, slot_position, long_slot_position,
+                    source_video_id, short_id)
+                   VALUES (?, ?, ?, ?, 'clip', 'pending', ?, ?, ?, ?)""",
+                (
+                    channel_id, date_key,
+                    scheduled_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    target_upload.strftime("%Y-%m-%d %H:%M:%S"),
+                    clip_idx + 1,    # slot_position
+                    clip_idx + 1,    # long_slot_position
+                    video_id,        # source_video_id
+                    short_id,        # short_id (links ready short for dispatch)
+                ),
             )
+            slot_id = cursor.lastrowid
 
             short_ids.append(short_id)
             logger.info(
-                "pre_render: clip %d/%d rendered → short #%d (slot #%d) for %s",
-                clip_idx + 1, len(clips), short_id, slot["id"], channel_slug,
+                "pre_render: clip %d/%d rendered → short #%d (slot #%d) for %s "
+                "| upload at %s",
+                clip_idx + 1, len(clips), short_id, slot_id, channel_slug,
+                target_upload.strftime("%Y-%m-%d %H:%M:%S"),
             )
 
         conn.commit()

@@ -1210,6 +1210,28 @@ def run_job(
                 update_kwargs["target_public_at"] = recalculated_target  # new UTC target (or None if recalc failed)
             db.update_video(video_id, **update_kwargs)
             logger.info("Video %d status: %s (mp4 preserved for later upload)", video_id, gen_status)
+
+            # ── v26: Pre-render clip shorts during F1 (generate_only) ──
+            # Generate clip shorts from the source MP4 BEFORE cleanup, so they
+            # go directly to "Pendiente subida" with scheduled upload times.
+            # The source MP4 is preserved for F2 upload, so extraction works.
+            if action == "generate_only":
+                vp = video_data.get("video_path", "") if video_data else ""
+                if vp and Path(vp).exists():
+                    try:
+                        from api.services.shorts_scheduler import pre_render_clip_shorts_for_video
+                        pre_render_clip_shorts_for_video(
+                            video_id=video_id,
+                            channel_id=channel_id,
+                            channel_slug=canal,
+                            video_path=vp,
+                            script_id=video_data.get("script_id") if video_data else None,
+                        )
+                    except Exception as _pre_render_err:
+                        logger.warning(
+                            "[%s] Pre-render clip shorts during F1 failed (non-fatal): %s",
+                            canal, _pre_render_err,
+                        )
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")
             logger.info("Phase 7/7: Uploading to YouTube...")

@@ -6200,6 +6200,8 @@ class ExtendedDatabase(Database):
                 _maybe_trigger_publish_verification(dict(row))
 
             # ── 5. Shorts pending (slots for today, not dispatched yet) ──
+            # v26: Exclude slots that already have a short_id linked (pre-rendered
+            # clip shorts). Those appear in ready_to_upload section (Pendiente subida).
             shorts_pending = conn.execute(
                 """SELECT
                     sps.id as slot_id,
@@ -6219,6 +6221,8 @@ class ExtendedDatabase(Database):
                     WHERE sps.date_key >= date('now', 'localtime')
                       AND sps.date_key <= date('now', 'localtime', '+1 day')
                       AND sps.status = 'pending'
+                      AND sps.short_id IS NULL
+                      AND sps.short_type = 'native'
                     ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
             result["shorts"]["pending"] = [dict(r) for r in shorts_pending]
