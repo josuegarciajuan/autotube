@@ -1628,19 +1628,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         else:
             # Step 1: Word target
             if palabras_objetivo is not None:
-            cfg = self.canal_config
-            duration_target = _duration_for_words(cfg, palabras_objetivo)
-            word_target = {
-                "words_min": max(100, int(palabras_objetivo * 0.85)),
-                "words_max": int(palabras_objetivo * 1.5),
-                "duration_target": duration_target,
-                "blocks_min": max(3, int(duration_target * 1.2)),
-                "blocks_max": max(5, int(duration_target * 2.0)),
-                "palabras_objetivo": palabras_objetivo,
-            }
-        else:
-            word_target = self._get_word_target()
-            palabras_objetivo = word_target["palabras_objetivo"]
+                cfg = self.canal_config
+                duration_target = _duration_for_words(cfg, palabras_objetivo)
+                word_target = {
+                    "words_min": max(100, int(palabras_objetivo * 0.85)),
+                    "words_max": int(palabras_objetivo * 1.5),
+                    "duration_target": duration_target,
+                    "blocks_min": max(3, int(duration_target * 1.2)),
+                    "blocks_max": max(5, int(duration_target * 2.0)),
+                    "palabras_objetivo": palabras_objetivo,
+                }
+            else:
+                word_target = self._get_word_target()
+                palabras_objetivo = word_target["palabras_objetivo"]
 
         words_min = word_target["words_min"]
         logger.info(
