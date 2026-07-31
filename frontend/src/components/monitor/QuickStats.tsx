@@ -1,6 +1,5 @@
-import { useState, useEffect } from 'react'
 import { TrendingUp, Clock, Target, Zap } from 'lucide-react'
-import { api } from '../../lib/api'
+import { useMonitorDashboard } from '../../hooks/useQueries'
 
 interface QuickStatsData {
   generated_today: number
@@ -15,19 +14,8 @@ interface QuickStatsData {
 }
 
 export default function QuickStats() {
-  const [data, setData] = useState<QuickStatsData | null>(null)
-
-  useEffect(() => {
-    const fetch = async () => {
-      try {
-        const d = await api.getMonitorDashboard()
-        setData(d.quick_stats || null)
-      } catch { /* silent */ }
-    }
-    fetch()
-    const iv = setInterval(fetch, 30000)
-    return () => clearInterval(iv)
-  }, [])
+  const { data: monitorData } = useMonitorDashboard()
+  const data: QuickStatsData | null = monitorData?.quick_stats || null
 
   function fmtDate(iso: string): string {
     try {

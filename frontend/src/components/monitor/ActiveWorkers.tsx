@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { Film, Smartphone, Activity, Play, Terminal } from 'lucide-react'
-import { api } from '../../lib/api'
+import { useActiveWorkers } from '../../hooks/useQueries'
 import { CHANNEL_PILL } from '../../lib/channelConfig'
 import LiveLogs from './LiveLogs'
 
@@ -27,21 +27,9 @@ interface Worker {
 }
 
 export default function ActiveWorkers() {
-  const [workers, setWorkers] = useState<Worker[]>([])
+  const { data: rawData } = useActiveWorkers()
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval>>()
-
-  useEffect(() => {
-    const fetch = async () => {
-      try {
-        const d = await api.getActiveWorkers()
-        if (d?.ok) setWorkers(d.workers || [])
-      } catch { /* silent */ }
-    }
-    fetch()
-    timerRef.current = setInterval(fetch, 5000)
-    return () => clearInterval(timerRef.current)
-  }, [])
+  const workers: Worker[] = rawData?.ok ? (rawData.workers || []) : []
 
   function fmtElapsed(s: number): string {
     const m = Math.floor(s / 60)

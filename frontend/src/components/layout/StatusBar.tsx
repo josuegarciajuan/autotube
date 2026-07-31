@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
 import { Activity, MemoryStick, Bell } from 'lucide-react'
-import { api } from '../../lib/api'
+import { useStatusBar } from '../../hooks/useQueries'
 
 interface StatusBarData {
   workers: number
@@ -11,23 +10,11 @@ interface StatusBarData {
 }
 
 export default function StatusBar() {
-  const [data, setData] = useState<StatusBarData>({
+  const { data: rawData } = useStatusBar()
+  const data: StatusBarData = rawData ?? {
     workers: 0, long_running: 0, shorts_running: 0,
     ram_available_mb: null, critical_alerts: 0,
-  })
-  const timerRef = useRef<ReturnType<typeof setInterval>>()
-
-  useEffect(() => {
-    const fetch = async () => {
-      try {
-        const d = await api.getStatusBar()
-        if (d) setData(d)
-      } catch { /* silent */ }
-    }
-    fetch()
-    timerRef.current = setInterval(fetch, 10000)
-    return () => clearInterval(timerRef.current)
-  }, [])
+  }
 
   function fmtRam(mb: number | null): string {
     if (mb == null) return '--'

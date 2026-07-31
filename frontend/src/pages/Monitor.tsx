@@ -1,7 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
 import { RefreshCw, ShieldAlert } from 'lucide-react'
-import { api } from '../lib/api'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useMonitorDashboard } from '../hooks/useQueries'
 import SystemMetrics from '../components/monitor/SystemMetrics'
 import ActiveWorkers from '../components/monitor/ActiveWorkers'
 import EventTimeline from '../components/monitor/EventTimeline'
@@ -21,23 +20,10 @@ interface DashboardData {
 }
 
 export default function Monitor() {
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const { connected, lastUpdate } = useMonitorWebSocket()
+  const { data, isLoading: loading, refetch: refreshDashboard } = useMonitorDashboard()
+  const { connected } = useMonitorWebSocket()
 
-  const refreshDashboard = useCallback(async () => {
-    try {
-      const d = await api.getMonitorDashboard()
-      setData(d)
-    } catch { /* silent */ }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    refreshDashboard()
-    const iv = setInterval(refreshDashboard, 30000)
-    return () => clearInterval(iv)
-  }, [refreshDashboard])
+  const dashboardData = data as DashboardData | undefined
 
   if (loading && !data) {
     return (
@@ -47,7 +33,7 @@ export default function Monitor() {
     )
   }
 
-  const criticalAlerts = data?.alerts?.critical || 0
+  const criticalAlerts = dashboardData?.alerts?.critical || 0
 
   return (
     <div className="max-w-7xl mx-auto space-y-3 sm:space-y-4">
@@ -64,7 +50,7 @@ export default function Monitor() {
             {connected ? '🟢 Live' : '🔴 Polling'}
           </span>
           <button
-            onClick={refreshDashboard}
+            onClick={() => refreshDashboard()}
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-500/20 bg-gray-500/5 text-gray-400 hover:bg-gray-500/10 transition-all text-xs"
           >
             <RefreshCw size={12} />
@@ -93,19 +79,19 @@ export default function Monitor() {
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-semibold text-gray-300">Estado del Sistema</h3>
           <span className={`text-lg font-bold font-mono ${
-            (data?.health_score ?? 0) >= 80 ? 'text-emerald-400' :
-            (data?.health_score ?? 0) >= 50 ? 'text-amber-400' : 'text-red-400'
+            (dashboardData?.health_score ?? 0) >= 80 ? 'text-emerald-400' :
+            (dashboardData?.health_score ?? 0) >= 50 ? 'text-amber-400' : 'text-red-400'
           }`}>
-            {data?.health_score ?? 0}/100
+            {dashboardData?.health_score ?? 0}/100
           </span>
         </div>
         <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-1000 ${
-              (data?.health_score ?? 0) >= 80 ? 'bg-emerald-500' :
-              (data?.health_score ?? 0) >= 50 ? 'bg-amber-500' : 'bg-red-500'
+              (dashboardData?.health_score ?? 0) >= 80 ? 'bg-emerald-500' :
+              (dashboardData?.health_score ?? 0) >= 50 ? 'bg-amber-500' : 'bg-red-500'
             }`}
-            style={{ width: `${data?.health_score ?? 0}%` }}
+            style={{ width: `${dashboardData?.health_score ?? 0}%` }}
           />
         </div>
       </div>
@@ -128,8 +114,8 @@ export default function Monitor() {
         </div>
       </div>
 
-      {/* ═══ Section 4: Event timeline (full width) ═══ */}
-      <EventTimeline />
+      {/* ═══ Section 4: Event timeline (full width, shares parent WS) ═══ */}
+      <EventTimeline wsConnected={connected} />
     </div>
   )
 }

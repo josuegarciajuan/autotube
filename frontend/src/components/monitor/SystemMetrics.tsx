@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Cpu, HardDrive, MemoryStick, Clock } from 'lucide-react'
-import { api } from '../../lib/api'
+import { useSystemMetrics } from '../../hooks/useQueries'
 
 interface SystemData {
   cpu_percent: number
@@ -17,24 +17,16 @@ interface SystemData {
 }
 
 export default function SystemMetrics() {
-  const [data, setData] = useState<SystemData | null>(null)
+  const { data: rawData } = useSystemMetrics()
+  const data: SystemData | null = rawData?.ok ? rawData : null
   const [cpuHistory, setCpuHistory] = useState<number[]>(Array(20).fill(0))
-  const timerRef = useRef<ReturnType<typeof setInterval>>()
 
+  // Update CPU history when new data arrives
   useEffect(() => {
-    const fetch = async () => {
-      try {
-        const d = await api.getSystemMetrics()
-        if (d?.ok) {
-          setData(d)
-          setCpuHistory(prev => [...prev.slice(1), d.cpu_percent || 0])
-        }
-      } catch { /* silent */ }
+    if (data?.cpu_percent !== undefined) {
+      setCpuHistory(prev => [...prev.slice(1), data.cpu_percent])
     }
-    fetch()
-    timerRef.current = setInterval(fetch, 5000)
-    return () => clearInterval(timerRef.current)
-  }, [])
+  }, [data?.cpu_percent])
 
   function fmtUptime(s: number): string {
     const d = Math.floor(s / 86400)

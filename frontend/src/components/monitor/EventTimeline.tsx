@@ -30,15 +30,30 @@ interface TimelineEntry {
   entity?: string
 }
 
-export default function EventTimeline() {
+interface EventTimelineProps {
+  /** If provided by parent (Monitor), skip creating own WebSocket */
+  wsConnected?: boolean
+}
+
+export default function EventTimeline({ wsConnected }: EventTimelineProps) {
   const [entries, setEntries] = useState<TimelineEntry[]>([])
-  const [connected, setConnected] = useState(false)
+  const [connected, setConnected] = useState(wsConnected ?? false)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>()
   const mountedRef = useRef(true)
   const containerRef = useRef<HTMLDivElement>(null)
+  const externalWs = useRef(wsConnected)
+
+  useEffect(() => {
+    externalWs.current = wsConnected
+    if (wsConnected) {
+      setConnected(true)
+    }
+  }, [wsConnected])
 
   const connect = () => {
+    // Skip own WebSocket if parent provides connection
+    if (externalWs.current) return
     if (!mountedRef.current) return
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
