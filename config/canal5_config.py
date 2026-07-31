@@ -1277,6 +1277,8 @@ CONTENT_PILLARS = [
 
 # Enable viral mirror discovery for this channel
 VIRAL_ENABLED = True
+VIRAL_CONTENT_MODE = "rewrite"  # "rewrite" = via ScriptGenerator (original content)
+                                  # "direct"  = use scraper output directly (legacy, risk of translation)
 
 # English niche keywords for YouTube viral search
 NICHE_KEYWORDS_ENG = [

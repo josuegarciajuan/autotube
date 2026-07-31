@@ -1266,6 +1266,8 @@ CONTENT_PILLARS = [
 # VIRAL MIRROR
 # ═══════════════════════════════════════════════════════════════════
 VIRAL_ENABLED = True
+VIRAL_CONTENT_MODE = "rewrite"  # "rewrite" = via ScriptGenerator (original content)
+                                  # "direct"  = use scraper output directly (legacy, risk of translation)
 VIRAL_MAX_AGE_DAYS = 29  # Max days since publication (videos older are discarded)
 
 NICHE_KEYWORDS_ENG = [

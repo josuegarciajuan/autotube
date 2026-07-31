@@ -1,8 +1,13 @@
 """YouTube Viral Mirror scraper.
 
 Discovers high-performing YouTube videos in English-speaking markets,
-then transcribes, translates, paraphrases and adapts them into Spanish
-scripts that feed into the existing Autotube pipeline.
+then transcribes, creates ORIGINAL Spanish documentary scripts from the
+source material, and feeds them into the existing Autotube pipeline.
+
+IMPORTANT: This scraper does NOT translate viral scripts. It uses them
+as source material to create completely original Spanish narration —
+the same way Wikipedia or Reddit content is used. The LLM is instructed
+to extract facts and create fresh documentary content, never to translate.
 
 This is a content source like Reddit or Wikipedia — it populates the
 raw_content table with pre-processed viral scripts.
@@ -59,28 +64,45 @@ _USER_AGENTS = [
 ]
 
 
-# ── Translate & Paraphrase system prompt ─────────────────────────────
+# ── Script creation from source (v2: ORIGINAL content, NOT translation) ──
 
-_TRANSLATE_SYSTEM_PROMPT = """You are a professional content localizer specializing in YouTube.
-Your job: translate English viral video scripts into Spanish, then PARAPHRASE ~30% of the words
-so the result is NOT a direct translation — it's a fresh adaptation that preserves the viral hook,
-emotional arc, and search keywords but reads like original native Spanish content.
+_ADAPT_SCRIPT_ORIGINAL_SYSTEM_PROMPT = """You are a documentary scriptwriter for YouTube in Spanish (Latin American neutral).
 
-RULES:
-1. Translate accurately first, preserving all factual content, dates, and numbers.
-2. CRITICAL — REMOVE or REPLACE any host/narrator/creator/presenter names (e.g. "Danny Trejo",
-   "Joe Rogan", "MrBeast", "Johnny Harris", any channel name or on-screen personality).
-   Historical figures and subjects of the story (e.g. "Cleopatra", "Einstein") should be kept.
-   The adapted script must NOT sound like it was narrated by, written by, or associated with
-   the original content creator. Replace host references with neutral phrasing like
-   "el documental", "los investigadores", "los expertos", "este video", or omit them entirely.
-3. Then rewrite ~30% of words using synonyms, different sentence structures, and regional
-   Spanish variations. Change word order where natural.
-4. Keep the emotional tone and pacing of the original (if it builds suspense, keep it).
-5. Preserve SEO keywords — these must survive the paraphrasing (translate them but keep
-   them as close equivalents).
-6. Output ONLY the final adapted Spanish text — no explanations, no markers, no prefixes.
-7. If the text contains [MUSIC], [APPLAUSE], or similar production markers, drop them."""
+Your job: use an English video transcript as SOURCE MATERIAL to create a COMPLETELY ORIGINAL
+Spanish documentary script. You are NOT a translator. You are a writer creating NEW content.
+
+CRITICAL RULES — READ CAREFULLY:
+
+1. YOU ARE NOT A TRANSLATOR. Do NOT translate the source text. Do NOT follow its sentence
+   structure, paragraph order, or narrative style. Create something NEW from the information.
+
+2. EXTRACT FACTS, DISCARD STYLE. Pull out dates, numbers, names, locations, events, and
+   verifiable data from the transcript. Discard the original's tone, humor, pacing,
+   catchphrases, jokes, and stylistic mannerisms entirely.
+
+3. IF THE SOURCE IS COMEDY / SATIRE / MEME / SKETCH:
+   - Extract ONLY the factual elements (names, dates, places, events mentioned).
+   - Completely discard the humor, jokes, and comedic delivery.
+   - Build a serious, factual documentary narration from scratch using the extracted facts.
+   - If no usable facts remain, state "FACTS_INSUFFICIENT" and output nothing else.
+
+4. CREATE ORIGINAL DOCUMENTARY NARRATION:
+   - Write in Spanish for a Latin American audience.
+   - Use a documentary tone: serious, engaging, informative.
+   - Each paragraph must contain at least ONE concrete fact (number, date, name, place).
+   - NO filler sentences without substance. NO metaphors instead of facts.
+   - Build a clear narrative arc: hook → development → climax → reflection.
+
+5. REMOVE host/presenter/creator names (e.g. "Danny Trejo", "Joe Rogan"). Keep
+   historical figures and subjects of the story (e.g. "Cleopatra", "Einstein").
+
+6. Remove all production markers: [MUSIC], [APPLAUSE], [LAUGHTER], etc.
+
+7. Output ONLY the final original Spanish script — no explanations, no markers, no prefixes.
+   If the transcript contains no usable factual content, output exactly: FACTS_INSUFFICIENT"""
+
+# Legacy constant for backward compat with any external references
+_TRANSLATE_SYSTEM_PROMPT = _ADAPT_SCRIPT_ORIGINAL_SYSTEM_PROMPT
 
 _ADAPT_DURATION_SYSTEM_PROMPT = """You are a video script editor. Your job: adapt a Spanish script
 to fit a target duration of {target_minutes}-{target_max} minutes.
@@ -157,14 +179,14 @@ Output ONLY the description — no headers, no "Description:" prefixes, no quote
 
 @register_scraper("youtube_viral")
 class YouTubeViralScraper(BaseScraper):
-    """Discovers viral YouTube videos, transcribes, translates, and adapts them.
+    """Discovers viral YouTube videos, transcribes, and creates original Spanish scripts.
 
     On scrape(), this:
       1. Searches YouTube with English niche keywords via yt-dlp
       2. Calculates viral score for each result
       3. Downloads and transcribes the top candidate
-      4. Translates, paraphrases, and adapts the script to Spanish
-      5. Saves everything as raw_content with viral metadata
+      4. Creates an ORIGINAL Spanish documentary script from the source transcript
+      5. Adapts duration, builds blocks, and saves as raw_content with viral metadata
     """
 
     # ── LLM configuration (shared across instances) ─────────────────
@@ -1267,7 +1289,7 @@ class YouTubeViralScraper(BaseScraper):
     def process_candidate(self, candidate: dict) -> dict | None:
         """FASE B: Process a single candidate through the full viral pipeline.
 
-        Steps: download audio → transcribe → translate → adapt → build blocks.
+        Steps: download audio → transcribe → create original script → adapt → build blocks.
         Does NOT save to DB (caller handles that).
 
         Returns full item dict (same shape as scrape() output) or None if fails.
@@ -1278,6 +1300,12 @@ class YouTubeViralScraper(BaseScraper):
         logger.info("[%s] Processing candidate: '%s' (score=%.0f, views=%s)",
                     self.canal, candidate.get("title", "")[:60],
                     candidate.get("viral_score", 0), candidate.get("views", 0))
+
+        # Step 0: Quick genre check — reject comedy/satire/meme before heavy processing
+        if not self._is_documentary_compatible(candidate):
+            logger.info("[%s] ✗ Candidate REJECTED: genre incompatible with channel niche (comedy/satire/meme?)",
+                        self.canal)
+            return None
 
         # Step 1: Download audio
         audio_path = self._download_audio(video_url, video_id)
@@ -1295,7 +1323,7 @@ class YouTubeViralScraper(BaseScraper):
                 return None
         logger.info("[%s]   Transcribed: %d words EN", self.canal, len(transcript_en.split()))
 
-        # Step 3: Translate + paraphrase
+        # Step 3: Create original Spanish script from English transcript
         translated_script, translated_title, translated_desc = self._translate_and_paraphrase(
             transcript_en, candidate.get("title", "")
         )
@@ -1458,6 +1486,61 @@ class YouTubeViralScraper(BaseScraper):
         b = new_es.lower()
         return difflib.SequenceMatcher(None, a, b).ratio()
 
+    def _is_documentary_compatible(self, candidate: dict) -> bool:
+        """Quick genre check: reject comedy, satire, meme, sketch content.
+
+        Runs BEFORE heavy download+transcription. Uses only the title and
+        channel name to determine if the candidate is compatible with a
+        documentary/educational channel. Returns True if OK, False to reject.
+
+        This is a fast heuristic — the FACTS_INSUFFICIENT check in
+        _translate_and_paraphrase provides a deeper content-based gate.
+        """
+        title = (candidate.get("title", "") or "").lower()
+        channel = (candidate.get("channel_name", "") or "").lower()
+
+        # Comedy/satire/meme channel indicators
+        comedy_channels = {
+            "bill wurtz", "casually explained", "sam o'nella", "oversimplified",
+            "gradeaundera", "how it should have ended", "honest trailers",
+            "screen junkies", "ryan george", "pitch meeting", "cracker milk",
+            "longbeachgriffy", "circletoonshd", "alex meyers", "drew gooden",
+            "danny gonzalez", "kurtis conner", "jarvis johnson", "scott cramer",
+            "prozd", "gus johnson", "sven johnson", "cherdleys", "trevor wallace",
+            "calebcity", "rynn star", "julie nolke", "foil arms and hog",
+            "key & peele", "studio c", "dry bar comedy", "tommyinnit",
+            "dream", "georgenotfound", "sapnap", "ksi", "logan paul", "jake paul",
+        }
+
+        # Comedy/satire title indicators
+        comedy_title_patterns = [
+            r"\b(meme|comedy|sketch|skit|parody|satire|funny|joke|prank)\b",
+            r"\bthe (entire|whole|complete) (history|story|timeline)\b.*\b(i guess|kinda|sorta|maybe)\b",
+            r"\b(out ?of ?context|behind the meme|explained (badly|poorly|with)\b)",
+            r"\bif .* (was|were) (honest|realistic|a (movie|game|show))\b",
+            r"\bhow .* (actually|really|truly) works?\b.*\b(not|jk|just kidding)\b",
+            r"\b(cursed|blursed|blessed) .*\b",
+            r"\btry not to (laugh|cringe)\b",
+            r"\b(react|reaction) (to|meme)\b",
+            r"\bgoes (wrong|horribly right)\b",
+            r"\bin a nutshell\b",
+        ]
+
+        # Check channel first (stronger signal)
+        for cc in comedy_channels:
+            if cc in channel:
+                logger.info("[%s] Genre gate: channel '%s' matches comedy blocklist", self.canal, channel)
+                return False
+
+        # Check title for comedy patterns
+        for pattern in comedy_title_patterns:
+            if re.search(pattern, title):
+                logger.info("[%s] Genre gate: title '%s' matches comedy pattern '%s'",
+                            self.canal, title[:80], pattern)
+                return False
+
+        return True
+
     @staticmethod
     def _strip_title_artifacts(title: str) -> str:
         """Remove common LLM artifacts from generated titles."""
@@ -1472,9 +1555,13 @@ class YouTubeViralScraper(BaseScraper):
 
     def _translate_and_paraphrase(self, english_text: str, original_title: str,
                                     original_description: str = "") -> tuple[str | None, str | None, str | None]:
-        """Translate + paraphrase the transcript, title, and description.
+        """Create ORIGINAL Spanish script from English transcript source material.
 
-        Returns (translated_script, translated_title, translated_description) or None.
+        This is NOT a translation. The LLM extracts facts from the source and
+        creates a completely new documentary script in Spanish. If the source
+        contains no usable facts (comedy, satire, meme), returns None.
+
+        Returns (original_script, spanish_title, spanish_description) or None.
         """
         self._init_llm()
 
@@ -1482,12 +1569,27 @@ class YouTubeViralScraper(BaseScraper):
         translated_title = None
         translated_description = None
 
-        # 1. Translate + paraphrase the full transcript
+        # Step 1: Create ORIGINAL Spanish script from the English transcript
+        # CRITICAL: This is NOT a translation. The LLM creates new content.
         if english_text:
-            user_msg = f"Translate and paraphrase this viral video transcript into Spanish:\n\n{english_text[:8000]}"
-            translated_script = self._call_llm(_TRANSLATE_SYSTEM_PROMPT, user_msg, temperature=0.7)
+            canal_niche = getattr(self.config, "CANAL_NICHE_DESCRIPTION", "documentary")
+            user_msg = (
+                f"Create an ORIGINAL Spanish documentary script from this English transcript.\n"
+                f"EXTRACT facts and data — DO NOT translate the text.\n"
+                f"Channel niche: {canal_niche}\n\n"
+                f"SOURCE TRANSCRIPT (facts only — discard style):\n{english_text[:8000]}"
+            )
+            translated_script = self._call_llm(
+                _ADAPT_SCRIPT_ORIGINAL_SYSTEM_PROMPT, user_msg, temperature=0.75
+            )
             if translated_script and not self._is_spanish_text(translated_script):
-                logger.warning("[%s] Script translation returned non-Spanish text — discarding", self.canal)
+                logger.warning("[%s] Script creation returned non-Spanish text — discarding", self.canal)
+                translated_script = None
+            elif translated_script and "FACTS_INSUFFICIENT" in translated_script:
+                logger.warning(
+                    "[%s] Script creation: source has insufficient factual content "
+                    "(comedy/satire/meme detected) — rejecting candidate", self.canal
+                )
                 translated_script = None
 
         # 2. Generate a FRESH Spanish title (NOT a translation of the original)
@@ -1541,15 +1643,15 @@ class YouTubeViralScraper(BaseScraper):
                             self.canal, similarity * 100,
                         )
 
-        # 3. Generate a FRESH Spanish description from the translated script + topic
+        # 3. Generate a FRESH Spanish description from the original script + topic
         if translated_script:
-            # Use the translated script as the source — NEVER the original description
+            # Use the original script as the source — NEVER the original English description
             # Only the topic from the original title is used for context
             topic_hint = original_title[:200] if original_title else "contenido viral"
             desc_msg = (
                 f"Write an ORIGINAL Spanish YouTube description for a video with this title:\n"
                 f"\"{translated_title or topic_hint}\"\n\n"
-                f"Here is the TRANSLATED SCRIPT (use this as your source material, NOT any "
+                f"Here is the ORIGINAL SPANISH SCRIPT (use this as your source material, NOT any "
                 f"English description):\n\n{translated_script[:4000]}\n\n"
                 f"IMPORTANT: Do NOT translate any English description. Create original text "
                 f"based on the Spanish script above."

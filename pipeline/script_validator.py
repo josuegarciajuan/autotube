@@ -41,6 +41,13 @@ BANNED_OPENING_PATTERNS = [
     r"te\s+(voy|vamos)\s+a\s+(contar|hablar|explicar)",
 ]
 MIN_FACTS_FOR_PASS = 0  # minimum concrete facts from source (0 = skip this check)
+# ── Factual grounding thresholds ──────────────────────────────────
+# Blocks must contain at least one of: number, date pattern, proper name, location
+MAX_EMPTY_BLOCK_RATIO = 0.30   # max fraction of blocks with no concrete facts (warning)
+MAX_EMPTY_BLOCK_RATIO_GRAVE = 0.50  # max fraction before it's a grave issue
+# ── Source similarity thresholds ──────────────────────────────────
+SOURCE_SIMILARITY_GRAVE = 0.50  # script vs source text: >50% similarity = suspected translation
+SOURCE_SIMILARITY_WARNING = 0.35
 
 
 @dataclass
@@ -140,15 +147,38 @@ class ScriptValidator:
         else:
             result.coherence_score = 1.0
 
+        # 6. Factual grounding check (NEW)
+        fg_score = 1.0
+        if bloques and len(bloques) >= 3:
+            fg = self._check_factual_grounding(bloques)
+            result.details["factual_score"] = fg["score"]
+            fg_score = fg["score"]
+            if fg["issues"]:
+                result.issues.extend(fg["issues"])
+                severe_issues.update(fg.get("severe", []))
+
+        # 7. Source similarity check (NEW — detects literal translations)
+        ss_score = 1.0
+        if content_item and bloques:
+            ss = self._check_source_similarity(script, content_item)
+            result.details["source_similarity"] = ss.get("similarity", 0)
+            ss_score = ss.get("score", 1.0)
+            if ss["issues"]:
+                result.issues.extend(ss["issues"])
+                severe_issues.update(ss.get("severe", []))
+
         # Overall score (weighted average)
-        weights = {"structural": 0.30, "word_count": 0.25, "repetition": 0.25,
-                    "hook": 0.10, "coherence": 0.10}
+        weights = {"structural": 0.25, "word_count": 0.25, "repetition": 0.20,
+                    "hook": 0.10, "coherence": 0.10, "factual": 0.05,
+                    "source_sim": 0.05}
         result.score = (
             result.structural_score * weights["structural"]
             + result.word_count_score * weights["word_count"]
             + result.repetition_score * weights["repetition"]
             + result.hook_score * weights["hook"]
             + result.coherence_score * weights["coherence"]
+            + fg_score * weights["factual"]
+            + ss_score * weights["source_sim"]
         )
 
         result.details["severe_issues"] = severe_issues
@@ -326,3 +356,110 @@ class ScriptValidator:
             score = 0.7
 
         return {"score": score, "issues": issues}
+
+    def _check_factual_grounding(self, bloques: list[dict]) -> dict:
+        """Check that blocks contain concrete facts (numbers, dates, names, places).
+
+        Detects "empty" narration — blocks that are purely metaphorical,
+        poetic filler, or translation artifacts with no verifiable data.
+
+        A fact is identified by presence of: numbers, dates, capitalized
+        proper names, location markers, or measurement units.
+        """
+        issues = []
+        severe = set()
+        score = 1.0
+
+        # Fact indicator patterns (ordered: most specific → least specific)
+        fact_patterns = [
+            r'\d+',                              # any number
+            r'\b(?:siglo|año|mes|día|hora|década|milenio)\b',  # time references
+            r'\b(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b',  # months
+            r'\b(?:millones|miles|billones|metros|kilómetros|grados|por ciento|hectáreas|kilogramos|litros|toneladas)\b',  # units
+            # "de + Capitalized" — e.g. "Imperio de Roma", "Golfo de México"
+            # (?-i:...) forces case-sensitive match for the proper name part
+            r'\bde\s+(?-i:[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})',
+            # All-caps abbreviations — e.g. "ONU", "NASA", "UNESCO"
+            # (?-i:...) forces case-sensitive matching for this sub-pattern
+            r'(?-i:\b[A-ZÁÉÍÓÚÑ]{2,}\b)',
+            # Verification markers
+            r'\b(?:según|documentado|registrado|confirmado|descubierto|encontrado|excavado|publicado en|cita)\b',
+        ]
+        combined_pattern = '|'.join(fact_patterns)
+
+        empty_blocks = 0
+        for b in bloques:
+            text = b.get("texto", "")
+            if not text.strip():
+                empty_blocks += 1
+                continue
+            if not re.search(combined_pattern, text, re.IGNORECASE):
+                empty_blocks += 1
+
+        n = len(bloques)
+        empty_ratio = empty_blocks / max(1, n)
+
+        if empty_ratio >= MAX_EMPTY_BLOCK_RATIO_GRAVE:
+            issues.append(
+                f"Factual grounding GRAVE: {empty_blocks}/{n} blocks "
+                f"({empty_ratio:.0%}) have no concrete facts — possible "
+                f"translation, filler, or AI hallucination without data"
+            )
+            severe.add("no_factual_content")
+            score = max(0, 1.0 - empty_ratio)
+        elif empty_ratio >= MAX_EMPTY_BLOCK_RATIO:
+            issues.append(
+                f"Factual grounding: {empty_blocks}/{n} blocks "
+                f"({empty_ratio:.0%}) lack concrete facts"
+            )
+            score = max(0.3, 1.0 - empty_ratio * 1.5)
+
+        return {"score": score, "issues": issues, "severe": severe}
+
+    def _check_source_similarity(self, script: dict, content_item: dict) -> dict:
+        """Detect if the script is too similar to the source text.
+
+        High similarity with the source indicates a literal translation or
+        paraphrase rather than original content creation. This catches the
+        case where an LLM translates a viral transcript verbatim instead of
+        creating new documentary narration.
+        """
+        issues = []
+        severe = set()
+        score = 1.0
+
+        source_text = content_item.get("text", "")
+        if not source_text or len(source_text) < 50:
+            return {"score": score, "issues": issues, "similarity": 0, "severe": severe}
+
+        guion = script.get("guion", "")
+        if not guion or len(guion) < 50:
+            return {"score": score, "issues": issues, "similarity": 0, "severe": severe}
+
+        # Compare using SequenceMatcher on the full texts
+        similarity = SequenceMatcher(
+            None,
+            source_text.lower()[:3000],
+            guion.lower()[:3000],
+        ).ratio()
+
+        if similarity >= SOURCE_SIMILARITY_GRAVE:
+            issues.append(
+                f"Source similarity GRAVE: {similarity:.0%} — script appears "
+                f"to be a literal translation of source material (not original content)"
+            )
+            severe.add("source_translation_detected")
+            score = max(0, 1.0 - similarity)
+        elif similarity >= SOURCE_SIMILARITY_WARNING:
+            issues.append(
+                f"Source similarity: {similarity:.0%} — some phrases may be "
+                f"too close to original source"
+            )
+            score = max(0.5, 1.0 - similarity * 0.5)
+
+        return {
+            "score": score,
+            "issues": issues,
+            "severe": severe,
+            "similarity": round(similarity, 2),
+        }

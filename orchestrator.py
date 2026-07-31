@@ -576,7 +576,21 @@ class PipelineOrchestrator:
                 logger.warning("[%s] All %d candidates failed during processing", self.canal, max_attempts)
                 return self._viral_fallback_to_original(start)
 
-        # ── Build script from viral_content ─────────────────────
+        # ── Build script from viral_content vía ScriptGenerator ────
+        # v22.2: Viral content now passes through the SAME script generation
+        # pipeline as original content. The viral_script_es is treated as
+        # source research material (not final narration), fed into
+        # ScriptGenerator.generate_v2() which creates an original script
+        # with outline, batch generation, enrichment, and validation.
+        #
+        # This replaces the old approach of using viral_script_es directly
+        # as blocks, which caused literal translations of comedy/meme content
+        # to be published as documentary narration (e.g., Bill Wurtz incident).
+        #
+        # Controlled by VIRAL_CONTENT_MODE per channel ("rewrite" = default).
+        viral_mode = getattr(self.config, "VIRAL_CONTENT_MODE", "rewrite")
+        logger.info("[%s] VIRAL: content mode=%s", self.canal, viral_mode)
+
         if not viral_content:
             return self._viral_fallback_to_original(start)
 
@@ -588,7 +602,7 @@ class PipelineOrchestrator:
             logger.error("[%s] Viral candidate has no script (viral_script_es empty)", self.canal)
             return self._viral_fallback_to_original(start)
 
-        # ── Extract visual theme from viral script (Bug fix: ThemeExtractor was dead code) ──
+        # ── Extract visual theme from viral script ──
         self._extract_and_set_theme(script_es, original_title)
 
         # Parse viral metadata
@@ -597,170 +611,61 @@ class PipelineOrchestrator:
         except (json.JSONDecodeError, TypeError):
             viral_meta = {}
 
-        # ── Inject original_description for leak detection in viral_cloner ──
+        # ── Inject metadata for later phases ──
         if viral_content.get("viral_original_description"):
-            viral_meta["original_description"] = viral_content["viral_original_description"]
-        # ── Inject original_video_url for thumbnail fetching ──
+            viral_meta.setdefault("original_description", viral_content["viral_original_description"])
         if viral_content.get("viral_original_video_url"):
             viral_meta.setdefault("original_url", viral_content["viral_original_video_url"])
 
-        blocks = viral_meta.get("blocks", [])
-
-        # If no blocks, build simple block structure from script text
-        if not blocks:
-            import re
-            paragraphs = [p.strip() for p in script_es.split("\n\n") if p.strip() and len(p.strip()) > 20]
-            if not paragraphs:
-                sentences = re.split(r'(?<=[.!?])\s+', script_es)
-                paragraphs = [s.strip() for s in sentences if len(s.strip()) > 20]
-
-            if paragraphs:
-                n = len(paragraphs)
-                if n == 1:
-                    blocks = [{"tipo": "hook", "texto": paragraphs[0]}]
-                elif n <= 4:
-                    types = ["hook", "desarrollo", "climax", "cierre"][:n]
-                    blocks = [{"tipo": t, "texto": p} for t, p in zip(types, paragraphs)]
-                else:
-                    blocks = [{"tipo": "hook", "texto": paragraphs[0]}]
-                    for p in paragraphs[1:-3]:
-                        blocks.append({"tipo": "desarrollo", "texto": p})
-                    blocks.append({"tipo": "climax", "texto": paragraphs[-3]})
-                    blocks.append({"tipo": "reflexion", "texto": paragraphs[-2]})
-                    blocks.append({"tipo": "cierre", "texto": paragraphs[-1]})
-
-        # ── Enrich viral blocks with search_query_en, media_tipo, etc. ──
-        # Viral scripts from youtube_viral.py only produce blocks with tipo+texto.
-        # Without enrichment, the media_fetcher falls back to generic type-based
-        # queries (e.g. "dark dramatic mystery") that have nothing to do with
-        # what's being narrated. This step calls the same LLM enrichment used
-        # by generate_v2() to add per-block search_query_en, media_tipo,
-        # escena_descripcion, and emocion.
-        if blocks and self.script_gen:
-            enrichment_item = {
-                "title": translated_title or original_title or "Video",
-                "text": script_es,
-            }
-            try:
-                enriched_blocks = self.script_gen._enrich_block_fields_iterative(
-                    blocks, enrichment_item
-                )
-                if enriched_blocks:
-                    blocks = enriched_blocks
-                    logger.info(
-                        "[%s] Enriched %d viral blocks with search_query_en, media_tipo, escena_descripcion",
-                        self.canal, len(blocks),
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Viral block enrichment failed: %s — blocks will lack search queries (generic fallbacks used)",
-                    self.canal, exc,
-                )
-                # blocks stays as-is with just tipo+texto — safe fallback
-
-        # Get translated title
         translated_title = viral_meta.get("translated_title") or original_title or "Video"
 
-        # Validate title is Spanish — if original_title is English and used as fallback, extract from blocks
-        if translated_title and original_title and translated_title == original_title:
-            es_accents = sum(1 for c in original_title if c in 'áéíóúñü¿¡ÁÉÍÓÚÑÜ')
-            en_words = len(re.findall(
-                r'\b(the|and|that|with|this|from|have|what|when|will|about|your|our|for|not|but)\b',
-                original_title.lower()
-            ))
-            if en_words >= 1 and es_accents == 0:
-                logger.warning("[%s] Viral title is English (original_title used as fallback) — extracting Spanish title from blocks", self.canal)
-                blocks_text = [b.get("texto", "") for b in blocks]
-                if blocks_text:
-                    first_sentence = blocks_text[0].split(".")[0].strip()[:100]
-                    if first_sentence and len(first_sentence) > 20:
-                        translated_title = first_sentence
+        # ── Feed viral content through ScriptGenerator (same as original pipeline) ──
+        self._emit_progress(15, "script",
+                            f"Generando guion documental original desde fuente viral...")
+        logger.info(
+            "[%s] VIRAL: Feeding %d words of source material through ScriptGenerator",
+            self.canal, len(script_es.split()),
+        )
 
-        # Generate alternative titles
-        alt_titles = [translated_title]
-        if len(translated_title) > 5:
-            words = translated_title.split()
-            if len(words) > 2:
-                alt_titles.append(" ".join(words[1:] + words[:1]))
-
-        # Estimate duration
-        word_count = len(script_es.split())
-        duracion_estimada = max(1, word_count // 150)
-
-        # Build GUIóN from blocks
-        guion_parts = []
-        for b in blocks:
-            guion_parts.append(f"[{b.get('tipo', 'desarrollo').upper()}]\n{b.get('texto', '')}")
-        guion = "\n\n".join(guion_parts)
-
-        # Keywords from channel config
-        keywords = list(getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])[:5])
-
-        # Insert script into DB
-        raw_content_id = viral_content.get("id") or None
-        try:
-            script_id = self.db.insert_script(
-                raw_content_id=raw_content_id,
-                canal=self.canal,
-                titulo_options=alt_titles,
-                guion=guion,
-                escenas=blocks,
-                bloques=blocks,
-                keywords=keywords,
-                duracion_estimada=duracion_estimada,
-            )
-        except Exception:
-            # Race condition: raw_content row was deleted between selection and insert.
-            # Fall back with no FK reference so the script can still proceed.
-            logger.warning(
-                "[%s] FK constraint failed for raw_content_id=%s — retrying with NULL reference",
-                self.canal, raw_content_id,
-            )
-            script_id = self.db.insert_script(
-                raw_content_id=None,
-                canal=self.canal,
-                titulo_options=alt_titles,
-                guion=guion,
-                escenas=blocks,
-                bloques=blocks,
-                keywords=keywords,
-                duracion_estimada=duracion_estimada,
-            )
-
-        # Build result dict
-        result = {
-            "id": script_id,
-            "raw_content_id": viral_content.get("id", 0),
-            "guion": guion,
-            "bloques": blocks,
-            "bloques_json": json.dumps(blocks, ensure_ascii=False),
-            "titulo_options": json.dumps(alt_titles, ensure_ascii=False),
-            "titulo_selected": translated_title,
-            "keywords": keywords,
-            "keywords_json": json.dumps(keywords, ensure_ascii=False),
-            "duracion_estimada": duracion_estimada,
-            "canal": self.canal,
-            "_viral_meta": viral_meta,
-            "_viral_meta_json": json.dumps(viral_meta, ensure_ascii=False),
-            "_viral_original_thumbnail": viral_content.get("viral_original_thumbnail_url", ""),
-            "_viral_original_title": original_title,
-            "_viral_original_video_url": viral_content.get("viral_original_video_url", ""),
-            "_viral_content_id": viral_content.get("id", 0),
+        content_item = {
+            "id": viral_content.get("id") or None,
+            "title": translated_title,
+            "text": script_es,  # original Spanish content, not a translation
+            "source": "youtube_viral",
+            "subreddit": viral_content.get("subreddit", ""),
+            "score": viral_content.get("viral_score", 0),
+            "category": getattr(self.config, "CANAL_CATEGORY", "documental"),
+            "_palabras_objetivo": None,  # let ScriptGenerator compute from channel config
         }
 
+        # Call the same pipeline used for original content
+        result = self.script_gen.generate(content_item)
         duration_ms = int((time.time() - start) * 1000)
         self._timing["phases"]["script"] = duration_ms
-        if result:
-            self._emit_progress(23, "script",
-                                f"Guion viral listo: {word_count} palabras, {len(blocks)} bloques")
-            self.db.log_pipeline(self.canal, "script", "success",
-                                  f"Viral script {script_id} from candidate #{viral_content.get('id', 0)}",
-                                  content_id=script_id, duration_ms=duration_ms)
-            # Mark viral content as used (if it has a real DB id)
-            if viral_content.get("id", 0) > 0:
-                self.db.mark_content_used(viral_content["id"])
-        else:
-            _safe_log_error(self.db, self.canal, "script", "Viral script generation failed")
+
+        if not result:
+            logger.warning("[%s] VIRAL: ScriptGenerator returned None — falling back to original", self.canal)
+            return self._viral_fallback_to_original(start)
+
+        # ── Attach viral metadata to result for later phases (title gen, thumbnail, etc.) ──
+        result["_viral_meta"] = viral_meta
+        result["_viral_meta_json"] = json.dumps(viral_meta, ensure_ascii=False)
+        result["_viral_original_thumbnail"] = viral_content.get("viral_original_thumbnail_url", "")
+        result["_viral_original_title"] = original_title
+        result["_viral_original_video_url"] = viral_content.get("viral_original_video_url", "")
+        result["_viral_content_id"] = viral_content.get("id", 0)
+
+        word_count = len(result.get("guion", "").split()) if result.get("guion") else 0
+        self._emit_progress(23, "script",
+                            f"Guion viral generado: {word_count} palabras, script #{result.get('id')}")
+        self.db.log_pipeline(self.canal, "script", "success",
+                              f"Viral script {result.get('id')} via ScriptGenerator",
+                              content_id=result.get("id"), duration_ms=duration_ms)
+
+        # Mark viral content as used
+        if viral_content.get("id", 0) > 0:
+            self.db.mark_content_used(viral_content["id"])
+
         return result
 
     def _viral_fallback_to_original(self, start: float) -> Optional[dict]:
