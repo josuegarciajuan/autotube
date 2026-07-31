@@ -142,10 +142,20 @@ class Database:
                                   viral_score=0.0,
                                   viral_script_es=None,
                                   viral_meta_json=None):
-        """Insert viral content with all viral metadata columns. Returns row id. Skips duplicates by URL."""
+        """Insert or update viral content. Returns row id on success, None on error.
+        
+        If the URL already exists for this canal, the viral metadata columns
+        (script, score, views, etc.) are updated in-place. The row id of the
+        existing record is returned.
+        
+        Previously this method silently swallowed IntegrityError (returning None)
+        when the same URL existed for another canal — causing the caller to
+        fall back to id=0 which breaks the scripts.raw_content_id FK constraint.
+        """
         canal = self._resolve_canal(canal)
         with self._connect() as conn:
             try:
+                # Attempt INSERT first
                 cursor = conn.execute(
                     """INSERT INTO raw_content
                        (source, subreddit, url, title, text, score, canal,
@@ -161,9 +171,60 @@ class Database:
                      viral_channel_name, viral_score, viral_script_es, viral_meta_json),
                 )
                 conn.commit()
+                _log.debug("insert_raw_content_viral: new row id=%s for url=%s canal=%s",
+                           cursor.lastrowid, url, canal)
                 return cursor.lastrowid
             except sqlite3.IntegrityError:
-                return None
+                # URL already exists for this canal → UPDATE the viral fields
+                # (unless it's from a DIFFERENT canal — then we still do INSERT via the new UNIQUE(url, canal))
+                _log.info("insert_raw_content_viral: url already exists for canal=%s → updating viral fields (url=%s)",
+                          canal, url)
+                try:
+                    update_cursor = conn.execute(
+                        """UPDATE raw_content SET
+                            source = COALESCE(?, source),
+                            subreddit = COALESCE(?, subreddit),
+                            title = COALESCE(?, title),
+                            text = COALESCE(?, text),
+                            score = COALESCE(?, score),
+                            source_mode = COALESCE(?, source_mode),
+                            viral_original_title = COALESCE(?, viral_original_title),
+                            viral_original_description = COALESCE(?, viral_original_description),
+                            viral_original_thumbnail_url = COALESCE(?, viral_original_thumbnail_url),
+                            viral_original_video_url = COALESCE(?, viral_original_video_url),
+                            viral_views = COALESCE(?, viral_views),
+                            viral_upload_date = COALESCE(?, viral_upload_date),
+                            viral_duration_sec = COALESCE(?, viral_duration_sec),
+                            viral_channel_name = COALESCE(?, viral_channel_name),
+                            viral_score = COALESCE(?, viral_score),
+                            viral_script_es = COALESCE(?, viral_script_es),
+                            viral_meta_json = COALESCE(?, viral_meta_json)
+                           WHERE url = ? AND canal = ?""",
+                        (source, subreddit, title, text, score, source_mode,
+                         viral_original_title, viral_original_description,
+                         viral_original_thumbnail_url, viral_original_video_url,
+                         viral_views, viral_upload_date, viral_duration_sec,
+                         viral_channel_name, viral_score, viral_script_es, viral_meta_json,
+                         url, canal),
+                    )
+                    conn.commit()
+                    # Fetch the row id that was just updated
+                    row = conn.execute(
+                        "SELECT id FROM raw_content WHERE url = ? AND canal = ?",
+                        (url, canal),
+                    ).fetchone()
+                    if row:
+                        _log.info("insert_raw_content_viral: updated existing row id=%s for url=%s canal=%s",
+                                  row["id"], url, canal)
+                        return row["id"]
+                    else:
+                        _log.error("insert_raw_content_viral: UPDATE succeeded but row not found for url=%s canal=%s",
+                                   url, canal)
+                        return None
+                except sqlite3.IntegrityError as exc2:
+                    _log.error("insert_raw_content_viral: UPDATE also failed for url=%s canal=%s: %s",
+                               url, canal, exc2)
+                    return None
 
     def get_viral_candidates(self, canal=None, min_score=0.0, limit=20):
         """Fetch viral candidates ordered by viral_score (highest first)."""

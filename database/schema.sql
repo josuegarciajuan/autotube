@@ -9,13 +9,14 @@ CREATE TABLE IF NOT EXISTS raw_content (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,              -- 'reddit', 'wikipedia'
     subreddit   TEXT,                       -- Reddit subreddit name (if applicable)
-    url         TEXT NOT NULL UNIQUE,       -- canonical source URL
+    url         TEXT NOT NULL,               -- canonical source URL
     title       TEXT NOT NULL,
     text        TEXT NOT NULL,              -- full content text
     score       INTEGER DEFAULT 0,          -- upvotes / relevance
     scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     used        BOOLEAN DEFAULT 0,          -- already processed?
-    canal       TEXT DEFAULT 'canal2'
+    canal       TEXT DEFAULT 'canal2',
+    UNIQUE(url, canal)                     -- per-channel dedup
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_unused ON raw_content(canal, used, scraped_at);

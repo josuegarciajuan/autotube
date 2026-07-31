@@ -406,6 +406,29 @@ class PipelineOrchestrator:
             logger.warning("[%s] Could not load viral scraper: %s", self.canal, e)
             return None
 
+    @staticmethod
+    def _build_viral_fallback_dict(processed: dict, db_id: Optional[int]) -> dict:
+        """Build a viral_content pseudo-dict from processed candidate data.
+
+        When the DB insert/update fails (e.g., race condition, transient error),
+        this builds a dict with all the fields needed for script generation.
+        It does NOT set a fake raw_content id (id is None/null → FK-safe).
+        """
+        result = {
+            "source_mode": "viral",
+            "viral_script_es": processed.get("viral_script_es", ""),
+            "viral_original_title": processed.get("viral_original_title", ""),
+            "viral_original_video_url": processed.get("viral_original_video_url", ""),
+            "viral_original_thumbnail_url": processed.get("viral_original_thumbnail_url"),
+            "viral_meta_json": processed.get("viral_meta_json", "{}"),
+            "viral_score": processed.get("viral_score", 0),
+            "viral_views": processed.get("viral_views", 0),
+        }
+        # Only set id if we have a valid one from DB
+        if db_id:
+            result["id"] = db_id
+        return result
+
     def _phase_generate_script_viral(self, start: float) -> Optional[dict]:
         """Generate script from a viral mirror candidate — two-phase approach.
 
@@ -490,7 +513,7 @@ class PipelineOrchestrator:
                     # Save to raw_content for future fast-path use
                     try:
                         canal = getattr(scraper, "canal", self.canal)
-                        self.db.insert_raw_content_viral(
+                        content_id = self.db.insert_raw_content_viral(
                             source=processed["source"],
                             url=processed["url"],
                             title=processed["title"],
@@ -512,38 +535,35 @@ class PipelineOrchestrator:
                             viral_meta_json=processed.get("viral_meta_json"),
                         )
                         saved_to_db = True
-                        # Re-read from DB to get the id
-                        db_content = self.db.get_content_by_url(processed["url"], self.canal)
-                        if db_content:
-                            viral_content = db_content
-                            self.viral_candidate_id = viral_content["id"]
+
+                        if content_id:
+                            # Use the returned ID to fetch the full row
+                            db_content = self.db.get_content_by_id(content_id)
+                            if db_content:
+                                viral_content = db_content
+                                self.viral_candidate_id = content_id
+                            else:
+                                # Row was inserted/updated but can't be read back — rare race condition
+                                logger.warning("[%s] Insert/update returned id=%s but get_content_by_id failed — building fallback",
+                                               self.canal, content_id)
+                                viral_content = self._build_viral_fallback_dict(processed, content_id)
                         else:
-                            # Fallback: build pseudo-dict from processed data
-                            viral_content = {
-                                "id": 0,
-                                "source_mode": "viral",
-                                "viral_script_es": processed.get("viral_script_es", ""),
-                                "viral_original_title": processed.get("viral_original_title", ""),
-                                "viral_original_video_url": processed.get("viral_original_video_url", ""),
-                                "viral_original_thumbnail_url": processed.get("viral_original_thumbnail_url"),
-                                "viral_meta_json": processed.get("viral_meta_json", "{}"),
-                                "viral_score": processed.get("viral_score", 0),
-                                "viral_views": processed.get("viral_views", 0),
-                            }
+                            # insert_raw_content_viral returned None — unexpected error
+                            # Try fetching by URL as last resort
+                            db_content = self.db.get_content_by_url(processed["url"], self.canal)
+                            if db_content:
+                                viral_content = db_content
+                                self.viral_candidate_id = viral_content["id"]
+                                logger.warning("[%s] insert_raw_content_viral returned None but row found via get_content_by_url (id=%s)",
+                                               self.canal, viral_content["id"])
+                            else:
+                                logger.warning("[%s] insert_raw_content_viral returned None and get_content_by_url also failed — building fallback",
+                                               self.canal)
+                                viral_content = self._build_viral_fallback_dict(processed, None)
                     except Exception as exc:
                         logger.warning("[%s] Failed to save candidate to DB: %s", self.canal, exc)
-                        # Still usable — build pseudo-dict
-                        viral_content = {
-                            "id": 0,
-                            "source_mode": "viral",
-                            "viral_script_es": processed.get("viral_script_es", ""),
-                            "viral_original_title": processed.get("viral_original_title", ""),
-                            "viral_original_video_url": processed.get("viral_original_video_url", ""),
-                            "viral_original_thumbnail_url": processed.get("viral_original_thumbnail_url"),
-                            "viral_meta_json": processed.get("viral_meta_json", "{}"),
-                            "viral_score": processed.get("viral_score", 0),
-                            "viral_views": processed.get("viral_views", 0),
-                        }
+                        # Still usable — build pseudo-dict (no DB id)
+                        viral_content = self._build_viral_fallback_dict(processed, None)
                     break  # success!
                 else:
                     logger.warning("[%s] Candidate %d returned None — trying next", self.canal, attempt)
@@ -645,7 +665,7 @@ class PipelineOrchestrator:
 
         # Insert script into DB
         script_id = self.db.insert_script(
-            raw_content_id=viral_content.get("id", 0) or 0,
+            raw_content_id=viral_content.get("id") or None,
             canal=self.canal,
             titulo_options=alt_titles,
             guion=guion,

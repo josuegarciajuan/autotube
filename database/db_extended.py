@@ -868,6 +868,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v23: videos.published_verified_at + published_retry_at ──
     _migrate_v23(conn, logger)
+
+    # ── v24: raw_content UNIQUE(url, canal) instead of global UNIQUE(url) ──
+    _migrate_v24(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1563,6 +1566,127 @@ def _migrate_v23(conn, logger):
             conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {default}")
     
     logger.info("Migration: v23 schema applied (published verification columns)")
+
+
+def _migrate_v24(conn, logger):
+    """Idempotent v24: Fix raw_content.url UNIQUE constraint to per-channel.
+
+    Before: url TEXT NOT NULL UNIQUE (global — prevents different channels
+            from indexing the same YouTube viral video).
+    After:  url TEXT NOT NULL, UNIQUE(url, canal) (per-channel dedup).
+
+    Recreates the table with the corrected constraint, preserving all
+    row IDs so foreign key references from scripts.raw_content_id remain valid.
+    """
+    # Check if already applied — look for our explicit unique index
+    existing = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_raw_unique_url_canal'"
+    ).fetchone()
+    if existing:
+        logger.info("Migration: v24 already applied (idx_raw_unique_url_canal exists)")
+        return
+
+    # Check all columns exist in raw_content (columns from v4/v6 migrations)
+    expected_cols = [
+        "id", "source", "subreddit", "url", "title", "text",
+        "score", "scraped_at", "used", "canal",
+        "status", "scheduled_at", "source_mode",
+        "viral_original_title", "viral_original_description",
+        "viral_original_thumbnail_url", "viral_original_video_url",
+        "viral_views", "viral_upload_date", "viral_duration_sec",
+        "viral_channel_name", "viral_score", "viral_script_es", "viral_meta_json",
+    ]
+    existing_cols_info = conn.execute("PRAGMA table_info('raw_content')").fetchall()
+    existing_cols = [row[1] for row in existing_cols_info]
+
+    # Build column list from what actually exists
+    cols_present = [c for c in expected_cols if c in existing_cols]
+    cols_absent = [c for c in expected_cols if c not in existing_cols]
+    if cols_absent:
+        logger.warning("Migration v24: columns missing in raw_content: %s", cols_absent)
+
+    col_list = ", ".join(cols_present)
+    select_cols = ", ".join(cols_present)
+
+    logger.info("Migration v24: recreating raw_content with UNIQUE(url, canal)...")
+
+    # Disable FK checks for this connection (we preserve all IDs)
+    conn.execute("PRAGMA foreign_keys = 0")
+
+    # Build CREATE TABLE dynamically based on available columns
+    create_sql = """CREATE TABLE raw_content_v24 (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        source      TEXT NOT NULL,
+        subreddit   TEXT,"""
+    if "url" in cols_present:
+        create_sql += "\n        url         TEXT NOT NULL,"
+    if "title" in cols_present:
+        create_sql += "\n        title       TEXT NOT NULL,"
+    if "text" in cols_present:
+        create_sql += "\n        text        TEXT NOT NULL,"
+    if "score" in cols_present:
+        create_sql += "\n        score       INTEGER DEFAULT 0,"
+    if "scraped_at" in cols_present:
+        create_sql += "\n        scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+    if "used" in cols_present:
+        create_sql += "\n        used        BOOLEAN DEFAULT 0,"
+    if "canal" in cols_present:
+        create_sql += "\n        canal       TEXT DEFAULT 'canal2',"
+    for col in ["status", "scheduled_at", "source_mode"]:
+        if col in cols_present:
+            if col == "source_mode":
+                create_sql += f"\n        {col} TEXT DEFAULT 'original',"
+            elif col in ("status", "scheduled_at"):
+                create_sql += f"\n        {col} TEXT,"
+    viral_cols = [
+        "viral_original_title", "viral_original_description",
+        "viral_original_thumbnail_url", "viral_original_video_url",
+        "viral_channel_name", "viral_upload_date", "viral_script_es", "viral_meta_json",
+    ]
+    viral_int_cols = ["viral_views", "viral_duration_sec"]
+    viral_real_cols = ["viral_score"]
+    for col in viral_cols:
+        if col in cols_present:
+            create_sql += f"\n        {col} TEXT,"
+    for col in viral_int_cols:
+        if col in cols_present:
+            create_sql += f"\n        {col} INTEGER DEFAULT 0,"
+    for col in viral_real_cols:
+        if col in cols_present:
+            create_sql += f"\n        {col} REAL DEFAULT 0.0,"
+    # NEW: per-channel unique constraint
+    create_sql += "\n        UNIQUE(url, canal)\n    )"
+
+    # Execute table migration
+    conn.execute(create_sql)
+
+    # Copy data
+    insert_sql = f"INSERT OR IGNORE INTO raw_content_v24 ({col_list}) SELECT {select_cols} FROM raw_content"
+    conn.execute(insert_sql)
+
+    row_count = conn.execute("SELECT COUNT(*) FROM raw_content_v24").fetchone()[0]
+    logger.info("Migration v24: copied %d rows to new table", row_count)
+
+    # Drop old table and rename
+    conn.execute("DROP TABLE raw_content")
+    conn.execute("ALTER TABLE raw_content_v24 RENAME TO raw_content")
+
+    # Recreate indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_unused ON raw_content(canal, used, scraped_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_source ON raw_content(source)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_url ON raw_content(url)")
+    if "source_mode" in cols_present:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_source_mode ON raw_content(source_mode)")
+    if "viral_score" in cols_present:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_viral_score ON raw_content(viral_score)")
+
+    # Explicit unique index as migration checkpoint
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_unique_url_canal ON raw_content(url, canal)")
+
+    # Re-enable FK checks
+    conn.execute("PRAGMA foreign_keys = 1")
+
+    logger.info("Migration: v24 schema applied (raw_content UNIQUE(url, canal))")
 
 
 def _migrate_v10(conn, logger):
