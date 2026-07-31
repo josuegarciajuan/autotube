@@ -190,14 +190,14 @@ async def lifespan(app: FastAPI):
             "Server restart — all analysis threads killed"
         )
         if count > 0:
-            _startup_logger.warning(
+            logging.getLogger("autotube.startup").warning(
                 "Insight orphan cleanup: %d processing rows force-failed "
                 "(server restart killed all threads)", count
             )
         else:
-            _startup_logger.info("Insight orphan check: no stale processing rows")
+            logging.getLogger("autotube.startup").info("Insight orphan check: no stale processing rows")
     except Exception as exc:
-        _startup_logger.warning("Insight orphan cleanup skipped: %s", exc)
+        logging.getLogger("autotube.startup").warning("Insight orphan cleanup skipped: %s", exc)
 
     # ── PAUSE GATE: skip all auto-planning/dispatch when operator paused scheduling ──
     _scheduler_paused = False
