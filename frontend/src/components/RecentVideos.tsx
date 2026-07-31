@@ -87,7 +87,7 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
             return (
               <div
                 key={v.id}
-                className="p-3 rounded-lg bg-dark-700/50 hover:bg-dark-600/50 transition-all group border border-surface-border/30"
+                className="p-3 rounded-lg bg-dark-700/50 hover:bg-dark-600/50 transition-all group border border-surface-border/30 overflow-hidden"
               >
                 {/* Top row: thumbnail + title + link */}
                 <div className="flex items-center gap-3">
@@ -108,9 +108,9 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5 min-w-0">
                       <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${
                           CHANNEL_PILL[v.channel_slug] || DEFAULT_PILL
                         }`}
                       >
@@ -118,7 +118,7 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                       </span>
                       {v.is_marathon && (
                         <span
-                          className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1"
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1 shrink-0"
                           title={
                             v.marathon_config
                               ? `Maratón ${typeof v.marathon_config === 'string' ? JSON.parse(v.marathon_config).duration_target : (v.marathon_config as any).duration_target}min`
@@ -130,7 +130,7 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                         </span>
                       )}
                       {!lastAction && (
-                        <span className="text-[10px] text-gray-500">
+                        <span className="text-[10px] text-gray-500 shrink-0">
                           Sin acciones registradas
                         </span>
                       )}
@@ -146,9 +146,9 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                   </Link>
                 </div>
 
-                {/* Action timeline */}
+                {/* Action timeline — responsive: wraps on narrow screens, no horizontal scroll */}
                 {history.length > 0 && (
-                  <div className="mt-2 flex items-center gap-0 overflow-x-auto scrollbar-thin">
+                  <div className="mt-2 flex flex-wrap items-center gap-x-0.5 gap-y-1 min-w-0">
                     {history.map((a, i) => {
                       const colors = actionColor(a.action)
                       const isLast = i === history.length - 1
@@ -156,39 +156,25 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                         <div key={i} className="flex items-center shrink-0">
                           {/* Pill: dot + icon + label + time */}
                           <div
-                            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border ${
+                            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] ${
                               isLast
-                                ? `${colors.iconBg} border-current/30`
-                                : 'border-transparent bg-transparent'
+                                ? `${colors.iconBg} border-current/30 ${colors.text}`
+                                : 'border-transparent bg-transparent text-gray-400'
                             }`}
-                            style={isLast ? { borderColor: `${colors.dot}40` } : undefined}
                             title={`${a.action}: ${formatDate(a.date)}`}
                           >
-                            <span className={colors.text}>
-                              {actionIcon(a.action)}
-                            </span>
-                            <span className={`text-[10px] font-medium ${isLast ? colors.text : 'text-gray-400'}`}>
-                              {a.action}
-                            </span>
-                            <span className="text-[9px] text-gray-500 font-mono ml-0.5">
+                            <span>{actionIcon(a.action)}</span>
+                            <span className="font-medium">{a.action}</span>
+                            <span className="text-[9px] text-gray-500 font-mono">
                               {fmtTime(a.date)}
                             </span>
                           </div>
 
                           {/* Connector arrow */}
                           {!isLast && (
-                            <div className="flex items-center px-0.5">
-                              <svg width="14" height="10" viewBox="0 0 14 10" className="text-gray-600 shrink-0">
-                                <path
-                                  d="M0 5h12M9 1l4 4-4 4"
-                                  stroke="currentColor"
-                                  strokeWidth="1"
-                                  fill="none"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            </div>
+                            <span className="text-gray-600 px-0.5 shrink-0 select-none" aria-hidden="true">
+                              →
+                            </span>
                           )}
                         </div>
                       )

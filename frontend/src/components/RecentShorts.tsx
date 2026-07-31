@@ -86,7 +86,7 @@ export default function RecentShorts({ shorts }: RecentShortsProps) {
           {shorts.map((s) => (
             <div
               key={s.id}
-              className="flex items-center gap-3 p-3 rounded-lg bg-dark-700/50 hover:bg-dark-600/50 transition-all group border border-surface-border/30"
+              className="flex items-center gap-3 p-3 rounded-lg bg-dark-700/50 hover:bg-dark-600/50 transition-all group border border-surface-border/30 overflow-hidden"
             >
               {/* Shorts icon */}
               <div className="shrink-0 w-8 h-8 rounded-lg bg-emerald-400/10 flex items-center justify-center">
@@ -105,20 +105,20 @@ export default function RecentShorts({ shorts }: RecentShortsProps) {
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-2 mt-0.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5 min-w-0">
                   <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${
                       CHANNEL_PILL[s.channel_slug] || DEFAULT_PILL
                     }`}
                   >
                     {s.channel_name}
                   </span>
-                  <span className="text-[10px] text-gray-500 flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 flex items-center gap-1 shrink-0">
                     <Clock size={10} />
                     {timeAgo(s.published_at)}
                   </span>
                   {statusBadge(s.status) && (
-                    <span className={`ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium border flex items-center gap-1 ${statusBadge(s.status)!.cls}`}>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium border flex items-center gap-1 shrink-0 ${statusBadge(s.status)!.cls}`}>
                       {statusBadge(s.status)!.icon}
                       {statusBadge(s.status)!.label}
                     </span>
