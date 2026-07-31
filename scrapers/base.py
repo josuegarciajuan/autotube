@@ -198,6 +198,7 @@ class BaseScraper(ABC):
                     if attempt < self.max_retries:
                         sleep_time = (2 ** attempt) + random.uniform(0, 1)
                         time.sleep(sleep_time)
+                        continue
                     else:
                         raise RateLimitError(f"HTTP 429 for {url} after {self.max_retries} retries")
                 if e.code >= 500:
@@ -205,6 +206,7 @@ class BaseScraper(ABC):
                     if attempt < self.max_retries:
                         sleep_time = (2 ** attempt) + random.uniform(0, 1)
                         time.sleep(sleep_time)
+                        continue
                     else:
                         raise APIUnavailable(f"HTTP {e.code} for {url} after {self.max_retries} retries")
                 if e.code == 401:

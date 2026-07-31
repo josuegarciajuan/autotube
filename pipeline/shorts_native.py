@@ -144,7 +144,7 @@ class NativeShortsPipeline:
             return
 
         try:
-            from pipeline.theme_extractor import ThemeExtractor
+            from pipeline.theme_extractor import ThemeExtractor, NicheGuardrailError
             if self._theme_extractor is None:
                 self._theme_extractor = ThemeExtractor(config=self.config)
 
@@ -172,6 +172,8 @@ class NativeShortsPipeline:
                     self.channel_slug,
                 )
                 self._theme_context = None
+        except NicheGuardrailError:
+            raise  # Fatal — propagate to abort short generation
         except Exception as exc:
             logger.warning(
                 "[%s] Shorts theme extraction failed (non-fatal): %s",

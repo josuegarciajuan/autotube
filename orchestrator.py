@@ -196,7 +196,7 @@ class PipelineOrchestrator:
     def theme_extractor(self):
         """Lazy-loaded ThemeExtractor — extracts visual keywords for content coherence."""
         if self._theme_extractor is None:
-            from pipeline.theme_extractor import ThemeExtractor
+            from pipeline.theme_extractor import ThemeExtractor, NicheGuardrailError
             self._theme_extractor = ThemeExtractor(config=self.config)
         return self._theme_extractor
 
@@ -217,6 +217,8 @@ class PipelineOrchestrator:
                 self.canal, len(content_text.strip()),
             )
             return
+
+        from pipeline.theme_extractor import NicheGuardrailError as _NicheGuardrailError
 
         try:
             channel_name = getattr(self.config, "CANAL_DISPLAY_NAME", self.canal)
@@ -245,6 +247,8 @@ class PipelineOrchestrator:
             else:
                 logger.warning("[%s] Theme extraction returned empty keywords", self.canal)
                 self._theme_context = None
+        except _NicheGuardrailError:
+            raise  # Fatal — propagate to abort the pipeline
         except Exception as exc:
             logger.warning("[%s] Theme extraction failed (non-fatal): %s", self.canal, exc)
             self._theme_context = None

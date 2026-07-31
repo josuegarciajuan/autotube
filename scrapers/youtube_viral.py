@@ -283,6 +283,13 @@ class YouTubeViralScraper(BaseScraper):
                     max_tokens=4096,
                 )
                 content = resp.choices[0].message.content
+                if not content:
+                    # DeepSeek thinking mode: response may be in reasoning_content
+                    from config.llm_helpers import _extract_reasoning_content
+                    reasoning = _extract_reasoning_content(resp)
+                    if reasoning and reasoning.strip():
+                        logger.info("[%s] LLM fallback: using reasoning_content (thinking mode)", self.canal)
+                        content = reasoning.strip()
                 if content:
                     content = content.strip()
                     if not self._is_spanish_text(content):

@@ -8,6 +8,16 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+class NicheGuardrailError(Exception):
+    """Raised when extracted theme keywords have zero overlap with the channel niche.
+
+    This is a fatal error — the pipeline should abort rather than proceed with
+    off-niche content that would produce irrelevant media queries and potentially
+    black-screen videos.
+    """
+    pass
+
+
 @dataclass
 class ThemeContext:
     """Visual context extracted from the video's core argument."""
@@ -204,19 +214,10 @@ class ThemeExtractor:
                         ctx.theme_keywords_en,
                         niche_keywords[:8],
                     )
-                    # Return a generic/default context instead of poisoned one
-                    return ThemeContext(
-                        genre="documental",
-                        era="atemporal",
-                        visual_style="oscuro_documental",
-                        key_motifs=[],
-                        forbidden_elements=[],
-                        theme_keywords_en=[],
-                        primary_subject="",
-                        mood="misterioso",
-                        lighting="claroscuro",
-                        composition="primeros planos",
-                        era_decade="",
+                    raise NicheGuardrailError(
+                        f"Theme keywords {ctx.theme_keywords_en} have zero overlap "
+                        f"with niche keywords {niche_keywords[:8]} — pipeline aborted "
+                        f"to prevent off-niche content generation"
                     )
 
             logger.info(
