@@ -960,7 +960,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         return None
 
     # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
-    _MAX_CLIP_RETRIES = 10  # max clip cancellations before giving up
+    _MAX_CLIP_RETRIES = 3  # max clip cancellations before giving up
     _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
     _failed_force_ids: set[int] = set()  # force-dispatch: clip slots without source
 
@@ -1003,7 +1003,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 #
                 # Iterate: skip clip slots without source and retry up to
                 # _MAX_CLIP_RETRIES times to find a viable slot.
+                import time as _time
                 for _force_retry in range(_MAX_CLIP_RETRIES):
+                    if _force_retry > 0:
+                        _time.sleep(2)  # back off between retries to reduce log spam
                     force_slot = db.get_next_pending_shorts_slot(
                         exclude_slot_ids=list(_failed_force_ids) if _failed_force_ids else None
                     )
@@ -1155,16 +1158,17 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             long_pos = next_slot.get("long_slot_position")
             source_video_id = _resolve_clip_source(channel_id, long_pos)
             if source_video_id is None:
-                # No source video available — cancel this slot and retry
-                db.update_shorts_slot_status(
-                    slot_id, "cancelled",
-                    error_message="No completed source long video available",
-                )
+                # No source video available for this clip — skip (don't cancel).
+                # Keeping it pending allows it to be retried later when a long-form
+                # video becomes available (e.g. still generating). Only cancel
+                # slots that already exhausted all retries.
                 logger.info(
-                    "Shorts slot #%d cancelled: clip type but no completed source "
-                    "long video (channel=%s, long_slot=%s) — retrying next slot",
-                    slot_id, slug, long_pos,
+                    "Shorts slot #%d (%s) skipped: clip type but no completed source "
+                    "long video available yet (channel=%s, long_slot=%s) — "
+                    "keeping pending, retrying later",
+                    slot_id, slug, channel_id, long_pos,
                 )
+                _skipped_slot_ids.add(slot_id)
                 continue  # ← retry with next candidate
 
         # 10. Mark slot as running with source_video_id
@@ -2357,6 +2361,9 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
             capture_output=True, text=True, timeout=180,
         )
         if result.returncode != 0 or not Path(tmp_path).exists():
+            logger.error("yt-dlp failed (code %d): %s",
+                         result.returncode,
+                         result.stderr[-500:] if result.stderr else "(no output)")
             Path(tmp_path).unlink(missing_ok=True)
             return None, None
         return Path(tmp_path), padding

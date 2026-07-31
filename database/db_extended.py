@@ -6043,7 +6043,8 @@ class ExtendedDatabase(Database):
         return result
 
     def get_completed_videos_today(self, channel_id: int) -> list[dict]:
-        """Get today's completed videos for a channel, ordered by created_at.
+        """Get completed videos for a channel, ordered by created_at.
+        Searches today first; falls back to yesterday if none found today.
         Used by clip shorts dispatch to find source long videos."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -6055,16 +6056,39 @@ class ExtendedDatabase(Database):
                    ORDER BY created_at ASC""",
                 (channel_id,),
             ).fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, titulo_final, yt_video_id, created_at
+                   FROM videos
+                   WHERE channel_id = ?
+                     AND COALESCE(date(uploaded_at), date(created_at)) = date('now', '-1 day', 'localtime')
+                     AND status IN ('uploaded', 'uploaded_private', 'published')
+                   ORDER BY created_at ASC""",
+                (channel_id,),
+            ).fetchall()
         return [dict(r) for r in rows]
     
     def get_completed_videos_today_all_channels(self) -> list[dict]:
-        """Get today's completed videos for ALL channels. Returns [{channel_id, id}, ...].
+        """Get completed videos for ALL channels. Searches today first;
+        falls back to yesterday if none found today. Returns [{channel_id, id}, ...].
         Used by shorts dispatcher to pre-filter which channels have source videos for clips."""
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT id, channel_id
                    FROM videos
                    WHERE COALESCE(date(uploaded_at), date(created_at)) = date('now', 'localtime')
+                     AND status IN ('uploaded', 'uploaded_private', 'published')
+                   ORDER BY channel_id""",
+            ).fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, channel_id
+                   FROM videos
+                   WHERE COALESCE(date(uploaded_at), date(created_at)) = date('now', '-1 day', 'localtime')
                      AND status IN ('uploaded', 'uploaded_private', 'published')
                    ORDER BY channel_id""",
             ).fetchall()
