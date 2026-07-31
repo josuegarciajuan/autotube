@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { ExternalLink, Play, Film, AlertTriangle, Loader2, Zap, Upload, CheckCircle, Circle } from 'lucide-react'
+import { ExternalLink, Play, Film, AlertTriangle, Loader2, Zap, Upload, CheckCircle, Circle, Trophy } from 'lucide-react'
 import { formatDate } from '../lib/api'
 import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
@@ -19,6 +19,8 @@ interface RecentVideo {
   channel_name: string
   channel_slug: string
   action_history?: ActionHistoryItem[]
+  is_marathon?: number | boolean
+  marathon_config?: string | Record<string, any>
 }
 
 interface RecentVideosProps {
@@ -114,6 +116,19 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                       >
                         {v.channel_name}
                       </span>
+                      {v.is_marathon && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1"
+                          title={
+                            v.marathon_config
+                              ? `Maratón ${typeof v.marathon_config === 'string' ? JSON.parse(v.marathon_config).duration_target : (v.marathon_config as any).duration_target}min`
+                              : 'Video maratón ~1h'
+                          }
+                        >
+                          <Trophy size={10} />
+                          MARATÓN
+                        </span>
+                      )}
                       {!lastAction && (
                         <span className="text-[10px] text-gray-500">
                           Sin acciones registradas

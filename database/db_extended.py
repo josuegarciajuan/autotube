@@ -341,6 +341,9 @@ def migrate_v2(db_path: str = None):
         ("generation_started_at", "TIMESTAMP"),
         ("generation_finished_at", "TIMESTAMP"),
         ("scheduled_upload_at", "TEXT"),
+        # ── Marathon mode (v1.0) ──
+        ("is_marathon", "INTEGER DEFAULT 0"),
+        ("marathon_config", "TEXT"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -6105,6 +6108,7 @@ class ExtendedDatabase(Database):
                     gj.status as job_status,
                     gj.progress as job_progress,
                     gj.phase as job_phase,
+                    v.is_marathon,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM videos v
@@ -6130,6 +6134,7 @@ class ExtendedDatabase(Database):
                     v.progress_phase,
                     v.created_at,
                     v.generation_finished_at,
+                    v.is_marathon,
                     ch.name as channel_name,
                     ch.slug as channel_slug,
                     ps.target_upload_at as slot_target_upload_at
@@ -6836,3 +6841,62 @@ class ExtendedDatabase(Database):
                 (insight_id, f'-{stale_seconds} seconds'),
             ).fetchone()
             return row is None  # stale if no recent heartbeat found
+
+
+    # ── Marathon mode (v1.0) ──────────────────────────────────────
+
+    def count_all_awaiting_upload(self) -> int:
+        """Count all videos in awaiting_upload status across all channels."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos WHERE status='awaiting_upload'"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+    def get_last_marathon(self, channel_id: int) -> dict | None:
+        """Get the last marathon record for a channel.
+
+        Returns dict with {date, status} or None if no marathon recorded.
+        """
+        raw = self.get_system_state(f"last_marathon_{channel_id}")
+        if raw:
+            try:
+                import json as _mj
+                return _mj.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def record_marathon(self, channel_id: int, status: str) -> None:
+        """Record a marathon dispatch for a channel.
+
+        Args:
+            channel_id: Channel ID.
+            status: One of 'running', 'completed', 'failed'.
+        """
+        import json as _mj
+        from datetime import datetime as _dt
+
+        record = {
+            "date": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": status,
+        }
+        self.set_system_state(f"last_marathon_{channel_id}", _mj.dumps(record))
+
+    def get_marathon_rotation_order(self) -> list[str]:
+        """Get the saved marathon rotation order (list of channel slugs)."""
+        raw = self.get_system_state("marathon_rotation_order")
+        if raw:
+            try:
+                import json as _mj
+                rotation = _mj.loads(raw)
+                if isinstance(rotation, list):
+                    return rotation
+            except Exception:
+                pass
+        return []
+
+    def set_marathon_rotation_order(self, order: list[str]) -> None:
+        """Save the marathon rotation order to survive API restarts."""
+        import json as _mj
+        self.set_system_state("marathon_rotation_order", _mj.dumps(order))

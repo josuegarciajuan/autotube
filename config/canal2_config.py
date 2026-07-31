@@ -1278,6 +1278,26 @@ NICHE_KEYWORDS_ENG = [
 ]
 
 # English keywords per playlist — used by viral_query_builder for diverse searches
+# ═══════════════════════════════════════════════════════════════════
+# MARATHON MODE — Video largo de ~1 hora (v1.0)
+# ═══════════════════════════════════════════════════════════════════
+MARATHON_ENABLED = True
+MARATHON_VIDEO_DURATION_TARGET = 60          # minutos
+MARATHON_NUM_SECTIONS = 12                   # "Los 12 Sincronismos Más Increíbles"
+MARATHON_NARRATIVE_FORMAT = "top_cases"      # "top_cases" | "deep_story" | "historical_collapse"
+MARATHON_COOLDOWN_SUCCESS_DAYS = 7           # cooldown entre maratones exitosos del mismo canal
+MARATHON_COOLDOWN_FAILURE_DAYS = 1           # cooldown tras fallo (rápido para no atascarse)
+MARATHON_SCRIPT_WORDS_MIN = 8000             # ~60 min × 165 wpm × 0.85 Kokoro speed × 1.05 cushion
+MARATHON_SCRIPT_WORDS_MAX = 12000
+MARATHON_SCRIPT_BLOCKS_MIN = 50
+MARATHON_SCRIPT_BLOCKS_MAX = 90
+MARATHON_OUTLINE_CHAPTERS = 15               # capítulos en el outline (sin el cap de 6 habitual)
+MARATHON_MEDIA_VIDEO_PCT = 20                # % video (reducido para 1h, más imágenes)
+MARATHON_TITLE_FORMAT = "Los {N} Sincronismos Más Increíbles de la Historia"
+MARATHON_LLM_MAX_BATCHES = 150               # batches extra para guiones largos
+MARATHON_LLM_MAX_EMPTY_STRIKES = 20          # tolerancia extra en generación larga
+MARATHON_PUBLISH_MODE = "scheduled"          # siempre programado en prime time
+
 VIRAL_PLAYLIST_KEYWORDS = {
     "historias-completas": [
         "deep documentary mystery",

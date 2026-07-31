@@ -741,12 +741,32 @@ def run_job(
     try:
         from orchestrator import PipelineOrchestrator
 
+        # ── Detect marathon mode from video record ──
+        is_marathon = False
+        marathon_config = None
+        try:
+            video = db.get_video(video_id)
+            if video:
+                is_marathon = bool(video.get("is_marathon", False))
+                if is_marathon:
+                    mc_raw = video.get("marathon_config")
+                    if mc_raw:
+                        import json as _json_w
+                        marathon_config = _json_w.loads(mc_raw) if isinstance(mc_raw, str) else mc_raw
+                    else:
+                        marathon_config = {}
+                    logger.info("[MARATHON][%s] Marathon mode active: %s", canal, marathon_config)
+        except Exception as exc:
+            logger.debug("Could not read marathon config: %s", exc)
+
         orch = PipelineOrchestrator(
             canal=canal,
             db_video_id=video_id,
             progress_callback=_progress_to_db,
             source_mode=source_mode,
             viral_candidate_id=viral_candidate_id,
+            is_marathon=is_marathon,
+            marathon_config=marathon_config,
         )
         if test_mode:
             orch.config = config

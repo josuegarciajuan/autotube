@@ -471,6 +471,7 @@ export interface GeneratingVideo {
   job_phase: string | null;
   channel_name: string;
   channel_slug: string;
+  is_marathon?: number | boolean;
 }
 
 export interface AwaitingUploadVideo {
@@ -488,6 +489,7 @@ export interface AwaitingUploadVideo {
   generation_finished_at: string | null;
   channel_name: string;
   channel_slug: string;
+  is_marathon?: number | boolean;
 }
 
 export interface WarmingVideo {

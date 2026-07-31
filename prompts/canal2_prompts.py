@@ -456,3 +456,109 @@ def format_user_prompt(content_item: dict) -> str:
         category=content_item.get("category", "fenómenos inexplicables"),
         text=content_item.get("text", ""),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MARATHON MODE — Outline for ~1h deep-dive videos
+# ═══════════════════════════════════════════════════════════════════
+
+def build_marathon_outline_prompt(config=None, duration_min: float = 60,
+                                   num_sections: int = 12,
+                                   narrative_format: str = "top_cases",
+                                   word_target: int = 8500) -> str:
+    """Generate a structured outline for a ~1h marathon documentary video.
+
+    Supports three formats:
+      - top_cases: "Los 12 Sincronismos Más Increíbles de la Historia"
+      - deep_story: Single epic story told over 12 chapters
+      - historical_collapse: "12 Civilizaciones que la Historia Enterró"
+
+    Args:
+        config: Canal config module.
+        duration_min: Target video duration in minutes (~60).
+        num_sections: Number of sections/cases (~12).
+        narrative_format: "top_cases" | "deep_story" | "historical_collapse".
+        word_target: Target total word count (~8500).
+
+    Returns:
+        System prompt string for the outline generation.
+    """
+    cfg = config or _default_config
+    tone = getattr(cfg, "CANAL_TONE", "Cálido, curioso y envolvente.")
+    style = getattr(cfg, "CANAL_NARRATIVE_STYLE", "documental de asombro")
+    audience = getattr(cfg, "TARGET_AUDIENCE", "público LATAM adulto curioso")
+    n_chapters = num_sections  # marathon: one chapter per section
+
+    # ── Format-specific instructions ──
+    format_instructions = {
+        "top_cases": (
+            f"Genera EXACTAMENTE {n_chapters} secciones INDEPENDIENTES. "
+            "Cada sección cubre UN fenómeno/caso distinto con 3+ hechos concretos. "
+            "Las secciones NO dependen narrativamente unas de otras — son casos "
+            "autocontenidos unidos por el tema común. "
+            "Progresión: de lo más ligero a lo más impactante."
+        ),
+        "deep_story": (
+            f"Genera EXACTAMENTE {n_chapters} capítulos SECUENCIALES que cuentan "
+            "UNA SOLA historia épica de principio a fin. Cada capítulo es una "
+            "etapa de la historia. No puede haber repetición de eventos. "
+            "Progresión: introducción → desarrollo → clímax → reflexión."
+        ),
+        "historical_collapse": (
+            f"Genera EXACTAMENTE {n_chapters} perfiles de civilizaciones/imperios "
+            "que colapsaron. Cada sección cubre UNA civilización: origen, auge, "
+            "señales de declive, colapso, legado. 4+ hechos concretos por sección. "
+            "Progresión: de las más antiguas a las más recientes."
+        ),
+    }
+
+    fmt_text = format_instructions.get(
+        narrative_format,
+        format_instructions["top_cases"],
+    )
+
+    return f"""Eres el guionista jefe de una serie documental de alto presupuesto al estilo Netflix. Tu especialidad son los documentales largos de inmersión profunda que mantienen al espectador pegado a la pantalla durante una hora entera.
+
+TONO: {tone}
+ESTILO: {style}
+AUDIENCIA: {audience}
+DURACIÓN OBJETIVO: {duration_min} minutos (~{word_target} palabras)
+FORMATO: {narrative_format}
+
+Tu tarea es generar UN OUTLINE ESTRUCTURADO para un documental de {duration_min} minutos. NO escribas el guion — solo el outline.
+
+{fmt_text}
+
+REGLAS INQUEBRANTABLES:
+
+1. CADA sección DEBE tener AL MENOS 3 HECHOS CONCRETOS: números, fechas, nombres, lugares, estadísticas, citas documentadas. NO puede haber secciones sin datos.
+2. CADA sección necesita keywords visuales en INGLÉS específicas para búsqueda de stock media.
+3. PROHIBIDO el lenguaje puramente metafórico sin sustancia. Las frases como "el universo conspiró en un baile cósmico" NO son contenido válido.
+4. Los hechos deben ser verificables. Si no hay datos suficientes en la fuente, usa conocimientos generales bien establecidos.
+5. La emoción objetivo de cada sección debe seguir un arco narrativo que mantenga la retención.
+6. words_approx por sección: ~{word_target // n_chapters} palabras.
+
+FORMATO DE SALIDA (JSON):
+{{
+  "summary": "Resumen de 2-3 frases del arco narrativo completo del documental de {duration_min} minutos",
+  "chapters": [
+    {{
+      "chapter": 1,
+      "titulo": "Título de la sección en español (impactante, estilo título de YouTube)",
+      "idea_central": "Qué revela esta sección — una frase potente",
+      "hechos_concretos": [
+        "Hecho 1: fecha, nombre, dato numérico concreto",
+        "Hecho 2: otro dato verificable con números o nombres",
+        "Hecho 3: tercer dato o cita documentada",
+        "Hecho 4: cuarto dato (obligatorio para formato deep/historical)"
+      ],
+      "visual_keywords_en": "english keywords for stock media search (5-8 words, concrete, visual)",
+      "emocion_objetivo": "asombro|curiosidad|intriga|tensión|revelacion|inspiracion|reflexion",
+      "words_approx": {word_target // n_chapters}
+    }}
+  ]
+}}
+
+⚠️ CRÍTICO: El documental dura {duration_min} MINUTOS. Cada sección es una unidad narrativa completa. NO pueden ser breves ni superficiales. El espectador que ve esto durante 1 hora debe sentir que ha hecho un viaje épico.
+
+RECUERDA: Solo hechos verificables. Solo datos. Solo historias reales. NADA de metáforas vacías. La verdad es más fascinante que la ficción."""

@@ -486,6 +486,7 @@ async def _schedule_checker_loop():
     last_smart_replan = 0
     last_slot_calculation = 0
     last_power_word_analysis = 0
+    last_marathon_check = 0
     last_view_gap_check = 0
     first_run = True
 
@@ -547,6 +548,28 @@ async def _schedule_checker_loop():
                         logger.debug("Never-dry check: %s", exc)
                 
                 await _queue_consumer()
+
+                # ── Marathon check: when backlog is high and no long-form
+                #     dispatched, try a 1-hour marathon video (every 30 min).
+                #     Marathon ties up the single worker for 4-6h, draining the
+                #     backlog naturally while producing a high-value long video.
+                if now - last_marathon_check > 1800:  # every 30 min
+                    try:
+                        from api.services.marathon_service import check_and_dispatch_marathon
+                        marathon_result = await asyncio.to_thread(
+                            check_and_dispatch_marathon, _sched_db
+                        )
+                        if marathon_result:
+                            logger.info(
+                                "[MARATHON] Dispatched: channel=%s duration=%dmin sections=%d backlog=%d",
+                                marathon_result.get("channel", "?"),
+                                marathon_result.get("marathon_config", {}).get("duration_target", 60),
+                                marathon_result.get("marathon_config", {}).get("num_sections", 12),
+                                marathon_result.get("backlog", 0),
+                            )
+                    except Exception as exc:
+                        logger.debug("Marathon check: %s", exc)
+                    last_marathon_check = now
 
                 # ── Update catch-up state for adaptive sleep ──
                 # Combined count of long-form AND shorts past-due slots.

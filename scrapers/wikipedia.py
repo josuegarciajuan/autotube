@@ -51,12 +51,37 @@ class WikipediaScraper(BaseScraper):
         self.random_count = random_count
         self.category_limit = category_limit
 
-    def scrape(self) -> list[dict]:
+    def scrape(self, mode: str = "summary", config=None, limit: int = None,
+               deep_category_limit: int = 15) -> list[dict]:
         """Scrape Wikipedia articles from random and category sources.
+
+        Args:
+            mode: "summary" (default) uses REST API summaries (~500 chars).
+                  "deep" fetches full HTML pages with rich content (~2000-8000 chars).
+            config: Optional channel config for overriding categories.
+            limit: Optional override for category_limit (articles per category).
+            deep_category_limit: Max categories to fetch in deep mode.
 
         Returns:
             List of dicts with keys: source, url, title, text, subreddit, score.
         """
+        # Allow config to override categories
+        if config is not None:
+            cats = getattr(config, "WIKIPEDIA_CATEGORIES", None)
+            if cats:
+                self.categories = cats
+
+        if mode == "deep":
+            return self._scrape_deep(
+                config=config, 
+                category_limit=limit or 15,
+                deep_category_limit=deep_category_limit,
+            )
+
+        # ── Normal (summary) mode ──
+        if limit is not None:
+            self.category_limit = limit
+
         results: list[dict] = []
         seen_urls: set[str] = set()
 
@@ -74,6 +99,134 @@ class WikipediaScraper(BaseScraper):
 
         self.logger.info("Total scraped: %d articles", len(results))
         return results
+
+    def _scrape_deep(self, config=None, category_limit: int = 15,
+                     deep_category_limit: int = 15) -> list[dict]:
+        """Deep scrape: fetch full HTML pages from Wikipedia categories.
+
+        Yields rich, long-form content (~2000-8000 chars per article) suitable
+        for marathon video scripts. Fetches many more articles than normal mode.
+
+        Returns:
+            List of article dicts with full text.
+        """
+        results: list[dict] = []
+        seen_urls: set[str] = set()
+
+        # Fetch from many categories (deep mode)
+        cats_to_fetch = self.categories[:deep_category_limit]
+        if not cats_to_fetch:
+            cats_to_fetch = self.categories[:4]  # fallback
+
+        self.logger.info("Deep scrape: %d categories, %d articles each",
+                         len(cats_to_fetch), category_limit)
+
+        for category in cats_to_fetch:
+            try:
+                titles = self._get_category_members(category)
+                self.logger.debug("Category '%s': %d titles", category, len(titles))
+                
+                fetched = 0
+                for title in titles[:category_limit]:
+                    article = self._fetch_page_full(title)
+                    if article and article["url"] not in seen_urls:
+                        seen_urls.add(article["url"])
+                        results.append(article)
+                        fetched += 1
+                
+                self.logger.debug("Category '%s': fetched %d deep articles", category, fetched)
+            except Exception as exc:
+                self.logger.warning("Deep scrape: category '%s' failed: %s", category, exc)
+
+        self.logger.info("Deep scrape: %d total articles (%d chars avg)",
+                         len(results),
+                         sum(len(a["text"]) for a in results) // max(1, len(results)))
+        return results
+
+    def _fetch_page_full(self, title: str) -> dict | None:
+        """Fetch a full Wikipedia page via the mobile-html API and extract text.
+
+        Uses the page/mobile-html endpoint which returns cleaner HTML than
+        the desktop version (no infoboxes, navboxes, or sidebar clutter).
+
+        Args:
+            title: Exact Wikipedia page title.
+
+        Returns:
+            Article dict with rich text, or None if fetch fails.
+        """
+        import re as _re
+
+        encoded_title = urllib.parse.quote(title.replace(" ", "_"))
+        url = f"{self.REST_BASE}/page/mobile-html/{encoded_title}"
+
+        resp = self._request_raw(url)
+        if resp is None:
+            return None
+
+        html_content = resp
+        if not html_content or len(html_content) < 500:
+            self.logger.debug("Deep scrape: short/no content for '%s'", title)
+            return None
+
+        # Simple HTML to text extraction
+        try:
+            import re
+            # Remove script and style tags
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', ' ', text)
+            # Collapse whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+            # Decode HTML entities
+            import html as _html
+            text = _html.unescape(text)
+        except Exception:
+            # Fallback: just strip tags
+            text = _re.sub(r'<[^>]+>', ' ', html_content)
+            text = _re.sub(r'\s+', ' ', text).strip()
+
+        if len(text) < 200:
+            self.logger.debug("Deep scrape: text too short for '%s' (%d chars)", title, len(text))
+            return None
+
+        page_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+
+        self.logger.debug("Deep scrape: '%s' → %d chars", title, len(text))
+
+        return {
+            "source": "wikipedia_deep",
+            "url": page_url,
+            "title": title,
+            "text": text[:8000],  # Cap at 8000 chars to avoid huge prompts
+            "subreddit": None,
+            "score": 1,
+        }
+
+    def _request_raw(self, url: str) -> str | None:
+        """Make an HTTP request and return raw response text (for HTML).
+
+        Returns response body as string, or None on failure.
+        """
+        import time as _time
+        for attempt in range(self.max_retries + 1):
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(url, headers={"User-Agent": self.USER_AGENT})
+                with _ur.urlopen(req, timeout=30) as resp:
+                    content = resp.read()
+                    # Try to decode
+                    charset = resp.headers.get_content_charset() or 'utf-8'
+                    return content.decode(charset, errors='replace')
+            except Exception as exc:
+                self.logger.warning(
+                    "Request attempt %d/%d for %s failed: %s",
+                    attempt + 1, self.max_retries + 1, url, exc,
+                )
+                if attempt < self.max_retries:
+                    _time.sleep(self.rate_limit)
+        return None
 
     def save_to_db(self, db: Database) -> int:
         """Scrape and save all articles to the database.

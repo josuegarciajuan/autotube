@@ -356,3 +356,71 @@ def format_user_prompt(content_item: dict) -> str:
         category=content_item.get("category", "expediciones"),
         text=content_item.get("text", ""),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MARATHON MODE — Outline for ~1h deep-dive videos
+# ═══════════════════════════════════════════════════════════════════
+
+def build_marathon_outline_prompt(config=None, duration_min: float = 60,
+                                   num_sections: int = 12,
+                                   narrative_format: str = "tragic_expeditions",
+                                   word_target: int = 8500) -> str:
+    """Generate a structured outline for a ~1h marathon documentary video.
+
+    For canal4 (Expediciones sin retorno): expedition and survival tragedies.
+    """
+    cfg = config or _default_config
+    tone = getattr(cfg, "CANAL_TONE", "Grave, tenso y profundamente humano.")
+    style = getattr(cfg, "CANAL_NARRATIVE_STYLE", "documental de supervivencia")
+    audience = getattr(cfg, "TARGET_AUDIENCE", "público LATAM adulto curioso")
+    n_chapters = num_sections
+
+    return f"""Eres el guionista jefe de una serie documental de alto presupuesto. Tu especialidad son los documentales largos sobre las expediciones más trágicas y las historias de supervivencia más extremas de la humanidad.
+
+TONO: {tone}
+ESTILO: {style}
+AUDIENCIA: {audience}
+DURACIÓN OBJETIVO: {duration_min} minutos (~{word_target} palabras)
+FORMATO: {narrative_format}
+
+Tu tarea es generar UN OUTLINE ESTRUCTURADO para un documental de {duration_min} minutos sobre {n_chapters} expediciones trágicas. NO escribas el guion — solo el outline.
+
+CADA SECCIÓN CUBRE UNA EXPEDICIÓN DISTINTA ({n_chapters} expediciones en total):
+- Nombre de la expedición, año, líder, objetivo.
+- Condiciones extremas del entorno (temperaturas, altitud, geografía hostil).
+- Momento crítico: qué salió mal y por qué (decisión fatal, tormenta imprevista, error de cálculo).
+- Desenlace: número de víctimas, supervivientes, rescate (si lo hubo).
+- Legado: qué cambió en la exploración después de esta tragedia.
+
+REGLAS INQUEBRANTABLES:
+1. CADA sección DEBE tener AL MENOS 3 HECHOS CONCRETOS: fechas exactas, nombres de exploradores, coordenadas, temperaturas, altitudes, número de víctimas.
+2. NO inventes datos. Usa expediciones documentadas y verificables.
+3. Progresión: de las expediciones más antiguas a las más recientes, o de las más conocidas a las más oscuras.
+4. PROHIBIDO lenguaje poético sin sustancia. "La montaña reclamó sus almas" NO es contenido válido.
+5. Cada sección: ~{word_target // n_chapters} palabras.
+
+FORMATO DE SALIDA (JSON):
+{{
+  "summary": "Resumen del arco narrativo: de la ambición exploradora a la lección que la humanidad aprendió",
+  "chapters": [
+    {{
+      "chapter": 1,
+      "titulo": "Título impactante de la expedición en español",
+      "idea_central": "Qué define a esta expedición — una frase",
+      "hechos_concretos": [
+        "Año, líder, objetivo de la expedición",
+        "Condiciones extremas y momento crítico con datos numéricos",
+        "Número de víctimas, supervivientes, datos del rescate",
+        "Legado concreto: qué cambió después"
+      ],
+      "visual_keywords_en": "keywords for stock media (ice expedition, shipwreck, mountain rescue, survival)",
+      "emocion_objetivo": "intriga|tensión|crisis|lucha|desenlace|reflexión",
+      "words_approx": {word_target // n_chapters}
+    }}
+  ]
+}}
+
+⚠️ CRÍTICO: El documental dura {duration_min} MINUTOS. Cada expedición merece ~5 minutos de narración densa y detallada. El espectador debe sentir el frío, el miedo y la desesperación de cada una de estas {n_chapters} tragedias.
+
+RECUERDA: Solo hechos verificables. Solo expediciones reales. Solo historias que realmente ocurrieron. La verdad es más aterradora que cualquier ficción."""

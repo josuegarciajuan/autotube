@@ -522,6 +522,7 @@ class ScriptGenerator:
 
     def _generate_with_retry(
         self, content_item: dict, palabras_objetivo: int = None,
+        marathon_overrides: dict = None,
     ) -> Optional[dict]:
         """Generate a script with pre-flight checks, retry, and content validation.
 
@@ -559,6 +560,7 @@ class ScriptGenerator:
             try:
                 script = self.generate_v2(
                     content_item, palabras_objetivo=palabras_objetivo,
+                    marathon_overrides=marathon_overrides,
                 )
             except Exception as exc:
                 gen_ms = int((time.time() - gen_start) * 1000)
@@ -846,7 +848,10 @@ class ScriptGenerator:
         }
 
     def _generate_outline(
-        self, content_item: dict, word_target: dict,
+        self, content_item: dict, word_target: dict = None,
+        content_text: str = None, duration_min: float = None,
+        word_target_int: int = None, canal_config=None,
+        marathon_mode: bool = False, marathon_params: dict = None,
     ) -> Optional[dict]:
         """Generate a structured outline BEFORE writing blocks.
 
@@ -855,12 +860,82 @@ class ScriptGenerator:
         is then injected into every batch of block generation to maintain
         narrative coherence and factual substance.
 
+        Args:
+            content_item: Raw content dict (for normal mode).
+            word_target: Word target dict (for normal mode).
+            content_text: Direct content text (for marathon mode).
+            duration_min: Target duration (for marathon mode).
+            word_target_int: Target word count (for marathon mode).
+            canal_config: Channel config (for marathon mode).
+            marathon_mode: Whether this is a marathon generation.
+            marathon_params: {num_sections, narrative_format, outline_chapters}.
+
         Returns:
             Dict with ``chapters`` list and ``summary``, or None on failure.
         """
-        content_text = content_item.get("text", "")[:4000]
+        if marathon_mode:
+            # ── Marathon mode: use special marathon outline prompt ──
+            raw_text = content_text or ""
+            dm = duration_min or 60
+            wt = word_target_int or 8500
+            cfg = canal_config or self.canal_config
+            mp = marathon_params or {}
+
+            try:
+                prompts_module = importlib.import_module(
+                    f"prompts.{self.canal}_prompts"
+                )
+            except (ImportError, ModuleNotFoundError):
+                from prompts.canal2_prompts import build_marathon_outline_prompt as bmop_fn
+                system_prompt = bmop_fn(
+                    config=cfg, duration_min=dm,
+                    num_sections=mp.get("num_sections", 12),
+                    narrative_format=mp.get("narrative_format", "top_cases"),
+                    word_target=wt,
+                )
+            else:
+                build_marathon_fn = getattr(prompts_module, "build_marathon_outline_prompt", None)
+                if build_marathon_fn is None:
+                    from prompts.canal2_prompts import build_marathon_outline_prompt as build_marathon_fn
+                system_prompt = build_marathon_fn(
+                    config=cfg, duration_min=dm,
+                    num_sections=mp.get("num_sections", 12),
+                    narrative_format=mp.get("narrative_format", "top_cases"),
+                    word_target=wt,
+                )
+
+            user_prompt = (
+                f"Contenido fuente (investigación):\n\n{raw_text[:8000]}\n\n"
+                f"Genera el outline estructurado en formato JSON."
+            )
+
+            try:
+                data = self._call_with_failover(
+                    phase="marathon_outline",
+                    thinking=True,
+                    model=LLM_MODEL_SCRIPT,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=min(4096, OPENAI_MAX_TOKENS),
+                    response_format={"type": "json_object"},
+                )
+                chapters = data.get("chapters", [])
+                if not chapters or not isinstance(chapters, list):
+                    logger.warning("[MARATHON] _generate_outline: empty chapters")
+                    return None
+                logger.info("[MARATHON] _generate_outline: %d chapters", len(chapters))
+                return data
+            except Exception as exc:
+                logger.warning("[MARATHON] _generate_outline failed: %s", exc)
+                return None
+
+        # ── Normal mode ──
+        content_text_item = content_item.get("text", "")[:4000]
         content_title = content_item.get("title", "")
-        duration_min = word_target.get("duration_target", 15)
+        duration_min_val = word_target.get("duration_target", 15)
         palabras_objetivo = word_target.get("palabras_objetivo", 2500)
 
         try:
@@ -869,7 +944,7 @@ class ScriptGenerator:
             )
             system_prompt = prompts_module.build_outline_prompt(
                 config=self.canal_config,
-                duration_min=duration_min,
+                duration_min=duration_min_val,
                 word_target=palabras_objetivo,
             )
         except (ImportError, AttributeError):
@@ -1518,7 +1593,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 "fuentes_citadas": [],
             }
 
-    def generate_v2(self, content_item: dict, palabras_objetivo: int = None) -> Optional[dict]:
+    def generate_v2(self, content_item: dict, palabras_objetivo: int = None,
+                     marathon_overrides: dict = None) -> Optional[dict]:
         """Generate a script using sequential block-by-block generation.
 
         Content from the database is used as thematic inspiration only —
@@ -1528,6 +1604,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             content_item: Raw content dict (title, text, source, etc.)
             palabras_objetivo: Exact word target (computed from duration × voice speed).
                                If None, derived from channel average duration.
+            marathon_overrides: Optional dict with marathon-specific overrides:
+                - max_blocks: Override PROD_SCRIPT_BLOCKS_MAX * 1.5 cap
+                - max_batches: Override max_batches (default 50)
+                - max_empty_strikes: Override max_empty_strikes (default 10)
+                - outline: Pre-generated marathon outline to use directly
+                - word_target_override: Complete word target dict to use instead
 
         Returns:
             Enriched script dict or None on failure.
@@ -1539,8 +1621,13 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             logger.warning("Empty content text for item %s", content_id)
             return None
 
-        # Step 1: Word target
-        if palabras_objetivo is not None:
+        # ── Marathon override: use pre-computed word target ──
+        if marathon_overrides and marathon_overrides.get("word_target_override"):
+            word_target = marathon_overrides["word_target_override"]
+            duration_target = word_target["duration_target"]
+        else:
+            # Step 1: Word target
+            if palabras_objetivo is not None:
             cfg = self.canal_config
             duration_target = _duration_for_words(cfg, palabras_objetivo)
             word_target = {
@@ -1566,22 +1653,30 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         # This gives the LLM a coherent chapter structure BEFORE writing blocks,
         # preventing rambling, repetitive, or factually empty narration.
         outline = None
-        try:
-            outline = self._generate_outline(content_item, word_target)
-            if outline:
-                n_chapters = len(outline.get("chapters", []))
-                logger.info(
-                    "generate_v2: outline generated — %d chapters",
-                    n_chapters,
-                )
-        except Exception as exc:
-            logger.warning("generate_v2: outline generation failed (continuing without): %s", exc)
+        if marathon_overrides and marathon_overrides.get("outline"):
+            outline = marathon_overrides["outline"]
+            logger.info(
+                "generate_v2: using marathon outline — %d chapters",
+                len(outline.get("chapters", [])),
+            )
+        else:
+            try:
+                outline = self._generate_outline(content_item, word_target)
+                if outline:
+                    n_chapters = len(outline.get("chapters", []))
+                    logger.info(
+                        "generate_v2: outline generated — %d chapters",
+                        n_chapters,
+                    )
+            except Exception as exc:
+                logger.warning("generate_v2: outline generation failed (continuing without): %s", exc)
 
         # Step 3: Sequential block generation
         all_bloques: list[dict] = []
         empty_strikes = 0
-        max_empty_strikes = 10          # ↑ from 3 — don't give up easily
-        max_batches = 50                # ↑ from 30
+        # ── Marathon overrides: allow longer generation ──
+        max_empty_strikes = marathon_overrides.get("max_empty_strikes", 10) if marathon_overrides else 10
+        max_batches = marathon_overrides.get("max_batches", 50) if marathon_overrides else 50
         source_text = content_text[:3000]
 
         for batch_num in range(max_batches):
@@ -1667,15 +1762,27 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         # Safety net: if the LLM massively overshoots the configured block
         # limit (e.g. thinking mode + stale DB target), cap gracefully
         # instead of producing a 40+min video that takes 7h to render.
-        max_blocks = getattr(self.canal_config, "PROD_SCRIPT_BLOCKS_MAX", 18)
-        if len(all_bloques) > max_blocks * 1.5:
-            capped = max_blocks
-            logger.warning(
-                "generate_v2: bloques generados (%d) exceden 1.5x el máximo (%d). "
-                "Posible word_target inflado. Usando los primeros %d bloques.",
-                len(all_bloques), max_blocks, capped,
-            )
-            all_bloques = all_bloques[:capped]
+        # ── Marathon override: use marathon max_blocks, standard 1.5x otherwise ──
+        if marathon_overrides and marathon_overrides.get("max_blocks"):
+            marathon_max = marathon_overrides["max_blocks"]
+            if len(all_bloques) > marathon_max * 3:  # marathon: much higher cap (150 blocks)
+                capped = marathon_max
+                logger.warning(
+                    "generate_v2 [MARATHON]: bloques generados (%d) exceden 3x el máximo (%d). "
+                    "Posible word_target inflado. Usando los primeros %d bloques.",
+                    len(all_bloques), marathon_max, capped,
+                )
+                all_bloques = all_bloques[:capped]
+        else:
+            max_blocks = getattr(self.canal_config, "PROD_SCRIPT_BLOCKS_MAX", 18)
+            if len(all_bloques) > max_blocks * 1.5:
+                capped = max_blocks
+                logger.warning(
+                    "generate_v2: bloques generados (%d) exceden 1.5x el máximo (%d). "
+                    "Posible word_target inflado. Usando los primeros %d bloques.",
+                    len(all_bloques), max_blocks, capped,
+                )
+                all_bloques = all_bloques[:capped]
 
         # Step 3: Enrich blocks with structural fields
         if hasattr(self, '_progress_cb') and self._progress_cb:
@@ -3075,3 +3182,190 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             len(items),
         )
         return results
+
+    # ── Marathon mode: ~1h deep-dive video generation ─────────────
+
+    def generate_marathon(
+        self,
+        content_items: list,
+        canal_config,
+        duration_target: int = 60,
+        num_sections: int = 12,
+        narrative_format: str = "top_cases",
+        outline_chapters: int = 15,
+        words_min: int = 8000,
+        words_max: int = 12000,
+        blocks_min: int = 50,
+        blocks_max: int = 90,
+        llm_max_batches: int = 150,
+        llm_max_empty_strikes: int = 20,
+        title_format: str = "",
+    ) -> Optional[dict]:
+        """Generate a long-form marathon script (~1h video).
+
+        This is a specialized entry point that:
+        - Uses a marathon-specific outline prompt (build_marathon_outline_prompt)
+        - Scales word/block targets for 60-minute content
+        - Removes the hard caps on max_blocks, duration, and batch count
+        - Uses rich source material (deep-scraped Wikipedia articles)
+
+        Args:
+            content_items: List of deeply scraped content items.
+            canal_config: The channel's config module.
+            duration_target: Target video duration in minutes.
+            num_sections: Number of independent sections/cases.
+            narrative_format: "top_cases" | "deep_story" | "historical_collapse"
+            outline_chapters: Number of chapters in the outline.
+            words_min/max: Target word count range.
+            blocks_min/max: Target block count range.
+            llm_max_batches: Max batch iterations.
+            llm_max_empty_strikes: Tolerance for empty generations.
+            title_format: Optional title format string.
+
+        Returns:
+            Script dict or None on failure.
+        """
+        logger.info(
+            "[MARATHON][%s] generate_marathon: %dmin, %d sections, format=%s",
+            self.canal, duration_target, num_sections, narrative_format,
+        )
+
+        # ── 1. Build the marathon outline prompt ──────────────
+        try:
+            import importlib
+            prompts_module = importlib.import_module(f"prompts.{self.canal}_prompts")
+            build_marathon_fn = getattr(prompts_module, "build_marathon_outline_prompt", None)
+        except (ImportError, ModuleNotFoundError):
+            from prompts.canal2_prompts import build_marathon_outline_prompt as build_marathon_fn
+
+        if build_marathon_fn is None:
+            logger.warning("[MARATHON][%s] No build_marathon_outline_prompt found", self.canal)
+            return None
+
+        # Combine all source text
+        combined_text = "\n\n---\n\n".join(
+            f"FUENTE {i+1}: {item.get('title', 'Sin título')}\n{item.get('text', '')}"
+            for i, item in enumerate(content_items)
+        )
+
+        # Compute word target for marathon scale
+        from config.voice_timing import words_for_duration
+        words_obj = words_for_duration(canal_config, duration_minutes=duration_target)
+        words_target_for_prompt = words_obj
+
+        # ── 2. Generate marathon outline ──────────────────────
+        logger.info("[MARATHON][%s] Generating marathon outline (%d chapters)...", self.canal, outline_chapters)
+        outline = self._generate_outline(
+            content_text=combined_text[:8000],  # trim for prompt limit
+            duration_min=duration_target,
+            word_target=words_target_for_prompt,
+            canal_config=canal_config,
+            marathon_mode=True,
+            marathon_params={
+                "num_sections": num_sections,
+                "narrative_format": narrative_format,
+                "outline_chapters": outline_chapters,
+            },
+        )
+
+        if not outline or not outline.get("chapters"):
+            logger.warning("[MARATHON][%s] Outline generation failed", self.canal)
+            return None
+
+        logger.info(
+            "[MARATHON][%s] Outline: %d chapters generated",
+            self.canal, len(outline.get("chapters", [])),
+        )
+
+        # ── 3. Generate blocks with marathon scale ────────────
+        # Override the guards for marathon mode
+        total_scenes_min = max(30, num_sections * 3)
+        total_scenes_max = max(50, num_sections * 5)
+
+        # Use generate_v2 with marathon-scale parameters
+        # Build a synthetic content item that wraps all sources
+        marathon_content = {
+            "title": content_items[0].get("title", "Documental") if content_items else "Documental",
+            "text": combined_text[:12000],  # rich source material
+            "source": "wikipedia_deep",
+            "score": 100,
+            "canal": self.canal,
+            "id": content_items[0].get("id", 0) if content_items else 0,
+            "_marathon": True,
+            "_marathon_outline": outline,
+            "_marathon_params": {
+                "duration_target": duration_target,
+                "num_sections": num_sections,
+                "narrative_format": narrative_format,
+                "words_min": words_min,
+                "words_max": words_max,
+                "blocks_min": blocks_min,
+                "blocks_max": blocks_max,
+                "llm_max_batches": llm_max_batches,
+                "llm_max_empty_strikes": llm_max_empty_strikes,
+            },
+        }
+
+        # ── 4. Override generate_v2's internal caps ───────────
+        # Store original values to restore later
+        original_max_blocks = getattr(canal_config, "PROD_SCRIPT_BLOCKS_MAX", 18)
+        original_duration_max = getattr(canal_config, "PROD_VIDEO_DURATION_MAX", 14)
+
+        # Temporarily override for marathon scale
+        if hasattr(canal_config, "__dict__"):
+            canal_config.__dict__["PROD_SCRIPT_BLOCKS_MAX"] = blocks_max
+            canal_config.__dict__["PROD_VIDEO_DURATION_MAX"] = duration_target + 10
+        else:
+            # config is a SimpleNamespace, use setattr
+            import types
+            if isinstance(canal_config, types.SimpleNamespace):
+                canal_config.PROD_SCRIPT_BLOCKS_MAX = blocks_max
+                canal_config.PROD_VIDEO_DURATION_MAX = duration_target + 10
+
+        try:
+            # Use the standard generate path with marathon scale
+            # We override the config temporarily so the guards in generate_v2
+            # allow the large word/block counts
+            script = self._generate_with_retry(
+                marathon_content,
+                palabras_objetivo=words_obj,
+                marathon_overrides={
+                    "max_blocks": blocks_max,
+                    "max_batches": llm_max_batches,
+                    "max_empty_strikes": llm_max_empty_strikes,
+                    "outline": outline,
+                    "word_target_override": {
+                        "words_min": words_min,
+                        "words_max": words_max,
+                        "duration_target": duration_target,
+                        "blocks_min": blocks_min,
+                        "blocks_max": blocks_max,
+                        "palabras_objetivo": words_obj,
+                    },
+                },
+            )
+        finally:
+            # Restore original config values
+            if hasattr(canal_config, "__dict__"):
+                canal_config.__dict__["PROD_SCRIPT_BLOCKS_MAX"] = original_max_blocks
+                canal_config.__dict__["PROD_VIDEO_DURATION_MAX"] = original_duration_max
+            else:
+                import types
+                if isinstance(canal_config, types.SimpleNamespace):
+                    canal_config.PROD_SCRIPT_BLOCKS_MAX = original_max_blocks
+                    canal_config.PROD_VIDEO_DURATION_MAX = original_duration_max
+
+        if script:
+            words = len(script.get("guion", "").split()) if script.get("guion") else 0
+            logger.info(
+                "[MARATHON][%s] Script generated: %d words, %s",
+                self.canal, words, script.get("id"),
+            )
+
+            # Override title with marathon format if provided
+            if title_format and script:
+                formatted_title = title_format.replace("{N}", str(num_sections))
+                # The title will be set by the LLM, but we add the marathon tag
+                script["_marathon_title_format"] = formatted_title
+
+        return script

@@ -1304,6 +1304,26 @@ NICHE_KEYWORDS_ENG = [
     "medical documentary rare cases",
 ]
 
+# ═══════════════════════════════════════════════════════════════════
+# MARATHON MODE — Video largo de ~1 hora (v1.0)
+# ═══════════════════════════════════════════════════════════════════
+MARATHON_ENABLED = True
+MARATHON_VIDEO_DURATION_TARGET = 60          # minutos
+MARATHON_NUM_SECTIONS = 12                   # "12 Anomalías Médicas que la Ciencia No Explica"
+MARATHON_NARRATIVE_FORMAT = "top_cases"      # top casos médicos inexplicables
+MARATHON_COOLDOWN_SUCCESS_DAYS = 7
+MARATHON_COOLDOWN_FAILURE_DAYS = 1
+MARATHON_SCRIPT_WORDS_MIN = 8000
+MARATHON_SCRIPT_WORDS_MAX = 12000
+MARATHON_SCRIPT_BLOCKS_MIN = 50
+MARATHON_SCRIPT_BLOCKS_MAX = 90
+MARATHON_OUTLINE_CHAPTERS = 15
+MARATHON_MEDIA_VIDEO_PCT = 20
+MARATHON_TITLE_FORMAT = "Las {N} Anomalías Médicas Más Inexplicables de la Historia"
+MARATHON_LLM_MAX_BATCHES = 150
+MARATHON_LLM_MAX_EMPTY_STRIKES = 20
+MARATHON_PUBLISH_MODE = "scheduled"
+
 # Override viral scoring thresholds for this channel (optional)
 # VIRAL_MIN_VIEWS = 300000  # Lower threshold for smaller niche
 

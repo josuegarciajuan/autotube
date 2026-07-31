@@ -64,12 +64,15 @@ class PipelineOrchestrator:
 
     def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None,
                  progress_callback: Optional[callable] = None,
-                 source_mode: str = "original", viral_candidate_id: Optional[int] = None):
+                 source_mode: str = "original", viral_candidate_id: Optional[int] = None,
+                 is_marathon: bool = False, marathon_config: dict = None):
         self.canal = canal
         self.db_video_id = db_video_id  # Si != None, modo API: update en vez de insert
         self._progress_cb = progress_callback  # (percent, phase, message) → None
-        self.source_mode = source_mode  # "original" | "viral"
+        self.source_mode = source_mode  # "original" | "viral" | "marathon"
         self.viral_candidate_id = viral_candidate_id  # raw_content.id for viral mode
+        self.is_marathon = is_marathon  # flag for marathon ~1h video mode
+        self.marathon_config = marathon_config or {}  # {duration_target, num_sections, narrative_format, ...}
 
         # Phase timing tracking
         self._timing: dict = {"phases": {}}
@@ -353,11 +356,16 @@ class PipelineOrchestrator:
 
         When source_mode='viral', uses the pre-translated/adapted viral script
         from raw_content instead of calling the LLM script generator.
+        When is_marathon=True, generates a long-form ~1h marathon script.
         """
         start = time.time()
 
         if self.source_mode == "viral":
             return self._phase_generate_script_viral(start)
+
+        # ── Marathon mode: long-form deep script generation ──
+        if self.is_marathon:
+            return self._phase_generate_script_marathon(start)
 
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
@@ -682,6 +690,100 @@ class PipelineOrchestrator:
             logger.error("[%s] No original content available either — pipeline cannot continue", self.canal)
             return None
         return self.script_gen.generate(content_items[0])
+
+    def _phase_generate_script_marathon(self, start: float) -> Optional[dict]:
+        """Generate a long-form ~1h marathon script with deep content.
+
+        Uses extended Wikipedia scraping (deep mode), a multi-chapter outline,
+        and the ScriptGenerator's marathon-specific path for high word-count scripts.
+        """
+        cfg = self.config
+        mc = self.marathon_config
+
+        duration_target = mc.get("duration_target", 60)
+        num_sections = mc.get("num_sections", 12)
+        narrative_format = mc.get("narrative_format", "top_cases")
+
+        logger.info(
+            "[MARATHON][%s] Starting marathon script: %dmin, %d sections, format=%s",
+            self.canal, duration_target, num_sections, narrative_format,
+        )
+        self._emit_progress(12, "marathon_script",
+                            f"Generando guion maratón de {duration_target}min con IA...")
+
+        # ── Deep scrape: fetch rich content for marathon ──
+        content_items = []
+        try:
+            wiki_scraper = self.scraper.get("wikipedia")
+            if wiki_scraper:
+                self._emit_progress(14, "marathon_scrape",
+                                    f"Raspando artículos profundos de Wikipedia...")
+                # Use deep mode: full articles with higher category limit
+                deep_items = wiki_scraper.scrape(
+                    config=self.config,
+                    mode="deep",
+                    limit=20,
+                )
+                if deep_items:
+                    content_items.extend(deep_items)
+                    logger.info(
+                        "[MARATHON][%s] Deep scrape: %d articles (%d total chars)",
+                        self.canal, len(deep_items),
+                        sum(len(item.get("text", "")) for item in deep_items),
+                    )
+        except Exception as exc:
+            logger.warning("[MARATHON][%s] Deep scrape failed: %s — falling back to normal scrape",
+                           self.canal, exc)
+            # Fallback to normal content
+            fallback = self.db.get_unused_content(canal=self.canal, limit=10)
+            if fallback:
+                content_items = fallback
+
+        if not content_items:
+            # Last resort: use any available content
+            content_items = self.db.get_unused_content(canal=self.canal, limit=10)
+
+        if not content_items:
+            logger.error("[MARATHON][%s] No content available for marathon script", self.canal)
+            return None
+
+        # ── Generate marathon script ──
+        self._emit_progress(16, "marathon_script",
+                            f"Generando outline con {mc.get('outline_chapters', 15)} capítulos...")
+
+        result = self.script_gen.generate_marathon(
+            content_items=content_items,
+            canal_config=cfg,
+            duration_target=duration_target,
+            num_sections=num_sections,
+            narrative_format=narrative_format,
+            outline_chapters=mc.get("outline_chapters", 15),
+            words_min=mc.get("script_words_min", 8000),
+            words_max=mc.get("script_words_max", 12000),
+            blocks_min=mc.get("script_blocks_min", 50),
+            blocks_max=mc.get("script_blocks_max", 90),
+            llm_max_batches=mc.get("llm_max_batches", 150),
+            llm_max_empty_strikes=mc.get("llm_max_empty_strikes", 20),
+            title_format=mc.get("title_format", ""),
+        )
+
+        duration_ms = int((time.time() - start) * 1000)
+        self._timing["phases"]["marathon_script"] = duration_ms
+
+        if result:
+            words = len(result.get("guion", "").split()) if result.get("guion") else 0
+            self._emit_progress(23, "marathon_script",
+                                f"[MARATHON] Guion generado: {words} palabras ({num_sections} secciones)")
+            self.db.log_pipeline(self.canal, "marathon_script", "success",
+                                 f"Marathon script {result.get('id')}: {words} words, "
+                                 f"{num_sections} sections, {duration_target}min target",
+                                 content_id=result.get("id"),
+                                 duration_ms=duration_ms)
+        else:
+            _safe_log_error(self.db, self.canal, "marathon_script",
+                            "Marathon script generation failed")
+
+        return result
 
     def phase_tts(self, script: dict, job_id: int = None) -> Optional[dict]:
         """Generate TTS audio for a script using the channel's configured engine.

@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink } from 'lucide-react'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -178,6 +178,12 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
         </span>
+        {video.is_marathon && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
+            <Trophy size={10} />
+            MARATÓN
+          </span>
+        )}
         <ContentTypeBadge type="video" />
         <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
@@ -236,6 +242,12 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
         <span className={`text-xs font-semibold ${colors.text}`}>
           {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
         </span>
+        {video.is_marathon && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
+            <Trophy size={10} />
+            MARATÓN
+          </span>
+        )}
         <ContentTypeBadge type="video" />
         <span className="text-[10px] text-blue-400 font-mono ml-auto flex items-center gap-1">
           <HardDrive size={10} />
