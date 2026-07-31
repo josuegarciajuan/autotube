@@ -629,6 +629,35 @@ class PipelineOrchestrator:
                     blocks.append({"tipo": "reflexion", "texto": paragraphs[-2]})
                     blocks.append({"tipo": "cierre", "texto": paragraphs[-1]})
 
+        # ── Enrich viral blocks with search_query_en, media_tipo, etc. ──
+        # Viral scripts from youtube_viral.py only produce blocks with tipo+texto.
+        # Without enrichment, the media_fetcher falls back to generic type-based
+        # queries (e.g. "dark dramatic mystery") that have nothing to do with
+        # what's being narrated. This step calls the same LLM enrichment used
+        # by generate_v2() to add per-block search_query_en, media_tipo,
+        # escena_descripcion, and emocion.
+        if blocks and self.script_gen:
+            enrichment_item = {
+                "title": translated_title or original_title or "Video",
+                "text": script_es,
+            }
+            try:
+                enriched_blocks = self.script_gen._enrich_block_fields_iterative(
+                    blocks, enrichment_item
+                )
+                if enriched_blocks:
+                    blocks = enriched_blocks
+                    logger.info(
+                        "[%s] Enriched %d viral blocks with search_query_en, media_tipo, escena_descripcion",
+                        self.canal, len(blocks),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Viral block enrichment failed: %s — blocks will lack search queries (generic fallbacks used)",
+                    self.canal, exc,
+                )
+                # blocks stays as-is with just tipo+texto — safe fallback
+
         # Get translated title
         translated_title = viral_meta.get("translated_title") or original_title or "Video"
 
