@@ -188,21 +188,34 @@ TITLE_POWER_WORDS = [
     # ⚡ URGENCIA / EXCLUSIVIDAD
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
     "confidencial", "prohibido", "enterrado", "sellado",
+    "exclusivo", "desclasificado", "suprimido", "archivado", "silenciado",
+    "protegido", "blindado", "vetado",
     # 💥 IMPACTO EMOCIONAL
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "asombroso", "desconcertante", "fascinante",
+    "asombroso", "desconcertante", "fascinante", "impactante",
+    "colosal", "monumental", "imponente", "magnífico", "sobrecogedor",
+    "devastador", "insospechado", "deslumbrante",
     # 🔍 CURIOSIDAD / MISTERIO
     "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "impactante", "increíble", "insólito", "misterio", "enigma",
+    "increíble", "insólito", "misterio", "enigma",
+    "indescifrable", "desconocido", "enigmático",
     # Ancient / Lost (canal3 specific)
     "perdida", "milenaria", "ancestral", "desaparecida", "sumergida",
-    "maldita", "sagrada", "olvidado",
+    "maldita", "sagrada", "olvidado", "sepultado", "inhallable",
+    "legendaria", "mítica", "prehistórica", "antediluviana",
+    "sumergido", "subterráneo", "abandonado", "erosionado",
+    "petrificado", "fosilizado",
     # Discovery / Revelation (canal3 specific)
     "descubrieron", "encontraron", "reescribió", "cambió", "revolucionó",
+    "desenterraron", "hallaron", "excavaron", "revelaron", "desvelaron",
+    "sacaron a la luz", "emergió",
     # Authority / Science
     "demostrado", "confirmado", "verificado", "documentado",
-    "imposible", "sacudió",
+    "imposible", "sacudió", "cambió todo",
+    # Scale / Magnitude
+    "gigantesca", "titánica", "faraónica", "imposible",
+    "monumental", "inmensa", "descomunal",
 ]
 
 TITLE_MAX_CHARS = 65

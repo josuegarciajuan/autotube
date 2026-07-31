@@ -20,6 +20,10 @@ from googleapiclient.errors import HttpError
 
 from config.settings import LLM_MODEL_CREATIVE, TOKENS_DIR
 from pipeline.youtube_playlists import _load_credentials
+from pipeline.title_enricher import (
+    enforce_power_words,
+    build_optimizer_power_words_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +135,13 @@ CONTENIDO DEL VIDEO (guion):
 
 Genera NUEVOS metadatos que mejoren el rendimiento."""
 
+        # ── Inject channel power words into system prompt ──────────
+        power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
+        pw_section = build_optimizer_power_words_section(power_words)
+        system_prompt = _OPTIMIZE_SYSTEM
+        if pw_section:
+            system_prompt = _OPTIMIZE_SYSTEM + "\n" + pw_section
+
         try:
             from config.llm_helpers import llm_json_call
             client = self._get_llm()
@@ -140,7 +151,7 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
                 retry_delay=2.0,
                 model=LLM_MODEL_CREATIVE,
                 messages=[
-                    {"role": "system", "content": _OPTIMIZE_SYSTEM},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.9,
@@ -148,6 +159,10 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
             )
 
             title = result.get("title", current_title)[:100]
+
+            # ── Safety net: enforce at least one power word ────────
+            title = enforce_power_words(title, power_words)
+
             description = result.get("description", "")
             tags = result.get("tags", [])[:60]  # YouTube max 60 tags
             reason = result.get("reason", "Reoptimización automática por bajo CTR")

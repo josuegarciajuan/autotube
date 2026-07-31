@@ -59,10 +59,12 @@ Categories to explore exhaustively:
 1. Video duration vs retention / watchtime / revenue
 2. Publish hour and day vs 24h and 7d views
 3. Keywords/topics vs CTR, views, and retention
-4. Pipeline errors — which phases fail most, common error messages
-5. Content pillar balance vs performance
-6. Growth trends (subs, views) and inflection points
-7. Revenue patterns (CPM correlation with topic/duration)
+4. Title power words: which emotional/impact words in titles correlate with higher views/CTR?
+   Identify specific words that appear in top-performing titles and are MISSING from low performers.
+5. Pipeline errors — which phases fail most, common error messages
+6. Content pillar balance vs performance
+7. Growth trends (subs, views) and inflection points
+8. Revenue patterns (CPM correlation with topic/duration)
 
 For each finding: state the EXACT magnitude (e.g. "3x", "+40%"), cite the data point,
 and classify the category.
@@ -244,6 +246,11 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         }
     except Exception:
         data["current_config"] = {}
+
+    # ── Title power words inventory ──────────────────────────────────
+    # Include the current power words list so the LLM can analyze
+    # which ones appear in top-performing titles
+    data["title_power_words"] = data["current_config"].get("title_power_words", [])
 
     # ── Video performance (JOIN videos + video_stats_history) ──
     with db._connect() as conn:

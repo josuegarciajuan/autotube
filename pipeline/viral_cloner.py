@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import requests
 
 from config.config_bridge import get_channel_config
+from pipeline.title_enricher import enforce_power_words
 
 logger = logging.getLogger(__name__)
 
@@ -589,11 +590,16 @@ def clone_title_description(
     # Generate alternative titles by paraphrasing
     alt_titles = _generate_alt_titles(translated_title, channel_config)
 
+    # ── Safety net: enforce at least one power word ────────────────
+    power_words = getattr(channel_config, "TITLE_POWER_WORDS", [])
+    translated_title = enforce_power_words(translated_title, power_words)
+    alt_titles_checked = [enforce_power_words(t, power_words) for t in (alt_titles or [])]
+
     result = {
         "selected_title": translated_title,
         "description": translated_desc,
         "tags": tags,
-        "titles": alt_titles if alt_titles else [translated_title],
+        "titles": alt_titles_checked if alt_titles_checked else [translated_title],
         "thumbnail_text": thumbnail_text,
     }
     logger.info("[%s] clone_title_description: DONE — title='%s', %d tags, desc=%d chars",

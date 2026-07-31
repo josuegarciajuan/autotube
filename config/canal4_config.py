@@ -181,24 +181,35 @@ TITLE_FORMULAS = [
 TITLE_POWER_WORDS = [
     # ⚡ URGENCIA / EXCLUSIVIDAD
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "archivado",
+    "confidencial", "prohibido", "archivado", "silenciado",
+    "desclasificado", "ocultado", "suprimido", "enterrado",
     # 💥 IMPACTO EMOCIONAL
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "implacable", "extremo",
+    "implacable", "extremo", "brutal", "salvaje", "inhóspito",
+    "despiadado", "crucial", "angustiante", "desgarrador",
+    "sobrecogedor", "desolador", "sombrío", "trágico",
     # 🔍 CURIOSIDAD / MISTERIO
     "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "impactante", "increíble", "insólito",
+    "impactante", "increíble", "insólito", "intrigante",
+    "enigma", "misterio", "inquietante",
     # Danger / Death (canal4 specific)
     "desapareció", "nunca regresó", "atrapados", "perdidos", "abandonados",
     "muertos", "congelados", "hundidos", "sepultados",
+    "desvanecido", "devorados", "ahogados", "sepultado", "enterrados",
+    "consumidos", "aniquilados", "borrados del mapa",
     # Survival / Rescue (canal4 specific)
     "sobrevivió", "rescatado", "encontrado", "escapó", "volvió",
-    # Authority / Reality
-    "real", "documentado", "verificado", "demostrado", "confirmado",
+    "emergió", "resistió", "aguantó", "superó", "logró salir",
+    "milagrosamente", "contra todo pronóstico",
     # Environment / Scale (canal4 specific)
     "hielo", "nieve", "tormenta", "océano", "desierto", "montaña",
-    "selva", "abisal",
+    "selva", "abisal", "infierno", "gélido", "abrasador",
+    "helado", "ardiente", "impenetrable", "remoto",
+    "inaccesible", "aislado", "traidor", "mortal",
+    # Authority / Reality
+    "real", "documentado", "verificado", "demostrado", "confirmado",
+    "registrado", "grabado", "filmado",
 ]
 
 TITLE_MAX_CHARS = 65

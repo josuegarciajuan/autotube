@@ -185,24 +185,38 @@ TITLE_FORMULAS = [
 TITLE_POWER_WORDS = [
     # ⚡ URGENCIA / EXCLUSIVIDAD
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "archivado",
+    "confidencial", "prohibido", "archivado", "desclasificado",
+    "silenciado", "ocultado", "suprimido", "enterrado",
     # 💥 IMPACTO EMOCIONAL
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "asombroso", "desconcertante", "fascinante",
+    "asombroso", "desconcertante", "fascinante", "impactante",
+    "desgarrador", "conmovedor", "angustiante", "perturbador",
+    "alarmante", "devastador", "sobrehumano", "insólito",
     # 🔍 CURIOSIDAD / MISTERIO
-    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "impactante", "increíble", "insólito", "misterioso", "único",
+    "oculto", "secreto", "siniestro", "enigmático",
+    "increíble", "misterioso", "único", "raro", "extraño",
+    "indescifrable", "desconocido", "insospechado", "enigma",
     # Medical / Clinical (canal5 specific)
     "síndrome", "enfermedad", "diagnóstico", "caso", "paciente",
-    "curación", "tratamiento", "pronóstico",
+    "curación", "tratamiento", "pronóstico", "patología",
+    "condición", "trastorno", "mutación", "anomalía",
+    "malformación", "resistencia", "inmunidad", "remisión",
+    "milagro médico", "caso único",
     # Authority / Verification
     "documentado", "real", "verificado", "confirmado", "demostrado",
+    "científico", "médico", "clínico", "probado", "estudiado",
+    "publicado", "registrado",
     # Scale / Numbers (canal5 specific)
     "rara", "única", "primera", "última", "ningún",
+    "solo una", "la más rara", "extrema", "severa",
     # Survival / Hope (canal5 specific)
     "sobrevivió", "venció", "superó", "desafió", "contradijo",
-    "imposible", "increíble",
+    "imposible", "increíble", "milagrosa", "inexplicable",
+    "contra todo pronóstico", "resucitó",
+    # Body / Sensation
+    "cuerpo", "cerebro", "dolor", "sufrimiento", "agonía",
+    "transformación", "mutación", "deformidad",
 ]
 
 TITLE_MAX_CHARS = 65

@@ -123,10 +123,21 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin texto adicional."""
         }
 
 
-async def generate_title_options(script_text: str, count: int = 1) -> list[str]:
+async def generate_title_options(script_text: str, count: int = 1,
+                                 channel_slug: str = None) -> list[str]:
     """Generate a single viral title option."""
     client = get_marketing_client()
-    
+
+    # ── Channel power words (if available) ────────────────────────
+    power_words = []
+    if channel_slug:
+        try:
+            from config.config_bridge import get_channel_config
+            cfg = get_channel_config(channel_slug)
+            power_words = getattr(cfg, "TITLE_POWER_WORDS", [])
+        except Exception:
+            pass
+
     user_prompt = f"""Genera 1 ÚNICO título viral para YouTube basado en este contenido.
 Debe ser IMPOSIBLE de ignorar, generar curiosidad extrema, y usar palabras de alto impacto emocional.
 Máximo 100 caracteres.
@@ -151,9 +162,12 @@ CONTENIDO:
         )
         titles = result.get("title") if isinstance(result, dict) else result
         if isinstance(titles, str) and titles:
-            return [titles[:100]]
+            # ── Safety net: enforce at least one power word ────────
+            from pipeline.title_enricher import enforce_power_words
+            return [enforce_power_words(titles[:100], power_words)]
         if isinstance(titles, list):
-            return [t[:100] for t in titles if isinstance(t, str)][:count]
+            from pipeline.title_enricher import enforce_power_words
+            return [enforce_power_words(t[:100], power_words) for t in titles if isinstance(t, str)][:count]
         return ["La Historia Real Más Impactante que Escucharás Hoy"]
     except Exception as e:
         logger.warning("Title options generation failed after retries: %s", e)

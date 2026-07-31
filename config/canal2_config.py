@@ -203,22 +203,31 @@ TITLE_FORMULAS = [
 TITLE_POWER_WORDS = [
     # ⚡ URGENCIA / EXCLUSIVIDAD
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "exclusiva",
+    "confidencial", "prohibido", "exclusiva", "urgente", "limitado",
+    "desclasificado", "archivado", "ocultado", "silenciado", "suprimido",
+    "enterrado", "sellado", "bloqueado",
     # 💥 IMPACTO EMOCIONAL
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
     "conmovedor", "inspirador", "revelador", "imposible",
-    "extraordinario", "asombroso", "fascinante",
+    "extraordinario", "asombroso", "fascinante", "impactante",
+    "devastador", "magnético", "irresistible", "sobrehumano",
+    "desconcertante", "perturbador", "increíble", "insólito",
     # 🔍 CURIOSIDAD / MISTERIO
-    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "impactante", "increíble", "insólito",
-    # Authority / Verification (canal2 specific)
+    "oculto", "secreto", "siniestro", "enigmático", "misterio",
+    "enigma", "intriga", "sorprendente", "desconocido",
+    "inexplorado", "indescifrable", "inquietante",
+    # Authority / Verification
     "demostrado", "documentado", "real", "comprobado", "verificado",
+    "confirmado", "científico", "probado",
     # Spiritual / Destiny (canal2 specific)
     "milagro", "destino", "sincronía", "casualidad", "profecía",
     "sobrevivió", "regresó", "salvó", "predijo", "anticipó",
-    # Legacy compat
-    "sorprendente",
+    "señal", "coincidencia", "universo", "cósmico", "divino",
+    "transformación", "despertar", "conexión", "energía",
+    "revelación", "visionario", "premonición", "presagio",
+    # Unexpected / Twist
+    "inesperado", "impensable", "improbable", "insospechado",
 ]
 
 TITLE_MAX_CHARS = 65

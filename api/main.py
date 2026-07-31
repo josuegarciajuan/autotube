@@ -448,6 +448,7 @@ async def _schedule_checker_loop():
     last_shorts_recovery_check = 0
     last_smart_replan = 0
     last_slot_calculation = 0
+    last_power_word_analysis = 0
     first_run = True
 
     while True:
@@ -581,6 +582,37 @@ async def _schedule_checker_loop():
                     _sched_db.set_system_state("last_stats_collection", str(int(now)))
                 except Exception:
                     pass
+
+            # ── Weekly power word analysis ──────────────────────────
+            # Runs once per week (every 7 days = 604800 seconds).
+            # Analyzes historical title performance and regenerates
+            # each channel's TITLE_POWER_WORDS list.
+            if STATS_ENABLED and now - last_power_word_analysis > 604800:  # 7 days
+                try:
+                    from pipeline.power_word_analyzer import analyze_all_channels
+                    logger.info("Starting weekly power word analysis...")
+                    results = await asyncio.to_thread(analyze_all_channels)
+                    last_power_word_analysis = now
+                    try:
+                        _sched_db.set_system_state("last_power_word_analysis", str(int(now)))
+                    except Exception:
+                        pass
+                    if results:
+                        for r in results:
+                            if r.get("error"):
+                                logger.warning("Power word analysis failed for %s: %s",
+                                             r.get("channel_slug"), r["error"])
+                            else:
+                                logger.info(
+                                    "Power words updated for %s: %d words (was %d)",
+                                    r.get("channel_slug"), r.get("new_count"), r.get("previous_count"),
+                                )
+                        logger.info("Weekly power word analysis: %d/%d channels updated",
+                                   sum(1 for r in results if not r.get("error")), len(results))
+                    else:
+                        logger.info("Weekly power word analysis: no channels processed")
+                except Exception as e:
+                    logger.warning("Weekly power word analysis failed: %s", e)
                 
         except asyncio.CancelledError:
             raise

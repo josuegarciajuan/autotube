@@ -23,6 +23,10 @@ from config.settings import (
     LLM_PROVIDER,
 )
 from config.llm_helpers import llm_json_call, _derive_hook_from_title
+from pipeline.title_enricher import (
+    enforce_power_words,
+    build_power_words_prompt_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +272,13 @@ INSTRUCCIONES:
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
+        # ── Inject channel power words into system prompt ──────────
+        power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
+        pw_section = build_power_words_prompt_section(power_words)
+        system_prompt = _METADATA_SYSTEM_PROMPT
+        if pw_section:
+            system_prompt = _METADATA_SYSTEM_PROMPT + "\n" + pw_section
+
         client = create_llm_client(enable_thinking=False, timeout=120.0, max_retries=2)
         
         try:
@@ -277,7 +288,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 retry_delay=2.0,
                 model=LLM_MODEL_CREATIVE,
                 messages=[
-                    {"role": "system", "content": _METADATA_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.9,
@@ -306,7 +317,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 max_title_body = 100 - len(suffix_formatted)
                 title = title[:max_title_body].rstrip() + suffix_formatted
                 title = title[:100]  # final safety
-            
+
+            # ── Safety net: enforce at least one power word ────────
+            title = enforce_power_words(title, power_words)
+
             description = result.get("description", "")
             # Truncate description to 5000 bytes
             desc_bytes = description.encode("utf-8")
@@ -407,6 +421,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         
         titles = self._fallback_titles(script)
         title = titles[0] if titles else "Video sin título"
+
+        # ── Safety net: enforce at least one power word ────────────
+        power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
+        title = enforce_power_words(title, power_words)
         
         keywords_raw = script.get("keywords") or script.get("keywords_json", "[]")
         if isinstance(keywords_raw, str):
