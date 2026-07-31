@@ -109,12 +109,23 @@ def llm_json_call(
                     f"(attempt {attempt + 1}/{max_retries})"
                 )
 
-            # Strip markdown fences
+            # Robust JSON extraction from LLM responses.
+            # DeepSeek thinking-mode may leak preamble text ("Let me
+            # analyze...") before the actual JSON.  Use regex to extract
+            # JSON from anywhere in the response, not just when it starts
+            # with a markdown fence.
             text = content.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-                text = text.replace("```json", "").replace("```", "").strip()
+
+            # 1. Try markdown code fence extraction (anywhere in the text)
+            m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+            if m:
+                text = m.group(1).strip()
+            else:
+                # 2. Try to extract the first JSON object { ... } from
+                #    anywhere in the text (handles preamble / thinking text)
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                if m:
+                    text = m.group(0)
 
             return json.loads(text)
 
