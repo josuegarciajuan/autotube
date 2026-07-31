@@ -960,9 +960,14 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         return None
 
     # ── Core dispatch loop (retries on clip cancellations + cooldown skips) ──
-    _MAX_CLIP_RETRIES = 3  # max clip cancellations before giving up
+    # v25: Changed from fixed for-loop (3 retries) to while-loop where predictable
+    # skips (no source channel / no resolved source video) do NOT consume retries.
+    # This prevents a handful of unwinnable clip slots at the front of the queue
+    # from consuming all retry iterations and blocking the entire dispatch pipeline.
+    _MAX_CLIP_RETRIES = 3  # max effective retries (only counts hard failures)
     _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
     _failed_force_ids: set[int] = set()  # force-dispatch: clip slots without source
+    _retry_count = 0  # effective retry counter (only incremented on actual dispatch)
 
     # ── Pre-filter: cache which channels have completed long videos today ──
     # Clip shorts need a source long video. Pre-computing this avoids wasting
@@ -983,7 +988,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     except Exception:
         pass  # non-critical optimization
 
-    for _retry in range(_MAX_CLIP_RETRIES):
+    while _retry_count < _MAX_CLIP_RETRIES:
         # 6. Get next pending short slot that is due (skip cooldown-blocked slots)
         exclude_list = list(_skipped_slot_ids) if _skipped_slot_ids else None
         next_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=exclude_list)
@@ -1003,8 +1008,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 #
                 # Iterate: skip clip slots without source and retry up to
                 # _MAX_CLIP_RETRIES times to find a viable slot.
+                # v25: while-loop — predictable source-less skips don't consume retries.
                 import time as _time
-                for _force_retry in range(_MAX_CLIP_RETRIES):
+                _force_retry = 0
+                while _force_retry < _MAX_CLIP_RETRIES:
                     if _force_retry > 0:
                         _time.sleep(2)  # back off between retries to reduce log spam
                     force_slot = db.get_next_pending_shorts_slot(
@@ -1023,15 +1030,26 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     source_video_id_f = None
 
                     if short_type_f == "clip":
+                        # Skip clips for channels known to lack completed long videos today.
+                        if channel_id in _channels_without_source:
+                            logger.info(
+                                "Force dispatch: clip slot #%d (%s) — channel has "
+                                "no completed long videos today, skipping",
+                                slot_id, slug,
+                            )
+                            _failed_force_ids.add(slot_id)
+                            continue  # don't consume retry
                         source_video_id_f = _resolve_clip_source(channel_id,
                             force_slot.get("long_slot_position"))
                         if source_video_id_f is None:
                             logger.info(
-                                "Force dispatch #%d: clip slot #%d (%s) has no source — skipping",
-                                _force_retry + 1, slot_id, slug,
+                                "Force dispatch: clip slot #%d (%s) has no source — skipping",
+                                slot_id, slug,
                             )
                             _failed_force_ids.add(slot_id)
-                            continue
+                            continue  # don't consume retry — may resolve later
+
+                    _force_retry += 1  # only consume retry when we actually dispatch
 
                     logger.warning(
                         "FORCE DISPATCH: slot #%d %s type=%s (scheduled %s) — "
@@ -1170,6 +1188,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 )
                 _skipped_slot_ids.add(slot_id)
                 continue  # ← retry with next candidate
+
+        # All guards passed — this is a dispatchable slot. Only NOW do we
+        # consume a retry count (predictable skips like no-source don't count).
+        _retry_count += 1
 
         # 10. Mark slot as running with source_video_id
         db.update_shorts_slot_status(slot_id, "running", source_video_id=source_video_id)
