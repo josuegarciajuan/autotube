@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { api } from '../lib/api'
+import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
@@ -85,55 +86,45 @@ function ShortsCard({ config, onUpdate }: { config: ShortsPlanningConfig; onUpda
 
 // ── Today Status cards ───────────────────────────────────
 function TodayStatus() {
-  const [channels, setChannels] = useState<ChannelSummary[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data: today, isLoading: loadingToday } = useTodaySlots()
+  const { data: shortsToday, isLoading: loadingShorts } = useShortsSlotsToday()
+  const loading = loadingToday || loadingShorts
 
-  const load = useCallback(async () => {
-    try {
-      const [today, shortsToday] = await Promise.all([
-        api.getTodaySlots(),
-        api.getShortsSlotsToday(),
-      ])
-
-      const map = new Map<number, ChannelSummary>()
-      const ensure = (id: number, name: string, slug: string) => {
-        if (!map.has(id)) {
-          map.set(id, {
-            channel_id: id, channel_name: name, channel_slug: slug,
-            videos: { pending: 0, running: 0, completed: 0, cancelled: 0 },
-            shorts: { pending: 0, running: 0, completed: 0 },
-            next_time: null, next_kind: null,
-          })
-        }
-        return map.get(id)!
+  const channels = useMemo(() => {
+    if (!today && !shortsToday) return [] as ChannelSummary[]
+    const map = new Map<number, ChannelSummary>()
+    const ensure = (id: number, name: string, slug: string) => {
+      if (!map.has(id)) {
+        map.set(id, {
+          channel_id: id, channel_name: name, channel_slug: slug,
+          videos: { pending: 0, running: 0, completed: 0, cancelled: 0 },
+          shorts: { pending: 0, running: 0, completed: 0 },
+          next_time: null, next_kind: null,
+        })
       }
-
-      for (const s of (today.slots || [])) {
-        const ch = ensure(s.channel_id, s.channel_name, s.channel_slug)
-        if (s.status === 'completed') ch.videos.completed++
-        else if (s.status === 'running') ch.videos.running++
-        else if (s.status === 'pending') ch.videos.pending++
-        else if (s.status === 'cancelled') ch.videos.cancelled++
-        if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
-          ch.next_time = s.scheduled_at; ch.next_kind = 'video'
-        }
+      return map.get(id)!
+    }
+    for (const s of (today?.slots || [])) {
+      const ch = ensure(s.channel_id, s.channel_name, s.channel_slug)
+      if (s.status === 'completed') ch.videos.completed++
+      else if (s.status === 'running') ch.videos.running++
+      else if (s.status === 'pending') ch.videos.pending++
+      else if (s.status === 'cancelled') ch.videos.cancelled++
+      if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
+        ch.next_time = s.scheduled_at; ch.next_kind = 'video'
       }
-      for (const s of (shortsToday.slots || [])) {
-        const ch = ensure(s.channel_id, s.channel_name, s.channel_slug)
-        if (s.status === 'completed') ch.shorts.completed++
-        else if (s.status === 'running') ch.shorts.running++
-        else if (s.status === 'pending') ch.shorts.pending++
-        if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
-          ch.next_time = s.scheduled_at; ch.next_kind = 'short'
-        }
+    }
+    for (const s of (shortsToday?.slots || [])) {
+      const ch = ensure(s.channel_id, s.channel_name, s.channel_slug)
+      if (s.status === 'completed') ch.shorts.completed++
+      else if (s.status === 'running') ch.shorts.running++
+      else if (s.status === 'pending') ch.shorts.pending++
+      if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
+        ch.next_time = s.scheduled_at; ch.next_kind = 'short'
       }
-
-      setChannels(Array.from(map.values()).sort((a, b) => a.channel_id - b.channel_id))
-    } catch (e) { console.error(e) }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
+    }
+    return Array.from(map.values()).sort((a, b) => a.channel_id - b.channel_id)
+  }, [today, shortsToday])
 
   if (loading) {
     return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
@@ -226,13 +217,12 @@ function TodayStatus() {
 
 // ── Shorts section ───────────────────────────────────────
 function ShortsSection() {
-  const [configs, setConfigs] = useState<ShortsPlanningConfig[]>([])
-  const [loading, setLoading] = useState(true)
-  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [])
-  async function load() { try { setConfigs(await api.getShortsPlanningConfig()) } catch {} setLoading(false) }
-  async function update(channelId: number, data: any) { try { await api.updateShortsPlanningConfig(channelId, data); load() } catch (e: any) { alert(e.message) } }
-  if (loading || !configs.length) return null
-  const activeConfigs = configs.filter(c => c.slug !== 'test')
+  const { data: configs = [], isLoading: loading, refetch } = useShortsPlanningConfig()
+  const update = useCallback(async (channelId: number, data: any) => {
+    try { await api.updateShortsPlanningConfig(channelId, data); refetch() } catch (e: any) { alert(e.message) }
+  }, [refetch])
+  const activeConfigs = configs.filter((c: any) => c.slug !== 'test')
+  if (loading || !activeConfigs.length) return null
   return (
     <div className="space-y-3">
       <h4 className="text-sm font-medium text-white flex items-center gap-2">
@@ -247,27 +237,17 @@ function ShortsSection() {
 
 // ── Planning config section ──────────────────────────────
 function PlanningConfigSection() {
-  const [configs, setConfigs] = useState<PlanningConfig[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data: rawConfigs = [], isLoading: loading, refetch } = usePlanningConfig()
+  const configs = rawConfigs.filter((c: any) => c.channel_slug !== 'test')
 
-  const load = useCallback(async () => {
-    try {
-      const data = await api.getPlanningConfig()
-      setConfigs(data.filter((c: PlanningConfig) => c.channel_slug !== 'test'))
-    } catch (e) { console.error(e) }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
-
-  async function update(channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) {
+  const update = useCallback(async (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) => {
     try {
       await api.updatePlanningConfig(channelId, data)
-      load()
+      refetch()
     } catch (e: any) {
       alert(e.message)
     }
-  }
+  }, [refetch])
 
   if (loading) {
     return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>

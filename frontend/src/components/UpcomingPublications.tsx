@@ -1,27 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Clock, ChevronRight } from 'lucide-react';
-import { api, statusBadge, statusLabel, formatCountdown, formatTargetTime, type UpcomingPublication } from '../lib/api';
+import { Clock, ChevronRight } from 'lucide-react'
+import { statusBadge, statusLabel, formatCountdown, formatTargetTime, type UpcomingPublication } from '../lib/api'
+import { useUpcomingPublications } from '../hooks/useQueries'
 
 export default function UpcomingPublications() {
-  const [publications, setPublications] = useState<UpcomingPublication[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 120000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const loadData = async () => {
-    try {
-      const data = await api.getUpcomingPublications(undefined, 2);
-      setPublications(data);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: publications = [], isLoading: loading } = useUpcomingPublications()
 
   if (loading) return null;
 

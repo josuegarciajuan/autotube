@@ -35,17 +35,50 @@ def _get_monitor_lock():
 
 # ── System metrics helpers ─────────────────────────────────────
 
+# Background thread: non-blocking CPU percentage polling
+# psutil.cpu_percent(interval=N) blocks the calling thread for N seconds.
+# This daemon thread calls it periodically so _get_system_metrics() can
+# read a cached value without blocking the asyncio event loop.
+import threading
+import time as _time
+
+_cpu_cache_lock = threading.Lock()
+_cpu_cache = {
+    "percent": 0.0,
+    "per_core": [],
+    "count": 0,
+}
+
+def _cpu_poller():
+    """Daemon thread: update CPU metrics every 1 second."""
+    import psutil as _psutil
+    while True:
+        try:
+            with _cpu_cache_lock:
+                _cpu_cache["percent"] = _psutil.cpu_percent(interval=None)
+                _cpu_cache["per_core"] = _psutil.cpu_percent(interval=None, percpu=True)
+                _cpu_cache["count"] = _psutil.cpu_count()
+        except Exception:
+            pass
+        _time.sleep(1)
+
+# Start poller once — first call blocks briefly to get initial reading
+_cpu_poller_thread = threading.Thread(target=_cpu_poller, daemon=True)
+_cpu_poller_thread.start()
+
+
 def _get_system_metrics() -> dict:
-    """Collect CPU, RAM, disk, and uptime metrics."""
+    """Collect CPU, RAM, disk, and uptime metrics (non-blocking)."""
     import os
     metrics: dict = {}
 
     try:
         import psutil
-        # CPU
-        metrics["cpu_percent"] = psutil.cpu_percent(interval=0.3)
-        metrics["cpu_count"] = psutil.cpu_count()
-        metrics["cpu_per_core"] = psutil.cpu_percent(interval=None, percpu=True)
+        # CPU — read from background cache (non-blocking)
+        with _cpu_cache_lock:
+            metrics["cpu_percent"] = _cpu_cache["percent"]
+            metrics["cpu_count"] = _cpu_cache["count"]
+            metrics["cpu_per_core"] = list(_cpu_cache["per_core"])
         # RAM
         mem = psutil.virtual_memory()
         metrics["ram_total_mb"] = mem.total // (1024 * 1024)
@@ -525,9 +558,25 @@ def get_system_metrics_endpoint():
 # Status bar (lightweight — what the fixed header bar polls)
 # ═══════════════════════════════════════════════════════════════
 
+# TTL cache for status bar — most-frequently-called endpoint (every 10s)
+_STATUS_BAR_CACHE: dict = {}
+_STATUS_BAR_CACHE_TTL = 5  # seconds — keep it fresh but avoid DB hits
+
+def _get_statusbar_lock():
+    return _get_monitor_lock()  # reuse the same lock
+
+
 @router.get("/monitor/status-bar")
 def get_status_bar():
     """Lightweight endpoint for the fixed header status bar."""
+    import time as time_mod
+    lock = _get_statusbar_lock()
+    with lock:
+        if "status" in _STATUS_BAR_CACHE:
+            entry = _STATUS_BAR_CACHE["status"]
+            if time_mod.time() - entry["ts"] < _STATUS_BAR_CACHE_TTL:
+                return entry["data"]
+
     db = get_db()
     try:
         with db._connect() as conn:
@@ -543,16 +592,18 @@ def get_status_bar():
             # RAM (quick)
             from pipeline.ram_governor import available_mb
             ram_available = available_mb()
-            from pipeline.ram_governor import available_mb
             ram_free = ram_available if ram_available > 0 else None
 
-            return {
+            result = {
                 "workers": active_long + active_shorts,
                 "long_running": active_long,
                 "shorts_running": active_shorts,
                 "ram_available_mb": ram_free,
                 "critical_alerts": critical_alerts,
             }
+            with lock:
+                _STATUS_BAR_CACHE["status"] = {"data": result, "ts": time_mod.time()}
+            return result
     except Exception as exc:
         logger.error("Status bar error: %s", exc)
         return {"workers": 0, "ram_available_mb": None, "critical_alerts": 0, "error": str(exc)}

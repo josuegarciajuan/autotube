@@ -1,9 +1,11 @@
 /** Global context to track active video generation jobs across pages.
- *  v2.6: Discovers active jobs from API on mount + migrates old storage key.
+ *  v3.0: Uses React Query for polling instead of manual setInterval.
  *  Persists to localStorage so progress survives page refreshes.
  */
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../lib/api'
 
 export interface ActiveJob {
   jobId: number
@@ -87,6 +89,77 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>(loadFromStorage)
   const channelNamesRef = useRef<Map<number, string>>(new Map())
 
+  // React Query: fetch active jobs every 15s (replaces manual setInterval)
+  const { data: apiJobs } = useQuery({
+    queryKey: ['active-jobs'],
+    queryFn: () => api.getActiveJobs(),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  })
+
+  // React Query: fetch channel names once (replaces manual fetch in useEffect)
+  const { data: channels } = useQuery({
+    queryKey: ['channels', true],
+    queryFn: () => api.getChannels(true),
+    staleTime: 300_000, // 5 min — channels rarely change
+  })
+
+  // Update channel names ref when channels load
+  useEffect(() => {
+    if (channels) {
+      for (const ch of channels) {
+        channelNamesRef.current.set(ch.id, ch.name || ch.slug || `Canal ${ch.id}`)
+      }
+    }
+  }, [channels])
+
+  // Sync API jobs into context state (replaces the 200-line discoverAndVerify + pollForNewJobs)
+  useEffect(() => {
+    if (!apiJobs || apiJobs.length === 0) return
+
+    const apiJobIds = new Set<number>(apiJobs.map((j: any) => j.id))
+
+    setActiveJobs(prev => {
+      let changed = false
+      const result: ActiveJob[] = []
+
+      // Keep existing jobs that are still active, refresh names
+      const storedMap = new Map<number, ActiveJob>()
+      for (const j of prev) storedMap.set(j.jobId, j)
+
+      for (const j of apiJobs) {
+        const jobId = j.id
+        const existing = storedMap.get(jobId)
+        if (existing) {
+          const freshName = channelNamesRef.current.get(j.channel_id)
+          if (freshName && existing.channelName !== freshName) {
+            existing.channelName = freshName
+            changed = true
+          }
+          result.push(existing)
+        } else {
+          // New job from API
+          result.push({
+            jobId,
+            channelId: j.channel_id,
+            channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
+            action: j.action || 'generate_and_upload',
+            videoId: j.video_id,
+            storedAt: Date.now(),
+          })
+          changed = true
+        }
+      }
+
+      if (changed || result.length !== prev.length) {
+        saveToStorage(result)
+        return result
+      }
+      return prev
+    })
+  }, [apiJobs])
+
+  // Mutation functions (called imperatively by dispatch buttons)
   const addJob = useCallback((job: ActiveJob) => {
     setActiveJobs(prev => {
       const filtered = prev.filter(j => j.jobId !== job.jobId)
@@ -112,155 +185,6 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
   const isChannelBusy = useCallback((channelId: number) => {
     return activeJobs.some(j => j.channelId === channelId)
   }, [activeJobs])
-
-  // On mount: verify stored jobs + discover active jobs from API
-  useEffect(() => {
-    let cancelled = false
-
-    async function discoverAndVerify() {
-      // 1. Load stored jobs
-      const stored = loadFromStorage()
-      const storedMap = new Map<number, ActiveJob>()
-      for (const j of stored) storedMap.set(j.jobId, j)
-
-      // 2. Fetch channel names (needed for API-discovered jobs + polling)
-      try {
-        const chRes = await fetch('api/channels')
-        if (chRes.ok) {
-          const channels = await chRes.json()
-          for (const ch of channels) {
-            channelNamesRef.current.set(ch.id, ch.name || ch.slug || `Canal ${ch.id}`)
-          }
-        }
-      } catch {}
-
-      // 3. Fetch active jobs from API
-      try {
-        const jobsRes = await fetch('api/jobs/active')
-        if (jobsRes.ok) {
-          const apiJobs = await jobsRes.json()
-          const result: ActiveJob[] = []
-
-          for (const j of apiJobs) {
-            const jobId = j.id
-
-            // Already in stored? Refresh channelName from API if available
-            if (storedMap.has(jobId)) {
-              const storedJob = storedMap.get(jobId)!
-              const freshName = channelNamesRef.current.get(j.channel_id)
-              if (freshName) {
-                storedJob.channelName = freshName
-              }
-              result.push(storedJob)
-              continue
-            }
-
-            // New job from API: build ActiveJob
-            const chName = channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`
-            result.push({
-              jobId,
-              channelId: j.channel_id,
-              channelName: chName,
-              action: j.action || 'generate_and_upload',
-              videoId: j.video_id,
-              storedAt: Date.now(),
-            })
-          }
-
-          // 4. Remove completed/failed jobs (not in active list)
-          if (!cancelled) {
-            setActiveJobs(result)
-            saveToStorage(result)
-          }
-        } else {
-          // API failed → fall back to stored verification
-          const stillActive: ActiveJob[] = []
-          for (const job of stored) {
-            try {
-              const res = await fetch(`api/jobs/${job.jobId}`)
-              if (!res.ok) {
-                if (res.status === 404) continue
-                stillActive.push(job)
-                continue
-              }
-              const data = await res.json()
-              if (data.status !== 'completed' && data.status !== 'failed') {
-                stillActive.push(job)
-              }
-            } catch {
-              stillActive.push(job)
-            }
-          }
-          if (!cancelled) {
-            setActiveJobs(stillActive)
-            saveToStorage(stillActive)
-          }
-        }
-      } catch {
-        // Network error → keep stored jobs as-is
-      }
-    }
-
-    discoverAndVerify()
-    return () => { cancelled = true }
-  }, [])
-
-  // Periodic polling: discover new jobs created by schedulers (upload, publish, etc.)
-  // Runs every 15 seconds so the bottom bar catches scheduled operations
-  useEffect(() => {
-    async function pollForNewJobs() {
-      try {
-        const jobsRes = await fetch('api/jobs/active')
-        if (!jobsRes.ok) return
-        const apiJobs = await jobsRes.json()
-        const apiJobIds = new Set<number>(apiJobs.map((j: any) => j.id))
-        
-        setActiveJobs(prev => {
-          let changed = false
-          
-          // Remove jobs that are no longer active (completed/failed)
-          const filtered = prev.filter(j => apiJobIds.has(j.jobId))
-          if (filtered.length !== prev.length) changed = true
-          
-          // Refresh channel names for existing jobs from the ref
-          for (const j of filtered) {
-            const freshName = channelNamesRef.current.get(j.channelId)
-            if (freshName && j.channelName !== freshName) {
-              j.channelName = freshName
-              changed = true
-            }
-          }
-          
-           // Add new jobs discovered via API
-          const existingIds = new Set(filtered.map(j => j.jobId))
-          for (const j of apiJobs) {
-            if (!existingIds.has(j.id)) {
-              filtered.push({
-                jobId: j.id,
-                channelId: j.channel_id,
-                channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
-                action: j.action || 'generate_and_upload',
-                videoId: j.video_id,
-                storedAt: Date.now(),
-              })
-              changed = true
-            }
-          }
-          
-          if (changed) {
-            saveToStorage(filtered)
-            return filtered
-          }
-          return prev
-        })
-      } catch {
-        // Silently fail — keep current jobs
-      }
-    }
-    
-    const interval = setInterval(pollForNewJobs, 15_000)
-    return () => clearInterval(interval)
-  }, [])
 
   return (
     <GenerationContext.Provider value={{ activeJobs, addJob, removeJob, clearAll, isChannelBusy }}>

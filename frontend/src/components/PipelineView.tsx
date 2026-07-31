@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useMemo } from 'react'
 import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
+import { usePipelineStatus } from '../hooks/useQueries'
 import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
 
@@ -549,46 +550,39 @@ function ColumnHeader({ icon: Icon, title, count, colorClass }: {
 
 // ── Main component ───────────────────────────────────────────
 export default function PipelineView() {
-  const [planned, setPlanned] = useState<PlannedSlot[]>([])
-  const [generating, setGenerating] = useState<GeneratingVideo[]>([])
-  const [awaitingUpload, setAwaitingUpload] = useState<AwaitingUploadVideo[]>([])
-  const [warming, setWarming] = useState<WarmingVideo[]>([])
-  const [published24h, setPublished24h] = useState<PublishedItem[]>([])
-  const [shortsPending, setShortsPending] = useState<ShortsPipelineSlot[]>([])
-  const [shortsGenerating, setShortsGenerating] = useState<ShortsPipelineSlot[]>([])
-  const [shortsCompleted, setShortsCompleted] = useState<ShortsPipelineSlot[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { data, isLoading: loading, error: queryError, refetch } = usePipelineStatus()
+  const error = queryError ? String(queryError) : null
 
-  const load = useCallback(async () => {
-    try {
-      const data = await api.getPipelineStatus()
-      setPlanned(data.planned || [])
-      setGenerating(data.generating || [])
-      setAwaitingUpload(data.awaiting_upload || [])
-      setWarming(data.warming || [])
-      setPublished24h(data.published_24h || [])
-      setShortsPending(data.shorts?.pending || [])
-      setShortsGenerating(data.shorts?.generating || [])
-      setShortsCompleted(data.shorts?.completed || [])
-      setError(null)
-    } catch (e: any) {
-      console.error('PipelineView load error:', e)
-      setError(e.message)
+  // Use memo to compute derived state from the cached query result
+  const {
+    planned, generating, awaitingUpload, warming, published24h,
+    shortsPending, shortsGenerating, shortsCompleted,
+  } = useMemo(() => {
+    if (!data) {
+      return {
+        planned: [] as PlannedSlot[], generating: [] as GeneratingVideo[],
+        awaitingUpload: [] as AwaitingUploadVideo[], warming: [] as WarmingVideo[],
+        published24h: [] as PublishedItem[],
+        shortsPending: [] as ShortsPipelineSlot[], shortsGenerating: [] as ShortsPipelineSlot[],
+        shortsCompleted: [] as ShortsPipelineSlot[],
+      }
     }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 60000)
-    return () => clearInterval(t)
-  }, [load])
+    return {
+      planned: data.planned || [],
+      generating: data.generating || [],
+      awaitingUpload: data.awaiting_upload || [],
+      warming: data.warming || [],
+      published24h: data.published_24h || [],
+      shortsPending: data.shorts?.pending || [],
+      shortsGenerating: data.shorts?.generating || [],
+      shortsCompleted: data.shorts?.completed || [],
+    }
+  }, [data])
 
   async function handleUploadNow(videoId: number) {
     try {
       await api.uploadVideo(videoId)
-      load()
+      refetch()
     } catch (e: any) {
       console.error('Upload now error:', e)
     }

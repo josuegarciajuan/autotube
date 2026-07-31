@@ -7,6 +7,7 @@ export function useDashboard(channelId?: number) {
     queryKey: ['dashboard', channelId ?? 'all'],
     queryFn: () => api.getDashboard(channelId),
     staleTime: 60_000,
+    refetchInterval: 120_000, // auto-refresh every 2 minutes
   })
 }
 
@@ -129,5 +130,74 @@ export function useRecentEvents(limit = 20, channelId?: number) {
     queryKey: ['recent-events', limit, channelId ?? 'all'],
     queryFn: () => api.getRecentEvents(limit, channelId),
     staleTime: 15_000,
+  })
+}
+
+// ── Active jobs (GenerationContext + GenerationProgressBar) ──
+export function useActiveJobs() {
+  return useQuery({
+    queryKey: ['active-jobs'],
+    queryFn: () => api.getActiveJobs(),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  })
+}
+
+export function useJob(jobId: number) {
+  return useQuery({
+    queryKey: ['job', jobId],
+    queryFn: () => api.getJob(jobId),
+    refetchInterval: 3_000,
+    staleTime: 1_000,
+    enabled: !!jobId,
+  })
+}
+
+// ── Scheduling sub-components ──
+export function usePlannedSlots() {
+  return useQuery({
+    queryKey: ['planned-slots'],
+    queryFn: () => api.getPlannedSlots(),
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  })
+}
+
+export function useShortsPlanningConfig() {
+  return useQuery({
+    queryKey: ['shorts-planning-config'],
+    queryFn: () => api.getShortsPlanningConfig(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}
+
+export function useWeekSlots() {
+  return useQuery({
+    queryKey: ['week-slots'],
+    queryFn: () => api.getWeekSlots(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}
+
+// ── Channel insights ──
+export function useLatestInsight(channelId?: number) {
+  return useQuery({
+    queryKey: ['latest-insight', channelId ?? 0],
+    queryFn: () => api.getLatestInsight(channelId!),
+    staleTime: 120_000,
+    enabled: !!channelId && channelId > 0,
+  })
+}
+
+// ── Scheduled publish detail ──
+export function useVideo(videoId?: number) {
+  return useQuery({
+    queryKey: ['video', videoId ?? 0],
+    queryFn: () => api.getVideo(videoId!),
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    enabled: !!videoId && videoId > 0,
   })
 }
