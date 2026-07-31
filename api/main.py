@@ -1036,7 +1036,7 @@ async def _detect_and_clean_orphans():
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _detect_and_clean_orphans_sync)
     except Exception as exc:
-        logger.error("Orphan detection failed: %s", exc)
+        logger.error("Orphan detection failed: %s", exc, exc_info=True)
 
 
 # ── Stuck insight detection config ────────────────────────
@@ -1072,75 +1072,523 @@ def _cleanup_orphaned_insights(db, logger, timeout_minutes=INSIGHT_ORPHAN_TIMEOU
         logger.debug("Insight orphan cleanup skipped (non-critical): %s", exc)
 
 
+# ── Filesystem retry helper with exponential backoff ────────
+# Used by ghost worker detection and temp file cleanup to
+# survive transient filesystem errors (NFS stalls, /proc races,
+# disk I/O contention).
+#
+# Expected error cases:
+#   OSError        — stale file handle, /proc entry disappeared mid-read,
+#                    disk full, filesystem remounted readonly.
+#   IOError        — Python 2 compat alias; treated same as OSError.
+#   PermissionError — file exists but process lacks read/write access;
+#                     typically from container capability restrictions.
+#   FileNotFoundError — /proc/<pid>/cmdline vanished between pgrep and open;
+#                       normal race condition on fast-dying processes.
+#
+# Non-blocking: failures are logged at DEBUG with full traceback and
+# the caller continues with the next item.  No exception propagates up
+# to the orphan detection loop — the checker must keep running every 5 min.
+
+def _retry_fs_op(op_fn, max_retries=3, base_delay=0.5, label=""):
+    """Retry a filesystem operation with exponential backoff.
+    
+    Args:
+        op_fn: Callable that performs the filesystem operation.
+        max_retries: Maximum attempts (default 3 → 0.5s, 1s, 2s delays).
+        base_delay: Starting delay in seconds; doubles each attempt.
+        label: Human-readable label for debug logs.
+    
+    Returns:
+        The result of op_fn() on success.
+    
+    Raises:
+        OrphanCleanupError (non-blocking): After all retries exhausted.
+    """
+    import time as _time
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return op_fn()
+        except (OSError, IOError, PermissionError, FileNotFoundError) as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                _orphan_logger.debug(
+                    "fs retry %d/%d for %s after %.1fs: %s",
+                    attempt + 1, max_retries, label, delay, exc,
+                    exc_info=True,
+                )
+                _time.sleep(delay)
+    # All retries exhausted — raise non-blocking exception
+    raise OrphanCleanupError(
+        f"Filesystem operation '{label}' failed after {max_retries} attempts: {last_exc}"
+    ) from last_exc
+
+
+# ── Non-blocking exception class ────────────────────────────
+# Raised by retry helpers and cleanup functions when a filesystem
+# operation fails after all retries.  This is NOT a fatal error —
+# the orphan detection loop catches it per-item and continues.
+# The 'blocking' attribute is explicitly False to signal the
+# caller that execution should proceed.
+
+class OrphanCleanupError(Exception):
+    """Non-blocking exception for orphan cleanup failures.
+    
+    Raised when a single file/process operation fails after all
+    retries.  The orphan detection loop continues with the next
+    item — this exception does NOT abort the entire phase.
+    """
+    def __init__(self, message: str, blocking: bool = False):
+        super().__init__(message)
+        self.blocking = blocking
+
+
+# ── Module-level orphan logger (shared by helpers) ──────────
+_orphan_logger = logging.getLogger("autotube.orphans")
+
+
+def _read_cmdline_with_retry(pid: int) -> str:
+    """Read /proc/<pid>/cmdline with pre-validation and retry.
+    
+    Expected error cases:
+      - FileNotFoundError: Process died between pgrep and open
+        (normal race condition — skip silently).
+      - PermissionError: Container/capability restrictions
+        (process belongs to a different namespace).
+    
+    Returns cmdline string on success, empty string on permanent failure.
+    """
+    import os as _os
+    _proc_path = f'/proc/{pid}/cmdline'
+    
+    # Pre-validate: check existence and readability before attempting open.
+    # Avoids a noisy FileNotFoundError traceback for processes that died
+    # between the pgrep scan and this read.
+    if not _os.path.exists(_proc_path):
+        _orphan_logger.debug(
+            "Ghost worker PID %d: /proc/cmdline vanished before read "
+            "(process died — normal race condition)", pid,
+        )
+        return ""
+    if not _os.access(_proc_path, _os.R_OK):
+        _orphan_logger.debug(
+            "Ghost worker PID %d: /proc/cmdline not readable "
+            "(permission denied — possible namespace isolation)", pid,
+        )
+        return ""
+    
+    def _read():
+        with open(_proc_path, 'r') as f:
+            return f.read().replace('\x00', ' ')
+    
+    try:
+        return _retry_fs_op(_read, max_retries=3, base_delay=0.3,
+                            label=f"read /proc/{pid}/cmdline")
+    except OrphanCleanupError as exc:
+        _orphan_logger.debug(
+            "Ghost worker PID %d: cmdline read failed after retries: %s",
+            pid, exc,
+            exc_info=True,
+        )
+        return ""
+
+
 def _detect_ghost_workers(db, logger):
     """Kill worker processes whose --job-id does not exist in generation_jobs.
     
     These are truly orphaned: the worker subprocess is alive but its job row
     was deleted from the DB (channel deletion cascade, manual cleanup, etc).
     Without this detector, they would run forever doing work that disappears.
+    
+    Expected error cases (per PID, non-blocking — each is skipped):
+      - FileNotFoundError / OSError: /proc/<pid>/cmdline vanished (process died
+        between pgrep scan and file open — normal race).
+      - PermissionError: process belongs to a different container namespace.
+      - ProcessLookupError: process already dead when sending signal.
+      - ValueError: garbage PID from pgrep output (should never happen).
+      - subprocess.TimeoutExpired: pgrep hung (process table contention).
     """
     import os as _os
     import re as _re
     import signal as _signal
     import subprocess as _subprocess
+    import time as _time
     
-    try:
-        result = _subprocess.run(
-            ["pgrep", "-f", "full_pipeline_worker.py"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return
-        
-        for pid_str in result.stdout.strip().split('\n'):
-            pid_str = pid_str.strip()
-            if not pid_str:
+    # ── External connection: pgrep with retry ────────────────
+    for attempt in range(3):
+        try:
+            result = _subprocess.run(
+                ["pgrep", "-f", "full_pipeline_worker.py"],
+                capture_output=True, text=True, timeout=5,
+            )
+            break
+        except _subprocess.TimeoutExpired as exc:
+            logger.debug(
+                "Ghost worker: pgrep timed out (attempt %d/3): %s",
+                attempt + 1, exc,
+                exc_info=True,
+            )
+            if attempt < 2:
+                _time.sleep(0.5 * (2 ** attempt))
+        except Exception as exc:
+            logger.debug(
+                "Ghost worker: pgrep failed (attempt %d/3): %s",
+                attempt + 1, exc,
+                exc_info=True,
+            )
+            if attempt < 2:
+                _time.sleep(0.5 * (2 ** attempt))
+    else:
+        logger.debug("Ghost worker detection scan skipped: pgrep failed 3 times")
+        return
+    
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+    
+    for pid_str in result.stdout.strip().split('\n'):
+        pid_str = pid_str.strip()
+        if not pid_str:
+            continue
+        try:
+            pid = int(pid_str)
+            # ── File operation: read /proc/cmdline with retry+validation ──
+            cmdline = _read_cmdline_with_retry(pid)
+            if not cmdline:
                 continue
+            
+            match = _re.search(r'--job-id (\d+)', cmdline)
+            if not match:
+                continue
+            job_id = int(match.group(1))
+            
+            # ── External connection: DB query (handled by db.get_job) ──
             try:
-                pid = int(pid_str)
-                # Read cmdline to extract --job-id
-                with open(f'/proc/{pid}/cmdline', 'r') as f:
-                    cmdline = f.read().replace('\x00', ' ')
-                match = _re.search(r'--job-id (\d+)', cmdline)
-                if not match:
-                    continue
-                job_id = int(match.group(1))
-                
-                # Check if job exists in DB
                 job = db.get_job(job_id)
-                if job is None:
-                    # Also check if it exists in the running set (reconnect_active_workers
-                    # may have already marked it failed but row still exists)
-                    logger.warning(
-                        "GHOST WORKER DETECTED: PID %d (job %d) — "
-                        "job row deleted from DB. Killing...", pid, job_id
-                    )
+            except Exception as exc:
+                logger.debug(
+                    "Ghost worker PID %d: DB query for job %d failed: %s",
+                    pid, job_id, exc,
+                    exc_info=True,
+                )
+                continue
+            
+            if job is None:
+                # Also check if it exists in the running set (reconnect_active_workers
+                # may have already marked it failed but row still exists)
+                logger.warning(
+                    "GHOST WORKER DETECTED: PID %d (job %d) — "
+                    "job row deleted from DB. Killing...", pid, job_id
+                )
+                # ── External operation: kill with SIGTERM → SIGKILL ──
+                try:
                     _os.kill(pid, _signal.SIGTERM)
-                    import time as _time
                     _time.sleep(2)
                     # Force kill if still alive
                     try:
                         _os.kill(pid, _signal.SIGKILL)
                     except ProcessLookupError:
-                        pass
-            except (ValueError, ProcessLookupError, FileNotFoundError):
-                pass  # process already gone
+                        pass  # expected: process already exited
+                except ProcessLookupError:
+                    pass  # expected: process died between detection and kill
+                except OSError as exc:
+                    logger.debug(
+                        "Ghost worker PID %d: kill failed: %s",
+                        pid, exc,
+                        exc_info=True,
+                    )
+        except (ValueError, ProcessLookupError, FileNotFoundError) as exc:
+            logger.debug(
+                "Ghost worker: per-PID error for PID %s: %s",
+                pid_str, exc,
+                exc_info=True,
+            )
+            # Non-blocking: skip this PID, continue with next
+            continue
+        except Exception as exc:
+            logger.debug(
+                "Ghost worker: unexpected error for PID %s: %s",
+                pid_str, exc,
+                exc_info=True,
+            )
+            continue
+
+
+def _cleanup_orphaned_temp_files(db, orphaned_jobs: list, orphaned_videos: list, logger):
+    """Delete temporary files belonging to orphaned jobs and videos from disk.
+    
+    For each orphaned job/video, deletes:
+      - Scene assets (video clips, images, AI-generated scenes)
+      - MP3 narration and CTA audio files
+      - Timestamps JSON and subtitles SRT files
+      - Local MP4 video file
+    
+    Preserves:
+      - Thumbnails (panel display)
+      - channel configuration files
+    
+    Each file deletion is validated (existence + write permission) before
+    attempting, retried with exponential backoff (max 3 attempts), and
+    logged at DEBUG with full stack trace on failure.
+    
+    Expected error cases (per file, non-blocking):
+      - FileNotFoundError: file already deleted by another cleanup job.
+      - PermissionError: directory ownership changed, readonly filesystem.
+      - OSError: stale NFS handle, disk error, filesystem remounted.
+    
+    Non-blocking: a single file deletion failure logs the error and moves
+    to the next file.  No exception propagates to the orphan detection loop.
+    
+    Args:
+        db: Database connection.
+        orphaned_jobs: List of dicts with job_id, video_id, channel_slug.
+        orphaned_videos: List of dicts with video_id, channel_slug.
+        logger: Logger instance.
+    
+    Returns:
+        dict: {"files_deleted": int, "bytes_freed": int, "errors": list}
+    """
+    import os as _os
+    import json as _json
+    from pathlib import Path
+    
+    result = {"files_deleted": 0, "bytes_freed": 0, "errors": []}
+    
+    # Collect all orphaned video IDs (from both jobs and standalone videos)
+    video_ids_to_clean = set()
+    for job in orphaned_jobs:
+        vid = job.get("video_id")
+        if vid:
+            video_ids_to_clean.add(vid)
+    for vid_info in orphaned_videos:
+        vid = vid_info.get("video_id")
+        if vid:
+            video_ids_to_clean.add(vid)
+    
+    if not video_ids_to_clean:
+        logger.debug("Orphan temp file cleanup: no video IDs to clean")
+        return result
+    
+    logger.info(
+        "Orphan temp file cleanup: scanning %d orphaned video(s) for stale files",
+        len(video_ids_to_clean),
+    )
+    
+    for video_id in video_ids_to_clean:
+        try:
+            video = db.get_video(video_id)
+            if not video:
+                logger.debug("Orphan temp cleanup: video %d not found in DB (already pruned)", video_id)
+                continue
+            
+            # ── 1. Delete local MP4 video file ──────────────
+            vp = video.get("video_path", "")
+            if vp:
+                result = _safe_delete_file(vp, logger, result, "MP4")
+            
+            # ── 2. Delete main narration MP3 ────────────────
+            audio_path = video.get("audio_path", "")
+            if audio_path:
+                result = _safe_delete_file(audio_path, logger, result, "narration MP3")
+            
+            # ── 3. Delete CTA audio + derived files ─────────
+            cp_raw = video.get("checkpoint_data", "{}")
+            try:
+                cp = _json.loads(cp_raw) if isinstance(cp_raw, str) else cp_raw
+                cta_path = cp.get("tts", {}).get("cta_audio_path", "")
+                if cta_path:
+                    result = _delete_audio_group(cta_path, logger, result, "CTA")
+            except (_json.JSONDecodeError, TypeError) as exc:
+                logger.debug("Orphan temp cleanup: bad checkpoint_data for video %d: %s", video_id, exc)
+            
+            # ── 4. Delete scene asset files ─────────────────
+            try:
+                scenes = db.get_scenes(video_id)
+                for scene in scenes:
+                    image_path = scene.get("image_path", "")
+                    if not image_path:
+                        continue
+                    # Extract actual file path(s) from image_path column
+                    paths = _extract_paths_from_image_path(image_path)
+                    for fp in paths:
+                        result = _safe_delete_file(fp, logger, result, "scene asset")
+                        # Also delete AI metadata sidecar
+                        p = Path(fp)
+                        if p.suffix.lower() in (".jpg", ".jpeg", ".png"):
+                            json_sidecar = p.with_suffix(".pollo.json")
+                            result = _safe_delete_file(str(json_sidecar), logger, result, "AI metadata")
+            except Exception as exc:
+                logger.debug(
+                    "Orphan temp cleanup: could not query scenes for video %d: %s",
+                    video_id, exc,
+                    exc_info=True,
+                )
+            
+        except Exception as exc:
+            logger.debug(
+                "Orphan temp cleanup: error for video %d: %s",
+                video_id, exc,
+                exc_info=True,
+            )
+            result["errors"].append({
+                "video_id": video_id,
+                "error": str(exc),
+            })
+            # Non-blocking: continue with next video
+    
+    if result["files_deleted"] > 0:
+        logger.info(
+            "Orphan temp file cleanup: deleted %d file(s), freed %.1f MB",
+            result["files_deleted"],
+            result["bytes_freed"] / (1024 * 1024),
+        )
+    if result["errors"]:
+        logger.warning(
+            "Orphan temp file cleanup: %d error(s) during deletion",
+            len(result["errors"]),
+        )
+    
+    return result
+
+
+def _safe_delete_file(file_path: str, logger, result: dict, label: str) -> dict:
+    """Delete a single file with pre-validation, retry, and non-blocking error.
+    
+    Expected error cases:
+      - FileNotFoundError: already deleted (normal — no action).
+      - PermissionError: no write permission on file or parent directory.
+      - OSError: disk error, stale NFS handle.
+    
+    Returns updated result dict.
+    """
+    import os as _os
+    
+    if not file_path or not isinstance(file_path, str):
+        return result
+    
+    # ── Pre-validation: existence ──
+    if not _os.path.exists(file_path):
+        logger.debug("Orphan cleanup: %s not found (already deleted): %s", label, file_path)
+        return result
+    
+    # ── Pre-validation: write permission ──
+    # For deletion we need write permission on the parent directory, not the file.
+    # Check both as a safety net.
+    parent_dir = _os.path.dirname(file_path)
+    if parent_dir and _os.path.exists(parent_dir) and not _os.access(parent_dir, _os.W_OK):
+        logger.warning(
+            "Orphan cleanup: cannot delete %s — parent dir %s is not writable: %s",
+            label, parent_dir, file_path,
+        )
+        result["errors"].append({
+            "file": file_path,
+            "error": f"Parent directory not writable: {parent_dir}",
+        })
+        return result
+    
+    def _do_delete():
+        size = _os.path.getsize(file_path) if _os.path.isfile(file_path) else 0
+        _os.remove(file_path)
+        return size
+    
+    try:
+        size = _retry_fs_op(_do_delete, max_retries=3, base_delay=0.5,
+                            label=f"delete {label}: {file_path}")
+        logger.debug("Orphan cleanup: deleted %s: %s (%.1f KB)", label, file_path, size / 1024)
+        result["files_deleted"] += 1
+        result["bytes_freed"] += size
+    except OrphanCleanupError as exc:
+        logger.debug(
+            "Orphan cleanup: could not delete %s %s after retries: %s",
+            label, file_path, exc,
+            exc_info=True,
+        )
+        result["errors"].append({
+            "file": file_path,
+            "error": str(exc),
+        })
     except Exception as exc:
-        logger.debug("Ghost worker detection scan failed (non-critical): %s", exc)
+        logger.debug(
+            "Orphan cleanup: unexpected error deleting %s %s: %s",
+            label, file_path, exc,
+            exc_info=True,
+        )
+        result["errors"].append({
+            "file": file_path,
+            "error": str(exc),
+        })
+    
+    return result
+
+
+def _delete_audio_group(audio_path: str, logger, result: dict, label: str) -> dict:
+    """Delete an audio file and its derived timestamps JSON + subtitles SRT.
+    
+    Returns updated result dict.
+    """
+    from pathlib import Path
+    ap = Path(audio_path)
+    result = _safe_delete_file(str(ap), logger, result, f"{label} MP3")
+    
+    stem_dir = ap.parent
+    stem = ap.stem
+    for suffix in ["_timestamps.json", "_subtitles.srt"]:
+        derived = stem_dir / f"{stem}{suffix}"
+        result = _safe_delete_file(str(derived), logger, result, f"{label} {suffix.lstrip('_')}")
+    return result
+
+
+def _extract_paths_from_image_path(image_path_value) -> list:
+    """Extract actual file paths from image_path, handling both formats.
+    
+    Format A (newer): plain string like 'output/video_clips/pexels_abc123.mp4'
+    Format B (legacy): dict repr like
+        {'path': PosixPath('output/video_clips/pexels_video_27239437.mp4'), ...}
+    """
+    import re as _re
+    if not image_path_value:
+        return []
+    
+    s = str(image_path_value).strip()
+    
+    # Plain path string — already normalized
+    if not s.startswith("{"):
+        return [s]
+    
+    # Legacy dict repr — try to extract path
+    match = _re.search(r"PosixPath\('([^']+)'\)", s)
+    if match:
+        return [match.group(1)]
+    
+    match = _re.search(r"'path'\s*:\s*'([^']+)'", s)
+    if match:
+        return [match.group(1)]
+    
+    return []
 
 
 def _detect_and_clean_orphans_sync():
     """Synchronous orphan detection logic (runs in thread pool).
     
-    Also prunes old cancelled/skipped planned slots and detects ghost workers
-    (worker processes whose job_id was deleted from the DB).
+    Detects orphaned jobs, ghost workers, stuck insights, and stale temp files.
+    Also prunes old cancelled/skipped planned slots.
+    
+    If accumulated failures exceed a threshold, generates a pipeline alert
+    via the lifecycle monitor for operator visibility.
     """
     import logging
     logger = logging.getLogger("autotube.orphans")
+    accumulated_errors = []
+    
     try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
         result = db.cleanup_orphaned_jobs(timeout_minutes=ORPHAN_TIMEOUT_MINUTES)
+        
+        # Collect any per-item errors from the DB-level cleanup
+        if result.get("errors"):
+            accumulated_errors.extend(result["errors"])
         
         if result["jobs_failed"] == 0 and result["videos_reset"] == 0:
             logger.debug("Orphan check: all clear")
@@ -1156,6 +1604,21 @@ def _detect_and_clean_orphans_sync():
         # cause the frontend InsightsTab to show an infinite loading screen.
         _cleanup_orphaned_insights(db, logger)
         
+        # ── Orphaned temp file cleanup ──
+        # After marking jobs/videos as orphaned in the DB, delete their
+        # temporary files from disk to free storage space.  This is
+        # non-blocking — file deletion failures are logged and skipped.
+        orphaned_jobs = result.get("details", [])
+        orphaned_videos = [
+            d for d in orphaned_jobs
+            if d.get("type") in ("orphan_video",)
+        ]
+        temp_cleanup_result = _cleanup_orphaned_temp_files(
+            db, orphaned_jobs, orphaned_videos, logger,
+        )
+        if temp_cleanup_result.get("errors"):
+            accumulated_errors.extend(temp_cleanup_result["errors"])
+        
         # Prune old cancelled/skipped slots (older than yesterday)
         prune_result = db.prune_old_slots()
         if prune_result.get("planned_slots_deleted") or prune_result.get("shorts_planned_slots_deleted"):
@@ -1164,8 +1627,47 @@ def _detect_and_clean_orphans_sync():
                 prune_result["planned_slots_deleted"],
                 prune_result["shorts_planned_slots_deleted"],
             )
+        
+        # ── Alert generation on accumulated failures ─────────
+        # If multiple errors accumulated across phases, raise a
+        # pipeline alert so operators can investigate.
+        ALERT_THRESHOLD = 3  # generate alert if ≥3 errors accumulated
+        if len(accumulated_errors) >= ALERT_THRESHOLD:
+            try:
+                from api.services.lifecycle_monitor import create_alert
+                error_summary = "\n".join(
+                    f"- {e.get('file', e.get('error', str(e)))}"
+                    for e in accumulated_errors[:10]  # cap at 10 entries
+                )
+                create_alert(
+                    db,
+                    entity_type="system",
+                    alert_type="orphan",
+                    severity="warning",
+                    title=f"Orphan cleanup: {len(accumulated_errors)} errors accumulated",
+                    message=f"Errors during orphan detection cycle:\n{error_summary}",
+                    metadata={
+                        "error_count": len(accumulated_errors),
+                        "errors": accumulated_errors[:20],
+                        "jobs_failed": result.get("jobs_failed", 0),
+                        "videos_reset": result.get("videos_reset", 0),
+                        "temp_files_deleted": temp_cleanup_result.get("files_deleted", 0),
+                        "temp_bytes_freed": temp_cleanup_result.get("bytes_freed", 0),
+                    },
+                )
+                logger.warning(
+                    "Orphan cleanup alert generated: %d errors accumulated",
+                    len(accumulated_errors),
+                )
+            except Exception as alert_exc:
+                logger.debug(
+                    "Orphan cleanup: failed to create alert: %s",
+                    alert_exc,
+                    exc_info=True,
+                )
     except Exception as exc:
         logger.error("Orphan detection failed: %s", exc)
+        logger.debug("Orphan detection traceback:", exc_info=True)
 
 
 async def _process_lifecycle_actions():

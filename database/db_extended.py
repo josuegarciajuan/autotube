@@ -2464,15 +2464,39 @@ class ExtendedDatabase(Database):
     def cleanup_orphaned_jobs(self, timeout_minutes: int = None) -> dict:
         """Detect and clean up orphaned generation jobs and videos.
         
-        Three types of orphans:
-        1. Jobs stuck in 'running' with no finished_at for > timeout_minutes
-           (video phase: 20 min; all others: 60 min).
-        2. Videos stuck in 'generating' with no active job for > timeout_minutes
-        3. Videos in 'error' with job still 'running' (zombie-thread race)
+        Four types of orphans:
+        1a. Video-phase jobs stuck in 'running' with stale heartbeat (or no
+            heartbeat + started > VIDEO_PHASE_TIMEOUT_MINUTES).
+        1b. Non-video-phase jobs stuck in 'running' (30 min heartbeat timeout
+            or 120 min started_at fallback).
+        2.  Videos in 'generating' with no active job for > timeout_minutes.
+        3.  Videos in 'error' with job still 'running' (zombie-thread race).
         
-        Returns a dict with counts of cleaned items.
+        Per-row error handling:
+        Each orphan row is processed in its own savepoint.  If a single row
+        fails (e.g., pipeline_log INSERT locked, foreign key violation on a
+        cascade-deleted channel), the error is logged at DEBUG with full
+        traceback and the next row continues — no single orphan can abort
+        the entire cleanup phase.
+        
+        Pipeline log INSERTs are retried up to 3 times with exponential
+        backoff (0.3s → 0.6s → 1.2s) for transient SQLITE_BUSY / locked
+        database errors.
+        
+        Expected error cases:
+          - sqlite3.OperationalError (database locked): INSERT into pipeline_log
+            fails under high write concurrency; retried with backoff.
+          - sqlite3.IntegrityError: channel or video row was cascade-deleted
+            between the SELECT and the UPDATE; caught, logged, and skipped.
+          - OSError (ProcessLookupError): worker PID already dead when
+            attempting SIGTERM/kill; caught silently (expected).
+          - sqlite3.ProgrammingError: connection closed mid-transaction by a
+            concurrent close event; per-row savepoints contain the damage.
+        
+        Returns a dict with counts of cleaned items and accumulated errors.
         """
         import logging
+        import time as _time
         logger = logging.getLogger("autotube.orphans")
         
         if timeout_minutes is None:
@@ -2480,7 +2504,129 @@ class ExtendedDatabase(Database):
         else:
             default_timeout = timeout_minutes
         
-        result = {"jobs_failed": 0, "videos_reset": 0, "details": []}
+        result = {"jobs_failed": 0, "videos_reset": 0, "details": [], "errors": []}
+        
+        # ── Pre-validate DB connection health ─────────────────
+        # Verify the database file exists and is writable before
+        # starting the long-running orphan scan.  Catches readonly
+        # filesystem or missing DB early.
+        try:
+            if not os.path.exists(DATABASE_PATH):
+                raise FileNotFoundError(
+                    f"Database file not found: {DATABASE_PATH}"
+                )
+            if not os.access(DATABASE_PATH, os.W_OK):
+                raise PermissionError(
+                    f"Database file not writable: {DATABASE_PATH}"
+                )
+        except (FileNotFoundError, PermissionError) as exc:
+            logger.error("Orphan cleanup aborted: %s", exc)
+            result["errors"].append({
+                "phase": "pre_validation",
+                "error": str(exc),
+            })
+            return result
+        
+        # ── Helper: retry pipeline_log INSERT with backoff ────
+        def _retry_pipeline_log_insert(conn, canal: str, message: str):
+            """Insert into pipeline_log with exponential backoff.
+            
+            Expected transient errors:
+              - sqlite3.OperationalError: database is locked (another writer).
+              - sqlite3.OperationalError: disk I/O error.
+            
+            On permanent failure (max retries exhausted), raises
+            the last exception for the per-row catch block to handle.
+            """
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    conn.execute(
+                        """INSERT INTO pipeline_log (canal, phase, status, message)
+                           VALUES (?, 'orphan_detector', 'error', ?)""",
+                        (canal, message),
+                    )
+                    return  # success
+                except sqlite3.OperationalError as exc:
+                    last_exc = exc
+                    if attempt < 2:
+                        delay = 0.3 * (2 ** attempt)  # 0.3s → 0.6s → 1.2s
+                        logger.debug(
+                            "pipeline_log INSERT retry %d/3 for %s: %s",
+                            attempt + 1, canal, exc,
+                            exc_info=True,
+                        )
+                        _time.sleep(delay)
+            raise last_exc
+        
+        # ── Helper: process one orphan row in its own savepoint ──
+        def _process_orphan_row(conn, r: dict, orphan_type: str, message: str):
+            """Execute UPDATEs + pipeline_log INSERT for one orphan row.
+            
+            Each row runs in a SAVEPOINT so a failure affects only
+            that row.  On error the savepoint is rolled back and
+            the error is accumulated in result["errors"].
+            """
+            sp_name = f"sp_orphan_{orphan_type}_{r.get('job_id', r.get('video_id', '?'))}"
+            try:
+                conn.execute(f"SAVEPOINT {sp_name}")
+                
+                # Mark job as failed
+                if orphan_type in ("orphan_job", "inconsistent_job", "zombie_thread_job"):
+                    error_msg = (
+                        f"Orphaned: process lost after {r['elapsed_sec']}s"
+                        if orphan_type == "orphan_job"
+                        else f"Video failed: associated video #{r['video_id']} is in 'error' state "
+                             f"(phase={r.get('video_progress_phase', '?')}, elapsed={r['elapsed_sec']}s)"
+                        if orphan_type == "zombie_thread_job"
+                        else "Inconsistent state: running with finished_at"
+                    )
+                    conn.execute(
+                        "UPDATE generation_jobs SET status='failed', "
+                        "error_msg=COALESCE(?, error_msg), finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (error_msg, r.get("job_id")),
+                    )
+                
+                # Mark associated video as error if still 'generating'
+                vid = r.get("video_id")
+                vid_status = r.get("video_status")
+                if vid and vid_status in ("generating", None) and orphan_type != "zombie_thread_job":
+                    yt_check = conn.execute(
+                        "SELECT yt_video_id FROM videos WHERE id=?", (vid,)
+                    ).fetchone()
+                    if not (yt_check and yt_check[0]):  # skip if already uploaded
+                        conn.execute(
+                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                            (vid,),
+                        )
+                        result["videos_reset"] += 1
+                
+                # Zombie jobs don't reset the video (it's already 'error')
+                if orphan_type == "zombie_thread_job":
+                    pass  # video stays as-is
+                
+                # Insert pipeline_log with retry
+                _retry_pipeline_log_insert(conn, r.get("channel_slug", "unknown"), message)
+                
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                return True
+            except Exception as exc:
+                try:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                except Exception:
+                    pass  # savepoint may not exist if error was before creation
+                logger.debug(
+                    "Orphan row %s failed: %s",
+                    orphan_type, exc,
+                    exc_info=True,
+                )
+                result["errors"].append({
+                    "type": orphan_type,
+                    "entity_id": r.get("job_id") or r.get("video_id"),
+                    "channel": r.get("channel_slug", "?"),
+                    "error": str(exc),
+                })
+                return False
         
         with self._connect() as conn:
             # ── Type 1: Jobs stuck in 'running' beyond timeout ──
@@ -2517,9 +2663,6 @@ class ExtendedDatabase(Database):
             
             # Type 1b: Non-video-phase jobs — heartbeat-aware when available,
             # fallback to generous started_at timeout when no heartbeats exist.
-            # Upload phase can emit heartbeats via the resumable upload callback;
-            # other phases (metadata, thumbnail) are short-lived and use the
-            # job-level started_at timeout.
             orphan_jobs = conn.execute("""
                 SELECT j.id as job_id, j.video_id, j.channel_id, j.phase, j.started_at,
                        j.last_heartbeat_at, j.worker_pid,
@@ -2555,12 +2698,6 @@ class ExtendedDatabase(Database):
                     r.get("worker_pid", "?"),
                 )
                 
-                # Mark job as failed
-                conn.execute(
-                    "UPDATE generation_jobs SET status='failed', error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (f"Orphaned: process lost after {r['elapsed_sec']}s", r["job_id"]),
-                )
-                
                 # ── Kill the orphaned worker process if we have its PID ──
                 worker_pid = r.get("worker_pid")
                 if worker_pid:
@@ -2572,8 +2709,6 @@ class ExtendedDatabase(Database):
                             r["job_id"], worker_pid,
                         )
                         _os.kill(worker_pid, _signal.SIGTERM)
-                        # Give it 5 seconds to die gracefully, then SIGKILL
-                        import time as _time
                         _time.sleep(2)
                         try:
                             _os.kill(worker_pid, 0)  # check if still alive
@@ -2583,46 +2718,28 @@ class ExtendedDatabase(Database):
                             )
                             _os.kill(worker_pid, _signal.SIGKILL)
                         except OSError:
-                            pass  # process already dead
+                            pass  # process already dead — expected
                     except OSError as exc:
                         logger.debug(
                             "Orphan job #%d: could not kill PID %d: %s",
                             r["job_id"], worker_pid, exc,
+                            exc_info=True,
                         )
                 
-                # Mark associated video as error if it's still 'generating'
-                if r["video_id"] and r["video_status"] == "generating":
-                    # Guard: never overwrite status if video was already uploaded (zombie-thread race)
-                    yt_check = conn.execute(
-                        "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
-                    ).fetchone()
-                    if yt_check and yt_check[0]:
-                        logger.warning(
-                            "Skipping orphan error for video #%d: already uploaded (yt=%s)",
-                            r["video_id"], yt_check[0])
-                    else:
-                        conn.execute(
-                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                            (r["video_id"],),
-                        )
-                        result["videos_reset"] += 1
-                
-                # Log to pipeline_log
-                conn.execute(
-                    """INSERT INTO pipeline_log (canal, phase, status, message)
-                       VALUES (?, 'orphan_detector', 'error', ?)""",
-                    (r["channel_slug"], f"Job #{r['job_id']} orphaned after {r['elapsed_sec']}s (phase={r['phase']})"),
-                )
-                
-                result["jobs_failed"] += 1
-                result["details"].append({
-                    "type": "orphan_job",
-                    "job_id": r["job_id"],
-                    "video_id": r["video_id"],
-                    "channel": r["channel_slug"],
-                    "elapsed_sec": r["elapsed_sec"],
-                    "phase": r["phase"],
-                })
+                # ── Process row in its own savepoint ──────────
+                if _process_orphan_row(
+                    conn, r, "orphan_job",
+                    f"Job #{r['job_id']} orphaned after {r['elapsed_sec']}s (phase={r['phase']})",
+                ):
+                    result["jobs_failed"] += 1
+                    result["details"].append({
+                        "type": "orphan_job",
+                        "job_id": r["job_id"],
+                        "video_id": r["video_id"],
+                        "channel": r["channel_slug"],
+                        "elapsed_sec": r["elapsed_sec"],
+                        "phase": r["phase"],
+                    })
             
             # ── Type 1b: Jobs with inconsistent state (running + finished_at set) ──
             # These happen when update_job() set finished_at on a 'failed' transition
@@ -2648,47 +2765,23 @@ class ExtendedDatabase(Database):
                     r["job_id"], r["channel_slug"], r["video_id"], r["phase"], r["elapsed_sec"]
                 )
                 
-                # Mark job as failed (status was wrong)
-                conn.execute(
-                    "UPDATE generation_jobs SET status='failed', error_msg=COALESCE(error_msg, 'Inconsistent state: running with finished_at') WHERE id=?",
-                    (r["job_id"],),
-                )
-                
-                # Mark associated video as error if it's still 'generating'
-                if r["video_id"] and r["video_status"] == "generating":
-                    # Guard: never overwrite status if video was already uploaded
-                    yt_check = conn.execute(
-                        "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
-                    ).fetchone()
-                    if yt_check and yt_check[0]:
-                        logger.warning(
-                            "Skipping inconsistent error for video #%d: already uploaded (yt=%s)",
-                            r["video_id"], yt_check[0])
-                    else:
-                        conn.execute(
-                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                            (r["video_id"],),
-                        )
-                        result["videos_reset"] += 1
-                
-                # Log to pipeline_log
-                conn.execute(
-                    """INSERT INTO pipeline_log (canal, phase, status, message)
-                       VALUES (?, 'orphan_detector', 'error', ?)""",
-                    (r["channel_slug"],
-                     f"Inconsistent job #{r['job_id']}: running with finished_at set ({r['elapsed_sec']}s since finish, error={r['error_msg'][:80] if r['error_msg'] else 'unknown'})"),
-                )
-                
-                result["jobs_failed"] += 1
-                result["details"].append({
-                    "type": "inconsistent_job",
-                    "job_id": r["job_id"],
-                    "video_id": r["video_id"],
-                    "channel": r["channel_slug"],
-                    "elapsed_sec": r["elapsed_sec"],
-                    "phase": r["phase"],
-                    "error_msg": r["error_msg"][:200] if r["error_msg"] else None,
-                })
+                # Per-row savepoint with non-blocking error handling
+                if _process_orphan_row(
+                    conn, r, "inconsistent_job",
+                    f"Inconsistent job #{r['job_id']}: running with finished_at set "
+                    f"({r['elapsed_sec']}s since finish, "
+                    f"error={r['error_msg'][:80] if r['error_msg'] else 'unknown'})",
+                ):
+                    result["jobs_failed"] += 1
+                    result["details"].append({
+                        "type": "inconsistent_job",
+                        "job_id": r["job_id"],
+                        "video_id": r["video_id"],
+                        "channel": r["channel_slug"],
+                        "elapsed_sec": r["elapsed_sec"],
+                        "phase": r["phase"],
+                        "error_msg": r["error_msg"][:200] if r["error_msg"] else None,
+                    })
             
             # ── Type 2: Videos in 'generating' with no active job ──
             orphan_videos = conn.execute("""
@@ -2712,34 +2805,54 @@ class ExtendedDatabase(Database):
                     r["video_id"], r["channel_slug"], r["elapsed_sec"]
                 )
                 
-                # Guard: never overwrite status if video was already uploaded
-                yt_check = conn.execute(
-                    "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
-                ).fetchone()
-                if yt_check and yt_check[0]:
-                    logger.warning(
-                        "Skipping orphan error for video #%d: already uploaded (yt=%s)",
-                        r["video_id"], yt_check[0])
-                else:
-                    conn.execute(
-                        "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
-                        (r["video_id"],),
+                # Per-row savepoint (video-only orphan, no job row)
+                sp_name = f"sp_orphan_video_{r['video_id']}"
+                try:
+                    conn.execute(f"SAVEPOINT {sp_name}")
+                    
+                    # Guard: never overwrite status if video was already uploaded
+                    yt_check = conn.execute(
+                        "SELECT yt_video_id FROM videos WHERE id=?", (r["video_id"],)
+                    ).fetchone()
+                    if yt_check and yt_check[0]:
+                        logger.warning(
+                            "Skipping orphan error for video #%d: already uploaded (yt=%s)",
+                            r["video_id"], yt_check[0])
+                    else:
+                        conn.execute(
+                            "UPDATE videos SET status='error', progress_phase='orphaned' WHERE id=?",
+                            (r["video_id"],),
+                        )
+                    
+                    _retry_pipeline_log_insert(
+                        conn, r["channel_slug"],
+                        f"Video #{r['video_id']} orphaned after {r['elapsed_sec']}s (no active job)",
                     )
+                    
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                     result["videos_reset"] += 1
-                
-                conn.execute(
-                    """INSERT INTO pipeline_log (canal, phase, status, message)
-                       VALUES (?, 'orphan_detector', 'error', ?)""",
-                    (r["channel_slug"], f"Video #{r['video_id']} orphaned after {r['elapsed_sec']}s (no active job)"),
-                )
-                
-                result["videos_reset"] += 1
-                result["details"].append({
-                    "type": "orphan_video",
-                    "video_id": r["video_id"],
-                    "channel": r["channel_slug"],
-                    "elapsed_sec": r["elapsed_sec"],
-                })
+                    result["details"].append({
+                        "type": "orphan_video",
+                        "video_id": r["video_id"],
+                        "channel": r["channel_slug"],
+                        "elapsed_sec": r["elapsed_sec"],
+                    })
+                except Exception as exc:
+                    try:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    except Exception:
+                        pass
+                    logger.debug(
+                        "Orphan video #%d failed: %s",
+                        r["video_id"], exc,
+                        exc_info=True,
+                    )
+                    result["errors"].append({
+                        "type": "orphan_video",
+                        "video_id": r["video_id"],
+                        "channel": r.get("channel_slug", "?"),
+                        "error": str(exc),
+                    })
             
             # ── Type 3: Videos in 'error' with job still 'running' ──
             # This catches the race condition where a zombie pipeline thread
@@ -2767,36 +2880,33 @@ class ExtendedDatabase(Database):
                     r["phase"], r["elapsed_sec"]
                 )
                 
-                conn.execute(
-                    "UPDATE generation_jobs SET status='failed', error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (f"Video failed: associated video #{r['video_id']} is in 'error' state "
-                     f"(phase={r['video_progress_phase']}, elapsed={r['elapsed_sec']}s)", r["job_id"]),
-                )
-                
-                conn.execute(
-                    """INSERT INTO pipeline_log (canal, phase, status, message)
-                       VALUES (?, 'orphan_detector', 'error', ?)""",
-                    (r["channel_slug"],
-                     f"Zombie-thread job #{r['job_id']} resolved: video #{r['video_id']} "
-                     f"was already 'error' ({r['video_progress_phase']}) after {r['elapsed_sec']}s"),
-                )
-                
-                result["jobs_failed"] += 1
-                result["details"].append({
-                    "type": "zombie_thread_job",
-                    "job_id": r["job_id"],
-                    "video_id": r["video_id"],
-                    "channel": r["channel_slug"],
-                    "elapsed_sec": r["elapsed_sec"],
-                    "video_progress_phase": r["video_progress_phase"],
-                })
+                if _process_orphan_row(
+                    conn, r, "zombie_thread_job",
+                    f"Zombie-thread job #{r['job_id']} resolved: video #{r['video_id']} "
+                    f"was already 'error' ({r['video_progress_phase']}) after {r['elapsed_sec']}s",
+                ):
+                    result["jobs_failed"] += 1
+                    result["details"].append({
+                        "type": "zombie_thread_job",
+                        "job_id": r["job_id"],
+                        "video_id": r["video_id"],
+                        "channel": r["channel_slug"],
+                        "elapsed_sec": r["elapsed_sec"],
+                        "video_progress_phase": r["video_progress_phase"],
+                    })
             
             conn.commit()
         
         if result["jobs_failed"] > 0 or result["videos_reset"] > 0:
             logger.info(
-                "Orphan cleanup complete: %d jobs failed, %d videos reset",
-                result["jobs_failed"], result["videos_reset"]
+                "Orphan cleanup complete: %d jobs failed, %d videos reset, %d errors",
+                result["jobs_failed"], result["videos_reset"], len(result["errors"])
+            )
+        
+        if result["errors"]:
+            logger.warning(
+                "Orphan cleanup: %d per-row error(s) occurred (details in result['errors'])",
+                len(result["errors"]),
             )
         
         return result

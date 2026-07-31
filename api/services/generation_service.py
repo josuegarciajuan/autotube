@@ -126,6 +126,16 @@ def _kill_orphaned_ffmpeg():
        SKIPPED when a render is active to avoid killing legitimate ffmpeg workers.
     2. Kill ffmpeg processes whose PPID is 1 (true init orphans).
        Always runs — these are truly orphaned regardless of render state.
+    
+    Also cleans orphaned edge-tts and yt-dlp subprocesses, and reaps
+    zombie children to prevent <defunct> process accumulation.
+    
+    Expected error cases (non-blocking, logged at DEBUG):
+      - subprocess.CalledProcessError: pgrep not available (minimal container).
+      - subprocess.TimeoutExpired: process table contention causing pgrep hang.
+      - ProcessLookupError: process died between pgrep and kill (normal race).
+      - ValueError: garbage PID from pgrep output (should never happen).
+      - ChildProcessError: no children to reap (normal, no zombies).
     """
     killed = 0
     try:
@@ -144,9 +154,17 @@ def _kill_orphaned_ffmpeg():
                         os.kill(int(cpid), 9)
                         killed += 1
                     except ProcessLookupError:
-                        pass
-    except Exception:
-        pass
+                        pass  # expected: process died between pgrep and kill
+                    except ValueError as exc:
+                        logger.debug(
+                            "Orphan ffmpeg: invalid PID '%s' from pgrep: %s",
+                            cpid, exc,
+                            exc_info=True,
+                        )
+    except subprocess.TimeoutExpired as exc:
+        logger.debug("Orphan ffmpeg layer 1: pgrep timed out: %s", exc, exc_info=True)
+    except Exception as exc:
+        logger.debug("Orphan ffmpeg layer 1: pgrep failed: %s", exc, exc_info=True)
 
     try:
         # Layer 2: true orphans (parent is init/pid 1)
@@ -161,9 +179,17 @@ def _kill_orphaned_ffmpeg():
                     os.kill(int(opid), 9)
                     killed += 1
                 except ProcessLookupError:
-                    pass
-    except Exception:
-        pass
+                    pass  # expected: process died between pgrep and kill
+                except ValueError as exc:
+                    logger.debug(
+                        "Orphan ffmpeg layer 2: invalid PID '%s' from pgrep: %s",
+                        opid, exc,
+                        exc_info=True,
+                    )
+    except subprocess.TimeoutExpired as exc:
+        logger.debug("Orphan ffmpeg layer 2: pgrep timed out: %s", exc, exc_info=True)
+    except Exception as exc:
+        logger.debug("Orphan ffmpeg layer 2: pgrep failed: %s", exc, exc_info=True)
 
     if killed > 0:
         logger.warning(
@@ -191,10 +217,18 @@ def _kill_orphaned_ffmpeg():
                         if ppid in (1, os.getpid()):
                             os.kill(int(opid), 9)
                             killed += 1
-                    except (ProcessLookupError, ValueError):
-                        pass
-        except Exception:
-            pass
+                    except ProcessLookupError:
+                        pass  # expected: process died between pgrep and kill
+                    except (ValueError, subprocess.TimeoutExpired) as exc:
+                        logger.debug(
+                            "Orphan %s: PID %s could not be killed: %s",
+                            label, opid, exc,
+                            exc_info=True,
+                        )
+        except subprocess.TimeoutExpired as exc:
+            logger.debug("Orphan %s: pgrep timed out: %s", label, exc, exc_info=True)
+        except Exception as exc:
+            logger.debug("Orphan %s: scan failed (non-critical): %s", label, exc, exc_info=True)
 
     if killed > 0:
         logger.warning(
@@ -202,13 +236,17 @@ def _kill_orphaned_ffmpeg():
         )
 
     # ── Reap zombie children to prevent <defunct> processes ──
+    # Expected: ChildProcessError when no children exist, OSError for
+    # any other waitpid failure (both normal and non-blocking).
     try:
         while True:
             wpid, _ = os.waitpid(-1, os.WNOHANG)
             if wpid == 0:
                 break
-    except (ChildProcessError, OSError):
-        pass
+    except ChildProcessError:
+        pass  # expected: no children to reap
+    except OSError as exc:
+        logger.debug("Orphan ffmpeg: waitpid failed: %s", exc, exc_info=True)
 
 
 def _kill_orphaned_workers(logger) -> int:
@@ -219,34 +257,118 @@ def _kill_orphaned_workers(logger) -> int:
     stuck API calls, etc.).
 
     Returns the number of workers killed.
+    
+    Expected error cases (non-blocking, logged at DEBUG):
+      - FileNotFoundError: DATABASE_PATH does not exist (DB not initialized).
+      - PermissionError: DB file not readable/writable (permissions changed).
+      - sqlite3.OperationalError: DB locked or corrupted on connect; retried
+        up to 3 times with exponential backoff (0.5s -> 1s -> 2s).
+      - subprocess.TimeoutExpired: ps/pgrep hung (process table contention).
+      - OSError: kill failed because process already exited (normal race).
     """
+    import sqlite3
+    import os as _os
+    import time as _time
+    from config.settings import DATABASE_PATH
+    
     killed = 0
+    
+    # ── Pre-validate DB file existence and permissions ───────
+    if not _os.path.exists(DATABASE_PATH):
+        logger.debug(
+            "Orphan workers: DB file not found at %s — skipping worker check",
+            DATABASE_PATH,
+        )
+        return 0
+    if not _os.access(DATABASE_PATH, _os.R_OK | _os.W_OK):
+        logger.debug(
+            "Orphan workers: DB file not readable/writable at %s — skipping worker check",
+            DATABASE_PATH,
+        )
+        return 0
+    
+    # ── External connection: sqlite3.connect with retry ──────
+    # Retry up to 3 times for transient errors (SQLITE_BUSY, disk I/O).
+    db_conn = None
+    last_db_exc = None
+    for attempt in range(3):
+        try:
+            db_conn = sqlite3.connect(DATABASE_PATH)
+            db_conn.row_factory = sqlite3.Row
+            break
+        except sqlite3.OperationalError as exc:
+            last_db_exc = exc
+            if attempt < 2:
+                delay = 0.5 * (2 ** attempt)  # 0.5s → 1s → 2s
+                logger.debug(
+                    "Orphan workers: DB connect retry %d/3: %s",
+                    attempt + 1, exc,
+                    exc_info=True,
+                )
+                _time.sleep(delay)
+        except Exception as exc:
+            last_db_exc = exc
+            logger.debug(
+                "Orphan workers: DB connect failed (attempt %d/3): %s",
+                attempt + 1, exc,
+                exc_info=True,
+            )
+            if attempt < 2:
+                _time.sleep(0.5 * (2 ** attempt))
+    
+    if db_conn is None:
+        logger.debug(
+            "Orphan workers: DB connect failed after 3 attempts: %s",
+            last_db_exc,
+        )
+        return 0
+    
     try:
-        import sqlite3
-        # Get all running job IDs from the DB
-        from config.settings import DATABASE_PATH
-        conn = sqlite3.connect(DATABASE_PATH)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
+        cur = db_conn.cursor()
         running_jobs = set(
             row["id"] for row in cur.execute(
                 "SELECT id FROM generation_jobs WHERE status='running'"
             ).fetchall()
         )
-        conn.close()
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "Orphan workers: DB query for running jobs failed: %s",
+            exc,
+            exc_info=True,
+        )
         running_jobs = set()
+    finally:
+        db_conn.close()
 
     if not running_jobs:
         logger.debug("No running jobs in DB — will clean any stale worker processes")
 
-    # Find all worker processes
-    try:
-        result = subprocess.run(
-            ["ps", "-eo", "pid,args", "--no-headers"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
+    # ── External connection: ps (process listing) with retry ──
+    # Find all worker processes. Retry up to 2 times on timeout.
+    result = None
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid,args", "--no-headers"],
+                capture_output=True, text=True, timeout=5,
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            logger.debug(
+                "Orphan workers: ps timed out (attempt %d/2): %s",
+                attempt + 1, exc,
+                exc_info=True,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Orphan workers: ps failed (attempt %d/2): %s",
+                attempt + 1, exc,
+                exc_info=True,
+            )
+            if attempt < 1:
+                _time.sleep(1)
+    if result is None:
+        logger.debug("Orphan workers: ps failed after retries — skipping worker check")
         return 0
 
     for line in result.stdout.strip().split("\n"):
@@ -260,7 +382,12 @@ def _kill_orphaned_workers(logger) -> int:
             continue
         try:
             pid = int(parts[0])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as exc:
+            logger.debug(
+                "Orphan workers: invalid PID from ps output: %s",
+                exc,
+                exc_info=True,
+            )
             continue
 
         # Extract job-id from command line
@@ -272,10 +399,16 @@ def _kill_orphaned_workers(logger) -> int:
                 pid,
             )
             try:
-                os.kill(pid, signal.SIGTERM)
+                _os.kill(pid, signal.SIGTERM)
                 killed += 1
-            except OSError:
-                pass
+            except ProcessLookupError:
+                pass  # expected: process died between detection and kill
+            except OSError as exc:
+                logger.debug(
+                    "Orphan workers: kill failed for PID %d: %s",
+                    pid, exc,
+                    exc_info=True,
+                )
             continue
 
         job_id = int(job_match.group(1))
@@ -285,17 +418,22 @@ def _kill_orphaned_workers(logger) -> int:
                 pid, job_id,
             )
             try:
-                os.kill(pid, signal.SIGTERM)
-                import time as _time
+                _os.kill(pid, signal.SIGTERM)
                 _time.sleep(2)
                 try:
-                    os.kill(pid, 0)
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                    _os.kill(pid, 0)
+                    _os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # expected: process already exited
                 killed += 1
-            except OSError:
-                pass
+            except ProcessLookupError:
+                pass  # expected: process died between detection and kill
+            except OSError as exc:
+                logger.debug(
+                    "Orphan workers: kill failed for PID %d (job %d): %s",
+                    pid, job_id, exc,
+                    exc_info=True,
+                )
 
             # ── Clean up DB state for this orphaned worker ──
             # The worker was killed but the job/video may still be
@@ -303,45 +441,66 @@ def _kill_orphaned_workers(logger) -> int:
             # doesn't show phantom active generations.
             try:
                 import sqlite3 as _sql3
+                
+                # Reuse the pre-validation from above
+                if not _os.path.exists(DATABASE_PATH) or not _os.access(DATABASE_PATH, _os.R_OK | _os.W_OK):
+                    logger.debug(
+                        "Orphan workers: cannot clean DB state for job %d — DB not accessible",
+                        job_id,
+                    )
+                    continue
+                
                 _conn2 = _sql3.connect(DATABASE_PATH)
                 _conn2.row_factory = _sql3.Row
-                _cur2 = _conn2.cursor()
-                _job_row = _cur2.execute(
-                    "SELECT id, status, video_id FROM generation_jobs WHERE id=?",
-                    (job_id,),
-                ).fetchone()
-                if _job_row:
-                    _job_status = _job_row["status"]
-                    _video_id = _job_row["video_id"]
-                    if _job_status not in ("completed", "failed", "cancelled"):
-                        _cur2.execute(
-                            "UPDATE generation_jobs SET status='failed', "
-                            "error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                            ("Orphaned: worker killed by pre-spawn cleanup", job_id),
-                        )
-                    if _video_id:
-                        _vid = _cur2.execute(
-                            "SELECT status FROM videos WHERE id=?", (_video_id,),
-                        ).fetchone()
-                        if _vid and _vid["status"] == "generating":
-                            _yt = _cur2.execute(
-                                "SELECT yt_video_id FROM videos WHERE id=?", (_video_id,),
+                try:
+                    _cur2 = _conn2.cursor()
+                    _job_row = _cur2.execute(
+                        "SELECT id, status, video_id FROM generation_jobs WHERE id=?",
+                        (job_id,),
+                    ).fetchone()
+                    if _job_row:
+                        _job_status = _job_row["status"]
+                        _video_id = _job_row["video_id"]
+                        if _job_status not in ("completed", "failed", "cancelled"):
+                            _cur2.execute(
+                                "UPDATE generation_jobs SET status='failed', "
+                                "error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                ("Orphaned: worker killed by pre-spawn cleanup", job_id),
+                            )
+                        if _video_id:
+                            _vid = _cur2.execute(
+                                "SELECT status FROM videos WHERE id=?", (_video_id,),
                             ).fetchone()
-                            if not (_yt and _yt[0]):
-                                _cur2.execute(
-                                    "UPDATE videos SET status='error', "
-                                    "progress_phase='orphaned' WHERE id=?",
-                                    (_video_id,),
-                                )
-                                logger.warning(
-                                    "Orphan cleanup: video #%d reset to error/orphaned "
-                                    "(job #%d worker killed)",
-                                    _video_id, job_id,
-                                )
-                _conn2.commit()
-                _conn2.close()
-            except Exception:
-                pass
+                            if _vid and _vid["status"] == "generating":
+                                _yt = _cur2.execute(
+                                    "SELECT yt_video_id FROM videos WHERE id=?", (_video_id,),
+                                ).fetchone()
+                                if not (_yt and _yt[0]):
+                                    _cur2.execute(
+                                        "UPDATE videos SET status='error', "
+                                        "progress_phase='orphaned' WHERE id=?",
+                                        (_video_id,),
+                                    )
+                                    logger.warning(
+                                        "Orphan cleanup: video #%d reset to error/orphaned "
+                                        "(job #%d worker killed)",
+                                        _video_id, job_id,
+                                    )
+                    _conn2.commit()
+                except sqlite3.OperationalError as exc:
+                    logger.debug(
+                        "Orphan workers: DB state cleanup failed for job %d: %s",
+                        job_id, exc,
+                        exc_info=True,
+                    )
+                finally:
+                    _conn2.close()
+            except Exception as exc:
+                logger.debug(
+                    "Orphan workers: DB state cleanup failed for job %d: %s",
+                    job_id, exc,
+                    exc_info=True,
+                )
 
     if killed > 0:
         logger.warning("Killed %d orphaned worker process(es)", killed)
@@ -350,14 +509,21 @@ def _kill_orphaned_workers(logger) -> int:
 
 
 def _get_ffmpeg_pids() -> set[int]:
-    """Return PIDs of all running ffmpeg processes right now."""
+    """Return PIDs of all running ffmpeg processes right now.
+    
+    Expected error cases (non-blocking, returns empty set):
+      - subprocess.TimeoutExpired: pgrep hung (process table contention).
+      - FileNotFoundError: pgrep binary not available (minimal container).
+      - ValueError: garbage PID from pgrep output (should never happen).
+    """
     try:
         r = subprocess.run(
             ["pgrep", "-f", "ffmpeg"],
             capture_output=True, text=True, timeout=3,
         )
         return {int(p) for p in r.stdout.strip().split() if p}
-    except Exception:
+    except Exception as exc:
+        logger.debug("_get_ffmpeg_pids: pgrep failed: %s", exc, exc_info=True)
         return set()
 
 
