@@ -751,6 +751,13 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         native_count = sc.get("shorts_native_per_day", 3)
         clips_per_long = sc.get("shorts_clips_per_long", 3)
 
+        # ── v25: One-day native short compensation (2026-07-31 only) ──
+        # All clip shorts for today were cancelled (switching to pre-render model).
+        # Add 2 extra native shorts per channel to compensate, surviving any
+        # scheduler regeneration (baked into compute_daily_shorts_slots).
+        if date_str == '2026-07-31':
+            native_count += 2
+
         if native_count == 0 and clips_per_long == 0:
             continue
 
