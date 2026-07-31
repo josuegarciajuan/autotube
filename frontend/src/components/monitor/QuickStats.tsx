@@ -1,4 +1,4 @@
-import { TrendingUp, Clock, Target, Zap } from 'lucide-react'
+import { TrendingUp, Clock, Target, Zap, ShieldCheck } from 'lucide-react'
 import { useMonitorDashboard } from '../../hooks/useQueries'
 
 interface QuickStatsData {
@@ -24,8 +24,14 @@ export default function QuickStats() {
     } catch { return iso }
   }
 
+  const sh = (monitorData as any)?.script_health
+  const scriptHealthPct = sh ? `${(100 - (sh.error_rate_7d || 0)).toFixed(0)}%` : '--'
+  const scriptHealthSuffix = sh?.failures_24h !== undefined
+    ? `${sh.failures_24h} fallos 24h${sh.emergency_24h ? ` / ${sh.emergency_24h} emerg.` : ''}`
+    : ''
+
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
       <StatCard
         icon={<TrendingUp size={14} className="text-emerald-400" />}
         label="Generados hoy"
@@ -49,6 +55,12 @@ export default function QuickStats() {
         label="Próximo slot"
         value={data?.next_slot ? data.next_slot.channel : '--'}
         suffix={data?.next_slot?.at ? fmtDate(data.next_slot.at) : 'sin programar'}
+      />
+      <StatCard
+        icon={<ShieldCheck size={14} className="text-emerald-400" />}
+        label="Script Gen 7d"
+        value={scriptHealthPct}
+        suffix={scriptHealthSuffix}
       />
     </div>
   )

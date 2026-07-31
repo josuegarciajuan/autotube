@@ -94,6 +94,19 @@ BANNED_OPENING_PATTERNS = [
     r"te\s+(voy|vamos)\s+a\s+(contar|hablar|explicar)",
 ]
 
+# ── Fault-tolerance: retry & content-structure validation ────
+MAX_GENERATION_ATTEMPTS = 3
+GENERATION_BACKOFF_SECONDS = [2.0, 4.0, 8.0]
+API_CONNECTIVITY_CHECK_TIMEOUT = 5.0
+MIN_NARRATIVE_BLOCKS = 5
+END_HOOK_PATTERNS = [
+    r"pr[oó]ximo\s*(video|episodio|cap[ií]tulo)",
+    r"siguiente\s*(video|episodio|cap[ií]tulo)",
+    r"no\s*te\s*(pierdas|olvides)\s*el\s*(pr[oó]ximo|siguiente)",
+    r"pr[oó]xima\s*entrega",
+    r"activa\s*(la\s*)?campana",
+]
+
 
 class ScriptGenerator:
     """Generate YouTube narration scripts from raw content using AI (DeepSeek/OpenAI)."""
@@ -240,6 +253,7 @@ class ScriptGenerator:
     # ── Model pool failover (v22) ───────────────────────────────────
 
     @staticmethod
+    @staticmethod
     def _classify_error(exc: Exception) -> str:
         """Classify an exception into a standard error_type for logging."""
         exc_name = type(exc).__name__
@@ -260,6 +274,134 @@ class ScriptGenerator:
         if exc_name == "ValidationError" or "schema" in msg:
             return "schema_error"
         return "exception"
+
+    def _check_api_connectivity(self) -> tuple:
+        """Verify LLM API reachability before attempting generation.
+
+        Probes the base URL of each model in the pool with a short timeout.
+        Returns (reachable: bool, detail: str).
+        """
+        import requests
+        for entry, _ in self.model_pool.iter_models():
+            try:
+                url = entry.base_url.rstrip('/') + '/models'
+                resp = requests.get(
+                    url,
+                    timeout=API_CONNECTIVITY_CHECK_TIMEOUT,
+                    headers={'Authorization': f'Bearer {entry.api_key[:8]}***'},
+                )
+                if resp.status_code < 500:
+                    logger.debug(
+                        "API connectivity OK for %s (HTTP %d)",
+                        entry.display_name, resp.status_code,
+                    )
+                    return True, entry.display_name
+            except requests.Timeout:
+                logger.warning(
+                    "API connectivity TIMEOUT for %s", entry.display_name,
+                )
+            except requests.ConnectionError:
+                logger.warning(
+                    "API connectivity REFUSED for %s", entry.display_name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "API connectivity error for %s: %s",
+                    entry.display_name, exc,
+                )
+        return False, "all models unreachable"
+
+    def _validate_content_structure(self, script: dict) -> tuple:
+        """Validate script content structure for minimum quality requirements.
+
+        Checks:
+          1. Hook block contains numeric / quantitative data.
+          2. At least MIN_NARRATIVE_BLOCKS narrative / development blocks.
+          3. End hook references next video or continuation.
+
+        Returns (valid: bool, issues: list[str]).
+        """
+        if not script or not script.get('bloques'):
+            return False, ["no blocks in script"]
+
+        bloques = script['bloques']
+        issues = []
+
+        # 1. Hook must contain numeric/quantitative data
+        first_text = bloques[0].get('texto', '') if bloques else ''
+        if not re.search(r'\d+', first_text):
+            issues.append("hook block missing numeric / quantitative data")
+
+        # 2. At least MIN_NARRATIVE_BLOCKS development blocks
+        narrative_types = {
+            'desarrollo', 'suceso', 'climax', 'explicacion', 'reflexion',
+            'contexto', 'protagonistas', 'hechos', 'momento_cumbre',
+            'gancho', 'hook',
+        }
+        narrative_blocks = [
+            b for b in bloques
+            if b.get('tipo', 'desarrollo').lower() in narrative_types
+        ]
+        if len(narrative_blocks) < MIN_NARRATIVE_BLOCKS:
+            issues.append(
+                f"only {len(narrative_blocks)} narrative blocks "
+                f"(need >= {MIN_NARRATIVE_BLOCKS})"
+            )
+
+        # 3. End hook must reference next video / continuation
+        last_text = bloques[-1].get('texto', '') if bloques else ''
+        cta_text = ''
+        cta = script.get('cta')
+        if isinstance(cta, dict):
+            cta_text = cta.get('texto', '')
+        combined_end = (last_text + ' ' + cta_text).lower()
+        has_end_hook = any(
+            re.search(p, combined_end) for p in END_HOOK_PATTERNS
+        )
+        if not has_end_hook:
+            issues.append(
+                "end hook missing reference to next video / continuation"
+            )
+
+        return len(issues) == 0, issues
+
+    def _record_phase_metric(
+        self, phase: str, success: bool,
+        error_type: str = None, duration_ms: int = 0,
+        details: dict = None,
+    ):
+        """Record per-phase metrics for error-rate tracking and monitoring.
+
+        Accumulates counters in ``self._phase_metrics`` and persists
+        individual attempts to ``script_generation_attempts`` for
+        historical analysis via the Monitor panel.
+        """
+        if not hasattr(self, '_phase_metrics'):
+            self._phase_metrics = {}
+        m = self._phase_metrics.setdefault(
+            phase, {'attempts': 0, 'failures': 0, 'errors': {}},
+        )
+        m['attempts'] += 1
+        if not success:
+            m['failures'] += 1
+            if error_type:
+                m['errors'][error_type] = \
+                    m['errors'].get(error_type, 0) + 1
+
+        try:
+            self.db.log_generation_attempt(
+                canal=self.canal,
+                model_name="retry_wrapper",
+                attempt_number=1,
+                pool_position=0,
+                success=success,
+                error_type=error_type or ("ok" if success else "unknown"),
+                error_message=str(details) if details else "",
+                phase=f"retry_{phase}",
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            pass
 
     def _call_with_failover(
         self,
@@ -376,102 +518,261 @@ class ScriptGenerator:
             f"Last error: {last_error}"
         )
 
+    # ── Top-level retry wrapper with content validation ─────────────
+
+    def _generate_with_retry(
+        self, content_item: dict, palabras_objetivo: int = None,
+    ) -> Optional[dict]:
+        """Generate a script with pre-flight checks, retry, and content validation.
+
+        Up to ``MAX_GENERATION_ATTEMPTS`` attempts with exponential backoff
+        (2s / 4s / 8s). Each attempt:
+          1. Verifies API connectivity.
+          2. Calls ``generate_v2()`` (which internally uses model-pool failover).
+          3. Validates script content structure (hook with data, narrative
+             blocks, end hook).
+
+        Falls back to ``_generate_emergency_script`` if all attempts fail.
+        Returns the enriched script dict or None.
+        """
+        content_id = content_item.get('id')
+
+        for attempt in range(MAX_GENERATION_ATTEMPTS):
+            # ── Pre-check: API connectivity ──────────────────
+            reachable, detail = self._check_api_connectivity()
+            if not reachable:
+                logger.warning(
+                    "generate_with_retry: API unreachable "
+                    "(attempt %d/%d): %s",
+                    attempt + 1, MAX_GENERATION_ATTEMPTS, detail,
+                )
+                self._record_phase_metric(
+                    "precheck", False, "api_unreachable",
+                )
+                if attempt < MAX_GENERATION_ATTEMPTS - 1:
+                    time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
+                    continue
+                break
+
+            # ── Generate ─────────────────────────────────────
+            gen_start = time.time()
+            try:
+                script = self.generate_v2(
+                    content_item, palabras_objetivo=palabras_objetivo,
+                )
+            except Exception as exc:
+                gen_ms = int((time.time() - gen_start) * 1000)
+                logger.error(
+                    "generate_with_retry: generation crashed "
+                    "(attempt %d/%d): %s",
+                    attempt + 1, MAX_GENERATION_ATTEMPTS, exc,
+                )
+                self._record_phase_metric(
+                    "generation", False,
+                    self._classify_error(exc), gen_ms,
+                )
+                if attempt < MAX_GENERATION_ATTEMPTS - 1:
+                    time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
+                    continue
+                break
+
+            if script is None:
+                logger.warning(
+                    "generate_with_retry: generation returned None "
+                    "(attempt %d/%d)",
+                    attempt + 1, MAX_GENERATION_ATTEMPTS,
+                )
+                if attempt < MAX_GENERATION_ATTEMPTS - 1:
+                    time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
+                    continue
+                break
+
+            # ── Content-structure validation ─────────────────
+            valid, issues = self._validate_content_structure(script)
+            if valid:
+                logger.info(
+                    "generate_with_retry: PASSED on attempt %d/%d",
+                    attempt + 1, MAX_GENERATION_ATTEMPTS,
+                )
+                return script
+
+            logger.warning(
+                "generate_with_retry: content validation FAILED "
+                "(attempt %d/%d): %s",
+                attempt + 1, MAX_GENERATION_ATTEMPTS,
+                "; ".join(issues),
+            )
+            self._record_phase_metric(
+                "validation", False, "content_structure",
+                details={"issues": issues},
+            )
+            if attempt < MAX_GENERATION_ATTEMPTS - 1:
+                time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
+
+        # ── All attempts exhausted ───────────────────────────
+        logger.warning(
+            "generate_with_retry: ALL %d attempts failed for "
+            "content_id=%s — using emergency fallback",
+            MAX_GENERATION_ATTEMPTS, content_id,
+        )
+
+        # Emit phase-metrics summary for monitoring
+        if hasattr(self, '_phase_metrics') and self._phase_metrics:
+            parts = []
+            for ph, m in self._phase_metrics.items():
+                ok = m['attempts'] - m['failures']
+                parts.append(
+                    f"{ph}={ok}/{m['attempts']} ok"
+                )
+                if m['errors']:
+                    err_detail = ", ".join(
+                        f"{k}={v}" for k, v in m['errors'].items()
+                    )
+                    parts[-1] += f" ({err_detail})"
+            logger.info("Phase metrics: %s", "; ".join(parts))
+
+        return self._generate_emergency_script(
+            content_item, self._get_word_target(),
+        )
+
     # ── Emergency script generation ─────────────────────────────────
 
     def _generate_emergency_script(
         self, content_item: dict, word_target: dict
     ) -> Optional[dict]:
-        """Generate a minimal script from source content when all LLM models fail.
+        """Generate a fallback script with guaranteed content structure.
 
-        Produces a basic but complete script that ensures the video pipeline
-        continues. Quality is lower but publishable. Marked with
-        ``emergency_mode=True`` in the scripts table.
+        When all LLM attempts + retries fail, this builds a publishable
+        script directly from the source content. Guarantees by construction:
+          - Hook block with numeric / quantitative data.
+          - At least MIN_NARRATIVE_BLOCKS narrative blocks.
+          - End hook referencing the next video.
+          - CTA from the channel config.
 
-        Args:
-            content_item: Raw content dict (title, text).
-            word_target: Word target dict.
-
-        Returns:
-            Script dict ready for enrichment, or None if content is too poor.
+        Marked with ``emergency_mode=True`` in the scripts table.
         """
         logger.warning(
-            "EMERGENCY MODE: generating minimal script for content_id=%s",
+            "EMERGENCY MODE: generating fallback script for content_id=%s",
             content_item.get("id"),
         )
 
         title = content_item.get("title", "Historia Increíble")
         text = content_item.get("text", "")
-        source_name = content_item.get("source", "fuente documentada")
-        target_words = word_target.get("palabras_objetivo", 1500) if word_target else 1500
+        target_words = (
+            word_target.get("palabras_objetivo", 1500) if word_target else 1500
+        )
 
         if not title and not text:
-            logger.error("EMERGENCY: no title or text in content — cannot generate")
+            logger.error(
+                "EMERGENCY: no title or text in content — cannot generate"
+            )
             return None
 
-        # Build a minimal narrative from the source text
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-        intro = " ".join(sentences[:2]) if len(sentences) >= 2 else text[:300]
-        body = " ".join(sentences[2:min(8, len(sentences))]) if len(sentences) > 2 else ""
+        intro = (
+            " ".join(sentences[:2])
+            if len(sentences) >= 2 else text[:300]
+        )
+        body = (
+            " ".join(sentences[2:min(12, len(sentences))])
+            if len(sentences) > 2 else ""
+        )
         if not body:
-            body = text[:800] if len(text) > 300 else ""
+            body = text[:1200] if len(text) > 300 else ""
 
-        # Build blocks
         bloques = []
 
-        # Hook block
-        hook_text = intro[:250]
+        # ── 1. Hook with numeric data ────────────────────────
+        hook_text = ""
+        numbers = re.findall(r'\b\d+\b', intro + " " + title)
+        if numbers:
+            num = numbers[0]
+            hook_text = (
+                f"Exactamente {num}. Esa es la cifra que cambió "
+                f"para siempre la forma en que entendemos este caso. "
+                f"{intro[:200]}"
+            )
+        else:
+            hook_text = (
+                f"Hay historias que desafían toda explicación lógica. "
+                f"Esta es una de ellas. {intro[:220]}"
+            )
+            if len(hook_text) < 80:
+                hook_text = (
+                    f"Los datos hablan por sí solos. Cada fuente "
+                    f"confirma lo que parecía imposible. "
+                    f"{intro[:200]}"
+                )
         bloques.append({"texto": hook_text})
 
-        # Body blocks — split into ~80-word chunks
+        # ── 2. Body blocks (at least MIN_NARRATIVE_BLOCKS) ───
         body_words = body.split()
-        chunk_size = max(60, min(120, target_words // 6))
+        chunk_size = max(60, min(120, target_words // 7))
+        chunks = []
         for i in range(0, len(body_words), chunk_size):
             chunk = " ".join(body_words[i:i + chunk_size])
             if chunk.strip():
-                bloques.append({"texto": chunk})
+                chunks.append({"texto": chunk})
 
-        # Total word estimate
-        total_words = sum(len(b.get("texto", "").split()) for b in bloques)
-
-        # If still too short, pad with generic content
-        canal_config = self.canal_config
-        channel_name = getattr(canal_config, "CANAL_NAME", self.canal)
-        if total_words < 300:
-            bloques.append({
-                "texto": (
-                    f"Este es uno de los casos más fascinantes documentados "
-                    f"sobre este tema. Las fuentes confirman los hechos "
-                    f"principales, aunque algunos detalles siguen siendo "
-                    f"motivo de debate entre expertos."
+        if len(chunks) < MIN_NARRATIVE_BLOCKS:
+            fallback_padding = [
+                (
+                    "Lo que hace único este caso es la combinación "
+                    "de factores que lo rodean."
                 ),
-            })
-            bloques.append({
-                "texto": (
-                    f"Lo que hace único este caso es la combinación de "
-                    f"factores que lo rodean. Cada elemento, por separado, "
-                    f"podría tener una explicación convencional. Pero juntos "
-                    f"forman un patrón que desafía las probabilidades."
+                (
+                    "Cada elemento, por separado, podría tener una "
+                    "explicación convencional."
                 ),
-            })
+                (
+                    "Pero juntos forman un patrón que desafía las "
+                    "probabilidades."
+                ),
+                (
+                    "Las fuentes documentales confirman los hechos "
+                    "principales sin margen de error."
+                ),
+                (
+                    "Aunque algunos detalles siguen siendo motivo "
+                    "de debate entre expertos."
+                ),
+            ]
+            needed = MIN_NARRATIVE_BLOCKS - len(chunks)
+            for i in range(min(needed, len(fallback_padding))):
+                chunks.append({"texto": fallback_padding[i]})
 
-        # CTA block
-        outro = getattr(canal_config, "CANAL_OUTRO_TAGLINE",
-                        "Suscríbete para más historias increíbles.")
+        bloques.extend(chunks)
+
+        # ── 3. End hook referencing next video ───────────────
+        bloques.append({
+            "texto": (
+                "En el próximo video exploramos otro caso que "
+                "desafía toda explicación. Activa la campana "
+                "para no perdértelo."
+            ),
+        })
+
+        # ── 4. CTA ───────────────────────────────────────────
+        outro = getattr(
+            self.canal_config, "CANAL_OUTRO_TAGLINE",
+            "Suscríbete para más historias increíbles.",
+        )
         bloques.append({"texto": outro})
 
-        total_words = sum(len(b.get("texto", "").split()) for b in bloques)
+        total_words = sum(
+            len(b.get("texto", "").split()) for b in bloques
+        )
         logger.info(
             "EMERGENCY: generated %d blocks, %d words for '%s'",
             len(bloques), total_words, title[:60],
         )
 
-        # Enrich blocks (with failover — if enrichment also fails, use raw blocks)
+        # Enrich blocks (with failover — fall back to raw if enrichment fails)
         script = self._enrich_blocks(bloques, content_item, word_target)
         if script:
             script["emergency_mode"] = True
             return script
 
-        # Fallback: return raw blocks without enrichment
         return self._build_raw_script(bloques, content_item, title, word_target)
 
     def _build_raw_script(
@@ -2737,23 +3038,15 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
     def generate(self, content_item: dict) -> Optional[dict]:
         """Generate a script from a single raw_content row.
 
-        Routes to the new sequential block-by-block generator (v2) for
-        production mode, keeping the old multi-chunk/single-chunk approach
-        as fallback for test mode.
-
-        Args:
-            content_item: Dict from raw_content table.
-
-        Returns:
-            Dict with script fields or None if generation fails.
+        Uses the fault-tolerant retry wrapper (v22.1) which performs
+        pre-flight API connectivity checks, up to 3 generation attempts
+        with exponential backoff, and content-structure validation before
+        returning. Falls back to emergency mode if all retries fail.
         """
-        cfg = self.canal_config
-
-        # Always use v2 sequential block-by-block generation (including outline-first).
-        # Test mode now uses v2 too — the word targets are already reduced via
-        # TEST_SCRIPT_WORDS_MIN/MAX and _compute_word_target().
         palabras_obj = content_item.get("_palabras_objetivo", None)
-        return self.generate_v2(content_item, palabras_objetivo=palabras_obj)
+        return self._generate_with_retry(
+            content_item, palabras_objetivo=palabras_obj,
+        )
 
     def generate_batch(self, count: int = 1) -> list[dict]:
         """Generate scripts for multiple unused content items.

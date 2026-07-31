@@ -120,6 +120,70 @@ def _get_worker_process_ram_mb(pid: Optional[int]) -> Optional[int]:
         return None
 
 
+def _get_script_health(conn) -> dict:
+    """Aggregate script generation health metrics for the monitor dashboard.
+
+    Queries ``script_generation_attempts`` and ``scripts`` for recent
+    failure counts, error rates, emergency activations, and top error types.
+    """
+    try:
+        failures_24h = conn.execute(
+            """SELECT COUNT(*) FROM script_generation_attempts
+               WHERE success = 0
+                 AND created_at > datetime('now', '-1 day')"""
+        ).fetchone()[0]
+
+        attempts_7d = conn.execute(
+            """SELECT COUNT(*) FROM script_generation_attempts
+               WHERE created_at > datetime('now', '-7 days')"""
+        ).fetchone()[0]
+
+        failures_7d = conn.execute(
+            """SELECT COUNT(*) FROM script_generation_attempts
+               WHERE success = 0
+                 AND created_at > datetime('now', '-7 days')"""
+        ).fetchone()[0]
+
+        error_rate = round(
+            failures_7d / max(1, attempts_7d) * 100, 1,
+        )
+
+        emergency_24h = conn.execute(
+            """SELECT COUNT(*) FROM scripts
+               WHERE emergency_mode = 1
+                 AND created_at > datetime('now', '-1 day')"""
+        ).fetchone()[0]
+
+        top_errors = [
+            dict(r) for r in conn.execute(
+                """SELECT error_type, COUNT(*) as cnt
+                   FROM script_generation_attempts
+                   WHERE success = 0
+                     AND error_type IS NOT NULL
+                     AND created_at > datetime('now', '-7 days')
+                   GROUP BY error_type
+                   ORDER BY cnt DESC
+                   LIMIT 5"""
+            ).fetchall()
+        ]
+
+        return {
+            "failures_24h": failures_24h,
+            "emergency_24h": emergency_24h,
+            "error_rate_7d": error_rate,
+            "attempts_7d": attempts_7d,
+            "top_errors": top_errors,
+        }
+    except Exception:
+        return {
+            "failures_24h": 0,
+            "emergency_24h": 0,
+            "error_rate_7d": 0.0,
+            "attempts_7d": 0,
+            "top_errors": [],
+        }
+
+
 # ═══════════════════════════════════════════════════════════════
 # REST Endpoints
 # ═══════════════════════════════════════════════════════════════
@@ -294,6 +358,7 @@ def get_monitor_dashboard():
                         "at": (next_slot["target_upload_at"] or next_slot["target_public_at"]) if next_slot else None,
                     } if next_slot else None,
                 },
+                "script_health": _get_script_health(conn),
             }
             with _get_monitor_lock():
                 _MONITOR_CACHE["dashboard"] = {"data": result, "ts": time_mod.time()}
