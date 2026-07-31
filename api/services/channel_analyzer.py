@@ -172,6 +172,18 @@ _RECOMMENDATIONS_USER = """\
 {config_keys}
 </available_config_keys>
 
+<previous_recommendations>
+The following recommendations were made in a PREVIOUS analysis of this channel.
+- Applied recommendations have already been applied to the config. DO NOT repeat them.
+- Discarded recommendations were intentionally rejected by the user. DO NOT repeat them
+  unless you have strong NEW evidence that changes the situation.
+- If a previous recommendation covers similar ground but you have updated data,
+  acknowledge it and explain what changed.
+- Your new recommendations should BUILD UPON and ENRICH the previous analysis,
+  not replace it entirely. Focus on what is NEW or has CHANGED since the last analysis.
+{prev_recommendations_json}
+</previous_recommendations>
+
 <task>
 Convert the strongest hypotheses into actionable recommendations.
 For each recommendation, specify EXACTLY which config keys to change and their new values.
@@ -181,7 +193,7 @@ and provide a detailed opencode_prompt in Spanish.
 
 Return JSON:
 {{
-  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 opportunities, and biggest risks.",
+  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 opportunities, and biggest risks. Reference the previous analysis if applicable (e.g., 'Since the last analysis...').",
   "health_score": 72,
   "key_metrics": [
     {{ "label": "Views/dia", "value": "2,100", "sparkline": [10,12,11,15,13,14,15], "delta": "+8%", "delta_positive": true }}
@@ -364,6 +376,11 @@ def _run_phase(client, model: str, data: dict, phase: str,
             "{config_json}", json.dumps(extra_context.get("current_config", {}), ensure_ascii=False, default=str))
         user_prompt = user_prompt.replace(
             "{config_keys}", json.dumps(extra_context.get("config_keys", _CONFIG_KEYS), ensure_ascii=False))
+        prev_recs = extra_context.get("previous_recommendations", [])
+        user_prompt = user_prompt.replace(
+            "{prev_recommendations_json}",
+            json.dumps(prev_recs, ensure_ascii=False, default=str) if prev_recs
+            else "(no hay analisis previo — este es el primer analisis del canal)")
     else:
         user_prompt = user_template
 
@@ -416,6 +433,33 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
         logger.info("Data aggregated: %d videos, %d growth points",
                      len(data.get("video_performance", [])),
                      len(data.get("channel_growth", [])))
+
+        # ── Load previous analysis for context and enrichment ────
+        prev_recommendations = []
+        try:
+            prev_insight = db.get_latest_insight(channel_id)
+            if (prev_insight
+                    and prev_insight.get("status") == "completed"
+                    and prev_insight.get("id") != insight_id):
+                prev_json = prev_insight.get("insights_json", {})
+                if isinstance(prev_json, str):
+                    try:
+                        prev_json = json.loads(prev_json)
+                    except json.JSONDecodeError:
+                        prev_json = {}
+                prev_recommendations = prev_json.get("recommendations", [])
+                # Include previous context in aggregated data for exploration phase
+                data["previous_analysis"] = {
+                    "summary": prev_json.get("analysis_summary", ""),
+                    "health_score": prev_json.get("health_score"),
+                    "recommendations_count": len(prev_recommendations),
+                    "applied_count": sum(1 for r in prev_recommendations if r.get("applied")),
+                    "discarded_count": sum(1 for r in prev_recommendations if r.get("discarded")),
+                }
+                logger.info("Loaded %d previous recommendations from insight %d as context",
+                           len(prev_recommendations), prev_insight["id"])
+        except Exception as e:
+            logger.warning("Failed to load previous insights: %s", e)
 
         # ── Create LLM client with thinking mode ─────────────────
         client = create_llm_client(
@@ -473,12 +517,54 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 "hypotheses": hypotheses["content"].get("hypotheses", []),
                 "current_config": current_config,
                 "config_keys": _CONFIG_KEYS,
+                "previous_recommendations": [
+                    {
+                        "title": r.get("title"), "category": r.get("category"),
+                        "applied": r.get("applied"), "discarded": r.get("discarded"),
+                        "config_changes": r.get("config_changes"),
+                        "detail": r.get("detail", "")[:300],
+                    }
+                    for r in prev_recommendations
+                ],
             },
         )
         total_tokens_in += recommendations["tokens_in"]
         total_tokens_out += recommendations["tokens_out"]
         logger.info("Phase 3 done: %d recommendations",
                      len(recommendations["content"].get("recommendations", [])))
+
+        # ── Merge: carry over applied/discarded/validated recs from previous analysis ──
+        if prev_recommendations:
+            carried_over = [
+                r for r in prev_recommendations
+                if r.get("applied") or r.get("discarded") or r.get("validation")
+            ]
+            if carried_over:
+                new_recs = recommendations["content"].get("recommendations", [])
+                # Dedup: skip previously applied recs whose config_changes are
+                # already reflected in the current config (no need to show them again)
+                deduped_carried = []
+                new_config_changes_sets = []
+                for nr in new_recs:
+                    ncc = nr.get("config_changes", {})
+                    if ncc:
+                        new_config_changes_sets.append(set(ncc.keys()))
+                for cr in carried_over:
+                    if cr.get("applied") and cr.get("config_changes"):
+                        cr_keys = set(cr["config_changes"].keys())
+                        # Check if any new recommendation covers the same config keys
+                        if any(cr_keys & nccs for nccs in new_config_changes_sets):
+                            continue  # Already addressed by a new rec, skip
+                    if cr.get("discarded"):
+                        # Mark as from previous analysis for the frontend
+                        cr["from_previous"] = True
+                    deduped_carried.append(cr)
+                if deduped_carried:
+                    recommendations["content"]["recommendations"] = (
+                        new_recs + deduped_carried
+                    )
+                    logger.info("Merged %d carried-over recommendations (was %d before dedup)",
+                               len(deduped_carried), len(carried_over))
 
         # ── Save final result ───────────────────────────────────
         duration_ms = int((time.monotonic() - t0) * 1000)

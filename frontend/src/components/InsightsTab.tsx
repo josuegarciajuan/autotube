@@ -871,19 +871,32 @@ export default function InsightsTab({
   // ── Actions ──────────────────────────────────────────────────
   async function handleGenerate() {
     setAnalyzing(true)
-    setInsights(null)
+    // Don't clear existing insights — preserve them while enrichment runs
+    // Only clear if there's nothing to preserve
+    if (!insights) {
+      setInsights(null)
+    } else {
+      // Keep existing insights visible; new analysis will replace on completion
+      setInsights({
+        ...insights,
+        status: 'processing',
+        current_phase: 'exploration',
+      })
+    }
     try {
       const { insight_id } = await api.analyzeChannel(channelId)
-      // Start polling immediately
-      setInsights({
-        id: insight_id, channel_id: channelId,
-        status: 'processing', current_phase: 'exploration',
-        insights_json: { analysis_summary: '', recommendations: [] },
-        raw_patterns: null, raw_hypotheses: null,
-        error_msg: null, model_used: null,
-        tokens_input: 0, tokens_output: 0, generation_time_ms: 0,
-        generated_at: null, applied_at: null, applied_by: null,
-      })
+      // Start polling immediately; use a placeholder if no existing insights
+      if (!insights) {
+        setInsights({
+          id: insight_id, channel_id: channelId,
+          status: 'processing', current_phase: 'exploration',
+          insights_json: { analysis_summary: '', recommendations: [] },
+          raw_patterns: null, raw_hypotheses: null,
+          error_msg: null, model_used: null,
+          tokens_input: 0, tokens_output: 0, generation_time_ms: 0,
+          generated_at: null, applied_at: null, applied_by: null,
+        })
+      }
     } catch (e: any) {
       setError(e.message)
       setAnalyzing(false)
@@ -1060,8 +1073,10 @@ export default function InsightsTab({
 
   // ── Render states ────────────────────────────────────────────
 
-  // Immersive loading screen during analysis
-  if (insights?.status === 'processing' || analyzing) {
+  const hasExistingData = (insights?.insights_json?.recommendations?.length ?? 0) > 0
+
+  // Immersive loading screen during analysis (only when no existing data)
+  if ((insights?.status === 'processing' || analyzing) && !hasExistingData) {
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between">
@@ -1147,6 +1162,22 @@ export default function InsightsTab({
 
   return (
     <div className="space-y-6">
+      {/* ── Enrichment banner (when re-analyzing with existing data) ── */}
+      {analyzing && (
+        <div className="glass rounded-xl p-4 border border-neon-cyan/30 bg-neon-cyan/5 animate-pulse">
+          <div className="flex items-center gap-3">
+            <Loader2 size={18} className="animate-spin text-neon-cyan" />
+            <div>
+              <p className="text-sm font-medium text-neon-cyan">Enriqueciendo analisis...</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                El nuevo analisis se esta generando con los datos actualizados.
+                Las recomendaciones activas se mantienen visibles.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -1191,7 +1222,7 @@ export default function InsightsTab({
             onClick={handleGenerate}
             className="px-3 py-1.5 bg-neon-red text-white rounded-lg text-xs hover:bg-neon-red/80 transition-colors flex items-center gap-1.5"
           >
-            <Sparkles size={12} /> Generar nuevo analisis
+            <Sparkles size={12} /> Enriquecer analisis
           </button>
         </div>
       </div>
