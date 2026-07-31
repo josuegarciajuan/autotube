@@ -392,10 +392,39 @@ def _run_phase(client, model: str, data: dict, phase: str,
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=8000,
+            max_tokens=16000,
             temperature=0.7 if phase == "exploration" else 0.5,
             max_retries=2,
         )
+    except (ValueError, json.JSONDecodeError) as e:
+        # Thinking mode may consume all tokens for reasoning_content,
+        # leaving content empty.  Retry once with thinking disabled
+        # and a larger token budget as a fallback.
+        logger.warning(
+            "Phase %s: LLM returned empty/broken content (thinking mode) — "
+            "retrying with thinking=disabled, max_tokens=32000", phase,
+        )
+        try:
+            no_thinking_client = create_llm_client(
+                enable_thinking=False,
+                timeout=180,
+                max_retries=1,
+            )
+            result = llm_json_call(
+                no_thinking_client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=32000,
+                temperature=0.7 if phase == "exploration" else 0.5,
+                max_retries=1,
+            )
+            logger.info("Phase %s: thinking-disabled fallback succeeded", phase)
+        except Exception as e2:
+            logger.error("Phase %s failed after fallback: %s", phase, e2)
+            raise
     except Exception as e:
         logger.error("Phase %s failed: %s", phase, e)
         raise
@@ -464,7 +493,7 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
         # ── Create LLM client with thinking mode ─────────────────
         client = create_llm_client(
             enable_thinking=True,
-            reasoning_effort="high",
+            reasoning_effort="medium",
             timeout=180,
             max_retries=1,
         )
