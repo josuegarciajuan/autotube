@@ -901,35 +901,31 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         theme_block = ""
         tc = self._theme_context
         if tc:
-            theme_lines = ["\nCONTEXTO TEMÁTICO DEL VIDEO (datos extraídos del análisis del guion completo):"]
+            theme_lines = ["\nCONTEXTO TEMÁTICO DEL VIDEO (anclaje visual secundario):"]
             if tc.genre and tc.genre != "documental":
                 theme_lines.append(f"- Género/ambientación: {tc.genre}")
-            if tc.era and tc.era != "atemporal":
-                theme_lines.append(f"- Época: {tc.era}")
             if tc.era_decade and tc.era_decade not in ("atemporal", "presente", ""):
-                theme_lines.append(f"- Década: {tc.era_decade}")
+                theme_lines.append(f"- Época/década: {tc.era_decade}")
+            elif tc.era and tc.era != "atemporal":
+                theme_lines.append(f"- Época: {tc.era}")
             if tc.primary_subject:
                 theme_lines.append(f"- Sujeto visual principal: {tc.primary_subject}")
-            if tc.visual_style:
-                theme_lines.append(f"- Estilo visual: {tc.visual_style}")
             if tc.key_motifs:
-                theme_lines.append(f"- Motivos visuales icónicos disponibles: {', '.join(tc.key_motifs[:5])}")
-            if tc.mood:
-                theme_lines.append(f"- Estado de ánimo: {tc.mood}")
-            if tc.lighting:
-                theme_lines.append(f"- Iluminación: {tc.lighting}")
-            if tc.composition:
-                theme_lines.append(f"- Encuadre preferido: {tc.composition}")
+                theme_lines.append(f"- Motivos visuales icónicos: {', '.join(tc.key_motifs[:4])}")
             if tc.forbidden_elements:
                 theme_lines.append(f"- ⛔ ELEMENTOS PROHIBIDOS (NUNCA incluir en search_query_en): {', '.join(tc.forbidden_elements)}")
             theme_lines.append(
-                "\nINSTRUCCIÓN CLAVE: El contexto temático es el ANCLA VISUAL del video, NO una camisa de fuerza.\n"
-                "- Si el bloque narra algo que encaja con el género/época/motivos → úsalos para anclar la query visualmente\n"
-                "- Si el bloque habla de un concepto atemporal o moderno que no encaja con la época → "
-                "prioriza el mood, el estilo visual y los key_motifs como anclaje\n"
-                "- Lo fundamental: CADA escena debe sentirse parte del MISMO MUNDO VISUAL que el resto del video\n"
-                "- NUNCA incluyas elementos prohibidos en search_query_en — si un bloque menciona algo "
-                "de la lista prohibida, tradúcelo a un equivalente visual que SÍ pertenezca al mundo del video"
+                "\nINSTRUCCIÓN CLAVE: La temática es el CONTEXTO, NO el protagonista de la query.\n"
+                "- El SUJETO NARRATIVO (lo que se narra en este bloque concreto) SIEMPRE domina la query (~60-70%).\n"
+                "- La ambientación temática (época, motivos, género) se usa SOLO como anclaje secundario (~30-40%):\n"
+                "  máximo 1-2 keywords temáticas, y solo si son relevantes para lo narrado en este bloque.\n"
+                "- Ejemplo: si el canal es de Egipto antiguo y este bloque narra 'los mercaderes usaban\n"
+                "  balanzas de precisión para pesar el oro' → 'merchant weighing gold precision scale ancient Egyptian'\n"
+                "  (keywords narrativos dominan: merchant, weighing, gold, precision, scale + 1 anclaje: ancient Egyptian).\n"
+                "  NUNCA generes solo 'ancient Egypt trade economy' (eso es temático genérico, no refleja lo narrado).\n"
+                "- Si el bloque habla de un concepto atemporal sin conexión visual con la época → usa SOLO\n"
+                "  keywords narrativos + como máximo 1 keyword de ambientación.\n"
+                "- NUNCA incluyas elementos prohibidos en search_query_en."
             )
             theme_block = "\n".join(theme_lines)
 
@@ -950,26 +946,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "video/imagen en bancos de stock (Pexels, Pixabay, Unsplash).\n"
             "  REGLAS OBLIGATORIAS:\n"
             "  * FUSIÓN NARRATIVA + TEMÁTICA (DOS PARTES, AMBAS OBLIGATORIAS):\n"
-            "    (1) SUJETO NARRATIVO (VA PRIMERO): 2-4 keywords que describen\n"
-            "        EXACTAMENTE lo que se narra en este bloque — persona, acción,\n"
-            "        lugar, objeto mencionado en la narración.\n"
-            "    (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS): 1-2 keywords del contexto\n"
-            "        temático que anclan la escena en el mundo visual del video.\n"
+            "    (1) SUJETO NARRATIVO (VA PRIMERO, ~60-70% de la query): 3-5 keywords\n"
+            "        que describen EXACTAMENTE lo que se narra en este bloque — persona,\n"
+            "        acción, lugar, objeto CONCRETO mencionado en la narración.\n"
+            "        Usa palabras del propio texto narrado como keywords.\n"
+            "    (2) AMBIENTACIÓN TEMÁTICA (VA DESPUÉS, ~30-40% de la query): máximo 1-2\n"
+            "        keywords del contexto temático como ANCLAJE VISUAL secundario.\n"
             "        Usa preferentemente key_motifs, primary_subject, genre o era_decade.\n"
-            "  * LO QUE VES = LO QUE OYES: si el bloque narra 'el médico examinó\n"
-            "    al paciente con instrumentos rudimentarios', la query debe ser\n"
-            "    sobre 'physician examining patient medieval instruments',\n"
-            "    NO sobre 'medieval medicine history'.\n"
-            "  * HILO VISUAL (CONTINUIDAD ENTRE ESCENAS CONSECUTIVAS):\n"
-            "    Las escenas i e i+1 deben compartir al menos UNO de estos elementos:\n"
-            "    a) Un key_motif del contexto temático (ROTANDO entre ellos — no uses\n"
-            "       el mismo key_motif en dos bloques seguidos)\n"
-            "    b) El mismo tipo de iluminación o atmósfera\n"
-            "    c) El mismo material o tipo de locación (piedra, madera, agua,\n"
-            "       interior, exterior, noche, día...)\n"
-            "    d) La misma paleta cromática o mood\n"
-            "    PERO varía el encuadre/ángulo entre escenas consecutivas para evitar\n"
-            "    monotonía visual: alterna 'wide shot' ↔ 'close-up' ↔ 'detail'\n"
+            "  * LO QUE VES = LO QUE OYES: la query debe reflejar VISUALMENTE lo narrado.\n"
+            "    Si el bloque narra 'los mercaderes usaban balanzas de precisión para\n"
+            "    pesar el oro', la query debe ser 'merchant weighing gold precision scale\n"
+            "    ancient Egyptian', NO 'ancient Egypt trade economy' (eso es temático genérico).\n"
+            "  * Varía el encuadre/ángulo entre bloques consecutivos:\n"
+            "    alterna 'wide shot' ↔ 'close-up detail' ↔ 'distant view'.\n"
             "  * Usa términos visuales concretos: 'aerial shot', 'wide angle', "
             "'close up detail', 'drone footage', 'golden hour'\n"
             "  * Equilibra especificidad con disponibilidad en stock: "
@@ -977,11 +966,13 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "Danton 5 April 1794' (DEMASIADO específico, no existe en stock)\n"
             "  * Traduce conceptos abstractos a escenas visuales "
             "(ej: 'creencia en la muerte' → 'ancient tomb burial chamber dark')\n"
+            "  * BIEN: 'merchant weighing gold scale ancient Egyptian marketplace'\n"
             "  * BIEN: 'physician examining patient medieval instruments torchlight'\n"
             "  * BIEN: 'ancient Egyptian gold mask museum exhibit close up'\n"
             "  * MAL: 'Funeral Mask Egypt Art Institute Chicago' (nombre de museo)\n"
-            "  * MAL: 'medieval history atmosphere dramatic lighting' (sin keywords "
-            "de la narración, solo términos genéricos de época)\n"
+            "  * MAL: 'ancient Egypt history documentary' (solo temático, sin lo narrado)\n"
+            "  * MAL: 'medieval history atmosphere dramatic lighting' (solo términos de\n"
+            "    época, sin keywords de la narración)\n"
             "- escena_descripcion: descripción visual cinematográfica en español (1 frase)\n"
             "- media_tipo: 'video' o 'imagen' según:\n"
             "  * VIDEO: paisajes, naturaleza, ciudades, cielo, agua, movimiento, time-lapses, drones\n"

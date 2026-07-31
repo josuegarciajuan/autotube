@@ -1417,62 +1417,148 @@ class MediaFetcher:
 
     # ── Query pool builder ──────────────────────────────────────
 
+    @staticmethod
+    def _extract_narrative_keywords(query: str, ctx) -> str:
+        """Extract only the narrative keywords from a search query.
+
+        Strips theme keywords (from ThemeContext.theme_keywords_en, key_motifs,
+        and derived words) while preserving the narrative subject keywords
+        that describe what is actually being narrated in this specific block.
+
+        Then appends exactly ONE theme anchoring keyword to maintain visual
+        context without letting the theme dominate the query.
+
+        Returns a narrative-heavy query string, or empty string if no narrative
+        keywords remain after stripping.
+        """
+        if not query:
+            return ""
+
+        # Gather all theme-related words to strip
+        theme_words: set[str] = set()
+        if ctx:
+            if ctx.theme_keywords_en:
+                for kw in ctx.theme_keywords_en:
+                    for w in kw.lower().split():
+                        theme_words.add(w)
+            if ctx.key_motifs:
+                for motif in ctx.key_motifs:
+                    for w in motif.lower().split():
+                        theme_words.add(w)
+            if ctx.primary_subject:
+                for w in ctx.primary_subject.lower().split():
+                    theme_words.add(w)
+            if ctx.genre and ctx.genre != "documental":
+                for w in ctx.genre.lower().replace("_", " ").split():
+                    theme_words.add(w)
+            if ctx.era_decade and ctx.era_decade not in ("atemporal", "presente", ""):
+                theme_words.add(ctx.era_decade.lower())
+            elif ctx.era and ctx.era not in ("atemporal", "presente", ""):
+                for w in ctx.era.lower().replace("_", " ").split():
+                    theme_words.add(w)
+
+        # Separate narrative words from theme/style words
+        style_words = {
+            "cinematic", "photography", "dramatic", "lighting", "atmospheric",
+            "16:9", "moody", "high", "contrast", "professional", "dark",
+            "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
+            "overhead", "style", "film", "video", "stock", "vertical",
+            "establishing", "angle", "footage", "composition", "documentary",
+            "historical", "depth", "field", "color", "grading", "grade",
+            "wide", "close", "up", "detail", "low", "distant", "view",
+            "alternative",
+        }
+
+        words = query.split()
+        narrative_words = []
+        theme_words_found = []
+
+        for w in words:
+            wl = w.lower().strip(",.!?;:")
+            if wl in style_words:
+                continue
+            if wl in theme_words:
+                theme_words_found.append(w)
+            else:
+                narrative_words.append(w)
+
+        if not narrative_words:
+            return ""  # query was entirely thematic — no narrative core to extract
+
+        # Build: narrative keywords + at most 1 theme anchoring word
+        result = " ".join(narrative_words[:6])
+
+        # Pick the best single theme anchor from what was found
+        if theme_words_found:
+            anchor = theme_words_found[0]
+            if len(result) + len(anchor) + 1 <= 100:
+                result = f"{result} {anchor}"
+
+        return result[:100]
+
     def _build_query_pool(self, scene: dict, ctx) -> list[str]:
         """Build an ordered list of query variations for a scene.
 
-        Starts with the most specific and ends with generic fallbacks.
-        Each variation is a fresh attempt — if the first queries return
-        only duplicates, later queries with different wording should
-        produce different results from the providers.
+        Order (narrative priority): narrative-first queries try first,
+        theme-anchored queries are fallbacks. This ensures that what you
+        SEE matches what you HEAR, while maintaining visual context.
 
-        Returns deduplicated list of non-empty queries (~11 variants).
+        Returns deduplicated list of non-empty queries (~11-13 variants).
         """
         base = scene.get("search_query_en", "")
 
         pool = []
+
+        # 1. Base query (narrative + theme, roughly 60-70% / 30-40% ratio
+        #    thanks to the improved LLM prompt in script_generator.py)
         if base and base.strip():
             pool.append(base.strip())
 
         scene_tipo = scene.get("tipo", "desarrollo")
 
-        # 3 directional variations for the same topic
+        # 2. Narrative-heavy variant: strip most theme words, keep 1 anchor.
+        #    This prioritizes narrative content with minimal theme anchoring.
+        #    Comes BEFORE directional variations so narrative specificity
+        #    wins over theme-heavy angle variations.
+        narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
+        if narrative_heavy and narrative_heavy != base and narrative_heavy.strip():
+            pool.append(narrative_heavy.strip())
+
+        # 3. Base + directional variations (reduced to 3 from 5 — keep the
+        #    most distinct ones; wide/close/distant have most visual variety)
         if base:
             for suffix in [
                 "wide shot establishing",
                 "close-up detail",
-                "alternative angle composition",
-                "low angle dramatic",
                 "distant view atmospheric",
             ]:
                 v = f"{base} {suffix}"
-                if len(v) <= 100:  # Pixabay 100-char limit
+                if len(v) <= 100:
                     pool.append(v)
 
-        # Simplified: just the key nouns (3-4 words, no style modifiers)
+        # 4. Simplified: just the key nouns (3-4 words, no style modifiers)
         simple = self._simplify_query(base) if base else ""
         if simple and simple != base and simple.strip():
             pool.append(simple)
 
-        # Without theme keywords (v6) — theme injection can poison queries
+        # 5. Without theme keywords — anti-poisoning fallback
         if ctx and ctx.theme_keywords_en and base:
             clean = _strip_theme_keywords(base, ctx.theme_keywords_en)
             if clean and clean != base and clean.strip():
                 pool.append(clean)
 
-        # Type-specific fallback queries (dynamically themed when ThemeContext is available)
+        # 6. Type-specific fallback queries (generic, moved later in pool)
         type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
         if type_fb and type_fb not in pool:
             pool.append(type_fb)
 
-        # Themed fallback queries (v8): built dynamically from ThemeContext
-        # These are more specific than the generic _FALLBACK_BY_TYPE and appear AFTER
-        # type-specific fallbacks so they don't shadow more specific queries
+        # 7. Themed fallback queries: built dynamically from ThemeContext
         if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
             themed_fb = self._build_themed_fallback(scene_tipo, ctx)
             if themed_fb and themed_fb not in pool:
                 pool.append(themed_fb)
 
-        # Channel-configured fallback queries
+        # 8. Channel-configured fallback queries (absolute last resort)
         fallbacks = self._media_strategy.get("fallback_queries", [
             "historical documentary archival photography cinematic 16:9",
             "ancient history artifacts museum exhibition documentary",
