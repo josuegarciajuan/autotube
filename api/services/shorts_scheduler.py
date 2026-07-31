@@ -1691,7 +1691,7 @@ def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
         from config.settings import DATABASE_PATH
         conn = sqlite3.connect(str(DATABASE_PATH), timeout=15)
         conn.execute(
-            "UPDATE generation_jobs SET progress = ?, phase = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE generation_jobs SET progress = ?, phase = ? WHERE id = ?",
             (progress, phase, job_id),
         )
         conn.commit()
