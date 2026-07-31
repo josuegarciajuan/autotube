@@ -1689,15 +1689,16 @@ def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
     try:
         import sqlite3
         from config.settings import DATABASE_PATH
-        conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=15)
         conn.execute(
             "UPDATE generation_jobs SET progress = ?, phase = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (progress, phase, job_id),
         )
         conn.commit()
         conn.close()
+        logger.info("Short job #%d progress: %d%% (%s)", job_id, progress, phase)
     except Exception as e:
-        logger.debug("Short job progress update failed for #%d: %s", job_id, e)
+        logger.warning("Short job progress update failed for #%d: %s", job_id, e)
 
 
 # ── Native short generation ────────────────────────────────────
