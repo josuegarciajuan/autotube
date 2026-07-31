@@ -440,8 +440,14 @@ async def _schedule_checker_loop():
                 await _queue_consumer()
 
                 # ── Update catch-up state for adaptive sleep ──
+                # Combined count of long-form AND shorts past-due slots.
+                # Previously only counted planned_slots (long-form), which
+                # meant a shorts-only backlog never triggered catch-up mode.
+                # Now both queues contribute to the adaptive tick speed.
                 try:
-                    past_due = _sched_db.count_past_due_slots()
+                    past_due_long = _sched_db.count_past_due_slots()
+                    past_due_shorts = _sched_db.count_past_due_shorts_slots()
+                    past_due = past_due_long + past_due_shorts
                     _sched_db.set_system_state("past_due_slots", str(past_due))
                 except Exception:
                     pass

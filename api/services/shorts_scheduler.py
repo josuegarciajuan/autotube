@@ -1420,11 +1420,20 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
 
         try:
             import asyncio as _asyncio
+            _chain_loop = _asyncio.get_running_loop()
             async def _chain_next():
                 await _asyncio.sleep(2)  # let DB changes settle
                 try:
                     from api.services.shorts_scheduler import dispatch_next_due_shorts_slot
-                    next_result = dispatch_next_due_shorts_slot()
+                    # Run in thread pool to avoid blocking the event loop.
+                    # Pass _chain_loop so internal async scheduling uses
+                    # run_coroutine_threadsafe instead of create_task.
+                    next_result = await _chain_loop.run_in_executor(
+                        None,
+                        dispatch_next_due_shorts_slot,
+                        None,       # db
+                        _chain_loop,  # loop
+                    )
                     if next_result:
                         logger.info(
                             "Chained next short: slot=%d channel=%s type=%s",
@@ -2502,22 +2511,29 @@ def _sync_running_shorts_slots(db):
                 logger.info("Shorts slot #%d marked completed", slot_id)
                 continue
 
-        # Case 2: linked job failed (server restart, error, etc.) → mark failed
+        # Case 2: linked job failed (server restart, error, etc.) → reset to pending
+        # Previously these were marked as 'failed' and lost until the recovery
+        # planner ran (up to 60 min later, only during active hours). Now they
+        # reset to 'pending' with job_id=NULL so the dispatcher picks them up
+        # automatically in the next tick.
         if job_id:
             job = db.get_job(job_id)
-            if job is None:
-                # Job record deleted — slot is orphaned
-                db.update_shorts_slot_status(
-                    slot_id, "failed",
-                    error_message="Orphaned: job record missing",
-                )
-                logger.info("Shorts slot #%d marked failed (job #%d missing)", slot_id, job_id)
-            elif job.get("status") == "failed":
-                db.update_shorts_slot_status(
-                    slot_id, "failed",
-                    error_message=f"Job #{job_id} failed: {(job.get('error_msg') or '')[:200]}",
-                )
-                logger.info("Shorts slot #%d marked failed (job #%d failed)", slot_id, job_id)
+            if job is None or job.get("status") == "failed":
+                # Reset to pending: clear job link + error so the dispatcher
+                # sees it as a fresh pending slot. Uses direct SQL because
+                # update_shorts_slot_status() skips fields when None is passed.
+                import sqlite3 as _sql_sync
+                from config.settings import DATABASE_PATH as _DBP
+                with _sql_sync.connect(str(_DBP), timeout=30) as _conn:
+                    _conn.execute(
+                        "UPDATE shorts_planned_slots SET status='pending', "
+                        "job_id=NULL, error_message=NULL, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=?",
+                        (slot_id,),
+                    )
+                    _conn.commit()
+                reason = "orphaned after restart" if job is None else "job failed"
+                logger.info("Shorts slot #%d reset to pending (%s)", slot_id, reason)
 
 
 def _cancel_stale_shorts_slots(db):

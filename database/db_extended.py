@@ -4637,6 +4637,23 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
     
+    def count_past_due_shorts_slots(self) -> int:
+        """Count pending shorts_planned_slots whose scheduled_at is in the past.
+        
+        Mirrors count_past_due_slots() but for the shorts queue. The scheduler
+        loop uses the combined past-due count (long-form + shorts) to determine
+        adaptive sleep interval. Without this, a shorts-only backlog would be
+        ignored and the dispatch tick would stay at the default 5 minutes,
+        dispatching at most 12 shorts/hour instead of accelerating for catch-up.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shorts_planned_slots "
+                "WHERE status = 'pending' "
+                "AND scheduled_at <= datetime('now')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
     def get_active_upload_job_for_channel(self, channel_id: int) -> dict | None:
         """Check if a channel already has an active upload_only job."""
         with self._connect() as conn:
