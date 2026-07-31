@@ -471,46 +471,91 @@ def get_video_stats(data: dict):
         return {}
 
     db = get_db()
-    result = {}
-    for vid in video_ids:
-        # 1) Long-form videos table
-        with db._connect() as conn:
-            vrow = conn.execute(
-                "SELECT id FROM videos WHERE yt_video_id = ? LIMIT 1",
-                (vid,),
-            ).fetchone()
-        if vrow:
-            db_stats = db.get_video_latest_stats(vrow["id"])
-            if db_stats:
-                result[vid] = {
-                    "viewCount": str(db_stats.get("views", 0)),
-                    "likeCount": str(db_stats.get("likes", 0)),
-                    "commentCount": str(db_stats.get("comments", 0)),
-                    "embeddable": bool(db_stats.get("embeddable", 1)),
+    with db._connect() as conn:
+        conn.row_factory = None  # raw tuples for IN clause binding
+        result = {}
+
+        if not video_ids:
+            return result
+
+        # Build IN clause placeholders
+        placeholders = ",".join("?" * len(video_ids))
+
+        # 1) Batch lookup long-form videos
+        vrows = conn.execute(
+            f"SELECT id, yt_video_id FROM videos WHERE yt_video_id IN ({placeholders})",
+            video_ids,
+        ).fetchall()
+        vrow_map = {row[1]: row[0] for row in vrows}  # yt_video_id → video_id (int)
+
+        # 2) Batch lookup latest stats for found videos
+        if vrow_map:
+            vid_ids = list(vrow_map.values())
+            vid_placeholders = ",".join("?" * len(vid_ids))
+            vid_rows = conn.execute(
+                f"""SELECT vsh.*, v.yt_video_id
+                     FROM video_stats_history vsh
+                     JOIN videos v ON v.id = vsh.video_id
+                     WHERE vsh.id IN (
+                         SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                         WHERE vsh2.video_id IN ({vid_placeholders})
+                         GROUP BY vsh2.video_id
+                     )""",
+                vid_ids,
+            ).fetchall()
+            for row in vid_rows:
+                # row: (id, video_id, fetched_at, views, likes, comments, ..., yt_video_id)
+                cols = [desc[0] for desc in conn.execute(
+                    "SELECT * FROM video_stats_history LIMIT 0"
+                ).description]
+                d = dict(zip(cols, row))
+                yt_id = row[-1]  # yt_video_id was appended
+                result[yt_id] = {
+                    "viewCount": str(d.get("views", 0)),
+                    "likeCount": str(d.get("likes", 0)),
+                    "commentCount": str(d.get("comments", 0)),
+                    "embeddable": bool(d.get("embeddable", 1)),
                     "_from_db": True,
                 }
-                continue
 
-        # 2) Fallback: shorts table (YouTube ID stored in shorts.youtube_id)
-        with db._connect() as conn:
-            srow = conn.execute(
-                "SELECT id FROM shorts WHERE youtube_id = ? LIMIT 1",
-                (vid,),
-            ).fetchone()
-            if srow:
-                sstats = conn.execute(
-                    "SELECT views, likes, comments, embeddable FROM short_stats "
-                    "WHERE short_id = ? ORDER BY fetched_at DESC LIMIT 1",
-                    (srow["id"],),
-                ).fetchone()
-                if sstats:
-                    result[vid] = {
-                        "viewCount": str(sstats["views"]),
-                        "likeCount": str(sstats["likes"]),
-                        "commentCount": str(sstats["comments"]),
-                        "embeddable": bool(sstats["embeddable"]),
+        # 3) Batch fallback: shorts table (for IDs not found in long-form)
+        remaining = [vid for vid in video_ids if vid not in result]
+        if remaining:
+            s_placeholders = ",".join("?" * len(remaining))
+            srows = conn.execute(
+                f"SELECT id, youtube_id FROM shorts WHERE youtube_id IN ({s_placeholders})",
+                remaining,
+            ).fetchall()
+            srow_map = {row[1]: row[0] for row in srows}  # youtube_id → short_id
+
+            if srow_map:
+                s_ids = list(srow_map.values())
+                sid_placeholders = ",".join("?" * len(s_ids))
+                srows_stats = conn.execute(
+                    f"""SELECT ss.*, s.youtube_id
+                         FROM short_stats ss
+                         JOIN shorts s ON s.id = ss.short_id
+                         WHERE ss.id IN (
+                             SELECT MAX(ss2.id) FROM short_stats ss2
+                             WHERE ss2.short_id IN ({sid_placeholders})
+                             GROUP BY ss2.short_id
+                         )""",
+                    s_ids,
+                ).fetchall()
+                for row in srows_stats:
+                    cols = [desc[0] for desc in conn.execute(
+                        "SELECT * FROM short_stats LIMIT 0"
+                    ).description]
+                    d = dict(zip(cols, row))
+                    yt_id = row[-1]
+                    result[yt_id] = {
+                        "viewCount": str(d.get("views", 0)),
+                        "likeCount": str(d.get("likes", 0)),
+                        "commentCount": str(d.get("comments", 0)),
+                        "embeddable": bool(d.get("embeddable", 1)),
                         "_from_db": True,
                     }
+
     return result
 
 

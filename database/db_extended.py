@@ -5850,6 +5850,7 @@ class ExtendedDatabase(Database):
             result["generating"] = [dict(r) for r in generating]
 
             # ── 3. Awaiting Upload (F1 complete, waiting for F2 upload window) ──
+            # JOIN planned_slots ONCE instead of per-video subquery (N+1 fix)
             awaiting = conn.execute(
                 """SELECT
                     v.id as video_id,
@@ -5864,27 +5865,26 @@ class ExtendedDatabase(Database):
                     v.created_at,
                     v.generation_finished_at,
                     ch.name as channel_name,
-                    ch.slug as channel_slug
+                    ch.slug as channel_slug,
+                    ps.target_upload_at as slot_target_upload_at
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
+                   LEFT JOIN planned_slots ps ON ps.video_id = v.id
                    WHERE v.status IN ('awaiting_upload', 'uploading')
                      AND v.video_path IS NOT NULL
                      AND v.video_path != ''
+                   GROUP BY v.id
                    ORDER BY v.created_at ASC""",
             ).fetchall()
-            # Add derived target_upload_at from planned_slots if available
             awaiting_list = []
             for r in awaiting:
                 d = dict(r)
                 # Prefer scheduled_upload_at (set by upload_scheduler), fallback to planned_slot
                 if not d.get("scheduled_upload_at"):
-                    ps = conn.execute(
-                        "SELECT target_upload_at FROM planned_slots WHERE video_id = ? LIMIT 1",
-                        (d["video_id"],),
-                    ).fetchone()
-                    d["target_upload_at"] = ps["target_upload_at"] if ps else None
+                    d["target_upload_at"] = d.pop("slot_target_upload_at", None)
                 else:
                     d["target_upload_at"] = d["scheduled_upload_at"]
+                    d.pop("slot_target_upload_at", None)
                 awaiting_list.append(d)
             result["awaiting_upload"] = awaiting_list
 
