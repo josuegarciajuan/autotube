@@ -792,7 +792,8 @@ PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
 PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
 PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
-# PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (historia_documental → 20:00)
+PUBLISH_TARGET_HOUR = 10           # Forzado: 10:00 CEST = 08:00 UTC (franja primaria)
+OPTIMAL_PEAKS_LONG = 2             # Solo 2 franjas long-form (sin terciaria)
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)

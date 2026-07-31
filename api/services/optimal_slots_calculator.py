@@ -165,6 +165,10 @@ class OptimalSlotsCalculator:
         timezone = self._get_channel_timezone(slug, channel)
         keywords = self._get_channel_keywords(slug, channel)
 
+        # Read per-channel overrides from config
+        long_num_peaks = self._get_config_override(slug, "OPTIMAL_PEAKS_LONG", NUM_PEAKS_LONG)
+        forced_primary_hour = self._get_config_override(slug, "PUBLISH_TARGET_HOUR", None)
+
         # 1. Fetch data sources
         fetcher = YouTubeStatsFetcher(slug)
         api_ok = fetcher.authenticate()
@@ -191,15 +195,21 @@ class OptimalSlotsCalculator:
             hourly_data, historical_long, niche, WEIGHTS_LONG
         )
 
+        # If PUBLISH_TARGET_HOUR is forced in config, boost that hour to guarantee rank 1
+        if forced_primary_hour is not None and 0 <= forced_primary_hour < 24:
+            max_score = max(long_scores) if max(long_scores) > 0 else 1.0
+            long_scores[forced_primary_hour] = max_score + 0.5
+            long_sources["forced_primary"] = True
+
         # 3. Compute scores for shorts (use per-content-type data if available)
         short_hourly = self._extract_shorts_hourly(hourly_data)
         short_scores, short_sources = self._compute_hourly_scores(
             short_hourly or hourly_data, historical_short, niche, WEIGHTS_SHORT
         )
 
-        # 4. Find top peaks for each (v12: 3 long, 4 shorts)
+        # 4. Find top peaks for each (v12: per-channel long peaks, global short peaks)
         long_slots = self._find_top_peaks(long_scores, timezone, country_split, "long",
-                                           num_peaks=NUM_PEAKS_LONG)
+                                           num_peaks=long_num_peaks)
         short_slots = self._find_top_peaks(short_scores, timezone, country_split, "short",
                                             num_peaks=NUM_PEAKS_SHORT)
 
@@ -249,6 +259,18 @@ class OptimalSlotsCalculator:
             )
             slots_stored += 1
 
+        # Clean up orphaned long-form slots from previous configs with higher num_peaks
+        # (e.g. when reducing from 3 to 2 peaks per channel)
+        if long_num_peaks > 0:
+            with self._db._connect() as conn:
+                conn.execute(
+                    """DELETE FROM optimal_publish_slots
+                       WHERE channel_id = ? AND content_type = ?
+                         AND slot_rank > ?""",
+                    (channel_id, "long", long_num_peaks),
+                )
+                conn.commit()
+
         return {
             "slots_stored": slots_stored,
             "long_slots": long_slots,
@@ -276,6 +298,21 @@ class OptimalSlotsCalculator:
             pass
         # Default: Spain timezone (CET/CEST)
         return "Europe/Madrid"
+
+    def _get_config_override(self, slug: str, attr: str, default: any = None) -> any:
+        """Read an optional integer override from channel config.
+
+        Returns the config attribute value if set and non-None, otherwise default.
+        """
+        try:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(slug)
+            value = getattr(config, attr, None)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+        return default
 
     def _get_channel_keywords(self, slug: str, channel: dict) -> list[str]:
         """Extract SEO keywords from channel config."""
