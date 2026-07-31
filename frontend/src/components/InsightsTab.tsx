@@ -827,44 +827,76 @@ export default function InsightsTab({
   const [validatingIds, setValidatingIds] = useState<Set<string>>(new Set())
   const [refiningIds, setRefiningIds] = useState<Set<string>>(new Set())
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const pollCountRef = useRef(0)
 
   // ── Load / poll ──────────────────────────────────────────────
-  const loadInsight = useCallback(async () => {
+  const loadInsight = useCallback(async (opts?: { signal?: AbortSignal }) => {
     try {
-      const data = await api.getLatestInsight(channelId)
+      const data = await api.getLatestInsight(channelId, opts?.signal)
+      if (opts?.signal?.aborted) return
       setInsights(data)
       setError(null)
       if (data.status === 'completed' || data.status === 'failed') {
         setAnalyzing(false)
       }
+      return data
     } catch (e: any) {
+      if (e.name === 'AbortError') return
       if (e.message?.includes('404') || e.message?.includes('No analysis')) {
         setError(null) // not an error, just no analysis yet
       } else {
         setError(e.message)
       }
+      return null
+    } finally {
+      if (!opts?.signal?.aborted) setLoading(false)
     }
-    setLoading(false)
   }, [channelId, setInsights, setAnalyzing])
 
   // Initial load
   useEffect(() => {
     setLoading(true)
-    loadInsight()
+    // Abort any in-flight request from previous mount
+    if (abortRef.current) abortRef.current.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    pollCountRef.current = 0
+    loadInsight({ signal: controller.signal })
+    return () => {
+      controller.abort()
+    }
   }, [channelId])
 
-  // Poll while processing
+  // Poll while processing — with timeout guard
   useEffect(() => {
     if (insights?.status === 'processing' || analyzing) {
-      pollRef.current = setInterval(loadInsight, 3000)
+      pollRef.current = setInterval(() => {
+        pollCountRef.current++
+        // After 40 polls (2 min), give up and show timeout
+        if (pollCountRef.current > 40) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          pollRef.current = null
+          setAnalyzing(false)
+          setError('El analisis esta tardando demasiado. Puede que el servidor se haya reiniciado durante el proceso.')
+          return
+        }
+        // Use a fresh AbortController per poll so we don't cancel the wrong one
+        if (abortRef.current) abortRef.current.abort()
+        const controller = new AbortController()
+        abortRef.current = controller
+        loadInsight({ signal: controller.signal })
+      }, 3000)
       return () => {
         if (pollRef.current) clearInterval(pollRef.current)
+        if (abortRef.current) abortRef.current.abort()
       }
     } else {
       if (pollRef.current) {
         clearInterval(pollRef.current)
         pollRef.current = null
       }
+      pollCountRef.current = 0
     }
   }, [insights?.status, analyzing, loadInsight])
 

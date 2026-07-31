@@ -153,6 +153,20 @@ async def lifespan(app: FastAPI):
         logging.getLogger("autotube.startup").info("Orphan process cleanup completed")
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Orphan cleanup skipped: %s", exc)
+    
+    # ── Clean up stuck channel_insights from prior runs ──
+    # If the server was restarted mid-analysis, insight rows remain 'processing'
+    # and the frontend polls them infinitely. Fail them on startup.
+    try:
+        from database.db_extended import ExtendedDatabase
+        _insight_db = ExtendedDatabase()
+        _cleanup_orphaned_insights(
+            _insight_db,
+            logging.getLogger("autotube.startup"),
+            timeout_minutes=10,  # shorter on startup: anything still processing is definitely dead
+        )
+    except Exception as exc:
+        logging.getLogger("autotube.startup").warning("Insight orphan cleanup skipped: %s", exc)
 
     # ── PAUSE GATE: skip all auto-planning/dispatch when operator paused scheduling ──
     _scheduler_paused = False
@@ -993,6 +1007,39 @@ async def _detect_and_clean_orphans():
         logger.error("Orphan detection failed: %s", exc)
 
 
+# ── Stuck insight detection config ────────────────────────
+INSIGHT_ORPHAN_TIMEOUT_MINUTES = 30  # Insights stuck >30min without completion are declared orphaned
+
+
+def _cleanup_orphaned_insights(db, logger, timeout_minutes=INSIGHT_ORPHAN_TIMEOUT_MINUTES):
+    """Mark stuck channel_insights rows as failed if they've been 'processing' too long.
+    
+    Threads in the single-thread _INSIGHTS_EXECUTOR can hang on LLM API calls
+    or get killed on server restart, leaving rows with status='processing' forever.
+    The frontend polls these rows every 3s with no timeout, so a stuck row
+    causes an infinite loading screen.
+    """
+    import logging as _log_mod
+    if logger is None:
+        logger = _log_mod.getLogger("autotube.insights")
+    
+    try:
+        cleaned = db.execute(
+            """UPDATE channel_insights
+               SET status = 'failed',
+                   error_msg = 'Analysis timed out — auto-cleaned by orphan detector (' || ? || ' min timeout)'
+               WHERE status = 'processing'
+                 AND generated_at < datetime('now', ?)""",
+            (str(timeout_minutes), f'-{timeout_minutes} minutes')
+        )
+        count = db.total_changes
+        if count > 0:
+            db.commit()
+            logger.warning("Orphaned insights cleaned: %d stale processing rows → failed", count)
+    except Exception as exc:
+        logger.debug("Insight orphan cleanup skipped (non-critical): %s", exc)
+
+
 def _detect_ghost_workers(db, logger):
     """Kill worker processes whose --job-id does not exist in generation_jobs.
     
@@ -1071,6 +1118,11 @@ def _detect_and_clean_orphans_sync():
         # These are truly orphaned: the process is alive but its DB row was
         # deleted (e.g., channel deletion cascade, manual cleanup).
         _detect_ghost_workers(db, logger)
+        
+        # ── Stuck insight cleanup ──
+        # channel_insights rows stuck in 'processing' (thread hang, server restart)
+        # cause the frontend InsightsTab to show an infinite loading screen.
+        _cleanup_orphaned_insights(db, logger)
         
         # Prune old cancelled/skipped slots (older than yesterday)
         prune_result = db.prune_old_slots()
