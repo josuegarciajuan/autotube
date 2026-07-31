@@ -1105,20 +1105,23 @@ def _cleanup_orphaned_insights(db, logger, timeout_minutes=INSIGHT_ORPHAN_TIMEOU
         logger = _log_mod.getLogger("autotube.insights")
     
     try:
-        cleaned = db.execute(
-            """UPDATE channel_insights
-               SET status = 'failed',
-                   error_msg = 'Analysis timed out — auto-cleaned by orphan detector (' || ? || ' min timeout)'
-               WHERE status = 'processing'
-                 AND generated_at < datetime('now', ?)""",
-            (str(timeout_minutes), f'-{timeout_minutes} minutes')
-        )
-        count = db.total_changes
-        if count > 0:
-            db.commit()
-            logger.warning("Orphaned insights cleaned: %d stale processing rows → failed", count)
+        with db._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE channel_insights
+                   SET status = 'failed',
+                       error_msg = 'Analysis timed out — auto-cleaned by orphan detector (' || ? || ' min timeout)'
+                   WHERE status = 'processing'
+                     AND generated_at < datetime('now', ?)""",
+                (str(timeout_minutes), f'-{timeout_minutes} minutes')
+            )
+            count = cursor.rowcount
+            conn.commit()
+            if count > 0:
+                logger.warning("Orphaned insights cleaned: %d stale processing rows → failed", count)
+            else:
+                logger.info("Orphan check: no stale insights found (timeout=%d min)", timeout_minutes)
     except Exception as exc:
-        logger.debug("Insight orphan cleanup skipped (non-critical): %s", exc)
+        logger.error("Insight orphan cleanup failed: %s", exc, exc_info=True)
 
 
 # ── Filesystem retry helper with exponential backoff ────────

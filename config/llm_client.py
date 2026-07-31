@@ -64,6 +64,10 @@ def create_llm_client(
     effective_api_key = api_key or LLM_API_KEY
     effective_base_url = base_url or LLM_BASE_URL
 
+    # Defaults: 120s timeout per request, no SDK-level retries (our llm_json_call
+    # wrapper handles retries with exponential backoff). Callers can override both.
+    kwargs.setdefault("timeout", 120.0)
+    kwargs.setdefault("max_retries", 0)
     client = OpenAI(api_key=effective_api_key, base_url=effective_base_url, **kwargs)
 
     # Only patch DeepSeek endpoints to avoid interfering with OpenAI Vision etc.

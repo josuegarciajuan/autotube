@@ -883,12 +883,13 @@ export default function InsightsTab({
     if (insights?.status === 'processing' || analyzing) {
       pollRef.current = setInterval(() => {
         pollCountRef.current++
-        // After 40 polls (2 min), give up and show timeout
-        if (pollCountRef.current > 40) {
+        // After 200 polls (10 min), give up and show timeout
+        // Analysis typically takes 3-6 min for 3 LLM passes; 10 min is a safe ceiling.
+        if (pollCountRef.current > 200) {
           if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
           setAnalyzing(false)
-          setError('El analisis esta tardando demasiado. Puede que el servidor se haya reiniciado durante el proceso.')
+          setError('El analisis esta tardando mas de lo esperado. El servidor de IA puede estar ocupado — puedes cerrar esta ventana, el analisis seguira ejecutandose en segundo plano.')
           return
         }
         // Use a fresh AbortController per poll so we don't cancel the wrong one

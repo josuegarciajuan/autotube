@@ -55,6 +55,20 @@ def analyze_channel(channel_id: int):
     if not ch:
         raise HTTPException(404, "Channel not found")
 
+    # ── Dedup: if there is already a running analysis for this channel,
+    # return it instead of creating a duplicate that will just queue up.
+    existing = db.get_latest_insight(channel_id)
+    if existing and existing.get("status") == "processing":
+        logger.info(
+            "Analysis for channel %d already running (insight %d) — skipping new launch",
+            channel_id, existing["id"],
+        )
+        return {
+            "insight_id": existing["id"],
+            "status": "processing",
+            "already_running": True,
+        }
+
     insight_id = db.create_insight(channel_id)
 
     from api.services.channel_analyzer import run_channel_analysis_sync
@@ -64,7 +78,7 @@ def analyze_channel(channel_id: int):
     )
 
     logger.info("Analysis launched for channel %d (insight %d)", channel_id, insight_id)
-    return {"insight_id": insight_id, "status": "processing"}
+    return {"insight_id": insight_id, "status": "processing", "already_running": False}
 
 
 @router.get("/{channel_id}/insights/latest")
