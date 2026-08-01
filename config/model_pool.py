@@ -130,7 +130,8 @@ class ModelPool:
         if provider == "deepseek":
             api_key = LLM_API_KEY
             base_url = LLM_BASE_URL if "deepseek" in LLM_BASE_URL else "https://api.deepseek.com/v1"
-            enable_thinking = True
+            # Only v4 reasoning models need thinking mode; standard chat models don't
+            enable_thinking = "v4" in model_id.lower()
             timeout = 120.0
         elif provider == "openai":
             api_key = OPENAI_API_KEY
