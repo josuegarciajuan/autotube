@@ -30,7 +30,7 @@ from api.routers import insights
 from api.routers import view_gap as view_gap_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
-from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED
+from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT
 
 logger = logging.getLogger("autotube.main")
 
@@ -643,7 +643,7 @@ async def _schedule_checker_loop():
             
             # Collect YouTube stats every 6 hours
             now = time.time()
-            if STATS_ENABLED and now - last_stats_collection > 21600:  # 6 hours
+            if STATS_AUTO_COLLECT and now - last_stats_collection > 21600:  # 6 hours
                 await _collect_youtube_stats()
                 last_stats_collection = now
                 # Persist so a restart doesn't trigger immediate re-collection
