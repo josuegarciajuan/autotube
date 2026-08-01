@@ -1117,8 +1117,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         ]
         emociones = [b.get("emocion", "") for b in enriched_bloques if b.get("emocion")]
 
+        titulo_options = doc_meta.get("titulo_options", [content_item.get("title", "Sin título")])
         data = {
-            "titulo_options": doc_meta.get("titulo_options", [content_item.get("title", "Sin título")]),
+            "titulo_options": titulo_options,
+            "titulo_selected": titulo_options[0] if titulo_options else content_item.get("title", "Sin título"),
             "descripcion_seo": doc_meta.get("descripcion_seo", ""),
             "guion": full_guion,
             "parrafos": doc_meta.get("parrafos", [{"idea_central": "", "bloques": enriched_bloques}]),

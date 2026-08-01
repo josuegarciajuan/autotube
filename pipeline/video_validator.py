@@ -123,7 +123,12 @@ class VideoValidator:
         blocking: list[str] = []
         warnings: list[str] = []
 
-        titulo = (script.get("titulo_selected") or script.get("titulo") or "").strip()
+        titulo = (
+            script.get("titulo_selected")
+            or (script.get("titulo_options") or [None])[0]
+            or script.get("titulo")
+            or ""
+        ).strip()
 
         # 1. Title not empty
         if not titulo:

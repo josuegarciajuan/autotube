@@ -848,16 +848,22 @@ def run_job(
             
             db.update_video(video_id, progress=25, progress_phase="script",
                             script_id=script.get("id"))
+            _titulo_opts = script.get("titulo_options") or []
             _save_checkpoint(video_id, "script", {
                 "id": script.get("id"),
-                "titulo": script.get("titulo_selected", "")[:60],
+                "titulo": (script.get("titulo_selected") or (_titulo_opts[0] if _titulo_opts else "") or "")[:60],
                 "guion": script.get("guion", ""),
                 "bloques_json": script.get("bloques_json", []),
                 "escenas_json": script.get("escenas_json", []),
-                "titulo_options": script.get("titulo_options", []),
+                "titulo_options": _titulo_opts,
             }, db)
         
-        titulo = (script.get("titulo_selected") or script.get("titulo") or "Sin titulo")[:60] if script else ""
+        titulo = (
+            script.get("titulo_selected")
+            or (script.get("titulo_options") or [None])[0]
+            or script.get("titulo")
+            or "Sin titulo"
+        )[:60] if script else ""
         logger.info("Script: '%s' (%d words)", titulo,
                     len(script.get("guion", "").split()) if script else 0)
 

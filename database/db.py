@@ -317,16 +317,18 @@ class Database:
                       duracion_estimada=None, token_count=0, cost_estimate=0.0,
                       emergency_mode=False):
         """Insert a generated script. Returns row id."""
+        titulo_selected = titulo_options[0] if titulo_options else ""
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO scripts
-                   (raw_content_id, canal, titulo_options, guion,
+                   (raw_content_id, canal, titulo_options, titulo_selected, guion,
                     escenas_json, bloques_json, emociones_json, keywords_json,
                     duracion_estimada, token_count, cost_estimate, emergency_mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     raw_content_id, canal,
                     json.dumps(titulo_options, ensure_ascii=False),
+                    titulo_selected,
                     guion,
                     json.dumps(escenas, ensure_ascii=False),
                     json.dumps(bloques, ensure_ascii=False) if bloques else None,
