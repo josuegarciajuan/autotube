@@ -133,7 +133,7 @@ class ModelPool:
             enable_thinking = True
             timeout = 120.0
         elif provider == "openai":
-            api_key = LLM_API_KEY or OPENAI_API_KEY
+            api_key = OPENAI_API_KEY
             base_url = "https://api.openai.com/v1"
             enable_thinking = False
             timeout = 90.0
