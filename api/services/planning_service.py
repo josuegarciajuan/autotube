@@ -813,6 +813,147 @@ def _get_slot_timezone(slot: dict) -> str:
 
 # ── Persistence layer ─────────────────────────────────────────
 
+def _resolve_existing_collisions(
+    slots: list[dict],
+    date_str: str,
+    db,
+) -> None:
+    """Check newly-computed slots against existing DB entries for the same
+    channel on the same date, and push conflicting target_public_at forward.
+
+    v10.3 (Aug 2026): Prevents replans from creating duplicate publish times
+    when non-pending slots or already-created videos already occupy a time window.
+
+    Modifies slots in-place if collisions are found.
+    """
+    import sqlite3
+    from datetime import timezone as _tz, datetime as _dt, timedelta as _td
+
+    min_gap = _td(hours=MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS)
+
+    # Group slots by channel for efficient DB queries
+    by_channel = {}
+    for s in slots:
+        ch_id = s.get("channel_id")
+        if not ch_id or not s.get("target_public_at") or s.get("publish_mode") != "scheduled":
+            continue
+        by_channel.setdefault(ch_id, []).append(s)
+
+    if not by_channel:
+        return
+
+    conn = None
+    try:
+        if hasattr(db, '_connect'):
+            conn = db._connect()
+
+        for ch_id, ch_slots in by_channel.items():
+            # Query existing non-pending planned_slots for this channel+date
+            existing_targets = []
+            if conn:
+                # Check 1: non-pending planned_slots
+                rows = conn.execute("""
+                    SELECT ps.target_public_at, ps.status
+                    FROM planned_slots ps
+                    WHERE ps.channel_id = ?
+                      AND ps.date_key = ?
+                      AND ps.status IN ('running', 'completed')
+                      AND ps.target_public_at IS NOT NULL
+                    ORDER BY ps.target_public_at
+                """, (ch_id, date_str)).fetchall()
+                for row in rows:
+                    ts = row["target_public_at"]
+                    if isinstance(ts, str):
+                        try:
+                            dt = _dt.fromisoformat(ts.replace("Z", "+00:00").replace(" ", "T"))
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        dt = ts
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=_tz.utc)
+                    existing_targets.append((dt, f"slot({row['status']})"))
+
+                # Check 2: videos with target_public_at on the same date
+                rows2 = conn.execute("""
+                    SELECT v.target_public_at, v.titulo_final, v.status
+                    FROM videos v
+                    WHERE v.channel_id = ?
+                      AND v.target_public_at IS NOT NULL
+                      AND date(v.target_public_at) = ?
+                    ORDER BY v.target_public_at
+                """, (ch_id, date_str)).fetchall()
+                for row in rows2:
+                    ts = row["target_public_at"]
+                    if isinstance(ts, str):
+                        try:
+                            dt = _dt.fromisoformat(ts.replace("Z", "+00:00").replace(" ", "T"))
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        dt = ts
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=_tz.utc)
+                    existing_targets.append((dt, f"video({row['status']})"))
+
+            if not existing_targets:
+                continue
+
+            # Sort existing targets by time
+            existing_targets.sort(key=lambda x: x[0])
+
+            # For each new slot, check against existing targets
+            for s in ch_slots:
+                tpa_str = s.get("target_public_at")
+                if not tpa_str:
+                    continue
+                try:
+                    if isinstance(tpa_str, str):
+                        tpa = _dt.fromisoformat(tpa_str.replace("Z", "+00:00").replace(" ", "T"))
+                    else:
+                        tpa = tpa_str
+                    if tpa.tzinfo is None:
+                        tpa = tpa.replace(tzinfo=_tz.utc)
+                except (ValueError, TypeError):
+                    continue
+
+                # Find the closest existing target after ours
+                adjusted = tpa
+                for ex_dt, ex_label in existing_targets:
+                    gap = abs((adjusted - ex_dt).total_seconds()) / 3600.0
+                    if gap < MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS:
+                        # Collision! Push our slot forward to after the existing one
+                        pushed = ex_dt + min_gap
+                        logger.info(
+                            "_resolve_existing_collisions: [ch=%d] slot target %s conflicts "
+                            "with existing %s (%s, gap=%.1fh). Pushing to %s.",
+                            ch_id,
+                            tpa_str[:19] if isinstance(tpa_str, str) else str(tpa)[:19],
+                            ex_label,
+                            str(ex_dt)[:19],
+                            gap,
+                            str(pushed)[:19],
+                        )
+                        adjusted = pushed
+
+                if adjusted != tpa:
+                    s["target_public_at"] = adjusted.isoformat()
+                    # Also adjust target_upload_at (back out warmup + pipeline)
+                    # to maintain ordering: target_upload_at < target_public_at
+                    warmup_min = s.get("warmup_min", 120)
+                    reverse_min = ESTIMATED_PIPELINE_MINUTES + warmup_min
+                    upload_dt = adjusted - _td(minutes=reverse_min)
+                    s["target_upload_at"] = upload_dt.isoformat()
+    except Exception as e:
+        logger.debug("_resolve_existing_collisions: skipped (non-fatal): %s", e)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def compute_and_store_slots(
     date_str: Optional[str] = None,
     db=None,
@@ -858,6 +999,12 @@ def compute_and_store_slots(
     
     # Compute slots
     slots = compute_daily_slots(date_str, channel_configs)
+    
+    # ── v10.3: Resolve collisions with already-existing slots/videos ──
+    # Check against non-pending planned_slots AND existing videos with 
+    # target_public_at on the same date. This prevents replans from 
+    # creating duplicate publish times.
+    _resolve_existing_collisions(slots, date_str, db)
     
     # Store them
     stored = db.create_planned_slots_batch(slots)
@@ -1713,6 +1860,51 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         
         # ── Use the correct target_public_at (peak publish time) ──
         target_public_at = next_slot.get("target_public_at")
+        
+        # ── v10.3: Collision guard at dispatch time ──
+        # Before creating the video, verify the target_public_at doesn't collide
+        # with already-existing videos or planned slots from the same channel.
+        # This catches cases where the planning system assigned the same time
+        # to multiple slots (e.g., due to replan/race conditions).
+        if target_public_at and is_scheduled:
+            try:
+                from pipeline.publish_scheduler import _avoid_channel_collision
+                from datetime import timezone as _tz_guard, datetime as _dt_guard
+                
+                # Parse the ISO8601 UTC string to datetime
+                tpa_str = str(target_public_at) if target_public_at else ""
+                if isinstance(target_public_at, str):
+                    proposed = _dt_guard.fromisoformat(
+                        tpa_str.replace("Z", "+00:00").replace(" ", "T")
+                    )
+                else:
+                    proposed = target_public_at
+                if proposed.tzinfo is None:
+                    proposed = proposed.replace(tzinfo=_tz_guard.utc)
+                
+                adjusted = _avoid_channel_collision(
+                    channel_id, proposed, db=db, slug=slug,
+                )
+                if adjusted != proposed:
+                    logger.info(
+                        "[%s] Dispatch collision guard: pushed target_public_at from %s → %s",
+                        slug,
+                        proposed.isoformat(),
+                        adjusted.isoformat(),
+                    )
+                    target_public_at = adjusted.isoformat()
+                    # Update the planned_slot's target_public_at too
+                    try:
+                        with db._connect() as _gc:
+                            _gc.execute(
+                                "UPDATE planned_slots SET target_public_at = ? WHERE id = ?",
+                                (target_public_at, slot_id),
+                            )
+                            _gc.commit()
+                    except Exception:
+                        pass
+            except Exception as guard_exc:
+                logger.debug("[%s] Dispatch collision guard skipped: %s", slug, guard_exc)
         
         with db._connect() as conn:
             cursor = conn.execute(
