@@ -63,7 +63,13 @@ echo "   $ACTIVE_JOBS"
 
 if [[ "$ACTIVE_JOBS" == ACTIVE:* ]]; then
     JOB_ID=$(echo "$ACTIVE_JOBS" | cut -d: -f3)
-    if [ "$WORKER_MODE" = "ON" ]; then
+    # Detect whether the running job is a subprocess worker (survivable)
+    # or legacy in-process (would die on API restart)
+    WORKER_MODE="IN_PROCESS"
+    if pgrep -f "full_pipeline_worker.*--job-id $JOB_ID" > /dev/null 2>&1; then
+        WORKER_MODE="SUBPROCESS"
+    fi
+    if [ "$WORKER_MODE" = "SUBPROCESS" ]; then
         echo ""
         echo "✅ Active job #$JOB_ID running in SUBPROCESS mode."
         echo "   The worker will continue independently during the API restart."
