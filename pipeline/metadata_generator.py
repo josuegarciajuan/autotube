@@ -11,8 +11,11 @@ Follows YouTube SEO best practices:
 - Thumbnail text: 3-5 words, complementary to title, high emotional impact
 """
 
+import hashlib
 import json
 import logging
+import random
+import re as _re
 from typing import Optional
 
 from config.llm_client import create_llm_client
@@ -160,6 +163,133 @@ def _smart_overlay_text(text: str, soft: int = 24, hard: int = 34) -> str:
     return out or text[:hard]  # never empty; last-resort hard cut
 
 
+# ── Unique keyword selection per video ──────────────────────────
+
+# Common Spanish stop words to filter out when extracting
+# keywords from titles (avoid polluting tags with articles,
+# prepositions, and generic terms).
+_STOP_WORDS_ES: set[str] = {
+    "antes", "aunque", "cada", "como", "cuando", "donde", "este",
+    "esto", "hace", "hacer", "hasta", "mucho", "nuestro", "otro",
+    "para", "pero", "puede", "pueden", "será", "serán", "sobre",
+    "también", "tener", "tenía", "tenían", "todo", "todos", "tiene",
+    "tienen", "tuvo", "unos", "unas", "usted", "veces",
+    "video", "vídeo", "viral", "está", "están",
+    "entre", "desde", "hacia", "cerca", "debajo", "ahora", "nunca",
+    "siempre", "tampoco", "entonces", "después", "luego", "mientras",
+    "porque", "durante", "ningún", "ninguna", "ninguno", "muchos",
+    "muchas", "pocos", "pocas", "varios", "varias", "algunos",
+    "algunas", "cualquier", "cualquiera", "quién", "quiénes",
+    "cuánto", "cuántos", "cuál", "cuáles", "dónde", "adónde",
+    "cuándo", "cómo", "porqué", "hecho", "hecha", "hechos",
+    "había", "habían", "sería", "serían", "estaría", "estarían",
+    "podría", "podrían", "debería", "deberían", "tendrían",
+    "habrían", "hubiera", "hubieran", "dicha", "dicho", "dichos",
+    "dichas", "vista", "visto", "verás", "verán", "descubrir",
+    "descubrió", "descubrieron", "encontrar", "encontró",
+    "encontraron", "saber", "supo", "supieron", "parece", "parecía",
+    "parecen", "parecían", "existe", "existía", "existían",
+    "existir", "existieron", "hablar", "habla", "hablan",
+}
+
+def select_video_keywords(
+    config,
+    script: dict = None,
+    content_text: str = "",
+    min_kw: int = 5,
+    max_kw: int = 15,
+) -> list[str]:
+    """Select a unique keyword combination for each video.
+
+    Builds a master pool from all channel keyword sources
+    (YT_DEFAULT_TAGS, SEO_SECONDARY_KEYWORDS, SEO_PRIMARY_KEYWORD,
+    CHANNEL_KEYWORDS), then selects a random subset using
+    content-derived entropy so each video gets a different
+    combination. Also extracts eligible words from the title.
+
+    Args:
+        config: Channel config object (SimpleNamespace or module).
+        script: Optional script dict with keys 'selected_title',
+                'titulo', 'guion' for content entropy.
+        content_text: Additional text for entropy seeding
+                      (e.g. block_texts from viral cloner).
+        min_kw: Minimum number of keywords to return (default 5).
+        max_kw: Maximum number of keywords to return (default 15).
+
+    Returns:
+        List of unique keyword strings, 5-15 items.
+    """
+    # ── Build master keyword pool ──────────────────────────
+    pool: set[str] = set()
+
+    for attr in ("YT_DEFAULT_TAGS", "SEO_SECONDARY_KEYWORDS", "CHANNEL_KEYWORDS"):
+        tags = getattr(config, attr, []) or []
+        for t in tags:
+            stripped = str(t).strip().lower()
+            if stripped and len(stripped) >= 3:
+                pool.add(stripped)
+
+    primary = getattr(config, "SEO_PRIMARY_KEYWORD", "")
+    if primary:
+        stripped = str(primary).strip().lower()
+        if stripped and len(stripped) >= 3:
+            pool.add(stripped)
+
+    pool_list = sorted(pool)  # deterministic ordering for reproducible sampling
+    if not pool_list:
+        logger.warning("select_video_keywords: empty keyword pool for channel — returning empty list")
+        return []
+
+    # ── Derive entropy seed from content ────────────────────
+    seed_parts: list[str] = [content_text or ""]
+    if script:
+        title = script.get("selected_title", "") or script.get("titulo", "") or ""
+        guion = script.get("guion", "") or ""
+        seed_parts.append(title)
+        seed_parts.append(guion[:500])
+
+    seed_str = "|".join(seed_parts)
+    if not seed_str.strip("|"):
+        # Truly no content — use timestamp for unique fallback
+        import time as _time
+        seed_str = str(_time.time())
+
+    seed = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+
+    # ── Select random subset ───────────────────────────────
+    n = rng.randint(min_kw, min(max_kw, len(pool_list)))
+    selected = rng.sample(pool_list, n)
+
+    # ── Extract additional keywords from title words ────────
+    if script:
+        title = script.get("selected_title", "") or script.get("titulo", "")
+        if title:
+            clean = _re.sub(r"\([^)]*\)", "", title)   # remove parentheticals
+            clean = _re.sub(r"[^\w\s]", "", clean)     # remove punctuation
+            words = [w.lower() for w in clean.split()
+                     if len(w) > 4 and w.isalpha()
+                     and w.lower() not in _STOP_WORDS_ES]
+            added = 0
+            for w in words:
+                if w not in selected and not any(w in s or s in w for s in selected):
+                    selected.append(w)
+                    added += 1
+                    if len(selected) >= max_kw:
+                        break
+            if added:
+                logger.debug("select_video_keywords: added %d title words to keyword set", added)
+
+    # ── Ensure minimum count ───────────────────────────────
+    if len(selected) < min_kw and len(pool_list) >= min_kw:
+        remaining = [p for p in pool_list if p not in selected]
+        if remaining:
+            needed = min(min_kw - len(selected), len(remaining))
+            selected.extend(rng.sample(remaining, needed))
+
+    return selected[:max_kw]
+
+
 class MetadataGenerator:
     """Generate YouTube-optimized metadata (titles, description, tags, thumbnail text)
     using the same LLM provider as the script generator.
@@ -224,6 +354,18 @@ CATEGORÍA: Educación (ID 27)"""
         
         keywords_str = ", ".join(keywords[:10]) if keywords else "historias impactantes, psicología, experimentos"
         
+        # ── Unique keyword bank per video ──────────────────────
+        # Each video gets a different random subset from the
+        # channel's keyword pool, ensuring tag variety.
+        keyword_bank = select_video_keywords(
+            self.config,
+            script=script,
+            content_text=keywords_str,
+            min_kw=5,
+            max_kw=15,
+        )
+        keyword_bank_str = ", ".join(keyword_bank) if keyword_bank else keywords_str
+        
         # Build scene chapters for description
         escenas_raw = script.get("escenas") or script.get("escenas_json", "[]")
         if isinstance(escenas_raw, str):
@@ -255,6 +397,9 @@ CATEGORÍA: Educación (ID 27)"""
 CONTENIDO DEL VIDEO:
 Tema principal: {keywords_str}
 {source_text}
+
+BANCO DE KEYWORDS ÚNICAS (selección variada para este video):
+{keyword_bank_str}
 
 RESUMEN DEL GUIÓN:
 {script_snippet[:2500]}
@@ -426,16 +571,27 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
         title = enforce_power_words(title, power_words)
         
-        keywords_raw = script.get("keywords") or script.get("keywords_json", "[]")
-        if isinstance(keywords_raw, str):
-            try:
-                keywords = json.loads(keywords_raw)
-            except json.JSONDecodeError:
-                keywords = []
-        else:
-            keywords = keywords_raw or []
-        
-        tags = keywords[:10] if keywords else ["historias", "impactante", "documental"]
+        # ── Unique keyword selection per video ─────────────────────
+        # Even in fallback, avoid using the same static keyword set
+        # for every video.
+        tags = select_video_keywords(
+            self.config,
+            script=script,
+            content_text=title,
+            min_kw=5,
+            max_kw=10,
+        )
+        if not tags:
+            # Ultimate last resort: script-generated keywords or hardcoded fallback
+            keywords_raw = script.get("keywords") or script.get("keywords_json", "[]")
+            if isinstance(keywords_raw, str):
+                try:
+                    keywords = json.loads(keywords_raw)
+                except json.JSONDecodeError:
+                    keywords = []
+            else:
+                keywords = keywords_raw or []
+            tags = keywords[:10] if keywords else ["historias", "impactante", "documental"]
         
         # Build basic description from template
         channel_desc = getattr(self.config, "DESCRIPTION_TEMPLATE", "")

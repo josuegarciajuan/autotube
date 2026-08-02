@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import requests
 
 from config.config_bridge import get_channel_config
+from pipeline.metadata_generator import select_video_keywords
 from pipeline.title_enricher import enforce_power_words
 
 logger = logging.getLogger(__name__)
@@ -608,18 +609,37 @@ def clone_title_description(
 
 
 def _extract_tags_from_script(block_texts: list[str], config: SimpleNamespace) -> list[str]:
-    """Extract SEO tags using channel config defaults plus viral marker."""
-    # Start with channel default tags
-    default_tags = getattr(config, "YT_DEFAULT_TAGS", [])
-    hashtags = getattr(config, "SEO_HASHTAGS", [])
+    """Extract SEO tags using unique keyword selection per video.
 
-    tags = list(default_tags[:8])  # Copy first 8 defaults
+    Uses select_video_keywords() to pick a different random subset
+    from the channel's keyword pool for each video, seeded by the
+    block text content. Always includes 'video viral' as suffix.
+    """
+    # Build a pseudo-script for content entropy
+    content_text = " ".join(block_texts[:5]) if block_texts else ""
+    pseudo_script = {"guion": content_text, "titulo": ""}
+
+    # Extract first meaningful sentence as pseudo-title for extra entropy
+    if block_texts:
+        first = block_texts[0].split(".")[0].strip()
+        if len(first) > 10:
+            pseudo_script["titulo"] = first
+
+    tags = select_video_keywords(
+        config,
+        script=pseudo_script,
+        content_text=content_text,
+        min_kw=5,
+        max_kw=14,  # leave room for "video viral"
+    )
+
+    # Strip '#' characters if any leaked through
     tags = [t.strip("#") for t in tags]
 
     # Add viral-specific tag
-    tags.append("video viral")
+    if "video viral" not in tags:
+        tags.append("video viral")
 
-    # Limit to 15 tags
     return tags[:15]
 
 
