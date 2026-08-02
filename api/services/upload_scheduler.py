@@ -376,7 +376,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                     """SELECT COUNT(*) as cnt FROM videos
                        WHERE channel_id = ?
                          AND date(uploaded_at) = date('now', 'localtime')
-                         AND status IN ('uploaded', 'uploaded_private', 'published')""",
+                         AND status = 'published'
+                         AND yt_video_id IS NOT NULL""",
                     (ch_id,),
                 ).fetchone()
             today_uploads[ch_id] = row["cnt"] if row else 0

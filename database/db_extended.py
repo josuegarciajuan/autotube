@@ -95,9 +95,10 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
             retry_count = _get_retry_count(video_id)
             if retry_count >= _PUBLISH_MAX_RETRIES:
                 vlog.warning(
-                    "[%s] Video #%d still %s after %d retries — giving up",
+                    "[%s] Video #%d still %s after %d retries — forcing go_public",
                     channel_slug, video_id, privacy_status, retry_count,
                 )
+                _force_go_public(video_id, channel_slug, yt_video_id)
             else:
                 delay = min(
                     _PUBLISH_RETRY_BASE_MINUTES * (2 ** retry_count),
@@ -140,6 +141,47 @@ def _mark_video_published(video_id: int, channel_slug: str, yt_video_id: str):
     except Exception as e:
         vlog.error("[%s] Failed to update video #%d: %s",
                    channel_slug, video_id, e)
+
+
+def _force_go_public(video_id: int, channel_slug: str, yt_video_id: str):
+    """Force the video to public after max failed verification retries.
+
+    YouTube's publishAt sometimes doesn't fire on time. This function
+    manually sets privacyStatus to 'public' via the YouTube API.
+    Quota cost: 50 units (videos.update).
+    """
+    vlog = logger.getChild("publish_verify")
+    vlog.warning(
+        "[%s] 🔧 Forcing go_public for video #%d (yt=%s)...",
+        channel_slug, video_id, yt_video_id,
+    )
+    try:
+        from pipeline.youtube_uploader import YouTubeUploader
+        uploader = YouTubeUploader(channel_slug)
+        if not uploader.authenticate():
+            vlog.error("[%s] Auth failed for go_public of #%d", channel_slug, video_id)
+            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+            return
+
+        uploader.set_privacy(yt_video_id, "public")
+
+        db = ExtendedDatabase()
+        now_iso = datetime.now(_dt_timezone.utc).isoformat()
+        db.update_video(
+            video_id,
+            status="published",
+            privacy_status="public",
+            published_at=now_iso,
+            published_verified_at=now_iso,
+        )
+        vlog.info(
+            "[%s] ✅ Video #%d forced to public (yt=%s)",
+            channel_slug, video_id, yt_video_id,
+        )
+    except Exception as e:
+        vlog.error("[%s] ❌ Failed to force go_public for #%d: %s",
+                   channel_slug, video_id, e)
+        _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
 
 
 def _schedule_publish_retry(video_id: int, delay_minutes: int):
