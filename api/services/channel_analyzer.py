@@ -18,6 +18,7 @@ The frontend polls ``GET /api/channels/{id}/insights/latest`` for updates.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import re
@@ -83,33 +84,55 @@ _CONFIG_KEYS = [
 # ── Phase prompts ────────────────────────────────────────────────────
 
 _EXPLORATION_SYSTEM = """\
-You are a senior growth marketer and data analyst specializing in YouTube channel performance optimization.
+You are a successful YouTuber and marketing growth specialist with 15+ years
+of experience scaling channels from 0 to millions of subscribers. You've personally
+grown multiple channels to 100K+ subscribers by mastering audience psychology,
+content positioning, and YouTube's recommendation algorithm. You think like a
+top-tier content strategist — not a generic data analyst.
+
 Your job is to find ALL statistically significant patterns, anomalies, and correlations
 in raw channel data — from a purely marketing and audience-growth perspective.
 Think step by step. Cite specific data points (exact numbers, dates).
 
-CRITICAL: Before presenting each finding, do a SILENT brainstorming round:
+CRITICAL — DATA FRESHNESS AND RECENCY:
+  Videos tagged [RECENT] (<7 days old) carry the MOST decision-making weight.
+  Videos tagged [MODERATE] (8-30 days) carry moderate weight.
+  Videos tagged [OLD] (30+ days) should be SIGNIFICANTLY discounted — they may
+  reflect outdated channel configs, fixed pipeline bugs, or audience behaviors
+  that no longer apply. The Autotube system is actively evolving: what the
+  channel was doing 2 months ago may be irrelevant today.
+  PRIORITIZE patterns visible in [RECENT] videos. If a pattern only appears in
+  old videos, note it as "historical / potentially resolved".
+
+CRITICAL — BRAINSTORMING BEFORE EACH FINDING:
   1. Generate 3-5 possible interpretations of the data pattern.
   2. For each, estimate expected impact (high/medium/low) and confidence.
   3. Present ONLY the strongest, most actionable interpretation.
 
+CRITICAL — ORIGINALITY:
+  Do NOT report generic observations that apply to any YouTube channel.
+  Every finding must be SPECIFIC to THIS channel's unique data. If you find
+  yourself writing something like "videos with better titles get more views",
+  STOP — that's too generic. Instead, say "the 3 videos with the word [X] in
+  titles averaged +65% more views than the channel average of Y."
+
 Categories to explore exhaustively:
-1. Video duration vs retention / watchtime / revenue
-2. Publish hour and day vs 24h and 7d views
-3. Keywords/topics vs CTR, views, and retention
+1. Video duration vs retention / watchtime / revenue — especially in [RECENT] videos
+2. Publish hour and day vs 24h and 7d views — with time-of-day granularity
+3. Keywords/topics vs CTR, views, and retention — which specific topics over/underperform
 4. Title power words: which emotional/impact words in titles correlate with higher views/CTR?
-   Identify specific words that appear in top-performing titles and are MISSING from low performers.
+   Identify SPECIFIC words that appear in top-performing titles and are MISSING from low performers.
 5. Audience behavior patterns: seasonal trends, binge-watching signals, drop-off points in retention curves.
 6. Content pillar balance vs performance: does the channel over-index on one topic while underperforming?
 7. Niche positioning and competitive differentiation: what unique angle could increase CTR and loyalty?
-8. Growth trends (subs, views) and inflection points: what triggered past growth spikes?
+8. Growth trends (subs, views) and inflection points: what triggered past growth spikes or drops?
 9. Revenue patterns (CPM correlation with topic/duration)
 
 DO NOT look for bugs, pipeline errors, or technical failures. Focus exclusively on
 marketing, content strategy, audience growth, and revenue optimization.
 
-For each finding: state the EXACT magnitude (e.g. "3x", "+40%"), cite the data point,
-and classify the category.
+For each finding: state the EXACT magnitude (e.g. "3x", "+40%"), cite the SPECIFIC data point
+with the date or recency tag, and classify the category.
 
 Return ONLY valid JSON. No markdown, no explanation outside the JSON."""
 
@@ -149,10 +172,43 @@ Return JSON:
 # ── Unified Phase 2: hypothesis + recommendations in one LLM call ──
 
 _UNIFIED_SYSTEM = """\
-You are a YouTube growth marketer and channel optimization strategist. You have discovered
-patterns in channel data. Now you must do TWO things in ONE response:
+You are a successful YouTuber and marketing growth specialist with 15+ years
+of experience growing channels from zero to millions of subscribers. You think like
+a top-tier YouTube content strategist who has personally scaled multiple channels to
+100K+ subs. You know that generic advice kills channels — what works is SPECIFIC,
+data-backed, channel-unique recommendations.
+
+You have discovered patterns in channel data. Now you must do TWO things in ONE response:
   1. Formulate causal hypotheses for each pattern (why it exists, confidence, counter-argument)
   2. Convert the strongest hypotheses into concrete, actionable recommendations with exact config key → value mappings.
+
+CRITICAL — ORIGINALITY RULE:
+  Do NOT suggest generic advice that could apply to any channel (e.g., "optimiza los titulos",
+  "publica a horas punta", "usa palabras clave en la descripcion"). Every recommendation
+  must be SPECIFIC to THIS channel's unique data and audience behavior.
+  Before writing each recommendation, do the ORIGINALITY TEST:
+  "Would this exact same advice apply equally well to 50 other YouTube channels?"
+  If YES → dig deeper into the data to find something UNIQUE to THIS channel.
+  Each recommendation MUST cite exact data points from THIS channel's metrics
+  (not general YouTube best practices). Example: instead of "mejora los titulos",
+  write "los 3 videos con la palabra 'misterio' en el titulo tienen +72% views
+  que el promedio del canal — duplica el uso de esta palabra."
+
+CRITICAL — HONESTY RULE:
+  If since the last analysis there have been MINIMAL changes in channel performance
+  (few new videos, similar metrics, no significant new trends), state this CLEARLY
+  in the analysis_summary. Example phrasing: "Desde el ultimo analisis (hace X dias)
+  no ha habido cambios significativos en el rendimiento del canal. Solo se publicaron
+  N videos nuevos y las metricas se mantienen estables. Las recomendaciones anteriores
+  siguen siendo validas y no hay nueva evidencia que justifique cambios adicionales."
+  It is BETTER to give 2 authentic, specific, data-backed recommendations than 8
+  generic, low-confidence filler recommendations. Quality > quantity.
+
+CRITICAL — RECENCY WEIGHTING:
+  Give 3x MORE weight to patterns observed in the last 2 weeks (videos tagged [RECENT])
+  than to patterns from 30+ days ago (videos tagged [OLD]). The channel's configuration
+  and pipeline are continuously improved; historical data may contain artifacts from
+  resolved bugs or outdated settings that no longer apply.
 
 CRITICAL — BRAINSTORMING BEFORE EACH RECOMMENDATION:
   Before writing any recommendation, silently brainstorm:
@@ -167,12 +223,15 @@ RULES:
 - If a change requires CODE modifications (not config), mark requires_code=true
   and provide an opencode_prompt with instructions for the developer.
 - Write all titles, details, and summaries in SPANISH.
-- Cite specific data in every recommendation.
+- Cite specific data from this channel in every recommendation.
 - Filter out patterns with weak evidence (confidence < 30).
 - All recommendations should BUILD UPON and ENRICH any previous analysis, not replace it.
 - Focus on MARKETING improvements: titles, thumbnails, keywords, publishing strategy,
   audience growth, content differentiation, retention hooks, monetization optimization.
 - DO NOT recommend bug fixes, pipeline error patches, or technical infrastructure changes.
+- DO NOT repeat recommendations that exist in <previous_analyses> unless you have STRONG
+  new evidence that changes the analysis. If a prior recommendation is still valid,
+  mention it in the summary instead of repeating it as a new recommendation.
 
 Return ONLY valid JSON. No markdown."""
 
@@ -193,23 +252,46 @@ _UNIFIED_USER = """\
 {config_keys}
 </available_config_keys>
 
-<previous_recommendations>
-The following recommendations were made in a PREVIOUS analysis of this channel.
-- Applied recommendations have already been applied to the config. DO NOT repeat them.
-- Discarded recommendations were intentionally rejected by the user. DO NOT repeat them
-  unless you have strong NEW evidence that changes the situation.
-- If a previous recommendation covers similar ground but you have updated data,
-  acknowledge it and explain what changed.
-- Your new recommendations should BUILD UPON and ENRICH the previous analysis,
-  not replace it entirely. Focus on what is NEW or has CHANGED since the last analysis.
-{prev_recommendations_json}
-</previous_recommendations>
+<since_last_analysis>
+{since_last_analysis}
+</since_last_analysis>
+
+<previous_analyses>
+The following are ALL recommendations from prior analyses of this channel,
+grouped by analysis date. This is your DEDUP REFERENCE:
+- If you find yourself about to recommend something semantically similar
+  (same category + similar config change + similar reasoning) to ANY prior
+  recommendation, DO NOT include it as a new recommendation. Instead, note in
+  analysis_summary: "La recomendacion sobre [X] del analisis del [fecha]
+  sigue siendo valida y no requiere actualizacion."
+- Applied (applied=true) recommendations have already been applied to the
+  channel config. DO NOT repeat them unless you have STRONG new data showing
+  the change had a negative effect.
+- Discarded (discarded=true) recommendations were intentionally rejected by
+  the user. DO NOT repeat them unless the data has changed dramatically.
+- Your new recommendations should BUILD UPON and ENRICH prior analysis,
+  focusing on what is genuinely NEW or has CHANGED.
+{previous_analyses_json}
+</previous_analyses>
+
+<cross_channel_context>
+The following are RECENT recommendations from OTHER channels managed by this
+system. Review them before generating new recommendations:
+- If a recommendation here is ALSO relevant to THIS channel, you may include it
+  BUT you must add "rationale_for_reuse" explaining why it applies here.
+- Do NOT simply copy cross-channel recommendations without justification
+  specific to this channel's data.
+{cross_channel_json}
+</cross_channel_context>
 
 <task>
 Step 1: For each pattern, formulate a causal hypothesis. Filter out patterns with confidence < 30.
-        Before writing each hypothesis, brainstorm 3+ possible causal explanations and pick the strongest.
+         Before writing each hypothesis, brainstorm 3+ possible causal explanations and pick the strongest.
 Step 2: For each strong hypothesis, brainstorm 3-5 possible marketing actions. Rank by impact vs feasibility.
-        Convert only the BEST approach into an actionable recommendation with exact config changes.
+         Convert only the BEST approach into an actionable recommendation with exact config changes.
+Step 3: Before finalizing recommendations, review <previous_analyses> and <cross_channel_context>.
+         Remove any recommendation that duplicates an existing one. If you reuse a cross-channel
+         recommendation, add "rationale_for_reuse" to explain why it fits this channel.
 
 Return JSON:
 {{
@@ -225,7 +307,7 @@ Return JSON:
       "evidence_strength": "fuerte|moderado|debil"
     }}
   ],
-  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 growth opportunities, and biggest competitive risks. Reference the previous analysis if applicable (e.g., 'Since the last analysis...').",
+  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 growth opportunities, and biggest competitive risks. Explicitly mention what has CHANGED since the last analysis — or state honestly if nothing significant has changed. If prior recommendations are still valid, mention them instead of repeating.",
   "health_score": 72,
   "key_metrics": [
     {{ "label": "Views/dia", "value": "2,100", "sparkline": [10,12,11,15,13,14,15], "delta": "+8%", "delta_positive": true }}
@@ -242,7 +324,8 @@ Return JSON:
       "data_cited": {{ "metric_name": "exact value from data" }},
       "requires_code": false,
       "opencode_prompt": null,
-      "rationale_brief": "1-sentence summary of why (Spanish)"
+      "rationale_brief": "1-sentence summary of why (Spanish)",
+      "rationale_for_reuse": null
     }}
   ]
 }}
@@ -258,18 +341,24 @@ Each sparkline must be an array of 7 integers representing the last 7 data point
 </task>"""
 
 
+
+
 # ── Data aggregation ────────────────────────────────────────────────
 
 def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
                             slug: str) -> dict[str, Any]:
     """Collect all relevant data for LLM analysis in one structured dict.
 
-    v20.1: Summarizes data to speed up LLM processing without losing signal.
+    v21.1: Adds recency tags, data freshness summary, and since_last_analysis context.
       - Top 20 videos by recency (not 50)
       - Last 15 channel growth points (not all)
       - Last 20 content patterns (not 30)
+      - Recency tags: [RECENT] <7d, [MODERATE] 8-30d, [OLD] >30d
+      - Data freshness summary: count per bucket, date range
+      - Since last analysis: delta metrics from previous completed analysis
     """
     data: dict[str, Any] = {}
+    now = dt.datetime.utcnow()
 
     # Channel identity
     ch = db.get_channel(channel_id)
@@ -315,7 +404,48 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             ORDER BY v.uploaded_at DESC
             LIMIT 20
         """, (channel_id,)).fetchall()
-        data["video_performance"] = [dict(r) for r in rows]
+        video_list = [dict(r) for r in rows]
+
+        # ── Add recency tags to each video ──
+        recency_counts = {"RECENT": 0, "MODERATE": 0, "OLD": 0}
+        for vid in video_list:
+            uploaded_str = vid.get("uploaded_at")
+            recency_tag = "OLD"
+            if uploaded_str:
+                try:
+                    if isinstance(uploaded_str, str):
+                        uploaded_dt = dt.datetime.strptime(
+                            uploaded_str, "%Y-%m-%d %H:%M:%S"
+                        )
+                    else:
+                        uploaded_dt = uploaded_str
+                    age_days = (now - uploaded_dt).days
+                    if age_days <= 7:
+                        recency_tag = "RECENT"
+                    elif age_days <= 30:
+                        recency_tag = "MODERATE"
+                    else:
+                        recency_tag = "OLD"
+                    vid["days_since_upload"] = age_days
+                except (ValueError, TypeError):
+                    vid["days_since_upload"] = None
+            else:
+                vid["days_since_upload"] = None
+            vid["recency"] = recency_tag
+            recency_counts[recency_tag] += 1
+        data["video_performance"] = video_list
+
+    # ── Data freshness summary ──
+    data["data_freshness_summary"] = {
+        "analysis_timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "videos_by_recency": recency_counts,
+        "oldest_video_date": (
+            video_list[-1].get("uploaded_at") if video_list else None
+        ),
+        "newest_video_date": (
+            video_list[0].get("uploaded_at") if video_list else None
+        ),
+    }
 
     # ── Channel growth — last 15 data points ──
     with db._connect() as conn:
@@ -380,7 +510,97 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         """, (channel_id,)).fetchall()
         data["timing_data"] = [dict(r) for r in rows]
 
+    # ── Since last analysis context ──
+    since_last = _compute_since_last_analysis(db, channel_id, now)
+    data["since_last_analysis"] = since_last
+
     return data
+
+
+def _compute_since_last_analysis(db: ExtendedDatabase, channel_id: int,
+                                  now: dt.datetime) -> dict[str, Any]:
+    """Compute what has changed since the last completed analysis.
+
+    Returns dict with: previous_analysis_date, days_since, new_videos_since,
+    config_changes_since (count of applied recommendations).
+    """
+    result: dict[str, Any] = {
+        "previous_analysis_date": None,
+        "days_since": None,
+        "new_videos_since": 0,
+        "applied_recommendations_since": 0,
+        "note": "Este es el primer analisis de este canal.",
+    }
+
+    try:
+        prev = db.get_latest_completed_insight(channel_id)
+        if not prev or not prev.get("generated_at"):
+            return result
+
+        prev_date_str = prev["generated_at"]
+        try:
+            if isinstance(prev_date_str, str):
+                prev_date = dt.datetime.strptime(
+                    prev_date_str, "%Y-%m-%d %H:%M:%S"
+                )
+            else:
+                prev_date = prev_date_str
+        except (ValueError, TypeError):
+            return result
+
+        days_since = (now - prev_date).days
+        result["previous_analysis_date"] = prev_date_str
+        result["days_since"] = max(days_since, 0)
+
+        # Count new videos uploaded since last analysis
+        with db._connect() as conn:
+            count = conn.execute(
+                """SELECT COUNT(*) FROM videos
+                   WHERE channel_id = ? AND uploaded_at > ?""",
+                (channel_id, prev_date_str),
+            ).fetchone()
+            result["new_videos_since"] = count[0] if count else 0
+
+        # Count applied recommendations from the previous analysis
+        prev_json = prev.get("insights_json", {})
+        if isinstance(prev_json, str):
+            try:
+                prev_json = json.loads(prev_json)
+            except json.JSONDecodeError:
+                prev_json = {}
+        recs = prev_json.get("recommendations", [])
+        applied_count = sum(
+            1 for r in recs
+            if r.get("applied") and not r.get("discarded")
+        )
+        result["applied_recommendations_since"] = applied_count
+
+        if days_since <= 1:
+            result["note"] = (
+                f"El analisis anterior fue hace {days_since} dia(s). "
+                f"Se publicaron {result['new_videos_since']} video(s) nuevos "
+                f"y se aplicaron {applied_count} recomendacion(es). "
+                f"Si los cambios son minimos, se honesto en el analysis_summary."
+            )
+        elif days_since <= 7:
+            result["note"] = (
+                f"El analisis anterior fue hace {days_since} dias. "
+                f"Se publicaron {result['new_videos_since']} video(s) nuevos "
+                f"y se aplicaron {applied_count} recomendacion(es). "
+                f"Enfocate en lo que ha CAMBIADO desde entonces."
+            )
+        else:
+            result["note"] = (
+                f"El analisis anterior fue hace {days_since} dias. "
+                f"Se publicaron {result['new_videos_since']} video(s) nuevos "
+                f"y se aplicaron {applied_count} recomendacion(es). "
+                f"Hay suficiente tiempo transcurrido para detectar tendencias nuevas."
+            )
+
+    except Exception as e:
+        logger.warning("Failed to compute since_last_analysis: %s", e)
+
+    return result
 
 
 def _serialize_config(config_ns) -> dict[str, Any]:
@@ -394,6 +614,154 @@ def _serialize_config(config_ns) -> dict[str, Any]:
             else:
                 d[k] = str(v)
     return d
+
+
+# ── Semantic deduplication ──────────────────────────────────────────
+
+# Stop words for Spanish titles (excluded from Jaccard similarity)
+_DEDUP_STOP_WORDS = {
+    "de", "la", "el", "en", "los", "las", "un", "una", "del", "al",
+    "por", "para", "con", "sin", "que", "es", "y", "o", "a", "se",
+    "su", "lo", "como", "mas", "pero", "sus", "le", "ya", "este",
+    "entre", "todo", "esta", "ser", "son", "fue", "era", "han",
+}
+
+
+def _tokenize_title(title: str) -> set[str]:
+    """Extract meaningful word tokens from a title for similarity comparison."""
+    if not title:
+        return set()
+    tokens = set()
+    for word in title.lower().split():
+        word = word.strip(",.!?¿¡;:()[]\"'")
+        if len(word) >= 3 and word not in _DEDUP_STOP_WORDS:
+            tokens.add(word)
+    return tokens
+
+
+def _jaccard_similarity(set_a: set[str], set_b: set[str]) -> float:
+    """Compute Jaccard similarity between two sets of tokens."""
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _config_key_overlap(rec_a: dict, rec_b: dict) -> float:
+    """Compute overlap of config_changes keys between two recommendations."""
+    keys_a = set(rec_a.get("config_changes", {}).keys())
+    keys_b = set(rec_b.get("config_changes", {}).keys())
+    if not keys_a or not keys_b:
+        return 0.0
+    intersection = keys_a & keys_b
+    union = keys_a | keys_b
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _compute_rec_similarity(rec_a: dict, rec_b: dict) -> float:
+    """Compute overall similarity score between two recommendations.
+
+    Combination of: title word overlap (Jaccard) + config key overlap + category match.
+    Returns 0.0 to 1.0.
+    """
+    title_a = rec_a.get("title", "")
+    title_b = rec_b.get("title", "")
+    title_sim = _jaccard_similarity(
+        _tokenize_title(title_a), _tokenize_title(title_b)
+    )
+    config_sim = _config_key_overlap(rec_a, rec_b)
+
+    # Category match bonus
+    cat_a = rec_a.get("category", "")
+    cat_b = rec_b.get("category", "")
+    cat_match = 1.0 if cat_a and cat_b and cat_a == cat_b else 0.0
+
+    # Weighted combination: title overlap is most important, config keys second,
+    # category match adds a tiebreaker
+    return 0.5 * title_sim + 0.3 * config_sim + 0.2 * cat_match
+
+
+def _dedup_recommendations(
+    new_recs: list[dict],
+    prev_all_recs: list[dict],
+    cross_channel_recs: list[dict],
+    similarity_threshold: float = 0.55,
+) -> tuple[list[dict], dict]:
+    """Deduplicate new recommendations against prior and cross-channel history.
+
+    Returns (filtered_recs, similarity_report).
+    similarity_report: {rec_id: {duplicate_of: ..., cross_channel_similar: ..., cross_channel_name: ...}}
+    """
+    report: dict[str, dict] = {}
+
+    for new_rec in new_recs:
+        rec_id = new_rec.get("id", "")
+
+        # ── Check against prior recommendations (intra-channel) ──
+        for prev_rec in prev_all_recs:
+            sim = _compute_rec_similarity(new_rec, prev_rec)
+            if sim >= similarity_threshold:
+                prev_id = prev_rec.get("id", "unknown")
+                logger.info(
+                    "Dedup: new rec '%s' is similar (%.2f) to prior rec '%s' (%s)",
+                    new_rec.get("title", "")[:60], sim,
+                    prev_rec.get("title", "")[:60], prev_id,
+                )
+                report[rec_id] = {
+                    "duplicate_of": prev_id,
+                    "similarity_score": round(sim, 2),
+                    "prior_title": prev_rec.get("title", "")[:100],
+                    "prior_analysis_date": prev_rec.get("analysis_date", ""),
+                }
+                break  # Stop at first match
+
+        if rec_id in report:
+            continue  # Skip cross-channel check if already intra-channel duplicate
+
+        # ── Check against cross-channel recommendations ──
+        for cc_rec in cross_channel_recs:
+            sim = _compute_rec_similarity(new_rec, cc_rec)
+            if sim >= similarity_threshold:
+                cc_name = cc_rec.get("channel_name", "otro canal")
+                logger.info(
+                    "Cross-dedup: new rec '%s' is similar (%.2f) to rec from '%s'",
+                    new_rec.get("title", "")[:60], sim, cc_name,
+                )
+                report[rec_id] = {
+                    "cross_channel_similar": True,
+                    "cross_channel_name": cc_name,
+                    "similarity_score": round(sim, 2),
+                    "cross_channel_rec_id": cc_rec.get("id", ""),
+                    "cross_channel_title": cc_rec.get("title", "")[:100],
+                }
+                # Note: cross-channel matches are NOT removed, just flagged
+                # (user decided: keep if relevant, just add the badge)
+                break
+
+    # ── Filter out strict intra-channel duplicates ──
+    filtered = []
+    for new_rec in new_recs:
+        rec_id = new_rec.get("id", "")
+        if rec_id in report and "duplicate_of" in report[rec_id]:
+            # Intra-channel duplicate — remove from main list
+            new_rec["hidden_as_duplicate"] = True
+            new_rec["duplicate_of"] = report[rec_id]["duplicate_of"]
+            new_rec["similarity_score"] = report[rec_id]["similarity_score"]
+            filtered.append(new_rec)  # Keep but mark as hidden
+        else:
+            # Cross-channel similar — include but flag
+            if rec_id in report:
+                new_rec["cross_channel_similar"] = True
+                new_rec["cross_channel_name"] = report[rec_id].get(
+                    "cross_channel_name", ""
+                )
+                new_rec["similarity_to_previous"] = report[rec_id].get(
+                    "similarity_score", 0
+                )
+            filtered.append(new_rec)
+
+    return filtered, report
 
 
 # ── Streaming LLM phase runner with dead-man switch ──────────────────
@@ -658,23 +1026,60 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
     logger.info("Starting analysis for channel %s (insight %d, max %d attempts)",
                 slug, insight_id, MAX_RETRY_ATTEMPTS)
 
-    # ── Load previous analysis context (shared across retries) ──
-    prev_recommendations = []
+    # ── Load ALL previous analysis context (shared across retries) ──
+    # v21.1: load all completed insights (not just last one) for full dedup history
+    all_prev_recommendations: list[dict] = []
+    prev_insights_list: list[dict] = []
     try:
-        prev_insight = db.get_latest_insight(channel_id)
-        if (prev_insight
-                and prev_insight.get("status") == "completed"
-                and prev_insight.get("id") != insight_id):
-            prev_json = prev_insight.get("insights_json", {})
-            if isinstance(prev_json, str):
-                try:
-                    prev_json = json.loads(prev_json)
-                except json.JSONDecodeError:
-                    prev_json = {}
-            prev_recommendations = prev_json.get("recommendations", [])
-            logger.info("Loaded %d previous recommendations as context", len(prev_recommendations))
+        prev_insights_list = db.get_channel_insights(channel_id, limit=10)
+        for prev_insight in prev_insights_list:
+            if (prev_insight.get("status") == "completed"
+                    and prev_insight.get("id") != insight_id):
+                prev_json = prev_insight.get("insights_json", {})
+                if isinstance(prev_json, str):
+                    try:
+                        prev_json = json.loads(prev_json)
+                    except json.JSONDecodeError:
+                        prev_json = {}
+                recs = prev_json.get("recommendations", [])
+                for r in recs:
+                    r["analysis_date"] = prev_insight.get("generated_at", "")
+                    r["analysis_id"] = prev_insight.get("id")
+                all_prev_recommendations.extend(recs)
+        logger.info("Loaded %d previous recommendations from %d completed analyses",
+                     len(all_prev_recommendations),
+                     sum(1 for p in prev_insights_list if p.get("status") == "completed"))
     except Exception as e:
         logger.warning("Failed to load previous insights: %s", e)
+
+    # ── Load cross-channel recommendations ──
+    cross_channel_recs: list[dict] = []
+    try:
+        all_channels = db.get_channels()
+        for ch in all_channels:
+            ch_id = ch.get("id")
+            if ch_id == channel_id:
+                continue
+            ch_insights = db.get_channel_insights(ch_id, limit=3)
+            for ci in ch_insights:
+                if ci.get("status") != "completed":
+                    continue
+                ci_json = ci.get("insights_json", {})
+                if isinstance(ci_json, str):
+                    try:
+                        ci_json = json.loads(ci_json)
+                    except json.JSONDecodeError:
+                        ci_json = {}
+                for rec in ci_json.get("recommendations", []):
+                    if rec.get("applied") or rec.get("discarded"):
+                        continue  # Skip applied/discarded from other channels
+                    rec["channel_name"] = ch.get("name", f"canal {ch_id}")
+                    rec["channel_slug"] = ch.get("slug", "")
+                    cross_channel_recs.append(rec)
+        logger.info("Loaded %d cross-channel recommendations from other channels",
+                     len(cross_channel_recs))
+    except Exception as e:
+        logger.warning("Failed to load cross-channel recommendations: %s", e)
 
     # ── Retry loop ──────────────────────────────────────────────
     for attempt in range(MAX_RETRY_ATTEMPTS):
@@ -765,19 +1170,61 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
             except Exception:
                 current_config = {}
 
-            # Build previous context summary
-            prev_context = (
+            # Build previous analyses context (all history, grouped by analysis)
+            prev_analyses_groups: list[dict] = []
+            seen_analysis_ids = set()
+            for rec in all_prev_recommendations:
+                aid = rec.get("analysis_id")
+                if aid and aid not in seen_analysis_ids:
+                    seen_analysis_ids.add(aid)
+                    analysis_recs = [
+                        {
+                            "title": r.get("title"),
+                            "category": r.get("category"),
+                            "applied": r.get("applied"),
+                            "discarded": r.get("discarded"),
+                            "config_changes": r.get("config_changes"),
+                            "detail": r.get("detail", "")[:200],
+                        }
+                        for r in all_prev_recommendations
+                        if r.get("analysis_id") == aid
+                    ]
+                    prev_analyses_groups.append({
+                        "analysis_date": rec.get("analysis_date", ""),
+                        "analysis_id": aid,
+                        "recommendations": analysis_recs,
+                    })
+
+            previous_analyses_json = (
+                json.dumps(prev_analyses_groups, ensure_ascii=False, default=str)
+                if prev_analyses_groups
+                else "(no hay analisis previo — este es el primer analisis del canal)"
+            )
+
+            # Build cross-channel context (dedup reference)
+            cross_channel_json = (
                 json.dumps([
                     {
-                        "title": r.get("title"), "category": r.get("category"),
-                        "applied": r.get("applied"), "discarded": r.get("discarded"),
+                        "title": r.get("title"),
+                        "category": r.get("category"),
                         "config_changes": r.get("config_changes"),
-                        "detail": r.get("detail", "")[:300],
+                        "channel_name": r.get("channel_name", ""),
+                        "detail": r.get("detail", "")[:200],
                     }
-                    for r in prev_recommendations
+                    for r in cross_channel_recs[:20]  # Cap at 20 for prompt size
                 ], ensure_ascii=False, default=str)
-                if prev_recommendations
-                else "(no hay analisis previo — este es el primer analisis del canal)"
+                if cross_channel_recs
+                else "(no hay recomendaciones de otros canales disponibles)"
+            )
+
+            # Build since_last_analysis context from aggregated data
+            since_la = data.get("since_last_analysis", {})
+            since_la_str = (
+                f"Ultimo analisis: {since_la.get('previous_analysis_date', 'N/A')}\n"
+                f"Dias transcurridos: {since_la.get('days_since', 'N/A')}\n"
+                f"Videos nuevos publicados desde entonces: {since_la.get('new_videos_since', 0)}\n"
+                f"Recomendaciones aplicadas desde entonces: {since_la.get('applied_recommendations_since', 0)}\n"
+                f"Nota: {since_la.get('note', '')}"
             )
 
             unified_user = _UNIFIED_USER.replace(
@@ -794,8 +1241,14 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 "{config_keys}",
                 json.dumps(_CONFIG_KEYS, ensure_ascii=False),
             ).replace(
-                "{prev_recommendations_json}",
-                prev_context,
+                "{since_last_analysis}",
+                since_la_str,
+            ).replace(
+                "{previous_analyses_json}",
+                previous_analyses_json,
+            ).replace(
+                "{cross_channel_json}",
+                cross_channel_json,
             )
 
             unified_messages = [
@@ -833,11 +1286,28 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 return
 
             # ── Merge: carry over applied/discarded/validated from previous ──
-            if prev_recommendations:
+            if all_prev_recommendations:
                 carried_over = [
-                    r for r in prev_recommendations
+                    r for r in all_prev_recommendations
                     if r.get("applied") or r.get("discarded") or r.get("validation")
                 ]
+                # Deduplicate carried_over by title (keep latest analysis_date)
+                seen_titles = {}
+                unique_carried = []
+                for cr in carried_over:
+                    key = cr.get("title", "")[:80]
+                    if key in seen_titles:
+                        existing = seen_titles[key]
+                        if (cr.get("analysis_date", "") >
+                                existing.get("analysis_date", "")):
+                            unique_carried.remove(existing)
+                            unique_carried.append(cr)
+                            seen_titles[key] = cr
+                    else:
+                        unique_carried.append(cr)
+                        seen_titles[key] = cr
+                carried_over = unique_carried
+
                 if carried_over:
                     new_recs = unified_result["content"].get("recommendations", [])
                     new_config_keys = [
@@ -859,6 +1329,36 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                         )
                         logger.info("Merged %d carried-over recommendations",
                                      len(deduped_carried))
+
+            # ── v21.1: Post-generation semantic dedup ──
+            new_recs = unified_result["content"].get("recommendations", [])
+            clean_prev_recs = [
+                {k: v for k, v in r.items()
+                 if k not in ("analysis_date", "analysis_id", "channel_name", "channel_slug")}
+                for r in all_prev_recommendations
+            ]
+            clean_cross = [
+                {k: v for k, v in r.items()
+                 if k not in ("channel_name", "channel_slug")}
+                for r in cross_channel_recs
+            ]
+            deduped_recs, dedup_report = _dedup_recommendations(
+                new_recs, clean_prev_recs, clean_cross,
+            )
+            # Tag cross-channel recs in the report
+            for rec_id, info in dedup_report.items():
+                if info.get("cross_channel_similar"):
+                    for rec in deduped_recs:
+                        if rec.get("id") == rec_id:
+                            rec["cross_channel_similar"] = True
+                            rec["cross_channel_name"] = info.get("cross_channel_name", "")
+                            break
+
+            unified_result["content"]["recommendations"] = deduped_recs
+            unified_result["content"]["_dedup_report"] = dedup_report
+            logger.info("Dedup: %d recs before, %d after (removed %d intra-channel duplicates)",
+                         len(new_recs), len(deduped_recs),
+                         len(new_recs) - len(deduped_recs))
 
             # ── Save final result ───────────────────────────────
             duration_ms = int((time.monotonic() - t0) * 1000)

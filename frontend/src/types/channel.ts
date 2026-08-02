@@ -417,11 +417,19 @@ export interface InsightRecommendation {
   requires_code?: boolean
   opencode_prompt?: string
   rationale_brief?: string
+  rationale_for_reuse?: string
   applied?: boolean
   discarded?: boolean
   // ── v20.1: validation & refinement ──
   validation?: ValidationResult
   refined_versions?: RefinedVersion[]
+  // ── v21.1: dedup badges ──
+  hidden_as_duplicate?: boolean
+  duplicate_of?: string
+  similarity_score?: number
+  cross_channel_similar?: boolean
+  cross_channel_name?: string
+  similarity_to_previous?: number
 }
 
 export interface ValidationResult {

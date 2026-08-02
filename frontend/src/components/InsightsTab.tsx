@@ -17,7 +17,7 @@ import {
   Brain, Clock, Loader2, AlertCircle, ChevronDown, ChevronUp,
   Check, X, Copy, ExternalLink, TrendingUp, Zap, BarChart3,
   Eye, EyeOff, Sparkles, Send, MessageSquare, RotateCcw, ThumbsUp,
-  ThumbsDown, AlertTriangle, Search, Ban,
+  ThumbsDown, AlertTriangle, Search, Ban, Filter,
 } from 'lucide-react'
 
 // ── Props ──────────────────────────────────────────────────────────
@@ -358,7 +358,11 @@ function RecommendationCard({
   const impact = impactBadge(rec.expected_impact)
 
   return (
-    <div className="glass rounded-xl border border-surface-border overflow-hidden transition-all">
+    <div className={`glass rounded-xl border overflow-hidden transition-all ${
+      rec.hidden_as_duplicate
+        ? 'border-gray-700/30 opacity-60 hover:opacity-90'
+        : 'border-surface-border'
+    }`}>
       {/* ── Collapsed row ── */}
       <div className="p-4">
         <div className="flex items-start gap-3">
@@ -385,6 +389,16 @@ function RecommendationCard({
               {rec.requires_code && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400">
                   Requiere codigo
+                </span>
+              )}
+              {rec.hidden_as_duplicate && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-gray-600/30 bg-gray-700/30 text-gray-400" title="Esta recomendacion ya fue sugerida en un analisis anterior">
+                  Repetida (oculta)
+                </span>
+              )}
+              {!rec.hidden_as_duplicate && rec.cross_channel_similar && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-blue-500/30 bg-blue-500/10 text-blue-400" title={`Esta sugerencia tambien se dio en ${rec.cross_channel_name || 'otro canal'}`}>
+                  Tambien en {rec.cross_channel_name || 'otro canal'}
                 </span>
               )}
             </div>
@@ -872,6 +886,7 @@ export default function InsightsTab({
   const startedAtRef = useRef<Date | null>(null)
   const phaseRef = useRef<string>('exploration')
   const [renderTick, setRenderTick] = useState(0)
+  const [showHiddenDuplicates, setShowHiddenDuplicates] = useState(false)
 
   // ── Stale heartbeat detection ──────────────────────────────────
   // Check if a processing insight's heartbeat is > 3 min old (dead thread)
@@ -1281,7 +1296,13 @@ export default function InsightsTab({
   const data = insights.insights_json
   const summary = data?.analysis_summary || ''
   const metrics = data?.key_metrics || []
-  const recs = data?.recommendations || []
+  const allRecs = data?.recommendations || []
+
+  // v21.1: separate hidden duplicates from regular recs
+  const hiddenDupCount = allRecs.filter(r => r.hidden_as_duplicate).length
+  const recs = showHiddenDuplicates
+    ? allRecs
+    : allRecs.filter(r => !r.hidden_as_duplicate)
 
   // Group recommendations by category
   const grouped: Record<string, InsightRecommendation[]> = {}
@@ -1362,6 +1383,27 @@ export default function InsightsTab({
           >
             <Sparkles size={12} /> Enriquecer analisis
           </button>
+          {/* v21.1: toggle hidden duplicates */}
+          {hiddenDupCount > 0 && (
+            <button
+              onClick={() => setShowHiddenDuplicates(prev => !prev)}
+              className={`px-2 py-1.5 rounded-lg text-xs transition-colors flex items-center gap-1 ${
+                showHiddenDuplicates
+                  ? 'bg-neon-gold/10 text-neon-gold border border-neon-gold/30'
+                  : 'bg-dark-800/50 text-gray-500 hover:text-gray-300'
+              }`}
+              title={
+                showHiddenDuplicates
+                  ? 'Ocultar recomendaciones repetidas'
+                  : `Mostrar ${hiddenDupCount} recomendaciones repetidas ocultas`
+              }
+            >
+              {showHiddenDuplicates ? <Filter size={12} /> : <Filter size={12} />}
+              {showHiddenDuplicates
+                ? `Ocultar repetidas (${hiddenDupCount})`
+                : `${hiddenDupCount} repetidas`}
+            </button>
+          )}
         </div>
       </div>
 
