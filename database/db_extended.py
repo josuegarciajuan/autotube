@@ -6129,9 +6129,8 @@ class ExtendedDatabase(Database):
                     ch.slug as channel_slug
                    FROM planned_slots ps
                    JOIN channels ch ON ch.id = ps.channel_id
-                    WHERE ps.date_key >= date('now', 'localtime')
-                      AND ps.date_key <= date('now', 'localtime', '+1 day')
-                      AND ps.status = 'pending'
+                     WHERE ps.scheduled_at <= datetime('now', 'localtime', '+24 hours')
+                       AND ps.status = 'pending'
                      AND ps.video_id IS NULL
                    ORDER BY ps.scheduled_at ASC""",
             ).fetchall()
