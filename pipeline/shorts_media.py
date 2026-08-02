@@ -906,6 +906,7 @@ def fetch_short_assets_exhaustive(
     channel_id: int = 0,
     video_ratio: float | None = None,
     channel_slug: str = "",
+    progress_cb: callable = None,
 ) -> list[dict[str, Any]]:
     """Fetch ONE asset per block with video/image mix strategy.
 
@@ -1030,6 +1031,14 @@ def fetch_short_assets_exhaustive(
         )
         assets[i] = asset
 
+        # ── v3: progress callback every ~1/3 of blocks ──
+        if progress_cb is not None and (i == 0 or i == n_blocks - 1
+                or (i + 1) % max(1, n_blocks // 3) == 0):
+            try:
+                progress_cb(i + 1, n_blocks)
+            except Exception:
+                pass
+
     # ── Subscribe CTA fallback: use channel avatar if no stock asset found ──
     for i, block in enumerate(blocks):
         if block.get("tipo") == "subscribe_cta" and assets[i] is None and channel_slug:
@@ -1077,6 +1086,7 @@ def render_short_hybrid(
     crossfade_dur: float = 1.0,
     srt_path: Path | None = None,
     scene_ranges: list[dict] | None = None,
+    progress_cb: callable = None,
 ) -> Path:
     """FFmpeg hybrid render: mix video clips and Ken Burns still images.
 
@@ -1135,6 +1145,10 @@ def render_short_hybrid(
             audio_duration = 20.0
     elif audio_duration is None:
         audio_duration = 20.0
+
+    # ── v3: progress — audio analyzed ──
+    if progress_cb is not None:
+        progress_cb(55, "render", "Analizando audio del short...")
 
     # ── Utility: check if an asset is renderable ──────────────
     def _asset_valid(a: dict[str, Any] | None) -> bool:
@@ -1321,6 +1335,10 @@ def render_short_hybrid(
                 sum(1 for a in valid_assets if a.get("type") == "image"),
                 n_assets - sum(asset_valid_flags))
 
+    # ── v3: progress — rendering with ffmpeg ──
+    if progress_cb is not None:
+        progress_cb(65, "render", "Renderizando short (ffmpeg xfade + subtitulos)...")
+
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         err = result.stderr[-600:] if result.stderr else "(no stderr)"
@@ -1337,6 +1355,10 @@ def render_short_hybrid(
             crossfade_dur=fade,
             srt_path=srt_path,
         )
+
+    # ── v3: progress — render complete ──
+    if progress_cb is not None:
+        progress_cb(72, "render", "Short renderizado, verificando output...")
 
     logger.info("Hybrid short rendered: %s (%.1f MB)",
                 output_path, output_path.stat().st_size / 1024 / 1024)

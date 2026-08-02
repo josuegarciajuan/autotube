@@ -288,6 +288,7 @@ def synthesize_shorts_blocks(
     output_srt_path: Path,
     voice: Optional[str] = None,
     max_duration_sec: float = SHORTS_MAX_DURATION_SEC,
+    progress_cb: callable = None,
 ) -> dict:
     """Synthesise TTS for a Short block-by-block.
 
@@ -324,7 +325,10 @@ def synthesize_shorts_blocks(
         from pipeline.kokoro_tts import KokoroTTSEngine
         engine = build_tts_engine(ch_config)
         logger.info("🎙️ Kokoro Short TTS: %d blocks, voice=%s", len(bloques), resolved["voice"])
-        audio_path_str, all_timestamps = engine.generate_segmented(bloques, output_path=str(output_audio_path))
+        audio_path_str, all_timestamps = engine.generate_segmented(
+            bloques, output_path=str(output_audio_path),
+            progress_cb=progress_cb,
+        )
         import shutil
         shutil.move(audio_path_str, str(output_audio_path))
         srt_content = _timestamps_to_srt(all_timestamps)
@@ -426,6 +430,13 @@ def synthesize_shorts_blocks(
             # so SRT subtitles reflect the silence between narrative blocks
             if i < len(valid) - 1:
                 cumulative_offset_ms += BLOCK_PAUSE_MS
+
+        # ── v3: progress callback per block ──
+        if progress_cb is not None:
+            try:
+                progress_cb(i + 1, len(valid))
+            except Exception:
+                pass
 
     if not temp_files:
         raise RuntimeError("No blocks produced audio — cannot create Short")

@@ -289,6 +289,7 @@ class VideoEditor:
         scene_ranges: list[dict] | None = None,     # v2: precomputed enforceable ranges
         job_id: int = None,                           # v3: for heartbeat emission during render
         video_id: int = None,                         # v4: for subprocess progress writes to DB
+        progress_cb: callable = None,                 # v5: for granular progress emission
     ) -> Path:
         """Assemble the complete video from blocks, media, audio, and effects.
 
@@ -579,6 +580,19 @@ class VideoEditor:
                         )
                     except Exception:
                         pass  # never let a DB write crash the render
+            # ── v5: also route progress through callback (legacy mode + WebSocket) ──
+            if progress_cb is not None:
+                _total = len(block_ranges)
+                _update_interval = max(1, _total // 10)
+                if (i == 0 or i == _total - 1
+                        or (i + 1) % _update_interval == 0):
+                    _total_done = len(completed_scenes) + rendered_this_run
+                    _pct = 60 + int(_total_done / _total * 15)
+                    try:
+                        progress_cb(_pct, "video",
+                            f"Renderizando escenas: {_total_done}/{_total}...")
+                    except Exception:
+                        pass
 
         # Remove empty entries AND corresponding block_ranges to keep 1:1 alignment
         _valid = []
@@ -708,6 +722,8 @@ class VideoEditor:
                 self.logger.warning("Dynamic gap fill skipped (non-fatal): %s", _gf_err)
 
         # ── Concat segments with crossfades (+ grain + vignette) ──
+        if progress_cb is not None:
+            progress_cb(68, "video", "Concatenando segmentos con transiciones xfade...")
         self.logger.info("Step 3/6: Concatenating %d segments with xfade…", len(segment_paths))
         body_path = seg_dir / "body.mp4"
         body_segment_path = self._concat_body_with_crossfades(
@@ -716,6 +732,10 @@ class VideoEditor:
 
         # Load body as VideoClip for final assembly (cheap — single file)
         body_video = VideoFileClip(body_segment_path)
+
+        # ── v5: progress after body concat ──
+        if progress_cb is not None:
+            progress_cb(71, "video", "Video base ensamblado, añadiendo CTA y final...")
 
         # ── Tack on CTA clip at body end if requested ──────────
         # (Some tests pass cta_audio_path to force a follow-up clip)
@@ -812,6 +832,8 @@ class VideoEditor:
         # Sequence: INTRO → BODY → CTA → OUTRO
         # Render intro/cta/outro as standalone segments, then concat all
         # using ffmpeg concat demuxer (stream-copy, near-zero RAM).
+        if progress_cb is not None:
+            progress_cb(73, "video", "Renderizando intro/outro + montaje final...")
         self.logger.info("Step 5/6: Rendering intro/cta/outro segments + final concat…")
 
         # Render intro/cta/outro + body as segment files for concat
@@ -1109,6 +1131,8 @@ class VideoEditor:
         # ── v4: Video already rendered (concat demuxer) ─────────
         # Skip MoviePy write_videofile — the video exists on disk.
         # Just validate the output and proceed to audio re-mux.
+        if progress_cb is not None:
+            progress_cb(74, "video", "Aplicando audio final...")
         self.logger.info("Step 6/6: Video assembled via segments — applying audio post-process…")
 
         # ── Timeline sync check ──────────────────────────────────

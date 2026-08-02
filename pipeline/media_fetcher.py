@@ -386,6 +386,7 @@ class MediaFetcher:
         bloques: list[dict] = None,
         theme_context=None,
         scene_ranges: list[dict] | None = None,
+        progress_cb: callable = None,
     ) -> list[dict]:
         """Fetch media for every scene in a script.
 
@@ -670,6 +671,14 @@ class MediaFetcher:
                 placeholder += 1
 
             results[i] = asset
+
+            # ── v14: progress callback (every ~10% of scenes) ──
+            if progress_cb is not None and (i == 0 or i == n_scenes - 1
+                    or (i + 1) % max(1, n_scenes // 10) == 0):
+                try:
+                    progress_cb(i + 1, n_scenes)
+                except Exception:
+                    pass
 
             # ── Global timeout: abort if media phase takes too long ──
             elapsed = time.time() - _cb_phase_start

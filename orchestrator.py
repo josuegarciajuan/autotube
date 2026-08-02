@@ -320,10 +320,18 @@ class PipelineOrchestrator:
 
         # Reddit scraping with per-source timeout (5 min per scraper)
         # Viral scraper: skip in non-viral mode (runs on-demand in _phase_generate_script_viral)
+        scraper_names = list(self.scraper.keys())
+        active_scrapers = [n for n in scraper_names
+                          if not (n == "youtube_viral" and self.source_mode != "viral")]
+        n_active = len(active_scrapers) if active_scrapers else 1
+        scraper_idx = 0
         for scraper_name, s in self.scraper.items():
             if scraper_name == "youtube_viral" and self.source_mode != "viral":
                 logger.debug("[%s] Skipping viral scraper in %s mode", self.canal, self.source_mode)
                 continue
+            # Stagger progress per scraper: 6→9% range
+            scraper_pct = 6 + int((scraper_idx / n_active) * 3)
+            scraper_idx += 1
             try:
                 timeout = 600 if scraper_name == "youtube_viral" else 300
                 progress_msg = (
@@ -331,7 +339,7 @@ class PipelineOrchestrator:
                     if scraper_name == "youtube_viral"
                     else f"Scraping {scraper_name}..."
                 )
-                self._emit_progress(7, "scrape", progress_msg)
+                self._emit_progress(scraper_pct, "scrape", progress_msg)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(s.save_to_db, self.db)
                     count = future.result(timeout=timeout)
@@ -853,7 +861,15 @@ class PipelineOrchestrator:
                         logger.info("[%s] TTS lock acquired for channel_id=%d", self.canal, channel_id)
 
                 try:
-                    audio_path, timestamps = self.tts.generate_segmented(bloques)
+                    tts_total = len(bloques)
+                    def _tts_progress(i_block: int, total: int):
+                        if total > 0:
+                            pct = 31 + int((i_block / total) * 6)
+                            self._emit_progress(pct, "tts",
+                                f"Generando voz: bloque {i_block}/{total}...")
+                    audio_path, timestamps = self.tts.generate_segmented(
+                        bloques, progress_cb=_tts_progress,
+                    )
                 finally:
                     if tts_lock_acquired and channel_id is not None:
                         self.db.release_tts_lock(channel_id, job_id or 0)
@@ -984,9 +1000,16 @@ class PipelineOrchestrator:
                         len(scene_ranges) if scene_ranges else len(bloques))
 
             # Fetch one asset per scene (scene_ranges or bloques as fallback)
+            n_total = len(scene_ranges) if scene_ranges else len(bloques)
+            def _media_progress(i_scene: int, total: int):
+                if total > 0:
+                    pct = 46 + int((i_scene / total) * 6)
+                    self._emit_progress(pct, "images",
+                        f"Descargando media: {i_scene}/{total}...")
             media_assets = self.media_fetcher.fetch_for_script(
                 bloques=bloques,
                 scene_ranges=scene_ranges,
+                progress_cb=_media_progress,
             )
 
             # Post-process images only (videos are used as-is)
@@ -1141,6 +1164,8 @@ class PipelineOrchestrator:
                     scene_ranges=getattr(self, "_last_scene_ranges", None),
                     job_id=job_id,
                     cta_audio_path=audio_data.get("cta_audio_path"),
+                    video_id=self.db_video_id,
+                    progress_cb=self._emit_progress,
                 )
             else:
                 # ── Legacy fallback: scene-based assembly ────
