@@ -243,8 +243,14 @@ DAY_END_MINUTES = 24 * 60       # End of day cap
 JITTER_BEFORE_MIN = 25         # max minutes before target slot
 JITTER_AFTER_MIN = 5           # max minutes after target slot
 
-# ── Generation lead time: shorts take ~5 min to generate ──────
-SHORT_GEN_LEAD_MIN = 5
+# ── Generation lead time: shorts need realistic buffer ──────
+# v10.3 (Aug 2026): Differentiated by type:
+#   - native: full pipeline (LLM + TTS + render + upload) → ~3-7 min real
+#   - clip pre-render: upload only (~30s)
+#   - clip on-the-fly: extract + render + upload (~3-5 min)
+SHORT_GEN_LEAD_MIN = 15           # native shorts (was 5)
+SHORT_GEN_LEAD_MIN_CLIP = 5       # pre-rendered clip: just upload
+SHORT_GEN_LEAD_MIN_CLIP_ONTHEFLY = 15  # on-the-fly clip: extract + render + upload
 
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
 SHORTS_COOLDOWN_MINUTES = 20  # was 30 — reduced for 10-15/day density
@@ -298,12 +304,20 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
                           channel_id: int, channel_slug: str,
                           short_type: str, tz: ZoneInfo,
                           long_slot_position: int = None,
-                          slot_position: int = 0) -> dict:
+                          slot_position: int = 0,
+                          gen_lead_min: int = None) -> dict:
     """Convert a minute-of-day (local tz) to a slot dict with UTC timestamps.
 
     Handles overflow past midnight: target_upload_at / scheduled_at spill
     into the next day, but date_key stays as the original planning day.
+
+    Args:
+        gen_lead_min: generation lead time in minutes. Defaults to
+            SHORT_GEN_LEAD_MIN (15) for native, pass SHORT_GEN_LEAD_MIN_CLIP (5)
+            for pre-rendered clips.
     """
+    if gen_lead_min is None:
+        gen_lead_min = SHORT_GEN_LEAD_MIN
     # Handle overflow past midnight: adjust effective date for datetime
     # conversion, but keep original date_key (slot was planned for this day)
     overflow_days = total_min // (24 * 60)
@@ -318,7 +332,7 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
 
     h, m = total_min // 60, total_min % 60
     target_utc = _local_to_utc(effective_date_str, h, m, tz)
-    sched_total = max(0, total_min - SHORT_GEN_LEAD_MIN)
+    sched_total = max(0, total_min - gen_lead_min)
     sh, sm = sched_total // 60, sched_total % 60
     sched_utc = _local_to_utc(effective_date_str, sh, sm, tz)
     return {
@@ -331,6 +345,95 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
         "slot_position": slot_position,
         "channel_slug": channel_slug,
     }
+
+
+def _load_shorts_optimal_windows(db=None, channel_id=None) -> list[tuple]:
+    """Load optimal publish windows for shorts (native or clip).
+
+    Returns list of (hour, minute) tuples, sorted by hour.
+    Falls back to NATIVE_WINDOWS if no DB or no optimal slots found.
+    """
+    windows = list(NATIVE_WINDOWS)  # default fallback
+    if db is not None and channel_id is not None:
+        try:
+            optimal_slots = db.get_optimal_publish_slots(
+                channel_id, content_type="short",
+            )
+            if optimal_slots:
+                windows = []
+                seen = set()
+                for s in optimal_slots:
+                    h = s.get("target_hour")
+                    m = s.get("target_minute", 0)
+                    key = (h, m)
+                    if h is not None and key not in seen:
+                        windows.append((h, m))
+                        seen.add(key)
+                windows.sort(key=lambda x: (x[0], x[1]))
+                if windows:
+                    logger.debug(
+                        "_load_shorts_optimal_windows: using %d optimal slots for ch=%d",
+                        len(windows), channel_id,
+                    )
+        except Exception:
+            pass
+    return windows
+
+
+def _snap_to_optimal_shorts_window(
+    anchor_utc: datetime,
+    timezone_str: str = "Europe/Madrid",
+    db=None,
+    channel_id=None,
+    min_delay_min: int = 60,
+) -> datetime:
+    """Snap a UTC datetime to the nearest upcoming optimal shorts publish window.
+
+    v10.3 (Aug 2026): Used by clip pre-render to ensure clips land in
+    optimal publishing windows instead of blind 60-min increments.
+
+    Args:
+        anchor_utc: UTC datetime to anchor from (e.g., long video target_public_at).
+        timezone_str: Channel timezone for local hour calculations.
+        db: Database instance for optimal slots lookup.
+        channel_id: Channel ID for optimal slots lookup.
+        min_delay_min: Minimum delay from anchor before the first clip can publish.
+            Default 60 min (to allow pre-render time).
+
+    Returns:
+        UTC datetime snapped to the nearest upcoming optimal window.
+        If no window is available within 24h, returns anchor + min_delay_min.
+    """
+    windows = _load_shorts_optimal_windows(db, channel_id)
+    if not windows:
+        return anchor_utc + timedelta(minutes=min_delay_min)
+
+    tz = ZoneInfo(timezone_str) if timezone_str else UTC
+    anchor_local = anchor_utc.astimezone(tz)
+    earliest_local = anchor_local + timedelta(minutes=min_delay_min)
+
+    # Try today's windows first, then tomorrow's
+    for day_offset in (0, 1):
+        for (h, m) in windows:
+            candidate = earliest_local.replace(
+                hour=h, minute=m, second=0, microsecond=0,
+            )
+            if day_offset > 0:
+                candidate += timedelta(days=day_offset)
+            if candidate > earliest_local:
+                result_utc = candidate.astimezone(UTC)
+                logger.debug(
+                    "_snap_to_optimal_shorts_window: snapped %s → %s "
+                    "(window %02d:%02d, delay=%d min)",
+                    anchor_utc.isoformat()[:16],
+                    result_utc.isoformat()[:16],
+                    h, m,
+                    int((result_utc - anchor_utc).total_seconds() / 60),
+                )
+                return result_utc
+
+    # Fallback: no window available (shouldn't happen with 4 windows × 2 days)
+    return anchor_utc + timedelta(minutes=min_delay_min)
 
 
 def _build_shorts_slots_for_channel(
@@ -1139,6 +1242,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         short_type=short_type_f,
                         source_video_id=source_video_id_f,
                         slot_rank=slot_rank_f,
+                        target_upload_at=force_slot.get("target_upload_at"),
                     )
                     if loop is not None:
                         import asyncio as _asyncio_f
@@ -1325,6 +1429,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             short_type=short_type,
             source_video_id=source_video_id,
             slot_rank=slot_rank,
+            target_upload_at=next_slot.get("target_upload_at"),
         )
         if loop is not None:
             import asyncio as _asyncio2
@@ -1403,13 +1508,17 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
 async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                                  channel_slug: str, short_type: str,
                                  source_video_id: int = None,
-                                 slot_rank: int = 0):
+                                 slot_rank: int = 0,
+                                 target_upload_at: str = None):
     """Async wrapper that dispatches the actual short generation and updates DB.
 
     IMPORTANT: _dispatch_native_short() and _dispatch_clip_short() are
     synchronous functions that block for 5+ minutes (LLM, TTS, ffmpeg).
     They MUST be called via asyncio.to_thread() to avoid blocking the
     uvicorn event loop thread. DO NOT call them synchronously here.
+
+    v10.3: target_upload_at enables scheduled publishing (private + publishAt)
+    instead of immediate public.
     """
     import asyncio
     import sqlite3
@@ -1422,6 +1531,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 _dispatch_native_short,
                 channel_id, channel_slug,
                 slot_rank=slot_rank, job_id=job_id,
+                target_upload_at=target_upload_at,
             )
         else:
             # ── v25: Check for pre-rendered clip ──
@@ -1457,6 +1567,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 channel_id, channel_slug, source_video_id,
                 slot_rank=slot_rank, job_id=job_id,
                 pre_rendered_short_id=pre_rendered_short_id,
+                target_upload_at=target_upload_at,
             )
 
         if short_id:
@@ -1655,10 +1766,14 @@ def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
 # ── Native short generation ────────────────────────────────────
 
 def _dispatch_native_short(channel_id: int, channel_slug: str,
-                           slot_rank: int = 0, job_id: int = None) -> int | None:
+                            slot_rank: int = 0, job_id: int = None,
+                            target_upload_at: str = None) -> int | None:
     """Generate and publish a native Short.
 
     Uses the existing native short generation pipeline (LLM script → TTS → render → upload).
+
+    v10.3: If target_upload_at is provided, uploads as private + publishAt
+    (scheduled publishing) instead of immediate public.
 
     Returns short_id or None on failure.
     """
@@ -2087,13 +2202,22 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         channel_url=channel_url,
     )
     _update_short_job_progress(job_id, 90, "upload")
+    # ── v10.3: Scheduled publishing ──
+    if target_upload_at:
+        privacy_mode = "private"
+        publish_at = target_upload_at
+        logger.info("Native short: scheduled publish at %s", publish_at[:19])
+    else:
+        privacy_mode = "public"
+        publish_at = None
     result = uploader.upload(
         video_path=video_path,
         title=title[:100],
         description=description[:5000],
         tags=hashtags[:60],
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-        privacy="public",
+        privacy=privacy_mode,
+        publish_at=publish_at,
     )
 
     yt_id = result.get("video_id")
@@ -2156,7 +2280,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 def _dispatch_clip_short(channel_id: int, channel_slug: str,
                           source_video_id: int, slot_rank: int = 0,
                           job_id: int = None,
-                          pre_rendered_short_id: int = None) -> int | None:
+                          pre_rendered_short_id: int = None,
+                          target_upload_at: str = None) -> int | None:
     """Extract a clip from a long video, render, and publish.
 
     Uses the ShortsExtractor pipeline pattern from api/routers/shorts.py
@@ -2165,6 +2290,9 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
     v25: If pre_rendered_short_id is provided, skips the LLM extraction and
     rendering phases (the clip was pre-rendered by pre_render_clip_shorts_for_video()
     right after the long-form upload). Only uploads the existing file.
+
+    v10.3: If target_upload_at is provided, uploads as private + publishAt
+    (scheduled publishing) instead of immediate public.
 
     Returns short_id or None on failure.
     """
@@ -2223,13 +2351,21 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
                 longform_url=longform_url, channel_url=channel_url_value,
             )
             _update_short_job_progress(job_id, 90, "upload")
+            # ── v10.3: Scheduled publishing ──
+            if target_upload_at:
+                clip_privacy = "private"
+                clip_publish_at = target_upload_at
+            else:
+                clip_privacy = "public"
+                clip_publish_at = None
             result = uploader.upload(
                 video_path=output_path,
                 title=title,
                 description=description[:5000],
                 tags=hashtags[:60],
                 category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-                privacy="public",
+                privacy=clip_privacy,
+                publish_at=clip_publish_at,
             )
 
             yt_id = result.get("video_id")
@@ -2566,13 +2702,21 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             channel_url=channel_url_value,
         )
         _update_short_job_progress(job_id, 90, "upload")
+        # ── v10.3: Scheduled publishing ──
+        if target_upload_at:
+            clip_privacy2 = "private"
+            clip_publish_at2 = target_upload_at
+        else:
+            clip_privacy2 = "public"
+            clip_publish_at2 = None
         result = uploader.upload(
             video_path=output_path,
             title=title,
             description=description[:5000],
             tags=hashtags[:60],
             category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-            privacy="public",
+            privacy=clip_privacy2,
+            publish_at=clip_publish_at2,
         )
 
         yt_id = result.get("video_id")
@@ -2761,15 +2905,72 @@ def pre_render_clip_shorts_for_video(
             anchor = now_utc
             logger.info("pre_render: no target_public_at — using now as anchor")
 
-        # Calculate target upload times: first clip at anchor + 60min,
-        # subsequent clips spaced 60min apart.
+        # ── v10.3: Calculate clip upload schedule using optimal shorts windows ──
+        # Instead of blind 60-min increments, snap each clip to the nearest
+        # upcoming optimal shorts publish window (≥60 min after anchor).
+        # windows: (9,30), (13,0), (18,30), (21,0) or DB optimal slots.
+        # Subsequent clips spread across consecutive windows.
         upload_times = []
+        channel_timezone = "Europe/Madrid"
+        try:
+            from config.config_bridge import get_channel_config
+            ch_cfg = get_channel_config(channel_slug)
+            channel_timezone = getattr(ch_cfg, "PUBLISH_TIMEZONE", "Europe/Madrid")
+        except Exception:
+            pass
+
+        # Load optimal windows (or fallback to NATIVE_WINDOWS)
+        windows = _load_shorts_optimal_windows(db=None, channel_id=channel_id)
+        windows_used = []  # track which windows we've assigned this batch
+
         for i in range(max_clips):
-            target_upload = anchor + _timedelta(minutes=60 * (i + 1))
+            if i == 0:
+                # First clip: snap to the nearest upcoming optimal window ≥60 min
+                target_upload = _snap_to_optimal_shorts_window(
+                    anchor, timezone_str=channel_timezone,
+                    db=None, channel_id=channel_id,
+                    min_delay_min=60,
+                )
+                # Find which window was used
+                tz_obj = ZoneInfo(channel_timezone)
+                target_local = target_upload.astimezone(tz_obj)
+                used_hour = target_local.hour
+                windows_used.append(used_hour)
+            else:
+                # Subsequent clips: use the next consecutive optimal window
+                # Find the window after the previous clip's window
+                prev_local = upload_times[-1].astimezone(tz_obj)
+                prev_hour = prev_local.hour
+                
+                # Find the next window after prev_hour
+                found = False
+                for (wh, wm) in windows:
+                    if wh > prev_hour:
+                        candidate = prev_local.replace(
+                            hour=wh, minute=wm, second=0, microsecond=0,
+                        )
+                        # Ensure at least some spacing (avoid same-hour issues)
+                        if (candidate - prev_local).total_seconds() > 30 * 60:
+                            target_upload = candidate.astimezone(UTC)
+                            windows_used.append(wh)
+                            found = True
+                            break
+                
+                if not found:
+                    # Fallback: anchor + 60*(i+1) with a small offset
+                    target_upload = anchor + _timedelta(minutes=75 + 75 * (i - 1))
+
             # Ensure target_upload is not in the past (for immediate mode)
             if target_upload < now_utc:
-                target_upload = now_utc + _timedelta(minutes=5 + 60 * i)
+                target_upload = now_utc + _timedelta(minutes=30 + 60 * i)
             upload_times.append(target_upload)
+
+        if upload_times:
+            logger.info(
+                "pre_render: clip upload windows: %s → %s",
+                anchor.isoformat()[:16],
+                ", ".join(t.isoformat()[:16] for t in upload_times),
+            )
 
         # Script + blocks
         script_text = ""
@@ -2911,7 +3112,7 @@ def pre_render_clip_shorts_for_video(
 
             # Calculate schedule for this clip
             target_upload = upload_times[clip_idx]
-            scheduled_at = target_upload - _timedelta(minutes=5)  # upload lead time
+            scheduled_at = target_upload - _timedelta(minutes=SHORT_GEN_LEAD_MIN_CLIP)  # upload lead time
             date_key = scheduled_at.astimezone(channel_tz).strftime("%Y-%m-%d")
 
             # Save to shorts table as 'ready'
