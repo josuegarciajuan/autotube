@@ -151,7 +151,7 @@ def upload_single_video(
 
     # Upload
     try:
-        uploader = YouTubeUploader(channel_slug=slug)
+        uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
         if not uploader.authenticate():
             logger.error("[%s] Video #%d: authentication failed", slug, video_id)
             return False
