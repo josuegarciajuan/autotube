@@ -767,7 +767,8 @@ GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate (1.5 days)
 # Upload windows (franjas de subida): videos suben en estas franjas a horas random
 UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},   # Mañana: 10:00-13:00
-    {"start": 20, "end": 22},   # Tarde: 20:00-22:00
+    {"start": 17, "end": 20},   # Tarde: 17:00-20:00 (cubre optimal 19:07)
+    {"start": 20, "end": 22},   # Noche: 20:00-22:00
 ]
 
 YT_DEFAULT_TAGS = [

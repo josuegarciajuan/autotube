@@ -754,7 +754,8 @@ GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
 # Upload windows (franjas de subida): videos suben en estas franjas a horas random
 UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},   # Mañana: 10:00-13:00
-    {"start": 20, "end": 22},   # Tarde: 20:00-22:00
+    {"start": 14, "end": 17},   # Mediodía: 14:00-17:00 (cubre optimal 14:13 + secundario 17h)
+    {"start": 20, "end": 22},   # Noche: 20:00-22:00
 ]
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)

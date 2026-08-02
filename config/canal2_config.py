@@ -730,10 +730,11 @@ GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
 # Upload windows (franjas de subida): videos suben en estas franjas a horas random
 UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},   # Mañana: 10:00-13:00
-    {"start": 20, "end": 22},   # Tarde: 20:00-22:00
+    {"start": 16, "end": 19},   # Tarde: 16:00-19:00 (cubre optimal 18:37)
+    {"start": 20, "end": 22},   # Noche: 20:00-22:00
 ]
 PUBLISH_TIMEZONE = "Europe/Madrid"
-PUBLISH_TARGET_HOUR = 21           # 9 PM — peak para contenido de misterio
+# PUBLISH_TARGET_HOUR = None — usa optimal_slots calculados por datos
 PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
 PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
 PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico

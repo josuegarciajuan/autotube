@@ -786,14 +786,14 @@ GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
 # Upload windows (franjas de subida): videos suben en estas franjas a horas random
 UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},   # Mañana: 10:00-13:00
-    {"start": 20, "end": 22},   # Tarde: 20:00-22:00
+    {"start": 14, "end": 17},   # Mediodía: 14:00-17:00
+    {"start": 20, "end": 22},   # Noche: 20:00-22:00
 ]
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
 PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
 PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
-PUBLISH_TARGET_HOUR = 10           # Forzado: 10:00 CEST = 08:00 UTC (franja primaria)
-OPTIMAL_PEAKS_LONG = 2             # Solo 2 franjas long-form (sin terciaria)
+# PUBLISH_TARGET_HOUR = None — usa optimal_slots calculados por datos
 
 YT_DEFAULT_TAGS = [
     # Tier 1: Primary keywords (broad match)
