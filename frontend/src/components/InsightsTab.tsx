@@ -1289,9 +1289,9 @@ export default function InsightsTab({
     (grouped[r.category] ||= []).push(r)
   }
 
-  // Sort categories by priority: errores first (fixes), then duracion, hora, keywords, contenido
+  // Sort categories by priority: duracion first (retention is king), then hora, keywords, contenido
   const categoryOrder: InsightCategory[] = [
-    'errores', 'duracion', 'hora_publicacion', 'keywords', 'contenido',
+    'duracion', 'hora_publicacion', 'keywords', 'contenido',
   ]
 
   // Count discarded and applied

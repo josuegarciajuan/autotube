@@ -513,6 +513,9 @@ export const INSIGHT_CATEGORY_META: Record<
     bg: 'bg-neon-red/10',
     border: 'border-neon-red/30',
   },
+  // v20.2: errores category is deprecated — analysis is now marketing-only.
+  // Kept in type union for backward compatibility with existing DB insights.
+  // Not included in categoryOrder — errores recs fall to end of list.
 }
 
 export function getCategoryMeta(

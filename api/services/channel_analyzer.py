@@ -83,9 +83,15 @@ _CONFIG_KEYS = [
 # ── Phase prompts ────────────────────────────────────────────────────
 
 _EXPLORATION_SYSTEM = """\
-You are a senior data analyst specializing in YouTube channel performance optimization.
+You are a senior growth marketer and data analyst specializing in YouTube channel performance optimization.
 Your job is to find ALL statistically significant patterns, anomalies, and correlations
-in raw channel data. Think step by step. Cite specific data points (exact numbers, dates).
+in raw channel data — from a purely marketing and audience-growth perspective.
+Think step by step. Cite specific data points (exact numbers, dates).
+
+CRITICAL: Before presenting each finding, do a SILENT brainstorming round:
+  1. Generate 3-5 possible interpretations of the data pattern.
+  2. For each, estimate expected impact (high/medium/low) and confidence.
+  3. Present ONLY the strongest, most actionable interpretation.
 
 Categories to explore exhaustively:
 1. Video duration vs retention / watchtime / revenue
@@ -93,10 +99,14 @@ Categories to explore exhaustively:
 3. Keywords/topics vs CTR, views, and retention
 4. Title power words: which emotional/impact words in titles correlate with higher views/CTR?
    Identify specific words that appear in top-performing titles and are MISSING from low performers.
-5. Pipeline errors — which phases fail most, common error messages
-6. Content pillar balance vs performance
-7. Growth trends (subs, views) and inflection points
-8. Revenue patterns (CPM correlation with topic/duration)
+5. Audience behavior patterns: seasonal trends, binge-watching signals, drop-off points in retention curves.
+6. Content pillar balance vs performance: does the channel over-index on one topic while underperforming?
+7. Niche positioning and competitive differentiation: what unique angle could increase CTR and loyalty?
+8. Growth trends (subs, views) and inflection points: what triggered past growth spikes?
+9. Revenue patterns (CPM correlation with topic/duration)
+
+DO NOT look for bugs, pipeline errors, or technical failures. Focus exclusively on
+marketing, content strategy, audience growth, and revenue optimization.
 
 For each finding: state the EXACT magnitude (e.g. "3x", "+40%"), cite the data point,
 and classify the category.
@@ -109,17 +119,22 @@ _EXPLORATION_USER = """\
 </channel_data>
 
 <task>
-Analyze this channel exhaustively. Find EVERY meaningful pattern, anomaly, correlation.
+Analyze this channel from a MARKETING PERSPECTIVE. Find EVERY meaningful pattern,
+anomaly, and correlation related to audience growth, content performance, and revenue.
+Focus on actionable insights, not technical issues.
+
+For each pattern: before writing the finding, silently brainstorm 3-5 interpretations
+and pick the strongest one.
 
 Return JSON:
 {{
   "patterns": [
     {{
       "name": "short descriptive name",
-      "category": "duracion|hora_publicacion|keywords|contenido|errores",
-      "finding": "detailed data-backed description (Spanish, 1-2 sentences)",
+      "category": "duracion|hora_publicacion|keywords|contenido",
+      "finding": "detailed data-backed marketing insight (Spanish, 1-2 sentences)",
       "data_points": ["specific metric: value", "specific metric: value"],
-      "magnitude": "3x|+40%|-15%|23% error rate",
+      "magnitude": "3x|+40%|-15%|50% higher CTR",
       "direction": "positive|negative|neutral"
     }}
   ],
@@ -134,10 +149,17 @@ Return JSON:
 # ── Unified Phase 2: hypothesis + recommendations in one LLM call ──
 
 _UNIFIED_SYSTEM = """\
-You are a YouTube channel optimization engineer. You have discovered patterns in channel data.
-Now you must do TWO things in ONE response:
+You are a YouTube growth marketer and channel optimization strategist. You have discovered
+patterns in channel data. Now you must do TWO things in ONE response:
   1. Formulate causal hypotheses for each pattern (why it exists, confidence, counter-argument)
   2. Convert the strongest hypotheses into concrete, actionable recommendations with exact config key → value mappings.
+
+CRITICAL — BRAINSTORMING BEFORE EACH RECOMMENDATION:
+  Before writing any recommendation, silently brainstorm:
+  a) 3-5 different possible approaches to capitalize on the pattern.
+  b) For each: estimate expected impact (views/CTR/revenue %) and implementation difficulty.
+  c) Pick the single strongest, most cost-effective approach.
+  d) Present ONLY that approach as the recommendation.
 
 RULES:
 - Every recommendation must map to specific config keys from the provided list.
@@ -148,6 +170,9 @@ RULES:
 - Cite specific data in every recommendation.
 - Filter out patterns with weak evidence (confidence < 30).
 - All recommendations should BUILD UPON and ENRICH any previous analysis, not replace it.
+- Focus on MARKETING improvements: titles, thumbnails, keywords, publishing strategy,
+  audience growth, content differentiation, retention hooks, monetization optimization.
+- DO NOT recommend bug fixes, pipeline error patches, or technical infrastructure changes.
 
 Return ONLY valid JSON. No markdown."""
 
@@ -182,23 +207,25 @@ The following recommendations were made in a PREVIOUS analysis of this channel.
 
 <task>
 Step 1: For each pattern, formulate a causal hypothesis. Filter out patterns with confidence < 30.
-Step 2: Convert the strongest hypotheses into actionable recommendations with exact config changes.
+        Before writing each hypothesis, brainstorm 3+ possible causal explanations and pick the strongest.
+Step 2: For each strong hypothesis, brainstorm 3-5 possible marketing actions. Rank by impact vs feasibility.
+        Convert only the BEST approach into an actionable recommendation with exact config changes.
 
 Return JSON:
 {{
   "hypotheses": [
     {{
       "pattern_name": "<match pattern name exactly>",
-      "category": "duracion|hora_publicacion|keywords|contenido|errores",
+      "category": "duracion|hora_publicacion|keywords|contenido",
       "explanation": "causal mechanism (Spanish, 2-3 sentences)",
-      "proposed_change": "what specific change to make",
+      "proposed_change": "what specific marketing change to make",
       "expected_outcome": "quantified prediction (e.g. '+30% views in 24h')",
       "confidence": 85,
       "counter_argument": "why this might NOT work (Spanish, 1 sentence)",
       "evidence_strength": "fuerte|moderado|debil"
     }}
   ],
-  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 opportunities, and biggest risks. Reference the previous analysis if applicable (e.g., 'Since the last analysis...').",
+  "analysis_summary": "2-3 paragraph executive summary in Spanish covering the channel's overall health, top 3 growth opportunities, and biggest competitive risks. Reference the previous analysis if applicable (e.g., 'Since the last analysis...').",
   "health_score": 72,
   "key_metrics": [
     {{ "label": "Views/dia", "value": "2,100", "sparkline": [10,12,11,15,13,14,15], "delta": "+8%", "delta_positive": true }}
@@ -206,9 +233,9 @@ Return JSON:
   "recommendations": [
     {{
       "id": "<uuid-v4>",
-      "category": "duracion|hora_publicacion|keywords|contenido|errores",
+      "category": "duracion|hora_publicacion|keywords|contenido",
       "title": "short actionable title (Spanish, max 8 words)",
-      "detail": "data-backed explanation (Spanish, 2-4 sentences)",
+      "detail": "data-backed marketing insight (Spanish, 2-4 sentences)",
       "confidence": 85,
       "expected_impact": "alta|media|baja",
       "config_changes": {{ "VIDEO_AVERAGE_DURATION_MIN": 11 }},
@@ -220,7 +247,13 @@ Return JSON:
   ]
 }}
 
-IMPORTANT for key_metrics: provide exactly 4 metrics (views/dia, retention, errores_pipeline, subs_30d).
+IMPORTANT for key_metrics: provide 4-6 marketing metrics. Prefer these when data is available:
+  - Views/dia (daily view average)
+  - Retention promedio (average viewer retention %)
+  - CTR promedio (average click-through rate %)
+  - Suscripciones por video (average new subs per published video)
+  - Ingresos estimados (estimated revenue, if monetized)
+  - Subs 30d (subscriber growth in last 30 days)
 Each sparkline must be an array of 7 integers representing the last 7 data points.
 </task>"""
 
@@ -667,6 +700,12 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
             logger.info("Data aggregated: %d videos, %d growth points",
                          len(data.get("video_performance", [])),
                          len(data.get("channel_growth", [])))
+
+            # v20.2: strip pipeline error data — LLM analysis is marketing-only,
+            # not bug-hunting. Pipeline error logs accumulate historical noise
+            # and distract the LLM from actionable audience-growth insights.
+            data.pop("pipeline_errors_by_phase", None)
+            data.pop("pipeline_alerts", None)
 
             # Check cancel flag after data aggregation
             if _is_cancelled(insight_id):
