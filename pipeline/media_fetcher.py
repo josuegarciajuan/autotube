@@ -753,6 +753,7 @@ class MediaFetcher:
                         video_ok += 1
                         image_ok -= 1
                         rescued += 1
+                        self._record_asset_for_history(retry)
                         logger.info(
                             "Video rescue scene %d: %r → %s",
                             i + 1, fbq[:50], retry.get("source", "?"),
@@ -771,14 +772,19 @@ class MediaFetcher:
         """Fetch ONE image urgently from any available provider.
 
         Used by the dynamic gap-fill system during video rendering when
-        a scene runs out of pre-fetched assets. Skips cross-video dedup
-        but still avoids the very last downloaded image to prevent
-        exact duplicates within the same fill session.
+        a scene runs out of pre-fetched assets. Checks against all
+        dedup tracking sets (URLs, filenames, cross-video history)
+        to prevent reusing assets already present in this or any
+        previous video.
 
         Returns {type, path, source} dict or None if all providers fail.
         """
         import time
-        _last_url = getattr(self, '_urgent_last_url', None)
+        _urgent_set = getattr(self, '_urgent_used_urls', None)
+        if _urgent_set is None:
+            _urgent_set = set()
+            self._urgent_used_urls = _urgent_set
+
         for provider in self._image_providers:
             if not provider.available:
                 continue
@@ -788,15 +794,40 @@ class MediaFetcher:
                     continue
                 for candidate in candidates:
                     url = getattr(candidate, 'url', '')
-                    if url and url == _last_url:
-                        continue  # skip exact duplicate from same session
+                    if not url:
+                        continue
+                    # --- Dedup: check all tracking sets ---
+                    if url in _urgent_set:
+                        continue
+                    if url in self._used_image_urls:
+                        continue
+                    if url in self._used_asset_urls:
+                        continue
+                    img_id = str(getattr(candidate, 'id', ''))
+                    source = getattr(provider, 'name', 'unknown')
+                    if img_id:
+                        predicted = f"output/images/{source}_{img_id}.jpg"
+                        if predicted in self._used_filenames:
+                            continue
+                        # Also check cross-video dedup for this filename
+                        if hasattr(self, '_cross_video_used_filenames') and predicted in self._cross_video_used_filenames:
+                            continue
+
                     path = self._download_image(url, f"fill_{int(time.time())}.jpg")
                     if path and self._is_valid_image(path):
-                        self._urgent_last_url = url
+                        _urgent_set.add(url)
+                        self._used_image_urls.add(url)
+                        self._used_asset_urls.add(url)
+                        # Record for cross-video dedup
+                        self._record_asset_for_history({
+                            "path": str(path),
+                            "source": source,
+                            "url": url,
+                        })
                         return {
                             "type": "image",
                             "path": str(path),
-                            "source": getattr(provider, 'name', 'unknown'),
+                            "source": source,
                         }
             except Exception:
                 continue
@@ -1013,7 +1044,7 @@ class MediaFetcher:
                         "path": path,
                         "type": "video",
                         "duration": asset.duration,
-                        "source": f"{provider.name}_video",
+                        "source": f"{provider.name}",
                     }
 
                 # Download failed: treat as soft failure for this scene
@@ -1087,7 +1118,7 @@ class MediaFetcher:
                         "path": path,
                         "type": "video",
                         "duration": asset.duration,
-                        "source": f"{provider.name}_video",
+                        "source": f"{provider.name}",
                     }
 
                 logger.warning("Provider %s: found video but download failed", provider.name)
@@ -1128,7 +1159,7 @@ class MediaFetcher:
                         "path": path,
                         "type": "video",
                         "duration": asset.duration,
-                        "source": f"{provider.name}_video",
+                        "source": f"{provider.name}",
                     }
 
                 logger.warning("Provider %s: found video but download failed", provider.name)
@@ -1378,6 +1409,14 @@ class MediaFetcher:
             return True
         if predicted_fn and predicted_fn in self._cross_video_used_filenames:
             return True
+        # Also check Pixabay fallback (_fb) suffix — the same image
+        # may have been saved with the fallback URL in a previous video.
+        if predicted_fn and predicted_fn.endswith(".jpg"):
+            fb_fn = predicted_fn[:-4] + "_fb.jpg"
+            if fb_fn in self._cross_video_used_filenames:
+                return True
+            if fb_fn in self._used_filenames:
+                return True
 
         content_hash = asset_info.get("content_hash", "")
         if content_hash and content_hash in self._used_content_hashes:
@@ -1771,7 +1810,7 @@ class MediaFetcher:
                     "url": asset.url,
                     "type": "video",
                     "duration": asset.duration,
-                    "source": f"{pname}_video",
+                    "source": pname,
                     "provider": pname,
                     "_total_available": sp.total_available,
                     "_per_page": sp.per_page,

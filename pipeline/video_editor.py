@@ -351,6 +351,8 @@ class VideoEditor:
         self._image_last_clip_idx.clear()
         self._current_clip_idx = 0
         self._image_reuse_count.clear()
+        self._pending_fill_dur = 0.0
+        self._pending_fill_usable = 0.0
 
         # ── Compute block time ranges ──────────────────────────
         if scene_ranges:
@@ -1549,8 +1551,12 @@ class VideoEditor:
                         self._image_last_clip_idx[fb_path] = self._current_clip_idx
                     else:
                         self.logger.warning("  All fallback images already used — returning None")
+                        self._pending_fill_dur = 0.0
+                        self._pending_fill_usable = 0.0
                         return None
                 else:
+                    self._pending_fill_dur = 0.0
+                    self._pending_fill_usable = 0.0
                     return None
             else:
                 # Video clip created successfully. Check if it was truncated
