@@ -361,6 +361,193 @@ def set_video_privacy(video_id: int, data: dict):
     }
 
 
+# ── Processing verification routes ───────────────────────────
+
+@router.post("/verify-processing")
+def verify_all_processing():
+    """Verify YouTube processing status for all non-published videos with yt_video_id.
+
+    Queries YouTube API (part=status) for each video and returns a report
+    with counts of processing failures, stuck videos, and deleted videos.
+
+    Quota: ~1 unit per video checked.
+    """
+    import json
+    db = get_db()
+
+    # Get all non-published videos with YT IDs
+    all_videos = db.get_videos(status=None, limit=9999, offset=0)
+    to_check = [v for v in all_videos
+                if v.get("yt_video_id", "").strip()
+                and v.get("status") != "published"]
+
+    if not to_check:
+        return {"total": 0, "message": "No videos to check"}
+
+    # Group by channel to reuse uploaders
+    channels = db.get_channels()
+    channel_slug_map = {ch["id"]: ch["slug"] for ch in channels}
+    uploader_cache: dict[str, "YouTubeUploader"] = {}
+
+    results = []
+    stats = {"total": len(to_check), "ok": 0, "processing": 0,
+             "failed": 0, "deleted": 0, "unknown": 0, "errors": 0}
+
+    from pipeline.youtube_uploader import YouTubeUploader
+
+    for v in to_check:
+        v_id = v["id"]
+        yt_id = v["yt_video_id"]
+        canal = v.get("canal") or channel_slug_map.get(v.get("channel_id", 0), "?")
+
+        if canal not in uploader_cache:
+            uploader = YouTubeUploader(canal)
+            uploader_cache[canal] = uploader if uploader.authenticate() else None
+        uploader = uploader_cache[canal]
+        if uploader is None:
+            stats["errors"] += 1
+            continue
+
+        try:
+            service = uploader._get_service()
+            resp = service.videos().list(part="status", id=yt_id).execute()
+            items = resp.get("items", [])
+        except Exception:
+            stats["errors"] += 1
+            continue
+
+        if not items:
+            results.append({
+                "video_id": v_id, "yt_video_id": yt_id, "canal": canal,
+                "action": "deleted", "detail": "Video not found on YouTube",
+            })
+            stats["deleted"] += 1
+            continue
+
+        st = items[0].get("status", {})
+        ps = st.get("processingStatus", "")
+        us = st.get("uploadStatus", "")
+        fr = st.get("failureReason", "")
+        pfr = st.get("processingFailureReason", "")
+
+        if ps == "failed" or us == "failed" or fr:
+            results.append({
+                "video_id": v_id, "yt_video_id": yt_id, "canal": canal,
+                "action": "failed",
+                "detail": fr or pfr or ps or us,
+            })
+            stats["failed"] += 1
+        elif ps == "processing" or (us == "uploaded" and not ps):
+            results.append({
+                "video_id": v_id, "yt_video_id": yt_id, "canal": canal,
+                "action": "processing",
+                "detail": f"processingStatus={ps}, uploadStatus={us}",
+            })
+            stats["processing"] += 1
+        elif ps == "succeeded" or us == "processed":
+            results.append({
+                "video_id": v_id, "yt_video_id": yt_id, "canal": canal,
+                "action": "ok", "detail": f"privacy={st.get('privacyStatus', '?')}",
+            })
+            stats["ok"] += 1
+        else:
+            results.append({
+                "video_id": v_id, "yt_video_id": yt_id, "canal": canal,
+                "action": "unknown", "detail": f"ps={ps}, us={us}",
+            })
+            stats["unknown"] += 1
+
+    return {
+        "stats": stats,
+        "results": results,
+        "quota_used": stats["total"] - stats["errors"],
+    }
+
+
+@router.post("/{video_id}/verify-processing")
+def verify_single_processing(video_id: int):
+    """Verify processing status of a single video against YouTube API.
+
+    If processing failed, the system will attempt auto-retry.
+    Returns current YT status and action taken.
+    """
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if not v.get("yt_video_id"):
+        raise HTTPException(400, "Video has no YouTube ID")
+
+    yt_id = v["yt_video_id"]
+    canal = v.get("canal", "")
+    if not canal:
+        ch = db.get_channel(v.get("channel_id", 0))
+        canal = ch["slug"] if ch else "?"
+    if canal == "?":
+        raise HTTPException(400, "Video has no channel assigned")
+
+    from pipeline.youtube_uploader import YouTubeUploader
+    uploader = YouTubeUploader(canal)
+    if not uploader.authenticate():
+        raise HTTPException(500, "Failed to authenticate with YouTube")
+
+    try:
+        service = uploader._get_service()
+        resp = service.videos().list(part="status", id=yt_id).execute()
+        items = resp.get("items", [])
+    except Exception as e:
+        raise HTTPException(500, f"YouTube API error: {e}")
+
+    if not items:
+        return {
+            "video_id": video_id,
+            "yt_video_id": yt_id,
+            "found": False,
+            "action": "deleted",
+            "message": "Video not found on YouTube (may have been deleted)",
+        }
+
+    st = items[0].get("status", {})
+    ps = st.get("processingStatus", "")
+    pfr = st.get("processingFailureReason", "")
+    us = st.get("uploadStatus", "")
+    fr = st.get("failureReason", "")
+
+    result = {
+        "video_id": video_id,
+        "yt_video_id": yt_id,
+        "found": True,
+        "privacyStatus": st.get("privacyStatus", ""),
+        "uploadStatus": us,
+        "processingStatus": ps,
+        "processingFailureReason": pfr,
+        "failureReason": fr,
+    }
+
+    # ── Auto-retry if processing failed ──
+    if ps == "failed" or us == "failed" or fr:
+        from api.services.upload_health_checker import _auto_retry_upload
+        success = _auto_retry_upload(video_id, yt_id, canal, db,
+                                     fr or pfr or ps)
+        result["action"] = "retry_initiated" if success else "retry_failed"
+        result["retry_success"] = success
+        result["message"] = (
+            "Processing failed — auto-retry initiated" if success
+            else "Processing failed — auto-retry failed (check logs)"
+        )
+    elif ps == "succeeded" or us == "processed":
+        result["action"] = "ok"
+        result["message"] = "Video processed successfully on YouTube"
+    elif ps == "processing" or us == "uploaded":
+        result["action"] = "processing"
+        result["message"] = "Video still processing on YouTube"
+    else:
+        result["action"] = "unknown"
+        result["message"] = f"Unexpected state: ps={ps}, us={us}"
+
+    return result
+
+
 @router.post("/{video_id}/regenerate-thumbnail")
 def regenerate_thumbnail(video_id: int, background_tasks: BackgroundTasks):
     """Regenerate video thumbnail."""

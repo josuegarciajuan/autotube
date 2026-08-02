@@ -1942,6 +1942,18 @@ class PipelineOrchestrator:
                                   content_id=script.get("id") if script else None,
                                   duration_ms=duration_ms)
 
+            # ── Post-upload: schedule processing health checks ──
+            # Monitors YouTube's processingStatus at 5min, 30min, 2h to detect
+            # encoding failures that happen after the upload verification succeeds.
+            try:
+                db_vid = db_video_id or self.db_video_id
+                if db_vid:
+                    from api.services.upload_health_checker import schedule_checks
+                    schedule_checks(db_vid, video_id, self.canal, self.db)
+                    logger.info(f"[{self.canal}] Health checks scheduled for video #{db_vid}")
+            except Exception as hc_exc:
+                logger.warning(f"[{self.canal}] Failed to schedule health checks: {hc_exc}")
+
             # ── Post-upload: real YouTube stats snapshot ──
             try:
                 from pipeline.youtube_stats import YouTubeStatsFetcher

@@ -285,6 +285,9 @@ async def lifespan(app: FastAPI):
     # Launch publish verification checker in background
     publish_verify_task = asyncio.create_task(_publish_verify_loop())
     
+    # Launch upload health checker in background (processing status monitoring)
+    health_checker_task = asyncio.create_task(_upload_health_checker_loop())
+    
     yield
     
     # Shutdown
@@ -297,6 +300,7 @@ async def lifespan(app: FastAPI):
     schedule_task.cancel()
     health_monitor_task.cancel()
     publish_verify_task.cancel()
+    health_checker_task.cancel()
     try:
         await schedule_task
     except asyncio.CancelledError:
@@ -307,6 +311,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await publish_verify_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await health_checker_task
     except asyncio.CancelledError:
         pass
 
@@ -425,6 +433,44 @@ async def _publish_verify_loop():
         except Exception as exc:
             logger.warning("Publish verify error: %s", exc)
         
+        await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _upload_health_checker_loop():
+    """Background loop: process due upload health checks (YouTube processing monitoring).
+
+    Runs every 5 minutes. Each check verifies a video's processingStatus via
+    YouTube API and auto-retries uploads if encoding failed.
+    Also performs periodic cleanup of old checks every 6 hours.
+    """
+    import asyncio, logging, time
+    logger = logging.getLogger("autotube.health_checker")
+
+    await asyncio.sleep(120)  # Let API stabilize first
+    logger.info("Upload health checker loop started (interval: 5 min)")
+
+    last_cleanup = time.time()
+
+    while True:
+        try:
+            from api.services.upload_health_checker import process_due_checks, cleanup_old_checks
+
+            result = await asyncio.to_thread(process_due_checks)
+            if result and (result.get("processed", 0) > 0 or result.get("failed_detected", 0) > 0):
+                logger.info(
+                    "Health checks: %d processed, %d failed detected, %d retried, %d errors",
+                    result.get("processed", 0), result.get("failed_detected", 0),
+                    result.get("retried", 0), result.get("errors", 0),
+                )
+
+            # Periodic cleanup every 6 hours
+            if time.time() - last_cleanup > 21600:
+                await asyncio.to_thread(cleanup_old_checks, max_age_days=7)
+                last_cleanup = time.time()
+
+        except Exception as exc:
+            logger.warning("Upload health checker error: %s", exc)
+
         await asyncio.sleep(300)  # Every 5 minutes
 
 

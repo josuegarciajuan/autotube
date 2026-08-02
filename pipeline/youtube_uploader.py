@@ -674,6 +674,8 @@ class YouTubeUploader:
                 title = snippet.get("title", "")
                 upload_status = status.get("uploadStatus", "")
                 rejection = status.get("rejectionReason", "")
+                processing_status = status.get("processingStatus", "")
+                processing_failure = status.get("processingFailureReason", "")
                 
                 # Detect silently deleted videos
                 if title == "Deleted video" or (not title and not snippet.get("description")):
@@ -691,17 +693,44 @@ class YouTubeUploader:
                         f"Revisa los lineamientos de contenido."
                     )
                 
+                # ── Check processing status (encoding may fail AFTER upload succeeds) ──
+                if processing_status == "failed":
+                    raise RuntimeError(
+                        f"YouTube processing FAILED for video {video_id}: "
+                        f"{processing_failure or 'unknown reason'}. "
+                        f"El video se subió pero YouTube no pudo procesarlo (encoding error). "
+                        f"Se reintentará automáticamente."
+                    )
+                
+                if processing_status == "suspended":
+                    raise RuntimeError(
+                        f"YouTube processing SUSPENDED for video {video_id}: "
+                        f"posible violación de políticas o detección de contenido IA. "
+                        f"Revisar YouTube Studio manualmente."
+                    )
+                
                 if upload_status == "processed":
                     logger.info(
-                        "Post-upload verification OK: video %s (status=%s, title=%s)",
-                        video_id, upload_status, title[:60],
+                        "Post-upload verification OK: video %s (status=%s, processing=%s, title=%s)",
+                        video_id, upload_status, processing_status, title[:60],
                     )
                     return
                 
                 if upload_status == "uploaded":
+                    # ── If processing hasn't started yet, give more time ──
+                    if not processing_status and attempt < POST_UPLOAD_VERIFY_RETRIES:
+                        extended_delay = POST_UPLOAD_VERIFY_DELAY * 2
+                        logger.info(
+                            "Post-upload verification attempt %d/%d: uploaded but processing not started yet, "
+                            "waiting %ds...",
+                            attempt, POST_UPLOAD_VERIFY_RETRIES, extended_delay,
+                        )
+                        time.sleep(extended_delay)
+                        continue
+                    
                     logger.info(
-                        "Post-upload verification: video %s accepted, still processing.",
-                        video_id,
+                        "Post-upload verification: video %s accepted (processing=%s).",
+                        video_id, processing_status or "pending",
                     )
                     return
                 

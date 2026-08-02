@@ -878,6 +878,9 @@ def migrate_v2(db_path: str = None):
     # ── v25: performance indexes for dashboard/monitor/pipeline queries ──
     _migrate_v25(conn, logger)
     
+    # ── v26: upload_health_checks + yt_failed_ids (post-upload processing monitoring) ──
+    _migrate_v26(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -1767,6 +1770,48 @@ def _migrate_v25(conn, logger):
         logger.info("Migration: v25 created %d performance indexes", created)
     else:
         logger.info("Migration: v25 already applied (all indexes exist)")
+
+
+def _migrate_v26(conn, logger):
+    """Idempotent v26: upload_health_checks table + videos.yt_failed_ids.
+
+    upload_health_checks: post-upload processing monitoring.
+    Schedules API checks at 5min, 30min, 2h after upload to detect
+    YouTube encoding failures that happen after initial verification.
+
+    videos.yt_failed_ids: JSON array of previous yt_video_ids for
+    uploads that failed processing, preserving history across retries.
+    """
+    # ── upload_health_checks table ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS upload_health_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER REFERENCES videos(id),
+            yt_video_id TEXT NOT NULL,
+            channel_slug TEXT NOT NULL,
+            check_at TIMESTAMP NOT NULL,
+            attempt INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'pending',
+            result TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_health_checks_pending "
+        "ON upload_health_checks(status, check_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_health_checks_video "
+        "ON upload_health_checks(video_id)"
+    )
+
+    # ── videos.yt_failed_ids column ──
+    existing = conn.execute("PRAGMA table_info('videos')").fetchall()
+    col_names = [row[1] for row in existing]
+    if "yt_failed_ids" not in col_names:
+        conn.execute("ALTER TABLE videos ADD COLUMN yt_failed_ids TEXT DEFAULT ''")
+
+    logger.info("Migration: v26 schema applied (upload_health_checks + yt_failed_ids)")
 
 
 def _migrate_v10(conn, logger):
