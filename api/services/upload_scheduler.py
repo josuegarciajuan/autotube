@@ -328,6 +328,23 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                     except (ValueError, TypeError):
                         pass
 
+        # v12.1: — scheduled_upload_at past-due check ─
+        # A video whose scheduled_upload_at has passed is overdue for upload
+        # regardless of whether target_public_at has arrived yet.
+        if not past_due and sched_at_val is not None:
+            try:
+                sched_dt = datetime.strptime(
+                    str(sched_at_val)[:19], "%Y-%m-%d %H:%M:%S"
+                )
+                if sched_dt < now:
+                    past_due = True
+                    logger.info(
+                        "Video %d: scheduled_upload_at already passed — uploading ASAP",
+                        video_id,
+                    )
+            except (ValueError, TypeError):
+                pass
+
         # Window gate (unless past-due)
         current_hour = now.hour
         if past_due or _is_in_any_window(current_hour, windows):
