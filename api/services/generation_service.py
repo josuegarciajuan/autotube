@@ -3031,20 +3031,33 @@ async def auto_recover_on_startup():
         log.info("Cleaned up %d orphaned shorts slot(s) (job died on restart)", orphaned_slots)
 
     # ── Step 3: Auto-recover recoverable videos ───────────────
-    # ── Concurrency guard: skip recovery if a long-form generation is already
-    # running. Creating reassemble jobs while a worker is active would block
-    # all dispatches (count_active_jobs > 0 → everything defers).
-    # Recovery will retry on the next restart when the system is idle.
+    # ── Concurrency guard: skip non-marathon recovery if a long-form
+    # generation is already running. However, marathon videos that died early
+    # (before checkpoint) are allowed through so they can be reset to draft
+    # and re-dispatched — they don't create reassemble jobs that would block
+    # the dispatcher.
     active_gen_count = db.count_active_jobs()
+    _marathon_skip_recovery_for_non_marathon = False
     if active_gen_count > 0:
+        # Check if there are marathon videos that need recovery
+        marathon_pending = conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE status='error' AND is_marathon=1 "
+            "AND (checkpoint_data IS NULL OR checkpoint_data = '{}')"
+        ).fetchone()[0]
+        if marathon_pending == 0:
+            log.info(
+                "Skipping auto-recovery: %d active job(s) running — "
+                "no marathon videos pending reset. Will retry on next idle restart.",
+                active_gen_count,
+            )
+            conn.close()
+            return
         log.info(
-            "Skipping auto-recovery: %d active job(s) running — "
-            "creating reassemble jobs now would block the dispatcher. "
-            "Will retry on next idle restart.",
-            active_gen_count,
+            "Auto-recovery: %d active job(s) running but %d marathon video(s) need reset — "
+            "proceeding with marathon-only cleanup (no reassemble jobs created).",
+            active_gen_count, marathon_pending,
         )
-        conn.close()
-        return
+        _marathon_skip_recovery_for_non_marathon = True  # only process marathon videos
     rows = conn.execute(
         "SELECT * FROM videos WHERE status='error' "
         "AND checkpoint_data IS NOT NULL AND checkpoint_data != '{}' "
@@ -3055,12 +3068,18 @@ async def auto_recover_on_startup():
     bugs_skipped = 0
     recovered = 0
     unrecoverable = 0
+    marathon_reset = 0  # marathon videos reset to draft (no checkpoint, fresh start)
     processed_ids: set[int] = set()  # guard against re-processing the same video
     _pending_recoveries: list[tuple[int, int]] = []  # (job_id, video_id) — deferred dispatch
 
     for row in rows:
         video_id = row["id"]
         
+        # ── Non-marathon skip: when active jobs are running, only process marathons ──
+        video_dict = dict(row)
+        if _marathon_skip_recovery_for_non_marathon and video_dict.get("is_marathon") != 1:
+            continue
+
         # ── Dedup guard: skip videos already handled in this recovery run ──
         if video_id in processed_ids:
             continue
@@ -3072,8 +3091,6 @@ async def auto_recover_on_startup():
         if progress_phase == "interrupted":
             pass  # continue to check recoverability
 
-        video_dict = dict(row)
-
         # ── Parse checkpoint ──────────────────────────────────
         cp_raw = video_dict.get("checkpoint_data", "{}")
         try:
@@ -3083,8 +3100,20 @@ async def auto_recover_on_startup():
 
         # Must have tts + media to reassemble
         if not cp.get("tts") or not isinstance(cp.get("tts"), dict) or not cp.get("media"):
-            log.info("Video %d: no tts/media in checkpoint — not recoverable", video_id)
-            unrecoverable += 1
+            # Marathon videos that died early (before checkpoint) can't be
+            # reassembled, but shouldn't be abandoned forever. Reset to draft
+            # so the marathon dispatcher can pick them up on the next cycle.
+            if video_dict.get("is_marathon") == 1:
+                conn.execute(
+                    "UPDATE videos SET status='draft', progress_phase=NULL, progress=0 "
+                    "WHERE id=?",
+                    (video_id,),
+                )
+                marathon_reset += 1
+                log.info("Video %d: marathon with no checkpoint — reset to draft", video_id)
+            else:
+                log.info("Video %d: no tts/media in checkpoint — not recoverable", video_id)
+                unrecoverable += 1
             continue
 
         # Must have audio file on disk
@@ -3177,8 +3206,8 @@ async def auto_recover_on_startup():
             log.warning("Video %d: recovery dispatch failed — %s", video_id, exc)
             unrecoverable += 1
 
-    log.info("Startup recovery complete: %d bug(s) skipped, %d dispatched, %d unrecoverable",
-             bugs_skipped, recovered, unrecoverable)
+    log.info("Startup recovery complete: %d bug(s) skipped, %d dispatched, %d unrecoverable, %d marathon(s) reset to draft",
+             bugs_skipped, recovered, unrecoverable, marathon_reset)
 
     # ── Deferred dispatch: launch recovery tasks AFTER all startup writes settle ──
     # Workers launched immediately during startup recovery cause SQLite lock

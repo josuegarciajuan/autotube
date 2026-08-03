@@ -3258,6 +3258,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         # ── 2. Generate marathon outline ──────────────────────
         logger.info("[MARATHON][%s] Generating marathon outline (%d chapters)...", self.canal, outline_chapters)
         outline = self._generate_outline(
+            content_item=None,
             content_text=combined_text[:8000],  # trim for prompt limit
             duration_min=duration_target,
             word_target=words_target_for_prompt,

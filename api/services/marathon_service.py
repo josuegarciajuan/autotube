@@ -222,15 +222,34 @@ def check_and_dispatch_marathon(db, min_backlog: int = 12) -> dict | None:
 # ── Internal helpers ───────────────────────────────────────────
 
 def _has_pending_marathon(db) -> bool:
-    """Check if there's already a queued or running marathon job."""
+    """Check if there's already a queued, running, or recently-failed marathon job.
+
+    Recently-failed marathons (within 4 hours) are treated as "pending" to prevent
+    the dispatcher from spawning duplicate marathons after an API restart kills
+    all workers. Without this guard, all marathons become 'failed' on restart and
+    the dispatcher sees zero pending → creates more → restart kills more → loop.
+    """
     try:
         with db._connect() as conn:
+            # Active jobs (queued/running)
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs gj "
                 "JOIN videos v ON gj.video_id = v.id "
                 "WHERE v.is_marathon = 1 "
                 "AND gj.status IN ('queued', 'running')"
             ).fetchone()
-            return row["cnt"] > 0 if row else False
+            if row and row["cnt"] > 0:
+                return True
+
+            # Recently-failed marathon jobs (within 4 hours)
+            # Prevents re-spawning after API restart turns all running → failed
+            row2 = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs gj "
+                "JOIN videos v ON gj.video_id = v.id "
+                "WHERE v.is_marathon = 1 "
+                "AND gj.status = 'failed' "
+                "AND gj.created_at > datetime('now', 'localtime', '-4 hours')"
+            ).fetchone()
+            return row2["cnt"] > 0 if row2 else False
     except Exception:
         return False
