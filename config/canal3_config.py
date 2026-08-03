@@ -760,7 +760,7 @@ UPLOAD_WINDOWS = [
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 15            # ±15 min jitter: evita colisiones exactas si los guards fallan
 PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
-PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
+PUBLISH_WINDOW_SPREAD_MIN = 90      # ±90 min spread around peak hour to avoid collisions (v23)
 # PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (historia_documental → 20:00)
 
 YT_DEFAULT_TAGS = [

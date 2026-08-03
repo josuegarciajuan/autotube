@@ -589,14 +589,21 @@ def _snap_to_next_target_hour(
     timezone_str: str,
     warmup_min: int,
     slug: str,
+    spread_min: int = 0,
 ) -> tuple[datetime, datetime]:
-    """Snap to exactly HH:00 in the given timezone, respecting warmup.
+    """Snap to HH:00 in the given timezone, respecting warmup.
 
     If now + warmup_min is past target_hour today, schedules for tomorrow.
+
+    Args:
+        spread_min: If >0, add random ±spread_min minutes to avoid all videos
+                    landing exactly on the same minute (v23).
 
     Returns:
         (target_utc: datetime (UTC), target_local: datetime (local tz))
     """
+    import random
+
     try:
         tz = pytz.timezone(timezone_str)
     except pytz.UnknownTimeZoneError:
@@ -632,6 +639,16 @@ def _snap_to_next_target_hour(
             target_hour,
         )
 
+    # ── v23: Apply random spread to avoid exact-snapping collisions ──
+    jitter_applied = 0
+    if spread_min > 0:
+        jitter_applied = random.randint(-spread_min, spread_min)
+        target_local += timedelta(minutes=jitter_applied)
+        logger.info(
+            "[%s] Applying spread jitter: %+d min → %s",
+            slug, jitter_applied, target_local.strftime("%H:%M"),
+        )
+
     target_utc = target_local.astimezone(pytz.UTC)
     return target_utc, target_local
 
@@ -645,16 +662,16 @@ def calculate_target_public_time(
     jitter_min: int = 0,
     jitter_after: int = 0,
     warmup_min: int = 60,
+    publish_window_spread_min: int = 0,
     db=None,
     channel_id: Optional[int] = None,
 ) -> dict:
     """Calcula la hora objetivo de publicación para un vídeo.
 
-    Lógica determinista (no jitter): se ajusta exactamente a HH:00 en la zona
-    horaria del canal. Si no queda suficiente warmup (warmup_min) hasta esa hora
-    hoy, se programa para la misma hora del día siguiente.
-
-    La publicación se materializa vía YouTube API `scheduledPublishTime` (publishAt).
+    Lógica determinista con spread opcional (v23): se ajusta a HH:00 en la zona
+    horaria del canal, más un spread aleatorio de ±publish_window_spread_min
+    minutos para evitar colisiones. Si no queda suficiente warmup (warmup_min)
+    hasta esa hora hoy, se programa para la misma hora del día siguiente.
 
     Args:
         slug: Canal slug
@@ -665,19 +682,12 @@ def calculate_target_public_time(
         jitter_min: Ignorado (mantenido por compatibilidad de firma).
         jitter_after: Ignorado (mantenido por compatibilidad de firma).
         warmup_min: Minutos mínimos entre la subida y la publicación (default 60).
+        publish_window_spread_min: ±minutos de spread aleatorio alrededor de HH:00 (default 0).
         db: Database para consultar histórico y optimal slots.
         channel_id: ID del canal en BD.
 
-    Returns:
-        {
-            "target_public_at": str (ISO8601 UTC),
-            "target_public_at_local": str (ISO8601 local tz),
-            "peak_hour_local": int,
-            "peak_source": "optimal_slots" | "history" | "heuristic",
-            "niche": str,
-            "jitter_applied": 0 (siempre),
-            "warmup_min": int,
-        }
+    Returns: {target_public_at, target_public_at_local, peak_hour_local, peak_source, niche,
+              jitter_applied, warmup_min, ...}
     """
     all_keywords = [primary_keyword] if primary_keyword else []
     if secondary_keywords:
@@ -708,9 +718,10 @@ def calculate_target_public_time(
                 except Exception:
                     pass
 
-                # ── Snap to exactly HH:00, respecting warmup ──
+                # ── Snap to HH:00 ± spread_min, respecting warmup ──
                 target_utc, target_local = _snap_to_next_target_hour(
                     seed_hour, timezone_str, warmup_min, slug,
+                    spread_min=publish_window_spread_min,
                 )
 
                 # ── Avoid same-channel publish time collisions ──
@@ -768,9 +779,10 @@ def calculate_target_public_time(
         except Exception as e:
             logger.debug("[%s] History adjustment skipped: %s", slug, e)
 
-    # ── 3. Snap determinista: HH:00 exacto, sin jitter ──
+    # ── 3. Snap to HH:00 ± spread_min, respecting warmup ──
     target_utc, target_local = _snap_to_next_target_hour(
         seed_hour, timezone_str, warmup_min, slug,
+        spread_min=publish_window_spread_min,
     )
 
     # ── 4. Avoid same-channel publish time collisions ──
@@ -1028,31 +1040,56 @@ def ensure_future_target_public_at(
     target_hour: Optional[int] = None,
     jitter_min: int = 0,
     warmup_min: int = 60,
+    publish_window_spread_min: int = 0,
     db=None,
     channel_id: Optional[int] = None,
 ) -> str:
-    """Validate that target_public_at is in the future. Recalculate if stale.
+    """Validate that target_public_at is in the future and collision-free.
 
     This is the single guard function that should be called before any upload
-    or scheduling operation to ensure the target_public_at is never in the past.
+    or scheduling operation to ensure the target_public_at is never in the past
+    and never collides with another video on the same channel (v23).
 
     Args:
         target_public_at: Current target (can be None, ISO8601 UTC, or naive local).
         slug: Channel slug for logging + recalculation.
         timezone_str: Channel timezone (for parsing naive strings).
-        primary_keyword, secondary_keywords, target_hour, jitter_min, warmup_min:
+        primary_keyword, secondary_keywords, target_hour, jitter_min, warmup_min,
+            publish_window_spread_min:
             Parameters forwarded to calculate_target_public_time() if recalc needed.
         db: Database instance for history-based recalculation.
         channel_id: Channel DB ID for history lookup.
 
     Returns:
-        ISO8601 UTC string guaranteed to be in the future.
+        ISO8601 UTC string guaranteed to be in the future and collision-free.
     """
-    if not _target_is_stale(target_public_at, timezone_str, warmup_min):
+    needs_recalc = _target_is_stale(target_public_at, timezone_str, warmup_min)
+
+    if not needs_recalc:
         # Already valid — parse and return as ISO8601 UTC
         parsed = _parse_target_public_at(target_public_at, timezone_str)
         if parsed is not None:
-            return parsed.isoformat()
+            result_iso = parsed.isoformat()
+
+            # ── v23: Check for collisions even when target is in the future ──
+            if db is not None and channel_id is not None:
+                try:
+                    adjusted_utc = _avoid_channel_collision(
+                        channel_id, parsed, db=db, slug=slug,
+                    )
+                    adjusted_iso = adjusted_utc.isoformat()
+                    if adjusted_iso != result_iso:
+                        logger.info(
+                            "[%s] Collision detected even though target is in the future. "
+                            "Adjusted: %s → %s",
+                            slug, str(target_public_at)[:19] if target_public_at else "None",
+                            str(adjusted_iso)[:19],
+                        )
+                        return adjusted_iso
+                except Exception as e:
+                    logger.debug("[%s] Collision check skipped: %s", slug, e)
+
+            return result_iso
 
     # ── Stale or None → recalculate ──
     logger.info(
@@ -1068,6 +1105,7 @@ def ensure_future_target_public_at(
         target_hour=target_hour,
         jitter_min=jitter_min,
         warmup_min=warmup_min,
+        publish_window_spread_min=publish_window_spread_min,
         db=db,
         channel_id=channel_id,
     )

@@ -1679,6 +1679,7 @@ class PipelineOrchestrator:
                 tz = getattr(self.config, "PUBLISH_TIMEZONE", "Europe/Madrid")
                 target_h = getattr(self.config, "PUBLISH_TARGET_HOUR", None)
                 warmup = getattr(self.config, "PUBLISH_WARMUP_MIN", 60)
+                spread_min = getattr(self.config, "PUBLISH_WINDOW_SPREAD_MIN", 90)
                 channel_id = self._get_channel_id()
 
                 # ── If the planning system provided a target, use it ──
@@ -1707,6 +1708,7 @@ class PipelineOrchestrator:
                                 target_hour=target_h,
                                 jitter_min=0,
                                 warmup_min=warmup,
+                                publish_window_spread_min=spread_min,
                                 db=self.db,
                                 channel_id=channel_id,
                             )
@@ -1747,6 +1749,7 @@ class PipelineOrchestrator:
                         jitter_min=0,
                         jitter_after=0,
                         warmup_min=warmup,
+                        publish_window_spread_min=spread_min,
                         db=self.db,
                         channel_id=channel_id,
                     )

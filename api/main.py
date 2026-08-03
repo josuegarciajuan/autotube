@@ -547,6 +547,7 @@ async def _schedule_checker_loop():
     last_shorts_recovery_check = 0
     last_smart_replan = 0
     last_slot_calculation = 0
+    last_overlap_verify = 0  # v23: periodic overlap verification
     last_power_word_analysis = 0
     last_marathon_check = 0
     last_view_gap_check = 0
@@ -650,6 +651,23 @@ async def _schedule_checker_loop():
                 if now - last_lifecycle_check > 900:
                     await _process_lifecycle_actions()
                     last_lifecycle_check = now
+
+                # ── v23: Overlap safety net — verify no publish-time collisions every 15 min ──
+                if now - last_overlap_verify > 900:
+                    try:
+                        from api.services.upload_scheduler import verify_no_overlaps
+                        result = await asyncio.to_thread(
+                            verify_no_overlaps, db=_sched_db, auto_fix=True
+                        )
+                        if result and (result.get("fixed", 0) > 0 or result.get("remaining", 0) > 0):
+                            logger.info(
+                                "Overlap verify: %d fixed, %d remaining, %d errors",
+                                result.get("fixed", 0), result.get("remaining", 0),
+                                result.get("errors", 0),
+                            )
+                    except Exception as exc:
+                        logger.debug("Overlap verify: %s", exc)
+                    last_overlap_verify = now
 
                 # Auto-recovery: replan missing publications every 60 minutes
                 if now - last_recovery_check > 3600:

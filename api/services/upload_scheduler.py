@@ -200,39 +200,91 @@ def _recover_stuck_uploading_videos(db) -> int:
 
 
 def _check_for_overlapping_targets(db, channel_id: int, slug: str,
-                                   effective_target: str, current_video_id: int):
-    """v11: Detect and warn when multiple uploaded_private videos share the same
-    target_public_at. This is a safety net — the collision avoidance in
-    publish_scheduler.py should prevent this, but if it fails, we log a loud
-    warning so operators can intervene before videos go public simultaneously.
+                                   effective_target: str, current_video_id: int) -> str:
+    """v11+v23: Detect and FIX overlapping target_public_at collisions.
+
+    If multiple uploaded_private videos share the same target_public_at,
+    push the current video forward by 3h to avoid simultaneous publications.
+    Updates DB (videos, planned_slots, lifecycle_actions) to reflect the fix.
+
+    Returns:
+        The (possibly corrected) effective_target string.
     """
     if not effective_target:
-        return
+        return effective_target
+
     try:
+        from datetime import timedelta as _td
+
         with db._connect() as conn:
             rows = conn.execute(
                 """SELECT v.id, v.titulo_final, v.target_public_at
                    FROM videos v
                    WHERE v.channel_id = ?
-                     AND v.status IN ('uploaded_private', 'uploading')
+                     AND v.status IN ('uploaded_private', 'uploading', 'warming', 'scheduled')
                      AND v.id != ?
                      AND v.target_public_at = ?
                    ORDER BY v.id
                    LIMIT 20""",
                 (channel_id, current_video_id, effective_target),
             ).fetchall()
-        if rows:
-            overlap_ids = [r["id"] for r in rows]
-            logger.warning(
-                "⚠️ [%s] Video #%d target_public_at COLLISION detected! "
-                "Same time (%s) as videos %s. This may cause simultaneous "
-                "publications. Run scripts/fix_canal4_overlap.py to remediate.",
-                slug, current_video_id,
-                str(effective_target)[:19],
-                overlap_ids,
+
+        if not rows:
+            return effective_target
+
+        overlap_ids = [r["id"] for r in rows]
+        logger.warning(
+            "⚠️ [%s] Video #%d target_public_at COLLISION with %s at %s — auto-fixing...",
+            slug, current_video_id, overlap_ids, str(effective_target)[:19],
+        )
+
+        # ── Auto-fix: push current video forward by 3h ──
+        # Parse current effective_target
+        for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
+            try:
+                current_dt = datetime.strptime(str(effective_target)[:19], fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            logger.warning("[%s] Cannot parse effective_target '%s' — keeping as-is",
+                           slug, effective_target)
+            return effective_target
+
+        # Push forward by 3h and persist
+        GAP_HOURS = 3
+        new_dt = current_dt + _td(hours=GAP_HOURS)
+        new_target = new_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+        # Persist to DB
+        old_tpa = effective_target
+        db.update_video(current_video_id, target_public_at=new_target)
+
+        with db._connect() as conn:
+            conn.execute(
+                """UPDATE planned_slots SET target_public_at = ?
+                   WHERE video_id = ? AND target_public_at = ?""",
+                (new_target, current_video_id, old_tpa),
             )
+            conn.execute(
+                """UPDATE video_lifecycle_actions SET scheduled_for = ?
+                   WHERE video_id = ? AND scheduled_for = ?""",
+                (new_target, current_video_id, old_tpa),
+            )
+            conn.commit()
+
+        logger.info(
+            "✅ [%s] Video #%d: overlap auto-fixed: %s → %s",
+            slug, current_video_id,
+            str(old_tpa)[:19], str(new_target)[:19],
+        )
+
+        return new_target
+
     except Exception:
-        pass  # non-fatal guard — never block upload dispatch
+        pass
+
+    return effective_target
 
 
 def dispatch_due_uploads(loop=None, db=None) -> dict | None:
@@ -479,6 +531,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     try:
         from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
         ch_cfg_raw = ch_cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+        ch_cfg_spread = ch_cfg.get("PUBLISH_WINDOW_SPREAD_MIN", 90)
         if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=60):
             logger.warning(
                 "[%s] Video #%d: target_public_at is stale (%s). Recalculating...",
@@ -491,6 +544,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 db=db,
                 channel_id=channel_id,
                 warmup_min=60,
+                publish_window_spread_min=ch_cfg_spread,
             )
             # Persist to both tables
             db.update_video(video_id, target_public_at=effective_target)
@@ -507,8 +561,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     except Exception as e:
         logger.debug("[%s] Target recalculation skipped: %s", slug, e)
 
-    # ── v11: Overlap guard — detect and warn if multiple videos share the same target_public_at ──
-    _check_for_overlapping_targets(db, channel_id, slug, effective_target, video_id)
+    # ── v23: Overlap guard — detect and auto-fix if multiple videos share the same target_public_at ──
+    effective_target = _check_for_overlapping_targets(db, channel_id, slug, effective_target, video_id)
 
     logger.info(
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",
@@ -586,3 +640,109 @@ def get_active_upload_count(db=None) -> int:
 
         db = ExtendedDatabase()
     return db.count_active_upload_jobs()
+
+
+def verify_no_overlaps(db=None, auto_fix: bool = True) -> dict:
+    """Post-upload safety net: scan all channels for overlapping target_public_at.
+
+    Called periodically (e.g., every 15 min) from the scheduler loop.
+    If overlaps are found and auto_fix=True, automatically redistributes
+    videos with 3h gaps (updates DB only — YouTube API requires auth).
+
+    Returns:
+        {"fixed": int, "remaining": int, "errors": int}
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    total_fixed = 0
+    total_remaining = 0
+    total_errors = 0
+
+    try:
+        with db._connect() as conn:
+            overlap_groups = conn.execute("""
+                SELECT v.channel_id, c.slug, v.target_public_at, COUNT(*) as cnt,
+                       GROUP_CONCAT(v.id ORDER BY v.id) as ids
+                FROM videos v
+                JOIN channels c ON c.id = v.channel_id
+                WHERE v.status IN ('uploaded_private', 'uploading', 'warming', 'scheduled')
+                  AND v.target_public_at IS NOT NULL
+                GROUP BY v.channel_id, v.target_public_at
+                HAVING cnt > 1
+                ORDER BY v.channel_id, v.target_public_at
+            """).fetchall()
+
+        if not overlap_groups:
+            return {"fixed": 0, "remaining": 0, "errors": 0}
+
+        for group in overlap_groups:
+            slug = group["slug"]
+            tpa = group["target_public_at"]
+            ids_str = group["ids"]
+            video_ids = [int(x) for x in ids_str.split(",")]
+            count = group["cnt"]
+
+            logger.warning(
+                "⚠️ [%s] Post-upload overlap detected: %d videos at %s [%s]",
+                slug, count, str(tpa)[:19] if tpa else "?", ids_str,
+            )
+
+            if not auto_fix or len(video_ids) < 2:
+                total_remaining += count
+                continue
+
+            # Auto-fix: redistribute with 3h gaps
+            from datetime import timedelta as _td
+            base_tpa = tpa[:19] if tpa else None
+            if not base_tpa:
+                total_remaining += count
+                continue
+
+            try:
+                base_dt = datetime.strptime(base_tpa, "%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                try:
+                    base_dt = datetime.strptime(base_tpa, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    total_remaining += count
+                    continue
+
+            for i, vid in enumerate(video_ids):
+                if i == 0:
+                    continue  # Keep first at original time
+                new_dt = base_dt + _td(hours=i * 3)
+                new_target = new_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                try:
+                    db.update_video(vid, target_public_at=new_target)
+                    with db._connect() as conn:
+                        conn.execute(
+                            "UPDATE planned_slots SET target_public_at=? "
+                            "WHERE video_id=? AND target_public_at=?",
+                            (new_target, vid, tpa))
+                        conn.execute(
+                            "UPDATE video_lifecycle_actions SET scheduled_for=? "
+                            "WHERE video_id=? AND scheduled_for=?",
+                            (new_target, vid, tpa))
+                        conn.commit()
+                    total_fixed += 1
+                    logger.info(
+                        "✅ [%s] Auto-fixed video #%d: %s → %s",
+                        slug, vid, str(tpa)[:19], str(new_target)[:19],
+                    )
+                except Exception as e:
+                    logger.error("❌ [%s] Failed to fix video #%d: %s", slug, vid, e)
+                    total_errors += 1
+
+    except Exception as e:
+        logger.error("verify_no_overlaps failed: %s", e)
+        total_errors += 1
+
+    if total_fixed > 0 or total_remaining > 0:
+        logger.info(
+            "🔍 Overlap scan complete: %d fixed, %d remaining, %d errors",
+            total_fixed, total_remaining, total_errors,
+        )
+
+    return {"fixed": total_fixed, "remaining": total_remaining, "errors": total_errors}
