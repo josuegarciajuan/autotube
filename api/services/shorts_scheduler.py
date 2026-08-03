@@ -1156,17 +1156,18 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     len(_skipped_slot_ids),
                 )
                 # ── Fallback: all eligible slots are blocked by guards. ──────────
-                # Force-dispatch the most urgent pending slot regardless of
-                # cooldown, same-type conflict, or per-channel job guard.
-                # This prevents the queue from stalling when every slot is
-                # mutually blocked (common with 24h lookahead where many
-                # future slots have nearby target_upload_at).
+                # Try dispatching a slot from a DIFFERENT channel first — the
+                # guards (cooldown, same-type gap, per-channel concurrency) are
+                # per-channel, so another channel's slot should be unblocked.
+                # Only if ALL channels' slots fail the guard checks do we
+                # resort to bypassing them.
                 #
                 # Iterate: skip clip slots without source and retry up to
                 # _MAX_CLIP_RETRIES times to find a viable slot.
                 # v25: while-loop — predictable source-less skips don't consume retries.
                 import time as _time
                 _force_retry = 0
+                _force_bypass_guards = False  # escalate to bypass only as last resort
                 while _force_retry < _MAX_CLIP_RETRIES:
                     if _force_retry > 0:
                         _time.sleep(2)  # back off between retries to reduce log spam
@@ -1174,7 +1175,22 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         exclude_slot_ids=list(_failed_force_ids) if _failed_force_ids else None
                     )
                     if not force_slot:
-                        logger.warning("Force dispatch: no viable slots after %d attempts", _force_retry)
+                        # ── Escalation: all slots tried, escalate to bypass mode ──
+                        if not _force_bypass_guards and _failed_force_ids:
+                            logger.warning(
+                                "Force dispatch: %d slot(s) from all channels exhausted "
+                                "guard checks — escalating to bypass mode",
+                                len(_failed_force_ids),
+                            )
+                            _force_bypass_guards = True
+                            _failed_force_ids.clear()
+                            _force_retry = 0
+                            continue  # restart loop with guard bypass
+                        logger.warning(
+                            "Force dispatch: no viable slots after %d attempts "
+                            "(bypass=%s)",
+                            _force_retry, _force_bypass_guards,
+                        )
                         return None
 
                     slot_id = force_slot["id"]
@@ -1193,6 +1209,46 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         )
                         _failed_force_ids.add(slot_id)
                         continue
+
+                    # ── v10.5: Apply same-channel guards even in force dispatch ──
+                    # Only bypass these guards as absolute last resort (after
+                    # exhausting all channels). This prevents the force dispatch
+                    # from becoming an avalanche that publishes shorts back-to-back.
+                    if not _force_bypass_guards:
+                        # Per-channel short job guard
+                        active_ch = db.get_active_shorts_job_for_channel(channel_id)
+                        if active_ch:
+                            logger.info(
+                                "Force dispatch: slot #%d (%s) — channel has active "
+                                "job #%d, trying next channel",
+                                slot_id, slug, active_ch["id"],
+                            )
+                            _failed_force_ids.add(slot_id)
+                            continue
+
+                        # Per-channel cooldown
+                        if not _channel_shorts_cooldown_ok(channel_id, db):
+                            logger.info(
+                                "Force dispatch: slot #%d (%s) — cooldown active "
+                                "(< %d min), trying next channel",
+                                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+                            )
+                            _failed_force_ids.add(slot_id)
+                            continue
+
+                        # Same-type/cross-type collision guard
+                        target_up = force_slot.get("target_upload_at")
+                        if _same_type_shorts_slot_conflict(channel_id, short_type_f,
+                                                            target_up, db,
+                                                            exclude_slot_id=slot_id,
+                                                            cross_type=True):
+                            logger.info(
+                                "Force dispatch: slot #%d (%s) — publish conflict, "
+                                "trying next channel",
+                                slot_id, slug,
+                            )
+                            _failed_force_ids.add(slot_id)
+                            continue
 
                     if short_type_f == "clip":
                         # Skip clips for channels known to lack completed long videos today.
@@ -1216,11 +1272,20 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
                     _force_retry += 1  # only consume retry when we actually dispatch
 
-                    logger.warning(
+                    log_msg = (
                         "FORCE DISPATCH: slot #%d %s type=%s (scheduled %s) — "
-                        "all other slots blocked by guards",
-                        slot_id, slug, short_type_f, scheduled_f,
+                        "all other slots blocked by guards"
                     )
+                    if _force_bypass_guards:
+                        logger.warning(
+                            log_msg + " [BYPASSING GUARDS: all channels exhausted]",
+                            slot_id, slug, short_type_f, scheduled_f,
+                        )
+                    else:
+                        logger.warning(
+                            log_msg + " [different channel — guards passed]",
+                            slot_id, slug, short_type_f, scheduled_f,
+                        )
 
                     db.update_shorts_slot_status(slot_id, "running",
                                                   source_video_id=source_video_id_f)

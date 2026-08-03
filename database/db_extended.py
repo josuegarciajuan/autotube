@@ -31,6 +31,8 @@ _PUBLISH_MAX_RETRIES = 3                # max verification attempts
 _PUBLISH_RETRY_BASE_MINUTES = 10        # base retry delay
 _PUBLISH_RETRY_MAX_MINUTES = 60         # cap retry delay
 _PUBLISH_YOUTUBE_API_QUOTA_COST = 1     # videos.list(part="status") costs 1 unit
+_CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
+_CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
 
 
 def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: str):
@@ -61,9 +63,17 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
             from pipeline.youtube_uploader import YouTubeUploader
             uploader = YouTubeUploader(channel_slug)
             if not uploader.authenticate():
-                vlog.warning("[%s] Auth failed for publish verification of #%d",
-                             channel_slug, video_id)
-                _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+                retry_count = _get_retry_count(video_id)
+                if retry_count >= _PUBLISH_MAX_RETRIES:
+                    vlog.error(
+                        "[%s] ❌ Auth stuck for #%d after %d retries — needs manual re-auth",
+                        channel_slug, video_id, retry_count,
+                    )
+                    _mark_video_auth_stuck(video_id)
+                else:
+                    vlog.warning("[%s] Auth failed for publish verification of #%d (retry %d/%d)",
+                                 channel_slug, video_id, retry_count + 1, _PUBLISH_MAX_RETRIES)
+                    _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
                 return
             
             service = uploader._get_service()
@@ -207,6 +217,24 @@ def _get_retry_count(video_id: int) -> int:
         return int(row[0]) if row and row[0] else 0
 
 
+def _mark_video_auth_stuck(video_id: int):
+    """Mark a video as stuck due to persistent authentication failure.
+
+    Sets status to 'auth_stuck' so operators can see it in the panel.
+    Resets retry schedule to stop the infinite retry loop.
+    """
+    db = ExtendedDatabase()
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE videos SET status = 'auth_stuck', published_retry_at = NULL WHERE id = ?",
+                (video_id,),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to mark video #%d as auth_stuck: %s", video_id, e)
+
+
 def _maybe_trigger_publish_verification(video: dict):
     """Check if a warming video should trigger a YouTube API verification.
     
@@ -241,6 +269,15 @@ def _maybe_trigger_publish_verification(video: dict):
     now_utc = datetime.now(_dt_timezone.utc)
     if target_dt > now_utc:
         return  # not time yet
+    
+    # ── Rate-limit: max 1 verification trigger per channel per cycle ──
+    # Prevents N concurrent threads from racing on the same token file
+    # when multiple videos on the same channel are all warming.
+    if channel_slug:
+        last = _CHANNEL_LAST_VERIFY.get(channel_slug)
+        if last and (now_utc - last).total_seconds() < _CHANNEL_VERIFY_COOLDOWN:
+            return  # wait for next cycle
+        _CHANNEL_LAST_VERIFY[channel_slug] = now_utc
     
     # ── Don't verify if already confirmed ──
     if verified_at_str:
@@ -6005,10 +6042,11 @@ class ExtendedDatabase(Database):
         Slots older than 24h are excluded to prevent truly obsolete slots
         from blocking the dispatch queue.
         
-        Lookahead: includes slots scheduled within the next 24 hours so
-        the dispatcher never runs dry. The ORDER BY ensures the most
-        urgent slots (closest deadline) are dispatched first. Per-channel
-        cooldown and per-channel short job guards maintain natural spacing.
+        Lookahead: only slots with scheduled_at <= now + 10 min are considered
+        due. This prevents dispatching slots hours before their scheduled time
+        (which caused avalanche clustering when combined with the 45-min
+        same-type gap). The 10-min grace window accounts for scheduler tick
+        latency.
         
         Args:
             exclude_slot_ids: Optional list of slot IDs to skip. Used by the
@@ -6021,7 +6059,7 @@ class ExtendedDatabase(Database):
                        WHERE sps.status = 'pending'
                             AND c.active = 1
                             AND sps.scheduled_at >= datetime('now','-24 hours')
-                            AND sps.scheduled_at <= datetime('now','+1 day')"""
+                            AND sps.scheduled_at <= datetime('now','+10 minutes')"""
             params: list = []
             if exclude_slot_ids:
                 placeholders = ",".join("?" for _ in exclude_slot_ids)
