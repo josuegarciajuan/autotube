@@ -6,7 +6,8 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 30 * 1000,     // data is fresh for 30 seconds
       refetchOnWindowFocus: false,
-      retry: 1,
+      retry: 3,
+      retryDelay: (attempt) => Math.min(5000 * 2 ** attempt, 20000),
     },
     mutations: {
       retry: 0,

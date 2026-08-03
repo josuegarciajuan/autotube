@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy } from 'lucide-react'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, RefreshCw } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -677,8 +677,18 @@ export default function PipelineView() {
 
   if (error) {
     return (
-      <div className="text-center py-6">
-        <p className="text-xs text-red-400">{error}</p>
+      <div className="flex flex-col items-center gap-3 py-8 glass rounded-xl">
+        <AlertTriangle size={20} className="text-amber-400" />
+        <div className="text-center">
+          <p className="text-xs text-red-400">{error}</p>
+          <p className="text-[10px] text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
+        >
+          <RefreshCw size={12} /> Reintentar
+        </button>
       </div>
     )
   }

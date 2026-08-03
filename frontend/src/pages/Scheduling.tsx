@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { api } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
-import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus } from 'lucide-react'
+import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
@@ -86,9 +86,10 @@ function ShortsCard({ config, onUpdate }: { config: ShortsPlanningConfig; onUpda
 
 // ── Today Status cards ───────────────────────────────────
 function TodayStatus() {
-  const { data: today, isLoading: loadingToday } = useTodaySlots()
-  const { data: shortsToday, isLoading: loadingShorts } = useShortsSlotsToday()
+  const { data: today, isLoading: loadingToday, isError: errorToday, refetch: refetchToday } = useTodaySlots()
+  const { data: shortsToday, isLoading: loadingShorts, isError: errorShorts, refetch: refetchShorts } = useShortsSlotsToday()
   const loading = loadingToday || loadingShorts
+  const hasError = errorToday || errorShorts
 
   const channels = useMemo(() => {
     if (!today && !shortsToday) return [] as ChannelSummary[]
@@ -128,6 +129,23 @@ function TodayStatus() {
 
   if (loading) {
     return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
+  }
+  if (hasError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-6 glass rounded-xl">
+        <AlertTriangle size={20} className="text-amber-400" />
+        <div className="text-center">
+          <p className="text-sm text-gray-300">Error al cargar el estado de hoy</p>
+          <p className="text-xs text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
+        </div>
+        <button
+          onClick={() => { if (errorToday) refetchToday(); if (errorShorts) refetchShorts(); }}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
+        >
+          <RefreshCw size={12} /> Reintentar
+        </button>
+      </div>
+    )
   }
   if (channels.length === 0) {
     return <p className="text-xs text-gray-500 text-center py-4">Sin actividad hoy.</p>
@@ -217,12 +235,30 @@ function TodayStatus() {
 
 // ── Shorts section ───────────────────────────────────────
 function ShortsSection() {
-  const { data: configs = [], isLoading: loading, refetch } = useShortsPlanningConfig()
+  const { data: configs = [], isLoading: loading, isError, refetch } = useShortsPlanningConfig()
   const update = useCallback(async (channelId: number, data: any) => {
     try { await api.updateShortsPlanningConfig(channelId, data); refetch() } catch (e: any) { alert(e.message) }
   }, [refetch])
   const activeConfigs = configs.filter((c: any) => c.slug !== 'test')
-  if (loading || !activeConfigs.length) return null
+  if (loading) return null
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-6 glass rounded-xl">
+        <AlertTriangle size={20} className="text-amber-400" />
+        <div className="text-center">
+          <p className="text-sm text-gray-300">Error al cargar config de shorts</p>
+          <p className="text-xs text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
+        >
+          <RefreshCw size={12} /> Reintentar
+        </button>
+      </div>
+    )
+  }
+  if (!activeConfigs.length) return null
   return (
     <div className="space-y-3">
       <h4 className="text-sm font-medium text-white flex items-center gap-2">
@@ -237,7 +273,7 @@ function ShortsSection() {
 
 // ── Planning config section ──────────────────────────────
 function PlanningConfigSection() {
-  const { data: rawConfigs = [], isLoading: loading, refetch } = usePlanningConfig()
+  const { data: rawConfigs = [], isLoading: loading, isError, refetch } = usePlanningConfig()
   const configs = rawConfigs.filter((c: any) => c.channel_slug !== 'test')
 
   const update = useCallback(async (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) => {
@@ -251,6 +287,24 @@ function PlanningConfigSection() {
 
   if (loading) {
     return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
+  }
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-6 glass rounded-xl">
+        <AlertTriangle size={20} className="text-amber-400" />
+        <div className="text-center">
+          <p className="text-sm text-gray-300">Error al cargar la configuracion</p>
+          <p className="text-xs text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
+        >
+          <RefreshCw size={12} /> Reintentar
+        </button>
+      </div>
+    )
   }
 
   return (
