@@ -2065,7 +2065,56 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM channels WHERE slug = ?", (slug,)).fetchone()
         return dict(row) if row else None
-    
+
+    def get_overlapping_scheduled_videos(
+        self,
+        channel_id: int,
+        status: str = "uploaded_private",
+        target_public_at: str = None,
+    ) -> list[dict]:
+        """Find videos with the same target_public_at in a given status.
+
+        Used by fix_canal4_overlap.py to detect and remediate batches of
+        videos that were scheduled at identical publish times.
+
+        Args:
+            channel_id: Channel to check.
+            status: Video status filter (default: uploaded_private).
+            target_public_at: Specific target to look for. If None,
+                              finds all groups with >=2 videos sharing
+                              the same target_public_at.
+
+        Returns:
+            List of video dicts sorted by id ascending.
+        """
+        with self._connect() as conn:
+            if target_public_at:
+                rows = conn.execute(
+                    """SELECT v.* FROM videos v
+                       WHERE v.channel_id = ?
+                         AND v.status = ?
+                         AND v.target_public_at = ?
+                       ORDER BY v.id ASC""",
+                    (channel_id, status, target_public_at),
+                ).fetchall()
+            else:
+                # Find all groups where 2+ videos share the same target
+                rows = conn.execute(
+                    """SELECT v.* FROM videos v
+                       WHERE v.channel_id = ?
+                         AND v.status = ?
+                         AND v.target_public_at IN (
+                           SELECT target_public_at FROM videos
+                           WHERE channel_id = ? AND status = ?
+                             AND target_public_at IS NOT NULL
+                           GROUP BY target_public_at
+                           HAVING COUNT(*) >= 2
+                         )
+                       ORDER BY v.target_public_at, v.id ASC""",
+                    (channel_id, status, channel_id, status),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Videos (extended) ────────────────────────────────────
     
     def get_videos(self, channel_id: int = None, status: str = None, limit: int = 50,

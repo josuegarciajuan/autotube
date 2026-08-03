@@ -199,6 +199,42 @@ def _recover_stuck_uploading_videos(db) -> int:
     return recovered
 
 
+def _check_for_overlapping_targets(db, channel_id: int, slug: str,
+                                   effective_target: str, current_video_id: int):
+    """v11: Detect and warn when multiple uploaded_private videos share the same
+    target_public_at. This is a safety net — the collision avoidance in
+    publish_scheduler.py should prevent this, but if it fails, we log a loud
+    warning so operators can intervene before videos go public simultaneously.
+    """
+    if not effective_target:
+        return
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.titulo_final, v.target_public_at
+                   FROM videos v
+                   WHERE v.channel_id = ?
+                     AND v.status IN ('uploaded_private', 'uploading')
+                     AND v.id != ?
+                     AND v.target_public_at = ?
+                   ORDER BY v.id
+                   LIMIT 20""",
+                (channel_id, current_video_id, effective_target),
+            ).fetchall()
+        if rows:
+            overlap_ids = [r["id"] for r in rows]
+            logger.warning(
+                "⚠️ [%s] Video #%d target_public_at COLLISION detected! "
+                "Same time (%s) as videos %s. This may cause simultaneous "
+                "publications. Run scripts/fix_canal4_overlap.py to remediate.",
+                slug, current_video_id,
+                str(effective_target)[:19],
+                overlap_ids,
+            )
+    except Exception:
+        pass  # non-fatal guard — never block upload dispatch
+
+
 def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     """Check for awaiting_upload videos and dispatch upload jobs.
 
@@ -470,6 +506,9 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             )
     except Exception as e:
         logger.debug("[%s] Target recalculation skipped: %s", slug, e)
+
+    # ── v11: Overlap guard — detect and warn if multiple videos share the same target_public_at ──
+    _check_for_overlapping_targets(db, channel_id, slug, effective_target, video_id)
 
     logger.info(
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",

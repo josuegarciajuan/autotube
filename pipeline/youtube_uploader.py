@@ -15,6 +15,7 @@ import logging
 import os
 import pickle
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -39,6 +40,14 @@ MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2  # seconds
 POST_UPLOAD_VERIFY_RETRIES = 3
 POST_UPLOAD_VERIFY_DELAY = 5  # seconds — YouTube processing may take a few secs
+
+# ── Token file concurrency protection ────────────────────────
+# Two threads sharing the same channel token must not race on
+# read → refresh → write.  A per-account mutex serialises all
+# token I/O for a given pickle file.
+_TOKEN_LOCKS: dict[str, threading.Lock] = {}
+_TOKEN_LOCKS_GUARD = threading.Lock()
+_TOKEN_REFRESH_COOLDOWN = 5  # seconds — if file was saved <5s ago, re-read instead of deleting
 
 
 class YouTubeUploader:
@@ -88,6 +97,38 @@ class YouTubeUploader:
             return getattr(self.config, name, fallback)
         return fallback
 
+    def _get_token_lock(self) -> threading.Lock:
+        """Obtain (and possibly create) the mutex for this account's token file."""
+        with _TOKEN_LOCKS_GUARD:
+            lock = _TOKEN_LOCKS.get(self.account_name)
+            if lock is None:
+                lock = threading.Lock()
+                _TOKEN_LOCKS[self.account_name] = lock
+            return lock
+
+    def _safe_unlink(self) -> None:
+        """Delete the token file, but only if no other thread just saved fresh credentials.
+
+        If the file was modified less than _TOKEN_REFRESH_COOLDOWN seconds ago,
+        another thread likely just refreshed the token — re-read it instead of
+        destroying it.
+        """
+        if not self._token_path.exists():
+            return
+        try:
+            mtime = self._token_path.stat().st_mtime
+            if time.time() - mtime < _TOKEN_REFRESH_COOLDOWN:
+                logger.warning(
+                    "Token file %s was modified %.1fs ago — re-reading instead of deleting",
+                    self._token_path, time.time() - mtime,
+                )
+                with open(self._token_path, "rb") as f:
+                    self._credentials = pickle.load(f)
+                return
+        except (OSError, pickle.UnpicklingError, EOFError) as exc:
+            logger.warning("Safe-unlink re-read failed (%s) — will delete", exc)
+        self._token_path.unlink(missing_ok=True)
+
     # ── Proxy support ─────────────────────────────────────────
 
     def _should_use_proxy(self) -> bool:
@@ -120,81 +161,86 @@ class YouTubeUploader:
         4. Save refreshed token
 
         Returns True on success.
+
+        Serialised per-account via a threading.Lock to prevent two
+        threads from racing on the same pickle file.
         """
-        self._credentials = None
+        lock = self._get_token_lock()
+        with lock:
+            self._credentials = None
 
-        if self._token_path.exists():
-            try:
-                with open(self._token_path, "rb") as f:
-                    self._credentials = pickle.load(f)
-                logger.info("Loaded credentials from %s", self._token_path)
-            except (pickle.UnpicklingError, EOFError, TypeError) as exc:
-                logger.warning(
-                    "Corrupted token file: %s — will re-authenticate.", exc
-                )
-                self._token_path.unlink(missing_ok=True)
-                self._credentials = None
-
-        if self._credentials and self._credentials.expired:
-            if self._credentials.refresh_token:
+            if self._token_path.exists():
                 try:
-                    self._credentials.refresh(Request())
-                    logger.info("Token refreshed successfully.")
-                except Exception as exc:
-                    logger.warning("Token refresh failed: %s", exc)
-                    self._token_path.unlink(missing_ok=True)
+                    with open(self._token_path, "rb") as f:
+                        self._credentials = pickle.load(f)
+                    logger.info("Loaded credentials from %s", self._token_path)
+                except (pickle.UnpicklingError, EOFError, TypeError) as exc:
+                    logger.warning(
+                        "Corrupted token file: %s — will re-authenticate.", exc
+                    )
+                    self._safe_unlink()
                     self._credentials = None
-            else:
-                logger.warning("No refresh token; re-authentication required.")
-                self._token_path.unlink(missing_ok=True)
-                self._credentials = None
 
-        if not self._credentials or not self._credentials.valid:
-            client_secret = self._client_secret_path
-            if not client_secret.exists():
-                logger.error(
-                    "Google client secret not found at %s", client_secret
+            if self._credentials and self._credentials.expired:
+                if self._credentials.refresh_token:
+                    try:
+                        self._credentials.refresh(Request())
+                        logger.info("Token refreshed successfully.")
+                    except Exception as exc:
+                        logger.warning("Token refresh failed: %s", exc)
+                        self._safe_unlink()
+                        self._credentials = None
+                else:
+                    logger.warning("No refresh token; re-authentication required.")
+                    self._safe_unlink()
+                    self._credentials = None
+
+            if not self._credentials or not self._credentials.valid:
+                client_secret = self._client_secret_path
+                if not client_secret.exists():
+                    logger.error(
+                        "Google client secret not found at %s", client_secret
+                    )
+                    return False
+
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(client_secret), SCOPES
                 )
-                return False
-
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(client_secret), SCOPES
-            )
-            flow.redirect_uri = "http://localhost"
-            
-            # Headless approach: print URL, user authorises, copies code from redirect
-            auth_url, _ = flow.authorization_url(
-                access_type="offline",
-                prompt="consent",
-                include_granted_scopes="true",
-            )
-            
-            # Save flow state so user can complete auth separately
-            import json as _json
-            state_path = TOKENS_DIR / f"{self.account_name}_state.json"
-            state_path.write_text(_json.dumps({
-                "client_secret_path": str(client_secret),
-                "scopes": SCOPES,
-                "code_verifier": getattr(flow, 'code_verifier', None),
-            }))
-            
-            print("\n" + "=" * 60)
-            print("🔐 ABRE ESTA URL EN TU NAVEGADOR PARA AUTORIZAR:")
-            print("=" * 60)
-            print(auth_url)
-            print("=" * 60)
-            print()
-            print("Después de autorizar, el navegador intentará cargar 'localhost'.")
-            print("ES NORMAL que dé error de conexión.")
-            print()
-            print("👉 COPIA el código de la barra de direcciones:")
-            print("   Busca 'code=' en la URL y copia todo hasta '&'")
-            print("   Ej: http://localhost/?code=4/0AanRRr...&scope=...")
-            print("   Necesitas: 4/0AanRRr...")
-            print()
-            print("📋 Luego ejecuta en el server:")
-            print(f"   python3 scripts/complete_auth.py canal2 'EL_CODIGO'")
-            return False  # needs manual code completion
+                flow.redirect_uri = "http://localhost"
+                
+                # Headless approach: print URL, user authorises, copies code from redirect
+                auth_url, _ = flow.authorization_url(
+                    access_type="offline",
+                    prompt="consent",
+                    include_granted_scopes="true",
+                )
+                
+                # Save flow state so user can complete auth separately
+                import json as _json
+                state_path = TOKENS_DIR / f"{self.account_name}_state.json"
+                state_path.write_text(_json.dumps({
+                    "client_secret_path": str(client_secret),
+                    "scopes": SCOPES,
+                    "code_verifier": getattr(flow, 'code_verifier', None),
+                }))
+                
+                print("\n" + "=" * 60)
+                print("🔐 ABRE ESTA URL EN TU NAVEGADOR PARA AUTORIZAR:")
+                print("=" * 60)
+                print(auth_url)
+                print("=" * 60)
+                print()
+                print("Después de autorizar, el navegador intentará cargar 'localhost'.")
+                print("ES NORMAL que dé error de conexión.")
+                print()
+                print("👉 COPIA el código de la barra de direcciones:")
+                print("   Busca 'code=' en la URL y copia todo hasta '&'")
+                print("   Ej: http://localhost/?code=4/0AanRRr...&scope=...")
+                print("   Necesitas: 4/0AanRRr...")
+                print()
+                print("📋 Luego ejecuta en el server:")
+                print(f"   python3 scripts/complete_auth.py canal2 'EL_CODIGO'")
+                return False  # needs manual code completion
 
         self._save_credentials()
         self._service = None  # force rebuild with fresh credentials
@@ -299,6 +345,8 @@ class YouTubeUploader:
         TOKENS_DIR.mkdir(parents=True, exist_ok=True)
         with open(self._token_path, "wb") as f:
             pickle.dump(self._credentials, f)
+            f.flush()
+            os.fsync(f.fileno())  # ensure full write to disk before releasing lock
         logger.info("Token saved to %s", self._token_path)
 
     def _get_service(self) -> Any:

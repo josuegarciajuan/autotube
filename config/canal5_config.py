@@ -757,7 +757,7 @@ AUTO_END_SCREENS = True
 # ── Scheduled Publishing ──────────────────────────────────────────
 PUBLISH_MODE = "scheduled"
 PUBLISH_TIMEZONE = "Europe/Madrid"
-PUBLISH_JITTER_MIN = 0             # Sin jitter: publicación determinista a HH:00 (publishAt)
+PUBLISH_JITTER_MIN = 15            # ±15 min jitter: evita colisiones exactas si los guards fallan
 PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
 PUBLISH_WINDOW_SPREAD_MIN = 0      # Sin spread: snapping exacto a la hora pico
 # PUBLISH_TARGET_HOUR not set — niche heuristic auto-detects (historia_documental → 20:00)

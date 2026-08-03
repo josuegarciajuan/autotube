@@ -273,8 +273,14 @@ def _avoid_channel_collision(
             else:
                 check_gap = min_gap
 
-            window_start = (adjusted - check_gap).strftime("%Y-%m-%d %H:%M:%S")
-            window_end = (adjusted + check_gap).strftime("%Y-%m-%d %H:%M:%S")
+            # ── v10.4: ISO8601-bound comparison. Use 'T' separator so stored
+            # ISO8601 timestamps (e.g. "2026-08-03T09:00:00+00:00") compare
+            # correctly with the bound strings. REPLACE(...,' ','T') handles
+            # legacy space-separated targets stored before this fix.
+            # Without this, 'T' > ' ' in lexicographic order, making ISO8601
+            # strings always > space-separated bounds — collision was blind.
+            window_start_iso = (adjusted - check_gap).strftime("%Y-%m-%dT%H:%M:%S")
+            window_end_iso = (adjusted + check_gap).strftime("%Y-%m-%dT%H:%M:%S")
 
             # ── Check 1: videos table — ALL statuses, any video with target_public_at ──
             # v10.3: Removed status filter. ANY video (published, generating, draft, etc.)
@@ -290,22 +296,22 @@ def _avoid_channel_collision(
                             SELECT v.id, v.target_public_at, v.titulo_final, v.channel_id
                             FROM videos v
                             WHERE v.target_public_at IS NOT NULL
-                              AND v.target_public_at >= ?
-                              AND v.target_public_at <= ?
+                              AND REPLACE(v.target_public_at, ' ', 'T') >= ?
+                              AND REPLACE(v.target_public_at, ' ', 'T') <= ?
                             ORDER BY v.target_public_at
                             LIMIT 10
-                        """, (window_start, window_end)).fetchall()
+                        """, (window_start_iso, window_end_iso)).fetchall()
                     else:
                         video_rows = conn.execute("""
                             SELECT v.id, v.target_public_at, v.titulo_final
                             FROM videos v
                             WHERE v.channel_id = ?
                               AND v.target_public_at IS NOT NULL
-                              AND v.target_public_at >= ?
-                              AND v.target_public_at <= ?
+                              AND REPLACE(v.target_public_at, ' ', 'T') >= ?
+                              AND REPLACE(v.target_public_at, ' ', 'T') <= ?
                             ORDER BY v.target_public_at
                             LIMIT 10
-                        """, (channel_id, window_start, window_end)).fetchall()
+                        """, (channel_id, window_start_iso, window_end_iso)).fetchall()
                     for row in video_rows:
                         video_collisions.append({
                             "source": "video",
@@ -338,11 +344,11 @@ def _avoid_channel_collision(
                             FROM planned_slots ps
                             WHERE ps.target_public_at IS NOT NULL
                               AND ps.status IN ('pending', 'running')
-                              AND ps.target_public_at >= ?
-                              AND ps.target_public_at <= ?
+                              AND REPLACE(ps.target_public_at, ' ', 'T') >= ?
+                              AND REPLACE(ps.target_public_at, ' ', 'T') <= ?
                             ORDER BY ps.target_public_at
                             LIMIT 10
-                        """, (window_start, window_end)).fetchall()
+                        """, (window_start_iso, window_end_iso)).fetchall()
                     else:
                         planned_rows = conn_ps.execute("""
                             SELECT ps.id, ps.target_public_at, ps.video_id
@@ -350,11 +356,11 @@ def _avoid_channel_collision(
                             WHERE ps.channel_id = ?
                               AND ps.target_public_at IS NOT NULL
                               AND ps.status IN ('pending', 'running')
-                              AND ps.target_public_at >= ?
-                              AND ps.target_public_at <= ?
+                              AND REPLACE(ps.target_public_at, ' ', 'T') >= ?
+                              AND REPLACE(ps.target_public_at, ' ', 'T') <= ?
                             ORDER BY ps.target_public_at
                             LIMIT 10
-                        """, (channel_id, window_start, window_end)).fetchall()
+                        """, (channel_id, window_start_iso, window_end_iso)).fetchall()
                     for row in planned_rows:
                         dict_row = dict(row)
                         # Skip if video_id is already set (covered by video check)
@@ -392,11 +398,11 @@ def _avoid_channel_collision(
                             WHERE vla.action_type = 'go_public'
                               AND vla.status = 'pending'
                               AND vla.scheduled_for IS NOT NULL
-                              AND vla.scheduled_for >= ?
-                              AND vla.scheduled_for <= ?
+                              AND REPLACE(vla.scheduled_for, ' ', 'T') >= ?
+                              AND REPLACE(vla.scheduled_for, ' ', 'T') <= ?
                             ORDER BY vla.scheduled_for
                             LIMIT 10
-                        """, (window_start, window_end)).fetchall()
+                        """, (window_start_iso, window_end_iso)).fetchall()
                     else:
                         lifecycle_rows = conn_lc.execute("""
                             SELECT vla.id as action_id, vla.video_id,
@@ -406,11 +412,11 @@ def _avoid_channel_collision(
                               AND vla.action_type = 'go_public'
                               AND vla.status = 'pending'
                               AND vla.scheduled_for IS NOT NULL
-                              AND vla.scheduled_for >= ?
-                              AND vla.scheduled_for <= ?
+                              AND REPLACE(vla.scheduled_for, ' ', 'T') >= ?
+                              AND REPLACE(vla.scheduled_for, ' ', 'T') <= ?
                             ORDER BY vla.scheduled_for
                             LIMIT 10
-                        """, (channel_id, window_start, window_end)).fetchall()
+                        """, (channel_id, window_start_iso, window_end_iso)).fetchall()
                     for row in lifecycle_rows:
                         dr = dict(row)
                         lifecycle_collisions.append({
