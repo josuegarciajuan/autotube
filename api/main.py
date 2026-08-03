@@ -263,6 +263,18 @@ async def lifespan(app: FastAPI):
                 )
                 total = sum(int(v.split()[0]) for v in result.values() if v and v[0].isdigit())
                 _logger.info("Shorts scheduler: 7-day plan generated (%d slots)", total)
+                
+                # v14: Cleanup excessive pending slots for today to prevent spam
+                from api.services.shorts_scheduler import cleanup_excessive_shorts_slots
+                cleanup_result = await _loop.run_in_executor(
+                    None, cleanup_excessive_shorts_slots,
+                )
+                if cleanup_result.get("cancelled_native", 0) > 0 or cleanup_result.get("cancelled_clip", 0) > 0:
+                    _logger.warning(
+                        "Shorts cleanup: cancelled %d native + %d clip excess slots",
+                        cleanup_result.get("cancelled_native", 0),
+                        cleanup_result.get("cancelled_clip", 0),
+                    )
             except Exception as exc:
                 _logger.warning("Shorts scheduler init skipped: %s", exc)
         
@@ -662,8 +674,9 @@ async def _schedule_checker_loop():
                         logger.debug("Smart replan: %s", exc)
                     last_smart_replan = now
 
-                # Shorts auto-recovery: rebalance shorts every 60 minutes
-                if now - last_shorts_recovery_check > 3600:
+                # Shorts auto-recovery: rebalance shorts every 120 minutes (v14: reduced from 60min)
+                # to prevent runaway recovery slot creation during normal operation
+                if now - last_shorts_recovery_check > 7200:
                     await _process_shorts_recovery_planner()
                     last_shorts_recovery_check = now
 

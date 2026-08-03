@@ -4259,7 +4259,23 @@ class ExtendedDatabase(Database):
             badges = [dict(r) for r in conn.execute(badges_sql, badges_params).fetchall()]
 
             # ── Shorts pipeline: today's status counts ──
-            shorts_pipe_where = "AND sps.channel_id = ?" if channel_id else ""
+            # v2: Completed = shorts actually published today (by published_at).
+            # Pending/running/cancelled/failed = shorts_planned_slots for today.
+            # This avoids the date_key mismatch (planning date ≠ publication date).
+            shorts_pipe_where = "AND ch.id = ?" if channel_id else ""
+            
+            # Completed: count from shorts table by actual publication date
+            completed_row = conn.execute(
+                f"""SELECT COUNT(*) as cnt FROM shorts s
+                    JOIN channels ch ON s.channel_id = ch.id
+                    WHERE s.status = 'published'
+                      AND DATE(s.published_at) = date('now', 'localtime')
+                      AND ch.active = 1 {shorts_pipe_where}""",
+                ch_params,
+            ).fetchone()
+            
+            # Pending/running/cancelled/failed: count from shorts_planned_slots
+            # (these don't have published_at yet, so date_key is the best filter)
             shorts_pipeline = conn.execute(
                 f"""SELECT sps.status, COUNT(*) as count
                     FROM shorts_planned_slots sps
@@ -4272,6 +4288,9 @@ class ExtendedDatabase(Database):
             shorts_pipeline_data = {}
             for r in shorts_pipeline:
                 shorts_pipeline_data[r["status"]] = r["count"]
+            
+            # Override 'completed' with actual published count (more accurate than date_key)
+            shorts_pipeline_data["completed"] = completed_row["cnt"] if completed_row else 0
 
         return {
             "global_kpis": {
@@ -6208,6 +6227,32 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchone()
         return row["updated_at"] if row and row["updated_at"] else None
+
+    def count_native_shorts_published_today(self, channel_id: int) -> int:
+        """Count native shorts actually published today (by published_at, not date_key).
+        
+        Used by the dispatch cap to prevent exceeding shorts_native_per_day.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM shorts
+                   WHERE channel_id = ?
+                     AND type = 'native'
+                     AND status = 'published'
+                     AND DATE(published_at) = DATE('now', 'localtime')""",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+    def get_native_shorts_per_day(self, channel_id: int) -> int:
+        """Get the configured shorts_native_per_day for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT shorts_native_per_day FROM shorts_planning_config
+                   WHERE channel_id = ?""",
+                (channel_id,),
+            ).fetchone()
+        return int(row["shorts_native_per_day"]) if row and row["shorts_native_per_day"] else 3
 
     def update_shorts_slot_status(self, slot_id: int, status: str,
                                    source_video_id: int = None,

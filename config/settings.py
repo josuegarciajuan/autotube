@@ -147,18 +147,15 @@ SHORTS_NATIVE_SCHEDULE = [
 ]
 SHORTS_NATIVE_MAX_DAILY = 4
 
-# ── Shorts frequency targets (v13: 6–6/day per channel) ──────
-# Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots)
-# and recovery planner (auto_recover_shorts).
-# Reduced from 10 to 6: with per-channel native_per_day=4, this allows
-# up to 2 filler slots to fill off-peak gaps. Prevents avalanche clustering.
-MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "6"))
+# ── Shorts frequency targets (v14: 4/day per channel) ──────
+# Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots).
+# v14: lowered from 6 to 4 — matches per-channel shorts_native_per_day (4).
+# Recovery planner no longer uses this floor (uses native_target + clip_target directly).
+MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "4"))
 MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "6"))
 
 # Conservative QUOTA cap: YouTube API default 10,000 units/day.
-# Each short upload costs ~1,650 units (1,600 upload + 50 thumbnail).
-# 6 shorts × 1,650 = 9,900/day — within default quota.
-# Aligned with MIN_DAILY_SHORTS for consistency.
+# v14: aligned with updated per-channel config (4 native + ~6 clips = ~10/day).
 MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
     "MAX_DAILY_SHORTS_QUOTA_SAFE", "6"
 ))  # Safe with default 10,000 unit quota

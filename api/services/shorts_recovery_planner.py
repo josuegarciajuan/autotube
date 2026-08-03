@@ -1,26 +1,17 @@
-"""Shorts auto-recovery planner — dynamic rebalancing for shorts schedules (v12).
+"""Shorts auto-recovery planner — dynamic rebalancing for shorts schedules (v14).
 
 Detects channels that are behind or ahead of their daily shorts target
 and creates/cancels planned slots accordingly.
 
-v12: Separate native/clip accounting.
-  - Native target: shorts_native_per_day (fixed, e.g. 3)
+v14: Capped recovery + use pct_covered (not pct_published).
+  - Native target: shorts_native_per_day (fixed, e.g. 4)
   - Clip target: shorts_clips_per_long × long_videos_completed_today (dynamic!)
-  - Clips from incomplete longs are NOT replaced with natives
-  - Recovery slots use low-audience hours to avoid prime time
+  - Tiered recovery uses pct_covered (published + pending) to avoid false gaps
+  - MAX 2 recovery slots per channel per run (RECOVERY_MAX_PER_RUN)
+  - Removed MIN_DAILY_SHORTS floor — uses native_target + clip_target directly
+  - Native/clip deficit recovery also capped at 2 slots per run
 
-Algorithm:
-  1. For each active channel with shorts enabled, read shorts_native_per_day
-     and shorts_clips_per_long from config.
-  2. Count shorts successfully published today (by type: native/clip).
-  3. Count shorts_planned_slots still pending/running for today (by type).
-  4. Native target = shorts_native_per_day (create/cancel only natives).
-  5. Clip target = shorts_clips_per_long × completed_longs_today.
-  6. If published + active < target → create recovery slots of that type.
-  7. If published + active > target → cancel excess pending slots.
-  8. Recovery slots use low-audience hours to avoid prime time.
-
-Called every 60 minutes by the background checker loop in api/main.py,
+Called every 120 minutes by the background checker loop in api/main.py,
 but only between 10:00-23:00 CEST.
 """
 
@@ -398,7 +389,7 @@ def auto_recover_shorts(db=None) -> dict:
                     "target": native_target, "excess": excess, "cancelled": cancelled,
                 })
         elif native_covered < native_target and native_target > 0:
-            missing = native_target - native_covered
+            missing = min(native_target - native_covered, 2)
             created = _create_recovery_slots(
                 ch_id, slug, today, "native", missing,
                 now_minute_of_day, active_slots, db,
@@ -413,34 +404,36 @@ def auto_recover_shorts(db=None) -> dict:
                     "recovered": len(created), "slots": created,
                 })
 
-        # ── TIERED RECOVERY (v13): time-based thresholds ───────────
-        # Total target includes BOTH natives + clips. Use MIN_DAILY_SHORTS
-        # as fallback floor if config is lower.
-        try:
-            from config.settings import MIN_DAILY_SHORTS
-        except ImportError:
-            MIN_DAILY_SHORTS = 10
-        total_target = max(native_target + clip_target, MIN_DAILY_SHORTS)
+        # ── TIERED RECOVERY (v14): time-based thresholds ───────────
+        # v14: total_target = native_target + clip_target (per-channel config).
+        # Removed MIN_DAILY_SHORTS floor — it inflated targets beyond per-channel config.
+        # Uses pct_covered (published + pending/running) instead of pct_published
+        # to avoid creating slots when coverage is already sufficient but not yet published.
+        # Caps recovery to max 2 slots per channel per run (RECOVERY_MAX_PER_RUN).
+        total_target = native_target + clip_target
         total_published = published_native + published_clip
         total_covered = native_covered + clip_covered
+        pct_covered = total_covered / max(total_target, 1)
         pct_published = total_published / max(total_target, 1)
+        RECOVERY_MAX_PER_RUN = 2  # cap recovery slots per channel per run
 
-        # Tier 1 (14:00): < 40% of total target → emergency
+        # Tier 1 (14:00): < 40% of total target covered → emergency (capped)
         if RECOVERY_TIER_1_HOUR <= now_hour < RECOVERY_TIER_2_HOUR:
-            if pct_published < RECOVERY_TIER_1_PCT and total_target > 0:
+            if pct_covered < RECOVERY_TIER_1_PCT and total_target > 0:
                 emergency_count = max(
-                    1, int((RECOVERY_TIER_1_PCT - pct_published) * total_target)
+                    1, int((RECOVERY_TIER_1_PCT - pct_covered) * total_target)
                 )
                 emergency_count = min(emergency_count, total_target - total_covered)
+                emergency_count = min(emergency_count, RECOVERY_MAX_PER_RUN)
                 if emergency_count > 0:
                     logger.warning(
                         "[shorts:%s] TIER-1 EMERGENCY @ %02d:00: "
-                        "%d/%d published (%.0f%% < %.0f%%) — "
-                        "creating %d emergency slots",
+                        "%d/%d covered (%.0f%% < %.0f%%) — "
+                        "creating %d emergency slots (capped at %d)",
                         slug, RECOVERY_TIER_1_HOUR,
-                        total_published, total_target,
-                        pct_published * 100, RECOVERY_TIER_1_PCT * 100,
-                        emergency_count,
+                        total_covered, total_target,
+                        pct_covered * 100, RECOVERY_TIER_1_PCT * 100,
+                        emergency_count, RECOVERY_MAX_PER_RUN,
                     )
                     created = _create_recovery_slots(
                         ch_id, slug, today, "native", emergency_count,
@@ -454,25 +447,25 @@ def auto_recover_shorts(db=None) -> dict:
                             "channel_id": ch_id, "slug": slug,
                             "action": "recovered_tier1_emergency",
                             "total_target": total_target,
-                            "published": total_published,
-                            "pct": round(pct_published * 100, 1),
+                            "covered": total_covered,
+                            "pct": round(pct_covered * 100, 1),
                             "recovered": len(created), "slots": created,
                         })
 
-        # Tier 2 (18:00): < 70% of total target → aggressive forced fill
+        # Tier 2 (18:00): < 70% of total target covered → aggressive forced fill (capped)
         if now_hour >= RECOVERY_TIER_2_HOUR:
-            if pct_published < RECOVERY_TIER_2_PCT and total_target > 0:
-                # Force all remaining slots for the day
-                forced_count = total_target - total_covered
+            if pct_covered < RECOVERY_TIER_2_PCT and total_target > 0:
+                # Fill remaining gap, but capped
+                forced_count = min(total_target - total_covered, RECOVERY_MAX_PER_RUN)
                 if forced_count > 0:
                     logger.warning(
                         "[shorts:%s] TIER-2 AGGRESSIVE @ %02d:00: "
-                        "%d/%d published (%.0f%% < %.0f%%) — "
-                        "forcing %d remaining slots",
+                        "%d/%d covered (%.0f%% < %.0f%%) — "
+                        "forcing %d remaining slots (capped at %d)",
                         slug, RECOVERY_TIER_2_HOUR,
-                        total_published, total_target,
-                        pct_published * 100, RECOVERY_TIER_2_PCT * 100,
-                        forced_count,
+                        total_covered, total_target,
+                        pct_covered * 100, RECOVERY_TIER_2_PCT * 100,
+                        forced_count, RECOVERY_MAX_PER_RUN,
                     )
                     created = _create_recovery_slots(
                         ch_id, slug, today, "native", forced_count,
@@ -486,8 +479,8 @@ def auto_recover_shorts(db=None) -> dict:
                             "channel_id": ch_id, "slug": slug,
                             "action": "recovered_tier2_aggressive",
                             "total_target": total_target,
-                            "published": total_published,
-                            "pct": round(pct_published * 100, 1),
+                            "covered": total_covered,
+                            "pct": round(pct_covered * 100, 1),
                             "recovered": len(created), "slots": created,
                         })
 
@@ -505,7 +498,7 @@ def auto_recover_shorts(db=None) -> dict:
                     "target": clip_target, "excess": excess, "cancelled": cancelled,
                 })
         elif clip_covered < clip_target and clip_target > 0:
-            missing = clip_target - clip_covered
+            missing = min(clip_target - clip_covered, 2)
             # Assign missing clips to completed longs with fewest existing clips
             created = _create_clip_recovery_slots(
                 ch_id, slug, today, missing, clips_per_long,

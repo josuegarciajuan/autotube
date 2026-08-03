@@ -806,6 +806,27 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         if native_count == 0 and clips_per_long == 0:
             continue
 
+        # ── Idempotency guard: skip if channel already has enough native slots ──
+        # Prevents duplicate slot creation when compute_daily_shorts_slots is
+        # called multiple times for the same date (e.g. server restart, recovery).
+        try:
+            existing_ch_slots = db.get_shorts_planned_slots(
+                date_key=date_str, channel_id=ch_id,
+            )
+            existing_native = [
+                s for s in existing_ch_slots
+                if s.get("short_type") == "native"
+                and s.get("status") in ("pending", "running", "completed")
+            ]
+            if len(existing_native) >= native_count:
+                logger.debug(
+                    "[%s] Skipping %s: %d native slots already exist (>=%d configured)",
+                    slug, date_str, len(existing_native), native_count,
+                )
+                continue
+        except Exception:
+            pass
+
         # Dynamic: how many long-form videos were published yesterday?
         # Clip slots are now based on YESTERDAY's published videos, not today's planned.
         yesterday_count = _get_yesterday_published_count(ch_id, date_str, db)
@@ -1049,6 +1070,105 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
     slots = compute_daily_shorts_slots(today, db)
     count = persist_daily_shorts_slots(today, slots, db)
     return count > 0
+
+
+def cleanup_excessive_shorts_slots(db=None) -> dict:
+    """Cancel excessive pending shorts slots for today.
+    
+    Ensures per-channel native slots <= shorts_native_per_day and
+    per-channel clip slots <= shorts_clips_per_long * completed_longs.
+    Called at startup to prevent spam after a period of over-generation.
+    
+    Returns dict with {cancelled_native, cancelled_clip} counts.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    
+    today = datetime.now(DEFAULT_TIMEZONE).date().isoformat()
+    result = {"cancelled_native": 0, "cancelled_clip": 0}
+    
+    try:
+        configs = db.get_shorts_planning_config()
+        for cfg in configs:
+            ch_id = cfg["channel_id"]
+            if not cfg.get("shorts_enabled", True):
+                continue
+            
+            native_max = cfg.get("shorts_native_per_day", 3)
+            clips_per_long = cfg.get("shorts_clips_per_long", 3)
+            
+            # Count completed longs for clip target
+            from database.db_extended import ExtendedDatabase as _EDB
+            import sqlite3 as _sqlite3
+            from config.settings import DATABASE_PATH as _DB_PATH
+            conn = _sqlite3.connect(str(_DB_PATH), timeout=10)
+            conn.row_factory = _sqlite3.Row
+            long_count = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos
+                   WHERE channel_id = ?
+                     AND status IN ('uploaded', 'published', 'uploaded_private')
+                     AND DATE(uploaded_at) >= DATE('now', 'localtime', '-1 day')""",
+                (ch_id,),
+            ).fetchone()
+            clip_max = clips_per_long * (long_count["cnt"] if long_count else 0)
+            
+            # Cancel excess native pending slots (keep only first N)
+            native_pending = conn.execute(
+                """SELECT id FROM shorts_planned_slots
+                   WHERE date_key = ? AND channel_id = ?
+                     AND short_type = 'native' AND status = 'pending'
+                   ORDER BY scheduled_at ASC""",
+                (today, ch_id),
+            ).fetchall()
+            native_ids = [r["id"] for r in native_pending]
+            if len(native_ids) > native_max:
+                to_cancel = native_ids[native_max:]
+                conn.executemany(
+                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    [(i,) for i in to_cancel],
+                )
+                result["cancelled_native"] += len(to_cancel)
+                logger.warning(
+                    "Cleaned up %d excess native slots for channel #%d (kept %d/%d)",
+                    len(to_cancel), ch_id, native_max, len(native_ids),
+                )
+            
+            # Cancel excess clip pending slots
+            clip_pending = conn.execute(
+                """SELECT id FROM shorts_planned_slots
+                   WHERE date_key = ? AND channel_id = ?
+                     AND short_type = 'clip' AND status = 'pending'
+                   ORDER BY scheduled_at ASC""",
+                (today, ch_id),
+            ).fetchall()
+            clip_ids = [r["id"] for r in clip_pending]
+            if len(clip_ids) > clip_max:
+                to_cancel = clip_ids[clip_max:]
+                conn.executemany(
+                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    [(i,) for i in to_cancel],
+                )
+                result["cancelled_clip"] += len(to_cancel)
+                logger.warning(
+                    "Cleaned up %d excess clip slots for channel #%d (kept %d/%d)",
+                    len(to_cancel), ch_id, clip_max, len(clip_ids),
+                )
+            
+            conn.commit()
+        conn.close()
+        
+        if result["cancelled_native"] > 0 or result["cancelled_clip"] > 0:
+            logger.info(
+                "Shorts cleanup: cancelled %d native + %d clip excess slots",
+                result["cancelled_native"], result["cancelled_clip"],
+            )
+    except Exception as e:
+        logger.error("Shorts cleanup failed: %s", e)
+    
+    return result
 
 
 # ── Smart shorts slot dispatcher ───────────────────────────────
@@ -1383,6 +1503,25 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             )
             _skipped_slot_ids.add(slot_id)
             continue
+
+        # 5b. Native shorts daily cap: skip if channel already published
+        # enough native shorts today (respects shorts_native_per_day config).
+        if short_type == "native":
+            try:
+                published_native_today = db.count_native_shorts_published_today(channel_id)
+                native_daily_max = db.get_native_shorts_per_day(channel_id)
+                if published_native_today >= native_daily_max:
+                    logger.info(
+                        "Shorts slot #%d (%s) skipped: native daily cap reached "
+                        "(%d/%d published today) — trying next channel",
+                        slot_id, slug, published_native_today, native_daily_max,
+                    )
+                    # Cancel this slot — we don't need it
+                    db.update_shorts_slot_status(slot_id, "cancelled")
+                    _skipped_slot_ids.add(slot_id)
+                    continue
+            except Exception:
+                pass  # non-critical guard failure
 
         # 8. Publish collision guard — same-type (45 min) + cross-type (20 min)
         target_upload = next_slot.get("target_upload_at")
@@ -2895,6 +3034,22 @@ def pre_render_clip_shorts_for_video(
             logger.info(
                 "pre_render: video #%d already has %d ready clips — skipping (already pre-rendered)",
                 video_id, existing_ready["cnt"],
+            )
+            return []
+
+        # 0b. Guard: skip if this video already has slots in shorts_planned_slots
+        # (prevents duplicate slot creation across restarts or retries)
+        existing_slots = conn.execute(
+            """SELECT COUNT(*) as cnt FROM shorts_planned_slots
+               WHERE source_video_id = ?
+                 AND short_type = 'clip'
+                 AND status IN ('pending', 'running', 'completed')""",
+            (video_id,),
+        ).fetchone()
+        if existing_slots and existing_slots["cnt"] > 0:
+            logger.info(
+                "pre_render: video #%d already has %d clip slot(s) — skipping (already planned)",
+                video_id, existing_slots["cnt"],
             )
             return []
 
