@@ -848,7 +848,7 @@ class ScriptGenerator:
         }
 
     def _generate_outline(
-        self, content_item: dict, word_target: dict = None,
+        self, content_item: dict = None, word_target: dict = None,
         content_text: str = None, duration_min: float = None,
         word_target_int: int = None, canal_config=None,
         marathon_mode: bool = False, marathon_params: dict = None,
