@@ -345,17 +345,21 @@ async def _queue_consumer():
         if not next_job:
             return
         
-        # Guard: don't dispatch if this channel already has an active job
-        active_for_channel = db.get_active_job_for_channel(next_job["channel_id"])
+        # Guard: don't dispatch if this channel already has a RUNNING job
+        # Uses get_running_job_for_channel (not get_active_job_for_channel) so
+        # a queued marathon job does not block itself from being dispatched.
+        active_for_channel = db.get_running_job_for_channel(next_job["channel_id"])
         if active_for_channel:
-            logger.debug("Queue consumer: channel %d already has active job #%d — skipping",
+            logger.debug("Queue consumer: channel %d already has running job #%d — skipping",
                         next_job["channel_id"], active_for_channel["id"])
             return
         
         # Global guard: defer dispatch if a long-form job is running
-        if db.count_active_longform_jobs() > 0:
-            logger.debug("Queue consumer deferred: %d active long-form job(s) — retrying next tick",
-                        db.count_active_longform_jobs())
+        # Uses count_running_longform_jobs (not count_active_longform_jobs)
+        # so queued marathon jobs do not block the consumer.
+        if db.count_running_longform_jobs() > 0:
+            logger.debug("Queue consumer deferred: %d running long-form job(s) — retrying next tick",
+                        db.count_running_longform_jobs())
             return
         
         # RAM gate: need at least 4 GB free

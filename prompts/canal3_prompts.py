@@ -347,3 +347,80 @@ def format_user_prompt(content_item: dict) -> str:
         category=content_item.get("category", "civilizaciones antiguas"),
         text=content_item.get("text", ""),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MARATHON MODE — Outline for ~1h deep-dive documentary videos
+# ═══════════════════════════════════════════════════════════════════
+
+def build_marathon_outline_prompt(config=None, duration_min: float = 60,
+                                   num_sections: int = 12,
+                                   narrative_format: str = "historical_collapse",
+                                   word_target: int = 8500) -> str:
+    """Generate a structured outline for a ~1h marathon documentary video.
+
+    For canal3 (Civilizaciones Olvidadas): lost civilization and archaeological
+    mystery documentaries.
+    """
+    cfg = config or _default_config
+    tone = getattr(cfg, "CANAL_TONE",
+                    "Grave, misterioso y profundamente envolvente. Narrativa estilo National Geographic.")
+    style = getattr(cfg, "CANAL_NARRATIVE_STYLE", "documental arqueológico")
+    audience = getattr(cfg, "TARGET_AUDIENCE", "público LATAM adulto curioso")
+    outro = getattr(cfg, "CANAL_OUTRO_TAGLINE",
+                     "El pasado nunca desaparece del todo. Solo espera a ser descubierto.")
+    n_chapters = num_sections
+
+    return f"""Eres el guionista jefe de una serie documental de alto presupuesto. Tu especialidad son los documentales largos sobre las civilizaciones más enigmáticas de la historia de la humanidad: imperios olvidados, ciudades perdidas, ruinas que guardan secretos y culturas que desaparecieron sin dejar explicación.
+
+TONO: {tone}
+ESTILO: {style}
+AUDIENCIA: {audience}
+DURACIÓN OBJETIVO: {duration_min} minutos (~{word_target} palabras)
+FORMATO: {narrative_format}
+
+Tu tarea es generar UN OUTLINE ESTRUCTURADO para un documental de {duration_min} minutos sobre {n_chapters} civilizaciones perdidas u olvidadas. NO escribas el guion — solo el outline.
+
+CADA SECCIÓN CUBRE UNA CIVILIZACIÓN DISTINTA ({n_chapters} civilizaciones en total):
+- Nombre de la civilización, ubicación geográfica, periodo histórico (fechas).
+- Descubrimiento: quién la encontró, cuándo, cómo (excavación, tecnología moderna, accidente).
+- Datos arqueológicos concretos: templos, artefactos, escritura, tamaño de la ciudad, población estimada.
+- Misterio principal: qué no sabemos y por qué (desaparición sin rastro, tecnología inexplicable, escritura sin descifrar).
+- Legado: qué cambió en nuestra comprensión de la historia gracias a este hallazgo.
+
+REGLAS INQUEBRANTABLES:
+1. CADA sección DEBE tener AL MENOS 3 HECHOS CONCRETOS: fechas, nombres de arqueólogos, ubicaciones, dimensiones, datación precisa.
+2. NO inventes datos. Usa civilizaciones documentadas y verificables en la literatura arqueológica.
+3. Progresión: de las civilizaciones más antiguas a las más recientes, o de las más conocidas a las más oscuras.
+4. PROHIBIDO lenguaje poético sin sustancia. "Las piedras guardan un secreto milenario" NO es contenido válido.
+5. Cada sección: ~{word_target // n_chapters} palabras.
+6. CADA sección necesita keywords visuales en INGLÉS específicas para búsqueda de stock media.
+
+FORMATO DE SALIDA (JSON):
+{{{{
+  "summary": "Resumen del arco narrativo: de la civilización más antigua a la lección que la humanidad olvidó",
+  "chapters": [
+    {{{{
+      "chapter": 1,
+      "titulo": "Título impactante de la civilización en español",
+      "idea_central": "Qué define a esta civilización — una frase potente",
+      "hechos_concretos": [
+        "Ubicación, periodo, descubridor y fecha del hallazgo",
+        "Datos arqueológicos: estructuras, artefactos, dimensiones con números concretos",
+        "Misterio principal sin resolver con las teorías en debate",
+        "Legado concreto: qué cambió en la arqueología"
+      ],
+      "visual_keywords_en": "english keywords for stock media (ancient ruins, archaeological site, lost city)",
+      "emocion_objetivo": "asombro|intriga|misterio|descubrimiento|revelacion|solemnidad|reflexion",
+      "words_approx": {word_target // n_chapters}
+    }}}}
+  ]
+}}}}
+
+⚠️ CRÍTICO: El documental dura {duration_min} MINUTOS. Cada civilización merece ~5 minutos de narración densa y detallada. El espectador debe sentir que está caminando entre ruinas milenarias, descubriendo un mundo que la historia oficial olvidó.
+
+RECUERDA: Solo hechos verificables. Solo civilizaciones reales. Solo la verdad arqueológica. El pasado es demasiado fascinante para adornarlo con ficción.
+
+OUTRO RECURRENTE: Cada sección conecta con la idea de que "{outro}" """
+
+

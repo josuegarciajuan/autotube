@@ -1435,6 +1435,14 @@ def run_job(
                 db.mark_script_used(script["id"])
         except Exception:
             pass
+        
+        # ── Record marathon completion ──
+        if is_marathon:
+            try:
+                db.record_marathon(channel_id, "completed")
+                logger.info("[MARATHON][%s] Marathon completed", canal)
+            except Exception as exc_mar:
+                logger.warning("[MARATHON][%s] Failed to record completion: %s", canal, exc_mar)
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -1444,6 +1452,14 @@ def run_job(
         logger.error("Pipeline crashed: %s\n%s", exc, tb)
         db.update_job(job_id, status="failed", error_msg=error_msg[:500])
         db.update_video(video_id, status="error", progress_phase="error")
+        
+        # ── Record marathon failure ──
+        if is_marathon:
+            try:
+                db.record_marathon(channel_id, "failed")
+                logger.warning("[MARATHON][%s] Marathon failed: %s", canal, error_msg[:200])
+            except Exception as exc_mar:
+                logger.warning("[MARATHON][%s] Failed to record failure: %s", canal, exc_mar)
         
         # ── Log lifecycle: generation failed ──
         try:

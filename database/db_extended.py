@@ -5089,6 +5089,20 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return dict(row) if row else None
     
+    def get_running_job_for_channel(self, channel_id: int) -> dict | None:
+        """Check if a generation job is RUNNING for a specific channel.
+        
+        Unlike get_active_job_for_channel, this only checks 'running' status,
+        NOT 'queued'. Used by the queue consumer so a queued marathon job
+        does not block itself from being dispatched.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE channel_id = ? AND status = 'running' LIMIT 1",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
+    
     def count_active_jobs(self) -> int:
         """Count ALL generation jobs currently running or queued.
         
@@ -5121,6 +5135,21 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+    
+    def count_running_longform_jobs(self) -> int:
+        """Count long-form generation jobs currently running only (not queued).
+        
+        Used by the queue consumer to decide whether to dispatch a new job.
+        Must exclude 'queued' so that a marathon job enqueued via the
+        normal FIFO dispatch does not block itself.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status = 'running' "
                 "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
@@ -7027,6 +7056,14 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM videos WHERE status='awaiting_upload'"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+    def count_all_warming(self) -> int:
+        """Count all videos in uploaded_private (warming) status across all channels."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos WHERE status='uploaded_private'"
             ).fetchone()
         return row["cnt"] if row else 0
 
