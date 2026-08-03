@@ -16,7 +16,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 # Ensure DB is migrated, then start
-ExecStartPre=/usr/bin/python3 -c "from database.db import init_db; from database.db_extended import migrate_v2; init_db(); migrate_v2()"
+# Use /bin/sh -c to safely handle semicolons in Python -c code
+ExecStartPre=-/bin/sh -c '/usr/bin/python3 -c "from database.db import init_db; from database.db_extended import migrate_v2; init_db(); migrate_v2()"'
 ExecStart=/usr/bin/python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info
 
 # Auto-restart on crash, but stop if it flaps (prevents restart storms)
@@ -29,7 +30,17 @@ RestartSec=10
 # Previously 'mixed' which SIGKILL'd the entire cgroup after TimeoutStopSec,
 # killing all in-flight renders on every apply_changes.sh deployment.
 KillMode=process
-TimeoutStopSec=30
+TimeoutStartSec=300
+TimeoutStopSec=60
+
+# Send SIGINT first (Python handles it better for clean shutdown),
+# then SIGTERM if still alive after 30s.
+KillSignal=SIGINT
+SendSIGKILL=yes
+
+# Watchdog: systemd will kill and restart the service if it doesn't
+# send a watchdog ping for 180 seconds (indicates hung process).
+WatchdogSec=180
 
 # Hardening
 NoNewPrivileges=no
