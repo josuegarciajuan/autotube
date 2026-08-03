@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Fix overlapping scheduled publish times for any Autotube channel.
+"""Fix overlapping and too-close scheduled publish times for any Autotube channel.
 
-Detects videos sharing the exact same target_public_at and redistributes them
-with configurable minimum gap and max publications per day.
-Non-overlapping videos (already correctly spaced) are left alone.
+Detects videos sharing the exact same target_public_at AND videos within 3h of each
+other on the same day, redistributing with minimum gap and max publications per day.
 
 Usage:
   python3 scripts/fix_overlap.py                           # Auto-detect and fix ALL channels
   python3 scripts/fix_overlap.py --channel canal4          # Fix specific channel
-  python3 scripts/fix_overlap.py --dry-run                 # Preview changes only
+  python3 scripts/fix_overlap.py --dry-run                 # Preview changes only  
   python3 scripts/fix_overlap.py --max-per-day 2           # Max 2 publications/day (default 3)
   python3 scripts/fix_overlap.py --min-gap 4               # Min 4h gap (default 3)
 """
@@ -41,7 +40,6 @@ NICHO_PEAK_HOURS = {
 
 
 def _get_peak_hour(channel: dict) -> int:
-    """Best peak hour for a channel based on SEO keyword."""
     try:
         from config.config_bridge import get_channel_config
         cfg = get_channel_config(channel["slug"])
@@ -59,7 +57,6 @@ def _get_peak_hour(channel: dict) -> int:
 
 
 def _parse_tpa(tpa_str: str) -> datetime:
-    """Parse target_public_at to UTC-aware datetime. None on failure."""
     if not tpa_str:
         return None
     s = str(tpa_str).strip()
@@ -100,7 +97,6 @@ def _build_utc(local_date: str, hour: int, minute: int,
 
 
 def _canonical(tpa_str: str) -> str:
-    """Canonical form: YYYY-MM-DDTHH:MM:SS (first 19 chars, no tz)."""
     return str(tpa_str)[:19] if tpa_str else ""
 
 
@@ -137,7 +133,6 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
         peak_hour = _get_peak_hour(channel)
         logger.info("\n[%s] ── Processing (peak=%02d:00 Madrid) ──", slug, peak_hour)
 
-        # ── Fetch ALL private/scheduled videos ──
         with db._connect() as conn:
             rows = conn.execute("""
                 SELECT * FROM videos
@@ -154,7 +149,7 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
 
         logger.info("[%s] %d videos with target_public_at", slug, len(videos))
 
-        # ── Group videos by EXACT target_public_at (canonical: first 19 chars) ──
+        # ── Step 1: Group by EXACT target_public_at and fix overlaps ──
         groups = defaultdict(list)
         for v in videos:
             v["_parsed_dt"] = _parse_tpa(v.get("target_public_at"))
@@ -165,32 +160,23 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
             key = _canonical(v.get("target_public_at"))
             groups[key].append(v)
 
-        # ── Find groups with overlap (2+ videos sharing same time) ──
         overlap_groups = {k: vlist for k, vlist in groups.items() if len(vlist) > 1}
+        new_targets = {}
 
-        if not overlap_groups:
-            logger.info("[%s] No exact overlaps detected.", slug)
-        else:
+        if overlap_groups:
             logger.info("[%s] %d overlap group(s) found:", slug, len(overlap_groups))
             for tpa_key, vlist in overlap_groups.items():
                 ids = [v["id"] for v in vlist]
                 logger.info("  %s: %d videos [%s]", tpa_key, len(vlist),
                             ", ".join(f"#{i}" for i in ids))
 
-        # ── Build NEW target_public_at for each video ──
-        # Start with current times; modify only overlapping ones
-        new_targets = {}  # video_id → new_dt (UTC)
-
         for tpa_key, vlist in overlap_groups.items():
-            # Sort by id (deterministic)
             vlist_sorted = sorted(vlist, key=lambda v: v["id"])
             base_dt = vlist_sorted[0]["_parsed_dt"]
-
             for i, v in enumerate(vlist_sorted):
-                new_dt = base_dt + timedelta(hours=i * min_gap_hours)
-                new_targets[v["id"]] = new_dt
+                new_targets[v["id"]] = base_dt + timedelta(hours=i * min_gap_hours)
 
-        # ── Now collect ALL videos with their effective target_public_at ──
+        # Build all_parsed with effective target times
         all_parsed = []
         for v in videos:
             vid = v["id"]
@@ -198,7 +184,7 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
                 eff_dt = new_targets[vid]
             else:
                 eff_dt = v["_parsed_dt"]
-                new_targets[vid] = eff_dt  # keep original
+                new_targets[vid] = eff_dt
 
             all_parsed.append({
                 "video": v,
@@ -209,8 +195,44 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
                                 and abs((eff_dt - v["_parsed_dt"]).total_seconds()) > 60),
             })
 
-        # ── Enforce max_per_day ──
-        # Group by local date after overlap fix
+        # ── Step 2: Enforce MIN_GAP between ALL same-day videos ──
+        # This catches the gap violations that survive the overlap fix
+        # (e.g., an overlap-fixed time of 14:44 clashing with an existing 15:00 video)
+        gap_delta = timedelta(hours=min_gap_hours)
+        gap_fixes = 0
+
+        # Group by local date
+        by_date = defaultdict(list)
+        for p in all_parsed:
+            dk = _local_date(p["new_dt"])
+            by_date[dk].append(p)
+
+        for dk in list(by_date.keys()):
+            day_vids = sorted(by_date[dk], key=lambda p: p["new_dt"])
+            
+            for i in range(1, len(day_vids)):
+                prev = day_vids[i - 1]
+                curr = day_vids[i]
+                min_allowed = prev["new_dt"] + gap_delta
+                
+                if curr["new_dt"] < min_allowed:
+                    old_dt = curr["new_dt"]
+                    curr["new_dt"] = min_allowed
+                    curr["is_modified"] = True
+                    gap_fixes += 1
+                    logger.debug(
+                        "[%s] Gap fix: #%d %s → %s (was %s)",
+                        slug, curr["vid"],
+                        curr["new_dt"].isoformat()[:19],
+                        old_dt.isoformat()[:19],
+                        prev["vid"],
+                    )
+
+        if gap_fixes:
+            logger.info("[%s] %d gap violation(s) fixed (videos too close on same day).", slug, gap_fixes)
+
+        # ── Step 3: Enforce max_per_day ──
+        # Re-group after gap fixes
         by_date = defaultdict(list)
         for p in all_parsed:
             dk = _local_date(p["new_dt"])
@@ -221,15 +243,16 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
 
         for dk in all_dates:
             day_vids = sorted(by_date[dk], key=lambda p: p["new_dt"])
-            if len(day_vids) > max_per_day:
-                keep = day_vids[:max_per_day]  # earliest N
+            over = len(day_vids) - max_per_day
+            if over > 0:
+                keep = day_vids[:max_per_day]
                 push = day_vids[max_per_day:]
                 logger.info("[%s] %s: %d → keep %d, push %d",
                             slug, dk, len(day_vids), len(keep), len(push))
                 by_date[dk] = keep
                 overflow.extend(push)
 
-        # ── Assign overflow to future dates at peak hour ──
+        # ── Step 4: Assign overflow to future dates at peak hour ──
         if overflow:
             if all_dates:
                 last_date = datetime.strptime(all_dates[-1], "%Y-%m-%d")
@@ -241,7 +264,6 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
             while overflow:
                 chunk = overflow[:max_per_day]
                 overflow = overflow[max_per_day:]
-                next_d_str = next_d.strftime("%Y-%m-%d")
 
                 for j, p in enumerate(chunk):
                     local_h = peak_hour + j * min_gap_hours
@@ -257,7 +279,24 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
 
                 next_d += timedelta(days=1)
 
-        # ── Collect final changes ──
+        # ── Step 5: Final gap enforcement after overflow placement ──
+        # Overflow videos placed on the same day at peak_hour + j*3h are fine
+        # (they're already 3h apart), but check for edge cases.
+        by_date_final = defaultdict(list)
+        for p in all_parsed:
+            dk = _local_date(p["new_dt"])
+            by_date_final[dk].append(p)
+
+        for dk in list(by_date_final.keys()):
+            day_vids = sorted(by_date_final[dk], key=lambda p: p["new_dt"])
+            for i in range(1, len(day_vids)):
+                prev = day_vids[i - 1]
+                curr = day_vids[i]
+                if curr["new_dt"] < prev["new_dt"] + gap_delta:
+                    curr["new_dt"] = prev["new_dt"] + gap_delta
+                    curr["is_modified"] = True
+
+        # ── Step 6: Collect final changes ──
         changes = [p for p in all_parsed if p["is_modified"]]
 
         if not changes:
@@ -273,7 +312,7 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
                         p["new_dt"].isoformat()[:19],
                         p["new_dt"].astimezone(tz).strftime("%H:%M"))
 
-        # ── Apply ──
+        # ── Step 7: Apply ──
         uploader = None
         try:
             uploader = YouTubeUploader(account_name=slug, channel_slug=slug, db=db)
@@ -289,7 +328,6 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
             vid = p["vid"]
             old_tpa = v.get("target_public_at")
 
-            # YouTube API
             if yt_id and uploader:
                 if dry_run:
                     logger.info("  [DRY RUN] #%d YT publishAt=%s", vid, new_iso)
@@ -307,7 +345,6 @@ def main(dry_run=False, channel_slug=None, min_gap_hours=MIN_GAP_HOURS,
             elif not yt_id:
                 logger.info("  ⚠️ #%d: no yt_video_id — skip YT API", vid)
 
-            # DB
             if dry_run:
                 logger.info("  [DRY RUN] #%d DB: target=%s", vid, new_iso)
                 total_updated += 1
