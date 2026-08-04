@@ -1041,19 +1041,26 @@ class ThumbnailMaker:
                     outline=accent_rgb + (200,),
                     width=2,
                 )
-                # Centre all lines vertically
-                total_h = fitted["total_h"]
-                start_y2 = (inset_h - total_h) // 2
-                for line in fitted["lines"]:
-                    w_line, _ = self._measure_text_size(inset_draw_a, line, fitted["font"])
+                # Centre all lines vertically using actual line bounding boxes
+                lines = fitted["lines"]
+                line_bboxes = [inset_draw_a.textbbox((0, 0), l, font=fitted["font"]) for l in lines]
+                line_heights = [b[3] - b[1] for b in line_bboxes]   # actual pixel height
+                line_tops = [b[1] for b in line_bboxes]             # anchor → top of text
+                line_bottoms = [b[3] for b in line_bboxes]          # anchor → bottom of text
+                gap = max(2, int(fitted["font_size"] * 0.18))
+                total_block_h = sum(line_heights) + gap * (len(lines) - 1)
+                current_y = (inset_h - total_block_h) // 2 - line_tops[0]
+                for i, line in enumerate(lines):
+                    w_line = line_bboxes[i][2] - line_bboxes[i][0]
                     tx_a = (inset_w - w_line) // 2
                     inset_draw_a.text(
-                        (tx_a, start_y2),
+                        (tx_a, current_y),
                         line,
                         fill=(220, 220, 220, 255),
                         font=fitted["font"],
                     )
-                    start_y2 += fitted["total_h"] // len(fitted["lines"]) + fitted.get("line_spacing", 2)
+                    if i < len(lines) - 1:
+                        current_y += line_bottoms[i] + gap - line_tops[i + 1]
 
                 img.paste(inset_overlay_a, (inset_x, inset_y), inset_overlay_a)
                 draw = ImageDraw.Draw(img)
@@ -1082,18 +1089,25 @@ class ThumbnailMaker:
                 outline=accent_rgb + (170,),
                 width=2,
             )
-            total_h_b = fitted_b["total_h"]
-            start_b = (inset_h2 - total_h_b) // 2
-            for line in fitted_b["lines"]:
-                w_line_b, _ = self._measure_text_size(inset_draw_b, line, fitted_b["font"])
+            lines_b = fitted_b["lines"]
+            line_bboxes_b = [inset_draw_b.textbbox((0, 0), l, font=fitted_b["font"]) for l in lines_b]
+            line_heights_b = [b[3] - b[1] for b in line_bboxes_b]
+            line_tops_b = [b[1] for b in line_bboxes_b]
+            line_bottoms_b = [b[3] for b in line_bboxes_b]
+            gap_b = max(2, int(fitted_b["font_size"] * 0.18))
+            total_block_h_b = sum(line_heights_b) + gap_b * (len(lines_b) - 1)
+            current_b = (inset_h2 - total_block_h_b) // 2 - line_tops_b[0]
+            for i, line in enumerate(lines_b):
+                w_line_b = line_bboxes_b[i][2] - line_bboxes_b[i][0]
                 tx_b = (inset_w2 - w_line_b) // 2
                 inset_draw_b.text(
-                    (tx_b, start_b),
+                    (tx_b, current_b),
                     line,
                     fill=(200, 200, 200, 255),
                     font=fitted_b["font"],
                 )
-                start_b += total_h_b // len(fitted_b["lines"]) + fitted_b.get("line_spacing", 1)
+                if i < len(lines_b) - 1:
+                    current_b += line_bottoms_b[i] + gap_b - line_tops_b[i + 1]
 
             img.paste(inset_overlay_b, (inset_x2, inset_y2), inset_overlay_b)
             draw = ImageDraw.Draw(img)
