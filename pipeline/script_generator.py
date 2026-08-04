@@ -160,9 +160,9 @@ class ScriptGenerator:
             prompts_module = importlib.import_module(f"prompts.{self.canal}_prompts")
             self._build_system_prompt = prompts_module.build_system_prompt
             self._format_user_prompt = prompts_module.format_user_prompt
-        except ImportError:
+        except (ImportError, AttributeError):
             logger.warning(
-                "No prompts module for %s, falling back to canal2_prompts",
+                "No prompts module or missing functions for %s, falling back to canal2_prompts",
                 self.canal,
             )
             from prompts.canal2_prompts import build_system_prompt, format_user_prompt
@@ -2363,6 +2363,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         # if cta_block and isinstance(cta_block, dict):
         #     all_bloques.append(cta_block)
         
+        # Normalize: content_id=0 (e.g. marathon synthetic content) fails FK constraint
+        if not content_id:
+            content_id = None
+        
         try:
             script_id = self.db.insert_script(
                 raw_content_id=content_id,
@@ -3293,7 +3297,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "source": "wikipedia_deep",
             "score": 100,
             "canal": self.canal,
-            "id": content_items[0].get("id", 0) if content_items else 0,
+            "id": (content_items[0].get("id") or None) if content_items else None,
             "_marathon": True,
             "_marathon_outline": outline,
             "_marathon_params": {

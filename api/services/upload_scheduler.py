@@ -664,7 +664,7 @@ def verify_no_overlaps(db=None, auto_fix: bool = True) -> dict:
         with db._connect() as conn:
             overlap_groups = conn.execute("""
                 SELECT v.channel_id, c.slug, v.target_public_at, COUNT(*) as cnt,
-                       GROUP_CONCAT(v.id ORDER BY v.id) as ids
+                       GROUP_CONCAT(v.id) as ids
                 FROM videos v
                 JOIN channels c ON c.id = v.channel_id
                 WHERE v.status IN ('uploaded_private', 'uploading', 'warming', 'scheduled')
