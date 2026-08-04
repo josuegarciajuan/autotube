@@ -100,13 +100,49 @@ GENERATION_BACKOFF_SECONDS = [2.0, 4.0, 8.0]
 API_CONNECTIVITY_CHECK_TIMEOUT = 5.0
 MIN_NARRATIVE_BLOCKS = 5
 END_HOOK_PATTERNS = [
-    r"pr[oó]ximo\s*(video|episodio|cap[ií]tulo)",
-    r"siguiente\s*(video|episodio|cap[ií]tulo)",
+    r"pr[oó]ximo\s*(video|episodio|cap[ií]tulo|caso|tema|historia|entrega)",
+    r"siguiente\s*(video|episodio|cap[ií]tulo|caso|tema|historia|entrega)",
     r"no\s*te\s*(pierdas|olvides)\s*el\s*(pr[oó]ximo|siguiente)",
     r"pr[oó]xima\s*entrega",
+    r"pr[oó]xima\s*historia",
+    r"pr[oó]ximo\s*caso",
     r"activa\s*(la\s*)?campana",
+    r"en\s*la\s*siguiente\s*entrega",
+    r"en\s*el\s*siguiente\s*video",
 ]
 
+# ── Lightweight language detection (no external deps) ──────────
+ES_STOPWORDS = {'de', 'la', 'que', 'el', 'en', 'los', 'las', 'con', 'por',
+                'para', 'una', 'como', 'más', 'pero', 'sus', 'fue', 'han',
+                'muy', 'sin', 'del', 'entre', 'había', 'era', 'sido', 'este',
+                'esta', 'cada', 'todo', 'historia', 'caso', 'años'}
+EN_STOPWORDS = {'the', 'of', 'and', 'to', 'in', 'that', 'was', 'for', 'with',
+                'had', 'this', 'from', 'but', 'they', 'his', 'her', 'were',
+                'been', 'have', 'are', 'their', 'not', 'would', 'been'}
+
+
+def _detect_text_language(text: str) -> str:
+    """Heuristic language detection via stopword frequency ratio.
+    
+    Returns 'es', 'en', or 'unknown'. Handles texts with 0 stopwords
+    gracefully. Not intended to be perfect — just catch obvious
+    mismatches (e.g. English Wikipedia fed to Spanish channel).
+    """
+    if not text or len(text) < 50:
+        return 'unknown'
+    text_lower = text.lower()
+    words = set(re.findall(r'\b\w+\b', text_lower))
+    es_hits = len(words & ES_STOPWORDS)
+    en_hits = len(words & EN_STOPWORDS)
+    if es_hits > en_hits * 2:
+        return 'es'
+    elif en_hits > es_hits * 2:
+        return 'en'
+    elif es_hits > en_hits:
+        return 'es'
+    elif en_hits > es_hits:
+        return 'en'
+    return 'unknown'
 
 class ScriptGenerator:
     """Generate YouTube narration scripts from raw content using AI (DeepSeek/OpenAI)."""
@@ -668,6 +704,28 @@ class ScriptGenerator:
             logger.error(
                 "EMERGENCY: no title or text in content — cannot generate"
             )
+            return None
+
+        # ── Language gate: never emit emergency script in wrong language
+        channel_lang = getattr(self.canal_config, 'LANGUAGE', 'es')
+        source_lang = _detect_text_language(text)
+        if channel_lang == 'es' and source_lang == 'en':
+            logger.error(
+                "EMERGENCY BLOCKED: source text is English (%s) but channel "
+                "language is Spanish. content_id=%s title=%.80s — "
+                "skipping to avoid incoherent TTS. The LLM validator "
+                "rejection should be investigated.",
+                source_lang, content_item.get("id"), title,
+            )
+            # Record in phase metrics for monitoring
+            if hasattr(self, '_phase_metrics'):
+                m = self._phase_metrics.setdefault(
+                    'emergency', {'attempts': 0, 'failures': 0, 'errors': {}}
+                )
+                m['attempts'] += 1
+                m['failures'] += 1
+                m['errors']['language_mismatch'] = \
+                    m['errors'].get('language_mismatch', 0) + 1
             return None
 
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())

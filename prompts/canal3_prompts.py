@@ -303,7 +303,7 @@ REGLAS ESENCIALES:
 
 5. ESTRUCTURA CLARA. El guion debe tener: introduccion impactante con el descubrimiento, desarrollo con datos arqueologicos concretos, climax con la revelacion o misterio, y cierre reflexivo.
 
-6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre, pero NO incluyas llamadas a la accion (suscribete, like, etc.) — eso se añade automaticamente.
+6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre. Incluye una mencion natural al proximo caso, civilizacion o misterio que exploraras en el siguiente video (ej. \"en el proximo video\", \"en la siguiente entrega\"). PERO NO uses formulas genericas de YouTube como \"suscribete\", \"dale like\", \"activa la campanita\" ni similares.
 
 7. LONGITUD. Apunta a {duration_target} minutos de video ({words_guide} palabras). Es una guia, no una regla rigida — prioriza calidad sobre cantidad.
 
