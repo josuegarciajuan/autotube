@@ -733,7 +733,25 @@ class PipelineOrchestrator:
                     limit=20,
                 )
                 if deep_items:
-                    content_items.extend(deep_items)
+                    # ── Save to raw_content so they get valid DB IDs ──
+                    # Deep-scraped Wikipedia articles were previously passed
+                    # directly to generate_marathon() without DB IDs, causing
+                    # FK violations on scripts.raw_content_id and triggering
+                    # the emergency fallback (2-min videos instead of 60-min).
+                    saved_items = []
+                    for article in deep_items:
+                        article_id = self.db.insert_raw_content(
+                            source="wikipedia_deep",
+                            url=article.get("url", ""),
+                            title=article.get("title", "")[:200],
+                            text=article.get("text", "")[:8000],
+                            score=article.get("score", 1),
+                            canal=self.canal,
+                        )
+                        if article_id:
+                            article["id"] = article_id
+                            saved_items.append(article)
+                    content_items.extend(saved_items)
                     logger.info(
                         "[MARATHON][%s] Deep scrape: %d articles (%d total chars)",
                         self.canal, len(deep_items),

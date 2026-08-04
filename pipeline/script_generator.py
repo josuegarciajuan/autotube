@@ -669,8 +669,14 @@ class ScriptGenerator:
                     parts[-1] += f" ({err_detail})"
             logger.info("Phase metrics: %s", "; ".join(parts))
 
+        # ── Use marathon word_target if available, otherwise channel default ──
+        if marathon_overrides and marathon_overrides.get("word_target_override"):
+            emergency_wt = marathon_overrides["word_target_override"]
+        else:
+            emergency_wt = self._get_word_target()
+
         return self._generate_emergency_script(
-            content_item, self._get_word_target(),
+            content_item, emergency_wt,
         )
 
     # ── Emergency script generation ─────────────────────────────────
@@ -728,17 +734,31 @@ class ScriptGenerator:
                     m['errors'].get('language_mismatch', 0) + 1
             return None
 
+        # ── Scale body extraction to target word count ────────
+        # For small targets (≤2000 words): use ~12 sentences (old behavior)
+        # For medium targets (2000-5000): use ~30 sentences
+        # For marathon targets (>5000): use up to 60 sentences, larger chunks
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        if target_words <= 2000:
+            max_body_sentences = 12
+            chunk_size = max(60, min(120, target_words // 7))
+        elif target_words <= 5000:
+            max_body_sentences = 30
+            chunk_size = max(90, min(180, target_words // 15))
+        else:
+            max_body_sentences = 60
+            chunk_size = max(120, min(250, target_words // 25))
+
         intro = (
             " ".join(sentences[:2])
             if len(sentences) >= 2 else text[:300]
         )
         body = (
-            " ".join(sentences[2:min(12, len(sentences))])
+            " ".join(sentences[2:min(max_body_sentences, len(sentences))])
             if len(sentences) > 2 else ""
         )
         if not body:
-            body = text[:1200] if len(text) > 300 else ""
+            body = text[:3000] if len(text) > 300 else ""
 
         bloques = []
 
@@ -767,37 +787,30 @@ class ScriptGenerator:
 
         # ── 2. Body blocks (at least MIN_NARRATIVE_BLOCKS) ───
         body_words = body.split()
-        chunk_size = max(60, min(120, target_words // 7))
         chunks = []
         for i in range(0, len(body_words), chunk_size):
             chunk = " ".join(body_words[i:i + chunk_size])
             if chunk.strip():
                 chunks.append({"texto": chunk})
 
-        if len(chunks) < MIN_NARRATIVE_BLOCKS:
+        # Min blocks scales with target: at least MIN_NARRATIVE_BLOCKS,
+        # but for large targets, aim for more blocks proportionally.
+        min_blocks = max(MIN_NARRATIVE_BLOCKS, target_words // 250)
+        if len(chunks) < min_blocks:
             fallback_padding = [
-                (
-                    "Lo que hace único este caso es la combinación "
-                    "de factores que lo rodean."
-                ),
-                (
-                    "Cada elemento, por separado, podría tener una "
-                    "explicación convencional."
-                ),
-                (
-                    "Pero juntos forman un patrón que desafía las "
-                    "probabilidades."
-                ),
-                (
-                    "Las fuentes documentales confirman los hechos "
-                    "principales sin margen de error."
-                ),
-                (
-                    "Aunque algunos detalles siguen siendo motivo "
-                    "de debate entre expertos."
-                ),
+                "Lo que hace único este caso es la combinación de factores que lo rodean.",
+                "Cada elemento, por separado, podría tener una explicación convencional.",
+                "Pero juntos forman un patrón que desafía las probabilidades.",
+                "Las fuentes documentales confirman los hechos principales sin margen de error.",
+                "Aunque algunos detalles siguen siendo motivo de debate entre expertos.",
+                # Extra padding for larger targets — fills gaps when source text is short
+                "Los investigadores han dedicado años a desentrañar cada pieza de este rompecabezas.",
+                "Nuevos datos siguen apareciendo, añadiendo capas de complejidad al caso.",
+                "Lo que comenzó como una simple observación se convirtió en un fenómeno documentado.",
+                "La comunidad científica sigue dividida sobre la interpretación de estos hallazgos.",
+                "Cada nueva investigación aporta un ángulo distinto que enriquece el debate.",
             ]
-            needed = MIN_NARRATIVE_BLOCKS - len(chunks)
+            needed = min_blocks - len(chunks)
             for i in range(min(needed, len(fallback_padding))):
                 chunks.append({"texto": fallback_padding[i]})
 
@@ -1819,30 +1832,45 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             len(all_bloques), total_words,
         )
 
-        # Safety net: if the LLM massively overshoots the configured block
-        # limit (e.g. thinking mode + stale DB target), cap gracefully
-        # instead of producing a 40+min video that takes 7h to render.
-        # ── Marathon override: use marathon max_blocks, standard 1.5x otherwise ──
+        # Safety net: if the LLM massively overshoots the word target
+        # (e.g. thinking mode or stale config), cap gracefully by word count
+        # instead of raw block count. Block count doesn't reliably correlate
+        # with duration — a 50-word hook block and a 150-word narrative block
+        # are very different lengths.
+        #
+        # Cap only triggers when total_words > 2× the target, and it keeps
+        # blocks sequentially up to ~1× the target words.
+        # ── Marathon: use marathon max_blocks as extra guard ──
         if marathon_overrides and marathon_overrides.get("max_blocks"):
             marathon_max = marathon_overrides["max_blocks"]
-            if len(all_bloques) > marathon_max * 3:  # marathon: much higher cap (150 blocks)
+            if len(all_bloques) > marathon_max * 3:  # marathon: very high bar (e.g. 270 blocks)
                 capped = marathon_max
                 logger.warning(
-                    "generate_v2 [MARATHON]: bloques generados (%d) exceden 3x el máximo (%d). "
-                    "Posible word_target inflado. Usando los primeros %d bloques.",
-                    len(all_bloques), marathon_max, capped,
+                    "generate_v2 [MARATHON]: bloques generados (%d, %d words) exceden 3x"
+                    " el máximo (%d). Posible word_target inflado. Usando los primeros"
+                    " %d bloques.",
+                    len(all_bloques), total_words, marathon_max, capped,
                 )
                 all_bloques = all_bloques[:capped]
         else:
-            max_blocks = getattr(self.canal_config, "PROD_SCRIPT_BLOCKS_MAX", 18)
-            if len(all_bloques) > max_blocks * 1.5:
-                capped = max_blocks
+            # Non-marathon: cap by word count, not block count
+            if total_words > palabras_objetivo * 2.0:
+                target_word_cap = int(palabras_objetivo * 1.0)
+                kept_bloques: list[dict] = []
+                kept_words = 0
+                for b in all_bloques:
+                    wc = len(b.get("texto", "").split())
+                    if kept_words + wc > target_word_cap and kept_bloques:
+                        break
+                    kept_bloques.append(b)
+                    kept_words += wc
                 logger.warning(
-                    "generate_v2: bloques generados (%d) exceden 1.5x el máximo (%d). "
-                    "Posible word_target inflado. Usando los primeros %d bloques.",
-                    len(all_bloques), max_blocks, capped,
+                    "generate_v2: total_words (%d) > 2× target (%d) — "
+                    "capped to %d words (%d blocks, was %d)",
+                    total_words, palabras_objetivo, kept_words,
+                    len(kept_bloques), len(all_bloques),
                 )
-                all_bloques = all_bloques[:capped]
+                all_bloques = kept_bloques
 
         # Step 3: Enrich blocks with structural fields
         if hasattr(self, '_progress_cb') and self._progress_cb:
