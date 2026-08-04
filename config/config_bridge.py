@@ -55,6 +55,67 @@ def _normalize_field_name(name: str) -> str:
     return name.upper()
 
 
+def _clean_duplicate_keys(db_config: dict, py_safe: dict) -> dict:
+    """Remove duplicate normalized keys from DB config, keeping canonical casing.
+
+    When the DB has both ``PROD_SCRIPT_BLOCKS_MAX=18`` (from sync) and
+    ``prod_script_blocks_max=6`` (from UI panel), this detects the collision
+    via case-insensitive matching and removes the non-canonical duplicate,
+    preferring the UPPER_SNAKE_CASE variant (matching Python config naming).
+
+    Args:
+        db_config: The raw DB ``config_json`` dict.
+        py_safe: Python-safe config fields (UPPER_SNAKE_CASE keys).
+
+    Returns:
+        Cleaned dict with no duplicate normalized keys.
+    """
+    if not db_config:
+        return db_config
+
+    # Group keys by normalized (upper) form
+    groups: dict[str, list[str]] = {}
+    for key in db_config:
+        upper = key.upper()
+        if upper not in groups:
+            groups[upper] = []
+        groups[upper].append(key)
+
+    keys_to_remove: list[str] = []
+    for upper, keys in groups.items():
+        if len(keys) <= 1:
+            continue  # No collision
+
+        # Prefer the key that matches Python's UPPER_SNAKE_CASE
+        canonical = None
+        for k in keys:
+            if k in py_safe:
+                canonical = k
+                break
+
+        if canonical is None:
+            # Python doesn't have this key — keep the UPPER_SNAKE_CASE variant
+            for k in keys:
+                if k == k.upper() and "_" in k:
+                    canonical = k
+                    break
+
+        if canonical is None:
+            canonical = keys[0]  # fallback: keep first
+
+        for k in keys:
+            if k != canonical:
+                keys_to_remove.append(k)
+
+    if keys_to_remove:
+        cleaned = dict(db_config)
+        for k in keys_to_remove:
+            del cleaned[k]
+        return cleaned
+
+    return db_config
+
+
 def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
     """Merge Python module attributes with DB config overrides.
 
@@ -75,6 +136,10 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
     if db_config:
         # Build a lookup: UPPER name → original key
         py_upper: dict[str, str] = {k.upper(): k for k in merged}
+        # Track which normalized keys we've already applied — prevents
+        # duplicate keys (e.g. PROD_SCRIPT_BLOCKS_MAX=18 from sync + 
+        # prod_script_blocks_max=6 from UI) from overwriting each other.
+        seen_normalized: set[str] = set()
 
         for db_key, db_value in db_config.items():
             # MEDIA_STRATEGY is authoritative from Python — never overridden
@@ -82,6 +147,22 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
             if db_key.upper() == "MEDIA_STRATEGY":
                 continue
             upper_key = db_key.upper()
+
+            # ── Detect and skip duplicate normalized keys ──────
+            # When a channel has both uppercase (from sync) and lowercase
+            # (from UI panel) versions of the same config key, the first
+            # one wins. This prevents the UI's lowercase variant from
+            # overwriting the authoritative uppercase value.
+            if upper_key in seen_normalized:
+                logger.warning(
+                    "Config bridge: skipping duplicate key '%s' (normalized='%s') — "
+                    "already set from earlier DB entry. Remove duplicate keys from "
+                    "channels.config_json to silence this warning.",
+                    db_key, upper_key,
+                )
+                continue
+            seen_normalized.add(upper_key)
+
             # Try exact match first, then case-insensitive
             if db_key in merged:
                 merged[db_key] = db_value
@@ -199,6 +280,19 @@ def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             existing_db = {}
 
+        # ── Clean duplicate keys from existing DB config ─────────
+        # When the DB has both UPPER_SNAKE_CASE and lowercase versions
+        # of the same config key (e.g. PROD_SCRIPT_BLOCKS_MAX=18 and
+        # prod_script_blocks_max=6), remove the lowercase duplicate.
+        # Normalizes to a single UPPER_SNAKE_CASE key per canonical name.
+        cleaned_db = _clean_duplicate_keys(existing_db, safe)
+        if cleaned_db != existing_db:
+            logger.info(
+                "sync_config_to_db: cleaned %d duplicate keys from %s config",
+                len(existing_db) - len(cleaned_db), slug,
+            )
+            existing_db = cleaned_db
+
         if merge_mode and existing_db:
             # Merge: start with DB values (preserve all user edits),
             # only add NEW Python fields that don't exist in DB yet.
@@ -249,6 +343,8 @@ def sync_all_configs_to_db() -> list[str]:
     try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
+        # ── First: clean duplicate keys from all channels ──────
+        _clean_duplicate_configs_in_db(db)
         for ch in db.get_channels(active_only=True):
             slug = ch["slug"]
             if sync_config_to_db(slug, merge_mode=True) is not None:
@@ -256,6 +352,48 @@ def sync_all_configs_to_db() -> list[str]:
     except Exception as exc:
         logger.error("sync_all_configs_to_db failed: %s", exc)
     return synced
+
+
+def _clean_duplicate_configs_in_db(db) -> int:
+    """Remove lowercase duplicate config keys from ALL channels in the DB.
+
+    Called at startup to ensure the DB is clean of stale duplicate keys
+    that cause the config bridge collision bug where lowercase values
+    (from UI panel edits) overwrite uppercase values (from Python sync).
+
+    Returns count of channels cleaned.
+    """
+    cleaned_count = 0
+    try:
+        for ch in db.get_channels(active_only=True):
+            slug = ch.get("slug", "?")
+            try:
+                existing = json.loads(ch.get("config_json", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            # Build py_safe: the Python config's UPPER_SNAKE_CASE keys
+            py_mod = _load_python_module(slug)
+            if py_mod is None:
+                continue
+            py_safe = {}
+            for name, value in vars(py_mod).items():
+                if name.startswith("_"):
+                    continue
+                if isinstance(value, (dict, list, str, int, float, bool, tuple, type(None))):
+                    py_safe[name] = value
+
+            cleaned = _clean_duplicate_keys(existing, py_safe)
+            if cleaned != existing:
+                db.update_channel(ch["id"], config=cleaned)
+                cleaned_count += 1
+                logger.info(
+                    "Cleaned %d duplicate config keys from channel %s (%s)",
+                    len(existing) - len(cleaned), ch.get("name", slug), slug,
+                )
+    except Exception as exc:
+        logger.error("_clean_duplicate_configs_in_db failed: %s", exc)
+    return cleaned_count
 
 
 def get_all_channel_configs() -> dict[str, object]:
