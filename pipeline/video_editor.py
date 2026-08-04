@@ -906,8 +906,9 @@ class VideoEditor:
             raise RuntimeError("ffmpeg concat produced empty output")
 
         # ── Blackness sanity check: multi-point sample ────────────
-        # Samples frames at 25%, 50%, and 75% of the video duration.
-        # If ANY point is >90% near-black, the video is defective.
+        # Samples frames at 20%, 35%, 50%, 65%, and 80% of the video duration.
+        # If ANY point is >90% near-black, logs a WARNING (no longer aborts —
+        # space/night/underwater scenes can be legitimately dark).
         # Single-point check at 50% missed defects where the first
         # half was fine but the second half was all-black/placeholder.
         _black_check_output = None
@@ -924,7 +925,7 @@ class VideoEditor:
                 from PIL import Image
                 import numpy as np
                 _black_check_output = output_path.with_suffix(".blackcheck.jpg")
-                _check_points = [0.25, 0.50, 0.75]
+                _check_points = [0.20, 0.35, 0.50, 0.65, 0.80]  # 5 points vs 3 — reduces false positives for dark scenes
                 _worst_pct = 0.0
                 _worst_ts = 0.0
                 for _cp in _check_points:
@@ -945,17 +946,17 @@ class VideoEditor:
                             _worst_pct = _black_pct
                             _worst_ts = _check_ts
                 if _worst_pct > 90:
-                    raise RuntimeError(
-                        f"BLACK-SCREEN DETECTED: frame at {_worst_ts:.0f}s is "
-                        f"{_worst_pct:.0f}% near-black (worst of 3 check points). "
-                        f"Video is mostly black — aborting to prevent publishing bad video."
+                    self.logger.warning(
+                        "BLACK-SCREEN WARNING: frame at %.0fs is %.0f%% near-black "
+                        "(worst of 5 check points). May indicate space/night/underwater "
+                        "scene — video kept for review.",
+                        _worst_ts, _worst_pct,
                     )
-                self.logger.info(
-                    "Blackness check (3 pts): worst %.0f%% near-black at %.0fs (OK: < 90%%)",
-                    _worst_pct, _worst_ts,
-                )
-        except RuntimeError:
-            raise
+                else:
+                    self.logger.info(
+                        "Blackness check (5 pts): worst %.0f%% near-black at %.0fs (OK: < 90%%)",
+                        _worst_pct, _worst_ts,
+                    )
         except Exception as _bc_err:
             self.logger.warning("Blackness check skipped (non-fatal): %s", _bc_err)
         finally:

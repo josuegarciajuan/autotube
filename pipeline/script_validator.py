@@ -44,10 +44,10 @@ MIN_FACTS_FOR_PASS = 0  # minimum concrete facts from source (0 = skip this chec
 # ── Factual grounding thresholds ──────────────────────────────────
 # Blocks must contain at least one of: number, date pattern, proper name, location
 MAX_EMPTY_BLOCK_RATIO = 0.30   # max fraction of blocks with no concrete facts (warning)
-MAX_EMPTY_BLOCK_RATIO_GRAVE = 0.50  # max fraction before it's a grave issue
+MAX_EMPTY_BLOCK_RATIO_GRAVE = 0.65  # was 0.50 — too aggressive for narrative/abstract blocks
 # ── Source similarity thresholds ──────────────────────────────────
-SOURCE_SIMILARITY_GRAVE = 0.50  # script vs source text: >50% similarity = suspected translation
-SOURCE_SIMILARITY_WARNING = 0.35
+SOURCE_SIMILARITY_GRAVE = 0.70  # was 0.50 — 50% similitud es normal en contenido factual
+SOURCE_SIMILARITY_WARNING = 0.50  # was 0.35
 
 
 @dataclass

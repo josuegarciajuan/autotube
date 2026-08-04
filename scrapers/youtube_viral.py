@@ -49,6 +49,14 @@ DEFAULT_MAX_QUERIES = 8
 DEFAULT_RESULTS_PER_QUERY = 15
 DEFAULT_MAX_CANDIDATES = 20
 
+# ── Duration gate: reject short-form content (comedy/sketch/meme)
+# Documentary content is overwhelmingly >10 min. This replaces the
+# hardcoded comedy_channels blocklist with an objective, self-updating filter.
+# Videos shorter than this are extremely unlikely to contain enough factual
+# substance for a 10-15 min documentary script. The FACTS_INSUFFICIENT LLM
+# gate provides a second layer of defense for edge cases.
+MIN_DOCUMENTARY_DURATION_SEC = 600  # 10 minutes
+
 
 # ── User-Agent pool (rotation to avoid yt-dlp detection) ─────────────
 
@@ -628,6 +636,19 @@ class YouTubeViralScraper(BaseScraper):
             if isinstance(duration_sec, str):
                 duration_sec = int(duration_sec) if duration_sec.isdigit() else 0
             duration_sec = int(duration_sec)
+
+            # ── Duration gate: reject short-form content ──────
+            # Documentary content is overwhelmingly >10 min.
+            # Short videos (<10 min) are typically comedy, sketch, meme,
+            # or reaction content unsuitable for long-form documentary.
+            # This replaces the hardcoded comedy_channels blocklist.
+            if duration_sec > 0 and duration_sec < MIN_DOCUMENTARY_DURATION_SEC:
+                logger.debug(
+                    "[%s] Filtered out (duration %.0fs < %ds min): %s",
+                    self.canal, duration_sec, MIN_DOCUMENTARY_DURATION_SEC,
+                    title[:60],
+                )
+                return None
 
             # Provisional score: views-based, neutral for unverified dates
             if date_verified:
@@ -1489,28 +1510,18 @@ class YouTubeViralScraper(BaseScraper):
     def _is_documentary_compatible(self, candidate: dict) -> bool:
         """Quick genre check: reject comedy, satire, meme, sketch content.
 
-        Runs BEFORE heavy download+transcription. Uses only the title and
-        channel name to determine if the candidate is compatible with a
-        documentary/educational channel. Returns True if OK, False to reject.
+        Runs BEFORE heavy download+transcription. Uses only the title
+        to determine if the candidate is compatible with a documentary/
+        educational channel. Returns True if OK, False to reject.
 
         This is a fast heuristic — the FACTS_INSUFFICIENT check in
         _translate_and_paraphrase provides a deeper content-based gate.
+
+        v2: Removed hardcoded comedy_channels blocklist (was 37 channels).
+        Replaced with MIN_DOCUMENTARY_DURATION_SEC filter in _parse_ytdlp_result()
+        which is objective, self-updating, and language-agnostic.
         """
         title = (candidate.get("title", "") or "").lower()
-        channel = (candidate.get("channel_name", "") or "").lower()
-
-        # Comedy/satire/meme channel indicators
-        comedy_channels = {
-            "bill wurtz", "casually explained", "sam o'nella", "oversimplified",
-            "gradeaundera", "how it should have ended", "honest trailers",
-            "screen junkies", "ryan george", "pitch meeting", "cracker milk",
-            "longbeachgriffy", "circletoonshd", "alex meyers", "drew gooden",
-            "danny gonzalez", "kurtis conner", "jarvis johnson", "scott cramer",
-            "prozd", "gus johnson", "sven johnson", "cherdleys", "trevor wallace",
-            "calebcity", "rynn star", "julie nolke", "foil arms and hog",
-            "key & peele", "studio c", "dry bar comedy", "tommyinnit",
-            "dream", "georgenotfound", "sapnap", "ksi", "logan paul", "jake paul",
-        }
 
         # Comedy/satire title indicators
         comedy_title_patterns = [
@@ -1526,17 +1537,30 @@ class YouTubeViralScraper(BaseScraper):
             r"\bin a nutshell\b",
         ]
 
-        # Check channel first (stronger signal)
-        for cc in comedy_channels:
-            if cc in channel:
-                logger.info("[%s] Genre gate: channel '%s' matches comedy blocklist", self.canal, channel)
-                return False
+        # ── Educational context safeguard ──────────────────────
+        # If the title contains educational/documentary keywords,
+        # let it through even if it matches a comedy pattern.
+        # E.g. "The History of Political Satire" has "satire" but
+        # is a legitimate documentary topic.
+        edu_safeguard = [
+            r"\b(history|ancient|documentary|science|archaeology|discovery|unsolved|mystery|true story|real case|lost civilization|forgotten|explained|investigation|conspiracy|legend|extinct)\b",
+        ]
 
-        # Check title for comedy patterns
+        # Check title for comedy patterns (with educational safeguard)
         for pattern in comedy_title_patterns:
             if re.search(pattern, title):
-                logger.info("[%s] Genre gate: title '%s' matches comedy pattern '%s'",
-                            self.canal, title[:80], pattern)
+                # Check safeguard before rejecting
+                if any(re.search(es, title) for es in edu_safeguard):
+                    logger.debug(
+                        "[%s] Genre gate: title '%s' matches comedy pattern '%s' "
+                        "but contains educational keywords — allowing",
+                        self.canal, title[:80], pattern,
+                    )
+                    continue
+                logger.info(
+                    "[%s] Genre gate: title '%s' matches comedy pattern '%s'",
+                    self.canal, title[:80], pattern,
+                )
                 return False
 
         return True

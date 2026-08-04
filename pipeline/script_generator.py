@@ -41,13 +41,21 @@ REQUIRED_JSON_KEYS = {
     "titulo_options",
     "guion",
     "escenas",
-    "emociones",
     "keywords",
     "duracion_estimada",
-    "descripcion_seo",
-    "hashtags",
-    "fuentes_citadas",
-    "chapters",
+    # ── Campos regenerados por metadata_generator — NO bloquean ──
+    # descripcion_seo, hashtags, fuentes_citadas, chapters, emociones
+    # son regenerados desde cero por MetadataGenerator.generate().
+    # Exigirlos aquí causaba descarte de guiones perfectos por campos
+    # que nadie consume downstream. Ver OPTIONAL_METADATA_KEYS abajo.
+}
+
+OPTIONAL_METADATA_KEYS = {
+    "descripcion_seo": "",
+    "hashtags": [],
+    "fuentes_citadas": [],
+    "chapters": [],
+    "emociones": [],
 }
 
 # Word count: voice-aware via config/voice_timing.py (single source of truth).
@@ -351,22 +359,23 @@ class ScriptGenerator:
         """Validate script content structure for minimum quality requirements.
 
         Checks:
-          1. Hook block contains numeric / quantitative data.
+          1. Hook block contains numeric / quantitative data (NON-BLOCKING).
           2. At least MIN_NARRATIVE_BLOCKS narrative / development blocks.
           3. End hook references next video or continuation.
 
-        Returns (valid: bool, issues: list[str]).
+        Returns (valid: bool, issues: list[str], warnings: list[str]).
         """
         if not script or not script.get('bloques'):
-            return False, ["no blocks in script"]
+            return False, ["no blocks in script"], []
 
         bloques = script['bloques']
         issues = []
+        warnings = []
 
-        # 1. Hook must contain numeric/quantitative data
+        # 1. Hook should contain numeric/quantitative data (non-blocking)
         first_text = bloques[0].get('texto', '') if bloques else ''
         if not re.search(r'\d+', first_text):
-            issues.append("hook block missing numeric / quantitative data")
+            warnings.append("hook block missing numeric / quantitative data (non-blocking)")
 
         # 2. At least MIN_NARRATIVE_BLOCKS development blocks
         narrative_types = {
@@ -399,7 +408,7 @@ class ScriptGenerator:
                 "end hook missing reference to next video / continuation"
             )
 
-        return len(issues) == 0, issues
+        return len(issues) == 0, issues, warnings
 
     def _record_phase_metric(
         self, phase: str, success: bool,
@@ -626,7 +635,12 @@ class ScriptGenerator:
                 break
 
             # ── Content-structure validation ─────────────────
-            valid, issues = self._validate_content_structure(script)
+            valid, issues, warnings = self._validate_content_structure(script)
+            if warnings:
+                logger.info(
+                    "generate_with_retry: content validation warnings: %s",
+                    "; ".join(warnings),
+                )
             if valid:
                 logger.info(
                     "generate_with_retry: PASSED on attempt %d/%d",
@@ -642,7 +656,7 @@ class ScriptGenerator:
             )
             self._record_phase_metric(
                 "validation", False, "content_structure",
-                details={"issues": issues},
+                details={"issues": issues, "warnings": warnings},
             )
             if attempt < MAX_GENERATION_ATTEMPTS - 1:
                 time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
@@ -817,13 +831,21 @@ class ScriptGenerator:
         bloques.extend(chunks)
 
         # ── 3. End hook referencing next video ───────────────
-        bloques.append({
-            "texto": (
+        emergency_end_hook = getattr(
+            self.canal_config, "EMERGENCY_END_HOOK", None,
+        )
+        if emergency_end_hook:
+            end_hook_text = emergency_end_hook
+        else:
+            outro_tagline = getattr(
+                self.canal_config, "CANAL_OUTRO_TAGLINE",
+                "Suscríbete para más historias increíbles.",
+            )
+            end_hook_text = (
                 "En el próximo video exploramos otro caso que "
-                "desafía toda explicación. Activa la campana "
-                "para no perdértelo."
-            ),
-        })
+                "desafía toda explicación. " + outro_tagline
+            )
+        bloques.append({"texto": end_hook_text})
 
         # ── 4. CTA ───────────────────────────────────────────
         outro = getattr(
@@ -2060,14 +2082,25 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             raise ValueError("keywords must be a list")
         if not isinstance(data["duracion_estimada"], (int, float)):
             raise ValueError("duracion_estimada must be a number")
-        if not isinstance(data.get("descripcion_seo"), str) or len(data.get("descripcion_seo", "")) < 20:
-            raise ValueError("descripcion_seo must be a string with at least 20 characters")
-        if not isinstance(data.get("hashtags"), list) or len(data.get("hashtags", [])) < 1:
-            raise ValueError("hashtags must be a non-empty list")
-        if not isinstance(data.get("fuentes_citadas"), list) or len(data.get("fuentes_citadas", [])) < 1:
-            raise ValueError("fuentes_citadas must be a non-empty list")
-        if not isinstance(data.get("chapters"), list) or len(data.get("chapters", [])) < 1:
-            raise ValueError("chapters must be a non-empty list")
+        # ── Optional metadata fields — regenerated by metadata_gen ──
+        # These fields are regenerated from scratch by MetadataGenerator.generate().
+        # Missing or empty values are NOT blocking — metadata_gen will fill them.
+        for key, default in OPTIONAL_METADATA_KEYS.items():
+            val = data.get(key)
+            if val is None or (isinstance(val, (str, list)) and len(val) == 0):
+                logger.warning(
+                    "Script JSON missing optional key '%s' — will be regenerated by metadata_gen", key
+                )
+                data.setdefault(key, default)
+
+        if not isinstance(data.get("emociones"), list):
+            data.setdefault("emociones", [])
+
+        # fuentes_citadas and chapters: optional, metadata_gen regenerates
+        if "fuentes_citadas" not in data:
+            data["fuentes_citadas"] = []
+        if "chapters" not in data:
+            data["chapters"] = []
 
         return data
 

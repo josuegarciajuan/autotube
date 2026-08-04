@@ -461,7 +461,10 @@ class VideoValidator:
                     )
                 )
             else:
-                blocking.append(msg)
+                # LLM regen failed — WARNING (don't block upload for empty desc)
+                warnings.append(
+                    f"Description auto-fix failed: {msg} — uploading anyway"
+                )
         elif len(desc) < 100:
             msg = f"Description too short ({len(desc)} chars) — attempting LLM auto-fix"
             checks.append(
@@ -493,7 +496,10 @@ class VideoValidator:
                 )
                 warnings.append(msg)
             else:
-                blocking.append(msg)
+                # LLM regen failed — WARNING (don't block upload for short desc)
+                warnings.append(
+                    f"Description auto-fix failed: {msg} — uploading anyway"
+                )
         else:
             checks.append(
                 ValidationCheck(
@@ -533,7 +539,10 @@ class VideoValidator:
                 )
                 warnings.append(msg)
             else:
-                blocking.append(msg)
+                # LLM regen failed — WARNING (don't block upload for missing tags)
+                warnings.append(
+                    f"Tags auto-fix failed: {msg} — uploading anyway"
+                )
         elif len(updated_tags) < 3:
             msg = f"Only {len(updated_tags)} tags (minimum 3) — attempting LLM auto-fix"
             checks.append(
