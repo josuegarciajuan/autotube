@@ -20,7 +20,7 @@ import asyncio
 import concurrent.futures
 import glob as _glob
 import importlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from api.utils import db_now
@@ -2434,13 +2434,67 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                          canal, yt_url, target_public_at)
         else:
             logger.error("[%s] Upload failed — video stays local", canal)
-            db.update_video(video_id, status="awaiting_upload", progress_phase="upload")
-            db.update_job(job_id, status="failed", error_msg="YouTube upload returned no video ID")
+            # ── v24: check retry count before reverting to awaiting_upload ──
+            from api.services.upload_scheduler import MAX_UPLOAD_RETRY_PER_VIDEO
+            retry_count = 0
+            try:
+                with db._connect() as _conn:
+                    retry_count = _conn.execute(
+                        "SELECT COUNT(*) FROM generation_jobs "
+                        "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
+                        (video_id,),
+                    ).fetchone()[0]
+            except Exception:
+                pass
+            if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
+                logger.error(
+                    "[%s] Video %d: max upload retries exceeded (%d/%d) — marking as error",
+                    canal, video_id, retry_count, MAX_UPLOAD_RETRY_PER_VIDEO,
+                )
+                db.update_video(video_id, status="error", progress_phase="upload",
+                                 progress=0)
+                db.update_job(job_id, status="failed",
+                               error_msg="Max upload retries exceeded")
+            else:
+                backoff_sec = 600 * (2 ** retry_count) if retry_count > 0 else 0  # 10min * 2^retry
+                sched_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_sec)
+                            ).strftime('%Y-%m-%d %H:%M:%S') if backoff_sec > 0 else None
+                db.update_video(video_id, status="awaiting_upload",
+                                 progress_phase="upload",
+                                 scheduled_upload_at=sched_at)
+                db.update_job(job_id, status="failed",
+                               error_msg="YouTube upload returned no video ID")
+                if backoff_sec > 0:
+                    logger.info("[%s] Video %d: retry #%d — backoff %ds",
+                                canal, video_id, retry_count + 1, backoff_sec)
 
     except Exception as e:
         logger.exception("[%s] Upload scheduler job %d failed: %s", canal, job_id, e)
-        db.update_job(job_id, status="failed", error_msg=str(e)[:500])
-        db.update_video(video_id, status="awaiting_upload", progress_phase="upload")
+        # ── v24: check retry count on exception too ──
+        from api.services.upload_scheduler import MAX_UPLOAD_RETRY_PER_VIDEO
+        retry_count = 0
+        try:
+            with db._connect() as _conn:
+                retry_count = _conn.execute(
+                    "SELECT COUNT(*) FROM generation_jobs "
+                    "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
+                    (video_id,),
+                ).fetchone()[0]
+        except Exception:
+            pass
+        if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
+            db.update_video(video_id, status="error", progress_phase="upload",
+                             progress=0)
+            db.update_job(job_id, status="failed",
+                           error_msg=f"Max upload retries exceeded: {e}"[:500])
+        else:
+            backoff_sec = 600 * (2 ** retry_count) if retry_count > 0 else 0
+            sched_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_sec)
+                        ).strftime('%Y-%m-%d %H:%M:%S') if backoff_sec > 0 else None
+            db.update_job(job_id, status="failed", error_msg=str(e)[:500])
+            db.update_video(video_id, status="awaiting_upload",
+                             progress_phase="upload",
+                             scheduled_upload_at=sched_at)
 
 
 async def regenerate_scene_audio_task(scene_id: int, canal: str):
@@ -2892,6 +2946,7 @@ async def auto_recover_on_startup():
          - If >= 3 reassembly attempts already failed → mark as bug_crash, skip.
     """
     import json
+    from api.services.upload_scheduler import MAX_UPLOAD_RETRY_PER_VIDEO
     
     MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "5"))
 
@@ -2947,15 +3002,32 @@ async def auto_recover_on_startup():
             )
             # Recover videos stuck in 'uploading' whose upload job died:
             # revert to 'awaiting_upload' so the upload scheduler can retry.
-            upload_recovered = conn.execute(
-                "UPDATE videos SET status='awaiting_upload', "
-                "progress_phase='upload', scheduled_upload_at=NULL "
-                "WHERE id=? AND status='uploading'",
+            # ── v24: check retry count before reverting ──
+            retry_count = conn.execute(
+                "SELECT COUNT(*) FROM generation_jobs "
+                "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
                 (rrow["video_id"],)
-            ).rowcount
-            if upload_recovered:
-                log.info("Recovered video #%d: uploading → awaiting_upload (upload job died on restart)",
-                         rrow["video_id"])
+            ).fetchone()[0]
+            if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
+                log.warning(
+                    "Video #%d: %d failed uploads — NOT reverting to awaiting_upload (marking error)",
+                    rrow["video_id"], retry_count,
+                )
+                conn.execute(
+                    "UPDATE videos SET status='error', progress_phase='upload' "
+                    "WHERE id=? AND status='uploading'",
+                    (rrow["video_id"],)
+                )
+            else:
+                upload_recovered = conn.execute(
+                    "UPDATE videos SET status='awaiting_upload', "
+                    "progress_phase='upload', scheduled_upload_at=NULL "
+                    "WHERE id=? AND status='uploading'",
+                    (rrow["video_id"],)
+                ).rowcount
+                if upload_recovered:
+                    log.info("Recovered video #%d: uploading → awaiting_upload (upload job died on restart)",
+                             rrow["video_id"])
             running_killed += 1
     if running_killed or running_alive:
         log.info("Running jobs: %d killed (worker dead), %d kept alive (worker survived restart)",

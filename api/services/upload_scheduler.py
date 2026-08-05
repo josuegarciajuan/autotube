@@ -27,6 +27,7 @@ from pathlib import Path
 logger = logging.getLogger("autotube.upload_scheduler")
 
 MAX_CONCURRENT_UPLOADS = 1  # One upload at a time (avoids YouTube rate limits)
+MAX_UPLOAD_RETRY_PER_VIDEO = 3  # Max upload attempts before marking video as error
 
 # Round-robin state: {(channel_id, date_str): last_window_index}
 # Resets naturally when the date changes.
@@ -331,12 +332,16 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                        v.scheduled_upload_at, c.slug as channel_slug, c.config_json
                FROM videos v
                JOIN channels c ON v.channel_id = c.id
-               WHERE v.status = 'awaiting_upload'
-                 AND v.video_path IS NOT NULL
-                 AND v.video_path != ''
-                 AND (v.scheduled_upload_at IS NULL
-                      OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now', 'localtime'))
-               ORDER BY v.scheduled_upload_at ASC, v.created_at ASC
+                WHERE v.status = 'awaiting_upload'
+                  AND v.video_path IS NOT NULL
+                  AND v.video_path != ''
+                  AND (v.scheduled_upload_at IS NULL
+                       OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now', 'localtime'))
+                  -- v24: exclude videos that exceeded upload retry limit
+                  AND (SELECT COUNT(*) FROM generation_jobs gj2
+                       WHERE gj2.video_id = v.id AND gj2.action = 'upload_only'
+                         AND gj2.status = 'failed') < 3
+                ORDER BY v.scheduled_upload_at ASC, v.created_at ASC
                LIMIT 20"""
         ).fetchall()
 
@@ -360,10 +365,30 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         # sqlite3.Row doesn't have .get() — use dict-style access with fallback
         sched_at_val = row["scheduled_upload_at"] if "scheduled_upload_at" in row.keys() else None
         if sched_at_val is None:
-            sched_time = _compute_random_upload_time(windows, now, channel_id)
-            if sched_time is None:
-                logger.debug("Video %d: no upload window available, skipping", video_id)
-                continue
+            # ── v24: exponential backoff for retries ──
+            retry_count = 0
+            try:
+                retry_count = conn.execute(
+                    "SELECT COUNT(*) FROM generation_jobs "
+                    "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
+                    (video_id,),
+                ).fetchone()[0]
+            except Exception:
+                pass
+            if retry_count > 0:
+                # Exponential backoff: 10min * 2^(retry-1), max ~80min at 3 retries
+                backoff_min = 10 * (2 ** (retry_count - 1))
+                sched_time = now + timedelta(minutes=backoff_min)
+                logger.info(
+                    "Video %d: retry #%d — applying %dmin backoff (next: %s)",
+                    video_id, retry_count, backoff_min,
+                    sched_time.strftime("%H:%M"),
+                )
+            else:
+                sched_time = _compute_random_upload_time(windows, now, channel_id)
+                if sched_time is None:
+                    logger.debug("Video %d: no upload window available, skipping", video_id)
+                    continue
             # Store in DB for future cycles
             try:
                 db.update_video(video_id, scheduled_upload_at=sched_time.strftime('%Y-%m-%d %H:%M:%S'))
@@ -573,6 +598,27 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
              else "INMEDIATA")
         ),
     )
+
+    # ── v24: Secondary retry-limit guard (belt-and-suspenders with SQL exclusion) ──
+    retry_count = 0
+    try:
+        with db._connect() as _conn:
+            retry_count = _conn.execute(
+                "SELECT COUNT(*) FROM generation_jobs "
+                "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
+                (video_id,),
+            ).fetchone()[0]
+    except Exception:
+        pass
+    if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
+        logger.warning(
+            "Video %d: exceeded max upload retries (%d/%d) — marking as error",
+            video_id, retry_count, MAX_UPLOAD_RETRY_PER_VIDEO,
+        )
+        db.update_video(video_id, status="error",
+                         progress_phase="upload",
+                         progress=0)
+        return None
 
     # ── 5. Create upload job and dispatch ──
     import asyncio
