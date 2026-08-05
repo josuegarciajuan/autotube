@@ -62,16 +62,20 @@ export default function AlertsPanel() {
     return map[s] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'
   }
 
-  /** Highlight view_gap_detected alerts with a distinctive color */
+  /** Highlight special alert types with distinctive colors */
   function alertTypeBadge(a: Alert): string {
     if (a.alert_type === 'view_gap_detected') {
       return 'bg-orange-500/20 text-orange-400 border-orange-500/30'
+    }
+    if (a.alert_type.startsWith('platform_token_expired')) {
+      return 'bg-red-600/20 text-red-400 border-red-500/40'
     }
     return severityBadge(a.severity)
   }
 
   function alertTypeIcon(a: Alert): string {
     if (a.alert_type === 'view_gap_detected') return 'view_gap'
+    if (a.alert_type.startsWith('platform_token_expired')) return 'token_expired'
     return a.alert_type
   }
 

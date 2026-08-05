@@ -134,6 +134,12 @@ def check_all_health(db) -> dict:
     # ── Check 6: Auto-resolve alerts for completed entities ──
     resolved += _auto_resolve_completed(db)
 
+    # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
+    created += _check_platform_auth_errors(db)
+
+    # ── Check 8: Auto-resolve platform token alerts when uploads succeed ──
+    resolved += _auto_resolve_platform_tokens(db)
+
     logger.info(
         "Health check: %d alerts created, %d resolved",
         created, resolved,
@@ -526,6 +532,173 @@ def _auto_resolve_completed(db) -> int:
             conn.commit()
     except Exception as exc:
         logger.warning("Auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _check_platform_auth_errors(db) -> int:
+    """Alert when cross-platform uploads fail with authentication errors.
+
+    Scans platform_videos for recent failures matching token expiration,
+    invalid credentials, or permission-denied patterns (HTTP 401/403).
+    Creates one alert per channel+platform combination via system alerts
+    with entity_id = channel_id for per-channel dedup.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT pv.channel_id, pv.platform, pv.error_message,
+                          pv.created_at, ch.name as channel_name, ch.slug
+                   FROM platform_videos pv
+                   JOIN channels ch ON ch.id = pv.channel_id
+                   WHERE pv.status = 'failed'
+                     AND (
+                         pv.error_message LIKE '%token%'
+                         OR pv.error_message LIKE '%401%'
+                         OR pv.error_message LIKE '%403%'
+                         OR pv.error_message LIKE '%auth%'
+                         OR pv.error_message LIKE '%expired%'
+                         OR pv.error_message LIKE '%permission%'
+                         OR pv.error_message LIKE '%invalid%'
+                         OR pv.error_message LIKE '%Not authenticated%'
+                         OR pv.error_message LIKE '%credentials%'
+                     )
+                     AND pv.created_at > datetime('now', '-14 days')
+                   ORDER BY pv.created_at DESC
+                """
+            ).fetchall()
+
+            for row in rows:
+                alert_type = f"platform_token_expired_{row['platform']}"
+                channel_id = row["channel_id"]
+
+                # Dedup: already an unresolved alert for this channel+platform?
+                existing = conn.execute(
+                    """SELECT id FROM pipeline_alerts
+                       WHERE entity_type = 'system'
+                         AND entity_id = ?
+                         AND alert_type = ?
+                         AND resolved = 0
+                       LIMIT 1""",
+                    (channel_id, alert_type),
+                ).fetchone()
+                if existing:
+                    # Update message to reflect latest error
+                    conn.execute(
+                        "UPDATE pipeline_alerts SET message = ? WHERE id = ?",
+                        (_build_platform_token_message(row), existing["id"]),
+                    )
+                    continue
+
+                # Was there a successful upload AFTER this failure?
+                success = conn.execute(
+                    """SELECT id FROM platform_videos
+                       WHERE channel_id = ? AND platform = ?
+                         AND status = 'published'
+                         AND uploaded_at > ?
+                       LIMIT 1""",
+                    (channel_id, row["platform"], row["created_at"]),
+                ).fetchone()
+                if success:
+                    continue  # already fixed
+
+                # Create alert
+                platform_label = row["platform"].title()
+                ch_name = row["channel_name"] or "?"
+                title = f"Token de {platform_label} expirado/revocado — {ch_name}"
+                message = _build_platform_token_message(row)
+                metadata = {
+                    "platform": row["platform"],
+                    "channel_slug": row["slug"],
+                    "last_error": row["error_message"][:500] if row["error_message"] else "",
+                }
+
+                created += _maybe_create_alert(
+                    db, conn,
+                    entity_type="system",
+                    entity_id=channel_id,
+                    channel_id=channel_id,
+                    alert_type=alert_type,
+                    severity="critical",
+                    title=title,
+                    message=message,
+                    metadata=metadata,
+                )
+
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Platform auth check failed: %s", exc)
+    return created
+
+
+def _build_platform_token_message(row: dict) -> str:
+    """Build a human-readable alert message for a platform auth failure."""
+    platform = row.get("platform", "?").title()
+    ch_name = row.get("channel_name", "?")
+    error = (row.get("error_message") or "Error de autenticación desconocido")[:300]
+    ch_id = row.get("channel_id", 0)
+
+    return (
+        f"El último intento de publicar en {platform} para el canal "
+        f"«{ch_name}» falló con un error de autenticación.\n\n"
+        f"Error: {error}\n\n"
+        f"🔧 Acción requerida: renovar el token/API key en "
+        f"Canales → {ch_name} → Cuentas Sociales → {platform}.\n"
+        f"Luego probar la conexión con el botón «Probar».\n\n"
+        f"Las siguientes generaciones de video NO se publicarán "
+        f"en {platform} hasta que el token sea renovado y validado."
+    )
+
+
+def _auto_resolve_platform_tokens(db) -> int:
+    """Auto-resolve platform token alerts when a subsequent upload succeeds.
+
+    If a cross-platform upload publishes successfully AFTER the alert
+    was created, the token issue has been fixed and we auto-resolve.
+    """
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            alerts = conn.execute(
+                """SELECT id, channel_id, alert_type, created_at
+                   FROM pipeline_alerts
+                   WHERE alert_type LIKE 'platform_token_expired_%'
+                     AND resolved = 0
+                """
+            ).fetchall()
+
+            for alert in alerts:
+                alert_type = alert["alert_type"]
+                platform = alert_type.replace("platform_token_expired_", "")
+                channel_id = alert["channel_id"]
+
+                # Check for successful upload after alert was created
+                success = conn.execute(
+                    """SELECT id FROM platform_videos
+                       WHERE channel_id = ? AND platform = ?
+                         AND status = 'published'
+                         AND uploaded_at > ?
+                       LIMIT 1""",
+                    (channel_id, platform, alert["created_at"]),
+                ).fetchone()
+
+                if success:
+                    conn.execute(
+                        """UPDATE pipeline_alerts
+                           SET resolved = 1, resolved_at = datetime('now'),
+                               message = message || '\n[Auto-resuelto: nuevo upload exitoso en ' || ? || ']'
+                           WHERE id = ?""",
+                        (platform, alert["id"]),
+                    )
+                    resolved += 1
+                    logger.info(
+                        "Auto-resolved %s alert #%d (channel %s published to %s)",
+                        alert_type, alert["id"], channel_id, platform,
+                    )
+
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Platform token auto-resolve failed: %s", exc)
     return resolved
 
 
