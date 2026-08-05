@@ -442,7 +442,9 @@ async def _publish_verify_loop():
                 pass
             
             db = get_db()
-            data = db.get_pipeline_status()
+            # Offload to thread pool — get_pipeline_status() makes sync sqlite3
+            # calls that can block the event loop during lock contention.
+            data = await asyncio.to_thread(db.get_pipeline_status)
             warming = data.get("warming", [])
             if warming:
                 logger.debug("Publish verify ping: %d warming video(s)", len(warming))
@@ -499,7 +501,9 @@ async def _health_monitor_loop():
         try:
             from api.services.lifecycle_monitor import check_all_health
             db = get_db()
-            result = check_all_health(db)
+            # Offload to thread pool — check_all_health() makes sync sqlite3
+            # calls that can block the event loop during lock contention.
+            result = await asyncio.to_thread(check_all_health, db)
             if result.get("alerts_created", 0) > 0:
                 logger.info("Health check: %d new alerts created", result["alerts_created"])
             # Always broadcast system snapshot to monitor WS clients
@@ -1057,8 +1061,13 @@ async def _calculate_optimal_slots():
         logger.error("Optimal slots calculation failed: %s", e)
 
 
-async def _process_due_schedules():
-    """Find and execute due schedules."""
+def _process_due_schedules_sync() -> list[dict]:
+    """Synchronous DB work for schedule dispatch. Returns list of dispatch payloads.
+
+    Offloaded to thread pool by _process_due_schedules() so that sqlite3.connect()
+    (with busy_timeout=30000) and ExtendedDatabase calls do not block the asyncio
+    event loop.
+    """
     import sqlite3, logging
     from datetime import datetime
     from config.settings import DATABASE_PATH
@@ -1081,7 +1090,9 @@ async def _process_due_schedules():
     
     if not rows:
         conn.close()
-        return
+        return []
+    
+    dispatch_payloads = []
     
     for row in rows:
         s = dict(row)
@@ -1092,7 +1103,6 @@ async def _process_due_schedules():
         if active_for_channel:
             logger.debug("Schedule #%d skipped: channel %d already has active job #%d",
                         s["id"], s["channel_id"], active_for_channel["id"])
-            # Push next_run_at forward 5 min to avoid tight retry loop
             try:
                 conn.execute(
                     "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
@@ -1154,7 +1164,6 @@ async def _process_due_schedules():
                 
                 # Update schedule: calculate next run
                 if s["schedule_type"] == "recurring":
-                    # Sanitize interval_h (must be a positive integer) to prevent SQL injection
                     try:
                         interval_h = int(s["interval_h"])
                         if interval_h <= 0:
@@ -1167,7 +1176,6 @@ async def _process_due_schedules():
                         (now, str(interval_h), video_id, s["id"]),
                     )
                 else:
-                    # One-time: deactivate after run
                     conn.execute(
                         "UPDATE content_schedules SET last_run_at = ?, active = 0, video_id = ? WHERE id = ?",
                         (now, video_id, s["id"]),
@@ -1175,29 +1183,13 @@ async def _process_due_schedules():
                 conn.commit()
             # ── End dispatch critical section ────────────────────
             
-            # Fire and forget the generation (don't await)
-            import asyncio
-            from api.services.generation_service import start_generation_job, start_generation_job_subprocess, USE_SUBPROCESS_WORKER
-            
-            if USE_SUBPROCESS_WORKER:
-                asyncio.create_task(
-                    start_generation_job_subprocess(
-                        job_id=job_id,
-                        channel_id=s["channel_id"],
-                        video_id=video_id,
-                        action=s["action"],
-                    )
-                )
-            else:
-                asyncio.create_task(
-                    start_generation_job(
-                        job_id=job_id,
-                        channel_id=s["channel_id"],
-                        video_id=video_id,
-                        action=s["action"],
-                        content_id=s.get("content_id"),
-                    )
-                )
+            dispatch_payloads.append({
+                "job_id": job_id,
+                "channel_id": s["channel_id"],
+                "video_id": video_id,
+                "action": s["action"],
+                "content_id": s.get("content_id"),
+            })
             
         except Exception as e:
             logger.error(f"Schedule #{s['id']} failed: {e}")
@@ -1208,6 +1200,48 @@ async def _process_due_schedules():
             conn.commit()
     
     conn.close()
+    return dispatch_payloads
+
+
+async def _process_due_schedules():
+    """Find and execute due schedules (async wrapper).
+
+    All synchronous DB operations (sqlite3.connect, ExtendedDatabase methods,
+    threading.Lock acquisition) are offloaded to a thread pool so that none of
+    them block the asyncio event loop — preventing watchdog timeouts during
+    SQLite lock contention with the worker process.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.scheduler")
+    
+    dispatch_payloads = await asyncio.to_thread(_process_due_schedules_sync)
+    
+    if not dispatch_payloads:
+        return
+    
+    # Fire and forget the generation (don't await) — must stay in event loop
+    from api.services.generation_service import start_generation_job, start_generation_job_subprocess, USE_SUBPROCESS_WORKER
+    
+    for payload in dispatch_payloads:
+        if USE_SUBPROCESS_WORKER:
+            asyncio.create_task(
+                start_generation_job_subprocess(
+                    job_id=payload["job_id"],
+                    channel_id=payload["channel_id"],
+                    video_id=payload["video_id"],
+                    action=payload["action"],
+                )
+            )
+        else:
+            asyncio.create_task(
+                start_generation_job(
+                    job_id=payload["job_id"],
+                    channel_id=payload["channel_id"],
+                    video_id=payload["video_id"],
+                    action=payload["action"],
+                    content_id=payload.get("content_id"),
+                )
+            )
 
 
 async def _detect_and_clean_orphans():
