@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 _config_cache: dict[str, SimpleNamespace] = {}
 
 
+def _load_defaults_module() -> object | None:
+    """Import ``config.defaults`` — universal fallback for all channels."""
+    try:
+        return importlib.import_module("config.defaults")
+    except ImportError:
+        logger.warning("Cannot load config.defaults — universal defaults unavailable")
+        return None
+
+
 def _load_python_module(slug: str) -> object | None:
     """Import ``config.{slug}_config`` as a Python module."""
     try:
@@ -116,20 +125,39 @@ def _clean_duplicate_keys(db_config: dict, py_safe: dict) -> dict:
     return db_config
 
 
-def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
-    """Merge Python module attributes with DB config overrides.
+def _merge_configs(
+    py_mod: object,
+    db_config: dict | None,
+    defaults_mod: object | None = None,
+) -> SimpleNamespace:
+    """Merge defaults + channel module + DB config into a single namespace.
 
-    DB keys take priority.  Keys are matched case-insensitively
-    (both ``CANAL_TONE`` and ``canal_tone`` are recognised).
+    Priority order (highest wins):
+      1. DB ``channels.config_json``  (UI edits, immediate effect)
+      2. ``config.{slug}_config.py``  (per-channel overrides)
+      3. ``config.defaults.py``       (universal fallback)
+
+    Keys are matched case-insensitively.
     """
-    # Start with all non-private, non-callable module-level attributes
+    # Build merged dict, starting with defaults as the base layer
     merged: dict[str, object] = {}
+
+    # ── Layer 1: Universal defaults ────────────────────────────
+    if defaults_mod is not None:
+        for name, value in vars(defaults_mod).items():
+            if name.startswith("_"):
+                continue
+            if inspect.ismodule(value) or inspect.isfunction(value) or inspect.isclass(value):
+                continue
+            if isinstance(value, (dict, list, str, int, float, bool, tuple, type(None))):
+                merged[name] = value
+
+    # ── Layer 2: Per-channel Python module ─────────────────────
     for name, value in vars(py_mod).items():
         if name.startswith("_"):
             continue
         if inspect.ismodule(value) or inspect.isfunction(value) or inspect.isclass(value):
             continue
-        # Only serialisable types — the bridge won't carry arbitrary objects
         if isinstance(value, (dict, list, str, int, float, bool, tuple, type(None))):
             merged[name] = value
 
@@ -177,6 +205,8 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
     for identity_key in ("CANAL_DISPLAY_NAME", "CANAL_NAME"):
         if identity_key in vars(py_mod):
             merged[identity_key] = vars(py_mod)[identity_key]
+        elif defaults_mod is not None and identity_key in vars(defaults_mod):
+            merged[identity_key] = vars(defaults_mod)[identity_key]
 
     # Add pseudo-attributes so code that expects module-style access works
     # (e.g. cfg.REDDIT_SUBREDDITS and cfg.reddit_subreddits)
@@ -185,9 +215,12 @@ def _merge_configs(py_mod: object, db_config: dict | None) -> SimpleNamespace:
             merged[key.lower()] = merged[key]
 
     # JSON round-trip turns tuples into lists. Restore all tuple-valued
-    # config entries using the Python module as the authoritative reference.
+    # config entries using the Python module + defaults as the authoritative reference.
     for key in list(merged.keys()):
+        # Prefer channel module value, fall back to defaults
         py_val = vars(py_mod).get(key)
+        if py_val is None and defaults_mod is not None:
+            py_val = vars(defaults_mod).get(key)
         if py_val is None:
             continue
         # Top-level tuples (e.g. VIDEO_RESOLUTION, INTRO_BG_COLOR)
@@ -208,7 +241,8 @@ def get_channel_config(slug: str, force_reload: bool = False) -> SimpleNamespace
 
     Priority order (highest wins):
     1. DB ``channels.config_json`` (can be edited via UI)
-    2. Python module ``config.{slug}_config`` (authoritative defaults)
+    2. Python module ``config.{slug}_config`` (per-channel overrides)
+    3. ``config.defaults.py`` (universal fallback for all channels)
 
     Results are cached per slug.  Pass ``force_reload=True`` to bypass
     the cache (used after a config sync).
@@ -228,15 +262,17 @@ def get_channel_config(slug: str, force_reload: bool = False) -> SimpleNamespace
     if py_mod is None:
         raise ImportError(f"Cannot load config for slug '{slug}'")
 
+    defaults_mod = _load_defaults_module()
     db_config = _load_db_config(slug)
-    merged = _merge_configs(py_mod, db_config)
+    merged = _merge_configs(py_mod, db_config, defaults_mod)
 
     _config_cache[cache_key] = merged
     logger.debug(
-        "Config bridge loaded: slug=%s py_fields=%d db_override=%s",
+        "Config bridge loaded: slug=%s py_fields=%d db_override=%s defaults=%s",
         slug,
         len(vars(merged)),
         "yes" if db_config else "no",
+        "yes" if defaults_mod else "no",
     )
     return merged
 
