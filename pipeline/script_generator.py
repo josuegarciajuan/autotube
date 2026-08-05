@@ -428,6 +428,82 @@ class ScriptGenerator:
 
         return len(issues) == 0, issues, warnings
 
+    def _inject_end_hook(self, script: dict) -> Optional[dict]:
+        """Ask the LLM to generate an end-hook and inject it into the script.
+
+        Called when ``_validate_content_structure`` rejects a script
+        *only* because the end-hook is missing — all other checks passed.
+        Instead of discarding the entire script and retrying from scratch,
+        we ask the LLM to generate just the end-hook paragraph and append
+        it before the CTA block.
+
+        Returns the modified script dict on success, or None if the LLM
+        call fails.
+        """
+        bloques = script.get('bloques', [])
+        if not bloques:
+            return None
+
+        last_blocks_text = '\n'.join(
+            b.get('texto', '') for b in bloques[-3:]
+        )
+
+        prompt = (
+            "Eres un guionista de documentales en español. "
+            "Añade UN párrafo de cierre (end-hook) que anticipe "
+            "el próximo video del canal. Debe conectar con el "
+            "contenido del guion actual.\n\n"
+            f"Últimos bloques del guion:\n{last_blocks_text}\n\n"
+            "End-hook (1 solo párrafo en español, máximo 60 palabras):\n"
+            'Responde con JSON: {"end_hook": "texto aquí"}'
+        )
+
+        try:
+            result = self._call_with_failover(
+                phase="endhook",
+                thinking=False,
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=min(200, OPENAI_MAX_TOKENS),
+            )
+        except Exception as exc:
+            logger.warning("End-hook injection LLM call failed: %s", exc)
+            return None
+
+        end_hook = (result or {}).get("end_hook", "").strip()
+        if not end_hook or len(end_hook) < 15:
+            logger.warning(
+                "End-hook injection: LLM returned empty or too-short text"
+            )
+            return None
+
+        # ── Inject the end-hook before the CTA block ──────────
+        # The CTA is typically the last block.  Detect it by checking
+        # if the final block contains common outro / subscribe patterns.
+        cta_last = False
+        if bloques:
+            last_text = bloques[-1].get('texto', '').lower()
+            if any(kw in last_text for kw in (
+                'suscríbete', 'suscribete', 'suscríbanse',
+                'comparte', 'dale like',
+            )):
+                cta_last = True
+
+        if cta_last:
+            cta_block = bloques.pop()
+            bloques.append({"texto": end_hook})
+            bloques.append(cta_block)
+        else:
+            bloques.append({"texto": end_hook})
+
+        logger.info(
+            "End-hook injected: %d chars before %s",
+            len(end_hook), "CTA" if cta_last else "end",
+        )
+        return script
+
     def _record_phase_metric(
         self, phase: str, success: bool,
         error_type: str = None, duration_ms: int = 0,
@@ -676,6 +752,29 @@ class ScriptGenerator:
                 "validation", False, "content_structure",
                 details={"issues": issues, "warnings": warnings},
             )
+
+            # ── Auto-repair: end-hook injection ──────────────
+            # If the ONLY issue is a missing end-hook, repair it
+            # in-place instead of rejecting the entire script.
+            # This saves otherwise-valid scripts when the LLM
+            # consistently omits the end-hook (common with DeepSeek).
+            if not valid and len(issues) == 1 and any(
+                "end hook" in i.lower() for i in issues
+            ):
+                logger.info(
+                    "generate_with_retry: attempting end-hook auto-repair "
+                    "(attempt %d/%d)",
+                    attempt + 1, MAX_GENERATION_ATTEMPTS,
+                )
+                repaired = self._inject_end_hook(script)
+                if repaired:
+                    logger.info(
+                        "generate_with_retry: end-hook auto-repair "
+                        "SUCCESS (attempt %d/%d)",
+                        attempt + 1, MAX_GENERATION_ATTEMPTS,
+                    )
+                    return repaired
+
             if attempt < MAX_GENERATION_ATTEMPTS - 1:
                 time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
 

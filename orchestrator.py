@@ -118,6 +118,22 @@ class PipelineOrchestrator:
                 "reddit": RedditScraper(config=self.config),
                 "wikipedia": WikipediaScraper(config=self.config),
             }
+            # ── Secondary scrapers (fallback when primaries yield too little) ──
+            self._secondary_scrapers = {}
+            try:
+                from scrapers.atlas_obscura import AtlasObscuraScraper
+                self._secondary_scrapers["atlas_obscura"] = AtlasObscuraScraper(
+                    config=self.config,
+                )
+                logger.debug("[%s] Atlas Obscura scraper available as fallback", self.canal)
+            except Exception as e:
+                logger.debug("[%s] Atlas Obscura scraper unavailable: %s", self.canal, e)
+            try:
+                from scrapers.quora import QuoraScraper
+                self._secondary_scrapers["quora"] = QuoraScraper(config=self.config)
+                logger.debug("[%s] Quora scraper available as fallback", self.canal)
+            except Exception as e:
+                logger.debug("[%s] Quora scraper unavailable: %s", self.canal, e)
             # Add viral scraper if enabled for this channel
             if getattr(self.config, "VIRAL_ENABLED", False):
                 try:
@@ -351,6 +367,33 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.error(f"[{self.canal}] {scraper_name} scrape failed: {e}")
                 _safe_log_error(self.db, self.canal, "scrape", str(e))
+
+        # ── Fallback: if primaries yielded too little, try secondaries ──
+        MIN_CONTENT_THRESHOLD = 3
+        if added < MIN_CONTENT_THRESHOLD and self._secondary_scrapers:
+            logger.warning(
+                "[%s] Primary scrapers only added %d items (< %d) — "
+                "activating secondary scrapers: %s",
+                self.canal, added, MIN_CONTENT_THRESHOLD,
+                list(self._secondary_scrapers.keys()),
+            )
+            for scraper_name, s in self._secondary_scrapers.items():
+                try:
+                    self._emit_progress(8, "scrape",
+                                        f"Scraping {scraper_name} (fallback)...")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(s.save_to_db, self.db)
+                        count = future.result(timeout=300)
+                    added += count
+                    logger.info(
+                        "[%s] %s (fallback): %d items scraped",
+                        self.canal, scraper_name, count,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[%s] %s fallback scrape failed: %s",
+                        self.canal, scraper_name, e,
+                    )
 
         self._emit_progress(10, "scrape", f"Contenido obtenido: {added} fuentes")
         duration_ms = int((time.time() - start) * 1000)
