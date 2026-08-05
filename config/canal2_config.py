@@ -711,7 +711,7 @@ LOGO_PATH = ""
 # ═══════════════════════════════════════════════════════════════════
 # YOUTUBE METADATA
 # ═══════════════════════════════════════════════════════════════════
-YT_CATEGORY_ID = "24"              # Entertainment
+YT_CATEGORY_ID = "27"              # Education (better indexing/search reach than Entertainment)
 
 YT_PRIVACY_STATUS = "public"
 
