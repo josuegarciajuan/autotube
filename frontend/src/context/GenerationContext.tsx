@@ -6,6 +6,7 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api'
+import { initAllChannelMaps } from '../lib/channelConfig'
 
 export interface ActiveJob {
   jobId: number
@@ -104,9 +105,13 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
     staleTime: 300_000, // 5 min — channels rarely change
   })
 
-  // Update channel names ref when channels load
+  // Update channel names and maps when channels load
   useEffect(() => {
     if (channels) {
+      initAllChannelMaps(channels.map((ch: any) => ({
+        id: ch.id, slug: ch.slug,
+        canal_initials: ch.config_json?.CANAL_INITIALS || ch.canal_initials,
+      })))
       for (const ch of channels) {
         channelNamesRef.current.set(ch.id, ch.name || ch.slug || `Canal ${ch.id}`)
       }

@@ -1,29 +1,88 @@
-/** Channel display configuration — single source of truth for all UI components.
+/** Channel display configuration — derived dynamically, no hardcoded slugs.
  *
- *  When a new channel is added to the database, add its entry here to ensure
- *  it renders with the correct abbreviation, dot color, and style across all
- *  scheduling / pipeline / planning views.
+ *  Colors are assigned from a rotating palette based on the channel id.
+ *  Abbreviations come from CANAL_INITIALS in the channel config (or auto-derived).
+ *  All functions accept a channel object with at minimum { slug, id }.
  */
 
-// ── 3-letter abbreviation (used in all pipeline & schedule components) ──
-export const CHANNEL_SHORT: Record<string, string> = {
-  canal2: 'SIN',
-  canal3: 'CIV',
-  canal4: 'EXP',
-  canal5: 'ANM',
-  test: 'TST',
-};
+// ── Color palette (8 colors, rotated by channel.id) ──────────────────
+const PALETTE = [
+  { name: 'cyan',     dot: 'bg-neon-cyan',    text: 'text-neon-cyan',    bg: 'bg-neon-cyan/10',    border: 'border-neon-cyan/30',    pill_bg: 'bg-neon-cyan/20',    table_bg: 'bg-neon-cyan/15' },
+  { name: 'amber',    dot: 'bg-amber-400',     text: 'text-amber-400',    bg: 'bg-amber-400/10',    border: 'border-amber-400/30',    pill_bg: 'bg-amber-400/20',    table_bg: 'bg-amber-400/15' },
+  { name: 'purple',   dot: 'bg-purple-400',    text: 'text-purple-400',   bg: 'bg-purple-400/10',   border: 'border-purple-400/30',   pill_bg: 'bg-purple-400/20',   table_bg: 'bg-purple-400/15' },
+  { name: 'red',      dot: 'bg-neon-red',      text: 'text-neon-red',     bg: 'bg-neon-red/10',     border: 'border-neon-red/30',     pill_bg: 'bg-neon-red/20',     table_bg: 'bg-neon-red/15' },
+  { name: 'emerald',  dot: 'bg-emerald-400',   text: 'text-emerald-400',  bg: 'bg-emerald-400/10',  border: 'border-emerald-400/30',  pill_bg: 'bg-emerald-400/20',  table_bg: 'bg-emerald-400/15' },
+  { name: 'sky',      dot: 'bg-sky-400',       text: 'text-sky-400',      bg: 'bg-sky-400/10',      border: 'border-sky-400/30',      pill_bg: 'bg-sky-400/20',      table_bg: 'bg-sky-400/15' },
+  { name: 'pink',     dot: 'bg-pink-400',      text: 'text-pink-400',     bg: 'bg-pink-400/10',     border: 'border-pink-400/30',     pill_bg: 'bg-pink-400/20',     table_bg: 'bg-pink-400/15' },
+  { name: 'orange',   dot: 'bg-orange-400',    text: 'text-orange-400',   bg: 'bg-orange-400/10',   border: 'border-orange-400/30',   pill_bg: 'bg-orange-400/20',   table_bg: 'bg-orange-400/15' },
+];
 
-// ── Dot (status indicator) color — shared across views ────────────────
-export const CHANNEL_DOT: Record<string, string> = {
-  canal2: 'bg-neon-cyan',
-  canal3: 'bg-amber-400',
-  canal4: 'bg-purple-400',
-  canal5: 'bg-neon-red',
-  test: 'bg-gray-400',
-};
+interface ChannelLike {
+  id?: number;
+  slug?: string;
+  channel_id?: number;
+  channel_slug?: string;
+  canal_initials?: string;
+}
 
-// ── Full channel style object — used by PipelineView & Scheduling ─────
+function _slug(ch: ChannelLike): string {
+  return (ch as any).slug || (ch as any).channel_slug || '';
+}
+
+function _id(ch: ChannelLike): number {
+  return (ch as any).id || (ch as any).channel_id || 0;
+}
+
+function _color(ch: ChannelLike) {
+  // Deterministic: use channel id to pick from palette, fallback to hash of slug
+  const id = _id(ch);
+  const index = id > 0 ? (id - 1) % PALETTE.length : _hashSlug(_slug(ch)) % PALETTE.length;
+  return PALETTE[index];
+}
+
+function _hashSlug(slug: string): number {
+  let hash = 0;
+  for (let i = 0; i < slug.length; i++) {
+    hash = ((hash << 5) - hash) + slug.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+// ── 3-letter abbreviation ────────────────────────────────────────────
+export function getChannelShort(ch: ChannelLike): string {
+  const initials = (ch as any).canal_initials;
+  if (initials && typeof initials === 'string' && initials.length >= 2) return initials.substring(0, 3).toUpperCase();
+  const slug = _slug(ch);
+  if (!slug) return '???';
+  // Auto-derive: take first 3 alphanumeric chars
+  const clean = slug.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return clean.substring(0, 3) || 'CHN';
+}
+
+// Backward-compat map (derived from channel list at runtime)
+export const CHANNEL_SHORT: Record<string, string> = {};
+
+export function initChannelShort(channels: ChannelLike[]) {
+  for (const ch of channels) {
+    CHANNEL_SHORT[_slug(ch)] = (ch as any).canal_initials || _slug(ch).substring(0, 3).toUpperCase();
+  }
+}
+
+// ── Dot color ────────────────────────────────────────────────────────
+export function getChannelDot(ch: ChannelLike): string {
+  return _color(ch).dot;
+}
+
+export const CHANNEL_DOT: Record<string, string> = {};
+
+export function initChannelDot(channels: ChannelLike[]) {
+  for (const ch of channels) {
+    CHANNEL_DOT[_slug(ch)] = getChannelDot(ch);
+  }
+}
+
+// ── Full channel style ────────────────────────────────────────────────
 export interface ChannelStyle {
   dot: string;
   text: string;
@@ -32,62 +91,57 @@ export interface ChannelStyle {
   accent?: string;
 }
 
-export const CHANNEL_STYLES: Record<string, ChannelStyle> = {
-  canal2: {
-    dot: 'bg-neon-cyan',
-    text: 'text-neon-cyan',
-    bg: 'bg-neon-cyan/10',
-    border: 'border-neon-cyan/30',
-    accent: 'neon-cyan',
-  },
-  canal3: {
-    dot: 'bg-amber-400',
-    text: 'text-amber-400',
-    bg: 'bg-amber-400/10',
-    border: 'border-amber-400/30',
-    accent: 'amber-400',
-  },
-  canal4: {
-    dot: 'bg-purple-400',
-    text: 'text-purple-400',
-    bg: 'bg-purple-400/10',
-    border: 'border-purple-400/30',
-    accent: 'purple-400',
-  },
-  canal5: {
-    dot: 'bg-neon-red',
-    text: 'text-neon-red',
-    bg: 'bg-neon-red/10',
-    border: 'border-neon-red/30',
-    accent: 'neon-red',
-  },
-  test: {
-    dot: 'bg-gray-400',
-    text: 'text-gray-400',
-    bg: 'bg-gray-400/10',
-    border: 'border-gray-400/30',
-  },
-};
+export function getChannelStyles(ch: ChannelLike): ChannelStyle {
+  const c = _color(ch);
+  return { dot: c.dot, text: c.text, bg: c.bg, border: c.border, accent: c.name };
+}
 
-// ── Pill-style (string) class — used by DailySchedule & UpcomingExecutions ──
-export const CHANNEL_PILL: Record<string, string> = {
-  canal2: 'bg-neon-cyan/20 text-neon-cyan border-neon-cyan/30',
-  canal3: 'bg-amber-400/20 text-amber-400 border-amber-400/30',
-  canal4: 'bg-purple-400/20 text-purple-400 border-purple-400/30',
-  canal5: 'bg-neon-red/20 text-neon-red border-neon-red/30',
-  test: 'bg-gray-400/20 text-gray-400 border-gray-400/30',
-};
+export const CHANNEL_STYLES: Record<string, ChannelStyle> = {};
 
-// ── Table-row style — used by ChannelScheduleTable ────────────────────
-export const CHANNEL_TABLE_ROW: Record<string, { bg: string; text: string; border: string; dot: string }> = {
-  canal2: { bg: 'bg-neon-cyan/15', text: 'text-neon-cyan', border: 'border-neon-cyan/30', dot: 'bg-neon-cyan' },
-  canal3: { bg: 'bg-amber-400/15', text: 'text-amber-400', border: 'border-amber-400/30', dot: 'bg-amber-400' },
-  canal4: { bg: 'bg-purple-400/15', text: 'text-purple-400', border: 'border-purple-400/30', dot: 'bg-purple-400' },
-  canal5: { bg: 'bg-neon-red/15', text: 'text-neon-red', border: 'border-neon-red/30', dot: 'bg-neon-red' },
-  test: { bg: 'bg-gray-400/15', text: 'text-gray-400', border: 'border-gray-400/30', dot: 'bg-gray-400' },
-};
+export function initChannelStyles(channels: ChannelLike[]) {
+  for (const ch of channels) {
+    CHANNEL_STYLES[_slug(ch)] = getChannelStyles(ch);
+  }
+}
 
-// ── Default / fallback for unknown channels ───────────────────────────
+// ── Pill style ────────────────────────────────────────────────────────
+export function getChannelPill(ch: ChannelLike): string {
+  const c = _color(ch);
+  return `${c.pill_bg} ${c.text} ${c.border}`;
+}
+
+export const CHANNEL_PILL: Record<string, string> = {};
+
+export function initChannelPill(channels: ChannelLike[]) {
+  for (const ch of channels) {
+    CHANNEL_PILL[_slug(ch)] = getChannelPill(ch);
+  }
+}
+
+// ── Table row style ───────────────────────────────────────────────────
+export function getChannelTableRow(ch: ChannelLike): { bg: string; text: string; border: string; dot: string } {
+  const c = _color(ch);
+  return { bg: c.table_bg, text: c.text, border: c.border, dot: c.dot };
+}
+
+export const CHANNEL_TABLE_ROW: Record<string, { bg: string; text: string; border: string; dot: string }> = {};
+
+export function initChannelTableRow(channels: ChannelLike[]) {
+  for (const ch of channels) {
+    CHANNEL_TABLE_ROW[_slug(ch)] = getChannelTableRow(ch);
+  }
+}
+
+// ── Initialize all maps at once (call once after fetching channels) ──
+export function initAllChannelMaps(channels: ChannelLike[]) {
+  initChannelShort(channels);
+  initChannelDot(channels);
+  initChannelStyles(channels);
+  initChannelPill(channels);
+  initChannelTableRow(channels);
+}
+
+// ── Default / fallback styles (unchanged) ────────────────────────────
 export const DEFAULT_STYLE: ChannelStyle = {
   dot: 'bg-gray-400',
   text: 'text-gray-400',

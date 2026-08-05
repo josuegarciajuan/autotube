@@ -112,7 +112,7 @@ export const api = {
   deleteContent: (id: number) => request<any>(`/content/${id}`, { method: 'DELETE' }),
   scheduleContent: (id: number, scheduledAt: string) => 
     request<any>(`/content/${id}/schedule`, { method: 'POST', body: JSON.stringify({ scheduled_at: scheduledAt }) }),
-  getScripts: (canal = 'canal2') => request<any[]>(`/content/scripts/list?canal=${canal}`),
+  getScripts: (canal: string) => request<any[]>(`/content/scripts/list?canal=${canal}`),
 
   // Jobs
   getJobs: (status?: string, channelId?: number, limit?: number) => {
