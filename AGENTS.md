@@ -12,6 +12,203 @@
 | 2 | canal3 | Civilizaciones Olvidadas | — | tokens/canal3.pickle |
 | 3 | canal4 | Expediciones sin retorno | — | — |
 
+## 🆕 Crear un canal nuevo — metodología plantillable
+
+**Principio:** El código es genérico. Los datos son del canal. No se hardcodea nada.
+
+### Arquitectura que lo hace posible
+
+| Capa | Archivo | Qué aporta |
+|---|---|---|
+| **Defaults heredables** | `config/defaults.py` | ~135 parámetros compartidos (test mode, media, transiciones, música, shorts, etc.) |
+| **Prompts parametrizados** | `prompts/base_prompts.py` | Templates LLM que derivan el lenguaje del nicho desde `CANAL_NARRATIVE_STYLE` |
+| **Config por canal** | `config/{slug}_config.py` | Solo ~40-60 parámetros específicos del nicho (identidad, tono, fuentes, estilo visual) |
+| **Frontend dinámico** | `frontend/src/lib/channelConfig.ts` | Colores asignados automáticamente por `channel.id`, abreviaturas desde `CANAL_INITIALS` |
+| **Google Accounts** | `channels.google_account` (DB) | Se consulta en runtime, sin mapas hardcodeados |
+
+### Proceso de creación (2 pasos)
+
+#### Paso 1 — Diseño conceptual (conversación)
+El usuario describe la idea del canal. Extraemos y consensuamos:
+
+| Dato | Ejemplo | Obligatorio |
+|---|---|---|
+| **Nombre del canal** | `"Anomalías Médicas"` | ✅ |
+| **Slug** | `"canal6"` o `"anomalias-medicas"` | ✅ |
+| **Nicho / temática** | Casos clínicos inexplicables, enfermedades raras | ✅ |
+| **Estilo narrativo** | `"documental médico de asombro"` | ✅ |
+| **YouTube Handle** | `@AnomaliasMedicas` | Opcional (si ya existe el canal) |
+| **Cuenta Google** | `tracatrack` o `burrianacasa2026` | Opcional (para auto-marcado IA) |
+| **Tagline** | Frase de 1-2 líneas que define el canal | ✅ |
+| **Duración objetivo** | 8-14 min, 6-10 min, etc. | ✅ (afecta PROD_SCRIPT_WORDS) |
+| **Categoría YouTube** | 24 (Entertainment) o 27 (Education) | ✅ |
+| **Tono** | Descripción detallada para el LLM | ✅ |
+| **Audiencia** | Demográficos y psicográficos | ✅ |
+| **Fuentes de contenido** | Reddit subs, Wikipedia cats, RSS feeds | ✅ |
+| **Estilo visual** | Paleta de colores, modificadores de imagen | ✅ |
+
+#### Paso 2 — Ejecución (el agente crea todo)
+Una vez claros los datos, se ejecutan estas acciones en orden:
+
+```
+1. Crear config/{slug}_config.py
+   → Solo parámetros específicos (~500 líneas máx)
+   → No importa defaults.py directamente — el bridge hace merge automático
+
+2. Crear el canal en el panel web:
+   → Ir a http://localhost:5173 → Canales → Nuevo Canal
+   → Rellenar nombre, slug, youtube_handle, google_account
+   → La API genera config_json automáticamente desde defaults + identidad
+
+3. Sincronizar config Python → DB:
+   → Botón "Sync Python" en la página del canal
+   → O: curl -X POST localhost:8000/api/channels/{id}/sync-config
+
+4. Verificar que la config carga correctamente:
+   python3 -c "from config.config_bridge import get_channel_config; cfg = get_channel_config('{slug}'); print(cfg.CANAL_DISPLAY_NAME, cfg.SUBTITLE_FONT_SIZE)"
+
+5. (Opcional) Autenticar YouTube:
+   → API: POST /api/channels/{id}/auth-start → da URL de OAuth
+   → Abrir URL en navegador, autorizar, copiar código
+   → API: POST /api/channels/{id}/auth-code → guarda token en tokens/{slug}.pickle
+
+6. (Opcional) Generar assets del canal:
+   → API: POST /api/channels/{id}/generate-profile
+   → Genera banner + avatar + descripción vía Pollo AI
+   → O hacerlo manualmente en YouTube Studio
+
+7. Configurar planning:
+   → Ir a Planificación → ajustar videos/día, shorts/día, etc.
+
+8. Test rápido de generación:
+   python3 test_video.py --canal {slug} --skip-scrape --quick
+```
+
+### Parámetros clave del archivo de config
+
+El archivo `config/{slug}_config.py` debe definir estos bloques (el resto se hereda de `defaults.py`):
+
+```python
+# IDENTITY (obligatorio)
+CANAL_NAME = "{slug}"
+CANAL_DISPLAY_NAME = "{Nombre}"
+CANAL_TAGLINE = "{tagline}"
+CANAL_OUTRO_TAGLINE = "{outro tagline}"
+YOUTUBE_HANDLE = "@handle"          # opcional
+YOUTUBE_CHANNEL_URL = "..."         # opcional
+CANAL_NARRATIVE_STYLE = "documental de X"
+CANAL_STYLE_DESCRIPTION = "{descripción larga para prompts}"
+CHANNEL_ABOUT_SECTION = """..."""   # texto para YT Studio
+CHANNEL_KEYWORDS = [...]            # 20 keywords
+CANAL_INITIALS = "XX"               # 2-3 letras
+LOGO_SIZE = 140                     # o 180
+
+# PRODUCTION TARGETS
+PROD_SCRIPT_WORDS_MIN = 2000
+PROD_SCRIPT_WORDS_MAX = 3500
+PROD_SCRIPT_SCENES_MIN/MAX = ...
+PROD_VIDEO_DURATION_MIN/MAX = ...
+VIDEO_AVERAGE_DURATION_MIN = ...
+
+# NARRATIVE TONE
+CANAL_TONE = "{descripción larga}"
+TARGET_AUDIENCE = "{demográficos}"
+TARGET_AUDIENCE_PSYCHOGRAPHIC = {{...}}
+
+# TITLE OPTIMIZATION
+TITLE_FORMULAS = [...]
+TITLE_POWER_WORDS = [...]
+TITLE_MAX_CHARS = 65
+
+# SCRIPT STRUCTURE
+SCRIPT_HOOK_RULE = "..."
+SCRIPT_STRUCTURE = [...]
+SCRIPT_END_HOOK = "..."
+SCRIPT_EMOTIONAL_ARC = {{...}}
+RETENTION_ANCHORS = {{...}}
+VIRALITY_TRIGGERS = [...]
+
+# VOICE / TTS
+TTS_STRATEGY = {{...}}
+VOICE_RATE, VOICE_PITCH, TTS_ENGINE, KOKORO_VOICE, KOKORO_BLOCK_SPEEDS
+
+# CONTENT SOURCES
+REDDIT_SUBREDDITS = [...]
+WIKIPEDIA_CATEGORIES = [...]
+SCRAPE_SOURCES = [...]
+ATLAS_OBSCURA_CATEGORIES = [...]
+RSS_FEEDS = [...]
+GOOGLE_NEWS_QUERIES = [...]
+
+# VISUAL STYLE
+IMAGE_STYLE_MODIFIERS = "..."
+COLOR_PALETTE = {{...}}
+FILM_GRAIN_OPACITY, FILM_GRAIN_FRAMES
+KEN_BURNS_ZOOM_MIN, KEN_BURNS_ZOOM_MAX
+
+# MEDIA STRATEGY (incluir fallback_query y fallback_query_simple)
+MEDIA_STRATEGY = {{...}}
+
+# INTRO / OUTRO
+INTRO_FONT_SIZE, INTRO_BG_COLOR
+OUTRO_FONT_SIZE, OUTRO_BG_COLOR, OUTRO_TEXT
+CTA_TEXT, CTA_TEXT_VARIANTS
+INTRO_VOICE_TEXT, CTA_VOICE_TEXT, OUTRO_VOICE_TEXT
+
+# YOUTUBE METADATA (solo lo que difiere de defaults)
+YT_CATEGORY_ID, PUBLISH_MODE, PUBLISH_WARMUP_MIN
+UPLOAD_WINDOWS, YT_DEFAULT_TAGS
+
+# SEO
+SEO_PRIMARY_KEYWORD, SEO_SECONDARY_KEYWORDS, SEO_HASHTAGS
+
+# SHORTS
+SHORTS_PER_DAY, SHORTS_HASHTAGS (SHORTS_SUBSCRIBE_CTA_VARIANTS opcional)
+
+# DESCRIPTION
+DESCRIPTION_TEMPLATE = """..."""
+
+# THUMBNAIL
+THUMBNAIL_VISUAL_STYLE, THUMBNAIL_MANUAL_STYLE, THUMBNAIL_STYLE, THUMBNAIL_TEMPLATES
+THUMBNAIL_BORDER_WIDTH, THUMBNAIL_FONT_FAMILY, THUMBNAIL_BORDER_COLOR
+THUMBNAIL_SHOW_4K_BADGE, THUMBNAIL_TEXT_STROKE_COLOR
+
+# MONETIZATION
+VIDEO_MIDROLL_STRATEGY, MONETIZATION_TARGET_CPM, MONETIZATION_VERTICALS
+
+# END SCREEN
+END_SCREEN_STRATEGY = {{...}}
+
+# PLAYLISTS (5 definiciones con slug, name, description, type)
+PLAYLISTS = [...]
+
+# FIRST 48H / COMMUNITY / CROSS-PLATFORM / COLLAB
+FIRST_48H_STRATEGY, COMMUNITY_TAB_PLAN, CROSS_PLATFORM
+COLLABORATION_TARGETS, TRENDING_TOPIC_HOOKS, CONTENT_PILLARS
+
+# MARATHON & VIRAL
+NICHE_KEYWORDS_ENG, MARATHON_NARRATIVE_FORMAT, MARATHON_TITLE_FORMAT
+VIRAL_PLAYLIST_KEYWORDS
+```
+
+### 🚫 Invariante de nuevas features
+
+Toda feature nueva que afecte a canales debe seguir este contrato:
+
+| ❌ Prohibido | ✅ Correcto |
+|---|---|
+| `if slug == "canal2"` o `if channel_id == 1` | Leer comportamiento de `config_json` del canal |
+| `from config.canal2_config import ...` en pipeline/scrapers/services | `config_bridge.get_channel_config(slug)` |
+| Diccionarios hardcodeados slug→valor | Columna en DB o campo en `config_json` |
+| Archivos de prompts por canal | `prompts.base_prompts.build_system_prompt(cfg)` |
+| Defaults a un canal concreto en scripts | Argumento requerido o leer de DB |
+| Colores/abreviaturas hardcodeados en frontend | `getChannelShort(ch)`, `getChannelStyles(ch)` |
+
+Cada nuevo parámetro que necesite variar por canal:
+1. Se añade a `config/defaults.py` con un valor por defecto sensato
+2. Se sobrescribe en `config/{slug}_config.py` si el canal necesita un valor distinto
+3. Se lee en el código vía `cfg = get_channel_config(slug); cfg.MI_PARAMETRO`
+
 ## OAuth por canal
 - Cada canal usa su propio `client_secret` (priority: `config/client_secret_{slug}.json` → `config/client_secret.json`)
 - Tokens se guardan en `tokens/{slug}.pickle` (pickle)
