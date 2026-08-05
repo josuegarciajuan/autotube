@@ -322,7 +322,7 @@ class ThumbnailMaker:
         Returns:
             Path to the generated thumbnail JPEG.
         """
-        slug = canal_slug or "canal2"
+        slug = canal_slug or ""
 
         # ── F1: Style Engine (cached per channel) ──────────────
         logger.info("[Thumbnail v2] F1: Loading channel style for %s", slug)

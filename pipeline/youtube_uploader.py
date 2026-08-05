@@ -239,7 +239,7 @@ class YouTubeUploader:
                 print("   Necesitas: 4/0AanRRr...")
                 print()
                 print("📋 Luego ejecuta en el server:")
-                print(f"   python3 scripts/complete_auth.py canal2 'EL_CODIGO'")
+                print(f"   python3 scripts/complete_auth.py {slug} 'EL_CODIGO'")
                 return False  # needs manual code completion
 
         self._save_credentials()
