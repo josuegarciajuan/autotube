@@ -178,9 +178,13 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 - **Playlist inteligente:** cada vídeo se asigna automáticamente a la playlist que mejor encaja con su contenido (clasificador LLM en `pipeline/youtube_playlists.py`).
 
 ## Stats collection
-- Stats de YouTube se recolectan automáticamente cada 6h (scheduler en `api/main.py`)
-- Se almacenan en `video_stats_history` y `channel_stats_history`
-- `POST /api/videos/stats` devuelve stats en tiempo real
+- **⛔ INVARIANTE: STATS_AUTO_COLLECT NUNCA se activa.** La recolección automática cada 6h consume quota de YouTube API innecesariamente.
+- La recolección de stats **SOLO se activa manualmente** desde el botón "Recolectar stats" del dashboard (`POST /api/stats/collect`).
+- `STATS_AUTO_COLLECT` está hardcodeado a `False` en `config/settings.py:246` — no depende de `.env`.
+- `api/main.py:41` tiene un guard al startup que mata el servidor si `STATS_AUTO_COLLECT=True`.
+- `STATS_ENABLED=false` en `.env` desactiva análisis adicionales (power words, view gap).
+- Los stats se almacenan en `video_stats_history` y `channel_stats_history`.
+- `POST /api/videos/stats` devuelve stats en tiempo real desde DB (no consume quota).
 
 ## Comandos frecuentes
 

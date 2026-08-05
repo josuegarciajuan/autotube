@@ -240,10 +240,11 @@ PROXY_CHANNELS = [
 # ── YouTube Stats collection ───────────────────────────────────
 STATS_ENABLED = os.getenv("STATS_ENABLED", "true").lower() == "true"
 
-# Stats auto-collection every 6h in the background loop.
-# Set to false (default) to save API quota — use the Dashboard
-# button to collect stats manually on demand.
-STATS_AUTO_COLLECT = os.getenv("STATS_AUTO_COLLECT", "false").lower() == "true"
+# ⛔ INVARIANTE: stats auto-collection NUNCA debe estar activa.
+# La recoleccion automatica cada 6h consume quota de API.
+# Solo se permite recoleccion manual via POST /api/stats/collect (boton dashboard).
+# STATS_AUTO_COLLECT esta hardcodeado a False — NO se puede cambiar con .env.
+STATS_AUTO_COLLECT = False  # INVARIANTE: hardcodeado, no depende de env
 
 # ── View Gap Monitor ─────────────────────────────────────────────
 # Daily check comparing YT channel total views vs DB-tracked views.

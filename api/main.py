@@ -38,6 +38,14 @@ logger = logging.getLogger("autotube.main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ⛔ Invariante: STATS_AUTO_COLLECT NUNCA debe activarse.
+    # Si alguien lo cambia en settings.py o .env, el servidor se niega a arrancar.
+    if STATS_AUTO_COLLECT:
+        raise SystemExit(
+            "FATAL: STATS_AUTO_COLLECT=True. Esto consume quota de YouTube API "
+            "innecesariamente. Debe ser False siempre. La recoleccion de stats "
+            "solo se activa manualmente desde el dashboard."
+        )
     # ── File-based logging (adds FileHandler to root logger) ──
     LOG_DIR = Path(__file__).parent.parent / "logs"
     LOG_DIR.mkdir(exist_ok=True)
