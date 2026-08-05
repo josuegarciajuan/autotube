@@ -408,6 +408,24 @@ class ScriptGenerator:
                 "end hook missing reference to next video / continuation"
             )
 
+        # 4. Language check: the generated script must be in the
+        #    channel language. If the LLM outputs English (because the
+        #    source was English and the prompt wasn't explicit enough),
+        #    catch it here so the retry loop can correct it.
+        channel_lang = getattr(self.canal_config, 'LANGUAGE', 'es')
+        if channel_lang:
+            guion_text = script.get('guion', '')
+            if not guion_text:
+                guion_text = ' '.join(
+                    b.get('texto', '') for b in bloques
+                )
+            script_lang = _detect_text_language(guion_text)
+            if script_lang and script_lang != channel_lang:
+                issues.append(
+                    f"script language is '{script_lang}' "
+                    f"(expected '{channel_lang}')"
+                )
+
         return len(issues) == 0, issues, warnings
 
     def _record_phase_metric(
@@ -698,14 +716,11 @@ class ScriptGenerator:
     def _generate_emergency_script(
         self, content_item: dict, word_target: dict
     ) -> Optional[dict]:
-        """Generate a fallback script with guaranteed content structure.
+        """Emergency fallback: LLM-based generation first, raw chunking last.
 
-        When all LLM attempts + retries fail, this builds a publishable
-        script directly from the source content. Guarantees by construction:
-          - Hook block with numeric / quantitative data.
-          - At least MIN_NARRATIVE_BLOCKS narrative blocks.
-          - End hook referencing the next video.
-          - CTA from the channel config.
+        When all normal LLM attempts fail validation, this makes a final
+        attempt with a simplified emergency prompt.  If even the LLM fails
+        here, raw text chunking is used as absolute last resort.
 
         Marked with ``emergency_mode=True`` in the scripts table.
         """
@@ -726,33 +741,112 @@ class ScriptGenerator:
             )
             return None
 
-        # ── Language gate: never emit emergency script in wrong language
-        channel_lang = getattr(self.canal_config, 'LANGUAGE', 'es')
-        source_lang = _detect_text_language(text)
-        if channel_lang == 'es' and source_lang == 'en':
-            logger.error(
-                "EMERGENCY BLOCKED: source text is English (%s) but channel "
-                "language is Spanish. content_id=%s title=%.80s — "
-                "skipping to avoid incoherent TTS. The LLM validator "
-                "rejection should be investigated.",
-                source_lang, content_item.get("id"), title,
-            )
-            # Record in phase metrics for monitoring
+        # ── Attempt 1: LLM-based emergency generation ──────────────
+        try:
+            script = self._emergency_llm_generate(content_item, target_words)
+            if script:
+                script["emergency_mode"] = True
+                logger.info(
+                    "EMERGENCY: LLM fallback succeeded — %d blocks",
+                    len(script.get('bloques', [])),
+                )
+                return script
+        except Exception as exc:
+            logger.error("EMERGENCY: LLM fallback crashed: %s", exc)
+            # Record in phase metrics
             if hasattr(self, '_phase_metrics'):
                 m = self._phase_metrics.setdefault(
                     'emergency', {'attempts': 0, 'failures': 0, 'errors': {}}
                 )
                 m['attempts'] += 1
                 m['failures'] += 1
-                m['errors']['language_mismatch'] = \
-                    m['errors'].get('language_mismatch', 0) + 1
+                m['errors']['llm_crash'] = \
+                    m['errors'].get('llm_crash', 0) + 1
+
+        # ── Attempt 2: raw text chunking (absolute last resort) ────
+        logger.warning(
+            "EMERGENCY: LLM fallback failed — falling through to raw chunking"
+        )
+        return self._emergency_raw_chunk(content_item, target_words)
+
+    def _emergency_llm_generate(
+        self, content_item: dict, target_words: int
+    ) -> Optional[dict]:
+        """Generate an emergency script via LLM with a simplified prompt.
+
+        Unlike the normal generation flow, this uses a single-shot prompt
+        that asks the LLM for the complete script in one response.  Less
+        sophisticated than the batched V2 approach, but much more likely
+        to produce a valid script when the normal flow is stuck.
+        """
+        title = content_item.get("title", "")
+        text = content_item.get("text", "")
+
+        emergency_prompt = (
+            "Eres un guionista de documentales en español latinoamericano "
+            "neutro. Genera un guion documental COMPLETO basado en esta "
+            "fuente:\n\n"
+            f"TÍTULO: {title}\n"
+            f"FUENTE: {text[:3000]}\n\n"
+            "REQUISITOS OBLIGATORIOS:\n"
+            "1. Hook inicial intrigante con un dato numérico concreto.\n"
+            "2. Al menos 5 bloques narrativos de desarrollo con hechos.\n"
+            "3. Un end-hook que anticipe el próximo video "
+            "(ej: 'En el próximo video exploramos...').\n"
+            "4. Un CTA final invitando a suscribirse al canal.\n"
+            "5. IDIOMA: TODO el guion en español latinoamericano neutro. "
+            "Nada de vosotros, os, conjugaciones ibéricas.\n"
+            f"6. Extensión objetivo: ~{target_words} palabras.\n\n"
+            "Responde ÚNICAMENTE con un JSON con este formato:\n"
+            '{"guion": "texto completo del guion", '
+            '"bloques": [{"texto": "bloque 1"}, {"texto": "bloque 2"}, ...]}'
+        )
+
+        try:
+            result = self._call_with_failover(
+                phase="emergency",
+                thinking=False,
+                messages=[
+                    {"role": "user", "content": emergency_prompt},
+                ],
+                temperature=0.8,
+                max_tokens=min(4000, OPENAI_MAX_TOKENS),
+            )
+        except Exception as exc:
+            logger.error("EMERGENCY: LLM call failed: %s", exc)
             return None
 
+        if not result or not result.get("bloques"):
+            logger.warning("EMERGENCY: LLM returned no blocks")
+            return None
+
+        # Enrich blocks (with failover — fall back to raw if enrichment fails)
+        script = self._enrich_blocks(result["bloques"], content_item, {"palabras_objetivo": target_words})
+        if script:
+            script["emergency_mode"] = True
+            return script
+
+        return self._build_raw_script(result["bloques"], content_item, title, {"palabras_objetivo": target_words})
+
+    def _emergency_raw_chunk(
+        self, content_item: dict, target_words: int
+    ) -> Optional[dict]:
+        """Absolute last resort: build a script by chunking raw source text.
+
+        This is the legacy emergency generator preserved as a safety net.
+        It builds blocks by splitting the source text into word chunks and
+        wrapping them with hardcoded Spanish scaffolding (hook, end-hook,
+        CTA).  The old language gate has been REMOVED — if we reach this
+        point the LLM has already failed, and a partially-Spanish script is
+        better than no script at all.
+        """
+        import re as _re
+
+        title = content_item.get("title", "Historia Increíble")
+        text = content_item.get("text", "")
+
         # ── Scale body extraction to target word count ────────
-        # For small targets (≤2000 words): use ~12 sentences (old behavior)
-        # For medium targets (2000-5000): use ~30 sentences
-        # For marathon targets (>5000): use up to 60 sentences, larger chunks
-        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        sentences = _re.split(r"(?<=[.!?])\s+", text.strip())
         if target_words <= 2000:
             max_body_sentences = 12
             chunk_size = max(60, min(120, target_words // 7))
@@ -777,8 +871,7 @@ class ScriptGenerator:
         bloques = []
 
         # ── 1. Hook with numeric data ────────────────────────
-        hook_text = ""
-        numbers = re.findall(r'\b\d+\b', intro + " " + title)
+        numbers = _re.findall(r'\b\d+\b', intro + " " + title)
         if numbers:
             num = numbers[0]
             hook_text = (
@@ -807,8 +900,6 @@ class ScriptGenerator:
             if chunk.strip():
                 chunks.append({"texto": chunk})
 
-        # Min blocks scales with target: at least MIN_NARRATIVE_BLOCKS,
-        # but for large targets, aim for more blocks proportionally.
         min_blocks = max(MIN_NARRATIVE_BLOCKS, target_words // 250)
         if len(chunks) < min_blocks:
             fallback_padding = [
@@ -817,7 +908,6 @@ class ScriptGenerator:
                 "Pero juntos forman un patrón que desafía las probabilidades.",
                 "Las fuentes documentales confirman los hechos principales sin margen de error.",
                 "Aunque algunos detalles siguen siendo motivo de debate entre expertos.",
-                # Extra padding for larger targets — fills gaps when source text is short
                 "Los investigadores han dedicado años a desentrañar cada pieza de este rompecabezas.",
                 "Nuevos datos siguen apareciendo, añadiendo capas de complejidad al caso.",
                 "Lo que comenzó como una simple observación se convirtió en un fenómeno documentado.",
@@ -858,17 +948,18 @@ class ScriptGenerator:
             len(b.get("texto", "").split()) for b in bloques
         )
         logger.info(
-            "EMERGENCY: generated %d blocks, %d words for '%s'",
+            "EMERGENCY (raw): generated %d blocks, %d words for '%s'",
             len(bloques), total_words, title[:60],
         )
 
         # Enrich blocks (with failover — fall back to raw if enrichment fails)
-        script = self._enrich_blocks(bloques, content_item, word_target)
+        word_target_dict = {"palabras_objetivo": target_words}
+        script = self._enrich_blocks(bloques, content_item, word_target_dict)
         if script:
             script["emergency_mode"] = True
             return script
 
-        return self._build_raw_script(bloques, content_item, title, word_target)
+        return self._build_raw_script(bloques, content_item, title, word_target_dict)
 
     def _build_raw_script(
         self, bloques: list[dict], content_item: dict, title: str, word_target: dict
@@ -1115,6 +1206,27 @@ class ScriptGenerator:
             system_prompt = self._build_minimal_prompt(previous_blocks, word_guidance, source_text)
 
         user_prompt = f"Fuente: {content_title}\n\nContinúa la narración documental."
+
+        # ── Language enforcement: when source text is in a different
+        #     language than the channel, explicitly instruct the LLM
+        #     to write in the channel language. Without this, the LLM
+        #     may follow the source language instead.
+        if source_text:
+            source_lang = _detect_text_language(source_text)
+            channel_lang = getattr(self.canal_config, 'LANGUAGE', 'es')
+            if source_lang and source_lang != channel_lang:
+                lang_names = {
+                    'en': 'inglés', 'es': 'español',
+                    'fr': 'francés', 'pt': 'portugués',
+                }
+                src_name = lang_names.get(source_lang, source_lang)
+                ch_name = lang_names.get(channel_lang, channel_lang)
+                user_prompt += (
+                    f"\n\n⚠️ IMPORTANTE: La fuente está en {src_name}. "
+                    f"DEBES escribir TODO el guion en {ch_name}. "
+                    "Usa los hechos como inspiración, NO traduzcas "
+                    "literalmente."
+                )
 
         try:
             data = self._call_with_failover(

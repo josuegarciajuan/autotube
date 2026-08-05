@@ -144,6 +144,9 @@ class MediaFetcher:
         # the video_asset_history DB table. Empty at init time.
         self._cross_video_used_filenames: set[str] = set()
 
+        # ── Image provider list (for urgent single-image fetches) ───
+        self._image_providers = self._get_all_image_providers()
+
         # ── Pending asset records for flush_asset_history() ────────
         # Accumulated during fetch_for_script(); flushed by the
         # orchestrator/service after video_id is assigned.
