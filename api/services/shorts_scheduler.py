@@ -2115,6 +2115,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
         return None
 
+    # 1a-bis. Type guard: llm_json_call may return a list (when the LLM
+    # outputs a JSON array instead of an object), which would crash
+    # validate_short_script below with "'list' has no attribute 'get'".
+    if not isinstance(script, dict):
+        logger.error("Short script generation returned unexpected type %s for %s",
+                     type(script).__name__, channel_slug)
+        return None
+
     # 1b. Validate script completeness (with smart truncation for over-long scripts)
     from pipeline.shorts_tts import validate_short_script, MAX_WORD_COUNT as _MAX_WORDS, MIN_WORD_COUNT as _MIN_WORDS
     errors = validate_short_script(script)

@@ -783,12 +783,19 @@ class MediaFetcher:
         Returns {type, path, source} dict or None if all providers fail.
         """
         import time
+        # Defensive guard: _image_providers may be absent if __init__
+        # was interrupted (e.g. race condition, hot-reload cascade).
+        # Gracefully return None instead of crashing.
+        _providers = getattr(self, '_image_providers', None)
+        if not _providers:
+            return None
+
         _urgent_set = getattr(self, '_urgent_used_urls', None)
         if _urgent_set is None:
             _urgent_set = set()
             self._urgent_used_urls = _urgent_set
 
-        for provider in self._image_providers:
+        for provider in _providers:
             if not provider.available:
                 continue
             try:
