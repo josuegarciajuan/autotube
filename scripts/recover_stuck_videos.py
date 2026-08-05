@@ -17,7 +17,7 @@ PROJECT_ROOT = Path("/root/autotube")
 
 STUCK_VIDEOS = [304, 305]
 
-CHANNEL_MAP = {"canal2": 3, "canal3": 4}
+CHANNEL_MAP = {}  # dynamically populated from DB if needed
 
 
 def get_video(db, video_id):
@@ -62,7 +62,7 @@ def main():
             continue
 
         video = dict(video)
-        canal = video.get("canal", "canal2")
+        canal = video.get("canal", "")
         video_path = video.get("video_path", "")
 
         if not video_path or not Path(video_path).exists():

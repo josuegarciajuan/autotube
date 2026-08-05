@@ -37,7 +37,7 @@ for v in ready_videos:
     video_id = v["id"]
     vpath = v.get("video_path", "")
     channel_id = v.get("channel_id") or 1
-    slug = get_channel_slug(channel_id) or v.get("canal", "canal2")
+    slug = get_channel_slug(channel_id) or v.get("canal") or ""
     titulo = v.get("titulo_final", "Video sin titulo")
     
     print(f"\n📹 Video #{video_id} [{slug}]: {titulo[:60]}...")
@@ -152,7 +152,7 @@ for v in private_videos:
     video_id = v["id"]
     yt_video_id = v.get("yt_video_id")
     channel_id = v.get("channel_id") or 1
-    slug = get_channel_slug(channel_id) or v.get("canal", "canal2")
+    slug = get_channel_slug(channel_id) or v.get("canal") or ""
     titulo = v.get("titulo_final", "Sin titulo")
     
     print(f"\n📺 Video #{video_id} [{slug}]: yt={yt_video_id} | {titulo[:60]}...")

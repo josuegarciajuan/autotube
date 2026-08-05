@@ -44,7 +44,7 @@ def main():
 
     for r in recent:
         yt_id = r["yt_video_id"]
-        canal = r["canal"] or "canal2"
+        canal = r["canal"] or ""
         db_status = r["db_status"]
         db_privacy = r["db_privacy"]
         title = r["title"] or "?"

@@ -81,7 +81,7 @@ def fetch_video_data(db_path: str, canal: str, video_id: int | None = None) -> d
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate thumbnail for a video in isolation")
-    parser.add_argument("--canal", default="canal2", help="Channel slug (default: canal2)")
+    parser.add_argument("--canal", required=True, help="Channel slug")
     parser.add_argument("--video-id", type=int, default=None, help="Specific video ID (default: latest)")
     parser.add_argument("--no-style", action="store_true", help="Skip style engine (use raw defaults)")
     parser.add_argument("--title", default="", help="Override title (testing)")

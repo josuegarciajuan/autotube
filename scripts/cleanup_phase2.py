@@ -19,7 +19,7 @@ print("=" * 60)
 v = db.get_video(471)
 if v and v["status"] == "ready":
     ch = db.get_channel(v.get("channel_id") or 4)
-    slug = ch["slug"] if ch else "canal3"
+    slug = ch["slug"] if ch else ""
     vpath = v.get("video_path", "")
     
     print(f"  [{slug}] {v.get('titulo_final', '')[:60]}")
@@ -81,7 +81,7 @@ for v in private:
     vid = v["id"]
     yt = v.get("yt_video_id")
     ch = db.get_channel(v.get("channel_id") or 1)
-    slug = ch["slug"] if ch else v.get("canal", "canal2")
+    slug = ch["slug"] if ch else v.get("canal", "")
     
     if not yt:
         print(f"  #{vid}: ❌ no yt_video_id")

@@ -221,9 +221,8 @@ def main():
     parser.add_argument("youtube_id", help="YouTube video ID (e.g. aTSywxpLiRA)")
     parser.add_argument(
         "slug",
-        nargs="?",
-        default="canal3",
-        help="Channel slug (default: canal3)",
+        help="Channel slug",
+    )
     )
     parser.add_argument(
         "--channel-id",

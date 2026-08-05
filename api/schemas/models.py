@@ -99,6 +99,8 @@ class ChannelCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     slug: str = Field(..., min_length=2, max_length=50, pattern=r"^[a-z0-9_-]+$")
     config: ChannelConfig = Field(default_factory=ChannelConfig)
+    youtube_handle: Optional[str] = None
+    google_account: Optional[str] = None
 
 
 class ChannelUpdate(BaseModel):

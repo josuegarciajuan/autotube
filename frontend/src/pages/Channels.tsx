@@ -9,7 +9,7 @@ export default function Channels() {
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<any>(null)
-  const [form, setForm] = useState({ name: '', slug: '' })
+  const [form, setForm] = useState({ name: '', slug: '', youtube_handle: '', google_account: '' })
   const [error, setError] = useState('')
 
   useEffect(() => { loadChannels() }, [])
@@ -34,14 +34,18 @@ export default function Channels() {
 
   function openNew() {
     setEditing(null)
-    setForm({ name: '', slug: '' })
+    setForm({ name: '', slug: '', youtube_handle: '', google_account: '' })
     setError('')
     setShowForm(true)
   }
 
   function openEdit(ch: any) {
     setEditing(ch)
-    setForm({ name: ch.name, slug: ch.slug })
+    setForm({
+      name: ch.name, slug: ch.slug,
+      youtube_handle: ch.config_json?.YOUTUBE_HANDLE || ch.youtube_handle || '',
+      google_account: ch.google_account || '',
+    })
     setError('')
     setShowForm(true)
   }
@@ -55,9 +59,16 @@ export default function Channels() {
     }
     try {
       if (editing) {
-        await api.updateChannel(editing.id, form)
+        await api.updateChannel(editing.id, {
+          name: form.name, slug: form.slug,
+          google_account: form.google_account || undefined,
+        })
       } else {
-        await api.createChannel(form)
+        await api.createChannel({
+          name: form.name, slug: form.slug,
+          youtube_handle: form.youtube_handle || undefined,
+          google_account: form.google_account || undefined,
+        })
       }
       setShowForm(false)
       loadChannels()
@@ -175,6 +186,27 @@ export default function Channels() {
                   className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm font-mono focus:outline-none focus:border-neon-red transition-colors"
                   placeholder="canal-misterio"
                 />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">YouTube Handle (opcional)</label>
+                <input
+                  type="text"
+                  value={form.youtube_handle}
+                  onChange={e => setForm({ ...form, youtube_handle: e.target.value })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red transition-colors"
+                  placeholder="@MiCanal"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Cuenta Google (opcional)</label>
+                <input
+                  type="text"
+                  value={form.google_account}
+                  onChange={e => setForm({ ...form, google_account: e.target.value })}
+                  className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red transition-colors"
+                  placeholder="micuenta (sin @gmail.com)"
+                />
+                <p className="text-[10px] text-gray-500 mt-1">Para automatizacion de YouTube Studio (marcar IA, end screens)</p>
               </div>
               {error && <p className="text-sm text-red-400">{error}</p>}
               <div className="flex gap-2 pt-2">

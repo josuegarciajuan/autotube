@@ -207,8 +207,8 @@ Examples:
                        help="Quarter-duration test: ~1/4 of normal (tests v2 outline+quality changes)")
     parser.add_argument("--fast-test", action="store_true",
                        help="Fast test mode: 480x270, no effects, no upload, canal4, ~5 min total")
-    parser.add_argument("--canal", type=str, default="canal2", 
-                       help="Channel slug to link video to (default: canal2)")
+parser.add_argument("--canal", type=str, required=True,
+                   help="Channel slug to link video to")
     parser.add_argument("--skip-metadata", action="store_true",
                        help="Skip AI metadata generation (titles, description, tags)")
     args = parser.parse_args()

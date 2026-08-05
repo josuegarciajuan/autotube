@@ -18,6 +18,47 @@ def _parse_config(ch: dict | None) -> None:
             ch["config_json"] = {}
 
 
+def _build_channel_config(data) -> dict:
+    """Build initial config_json for a new channel from defaults + identity."""
+    import importlib
+    try:
+        defaults = importlib.import_module("config.defaults")
+    except ImportError:
+        defaults = None
+
+    config = {}
+    if defaults:
+        for name, value in vars(defaults).items():
+            if name.startswith("_"):
+                continue
+            if isinstance(value, (dict, list, str, int, float, bool, tuple, type(None))):
+                config[name] = value
+
+    config["CANAL_NAME"] = data.slug
+    config["CANAL_DISPLAY_NAME"] = data.name
+    config["CANAL_INITIALS"] = _derive_initials(data.name)
+
+    yt_handle = getattr(data, "youtube_handle", None)
+    if yt_handle:
+        config["YOUTUBE_HANDLE"] = yt_handle
+        config["YOUTUBE_CHANNEL_URL"] = f"https://www.youtube.com/{yt_handle}"
+
+    user_config = data.config.model_dump() if data.config else {}
+    for k, v in user_config.items():
+        if v is not None:
+            config[k] = v
+
+    return config
+
+
+def _derive_initials(name: str) -> str:
+    """Derive a 2-3 letter abbreviation from channel name."""
+    words = name.strip().split()
+    if len(words) == 1:
+        return words[0][:3].upper()
+    return "".join(w[0].upper() for w in words[:3])
+
+
 @router.get("")
 def list_channels(active_only: bool = False):
     db = get_db()
@@ -32,17 +73,24 @@ def list_channels(active_only: bool = False):
 @router.post("")
 def create_channel(data: ChannelCreate):
     db = get_db()
-    config_dict = data.config.model_dump() if data.config else {}
+    
+    # Build initial config from defaults + channel identity
+    config_dict = _build_channel_config(data)
+    
     ch_id = db.create_channel(data.name, data.slug, config_dict)
     if ch_id is None:
         raise HTTPException(400, "Channel name or slug already exists")
+    
+    # Set google_account if provided
+    google_account = getattr(data, 'google_account', None)
+    if google_account:
+        db.update_channel(ch_id, google_account=google_account)
     
     # ── Auto-create 10 thematic playlists for new channel ──
     try:
         from pipeline.youtube_playlists import create_playlists_for_channel
         create_playlists_for_channel(data.slug)
     except Exception as e:
-        # Non-fatal: channel is usable even without playlists
         import logging
         logging.getLogger(__name__).warning(
             "Auto-create playlists failed for new channel '%s': %s", data.slug, e
@@ -52,6 +100,7 @@ def create_channel(data: ChannelCreate):
     if ch:
         ch["created_at"] = str(ch.get("created_at", ""))
         ch["updated_at"] = str(ch.get("updated_at", ""))
+        ch = _migrate_channel_fields(ch)
     return ch
 
 

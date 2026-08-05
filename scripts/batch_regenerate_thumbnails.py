@@ -115,7 +115,7 @@ def process_one(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Batch regenerate thumbnails")
-    parser.add_argument("--canal", default="canal4", help="Channel slug")
+    parser.add_argument("--canal", required=True, help="Channel slug")
     parser.add_argument("--sleep", type=int, default=60, help="Seconds between videos")
     parser.add_argument("--dry-run", action="store_true", help="List videos without generating")
     args = parser.parse_args()

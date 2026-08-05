@@ -972,6 +972,9 @@ def migrate_v2(db_path: str = None):
     # ── v26: upload_health_checks + yt_failed_ids (post-upload processing monitoring) ──
     _migrate_v26(conn, logger)
     
+    # ── v27: platform_videos (cross-platform video publishing to FB/Rumble/TikTok) ──
+    _migrate_v27(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -1906,6 +1909,23 @@ def _migrate_v26(conn, logger):
     logger.info("Migration: v26 schema applied (upload_health_checks + yt_failed_ids)")
 
 
+def _migrate_v27(conn, logger):
+    """Idempotent v27: platform_videos table for cross-platform video publishing.
+
+    Tracks full video uploads to non-YouTube platforms (Facebook, Rumble, TikTok)
+    for monetization diversification and traffic sourcing.
+    """
+    import os
+    schema_v27 = os.path.join(os.path.dirname(__file__), "schema_v27.sql")
+    if os.path.exists(schema_v27):
+        with open(schema_v27) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v27: platform_videos table created")
+    else:
+        logger.warning("Migration v27: schema_v27.sql not found")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -1998,7 +2018,8 @@ class ExtendedDatabase(Database):
                 return None
     
     def update_channel(self, channel_id: int, name: str = None, slug: str = None, 
-                       config: dict = None, active: bool = None) -> bool:
+                       config: dict = None, active: bool = None,
+                       google_account: str = None) -> bool:
         fields, values = [], []
         if name is not None:
             fields.append("name = ?"); values.append(name)
@@ -2011,6 +2032,8 @@ class ExtendedDatabase(Database):
             fields.append("updated_at = CURRENT_TIMESTAMP")
         if active is not None:
             fields.append("active = ?"); values.append(active)
+        if google_account is not None:
+            fields.append("google_account = ?"); values.append(google_account)
         if not fields:
             return False
         values.append(channel_id)

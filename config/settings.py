@@ -40,11 +40,25 @@ GOOGLE_CLIENT_SECRET_PATH = os.getenv(
 )
 
 # ── Channels ───────────────────────────────────────────────────
-ACTIVE_CHANNELS = [
-    c.strip()
-    for c in os.getenv("ACTIVE_CHANNELS", "canal2,canal3,canal4").split(",")
-    if c.strip()
-]
+def _load_active_channels() -> list[str]:
+    """Load active channels from DB, falling back to env var or empty list."""
+    env_override = os.getenv("ACTIVE_CHANNELS", "")
+    if env_override:
+        return [c.strip() for c in env_override.split(",") if c.strip()]
+    try:
+        import sqlite3
+        db_path = os.getenv("DATABASE_PATH", str(PROJECT_ROOT / "autotube.db"))
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT slug FROM channels WHERE active = 1 ORDER BY id"
+        ).fetchall()
+        conn.close()
+        return [r["slug"] for r in rows]
+    except Exception:
+        return []
+
+ACTIVE_CHANNELS = _load_active_channels()
 
 
 # ── Scheduling ─────────────────────────────────────────────────

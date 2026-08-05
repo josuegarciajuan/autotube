@@ -15,12 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [template-regen] %(message)s")
 logger = logging.getLogger("template-regen")
 
-CHANNELS = {
-    "canal2": "canal2",
-    "canal3": "canal3",
-    "canal4": "canal4",
-    "canal5": "canal5",
-}
+# Channel list is loaded dynamically from DB at runtime
+CHANNELS = {}  # populated by load_channels_from_db()
 
 
 def regen_channel(slug: str) -> dict:

@@ -26,7 +26,7 @@ from googleapiclient.errors import HttpError
 logger = logging.getLogger("delete_duplicates")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-TOKEN_PATH = Path("tokens/canal2.pickle")
+TOKEN_PATH = None  # resolved at runtime from channel
 
 # Canonical IDs — KEEP these
 KEEP = {"iaOMXoqxLos", "PYLOsZF9TTc"}
