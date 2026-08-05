@@ -308,6 +308,9 @@ async def lifespan(app: FastAPI):
     # Launch upload health checker in background (processing status monitoring)
     health_checker_task = asyncio.create_task(_upload_health_checker_loop())
     
+    # Launch shorts backfill in background (gradual long-form linking)
+    shorts_backfill_task = asyncio.create_task(_shorts_backfill_loop())
+    
     yield
     
     # Shutdown
@@ -321,6 +324,7 @@ async def lifespan(app: FastAPI):
     health_monitor_task.cancel()
     publish_verify_task.cancel()
     health_checker_task.cancel()
+    shorts_backfill_task.cancel()
     try:
         await schedule_task
     except asyncio.CancelledError:
@@ -335,6 +339,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await health_checker_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await shorts_backfill_task
     except asyncio.CancelledError:
         pass
 
@@ -531,6 +539,58 @@ async def _health_monitor_loop():
         except Exception as exc:
             logger.warning("Health monitor error: %s", exc)
         await asyncio.sleep(90)  # Check every 90 seconds
+
+
+async def _shorts_backfill_loop():
+    """Background loop: gradually add long-form links to short descriptions.
+
+    Processes shorts in small batches (15 every 30 min) to stay well under
+    YouTube API quota. Survives restarts via system_state persistence.
+    Runs until all published shorts have been linked, then idles.
+    """
+    import asyncio, logging, time
+    logger = logging.getLogger("autotube.backfill")
+
+    await asyncio.sleep(120)  # Let API stabilize first
+
+    logger.info("Shorts backfill loop started (batch=15, interval=30 min)")
+
+    while True:
+        try:
+            from api.services.shorts_backfill_service import (
+                run_backfill_batch, is_backfill_complete, get_backfill_status,
+            )
+
+            if is_backfill_complete():
+                # Still log occasionally so we know the loop is alive
+                if not hasattr(_shorts_backfill_loop, "_idle_count"):
+                    _shorts_backfill_loop._idle_count = 0
+                _shorts_backfill_loop._idle_count += 1
+                if _shorts_backfill_loop._idle_count % 12 == 1:  # ~every 6h
+                    logger.debug("Backfill loop idle — all shorts already linked")
+                await asyncio.sleep(1800)  # 30 min
+                continue
+
+            result = await asyncio.to_thread(run_backfill_batch)
+
+            if result["updated"] > 0 or result["errors"] > 0:
+                logger.info(
+                    "Backfill batch: %d updated, %d errors | status=%s",
+                    result["updated"], result["errors"],
+                    get_backfill_status(),
+                )
+
+            if result["done"]:
+                logger.info("Backfill complete! All shorts now have long-form links.")
+                # Continue the loop in case new shorts are published later
+                await asyncio.sleep(1800)
+                continue
+
+            await asyncio.sleep(1800)  # 30 min between batches
+
+        except Exception as exc:
+            logger.warning("Shorts backfill error: %s", exc)
+            await asyncio.sleep(600)  # 10 min on error, then retry
 
 
 async def _schedule_checker_loop():
