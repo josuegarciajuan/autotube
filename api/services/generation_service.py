@@ -2242,6 +2242,16 @@ async def start_upload_job(job_id: int, video_id: int):
                                    "failed", video_id)
 
 
+def _is_quota_exhausted(db) -> bool:
+    """Check if the upload scheduler has been paused due to quota exhaustion."""
+    try:
+        paused = db.get_system_state("scheduler_paused") == "true"
+        exhausted_at = db.get_system_state("quota_exhausted_at")
+        return paused and bool(exhausted_at)
+    except Exception:
+        return False
+
+
 async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id: int,
                                            source_mode: str = "original"):
     """Upload (F2) a video generated in Phase 1, using scheduled private mode.
@@ -2434,6 +2444,16 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                          canal, yt_url, target_public_at)
         else:
             logger.error("[%s] Upload failed — video stays local", canal)
+            # ── Quota exhaustion check: don't count as retry ──
+            if _is_quota_exhausted(db):
+                db.update_video(video_id, status="awaiting_upload",
+                                  progress_phase="upload", scheduled_upload_at=None,
+                                  error_message="YouTube API quota exhausted")
+                db.update_job(job_id, status="failed",
+                                error_msg="YouTube API quota exhausted")
+                logger.info("[%s] Video %d: quota exhausted — kept in awaiting_upload", canal, video_id)
+                return
+            
             # ── v24: check retry count before reverting to awaiting_upload ──
             from api.services.upload_scheduler import MAX_UPLOAD_RETRY_PER_VIDEO
             retry_count = 0
@@ -2452,7 +2472,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                     canal, video_id, retry_count, MAX_UPLOAD_RETRY_PER_VIDEO,
                 )
                 db.update_video(video_id, status="error", progress_phase="upload",
-                                 progress=0)
+                                 progress=0, error_message="Max upload retries exceeded")
                 db.update_job(job_id, status="failed",
                                error_msg="Max upload retries exceeded")
             else:
@@ -2461,7 +2481,8 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                             ).strftime('%Y-%m-%d %H:%M:%S') if backoff_sec > 0 else None
                 db.update_video(video_id, status="awaiting_upload",
                                  progress_phase="upload",
-                                 scheduled_upload_at=sched_at)
+                                 scheduled_upload_at=sched_at,
+                                 error_message="YouTube upload returned no video ID")
                 db.update_job(job_id, status="failed",
                                error_msg="YouTube upload returned no video ID")
                 if backoff_sec > 0:
@@ -2470,6 +2491,16 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
 
     except Exception as e:
         logger.exception("[%s] Upload scheduler job %d failed: %s", canal, job_id, e)
+        # ── Quota exhaustion check: don't count as retry ──
+        if _is_quota_exhausted(db):
+            db.update_video(video_id, status="awaiting_upload",
+                              progress_phase="upload", scheduled_upload_at=None,
+                              error_message=f"YouTube API quota exhausted")
+            db.update_job(job_id, status="failed",
+                            error_msg=f"YouTube API quota exhausted")
+            logger.info("[%s] Video %d: quota exhausted — kept in awaiting_upload", canal, video_id)
+            return
+        
         # ── v24: check retry count on exception too ──
         from api.services.upload_scheduler import MAX_UPLOAD_RETRY_PER_VIDEO
         retry_count = 0
@@ -2484,7 +2515,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             pass
         if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
             db.update_video(video_id, status="error", progress_phase="upload",
-                             progress=0)
+                             progress=0, error_message=f"Max upload retries exceeded: {e}"[:500])
             db.update_job(job_id, status="failed",
                            error_msg=f"Max upload retries exceeded: {e}"[:500])
         else:
@@ -2494,7 +2525,8 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             db.update_job(job_id, status="failed", error_msg=str(e)[:500])
             db.update_video(video_id, status="awaiting_upload",
                              progress_phase="upload",
-                             scheduled_upload_at=sched_at)
+                             scheduled_upload_at=sched_at,
+                             error_message=str(e)[:500])
 
 
 async def regenerate_scene_audio_task(scene_id: int, canal: str):

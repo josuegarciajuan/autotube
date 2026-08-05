@@ -41,6 +41,17 @@ RETRY_BASE_DELAY = 2  # seconds
 POST_UPLOAD_VERIFY_RETRIES = 3
 POST_UPLOAD_VERIFY_DELAY = 5  # seconds — YouTube processing may take a few secs
 
+
+class QuotaExhaustedError(RuntimeError):
+    """YouTube API daily quota exhausted. Raised when quotaExceeded is detected.
+    
+    Caught by orchestrator, upload scheduler, and generation service to:
+    - Auto-pause the scheduler (scheduler_paused=true in system_state)
+    - Create a pipeline_alert in the monitoring dashboard
+    - Keep videos in awaiting_upload without consuming retry attempts
+    """
+    pass
+
 # ── Token file concurrency protection ────────────────────────
 # Two threads sharing the same channel token must not race on
 # read → refresh → write.  A per-account mutex serialises all
@@ -878,7 +889,29 @@ class YouTubeUploader:
                             "La cuenta de YouTube requiere registro adicional (youtube.com/create_channel)."
                         ) from exc
                     if error_reason == "quotaExceeded":
-                        raise RuntimeError(
+                        # ── Auto-pause scheduler + create monitoring alert ──
+                        try:
+                            from database.db_extended import ExtendedDatabase
+                            _qdb = ExtendedDatabase()
+                            _qdb.set_quota_exhausted(channel_slug=getattr(self, 'canal', ''))
+                        except Exception:
+                            pass
+                        try:
+                            from api.services.lifecycle_monitor import create_alert
+                            from database.db_extended import ExtendedDatabase as _E2
+                            _adb = _E2()
+                            create_alert(_adb,
+                                         entity_type='system', entity_id=None, channel_id=None,
+                                         alert_type='quota_exhausted', severity='critical',
+                                         title='YouTube API quota agotada',
+                                         message='Cuota diaria de YouTube API agotada (10,000 unidades). '
+                                                 'El scheduler se ha pausado automáticamente. '
+                                                 'Se reanudará en 6 horas. Puedes reanudar manualmente '
+                                                 'desde el panel de monitorización.',
+                                         metadata={'channel': getattr(self, 'canal', 'unknown')})
+                        except Exception:
+                            pass
+                        raise QuotaExhaustedError(
                             "Cuota diaria de YouTube API agotada (10,000 unidades). Reintentar mañana."
                         ) from exc
                     logger.error("Auth/permission error (%s): %s", error_reason or "unknown", exc)

@@ -312,6 +312,9 @@ async def lifespan(app: FastAPI):
     # Launch shorts backfill in background (gradual long-form linking)
     shorts_backfill_task = asyncio.create_task(_shorts_backfill_loop())
     
+    # Launch quota recovery loop (auto-resume scheduler after 6h)
+    quota_recovery_task = asyncio.create_task(_quota_recovery_loop())
+    
     yield
     
     # Shutdown
@@ -326,6 +329,7 @@ async def lifespan(app: FastAPI):
     publish_verify_task.cancel()
     health_checker_task.cancel()
     shorts_backfill_task.cancel()
+    quota_recovery_task.cancel()
     try:
         await schedule_task
     except asyncio.CancelledError:
@@ -344,6 +348,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await shorts_backfill_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await quota_recovery_task
     except asyncio.CancelledError:
         pass
 
@@ -540,6 +548,96 @@ async def _health_monitor_loop():
         except Exception as exc:
             logger.warning("Health monitor error: %s", exc)
         await asyncio.sleep(90)  # Check every 90 seconds
+
+
+async def _quota_recovery_loop():
+    """Background loop: auto-resume scheduler 6 hours after quota exhaustion.
+    
+    When YouTube API quota is exhausted, the uploader auto-pauses the scheduler
+    and records the timestamp. After 6 hours (quota resets at midnight PST),
+    this loop automatically resumes scheduling so videos can be uploaded again.
+    
+    Can also be resumed manually via POST /api/system/scheduler-resume
+    which will preempt this loop (it checks scheduler_paused on each iteration).
+    """
+    import asyncio as _asyncio, logging, time as _time
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    
+    _logger = logging.getLogger("autotube.quota_recovery")
+    
+    await _asyncio.sleep(120)  # Let API stabilize first
+    
+    _logger.info("Quota recovery loop started (check every 30 min, auto-resume after 6h)")
+    
+    RECOVERY_HOURS = 6
+    
+    while True:
+        try:
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            
+            paused = _db.get_system_state("scheduler_paused") == "true"
+            exhausted_at_str = _db.get_system_state("quota_exhausted_at")
+            
+            if paused and exhausted_at_str:
+                try:
+                    exhausted_at = _dt.fromisoformat(exhausted_at_str)
+                    if exhausted_at.tzinfo is None:
+                        exhausted_at = exhausted_at.replace(tzinfo=_tz.utc)
+                    elapsed = _dt.now(_tz.utc) - exhausted_at
+                    
+                    if elapsed >= _td(hours=RECOVERY_HOURS):
+                        _logger.info(
+                            "Quota recovery: %s elapsed since quota exhausted — auto-resuming scheduler",
+                            elapsed,
+                        )
+                        _db.clear_quota_exhausted()
+                        
+                        # Resolve quota alerts
+                        try:
+                            with _db._connect() as _conn:
+                                _conn.execute(
+                                    """UPDATE pipeline_alerts 
+                                       SET resolved = 1, resolved_at = datetime('now')
+                                       WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
+                                )
+                                _conn.commit()
+                        except Exception:
+                            pass
+                        
+                        # Log lifecycle event
+                        try:
+                            from api.services.lifecycle_monitor import log_event as _le
+                            _le(_db, entity_type='system', entity_id=0, channel_id=None,
+                                event='quota_recovered', status='info',
+                                message=f'Scheduler auto-resumed after {elapsed}')
+                        except Exception:
+                            pass
+                        
+                        # Broadcast update to WebSocket clients
+                        try:
+                            from api.routers.monitor import broadcast_monitor_update
+                            await broadcast_monitor_update({
+                                "type": "quota_recovered",
+                                "message": "Scheduler auto-resumed after quota exhaustion",
+                                "elapsed_hours": round(elapsed.total_seconds() / 3600, 1),
+                            })
+                        except Exception:
+                            pass
+                        
+                        _logger.info("Quota recovery complete — scheduler resumed")
+                    else:
+                        remaining = _td(hours=RECOVERY_HOURS) - elapsed
+                        _logger.debug(
+                            "Quota recovery: %s elapsed, %s remaining until auto-resume",
+                            elapsed, remaining,
+                        )
+                except Exception as _parse_err:
+                    _logger.debug("Could not parse exhausted_at timestamp: %s", _parse_err)
+        except Exception as _exc:
+            _logger.debug("Quota recovery loop error: %s", _exc)
+        
+        await _asyncio.sleep(1800)  # Check every 30 minutes
 
 
 async def _shorts_backfill_loop():

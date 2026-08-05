@@ -1721,6 +1721,8 @@ class PipelineOrchestrator:
 
         _saved_uploader_db = None  # for finally restore
 
+        from pipeline.youtube_uploader import QuotaExhaustedError
+
         try:
             # Authenticate with YouTube
             self._emit_progress(83, "upload", "Autenticando con YouTube...")
@@ -2182,6 +2184,31 @@ class PipelineOrchestrator:
                                      self.canal, pl_exc)
 
             return video_id
+
+        except QuotaExhaustedError:
+            # ── Quota exhaustion: already auto-paused in youtube_uploader ──
+            # Belt-and-suspenders: ensure scheduler is paused + alert exists
+            logger.error(f"[{self.canal}] Quota agotada — scheduler pausado automáticamente")
+            try:
+                from database.db_extended import ExtendedDatabase
+                _qdb = ExtendedDatabase()
+                _qdb.set_quota_exhausted(channel_slug=self.canal)
+            except Exception:
+                pass
+            try:
+                from api.services.lifecycle_monitor import create_alert
+                from database.db_extended import ExtendedDatabase as _E
+                _adb = _E()
+                create_alert(_adb,
+                             entity_type='system', entity_id=None, channel_id=None,
+                             alert_type='quota_exhausted', severity='critical',
+                             title='YouTube API quota agotada',
+                             message=f'Cuota agotada durante subida del canal {self.canal}. '
+                                     'Scheduler pausado. Se reanudará en 6h o manualmente.',
+                             metadata={'channel': self.canal})
+            except Exception:
+                pass
+            return None
 
         except Exception as e:
             logger.error(f"[{self.canal}] Upload failed: {e}")

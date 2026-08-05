@@ -939,3 +939,57 @@ def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
         "video_id": video_id,
         "message": "Force-retry recovery started. Previous phase was '{}'".format(phase),
     }
+
+
+# ── Quota error recovery ─────────────────────────────────────
+
+@router.post("/recover-quota-errors")
+def recover_quota_errors():
+    """Recover videos that were marked as 'error' due to YouTube API quota exhaustion.
+    
+    Finds videos in status='error' whose error_message contains 'quota' and 
+    reverts them to 'awaiting_upload' so they can be retried when quota resets.
+    
+    Safe to call multiple times — only affects videos that failed due to quota.
+    """
+    db = get_db()
+    recovered = 0
+    skipped = 0
+    
+    try:
+        with db._connect() as conn:
+            # Find videos marked as error due to quota
+            rows = conn.execute(
+                """SELECT id FROM videos 
+                   WHERE status = 'error' 
+                     AND error_message LIKE '%quota%'
+                   ORDER BY created_at DESC"""
+            ).fetchall()
+            
+            for row in rows:
+                video_id = row[0] if isinstance(row, tuple) else row["id"]
+                try:
+                    conn.execute(
+                        """UPDATE videos 
+                           SET status = 'awaiting_upload', 
+                               error_message = error_message || ' [recovered by quota recovery]',
+                               processed_at = datetime('now')
+                           WHERE id = ?""",
+                        (video_id,),
+                    )
+                    recovered += 1
+                except Exception:
+                    skipped += 1
+            
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Recover quota errors failed: {e}")
+        raise HTTPException(500, f"Recovery failed: {str(e)}")
+    
+    logger.info(f"Quota error recovery: {recovered} videos recovered, {skipped} skipped")
+    return {
+        "ok": True,
+        "recovered": recovered,
+        "skipped": skipped,
+        "message": f"{recovered} videos recovered to awaiting_upload"
+    }

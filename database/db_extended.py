@@ -787,7 +787,7 @@ def migrate_v2(db_path: str = None):
     studio_urls = {}
     for slug in [ch["slug"] for ch in conn.execute("SELECT slug FROM channels WHERE active=1").fetchall()]:
         ch_info = conn.execute("SELECT slug, yt_channel_id FROM channels WHERE slug=?", (slug,)).fetchone()
-        if ch_info and ch_info.get("yt_channel_id"):
+        if ch_info and ch_info["yt_channel_id"]:
             studio_urls[slug] = f"https://studio.youtube.com/channel/{ch_info['yt_channel_id']}/editing/profile"
     for slug, url in studio_urls.items():
         conn.execute(
@@ -974,6 +974,9 @@ def migrate_v2(db_path: str = None):
     
     # ── v27: platform_videos (cross-platform video publishing to FB/Rumble/TikTok) ──
     _migrate_v27(conn, logger)
+    
+    # ── v28: videos.error_message column ──
+    _migrate_v28(conn, logger)
     
     conn.commit()
     conn.close()
@@ -1924,6 +1927,17 @@ def _migrate_v27(conn, logger):
         logger.info("Migration v27: platform_videos table created")
     else:
         logger.warning("Migration v27: schema_v27.sql not found")
+
+
+def _migrate_v28(conn, logger):
+    """Idempotent v28: videos.error_message column for tracking upload failure reasons."""
+    existing = conn.execute("PRAGMA table_info('videos')").fetchall()
+    col_names = [row[1] for row in existing]
+    if "error_message" not in col_names:
+        conn.execute("ALTER TABLE videos ADD COLUMN error_message TEXT DEFAULT ''")
+        logger.info("Migration v28: videos.error_message column added")
+    else:
+        logger.info("Migration v28: already applied")
 
 
 def _migrate_v10(conn, logger):
@@ -6783,6 +6797,28 @@ class ExtendedDatabase(Database):
                 (key, value),
             )
             conn.commit()
+
+    # ── Quota exhaustion helpers ────────────────────────────────
+
+    def set_quota_exhausted(self, channel_slug: str = "") -> None:
+        """Auto-pause scheduler and record quota exhaustion timestamp."""
+        self.set_system_state("scheduler_paused", "true")
+        self.set_system_state("quota_exhausted_at",
+                              datetime.now(_dt_timezone.utc).isoformat())
+        if channel_slug:
+            self.set_system_state("quota_exhausted_channel", channel_slug)
+
+    def is_quota_exhausted(self) -> bool:
+        """Check if scheduler is paused due to quota exhaustion."""
+        paused = self.get_system_state("scheduler_paused") == "true"
+        exhausted_at = self.get_system_state("quota_exhausted_at")
+        return paused and exhausted_at is not None
+
+    def clear_quota_exhausted(self) -> None:
+        """Resume scheduler and clear quota exhaustion markers."""
+        self.set_system_state("scheduler_paused", "false")
+        self.set_system_state("quota_exhausted_at", "")
+        self.set_system_state("quota_exhausted_channel", "")
 
     # ── Social Media Accounts ──────────────────────────────────
 

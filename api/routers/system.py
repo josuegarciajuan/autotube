@@ -238,6 +238,81 @@ def stabilize():
     return summary
 
 
+# ── Scheduler pause/resume endpoints ─────────────────────────────
+
+@router.post("/system/scheduler-pause")
+def scheduler_pause():
+    """Pausar todas las subidas programadas (shorts + long-form + planned slots).
+    
+    Útil cuando se agota la cuota de YouTube API o para mantenimiento.
+    Crea una alerta en el dashboard de monitorización.
+    """
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    
+    # Check if already paused
+    already_paused = db.get_system_state("scheduler_paused") == "true"
+    
+    db.set_system_state("scheduler_paused", "true")
+    db.set_system_state("quota_exhausted_at", 
+                         __import__('datetime').datetime.now(
+                             __import__('datetime').timezone.utc).isoformat())
+    
+    # Create alert if not already paused
+    if not already_paused:
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(db,
+                         entity_type='system', entity_id=None, channel_id=None,
+                         alert_type='quota_exhausted', severity='warning',
+                         title='Scheduler pausado manualmente',
+                         message='Todas las subidas programadas están pausadas. '
+                                 'Usa /api/system/scheduler-resume para reanudar.',
+                         metadata={'source': 'manual_pause'})
+        except Exception:
+            pass
+    
+    logger.info("Scheduler paused manually via API")
+    return {"ok": True, "scheduler_paused": True, "message": "Scheduler pausado. Todas las subidas detenidas."}
+
+
+@router.post("/system/scheduler-resume")
+def scheduler_resume():
+    """Reanudar las subidas programadas.
+    
+    Limpia los marcadores de quota agotada y resuelve las alertas relacionadas.
+    """
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    
+    db.set_system_state("scheduler_paused", "false")
+    db.set_system_state("quota_exhausted_at", "")
+    db.set_system_state("quota_exhausted_channel", "")
+    
+    # Resolve quota-related alerts
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                """UPDATE pipeline_alerts SET resolved = 1, resolved_at = datetime('now')
+                   WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
+            )
+            conn.commit()
+    except Exception:
+        pass
+    
+    # Log lifecycle event
+    try:
+        from api.services.lifecycle_monitor import log_event as _le
+        _le(db, entity_type='system', entity_id=0, channel_id=None,
+            event='quota_recovered', status='info',
+            message='Scheduler reanudado manualmente')
+    except Exception:
+        pass
+    
+    logger.info("Scheduler resumed manually via API")
+    return {"ok": True, "scheduler_paused": False, "message": "Scheduler reanudado. Subidas activas."}
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 def _purge_dir(dir_path: Path) -> int:
