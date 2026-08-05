@@ -993,6 +993,7 @@ def _migrate_shorts_planning_config(conn, logger):
         ("shorts_native_per_day", "INTEGER DEFAULT 3"),
         ("shorts_clip_per_day", "INTEGER DEFAULT 2"),
         ("shorts_clips_per_long", "INTEGER DEFAULT 3"),
+        ("shorts_standalone_per_day", "INTEGER DEFAULT 2"),
     ]
     had_old_column = "shorts_per_day" in existing
     columns_added = False

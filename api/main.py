@@ -623,6 +623,8 @@ async def _schedule_checker_loop():
     last_power_word_analysis = 0
     last_marathon_check = 0
     last_view_gap_check = 0
+    last_standalone_dispatch = 0  # standalone shorts auto-dispatch
+    last_collab_run = 0  # daily collaboration engine
     first_run = True
 
     # Restore last_view_gap_check from DB
@@ -745,7 +747,26 @@ async def _schedule_checker_loop():
                 if now - last_recovery_check > 3600:
                     await _process_recovery_planner()
                     last_recovery_check = now
-                
+
+                # Standalone shorts: auto-dispatch trending topics every 120 min (10:00-23:00)
+                if 10 <= local_hour <= 23 and now - last_standalone_dispatch > 7200:
+                    try:
+                        from api.services.shorts_scheduler import dispatch_standalone_shorts_daily
+                        await asyncio.to_thread(dispatch_standalone_shorts_daily)
+                    except Exception as exc:
+                        logger.debug("Standalone shorts dispatch: %s", exc)
+                    last_standalone_dispatch = now
+
+                # Collaboration engine: daily at 3:00-4:00 UTC (off-peak)
+                if 3 <= local_hour <= 4 and now - last_collab_run > 82800:  # ~23h
+                    try:
+                        from pipeline.collaboration_engine import run_all_channels_collab
+                        await asyncio.to_thread(run_all_channels_collab)
+                        logger.debug("Collaboration round completed")
+                    except Exception as exc:
+                        logger.debug("Collaboration run: %s", exc)
+                    last_collab_run = now
+
                 # Smart replan: every 30 min during active hours (10:00-23:00)
                 local_hour = time.localtime().tm_hour
                 if 10 <= local_hour <= 23 and now - last_smart_replan > 1800:

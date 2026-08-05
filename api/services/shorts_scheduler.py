@@ -1738,6 +1738,13 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 slot_rank=slot_rank, job_id=job_id,
                 target_upload_at=target_upload_at,
             )
+        elif short_type == "standalone":
+            short_id = await asyncio.to_thread(
+                _dispatch_standalone_short,
+                channel_id, channel_slug,
+                slot_rank=slot_rank, job_id=job_id,
+                target_upload_at=target_upload_at,
+            )
         else:
             # ── v25: Check for pre-rendered clip ──
             pre_rendered_short_id = None
@@ -1966,6 +1973,47 @@ def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
         logger.info("Short job #%d progress: %d%% (%s)", job_id, progress, phase)
     except Exception as e:
         logger.warning("Short job progress update failed for #%d: %s", job_id, e)
+
+
+# ── Standalone short generation ──────────────────────────────────
+
+def _dispatch_standalone_short(channel_id: int, channel_slug: str,
+                                slot_rank: int = 0, job_id: int = None,
+                                target_upload_at: str = None) -> int | None:
+    """Generate and publish a standalone Short with trending niche topic.
+
+    Uses topic discovery (YouTube trending + LLM curation) to find
+    high-CTR topics, then delegates to StandaloneShortsPipeline for
+    script → TTS → media → render → upload.
+    """
+    import logging
+    logger = logging.getLogger("autotube.standalone")
+
+    try:
+        from pipeline.shorts_standalone import discover_standalone_topics, run_standalone_short
+
+        # Discover 3 trending topics, pick the best one
+        topics = discover_standalone_topics(channel_slug, count=3)
+        if not topics:
+            logger.warning("[standalone] No topics found for %s", channel_slug)
+            return None
+
+        topic = topics[0]  # Best topic first
+        logger.info("[standalone] %s: running for topic '%s'", channel_slug, topic.get("title", "?"))
+
+        short_id = run_standalone_short(
+            channel_slug=channel_slug,
+            topic=topic,
+            channel_id=channel_id,
+            job_id=job_id,
+            target_upload_at=target_upload_at,
+        )
+
+        return short_id
+
+    except Exception as e:
+        logger.error("[standalone] Dispatch failed for %s: %s", channel_slug, e)
+        return None
 
 
 # ── Native short generation ────────────────────────────────────
@@ -3807,3 +3855,82 @@ def _memory_ok(min_free_gb: float = 4.0) -> bool:
         return avail_mb >= min_free_mb
     except ImportError:
         return True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Standalone shorts auto-dispatch
+# ═══════════════════════════════════════════════════════════════════
+
+def dispatch_standalone_shorts_daily() -> dict:
+    """Auto-dispatch standalone shorts for all active channels.
+
+    Creates 1-2 standalone short slots per channel per day (NOT pre-planned
+    — generated on demand). This function is called periodically from the
+    API background loop.
+
+    Returns: {"dispatched": N, "errors": N}
+    """
+    import logging
+    logger = logging.getLogger("autotube.standalone")
+
+    result = {"dispatched": 0, "errors": 0}
+
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        channels = db.get_channels(active_only=True)
+
+        for ch in channels:
+            channel_id = ch["id"]
+            slug = ch["slug"]
+
+            # Check how many standalone shorts were already dispatched today
+            today_dt = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+            conn = __import__("sqlite3").connect(
+                str(__import__("config.settings", fromlist=["DATABASE_PATH"]).DATABASE_PATH), timeout=10
+            )
+            today_count = conn.execute(
+                """SELECT COUNT(*) FROM generation_jobs
+                   WHERE action = 'generate_standalone_short'
+                     AND status IN ('completed', 'running', 'queued')
+                     AND created_at >= ?""",
+                (today_dt,),
+            ).fetchone()[0]
+            conn.close()
+
+            # Get per-channel config
+            conn2 = __import__("sqlite3").connect(
+                str(__import__("config.settings", fromlist=["DATABASE_PATH"]).DATABASE_PATH), timeout=10
+            )
+            row = conn2.execute(
+                "SELECT shorts_standalone_per_day FROM shorts_planning_config WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            conn2.close()
+            max_per_day = row[0] if row and row[0] else 2
+
+            if today_count >= max_per_day:
+                continue
+
+            # Dispatch one standalone short
+            try:
+                from api.services.shorts_scheduler import _dispatch_standalone_short
+                import asyncio
+                import threading
+
+                def _run():
+                    _dispatch_standalone_short(channel_id, slug)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+                result["dispatched"] += 1
+                logger.info("[standalone] Dispatched for %s (%d/%d today)", slug, today_count + 1, max_per_day)
+            except Exception as e:
+                logger.warning("[standalone] Dispatch error for %s: %s", slug, e)
+                result["errors"] += 1
+
+    except Exception as e:
+        logger.warning("[standalone] Daily dispatch failed: %s", e)
+        result["errors"] += 1
+
+    return result
