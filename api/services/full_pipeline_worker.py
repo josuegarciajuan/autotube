@@ -1292,6 +1292,41 @@ def run_job(
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url)
                 db.update_video(video_id, progress=100, status=worker_status)
 
+                # ── Cross-platform video publishing (Facebook, Rumble, TikTok) ──
+                # Uploads the same video file to other monetizable platforms.
+                # Each platform is independent — failures don't affect others.
+                try:
+                    from api.services.publishers.platform_manager import PlatformPublishManager
+                    cross_mgr = PlatformPublishManager(canal, channel_id, db)
+                    import asyncio as _asyncio
+                    try:
+                        _loop = _asyncio.get_event_loop()
+                    except RuntimeError:
+                        _loop = _asyncio.new_event_loop()
+                        _asyncio.set_event_loop(_loop)
+                    cross_results = _loop.run_until_complete(
+                        cross_mgr.publish_to_all(
+                            video_id=video_id,
+                            yt_video_id=yt_video_id,
+                            video_data=video_data,
+                            metadata={
+                                "title": metadata.get("title") if metadata else titulo,
+                                "description": metadata.get("description", ""),
+                                "tags": metadata.get("tags", []),
+                                "thumbnail_path": metadata.get("thumbnail_path"),
+                            },
+                        )
+                    )
+                    for platform, result in cross_results.items():
+                        if result.success:
+                            logger.info("[%s] Published to %s: %s", canal, platform,
+                                        result.platform_video_url or result.platform_video_id or "ok")
+                        else:
+                            logger.warning("[%s] Failed to publish to %s: %s", canal,
+                                           platform, result.error)
+                except Exception as cross_exc:
+                    logger.warning("[%s] Cross-platform publishing skipped: %s", canal, cross_exc)
+
                 # ── Auto-mark altered content (IA) via browser ──
                 try:
                     if getattr(config, "AUTO_MARK_ALTERED_CONTENT", False):

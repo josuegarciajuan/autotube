@@ -301,8 +301,40 @@ VIRAL_MAX_AGE_DAYS = 29
 # CROSS-PLATFORM DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 
+# Text-based cross-promotion flags (used by social caption/publisher system).
 CROSS_PLATFORM = {
     "facebook": False,
     "tiktok": False,
     "twitter": False,
+}
+
+# Auto-upload full videos to monetizable platforms after YouTube publishing.
+# True = upload the same video file to this platform via API.
+# Requires: valid credentials in channel_social_accounts for each platform.
+CROSS_PLATFORM_UPLOAD = {
+    "facebook": False,   # Graph API v18+ video upload (In-Stream Ads)
+    "rumble": False,     # Upload API (Rumble Player + licensing)
+    "tiktok": False,     # Content Posting API (clip upload)
+}
+
+# Per-platform settings for video uploads.
+CROSS_PLATFORM_SETTINGS = {
+    "facebook": {
+        "privacy": "public",
+        "cross_reference_yt": True,         # append YT link in description
+        "sync_metadata": True,              # use same title/desc/tags as YT
+        "upload_delay_min": 0,              # delay after YT upload
+    },
+    "rumble": {
+        "privacy": "public",
+        "cross_reference_yt": True,
+        "sync_metadata": True,
+        "upload_delay_min": 5,
+    },
+    "tiktok": {
+        "privacy": "public",
+        "clip_duration_sec": 60,
+        "cross_reference_yt": False,        # TikTok penalizes external links
+        "upload_delay_min": 30,
+    },
 }

@@ -202,7 +202,7 @@ export default function SocialAccountsPanel({ channelId }: Props) {
                       className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full"
                     />
                     <input
-                      type="password" placeholder="Contraseña" value={form.password}
+                      type="password" placeholder={['rumble', 'facebook'].includes(platform.id) ? 'Access Token / API Key' : 'Contraseña'} value={form.password}
                       onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))}
                       className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full"
                     />

@@ -6906,6 +6906,104 @@ class ExtendedDatabase(Database):
 
     # ── video_asset_history helpers (v9 cross-video dedup) ─────
 
+    # ── Platform Videos (v27 cross-platform publishing) ─────
+
+    def create_platform_video(self, video_id: int, channel_id: int, platform: str,
+                              status: str = "pending", privacy: str = "public",
+                              metadata_json: str = None) -> int:
+        """Insert or get an existing platform_videos row. Returns the row id."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO platform_videos
+                   (video_id, channel_id, platform, status, privacy, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(video_id, platform) DO UPDATE SET
+                   attempts = platform_videos.attempts + 1,
+                   status = excluded.status,
+                   updated_at = CURRENT_TIMESTAMP""",
+                (video_id, channel_id, platform, status, privacy,
+                 metadata_json or "{}"),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_platform_video(self, record_id: int, **kwargs) -> None:
+        """Update a platform_videos row. Supports: status, platform_video_id,
+        platform_video_url, error_message, privacy, metadata_json, attempts.
+        Sets uploaded_at when status='published'."""
+        allowed = {"status", "platform_video_id", "platform_video_url",
+                   "error_message", "privacy", "metadata_json", "attempts"}
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            if k in allowed and v is not None:
+                fields.append(f"{k} = ?")
+                if k == "error_message":
+                    values.append(str(v)[:2000])
+                else:
+                    values.append(v)
+        if kwargs.get("status") == "published":
+            fields.append("uploaded_at = CURRENT_TIMESTAMP")
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(record_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE platform_videos SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+            conn.commit()
+
+    def get_platform_video(self, video_id: int, platform: str) -> dict | None:
+        """Get a single platform_videos row."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM platform_videos WHERE video_id = ? AND platform = ?",
+                (video_id, platform),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_platform_videos(self, video_id: int) -> list[dict]:
+        """Get all platform_videos rows for a video."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM platform_videos WHERE video_id = ? ORDER BY platform",
+                (video_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_video_cross_platform_summary(self, video_id: int) -> dict[str, str]:
+        """Return {platform: status} mapping for UI badges."""
+        rows = self.get_platform_videos(video_id)
+        return {r["platform"]: r["status"] for r in rows}
+
+    def get_channel_platform_stats(self, channel_id: int) -> list[dict]:
+        """Get aggregate cross-platform publish stats for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT platform, status, COUNT(*) as count
+                   FROM platform_videos
+                   WHERE channel_id = ?
+                   GROUP BY platform, status
+                   ORDER BY platform, status""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_failed_platform_videos(self, channel_id: int, platform: str = None,
+                                   max_attempts: int = 3) -> list[dict]:
+        """Get platform_videos that failed and are eligible for retry."""
+        with self._connect() as conn:
+            q = ("SELECT * FROM platform_videos WHERE channel_id = ? "
+                 "AND status = 'failed' AND attempts < ?")
+            params = [channel_id, max_attempts]
+            if platform:
+                q += " AND platform = ?"
+                params.append(platform)
+            rows = conn.execute(q + " ORDER BY created_at DESC", params).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── video_asset_history helpers (v9 cross-video dedup) ─────
+
     def insert_asset_history(self, video_id: int, file_path: str,
                              source: str, asset_url: str = "") -> None:
         """Record an asset as used for cross-video deduplication."""

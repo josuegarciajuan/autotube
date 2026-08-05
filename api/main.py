@@ -25,6 +25,7 @@ from api.routers import channels, videos, scenes, jobs, schedules, sources, voic
 from api.routers import auth, planning, shorts
 from api.routers import monetization, milestones, analytics
 from api.routers import promotion, gamification, social_accounts
+from api.routers import cross_platform as cross_platform_router
 from api.routers import monitor as monitor_router
 from api.routers import insights
 from api.routers import view_gap as view_gap_router
@@ -2322,6 +2323,7 @@ app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(promotion.router, tags=["Promotion"])
 app.include_router(gamification.router, prefix="/api", tags=["Gamification"])
 app.include_router(social_accounts.router, prefix="/api/channels", tags=["Social Media"])
+app.include_router(cross_platform_router.router, prefix="", tags=["Cross-Platform"])
 app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
 app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])

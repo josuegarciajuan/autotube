@@ -325,7 +325,7 @@ class DashboardStats(BaseModel):
 # ── Social Media Accounts ───────────────────────────────────
 
 class SocialAccountCreate(BaseModel):
-    platform: str  # 'tiktok', 'twitter', 'instagram', 'facebook', 'reddit'
+    platform: str  # 'tiktok', 'twitter', 'instagram', 'facebook', 'reddit', 'rumble'
     username: str
     password: str  # plaintext — server encrypts before storing
     enabled: bool = True
@@ -357,6 +357,40 @@ class SocialTimingUpdate(BaseModel):
     instagram: Optional[int] = None
     facebook: Optional[int] = None
     reddit: Optional[int] = None
+    rumble: Optional[int] = None
+
+
+# ── Cross-Platform Publishing ──────────────────────────────
+
+
+class CrossPlatformConfigUpdate(BaseModel):
+    """Enable/disable auto-upload to each platform."""
+    facebook: Optional[bool] = None
+    rumble: Optional[bool] = None
+    tiktok: Optional[bool] = None
+
+
+class CrossPlatformConfigResponse(BaseModel):
+    facebook: bool = False
+    rumble: bool = False
+    tiktok: bool = False
+    settings: dict = {}
+
+
+class PlatformVideoResponse(BaseModel):
+    id: int
+    video_id: int
+    channel_id: int
+    platform: str
+    platform_video_id: Optional[str] = None
+    platform_video_url: Optional[str] = None
+    status: str
+    privacy: str
+    error_message: Optional[str] = None
+    attempts: int
+    uploaded_at: Optional[str] = None
+    created_at: str
+    updated_at: str
 
 
 # ── WebSocket Messages ──────────────────────────────────────

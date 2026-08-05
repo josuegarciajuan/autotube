@@ -1005,6 +1005,7 @@ class VideoLifecycleManager:
             "instagram": 120,
             "facebook": 180,
             "reddit": 240,
+            "rumble": 5,
         }
 
     def _has_social_account(self, platform: str) -> bool:

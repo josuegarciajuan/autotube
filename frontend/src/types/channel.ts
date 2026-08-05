@@ -350,6 +350,12 @@ export const SOCIAL_PLATFORMS = [
     strategy: 'CERO autopromoción. El post debe ser valioso por sí mismo. Sin link. Solo mención sutil al final: "Investigué esto para un video".',
     link: 'none',
   },
+  {
+    id: 'rumble', label: 'Rumble', icon: '🎬', color: '#56c758',
+    description: 'Video long-form completo. Monetización desde día 1 sin requisitos de suscriptores.',
+    strategy: 'Sube el video completo vía API. Rumble licencia contenido viral a Yahoo/MSN/Newsweek generando ingresos adicionales por licensing.',
+    link: 'none',
+  },
 ] as const
 
 export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
@@ -530,4 +536,31 @@ export function getCategoryMeta(
   category: InsightCategory
 ): (typeof INSIGHT_CATEGORY_META)[InsightCategory] {
   return INSIGHT_CATEGORY_META[category] || INSIGHT_CATEGORY_META.contenido
+}
+
+// ══════════════════════════════════════════════════════════
+// Cross-Platform Publishing (v27)
+// ══════════════════════════════════════════════════════════
+
+export interface CrossPlatformConfig {
+  facebook: boolean
+  rumble: boolean
+  tiktok: boolean
+  settings?: Record<string, any>
+}
+
+export interface PlatformVideo {
+  id: number
+  video_id: number
+  channel_id: number
+  platform: string
+  platform_video_id: string | null
+  platform_video_url: string | null
+  status: 'pending' | 'uploading' | 'processing' | 'published' | 'failed'
+  privacy: string
+  error_message: string | null
+  attempts: number
+  uploaded_at: string | null
+  created_at: string
+  updated_at: string
 }

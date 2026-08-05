@@ -60,6 +60,20 @@ export const api = {
   updateSocialTiming: (channelId: number, data: Record<string, number>) =>
     request<any>(`/channels/${channelId}/social-timing`, { method: 'PUT', body: JSON.stringify(data) }),
   
+  // Cross-Platform Publishing (v27)
+  getCrossPlatformConfig: (channelId: number) =>
+    request<any>(`/channels/${channelId}/cross-platform-config`),
+  updateCrossPlatformConfig: (channelId: number, data: { facebook?: boolean; rumble?: boolean; tiktok?: boolean }) =>
+    request<any>(`/channels/${channelId}/cross-platform-config`, { method: 'PUT', body: JSON.stringify(data) }),
+  getVideoPlatformStatus: (videoId: number) =>
+    request<any[]>(`/videos/${videoId}/platform-status`),
+  publishToPlatform: (videoId: number, platform: string) =>
+    request<any>(`/videos/${videoId}/publish-to/${platform}`, { method: 'POST' }),
+  republishToPlatform: (videoId: number, platform: string) =>
+    request<any>(`/videos/${videoId}/republish-to/${platform}`, { method: 'POST' }),
+  getChannelPlatformStats: (channelId: number) =>
+    request<any[]>(`/channels/${channelId}/platform-stats`),
+  
   // Templates
   generateTemplate: (channelId: number, segmentType: string) =>
     request<any>(`/channels/${channelId}/templates/${segmentType}/generate`, { method: 'POST' }),

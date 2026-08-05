@@ -76,3 +76,28 @@ def should_use_proxy(channel_slug: str) -> bool:
     if not PROXY_CHANNELS:
         return True  # empty list = apply to ALL channels
     return channel_slug in PROXY_CHANNELS
+
+
+def create_proxied_session(channel_slug: str = None):
+    """Create a requests.Session with proxy configured (if applicable).
+
+    Used by cross-platform publishers (Facebook Graph API, Rumble)
+    to route API calls through the residential proxy.
+
+    Args:
+        channel_slug: Optional channel slug for per-channel proxy toggling.
+
+    Returns:
+        requests.Session with proxy config applied, or a plain Session
+        if proxy is disabled.
+    """
+    import requests
+    session = requests.Session()
+
+    if channel_slug and should_use_proxy(channel_slug):
+        from config.settings import PROXY_TYPE, PROXY_HOST, PROXY_PORT
+        proxy_url = f"{PROXY_TYPE}://{PROXY_HOST}:{PROXY_PORT}"
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+        logger.debug("Proxy session created for channel %s: %s", channel_slug, proxy_url)
+
+    return session
