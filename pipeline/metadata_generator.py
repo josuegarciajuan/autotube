@@ -96,14 +96,18 @@ Ejemplos de buena capitalización:
 - Los 3 primeros son los que aparecen sobre el título del vídeo → elíguelos con máximo cuidado.
 - Formato: #PalabraClave
 
-🏷️ TAGS (METADATOS OCULTOS):
-- Entre 5 y 10 tags.
-- El PRIMER tag debe ser la keyword principal exacta (debe COINCIDIR con el primer hashtag — esto refuerza el SEO).
-- El RESTO de tags deben ser DIFERENTES de los hashtags (no los dupliques, salvo el primero):
-  • Variantes de la keyword principal.
-  • Errores comunes de escritura de la keyword.
-  • Tags en inglés si aplica.
-  • Temas relacionados y long-tail keywords.
+🏷️ TAGS (METADATOS OCULTOS) — ESTRATEGIA LONG-TAIL:
+- Entre 7 y 10 tags.
+- **RELA prioridad: tags ultra-específicos y long-tail (3-5 palabras) sobre tags genéricos.**
+- El PRIMER tag debe ser la keyword principal exacta (debe COINCIDIR con el primer hashtag).
+- Tags 2-5: frases de búsqueda long-tail que alguien REALMENTE escribiría en YouTube para encontrar este video. Ejemplos:
+  • NO uses "misterio" → usa "misterio del parque jerome nueva york"
+  • NO uses "documental español" → usa "documental español fabrica abandonada 1912"
+  • NO uses "historia real" → usa "historia real naufragio nao portuguesa atlantico"
+- Tags 6-8: variantes, errores comunes, y búsquedas relacionadas.
+- Tags 9-10: tags en inglés (si aplica) o búsquedas complementarias.
+- **PROHIBIDO:** tags de una sola palabra genérica ("misterio", "historia", "documental", "real", "2025", "video viral").
+- **PROHIBIDO:** poner el nombre del canal como tag (no uses "expediciones sin retorno" ni "sincronías" como tag).
 - Máximo 500 caracteres en total para todos los tags juntos.
 
 🖼️ TEXTO MINIATURA (DOS LÍNEAS DE OVERLAY):
@@ -596,10 +600,18 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         # Build basic description from template
         channel_desc = getattr(self.config, "DESCRIPTION_TEMPLATE", "")
         if channel_desc and "{titulo}" in channel_desc:
+            # ── v24: related_videos placeholder (cross-promotion) ──
+            related = script.get("related_videos_text", "")
+            if not related:
+                related = (
+                    "👉 Mira tambien nuestros documentales mas recientes en el canal\n"
+                    "👉 Suscribete para mas expediciones reales cada semana"
+                )
             description = channel_desc.format(
                 titulo=title,
                 descripcion_seo=script.get("descripcion_seo", ""),
                 chapters="0:00 — Introducción\n2:00 — Desarrollo\n5:00 — Conclusión",
+                related_videos=related,
             )
         else:
             description = f"{title}\n\nUna historia que te dejará sin palabras...\n\n#historias #documental"

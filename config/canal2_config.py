@@ -752,18 +752,33 @@ YT_DEFAULT_TAGS = [
     "experiencias inexplicables reales",
     "milagros modernos documentados",
     "sueños premonitorios",
-    # Tier 3: Format tags
-    "video ensayo misterio",
-    "documental español inexplicable",
+    "edgar mitchell astronauta misterio",
+    "bligh motin bounty supervivencia",
+    "mardani khel arte marcial india",
+    "cern aceleracion del tiempo",
+    "angeles reales grabados en video",
+    # Tier 3: Ultra-long-tail (low competition)
+    "sueños que predijeron el futuro casos reales",
+    "coincidencias imposibles que cambiaron la historia",
+    "milagros reales documentados por la ciencia",
+    "experiencias inexplicables que te dejaran sin palabras",
+    "fenómenos paranormales captados en camara",
+    "glitches en la matrix experiencias reales",
+    "sincronicidades de carl jung explicadas",
+    "casos reales de telepatia documentados",
+    "personas que predijeron su propia muerte",
+    "milagros de supervivencia contra todo pronostico",
+    "momentos inexplicables grabados en directo",
+    "historias reales que la ciencia no puede explicar",
+    "señales del universo sincronías inexplicables",
+    "avistamientos inexplicables grabados en video real",
+    "profecías que se cumplieron exactamente",
+    # Tier 4: Format / audience intent
+    "documental misterio español",
+    "video ensayo inexplicable",
     "historias que desafían la lógica",
     "misterios reales documental",
-    "sucesos inexplicables reales",
-    # Tier 4: Long-tail / adjacent
-    "casualidades del destino",
-    "historias de esperanza reales",
-    "lo inexplicable documental",
-    "fenómenos paranormales reales",
-    "historias reales impactantes",
+    "historias para reflexionar",
 ]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -779,12 +794,29 @@ SEO_SECONDARY_KEYWORDS = [
     "sincronías del universo",
     "fenómenos inexplicables reales",
     "milagros modernos",
-    # Phenomena
+    # Phenomena (specific)
     "predicciones cumplidas reales",
     "sueños premonitorios reales",
-    "experiencias inexplicables",
-    "casualidades sorprendentes",
+    "experiencias inexplicables documentadas",
+    "casualidades sorprendentes historia",
     "sucesos paranormales reales",
+    "glitches en la matrix casos reales",
+    "sincronicidades jung ejemplos reales",
+    "edgar mitchell telepatia espacio",
+    "motin de la bounty supervivencia real",
+    "colisionador de hadrones percepcion tiempo",
+    "angeles grabados en video real",
+    # Long-tail audience intent (low competition)
+    "sueños que predijeron el futuro historias reales",
+    "coincidencias imposibles que te dejaran helado",
+    "milagros reales que la ciencia no puede explicar",
+    "momentos inexplicables captados en video",
+    "casos de telepatia documentados por la ciencia",
+    "personas que predijeron su propia muerte real",
+    "historias de supervivencia contra todo pronostico",
+    "señales del universo que no puedes ignorar",
+    "fenómenos paranormales documental español",
+    "profecías que se hicieron realidad",
     # Format / channel
     "documental misterio español",
     "video ensayo inexplicable",
@@ -795,11 +827,6 @@ SEO_SECONDARY_KEYWORDS = [
     "datos curiosos inexplicables",
     "historias reales que inspiran",
     "fenómenos que la ciencia no explica",
-    # Adjacent
-    "destino y casualidades",
-    "ley del universo sincronías",
-    "historias de esperanza reales",
-    "lo inexplicable documental",
 ]
 
 SEO_HASHTAGS = [

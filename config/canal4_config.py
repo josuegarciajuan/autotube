@@ -796,30 +796,57 @@ PUBLISH_WINDOW_SPREAD_MIN = 90      # ±90 min spread around peak hour to avoid 
 # PUBLISH_TARGET_HOUR = None — usa optimal_slots calculados por datos
 
 YT_DEFAULT_TAGS = [
-    # Tier 1: Primary keywords (broad match)
+    # Tier 1: Primary niche keywords (broad match)
     "expediciones fallidas",
-    "documentales de supervivencia",
+    "exploraciones que salieron mal",
+    "tragedias en expediciones",
+    "supervivencia extrema documental",
     "naufragios historicos",
-    "exploracion y aventura",
-    "tragedias reales",
-    # Tier 2: Named expeditions (high-intent search)
+    # Tier 2: Named expeditions (high-intent specific search)
     "expedicion franklin",
-    "donner party",
-    "everest tragedias",
-    "naufragios famosos",
-    "exploradores perdidos",
-    # Tier 3: Format tags
-    "video ensayo historia",
-    "documental español supervivencia",
-    "historias reales de exploracion",
-    "desastres historicos",
-    "survival documental español",
-    # Tier 4: Long-tail / adjacent
-    "historia de la navegacion",
-    "accidentes de montaña",
-    "supervivencia extrema real",
-    "expediciones al artico",
+    "donner party historia real",
+    "naufragio endurance",
+    "everest desastre 1996",
+    "exploracion artica tragedias",
+    "tragedia batalla badr",
+    "desaparicion vasco de ataide",
+    "naufragio nao portuguesa",
+    "red october conspiración filipinas",
+    "fabrica abandonada virginia 1912",
+    "jerome park misterio Nueva York",
+    # Tier 3: Ultra-long-tail (low competition, specific intent)
+    "que paso en el everest 1996 documental",
+    "historia real donner party canibalismo",
+    "como sobrevivio shackleton en la antartida",
+    "naufragios famosos que nunca se encontraron",
+    "expediciones que terminaron en tragedia",
+    "historias reales de supervivencia en el mar",
+    "exploradores que desaparecieron sin dejar rastro",
+    "accidentes en el monte everest documental",
+    "exploracion del artico siglo xix",
+    "tragedias en alta mar documental español",
+    "supervivientes de naufragios historias reales",
+    "expediciones perdidas en la selva",
+    "montañeros que murieron en el everest",
+    "desastres navales peores de la historia",
+    "misterios sin resolver expediciones",
+    # Tier 4: Format / audience intent
+    "documental español expediciones",
+    "historia real documental exploracion",
+    "video ensayo tragedias historicas",
     "historias increibles documental",
+    "mejores documentales de supervivencia",
+    # Tier 5: Adjacent / lateral search
+    "descubrimientos arqueologicos en el hielo",
+    "barcos hundidos encontrados recientemente",
+    "tragedias en montaña documental",
+    "exploradores españoles olvidados",
+    "rutas de exploracion peligrosas historia",
+    "desaparecidos en expediciones famosos",
+    "misterios maritimos sin resolver",
+    "leyendas de naufragios documental",
+    "aventuras extremas que salieron mal",
+    "lugares mas peligrosos del mundo exploracion",
 ]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -830,28 +857,52 @@ SEO_PRIMARY_KEYWORD = "expediciones fallidas reales"
 
 SEO_SECONDARY_KEYWORDS = [
     # Core niche
-    "naufragios historicos documental",
     "exploraciones que salieron mal",
     "tragedias en expediciones",
     "supervivencia extrema documental",
-    "explotadores desaparecidos",
-    # Named expeditions
+    "naufragios historicos documental",
+    "expediciones fallidas reales",
+    # Named expeditions (high-intent specific)
     "expedicion franklin documental",
     "donner party historia real",
-    "naufragio endurance",
-    "everest desastre 1996",
+    "naufragio endurance shackleton",
+    "everest desastre 1996 documental",
     "exploracion artica tragedias",
-    # Format / channel
-    "documental supervivencia español",
-    "video ensayo exploracion",
-    "historias de naufragios",
-    "montañas mortales documental",
-    # Audience intent
-    "historias que inspiran respeto",
-    "documentales de aventura real",
-    "lo peor de la exploracion",
-    "como murieron los exploradores",
-    "tragedias maritimas documental",
+    "tragedia batalla de badr",
+    "desaparicion vasco de ataide naufragio",
+    "naufragio nao portuguesa documental",
+    "red october filipinas golpe de estado",
+    "fabrica abandonada virginia can company",
+    "jerome park nueva york leyenda urbana",
+    "juncus articulatus planta misteriosa",
+    "shayba ibn rabi duelo badr",
+    # Long-tail audience intent (low competition)
+    "que paso realmente en el everest 1996",
+    "historia real de la donner party canibalismo",
+    "como sobrevivio shackleton en la antartida",
+    "peores naufragios de la historia",
+    "expediciones que terminaron en tragedia documental",
+    "historias reales de supervivencia en el mar",
+    "exploradores que desaparecieron misteriosamente",
+    "accidentes en el everest documental español",
+    "tragedias en alta mar historias reales",
+    "supervivientes de naufragios famosos",
+    "expediciones perdidas en la amazonia",
+    "montañeros que murieron en el himalaya",
+    "desastres navales mas grandes de la historia",
+    "misterios sin resolver de expediciones",
+    "documental español exploracion supervivencia",
+    "video ensayo tragedias historicas",
+    "mejores historias de supervivencia documental",
+    # Cross-niche (related topics that attract similar audience)
+    "barcos hundidos encontrados recientemente",
+    "misterios maritimos sin resolver documental",
+    "lugares mas peligrosos del mundo exploracion",
+    "exploradores españoles olvidados historia",
+    "desaparecidos en montaña casos reales",
+    "leyendas de naufragios historias reales",
+    "aventuras extremas que salieron mal documental",
+    "lugares abandonados con historia documental",
 ]
 
 SEO_HASHTAGS = [
@@ -930,6 +981,11 @@ DESCRIPTION_TEMPLATE = """⛵ {titulo}
 🔔 Suscribete y activa la campana para descubrir mas expediciones que desafiaron a la naturaleza... y perdieron.
 
 💬 ¿Crees que habrias sobrevivido en esta expedicion? Dejalo en los comentarios.
+
+———
+
+🎬 VIDEOS RELACIONADOS DE NUESTRO CANAL
+{related_videos}
 
 #ExpedicionesSinRetorno #Supervivencia #HistoriasReales"""
 
