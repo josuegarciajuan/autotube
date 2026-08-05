@@ -199,19 +199,11 @@ class ScriptGenerator:
         self._word_count_emphasis = 1.0
         self._chunk_context = None
 
-        # Dynamic prompt import: canal2 → prompts.canal2_prompts, etc.
-        try:
-            prompts_module = importlib.import_module(f"prompts.{self.canal}_prompts")
-            self._build_system_prompt = prompts_module.build_system_prompt
-            self._format_user_prompt = prompts_module.format_user_prompt
-        except (ImportError, AttributeError):
-            logger.warning(
-                "No prompts module or missing functions for %s, falling back to canal2_prompts",
-                self.canal,
-            )
-            from prompts.canal2_prompts import build_system_prompt, format_user_prompt
-            self._build_system_prompt = build_system_prompt
-            self._format_user_prompt = format_user_prompt
+        # Unified prompts — parameterized by channel config
+        # Replaces per-channel prompts/canal*_prompts.py imports
+        from prompts.base_prompts import build_system_prompt, format_user_prompt
+        self._build_system_prompt = build_system_prompt
+        self._format_user_prompt = format_user_prompt
 
         logger.info(
             "ScriptGenerator initialized: provider=%s model=%s canal=%s",
@@ -1164,28 +1156,13 @@ class ScriptGenerator:
             cfg = canal_config or self.canal_config
             mp = marathon_params or {}
 
-            try:
-                prompts_module = importlib.import_module(
-                    f"prompts.{self.canal}_prompts"
-                )
-            except (ImportError, ModuleNotFoundError):
-                from prompts.canal2_prompts import build_marathon_outline_prompt as bmop_fn
-                system_prompt = bmop_fn(
-                    config=cfg, duration_min=dm,
-                    num_sections=mp.get("num_sections", 12),
-                    narrative_format=mp.get("narrative_format", "top_cases"),
-                    word_target=wt,
-                )
-            else:
-                build_marathon_fn = getattr(prompts_module, "build_marathon_outline_prompt", None)
-                if build_marathon_fn is None:
-                    from prompts.canal2_prompts import build_marathon_outline_prompt as build_marathon_fn
-                system_prompt = build_marathon_fn(
-                    config=cfg, duration_min=dm,
-                    num_sections=mp.get("num_sections", 12),
-                    narrative_format=mp.get("narrative_format", "top_cases"),
-                    word_target=wt,
-                )
+            from prompts.base_prompts import build_marathon_outline_prompt as bmop_fn
+            system_prompt = bmop_fn(
+                config=cfg, duration_min=dm,
+                num_sections=mp.get("num_sections", 12),
+                narrative_format=mp.get("narrative_format", "top_cases"),
+                word_target=wt,
+            )
 
             user_prompt = (
                 f"Contenido fuente (investigación):\n\n{raw_text[:8000]}\n\n"
@@ -1289,20 +1266,16 @@ class ScriptGenerator:
         content_id = content_item.get("id")
         content_title = content_item.get("title", "")
 
-        # Use the lightweight prompt
-        try:
-            prompts_module = importlib.import_module(f"prompts.{self.canal}_prompts")
-            system_prompt = prompts_module.build_content_only_prompt(
-                config=self.canal_config,
-                previous_blocks=previous_blocks,
-                word_guidance=word_guidance,
-                source_text=source_text,
-                outline=outline,
-                batch_num=batch_num,
-            )
-        except (ImportError, AttributeError):
-            # Fallback: build minimal prompt inline
-            system_prompt = self._build_minimal_prompt(previous_blocks, word_guidance, source_text)
+        # Use the unified base prompt
+        from prompts.base_prompts import build_content_only_prompt
+        system_prompt = build_content_only_prompt(
+            config=self.canal_config,
+            previous_blocks=previous_blocks,
+            word_guidance=word_guidance,
+            source_text=source_text,
+            outline=outline,
+            batch_num=batch_num,
+        )
 
         user_prompt = f"Fuente: {content_title}\n\nContinúa la narración documental."
 
@@ -3567,16 +3540,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
 
         # ── 1. Build the marathon outline prompt ──────────────
-        try:
-            import importlib
-            prompts_module = importlib.import_module(f"prompts.{self.canal}_prompts")
-            build_marathon_fn = getattr(prompts_module, "build_marathon_outline_prompt", None)
-        except (ImportError, ModuleNotFoundError):
-            from prompts.canal2_prompts import build_marathon_outline_prompt as build_marathon_fn
-
-        if build_marathon_fn is None:
-            logger.warning("[MARATHON][%s] No build_marathon_outline_prompt found", self.canal)
-            return None
+        from prompts.base_prompts import build_marathon_outline_prompt as build_marathon_fn
 
         # Combine all source text
         combined_text = "\n\n---\n\n".join(

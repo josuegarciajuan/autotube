@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, "/root/autotube")
 
 import pytest
-from prompts.canal2_prompts import build_content_only_prompt
+from prompts.base_prompts import build_content_only_prompt, build_outline_prompt
 from tests.conftest import MockConfigCanal2
 
 
@@ -100,7 +100,6 @@ class TestOutlinePrompt:
 
     def test_demands_concrete_facts(self):
         """Outline prompt must demand hechos concretos and forbid empty metaphors."""
-        from prompts.canal2_prompts import build_outline_prompt
         prompt = build_outline_prompt(
             config=MockConfigCanal2, duration_min=12, word_target=2000,
         )
@@ -110,7 +109,6 @@ class TestOutlinePrompt:
 
     def test_has_chapter_structure(self):
         """Outline must produce chapter JSON with required fields."""
-        from prompts.canal2_prompts import build_outline_prompt
         prompt = build_outline_prompt(
             config=MockConfigCanal2, duration_min=10, word_target=1500,
         )
@@ -120,7 +118,6 @@ class TestOutlinePrompt:
 
     def test_includes_visual_keywords(self):
         """Outline must include visual keywords for stock media."""
-        from prompts.canal2_prompts import build_outline_prompt
         prompt = build_outline_prompt(
             config=MockConfigCanal2, duration_min=8, word_target=1200,
         )
