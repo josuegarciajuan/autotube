@@ -605,18 +605,10 @@ def migrate_v2(db_path: str = None):
     """)
     conn.commit()
     
-    # ── v13: bump shorts targets to 10-15/day (ONE-TIME, already applied) ──
-    # Only fills NULL values; no longer forces clips_per_long=5 on every startup.
-    # Set shorts_clips_per_long via planning API or direct DB update.
+    # ── v13: fill NULL shorts_planning_config rows with default (5 native/day) ──
     conn.execute("""
         UPDATE shorts_planning_config
-        SET shorts_native_per_day = CASE
-                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
-                     IN ('canal2', 'canal3') THEN 5
-                WHEN (SELECT slug FROM channels WHERE id = shorts_planning_config.channel_id)
-                     IN ('canal4', 'canal5') THEN 4
-                ELSE 5
-            END,
+        SET shorts_native_per_day = COALESCE(shorts_native_per_day, 5),
             shorts_clips_per_long = COALESCE(shorts_clips_per_long, 5)
         WHERE shorts_native_per_day IS NULL
            OR shorts_clips_per_long IS NULL
@@ -779,19 +771,30 @@ def migrate_v2(db_path: str = None):
         conn.execute("UPDATE videos SET channel_id = 1 WHERE channel_id IS NULL")
         logger.warning("Migration: channels table empty — bootstrapped with %s", ACTIVE_CHANNELS[0])
 
-    # Seed yt_studio_url for existing channels (only if not yet set)
-    studio_urls = {
-        "canal2": "https://studio.youtube.com/channel/UC32VJJKqpbiEExfEHYGxdNw/editing/profile",
-        "canal3": "https://studio.youtube.com/channel/UCejkjoNtUs99-LPBEYC7rPQ/editing/profile",
-        "canal4": "https://studio.youtube.com/channel/UC9IOZKc0O4mBJ_Vb1x7czPg/editing/profile",
-        "canal5": "https://studio.youtube.com/channel/UCDZi5NrlYnncYVlnZ0O7wKA/editing/profile",
+    # ── v26: seed google_account from legacy CHANNEL_ACCOUNT_MAP (ONE-TIME) ──
+    _legacy_accounts = {
+        "canal2": "tracatrack", "canal3": "tracatrack",
+        "canal4": "burrianacasa2026", "canal5": "burrianacasa2026",
     }
+    for slug, account in _legacy_accounts.items():
+        conn.execute(
+            "UPDATE channels SET google_account = ? WHERE slug = ? AND google_account IS NULL",
+            (account, slug),
+        )
+    logger.info("Migration: seeded google_account for existing channels")
+
+    # Seed yt_studio_url from yt_channel_id where available
+    studio_urls = {}
+    for slug in [ch["slug"] for ch in conn.execute("SELECT slug FROM channels WHERE active=1").fetchall()]:
+        ch_info = conn.execute("SELECT slug, yt_channel_id FROM channels WHERE slug=?", (slug,)).fetchone()
+        if ch_info and ch_info.get("yt_channel_id"):
+            studio_urls[slug] = f"https://studio.youtube.com/channel/{ch_info['yt_channel_id']}/editing/profile"
     for slug, url in studio_urls.items():
         conn.execute(
             "UPDATE channels SET yt_studio_url = ? WHERE slug = ? AND yt_studio_url IS NULL",
             (url, slug),
         )
-    logger.info("Migration: seeded yt_studio_url for existing channels")
+    logger.info("Migration: seeded yt_studio_url for %d channels from yt_channel_id", len(studio_urls))
 
     # Check which channels need profile seeding (missing description, banner, or avatar)
     channels_needing_profile: list[str] = []
@@ -886,21 +889,30 @@ def migrate_v2(db_path: str = None):
     logger.info("Migration: v6 tables ensured (channel_milestones, video_analytics_detailed)")
 
     # Seed CPM values from channel configs if channels already exist
-    cpm_seeds = {
-        "canal2": (5.0, 12.0, "Bienestar, Libros, Viajes, Tecnologia, Salud"),
-        "canal3": (8.0, 18.0, "Educacion, Viajes, Libros, Tecnologia, Inversion"),
-        "canal4": (5.0, 12.0, "Aventura, Viajes, Libros, Educacion, Documentales"),
-    }
-    for slug, (cpm_min, cpm_max, vertical) in cpm_seeds.items():
-        ch = conn.execute(
-            "SELECT id, cpm_min, cpm_max FROM channels WHERE slug = ?", (slug,)
-        ).fetchone()
-        if ch and (ch["cpm_min"] is None or ch["cpm_max"] is None):
-            conn.execute(
-                "UPDATE channels SET cpm_min=?, cpm_max=?, monetization_vertical=? WHERE slug=?",
-                (cpm_min, cpm_max, vertical, slug),
-            )
-            logger.info("Migration: seeded CPM for %s (%.0f-%.0f USD)", slug, cpm_min, cpm_max)
+    try:
+        from config.config_bridge import get_channel_config
+        for ch in conn.execute("SELECT id, slug, cpm_min, cpm_max FROM channels WHERE active=1").fetchall():
+            slug = ch["slug"]
+            if ch["cpm_min"] is not None and ch["cpm_max"] is not None:
+                continue  # Already has CPM
+            try:
+                cfg = get_channel_config(slug)
+                cpm_str = str(getattr(cfg, "MONETIZATION_TARGET_CPM", ""))
+                # Parse "$5–$12 USD" → (5.0, 12.0)
+                import re
+                nums = re.findall(r'(\d+)', cpm_str)
+                if len(nums) >= 2:
+                    cpm_min, cpm_max = float(nums[0]), float(nums[1])
+                    vertical = ", ".join(getattr(cfg, "MONETIZATION_VERTICALS", []))
+                    conn.execute(
+                        "UPDATE channels SET cpm_min=?, cpm_max=?, monetization_vertical=? WHERE slug=?",
+                        (cpm_min, cpm_max, vertical, slug),
+                    )
+                    logger.info("Migration: seeded CPM for %s (%.0f-%.0f USD)", slug, cpm_min, cpm_max)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("Migration: CPM seeding skipped — %s", exc)
     conn.commit()
 
     # ── v4: Normalize media paths to project-root-relative form ──

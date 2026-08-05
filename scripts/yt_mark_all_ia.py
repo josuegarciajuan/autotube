@@ -27,12 +27,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 DB_PATH = PROJECT_ROOT / "autotube.db"
 
-CHANNEL_ACCOUNT_MAP = {
-    "canal2": "tracatrack",
-    "canal3": "tracatrack",
-    "canal4": "burrianacasa2026",
-    "canal5": "burrianacasa2026",
-}
+
+def get_account_for_channel(slug: str) -> Optional[str]:
+    """Return the Google account from the channels table."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT google_account FROM channels WHERE slug = ?", (slug,)).fetchone()
+        conn.close()
+        if row and row["google_account"]:
+            return row["google_account"]
+    except Exception:
+        pass
+    return None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,7 +146,7 @@ def main():
     by_account = {}
     for item in pending:
         canal = item["canal"]
-        account = CHANNEL_ACCOUNT_MAP.get(canal)
+        account = get_account_for_channel(canal)
         if not account:
             logger.warning(f"No account mapped for canal {canal}, skipping")
             continue

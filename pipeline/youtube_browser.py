@@ -52,14 +52,6 @@ SEL_OVERLAY_PROMO = "ytcp-promo-page"
 SEL_OVERLAY_WELCOME = "ytve-warm-welcome"
 # Menu items use text-based selectors (IDs shift after adding elements)
 
-# -- Channel -> Google Account mapping --
-CHANNEL_ACCOUNT_MAP = {
-    "canal2": "tracatrack",
-    "canal3": "tracatrack",
-    "canal4": "burrianacasa2026",
-    "canal5": "burrianacasa2026",
-}
-
 # -- Browser pool --
 _browser_instances: dict = {}
 _browser_lock = threading.Lock()
@@ -1271,7 +1263,16 @@ def cleanup_browser_thread():
 
 
 def get_account_for_channel(channel_slug: str) -> Optional[str]:
-    return CHANNEL_ACCOUNT_MAP.get(channel_slug)
+    """Return the Google account for a channel, from the DB channels table."""
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        ch = db.get_channel_by_slug(channel_slug)
+        if ch and ch.get("google_account"):
+            return ch["google_account"]
+    except Exception:
+        pass
+    return None
 
 
 # ── Session health check ───────────────────────────────────────
@@ -1400,7 +1401,21 @@ async def get_all_browser_session_status() -> list:
     from pathlib import Path as _Path
     result = []
     seen_accounts = set()
-    for slug, account in CHANNEL_ACCOUNT_MAP.items():
+    
+    # Get all channels with google_account set from DB
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+        channels = db.get_channels(active_only=True)
+        channel_accounts = [
+            (ch["slug"], ch.get("google_account"))
+            for ch in channels
+            if ch.get("google_account")
+        ]
+    except Exception:
+        channel_accounts = []
+    
+    for slug, account in channel_accounts:
         if account in seen_accounts:
             # Append channel to existing entry
             for r in result:
