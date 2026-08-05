@@ -130,11 +130,99 @@ class MixkitVideoProvider(BaseVideoProvider):
                      min_duration, max_duration, query)
         return None
 
+    def search_page(
+        self,
+        query: str,
+        min_duration: float,
+        max_duration: float,
+        resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
+    ) -> 'SearchPage':
+        """Return ALL matching Mixkit videos on the search page.
+
+        Overrides the base class (1 asset) by collecting every duration-
+        matching card and paginating in memory.  Download URLs are
+        resolved lazily in ``download()`` — only the page URL is stored
+        here, saving expensive per-video HTTP requests until a candidate
+        survives dedup filtering.
+        """
+        from pipeline.providers.base import SearchPage
+
+        search_url = f"{SEARCH_URL}?q={quote_plus(query)}"
+        logger.info("Mixkit: search_page %s (page=%d)", search_url, page)
+
+        try:
+            resp = self._session.get(search_url, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Mixkit: search_page request failed: %s", exc)
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        video_cards = self._parse_video_cards(soup)
+
+        if not video_cards:
+            logger.info("Mixkit: no video cards for query=%r", query)
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        logger.info("Mixkit: search_page found %d cards for query=%r", len(video_cards), query)
+
+        # ── Filter by duration ────────────────────────────────
+        assets: list[VideoAsset] = []
+        for card in video_cards:
+            dur = self._parse_duration(card.get("duration_text", ""))
+            if dur is None:
+                dur = 15.0
+            if dur < min_duration or dur > max_duration:
+                continue
+            page_url = card.get("url", "")
+            if not page_url:
+                continue
+
+            asset = VideoAsset(
+                url=page_url,  # resolved lazily in download()
+                file_path=Path(),
+                duration=dur,
+                resolution=resolution,
+                provider=self.name,
+            )
+            asset._mixkit_page_url = page_url  # type: ignore[attr-defined]
+            assets.append(asset)
+
+        # ── Paginate ───────────────────────────────────────────
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_assets = assets[start:end]
+
+        logger.info(
+            "Mixkit: search_page query=%r → %d matching, %d on page %d",
+            query, len(assets), len(page_assets), page,
+        )
+        return SearchPage(
+            assets=page_assets,
+            page=page,
+            per_page=per_page,
+            total_available=len(assets),
+        )
+
     def download(self, asset: VideoAsset, output_dir: Path) -> Path:
         """Download the Mixkit video MP4 file.
 
         Uses caching based on a hash of the download URL.
+        If the asset was created by ``search_page()`` with a page URL,
+        resolves the actual download URL first.
         """
+        # ── Lazy resolution: search_page() stores a page URL ───
+        page_url = getattr(asset, '_mixkit_page_url', None)
+        if page_url:
+            resolved = self._extract_download_url(page_url)
+            if not resolved:
+                raise RuntimeError(
+                    f"Mixkit: could not resolve download URL from {page_url}"
+                )
+            asset.url = resolved
+
         output_dir.mkdir(parents=True, exist_ok=True)
         url_hash = hashlib.md5(asset.url.encode()).hexdigest()[:12]
         filename = f"mixkit_{url_hash}.mp4"

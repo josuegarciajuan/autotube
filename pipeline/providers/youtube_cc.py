@@ -170,6 +170,108 @@ class YouTubeCCProvider(BaseVideoProvider):
         self._save_cache(cache_key, None)
         return None
 
+    def search_page(
+        self,
+        query: str,
+        min_duration: float,
+        max_duration: float,
+        resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
+        liberal_license: bool = False,
+    ) -> 'SearchPage':
+        """Return ALL matching YouTube CC videos (not just first match).
+
+        Overrides the base class default (1 asset per page) by collecting
+        every matching result from yt-dlp and paginating in memory.  This
+        gives the exhaustive search in ``_fetch_asset_exhaustive`` more
+        candidates to dedup against.
+        """
+        from pipeline.providers.base import SearchPage
+        import yt_dlp
+
+        search_query = query if liberal_license else f"{query} creative commons"
+        max_height = resolution[1]
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "noplaylist": True,
+            "playlistend": 50,
+            "ignoreerrors": True,
+            "geo_bypass": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch50:{search_query}", download=False)
+        except Exception as exc:
+            logger.error("YouTubeCC: search_page failed: %s", exc)
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        entries = info.get("entries", []) if info else []
+        assets: list[VideoAsset] = []
+
+        for entry in entries:
+            if entry is None:
+                continue
+
+            dur = entry.get("duration") or 0
+            if dur < min_duration or dur > max_duration:
+                continue
+
+            # Check license (skip when liberal_license mode)
+            if not liberal_license:
+                license_str = entry.get("license", "")
+                if not self._is_creative_commons(license_str, entry):
+                    continue
+
+            # Check resolution
+            actual_height = entry.get("height") or 0
+            actual_width = entry.get("width") or 0
+            if not actual_height or not actual_width:
+                formats = entry.get("formats") or []
+                for fmt in formats:
+                    h = fmt.get("height") or 0
+                    w = fmt.get("width") or 0
+                    if h and w:
+                        actual_height = max(actual_height, h)
+                        actual_width = max(actual_width, w)
+
+            if actual_height > max_height:
+                continue
+
+            web_url = entry.get("webpage_url", "")
+            if not web_url:
+                continue
+
+            asset = VideoAsset(
+                url=web_url,
+                file_path=Path(),
+                duration=dur,
+                resolution=(actual_width, actual_height),
+                provider=self.name,
+            )
+            asset._yt_entry = entry  # type: ignore[attr-defined]
+            assets.append(asset)
+
+        # Paginate from in-memory list
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_assets = assets[start:end]
+
+        logger.info(
+            "YouTubeCC: search_page query=%r → %d total, %d on page %d",
+            query, len(assets), len(page_assets), page,
+        )
+        return SearchPage(
+            assets=page_assets,
+            page=page,
+            per_page=per_page,
+            total_available=len(assets),
+        )
+
     def download(self, asset: VideoAsset, output_dir: Path) -> Path:
         """Download a YouTube Creative Commons video using yt-dlp.
 

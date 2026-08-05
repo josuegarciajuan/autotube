@@ -102,6 +102,94 @@ class CoverrVideoProvider(BaseVideoProvider):
         logger.info("Coverr: using fallback video for query=%r", query)
         return self._fallback_asset(min_duration, max_duration, resolution)
 
+    def search_page(
+        self,
+        query: str,
+        min_duration: float,
+        max_duration: float,
+        resolution: tuple = (1920, 1080),
+        page: int = 1,
+        per_page: int = 20,
+    ) -> 'SearchPage':
+        """Return ALL matching Coverr videos (not just the first).
+
+        Coverr does not expose per-video duration in search results —
+        most clips are ~15s.  We return all scraped links as candidates
+        with a default duration; the caller's min/max filter handles
+        the final gating.  Download URLs are resolved lazily in
+        ``download()``.
+        """
+        from pipeline.providers.base import SearchPage
+
+        search_url = f"{SEARCH_URL}?q={quote_plus(query)}"
+        logger.info("Coverr: search_page %s (page=%d)", search_url, page)
+
+        try:
+            resp = self._session.get(search_url, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Coverr: search_page failed: %s", exc)
+            # Fall back to hardcoded fallback videos
+            fallback = self._fallback_asset(min_duration, max_duration, resolution)
+            return SearchPage(
+                assets=[fallback] if fallback else [],
+                page=page, per_page=per_page,
+                total_available=1 if fallback else 0,
+            )
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        video_links = soup.select("a[href*='/videos/']")
+        if not video_links:
+            video_links = soup.select(
+                'a[href*="videos"], .video-card a, [class*="video"] a'
+            )
+
+        logger.info("Coverr: search_page found %d links for query=%r", len(video_links), query)
+
+        # Coverr videos are typically ~15s — skip if outside range entirely
+        typical_dur = 15.0
+        if typical_dur < min_duration or typical_dur > max_duration:
+            logger.info("Coverr: typical duration %.1fs outside [%.1f–%.1f] — skipping",
+                        typical_dur, min_duration, max_duration)
+            return SearchPage(assets=[], page=page, per_page=per_page, total_available=0)
+
+        assets: list[VideoAsset] = []
+        seen = set()
+        for link in video_links:
+            href = link.get("href", "")
+            if not href or "/videos/" not in href:
+                continue
+            page_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+            if page_url in seen:
+                continue
+            seen.add(page_url)
+
+            asset = VideoAsset(
+                url=page_url,  # resolved lazily in download()
+                file_path=Path(),
+                duration=typical_dur,
+                resolution=resolution,
+                provider=self.name,
+            )
+            asset._coverr_page_url = page_url  # type: ignore[attr-defined]
+            assets.append(asset)
+
+        # ── Paginate ───────────────────────────────────────────
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_assets = assets[start:end]
+
+        logger.info(
+            "Coverr: search_page query=%r → %d candidates, %d on page %d",
+            query, len(assets), len(page_assets), page,
+        )
+        return SearchPage(
+            assets=page_assets,
+            page=page,
+            per_page=per_page,
+            total_available=len(assets),
+        )
+
     def _search_scrape(
         self,
         query: str,
@@ -236,7 +324,19 @@ class CoverrVideoProvider(BaseVideoProvider):
         """Download the Coverr video MP4 file.
 
         Uses caching based on a hash of the download URL.
+        If the asset was created by ``search_page()`` with a page URL,
+        resolves the actual download URL first.
         """
+        # ── Lazy resolution: search_page() stores a page URL ───
+        page_url = getattr(asset, '_coverr_page_url', None)
+        if page_url:
+            resolved = self._extract_download_url(page_url)
+            if not resolved:
+                raise RuntimeError(
+                    f"Coverr: could not resolve download URL from {page_url}"
+                )
+            asset.url = resolved
+
         output_dir.mkdir(parents=True, exist_ok=True)
         url_hash = hashlib.md5(asset.url.encode()).hexdigest()[:12]
         filename = f"coverr_{url_hash}.mp4"

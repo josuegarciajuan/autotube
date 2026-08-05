@@ -38,7 +38,7 @@ class WikipediaScraper(BaseScraper):
         random_count: int = 5,
         category_limit: int = 2,
         config: SimpleNamespace | None = None,
-        rate_limit: float = 3.0,
+        rate_limit: float = 5.0,
         max_retries: int = 3,
     ) -> None:
         super().__init__(rate_limit=rate_limit, max_retries=max_retries)
@@ -125,7 +125,7 @@ class WikipediaScraper(BaseScraper):
             try:
                 titles = self._get_category_members(category)
                 self.logger.debug("Category '%s': %d titles", category, len(titles))
-                
+
                 fetched = 0
                 for title in titles[:category_limit]:
                     article = self._fetch_page_full(title)
@@ -133,10 +133,16 @@ class WikipediaScraper(BaseScraper):
                         seen_urls.add(article["url"])
                         results.append(article)
                         fetched += 1
-                
+
                 self.logger.debug("Category '%s': fetched %d deep articles", category, fetched)
             except Exception as exc:
                 self.logger.warning("Deep scrape: category '%s' failed: %s", category, exc)
+
+            # Jitter between categories to avoid Wikipedia rate-limiting (HTTP 429)
+            if len(cats_to_fetch) > 1:
+                import time as _time
+                import random as _random
+                _time.sleep(_random.uniform(1.0, 3.0))
 
         self.logger.info("Deep scrape: %d total articles (%d chars avg)",
                          len(results),
