@@ -7,7 +7,7 @@ import urllib.parse
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from config.canal2_config import (
+from config.defaults import (
     CANAL_NAME as _DEFAULT_CANAL,
     WIKIPEDIA_CATEGORIES as _DEFAULT_CATEGORIES,
 )

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional
 
 from bs4 import BeautifulSoup
 
-from config.canal2_config import CANAL_NAME as _DEFAULT_CANAL
+from config.defaults import CANAL_NAME as _DEFAULT_CANAL
 from scrapers.base import BaseScraper, register_scraper
 
 if TYPE_CHECKING:

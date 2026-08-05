@@ -101,6 +101,42 @@ GOOGLE_NEWS_LANGUAGE = "es"
 GOOGLE_NEWS_COUNTRY = "ES"
 
 # ═══════════════════════════════════════════════════════════════════
+# CONTENT SOURCE DEFAULTS (override per channel)
+# ═══════════════════════════════════════════════════════════════════
+
+REDDIT_SUBREDDITS = []
+WIKIPEDIA_CATEGORIES = []
+SCRAPE_SOURCES = [
+    {"plugin": "reddit", "priority": 1},
+    {"plugin": "wikipedia", "priority": 2},
+    {"plugin": "atlas_obscura", "priority": 3},
+    {"plugin": "rss", "priority": 4},
+    {"plugin": "google_news", "priority": 5},
+]
+ATLAS_OBSCURA_CATEGORIES = ["wonders", "history", "unique"]
+RSS_FEEDS = []
+GOOGLE_NEWS_QUERIES = []
+
+# ═══════════════════════════════════════════════════════════════════
+# VISUAL STYLE DEFAULTS (override per channel)
+# ═══════════════════════════════════════════════════════════════════
+
+IMAGE_STYLE_MODIFIERS = "cinematic documentary photography, 16:9, atmospheric"
+COLOR_PALETTE = {
+    "primary": (40, 40, 60),
+    "secondary": (15, 20, 35),
+    "accent": (200, 150, 50),
+    "text": (240, 240, 240),
+    "text_shadow": (8, 8, 8),
+    "tertiary": (35, 35, 45),
+    "warning": (220, 180, 30),
+}
+FILM_GRAIN_OPACITY = 5
+FILM_GRAIN_FRAMES = 8
+KEN_BURNS_ZOOM_MIN = 4
+KEN_BURNS_ZOOM_MAX = 12
+
+# ═══════════════════════════════════════════════════════════════════
 # SUBTITLE STYLE (shared across all channels)
 # ═══════════════════════════════════════════════════════════════════
 

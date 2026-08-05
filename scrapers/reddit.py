@@ -77,7 +77,7 @@ class RedditScraper(BaseScraper):
 
         # ── Subreddits, sort, time, limit ──────────────────────
         # Priority: constructor params > config object > module-level defaults
-        from config.canal2_config import (
+        from config.defaults import (
             CANAL_NAME as _DEFAULT_CANAL,
             REDDIT_SUBREDDITS as _DEFAULT_SUBS,
             REDDIT_SORT as _DEFAULT_SORT,

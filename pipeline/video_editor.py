@@ -30,7 +30,7 @@ from config.settings import (
     RENDER_TIMEOUT_MAX_SEC,
     ASSETS_DIR,
 )
-from config.canal2_config import (
+from config.defaults import (
     CANAL_NAME,
     CANAL_DISPLAY_NAME,
     COLOR_PALETTE,
@@ -2739,7 +2739,7 @@ class VideoEditor:
 
     def _get_template_path(self, segment_type: str) -> Optional[Path]:
         """Get cached template path if it exists."""
-        canal_name = self.canal.get("CANAL_NAME", self.canal.get("slug", "canal2"))
+        canal_name = self.canal.get("CANAL_NAME", self.canal.get("slug", CANAL_NAME))
         template_dir = Path("output/templates") / canal_name
         path = template_dir / f"{segment_type}.mp4"
         if path.exists():
