@@ -81,11 +81,12 @@ Ejemplos de buena capitalización:
   INCORRECTO (empieza con artículo débil sin impacto): "La historia que nadie te contó sobre..."
 
 📄 DESCRIPCIÓN (SEO completa):
-- PRIMERAS 2-3 LÍNEAS: un resumen envolvente que explique de qué va el vídeo a alguien que NO lo ha visto. Incluye la keyword principal de forma natural. Debe ser la respuesta a "¿de qué trata este vídeo?" en 2-3 frases.
-- Luego desarrolla el tema en 2-3 párrafos cortos con keywords secundarias y propuesta de valor del vídeo.
-- Incluye CAPÍTULOS en formato "0:00 — Título del capítulo" (mínimo 3).
+- **LO PRIMERO de todo**: CAPÍTULOS con timestamps en formato "0:00 — Título del capítulo" (mínimo 3, máximo 8). Esta es la PRIMERA LÍNEA de la descripción, sin NINGUNA introducción previa. YouTube indexa los timestamps y los muestra como "Key Moments" en los resultados de búsqueda, lo que aumenta el CTR un 20-30%.
+- **DESPUÉS de los capítulos**: PRIMERAS 2-3 LÍNEAS de resumen envolvente que explique de qué va el vídeo a alguien que NO lo ha visto. Incluye la keyword principal de forma natural.
+- Luego desarrolla el tema en 1-2 párrafos cortos con keywords secundarias y propuesta de valor del vídeo.
 - CTA de suscripción atractivo y natural.
-- Optimiza la descripción para que los primeros 125 caracteres sean el HOOK principal (es lo que se ve sin expandir).
+- Los primeros 125 caracteres DE LA DESCRIPCIÓN (sin contar los timestamps) deben ser el HOOK principal (es lo que se ve sin expandir).
+- 3-5 hashtags al final.
 - Máximo 5000 caracteres total.
 
 💡 HASHTAGS (AL FINAL DE LA DESCRIPCIÓN):
@@ -132,7 +133,7 @@ Responde SIEMPRE en formato JSON con exactamente estas claves:
 {
   "title": "Título viral en español (40-65 chars ideal, max 100, solo primera letra mayúscula + 1 palabra en CAPS + sufijo entre paréntesis)",
   "title_suffix": "REAL | DOCUMENTAL | CASO REAL | ARCHIVOS CIA | 2026 | EXPEDIENTE | '' si no aplica",
-  "description": "2-3 líneas de resumen + desarrollo + chapters + CTAs + 3-5 hashtags al final",
+  "description": "CAPÍTULOS CON TIMESTAMPS EN LA PRIMERA LÍNEA + luego 2-3 líneas de resumen + desarrollo + CTAs + 3-5 hashtags al final",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "thumbnail_text": "LÍNEA1 IMPACTO MAX 12 CHARS | línea2 complemento max 24 chars (separadas por |)",
   "badge_text": "DOCUMENTAL | CASO REAL | REAL | ARCHIVO | EXPEDIENTE | '' (texto para el sello/badge en la esquina de la miniatura)"
@@ -414,7 +415,7 @@ ESCENAS DEL VIDEO:
 INSTRUCCIONES:
 1. Genera 1 ÚNICO título viral optimizado (40-65 chars): keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll. Añade sufijo entre paréntesis si aporta credibilidad: (REAL), (DOCUMENTAL), etc.
 2. Si el título lleva sufijo parentético, sepáralo en el campo "title_suffix". Si no, déjalo vacío.
-3. Crea una descripción SEO completa con chapters, emojis estratégicos y hashtags, hook irresistible en las primeras 125 chars.
+3. Crea una descripción SEO. **LOS CAPÍTULOS CON TIMESTAMPS DEBEN SER LA PRIMERA LÍNEA**, sin introducción previa ni resumen delante. YouTube indexa los timestamps como Key Moments. Después de los capítulos, añade un hook irresistible en las primeras 125 chars (sin contar timestamps), desarrollo y hashtags al final.
 4. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
 5. Crea DOS LÍNEAS de texto para la miniatura separadas por | : L1 (máx 12 chars, palabra-gancho en MAYÚSCULAS) | L2 (máx 24 chars, complemento intrigante). No repitas el título.
 6. Define el texto para el badge/sello de la miniatura (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío).
