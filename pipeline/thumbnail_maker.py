@@ -156,10 +156,10 @@ class ThumbnailMaker:
             "show_badge": True,
             "show_border": True,
             "border_width_factor": 0.7,
-            "gradient_opacity": 160,
+            "gradient_opacity": 120,
             "gradient_start_pct": 0.45,
             "text_lines": 2,
-            "vignette_strength": 0.6,
+            "vignette_strength": 0.4,
         },
         "split_face": {
             "show_insets": False,
@@ -782,16 +782,21 @@ class ThumbnailMaker:
         img = Image.open(base_image).convert("RGB")
         img = self._resize_center_crop(img)
 
-        # ── Color grading per style (1.5x viral boost) ──────────
+        # ── Color grading per style (1.3x viral boost) ──────────
         effects = style.get("effects", {})
-        contrast_boost = float(effects.get("contrast_boost", 1.3)) * 1.5
-        saturation = float(effects.get("saturation", 0.85)) * 1.5
+        contrast_boost = float(effects.get("contrast_boost", 1.3)) * 1.3
+        saturation = float(effects.get("saturation", 0.85)) * 1.3
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(contrast_boost)
         enhancer = ImageEnhance.Color(img)
         img = enhancer.enhance(saturation)
         enhancer = ImageEnhance.Sharpness(img)
         img = enhancer.enhance(2.0)
+
+        # ── Brightness boost (per-style overrideable, gentle global default) ──
+        brightness_boost = float(effects.get("brightness_boost", 1.15))
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(brightness_boost)
 
         # ── Focus vignette (strength from layout profile) ───────
         img = self._apply_focus_vignette(

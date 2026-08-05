@@ -654,10 +654,10 @@ THUMBNAIL_MANUAL_STYLE = {
     },
     "base_composition": "dark_reveal",
     "effects": {
-"contrast_boost": 1.20,     # moderate — avoids muddy dark areas
-"saturation": 0.80,         # slightly desaturated — cold, realistic documentary look
-"vignette": 0.35,
-"brightness_boost": 1.25,  # extra lift — arctic palette needs more light than other channels
+        "contrast_boost": 1.20,     # moderate — avoids muddy dark areas
+        "saturation": 0.80,         # slightly desaturated — cold, realistic documentary look
+        "vignette": 0.35,
+        "brightness_boost": 1.25,  # extra lift — arctic palette needs more light than other channels
     },
     "text_style": {
         "uppercase": True,
