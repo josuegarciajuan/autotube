@@ -654,9 +654,10 @@ THUMBNAIL_MANUAL_STYLE = {
     },
     "base_composition": "dark_reveal",
     "effects": {
-        "contrast_boost": 1.20,     # moderate — avoids muddy dark areas
-        "saturation": 0.80,         # slightly desaturated — cold, realistic documentary look
-        "vignette": 0.35,
+"contrast_boost": 1.20,     # moderate — avoids muddy dark areas
+"saturation": 0.80,         # slightly desaturated — cold, realistic documentary look
+"vignette": 0.35,
+"brightness_boost": 1.25,  # extra lift — arctic palette needs more light than other channels
     },
     "text_style": {
         "uppercase": True,
@@ -780,7 +781,8 @@ AUTO_MARK_ALTERED_CONTENT = True
 AUTO_END_SCREENS = True
 
 # ── Scheduled Publishing ──────────────────────────────────────────
-PUBLISH_MODE = "scheduled"
+# "immediate" = pública al subir inmediatamente (sin warmup largo)
+PUBLISH_MODE = "immediate"
 # ── 3-Phase Pipeline (v9) ─────────────────────────────────────────
 GENERATION_LEAD_HOURS = 36    # Max hours ahead to generate
 # Upload windows (franjas de subida): videos suben en estas franjas a horas random
@@ -791,7 +793,7 @@ UPLOAD_WINDOWS = [
 ]
 PUBLISH_TIMEZONE = "Europe/Madrid"
 PUBLISH_JITTER_MIN = 15            # ±15 min jitter: evita colisiones exactas si los guards fallan
-PUBLISH_WARMUP_MIN = 60            # Mínimo 1h entre subida y publicación programada
+PUBLISH_WARMUP_MIN = 5             # Mínimo 5 min entre subida y publicación (immediate mode)
 PUBLISH_WINDOW_SPREAD_MIN = 90      # ±90 min spread around peak hour to avoid collisions (v23)
 # PUBLISH_TARGET_HOUR = None — usa optimal_slots calculados por datos
 

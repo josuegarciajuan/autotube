@@ -1883,6 +1883,17 @@ def _detect_and_clean_orphans_sync():
                 prune_result["shorts_planned_slots_deleted"],
             )
         
+        # ── Draft cleanup ─────────────────────────────────
+        # Drafts accumulate when planned slots are created but
+        # generation never completes. Prune old drafts and cap
+        # per-channel maximum to prevent scheduler pollution.
+        try:
+            draft_deleted = db.cleanup_drafts(max_age_hours=72, max_per_channel=10)
+            if draft_deleted:
+                logger.info("Draft cleanup: %d stale drafts deleted", draft_deleted)
+        except Exception as e:
+            logger.warning("Draft cleanup skipped: %s", e)
+
         # ── Alert generation on accumulated failures ─────────
         # If multiple errors accumulated across phases, raise a
         # pipeline alert so operators can investigate.

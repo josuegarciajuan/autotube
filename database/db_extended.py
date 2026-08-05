@@ -2276,7 +2276,53 @@ class ExtendedDatabase(Database):
                 (channel_id, older_than_days),
             ).fetchone()
             return row["cnt"] if row else 0
-    
+
+    def cleanup_drafts(self, max_age_hours: int = 72, max_per_channel: int = 10) -> int:
+        """Delete draft videos older than max_age_hours, and cap at max_per_channel.
+
+        Drafts are planned video slots that never started generation.
+        They accumulate when pipeline jobs fail silently or slots are
+        created but never dispatched. This function prevents unbounded
+        accumulation that wastes DB space and confuses the scheduler.
+
+        Returns total count of deleted rows.
+        """
+        deleted = 0
+        with self._connect() as conn:
+            # Step 1: delete drafts older than max_age_hours
+            cursor = conn.execute(
+                """DELETE FROM videos
+                   WHERE status = 'draft'
+                     AND created_at < datetime('now', '-' || ? || ' hours')""",
+                (max_age_hours,),
+            )
+            deleted += cursor.rowcount
+            # Step 2: cap per channel — keep newest max_per_channel, delete rest
+            cursor = conn.execute(
+                """DELETE FROM videos WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY canal ORDER BY created_at DESC
+                               ) as rn
+                        FROM videos WHERE status = 'draft'
+                    ) WHERE rn > ?
+                )""",
+                (max_per_channel,),
+            )
+            deleted += cursor.rowcount
+            conn.commit()
+        return deleted
+
+    def count_drafts(self) -> dict:
+        """Count draft videos per channel. Returns {canal: count} dict."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT canal, COUNT(*) as cnt FROM videos
+                   WHERE status = 'draft' GROUP BY canal"""
+            ).fetchall()
+        return {r["canal"]: r["cnt"] for r in rows}
+
     # ── Video Scenes ─────────────────────────────────────────
     
     def insert_scenes_batch(self, video_id: int, scenes: list[dict]):

@@ -630,6 +630,9 @@ async def extract_and_publish(video_id: int):
             fallback = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
         except:
             fallback = {}
+        # title_options is a JSON array (list of title strings), not a dict
+        if not isinstance(fallback, dict):
+            fallback = {}
         script_text = str(fallback.get("script", "")) or script_text
 
     if not script_text:

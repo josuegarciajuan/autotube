@@ -2700,6 +2700,9 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             fallback = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
         except Exception:
             fallback = {}
+        # title_options is a JSON array (list of title strings), not a dict
+        if not isinstance(fallback, dict):
+            fallback = {}
         script_text = str(fallback.get("script", "")) or script_text
 
     if not script_text:
@@ -3223,6 +3226,9 @@ def pre_render_clip_shorts_for_video(
             try:
                 fallback = _json.loads(bloques_raw) if isinstance(bloques_raw, str) else {}
             except Exception:
+                fallback = {}
+            # title_options is a JSON array (list of title strings), not a dict
+            if not isinstance(fallback, dict):
                 fallback = {}
             script_text = str(fallback.get("script", "")) or script_text
 
