@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2 } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2, CheckCircle } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
@@ -1567,7 +1567,15 @@ export default function ChannelDetail() {
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-dark-700 to-dark-900"><Video size={28} className="text-gray-700" /></div>
                   )}
                   {v.duracion_seg && <span className="absolute bottom-1.5 right-1.5 bg-black/85 text-white text-[11px] px-1.5 py-0.5 rounded font-mono">{formatDuration(v.duracion_seg)}</span>}
-                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium badge ${statusBadge(displayStatus)}`}>
+                  <span className={`absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded font-medium badge flex items-center gap-0.5 ${statusBadge(displayStatus)}`}>
+                    {displayStatus === 'published' && <CheckCircle size={9} />}
+                    {displayStatus === 'uploaded' && <Upload size={9} />}
+                    {displayStatus === 'uploaded_private' && <Upload size={9} />}
+                    {displayStatus === 'scheduled' && <Calendar size={9} />}
+                    {displayStatus === 'warming' && <Clock size={9} />}
+                    {displayStatus === 'generating' && <Loader2 size={9} className="animate-spin" />}
+                    {displayStatus === 'reassembling' && <Loader2 size={9} className="animate-spin" />}
+                    {displayStatus === 'error' && <AlertCircle size={9} />}
                     {statusLabel(displayStatus)}
                   </span>
                   {(v.source_mode === 'viral' || v.source_url) && (
@@ -1581,8 +1589,28 @@ export default function ChannelDetail() {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-white leading-tight line-clamp-2 group-hover:text-neon-red transition-colors">{v.titulo_final || 'Video sin título'}</p>
-                  <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-600">
-                    <span>{formatDateTime(v.uploaded_at || v.created_at)}</span>
+                  {/* ── Status + date pill (published / uploaded / created) ── */}
+                  <div className="mt-0.5">
+                    {(() => {
+                      const publishedDate = v.published_verified_at || v.published_at;
+                      const isPublished = !!(publishedDate) || v.status === 'published';
+                      const isUploaded = !isPublished && (!!(v.yt_video_id) || !!(v.uploaded_at));
+                      const displayDate = publishedDate || v.uploaded_at || v.generation_started_at || v.created_at;
+                      const dateLabel = isPublished ? 'Publicado' : isUploaded ? 'Subido' : 'Creado';
+                      const DateIcon = isPublished ? CheckCircle : isUploaded ? Upload : Clock;
+                      const dateColor = isPublished ? 'text-emerald-400 border-emerald-400/30' : isUploaded ? 'text-blue-400 border-blue-400/30' : 'text-gray-400 border-gray-500/30';
+                      const dateBg = isPublished ? 'bg-emerald-400/10' : isUploaded ? 'bg-blue-400/10' : 'bg-gray-500/10';
+                      return (
+                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${dateBg} ${dateColor}`}>
+                          <DateIcon size={10} className="shrink-0" />
+                          <span>{dateLabel}</span>
+                          <span className="opacity-70">{formatDateTime(displayDate)}</span>
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  {/* ── Links row (playlist, YT, source, short) ── */}
+                  <div className="flex items-center gap-1.5 mt-1 text-xs text-gray-600">
                     {v.target_playlist_name && (
                       <span className="text-[11px] bg-neon-purple/10 text-neon-purple/80 px-1.5 py-0.5 rounded-full flex items-center gap-1">
                         <ListPlus size={10} /> {v.target_playlist_name}
