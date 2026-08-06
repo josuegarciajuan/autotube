@@ -1683,6 +1683,73 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     return score
 
 
+def _get_active_channel_ids(db) -> list[int]:
+    """Get ordered list of active channel IDs for round-robin dispatch."""
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM channels ORDER BY id"
+            ).fetchall()
+        return [r["id"] for r in rows]
+    except Exception:
+        return []
+
+
+def _pick_round_robin(candidates: list[dict], db) -> dict | None:
+    """Select the next slot using round-robin across channels.
+
+    Candidates are already sorted by priority score (highest first).
+    This function picks the highest-scored candidate from the next
+    channel in the round-robin sequence, ensuring all channels get
+    equal dispatch turns.
+
+    Returns the selected slot dict, or None if no channel has ready
+    candidates.
+    """
+    if not candidates:
+        return None
+
+    channel_ids = _get_active_channel_ids(db)
+    if not channel_ids:
+        return candidates[0]
+
+    # Determine last dispatched channel
+    last_channel = None
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """SELECT channel_id FROM planned_slots
+                   WHERE status IN ('running', 'completed')
+                   ORDER BY scheduled_at DESC
+                   LIMIT 1"""
+            ).fetchone()
+        if row:
+            last_channel = row["channel_id"]
+    except Exception:
+        pass
+
+    # Find starting index in round-robin
+    if last_channel and last_channel in channel_ids:
+        start_idx = (channel_ids.index(last_channel) + 1) % len(channel_ids)
+    else:
+        start_idx = 0
+
+    # Cycle through channels to find one with candidates
+    for offset in range(len(channel_ids)):
+        target_ch = channel_ids[(start_idx + offset) % len(channel_ids)]
+        ch_candidates = [c for c in candidates if c["channel_id"] == target_ch]
+        if ch_candidates:
+            if offset > 0:
+                logger.info(
+                    "Round-robin: skipped %d channel(s) without candidates, "
+                    "dispatching channel %d",
+                    offset, target_ch,
+                )
+            return ch_candidates[0]
+
+    return None  # no channel has ready candidates
+
+
 def process_planned_slots(db=None, loop=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
@@ -1733,24 +1800,18 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         c["_priority_score"] = _score_priority_slot(c, db, today_str)
     candidates.sort(key=lambda c: c["_priority_score"], reverse=True)
     
-    # Pick the highest-scoring candidate
-    next_slot = candidates[0]
+    # Pick the next slot using round-robin across channels
+    next_slot = _pick_round_robin(candidates, db)
+    if next_slot is None:
+        logger.info("Round-robin dispatch: no channel has ready candidates")
+        return None
     best_score = next_slot.get("_priority_score", 0)
     slug_preview = next_slot.get("channel_slug", "?")
-    if len(candidates) > 1:
-        runner_up = candidates[1]
-        logger.info(
-            "Priority dispatch: %d candidates → selected %s (score=%d, pub=%s) "
-            "over %s (score=%d)",
-            len(candidates), slug_preview, best_score,
-            (next_slot.get("target_public_at") or "?")[:16],
-            runner_up.get("channel_slug", "?"), runner_up.get("_priority_score", 0),
-        )
-    else:
-        logger.info(
-            "Priority dispatch: 1 candidate → %s (score=%d)",
-            slug_preview, best_score,
-        )
+    logger.info(
+        "Round-robin dispatch: %d candidates → selected %s (score=%d, pub=%s)",
+        len(candidates), slug_preview, best_score,
+        (next_slot.get("target_public_at") or "?")[:16],
+    )
     
     # 2b. Is there already an active job for this channel?
     active = db.get_active_job_for_channel(next_slot["channel_id"])
