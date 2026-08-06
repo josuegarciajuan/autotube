@@ -1177,8 +1177,17 @@ class VideoEditor:
                         logger=None,
                     )
 
+                    # Dynamic timeout: scale with video file size
+                    # 0.25s per MB — 300s min, 750s for a 3GB marathon video
+                    _file_size_mb = output_path.stat().st_size / 1024 / 1024
+                    mux_timeout = max(300, int(_file_size_mb * 0.25))
+                    self.logger.info(
+                        "Audio mux: %d MB → timeout=%ds",
+                        int(_file_size_mb), mux_timeout,
+                    )
+
                     # Mux concat video + final_audio
-                    _sp2.run([
+                    _mux_cmd = [
                         'ffmpeg', '-y', '-v', 'error',
                         '-i', str(output_path),           # 0:v — concat video
                         '-i', str(_final_audio_temp),      # 1:a — full audio sequence
@@ -1187,7 +1196,8 @@ class VideoEditor:
                         '-map', '0:v:0', '-map', '1:a:0',
                         '-movflags', '+faststart',
                         str(_fix_path),
-                    ], check=True, timeout=180)
+                    ]
+                    _sp2.run(_mux_cmd, check=True, timeout=mux_timeout)
 
                     # Cleanup temp audio
                     try:
@@ -1199,12 +1209,34 @@ class VideoEditor:
                     output_path.unlink()
                     _fix_path.rename(output_path)
                     self.logger.info("🔊 Audio post-processed: full sequence (intro+body+CTA+outro)")
+                except subprocess.TimeoutExpired as _audio_fix_e:
+                    self.logger.warning(
+                        "Audio mux timed out after %ds — retrying with %ds",
+                        mux_timeout, mux_timeout * 3,
+                    )
+                    if _fix_path.exists():
+                        _fix_path.unlink(missing_ok=True)
+                    _sp2.run(_mux_cmd, check=True, timeout=mux_timeout * 3)
+                    # Cleanup temp audio
+                    try:
+                        _final_audio_temp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    # Replace original with fixed version
+                    output_path.unlink()
+                    _fix_path.rename(output_path)
+                    self.logger.info("🔊 Audio post-processed (retry OK)")
                 except Exception as _audio_fix_e:
-                    self.logger.warning("Audio post-process failed (%s) — keeping original", _audio_fix_e)
+                    self.logger.error(
+                        "Audio mux failed permanently — aborting to avoid silent upload"
+                    )
                     if _fix_path.exists():
                         _fix_path.unlink(missing_ok=True)
                     if '_final_audio_temp' in dir() and _final_audio_temp.exists():
                         _final_audio_temp.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"Audio mux failed after retry: {_audio_fix_e}"
+                    ) from _audio_fix_e
             else:
                 self.logger.error("❌ Video file missing or empty: %s", output_path)
                 raise RuntimeError(f"Video rendering failed: no output file at {output_path}")
@@ -2329,10 +2361,11 @@ class VideoEditor:
                 "\n".join(f"file '{p}'" for p in _wav_paths)
             )
             import subprocess as _sp
+            music_timeout = max(120, int(duration_sec * 0.05))
             _sp.run(
                 ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                  "-i", str(_list_path), "-b:a", "128k", str(out_path)],
-                check=True, capture_output=True, timeout=120,
+                check=True, capture_output=True, timeout=music_timeout,
             )
         finally:
             import shutil as _shutil

@@ -322,7 +322,36 @@ class VideoValidator:
             )
         )
 
-        # ── 3. Duration range (WARNING only — NEVER blocks) ───────
+        # ── 3. Audio track present ──────────────────────────────────
+        has_audio = self._has_audio_stream(video_path)
+        if not has_audio:
+            msg = (
+                f"Video has NO audio track — ffprobe returned no audio stream: "
+                f"{video_path}. Video must not be uploaded without audio."
+            )
+            checks.append(
+                ValidationCheck("has_audio", False, msg, "blocking")
+            )
+            blocking.append(msg)
+            return PostValidationResult(
+                passed=False,
+                checks=checks,
+                blocking_errors=blocking,
+                warnings=warnings,
+                duration_seconds=duration_sec,
+                title=updated_title,
+                description=updated_description,
+                tags=updated_tags,
+            )
+        else:
+            checks.append(
+                ValidationCheck(
+                    "has_audio", True,
+                    "Audio track present", "blocking",
+                )
+            )
+
+        # ── 4. Duration range (WARNING only — NEVER blocks) ───────
         if duration_sec < self.duration_min_sec:
             msg = (
                 f"Video duration {duration_sec / 60:.1f} min below "
@@ -353,7 +382,7 @@ class VideoValidator:
                 )
             )
 
-        # ── 4. Title present ──────────────────────────────────────
+        # ── 5. Title present ──────────────────────────────────────
         if not updated_title or not updated_title.strip():
             msg = "Title is empty — attempting LLM auto-fix"
             checks.append(
@@ -384,7 +413,7 @@ class VideoValidator:
                 )
             )
 
-        # ── 5. Title power word (belt+suspenders) ─────────────────
+        # ── 6. Title power word (belt+suspenders) ─────────────────
         # enforce_power_words() already ran in metadata_gen.
         # This verifies the guarantee held. If not, re-call it.
         if updated_title and not self._any_power_word_in_title(
@@ -438,7 +467,7 @@ class VideoValidator:
                 )
             )
 
-        # ── 6. Description present ────────────────────────────────
+        # ── 7. Description present ────────────────────────────────
         desc = (updated_description or "").strip()
         if not desc:
             msg = "Description is empty — attempting LLM auto-fix"
@@ -508,7 +537,7 @@ class VideoValidator:
                 )
             )
 
-        # ── 7. Tags present ───────────────────────────────────────
+        # ── 8. Tags present ───────────────────────────────────────
         if not updated_tags:
             msg = "No tags — attempting LLM auto-fix"
             checks.append(
@@ -631,6 +660,24 @@ class VideoValidator:
                 capture_output=True, text=True, timeout=30,
             )
             return "video" in (result.stdout or "").lower()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _has_audio_stream(video_path: str) -> bool:
+        """Check that the file has at least one audio stream."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    video_path,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            return "audio" in (result.stdout or "").lower()
         except Exception:
             return False
 
