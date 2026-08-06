@@ -1950,15 +1950,8 @@ def _migrate_v29(conn, logger):
     if schema_v19.exists():
         logger.info("Migration v29: running schema_v19.sql (llm_credit_status)")
         with open(schema_v19) as f:
-            sql = f.read()
-        # Split and execute each statement
-        for stmt in sql.split(";"):
-            stmt = stmt.strip()
-            if stmt and not stmt.startswith("--"):
-                try:
-                    conn.execute(stmt)
-                except Exception as e:
-                    logger.debug("Migration v29 stmt: %s", str(e)[:100])
+            conn.executescript(f.read())
+        conn.commit()
         logger.info("Migration v29: applied")
     else:
         logger.warning("Migration v29: schema_v19.sql not found")

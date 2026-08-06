@@ -208,8 +208,8 @@ def check_openai_from_errors(db) -> dict:
 
             # Check script_generation_attempts for quota errors
             attempt_rows = conn.execute(
-                """SELECT error, created_at FROM script_generation_attempts
-                   WHERE error IS NOT NULL
+                """SELECT error_message, created_at FROM script_generation_attempts
+                   WHERE error_message IS NOT NULL
                      AND created_at > datetime('now', '-7 days')
                    ORDER BY created_at DESC LIMIT 50"""
             ).fetchall()
@@ -228,7 +228,7 @@ def check_openai_from_errors(db) -> dict:
                         break
 
             for row in attempt_rows:
-                err = row["error"] or ""
+                err = row["error_message"] or ""
                 for pattern in OPENAI_QUOTA_PATTERNS:
                     if pattern.lower() in err.lower():
                         quota_errors.append({
