@@ -70,12 +70,20 @@ export default function AlertsPanel() {
     if (a.alert_type.startsWith('platform_token_expired')) {
       return 'bg-red-600/20 text-red-400 border-red-500/40'
     }
+    if (a.alert_type === 'llm_credit_exhausted') {
+      return 'bg-red-600/20 text-red-400 border-red-500/40'
+    }
+    if (a.alert_type === 'llm_credit_low') {
+      return 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+    }
     return severityBadge(a.severity)
   }
 
   function alertTypeIcon(a: Alert): string {
     if (a.alert_type === 'view_gap_detected') return 'view_gap'
     if (a.alert_type.startsWith('platform_token_expired')) return 'token_expired'
+    if (a.alert_type === 'llm_credit_exhausted') return 'credit_exhausted'
+    if (a.alert_type === 'llm_credit_low') return 'credit_low'
     return a.alert_type
   }
 

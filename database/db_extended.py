@@ -978,6 +978,9 @@ def migrate_v2(db_path: str = None):
     # ── v28: videos.error_message column ──
     _migrate_v28(conn, logger)
     
+    # ── v29: llm_credit_status (credit/balance monitoring for DeepSeek, OpenAI, YouTube) ──
+    _migrate_v29(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -1938,6 +1941,27 @@ def _migrate_v28(conn, logger):
         logger.info("Migration v28: videos.error_message column added")
     else:
         logger.info("Migration v28: already applied")
+
+
+def _migrate_v29(conn, logger):
+    """Idempotent v29: llm_credit_status table for DeepSeek/OpenAI/YouTube quota monitoring."""
+    from pathlib import Path as _P
+    schema_v19 = _P(__file__).parent / "schema_v19.sql"
+    if schema_v19.exists():
+        logger.info("Migration v29: running schema_v19.sql (llm_credit_status)")
+        with open(schema_v19) as f:
+            sql = f.read()
+        # Split and execute each statement
+        for stmt in sql.split(";"):
+            stmt = stmt.strip()
+            if stmt and not stmt.startswith("--"):
+                try:
+                    conn.execute(stmt)
+                except Exception as e:
+                    logger.debug("Migration v29 stmt: %s", str(e)[:100])
+        logger.info("Migration v29: applied")
+    else:
+        logger.warning("Migration v29: schema_v19.sql not found")
 
 
 def _migrate_v10(conn, logger):

@@ -6,6 +6,7 @@ import ActiveWorkers from '../components/monitor/ActiveWorkers'
 import EventTimeline from '../components/monitor/EventTimeline'
 import AlertsPanel from '../components/monitor/AlertsPanel'
 import QuickStats from '../components/monitor/QuickStats'
+import LLMCreditPanel from '../components/monitor/LLMCreditPanel'
 import { useMonitorWebSocket } from '../hooks/useMonitorWebSocket'
 
 interface DashboardData {
@@ -96,13 +97,16 @@ export default function Monitor() {
         </div>
       </div>
 
-      {/* ═══ Section 1: System metrics ═══ */}
+      {/* ═══ Section 1: LLM Credits / Quota Status ═══ */}
+      <LLMCreditPanel />
+
+      {/* ═══ Section 2: System metrics ═══ */}
       <SystemMetrics />
 
-      {/* ═══ Section 2: Quick stats ═══ */}
+      {/* ═══ Section 3: Quick stats ═══ */}
       <QuickStats />
 
-      {/* ═══ Section 3: Main content: Workers + Alerts side by side ═══ */}
+      {/* ═══ Section 4: Main content: Workers + Alerts side by side ═══ */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-4">
         {/* Workers (2/3 width) */}
         <div className="xl:col-span-2">
@@ -114,7 +118,7 @@ export default function Monitor() {
         </div>
       </div>
 
-      {/* ═══ Section 4: Event timeline (full width, shares parent WS) ═══ */}
+      {/* ═══ Section 5: Event timeline (full width, shares parent WS) ═══ */}
       <EventTimeline wsConnected={connected} />
     </div>
   )

@@ -390,6 +390,10 @@ export const api = {
   getStatusBar: () => request<any>('/monitor/status-bar'),
   getJobEta: (jobId: number) => request<any>(`/monitor/eta/${jobId}`),
 
+  // ── LLM Credit monitoring ──
+  getLLMCredits: () => request<any>('/monitor/llm-credits'),
+  triggerLLMCreditCheck: () => request<any>('/monitor/llm-credits/check', { method: 'POST' }),
+
   // ── View Gap Monitor ──
   getViewGapCoverage: (channelId?: number) => {
     const qs = channelId ? `?channel_id=${channelId}` : ''

@@ -31,6 +31,15 @@ export function useMonitorDashboard() {
   })
 }
 
+export function useLLMCredits() {
+  return useQuery({
+    queryKey: ['llm-credits'],
+    queryFn: () => api.getLLMCredits(),
+    refetchInterval: 600_000, // 10 min
+    staleTime: 300_000,
+  })
+}
+
 export function useSystemMetrics() {
   return useQuery({
     queryKey: ['system-metrics'],

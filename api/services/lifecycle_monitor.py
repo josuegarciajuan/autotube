@@ -140,6 +140,9 @@ def check_all_health(db) -> dict:
     # ── Check 8: Auto-resolve platform token alerts when uploads succeed ──
     resolved += _auto_resolve_platform_tokens(db)
 
+    # ── Check 9: LLM credits low/exhausted ──
+    created += _check_llm_credits(db)
+
     logger.info(
         "Health check: %d alerts created, %d resolved",
         created, resolved,
@@ -741,6 +744,120 @@ def _maybe_create_alert(db, conn, entity_type, entity_id, channel_id,
          json.dumps(metadata) if metadata else None),
     )
     return 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 9: LLM credits low/exhausted
+# ═══════════════════════════════════════════════════════════════
+
+def _check_llm_credits(db) -> int:
+    """Check DeepSeek balance and OpenAI quota errors every 12h.
+    
+    Creates alerts when:
+    - DeepSeek balance < threshold (llm_credit_low, severity: warning)
+    - DeepSeek balance = 0 or error (llm_credit_exhausted, severity: critical)
+    - OpenAI errors detected (llm_credit_exhausted, severity: critical)
+    
+    Returns number of alerts created.
+    """
+    created = 0
+    try:
+        from api.services.llm_credit_checker import check_all_llm_credits
+        status = check_all_llm_credits(db)
+    except Exception as exc:
+        logger.warning("LLM credit check failed: %s", exc)
+        return 0
+
+    try:
+        with db._connect() as conn:
+            # ── DeepSeek ──
+            ds = status.get("deepseek")
+            if ds:
+                ds_status = ds.get("status", "unknown")
+                if ds_status == "exhausted":
+                    existing = conn.execute(
+                        """SELECT id FROM pipeline_alerts
+                           WHERE entity_type = 'system' AND alert_type = 'llm_credit_exhausted'
+                             AND title LIKE '%DeepSeek%' AND resolved = 0 LIMIT 1"""
+                    ).fetchone()
+                    if not existing:
+                        balance = ds.get("balance_usd", 0)
+                        created += _maybe_create_alert(
+                            db, conn,
+                            entity_type="system", entity_id=0,
+                            alert_type="llm_credit_exhausted",
+                            severity="critical",
+                            title="DeepSeek sin créditos — generación de scripts detenida",
+                            message=(
+                                f"La cuenta de DeepSeek se ha quedado SIN créditos.\n\n"
+                                f"Saldo actual: ${balance:.2f} USD.\n\n"
+                                f"🔧 Acción requerida: recargar créditos en platform.deepseek.com.\n"
+                                f"Hasta entonces, las generaciones de video FALLARÁN "
+                                f"(DeepSeek es el proveedor principal de scripts)."
+                            ),
+                            metadata={"provider": "deepseek", "balance_usd": balance},
+                        )
+                elif ds_status == "low":
+                    existing = conn.execute(
+                        """SELECT id FROM pipeline_alerts
+                           WHERE entity_type = 'system' AND alert_type = 'llm_credit_low'
+                             AND title LIKE '%DeepSeek%' AND resolved = 0 LIMIT 1"""
+                    ).fetchone()
+                    if not existing:
+                        balance = ds.get("balance_usd", 0)
+                        created += _maybe_create_alert(
+                            db, conn,
+                            entity_type="system", entity_id=0,
+                            alert_type="llm_credit_low",
+                            severity="warning",
+                            title="DeepSeek créditos bajos — recargar pronto",
+                            message=(
+                                f"La cuenta de DeepSeek tiene créditos bajos.\n\n"
+                                f"Saldo actual: ${balance:.2f} USD "
+                                f"(umbral de aviso: $2.00 USD).\n\n"
+                                f"🔧 Acción recomendada: recargar créditos en "
+                                f"platform.deepseek.com para evitar interrupción "
+                                f"de las generaciones automáticas."
+                            ),
+                            metadata={"provider": "deepseek", "balance_usd": balance},
+                        )
+
+            # ── OpenAI ──
+            oa = status.get("openai")
+            if oa:
+                oa_status = oa.get("status", "unknown")
+                if oa_status == "exhausted":
+                    existing = conn.execute(
+                        """SELECT id FROM pipeline_alerts
+                           WHERE entity_type = 'system' AND alert_type = 'llm_credit_exhausted'
+                             AND title LIKE '%OpenAI%' AND resolved = 0 LIMIT 1"""
+                    ).fetchone()
+                    if not existing:
+                        err_count = oa.get("error_count_7d", 0)
+                        last_err = oa.get("last_error", "")[:300]
+                        created += _maybe_create_alert(
+                            db, conn,
+                            entity_type="system", entity_id=0,
+                            alert_type="llm_credit_exhausted",
+                            severity="critical",
+                            title="OpenAI sin créditos/quota — fallback de scripts caído",
+                            message=(
+                                f"La API de OpenAI está devolviendo errores de cuota/creditos.\n\n"
+                                f"Errores detectados (7d): {err_count}\n"
+                                f"Último error: {last_err}\n\n"
+                                f"🔧 Acción requerida: verificar billing en "
+                                f"platform.openai.com o añadir método de pago.\n"
+                                f"Sin OpenAI, el fallback automático (DeepSeek → OpenAI) "
+                                f"no funcionará."
+                            ),
+                            metadata={"provider": "openai", "error_count_7d": err_count},
+                        )
+
+            conn.commit()
+    except Exception as exc:
+        logger.warning("LLM credit alert check failed: %s", exc)
+
+    return created
 
 
 # ═══════════════════════════════════════════════════════════════

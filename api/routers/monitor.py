@@ -571,6 +571,35 @@ def trigger_health_check():
 
 
 # ═══════════════════════════════════════════════════════════════
+# LLM Credit monitoring endpoints
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/monitor/llm-credits")
+def get_llm_credits():
+    """Get credit balance/status for DeepSeek, OpenAI, and YouTube quota."""
+    db = get_db()
+    try:
+        from api.services.llm_credit_checker import get_llm_credit_status
+        return {"ok": True, **get_llm_credit_status(db)}
+    except Exception as exc:
+        logger.error("LLM credits get error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/monitor/llm-credits/check")
+def trigger_llm_credit_check():
+    """Manually trigger a credit/balance check for all LLM providers."""
+    db = get_db()
+    try:
+        from api.services.llm_credit_checker import check_all_llm_credits
+        status = check_all_llm_credits(db, force=True)
+        return {"ok": True, **status}
+    except Exception as exc:
+        logger.error("LLM credits check error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════
 # System metrics endpoint
 # ═══════════════════════════════════════════════════════════════
 
