@@ -802,6 +802,59 @@ class ScriptGenerator:
             content_item, emergency_wt,
         )
 
+    # ── Single-model call (bypasses pool for targeted retries) ──────
+
+    def _call_llm_single_model(
+        self, provider: str, model_id: str, phase: str = "emergency",
+        thinking: bool = False, video_id: int = None,
+        content_id: int = None, **call_kwargs,
+    ) -> dict:
+        """Call a single specific model, bypassing the pool entirely.
+
+        Used by the emergency language retry chain to target specific
+        models (GPT → DeepSeek → GPT → DeepSeek) instead of relying
+        on the default pool ordering.
+        """
+        from config.model_pool import ModelPool
+        entry = ModelPool._build_entry(provider, model_id)
+        if not entry:
+            raise ValueError(
+                f"Cannot build model entry for {provider}:{model_id}"
+            )
+        client = ModelPool(entries=[]).create_client(entry)
+        model_name = entry.display_name
+
+        t0 = time.time()
+        result = self._llm_json_call(
+            thinking=thinking,
+            client=client,
+            model_name=model_name,
+            **call_kwargs,
+        )
+        duration_ms = int((time.time() - t0) * 1000)
+
+        # Log the success
+        try:
+            self.db.log_generation_attempt(
+                canal=self.canal,
+                model_name=model_id,
+                attempt_number=1,
+                pool_position=0,
+                success=True,
+                phase=phase,
+                video_id=video_id,
+                content_id=content_id,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            pass
+
+        logger.info(
+            "Single-model call: %s succeeded (%.1fs, phase=%s)",
+            model_name, duration_ms / 1000.0, phase,
+        )
+        return result
+
     # ── Emergency script generation ─────────────────────────────────
 
     def _generate_emergency_script(
@@ -810,8 +863,13 @@ class ScriptGenerator:
         """Emergency fallback: LLM-based generation first, raw chunking last.
 
         When all normal LLM attempts fail validation, this makes a final
-        attempt with a simplified emergency prompt.  If even the LLM fails
-        here, raw text chunking is used as absolute last resort.
+        attempt with a simplified emergency prompt.  If the LLM produces
+        English (wrong language), up to 4 additional retries are made
+        with alternating models (GPT → DeepSeek → GPT → DeepSeek) and
+        progressively stronger language enforcement.
+
+        Only if ALL LLM attempts fail (including language retries) does
+        raw text chunking kick in as absolute last resort.
 
         Marked with ``emergency_mode=True`` in the scripts table.
         """
@@ -832,7 +890,7 @@ class ScriptGenerator:
             )
             return None
 
-        # ── Attempt 1: LLM-based emergency generation ──────────────
+        # ── Attempt 1: LLM-based emergency generation (pool) ──────
         try:
             script = self._emergency_llm_generate(content_item, target_words)
             if script:
@@ -844,7 +902,6 @@ class ScriptGenerator:
                 return script
         except Exception as exc:
             logger.error("EMERGENCY: LLM fallback crashed: %s", exc)
-            # Record in phase metrics
             if hasattr(self, '_phase_metrics'):
                 m = self._phase_metrics.setdefault(
                     'emergency', {'attempts': 0, 'failures': 0, 'errors': {}}
@@ -854,14 +911,71 @@ class ScriptGenerator:
                 m['errors']['llm_crash'] = \
                     m['errors'].get('llm_crash', 0) + 1
 
-        # ── Attempt 2: raw text chunking (absolute last resort) ────
-        logger.warning(
-            "EMERGENCY: LLM fallback failed — falling through to raw chunking"
+        # ── Language retry chain: 4 attempts with model alternation ──
+        # If the first attempt failed because of language (English output),
+        # retry with specific models one at a time.  Each model gets a
+        # stronger language enforcement preamble.
+        LANGUAGE_RETRY_CHAIN = [
+            ("openai", "gpt-4o-mini"),     # Retry 1: GPT
+            ("deepseek", "deepseek-chat"), # Retry 2: DeepSeek
+            ("openai", "gpt-4o-mini"),     # Retry 3: GPT (alt temp)
+            ("deepseek", "deepseek-chat"), # Retry 4: DeepSeek (alt temp)
+        ]
+
+        for retry_idx, (provider, model_id) in enumerate(LANGUAGE_RETRY_CHAIN):
+            full_model_id = f"{provider}:{model_id}"
+            logger.warning(
+                "EMERGENCY: language retry %d/4 — trying %s",
+                retry_idx + 1, full_model_id,
+            )
+
+            try:
+                script = self._emergency_llm_generate(
+                    content_item, target_words, model_id=full_model_id,
+                )
+                if script:
+                    script["emergency_mode"] = True
+                    logger.info(
+                        "EMERGENCY: language retry %d SUCCEEDED (%s) — "
+                        "%d blocks",
+                        retry_idx + 1, full_model_id,
+                        len(script.get('bloques', [])),
+                    )
+                    return script
+                else:
+                    logger.warning(
+                        "EMERGENCY: language retry %d FAILED (%s) — "
+                        "wrong language or empty output",
+                        retry_idx + 1, full_model_id,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "EMERGENCY: language retry %d crashed (%s): %s",
+                    retry_idx + 1, full_model_id, exc,
+                )
+                if hasattr(self, '_phase_metrics'):
+                    m = self._phase_metrics.setdefault(
+                        'emergency', {'attempts': 0, 'failures': 0, 'errors': {}}
+                    )
+                    m['attempts'] += 1
+                    m['failures'] += 1
+                    m['errors']['lang_retry_crash'] = \
+                        m['errors'].get('lang_retry_crash', 0) + 1
+
+        # ── All language retries exhausted ─────────────────────────
+        logger.error(
+            "EMERGENCY: ALL %d language retries failed — "
+            "falling through to raw chunking as absolute last resort",
+            len(LANGUAGE_RETRY_CHAIN),
         )
+
+        # ── Attempt 2: raw text chunking (absolute last resort) ────
+        # This will go through its own language guard before returning.
         return self._emergency_raw_chunk(content_item, target_words)
 
     def _emergency_llm_generate(
-        self, content_item: dict, target_words: int
+        self, content_item: dict, target_words: int,
+        model_id: str = None,
     ) -> Optional[dict]:
         """Generate an emergency script via LLM with a simplified prompt.
 
@@ -869,13 +983,33 @@ class ScriptGenerator:
         that asks the LLM for the complete script in one response.  Less
         sophisticated than the batched V2 approach, but much more likely
         to produce a valid script when the normal flow is stuck.
+
+        If *model_id* is provided (e.g. ``"openai:gpt-4o-mini"``), the
+        call bypasses the pool entirely and targets that specific model.
+        This is used by the language retry chain.
         """
         title = content_item.get("title", "")
         text = content_item.get("text", "")
 
+        # ── Language preamble: stronger when this is a retry ───────
+        if model_id:
+            lang_preamble = (
+                "⚠️ CRÍTICO — LEE ESTO PRIMERO:\n"
+                "TODO el guion DEBE estar EXCLUSIVAMENTE en español "
+                "latinoamericano neutro. PROHIBIDO escribir NINGUNA "
+                "frase en inglés. PROHIBIDO usar texto de la fuente "
+                "sin traducir. Si la fuente está en inglés, TRADÚCELA "
+                "completamente al español. Repito: SOLO ESPAÑOL.\n\n"
+            )
+        else:
+            lang_preamble = (
+                "Eres un guionista de documentales en español "
+                "latinoamericano neutro. "
+            )
+
         emergency_prompt = (
-            "Eres un guionista de documentales en español latinoamericano "
-            "neutro. Genera un guion documental COMPLETO basado en esta "
+            f"{lang_preamble}"
+            "Genera un guion documental COMPLETO basado en esta "
             "fuente:\n\n"
             f"TÍTULO: {title}\n"
             f"FUENTE: {text[:3000]}\n\n"
@@ -893,16 +1027,31 @@ class ScriptGenerator:
             '"bloques": [{"texto": "bloque 1"}, {"texto": "bloque 2"}, ...]}'
         )
 
+        # ── Call: single-model or pool ───────────────────────────
         try:
-            result = self._call_with_failover(
-                phase="emergency",
-                thinking=False,
-                messages=[
-                    {"role": "user", "content": emergency_prompt},
-                ],
-                temperature=0.8,
-                max_tokens=min(4000, OPENAI_MAX_TOKENS),
-            )
+            if model_id:
+                provider, mid = model_id.split(":", 1)
+                result = self._call_llm_single_model(
+                    provider=provider,
+                    model_id=mid,
+                    phase="emergency",
+                    thinking=False,
+                    messages=[
+                        {"role": "user", "content": emergency_prompt},
+                    ],
+                    temperature=0.8,
+                    max_tokens=min(4000, OPENAI_MAX_TOKENS),
+                )
+            else:
+                result = self._call_with_failover(
+                    phase="emergency",
+                    thinking=False,
+                    messages=[
+                        {"role": "user", "content": emergency_prompt},
+                    ],
+                    temperature=0.8,
+                    max_tokens=min(4000, OPENAI_MAX_TOKENS),
+                )
         except Exception as exc:
             logger.error("EMERGENCY: LLM call failed: %s", exc)
             return None
@@ -910,6 +1059,22 @@ class ScriptGenerator:
         if not result or not result.get("bloques"):
             logger.warning("EMERGENCY: LLM returned no blocks")
             return None
+
+        # ── Language validation ──────────────────────────────────
+        guion_text = result.get("guion", "")
+        if not guion_text:
+            guion_text = " ".join(
+                b.get("texto", "") for b in result.get("bloques", [])
+            )
+        script_lang = _detect_text_language(guion_text)
+        channel_lang = getattr(self.canal_config, "LANGUAGE", "es")
+        if script_lang and script_lang != channel_lang:
+            logger.warning(
+                "EMERGENCY: script language is '%s' (expected '%s') — "
+                "rejecting, will retry with next model",
+                script_lang, channel_lang,
+            )
+            return None  # caller will retry with another model
 
         # Enrich blocks (with failover — fall back to raw if enrichment fails)
         script = self._enrich_blocks(result["bloques"], content_item, {"palabras_objetivo": target_words})
@@ -927,9 +1092,12 @@ class ScriptGenerator:
         This is the legacy emergency generator preserved as a safety net.
         It builds blocks by splitting the source text into word chunks and
         wrapping them with hardcoded Spanish scaffolding (hook, end-hook,
-        CTA).  The old language gate has been REMOVED — if we reach this
-        point the LLM has already failed, and a partially-Spanish script is
-        better than no script at all.
+        CTA).
+
+        Includes a language gate: if the body blocks are predominantly in
+        English (i.e. raw Wikipedia text), the function refuses to return
+        the script — an unintelligible English narration read by a Spanish
+        TTS voice is worse than no video at all.
         """
         import re as _re
 
@@ -1034,6 +1202,25 @@ class ScriptGenerator:
             "Suscríbete para más historias increíbles.",
         )
         bloques.append({"texto": outro})
+
+        # ── Language gate: refuse to return raw English chunks ──
+        # The body blocks contain raw source text.  If that source is
+        # English (e.g. Wikipedia), a Spanish TTS voice reading English
+        # produces an unintelligible video.  Detect the body language
+        # and bail out if it's predominantly English.
+        body_text = " ".join(
+            b.get("texto", "") for b in chunks if b.get("texto", "")
+        )
+        if len(body_text) > 200:
+            body_lang = _detect_text_language(body_text)
+            channel_lang = getattr(self.canal_config, "LANGUAGE", "es")
+            if body_lang and body_lang != channel_lang:
+                logger.error(
+                    "EMERGENCY (raw): body language is '%s' (expected '%s') "
+                    "— refusing to produce raw English script for '%s'",
+                    body_lang, channel_lang, title[:60],
+                )
+                return None  # discard — partial Spanish scaffolding + English body is worse than nothing
 
         total_words = sum(
             len(b.get("texto", "").split()) for b in bloques

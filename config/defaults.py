@@ -30,6 +30,7 @@ YOUTUBE_CHANNEL_URL = ""
 CHANNEL_ABOUT_SECTION = ""
 CHANNEL_KEYWORDS = []
 CANAL_INITIALS = "NC"
+LANGUAGE = "es"                # narración: "es", "en", etc.
 LOGO_SIZE = 140
 LOGO_PATH = ""
 
