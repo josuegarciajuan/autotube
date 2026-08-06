@@ -1935,7 +1935,9 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
         
             if video_yt_id:
                 yt_url = f"https://youtube.com/watch?v={video_yt_id}"
-                db.mark_video_uploaded(video_id, video_yt_id, yt_url)
+                pub_mode = get_channel_config(canal).PUBLISH_MODE
+                upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+                db.mark_video_uploaded(video_id, video_yt_id, yt_url, status=upload_status)
 
                 # ── Auto-mark altered content (IA) via browser automation ──
                 try:
@@ -2218,7 +2220,9 @@ async def start_upload_job(job_id: int, video_id: int):
         video_yt_id = result.get("video_id")
         if video_yt_id:
             url = result.get("url", f"https://youtube.com/watch?v={video_yt_id}")
-            db.mark_video_uploaded(video_id, video_yt_id, url)
+            pub_mode = get_channel_config(canal).PUBLISH_MODE
+            upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+            db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
             # ── Save upload timing ───────────────────────────
             try:
                 _upload_ms = int((time.time() - upload_start) * 1000)

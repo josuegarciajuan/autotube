@@ -1289,7 +1289,7 @@ def run_job(
                 # Determine correct upload status based on publish mode
                 pub_mode = video_record.get("publish_mode", "immediate") if video_record else "immediate"
                 worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
-                db.mark_video_uploaded(video_id, yt_video_id, yt_url)
+                db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
                 db.update_video(video_id, progress=100, status=worker_status)
 
                 # ── Cross-platform video publishing (Facebook, Rumble, TikTok) ──
