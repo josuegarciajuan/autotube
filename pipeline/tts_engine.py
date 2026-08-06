@@ -300,7 +300,7 @@ class TTSEngine:
         logger.info("🎙️ Segmented TTS: %d blocks → %s", len(bloques), audio_path)
 
         # Synthesize each block to a temp MP3 file
-        temp_files: list[str] = []
+        temp_segments: list[AudioSegment] = []
         all_timestamps: list[dict] = []
         cumulative_offset_ms: float = 0.0
 
@@ -364,7 +364,16 @@ class TTSEngine:
             tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
             tmp.write(b"".join(audio_data))
             tmp.close()
-            temp_files.append(tmp.name)
+
+            # Measure actual block audio duration with pydub.
+            # WordBoundary timestamps from edge-tts exclude trailing silence
+            # and MP3 encoder padding (~1s per block). Using actual pydub
+            # duration prevents cumulative desync in marathons with 90+ blocks.
+            # (Kokoro TTS already measures real audio duration per block.)
+            block_seg = AudioSegment.from_mp3(tmp.name)
+            actual_dur_ms = len(block_seg)
+            temp_segments.append(block_seg)
+            os.unlink(tmp.name)  # loaded into memory, temp file no longer needed
 
             # Adjust timestamps with cumulative offset
             for ts in word_ts:
@@ -372,9 +381,8 @@ class TTSEngine:
                 ts["end_ms"] = round(ts["end_ms"] + cumulative_offset_ms, 1)
             all_timestamps.extend(word_ts)
 
-            # Update cumulative offset
-            if word_ts:
-                cumulative_offset_ms = word_ts[-1]["end_ms"]
+            # Update cumulative offset using ACTUAL audio duration
+            cumulative_offset_ms = round(cumulative_offset_ms + actual_dur_ms, 1)
 
             # Progress callback (if provided)
             if progress_cb:
@@ -383,26 +391,17 @@ class TTSEngine:
                 except Exception:
                     pass  # never let progress crash the synthesis
 
-        if not temp_files:
+        if not temp_segments:
             raise RuntimeError("No blocks produced audio — cannot create narration")
 
-        # ── Concatenate all temp MP3s with pydub ────────────
-        try:
-            logger.info("Concatenating %d audio segments…", len(temp_files))
-            combined = AudioSegment.empty()
-            for tmp_path in temp_files:
-                seg = AudioSegment.from_mp3(tmp_path)
-                combined += seg
+        # ── Concatenate all pre-loaded AudioSegments ────────────
+        logger.info("Concatenating %d audio segments…", len(temp_segments))
+        combined = AudioSegment.empty()
+        for seg in temp_segments:
+            combined += seg
 
-            combined.export(audio_path, format="mp3", bitrate="192k")
-            logger.info("Exported combined audio: %s (%.1fs)", audio_path, len(combined) / 1000.0)
-        finally:
-            # Always clean up temp files, even if concatenation/export fails
-            for tmp_path in temp_files:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        combined.export(audio_path, format="mp3", bitrate="192k")
+        logger.info("Exported combined audio: %s (%.1fs)", audio_path, len(combined) / 1000.0)
 
         # ── Save timestamps and SRT ─────────────────────────
         with open(json_path, "w", encoding="utf-8") as f:
@@ -413,8 +412,9 @@ class TTSEngine:
             f.write(srt_content)
 
         total_dur = all_timestamps[-1]["end_ms"] / 1000 if all_timestamps else 0
-        logger.info("✅ Segmented TTS done: %d words, %.1fs, %d blocks",
-                     len(all_timestamps), total_dur, len(temp_files))
+        pydub_dur = len(combined) / 1000.0
+        logger.info("✅ Segmented TTS done: %d words, pydub=%.1fs timestamps=%.1fs diff=%.1fs, %d blocks",
+                     len(all_timestamps), pydub_dur, total_dur, pydub_dur - total_dur, len(temp_segments))
 
         return audio_path, all_timestamps
 
