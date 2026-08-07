@@ -2368,7 +2368,11 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         if yt_video_id:
             yt_url = f"https://youtube.com/watch?v={yt_video_id}"
             db.mark_video_uploaded(video_id, yt_video_id, yt_url)
-            db.update_video(video_id, progress=100, status="uploaded_private")
+            # v26: Check PUBLISH_MODE — immediate channels upload as public,
+            # so status should be "uploaded" not "uploaded_private".
+            pub_mode = get_channel_config(canal).PUBLISH_MODE
+            upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+            db.update_video(video_id, progress=100, status=upload_status)
 
             # ── Auto-mark altered content (IA) via browser ──
             try:

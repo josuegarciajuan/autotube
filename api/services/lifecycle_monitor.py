@@ -464,6 +464,11 @@ def _check_publish_delayed(db) -> int:
                    FROM videos v
                    WHERE v.status = 'uploaded_private'
                      AND v.uploaded_at < datetime('now', ?)
+                     -- v26: Only alert if target_public_at has already passed.
+                     -- Videos with future targets are correctly waiting for YouTube's
+                     -- native scheduledPublishTime to fire; these are NOT stuck.
+                     AND (v.target_public_at IS NULL
+                          OR v.target_public_at < datetime('now'))
                      AND v.id NOT IN (
                          SELECT entity_id FROM pipeline_alerts
                          WHERE entity_type = 'video' AND resolved = 0
