@@ -3175,6 +3175,15 @@ class ExtendedDatabase(Database):
             # This catches the race condition where a zombie pipeline thread
             # overwrites the job's "failed" status back to "running" after the
             # error handler already marked the video as "error".
+            #
+            # GRACE PERIOD (v2.1): skip jobs started within the last 5 minutes.
+            # During API restart, startup recovery code may temporarily set a
+            # video to 'error' based on historical job data before the worker
+            # reconnection loop runs.  If the current job is brand-new (<5 min),
+            # it's almost certainly a legitimate upload_only/generate_only job
+            # that was re-dispatched after a stuck detection, not a zombie
+            # thread — killing it would destroy in-flight work.
+            ZOMBIE_GRACE_MINUTES = 5
             zombie_led_jobs = conn.execute("""
                 SELECT j.id as job_id, j.video_id, j.channel_id, j.phase,
                        j.started_at, j.progress,
@@ -3186,7 +3195,8 @@ class ExtendedDatabase(Database):
                 JOIN videos v ON j.video_id = v.id
                 WHERE j.status = 'running'
                   AND v.status = 'error'
-            """).fetchall()
+                  AND (julianday('now') - julianday(j.started_at)) * 1440 > ?
+            """, (ZOMBIE_GRACE_MINUTES,)).fetchall()
             
             for row in zombie_led_jobs:
                 r = dict(row)
