@@ -40,15 +40,15 @@ CHANNEL_KEYWORDS = [
 CANAL_INITIALS = "AM"
 LOGO_SIZE = 180
 
-PROD_SCRIPT_WORDS_MIN = 900
-PROD_SCRIPT_WORDS_MAX = 1200
-PROD_SCRIPT_SCENES_MIN = 6
-PROD_SCRIPT_SCENES_MAX = 12
-PROD_SCRIPT_BLOCKS_MIN = 6
-PROD_SCRIPT_BLOCKS_MAX = 12
-PROD_VIDEO_DURATION_MIN = 6
-PROD_VIDEO_DURATION_MAX = 10
-VIDEO_AVERAGE_DURATION_MIN = 8
+PROD_SCRIPT_WORDS_MIN = 2000
+PROD_SCRIPT_WORDS_MAX = 3500
+PROD_SCRIPT_SCENES_MIN = 10
+PROD_SCRIPT_SCENES_MAX = 18
+PROD_SCRIPT_BLOCKS_MIN = 10
+PROD_SCRIPT_BLOCKS_MAX = 18
+PROD_VIDEO_DURATION_MIN = 10
+PROD_VIDEO_DURATION_MAX = 14
+VIDEO_AVERAGE_DURATION_MIN = 12
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 CANAL_TONE = (
@@ -492,7 +492,19 @@ NICHE_KEYWORDS_ENG = [
 ]
 
 MARATHON_NARRATIVE_FORMAT = "top_cases"
-MARATHON_TITLE_FORMAT = "Las {N} Anomalías Médicas Más Inexplicables de la Historia"
+
+MARATHON_TITLE_FORMULAS = [
+    "{topic}: Casos Que La Medicina No Puede Explicar",
+    "Anomalías Médicas: {topic} | Documental",
+    "{topic} — Los Pacientes Que Desafiaron La Ciencia",
+    "Misterios Del Cuerpo Humano: {topic}",
+]
+
+MARATHON_HOOK_TYPES = [
+    "asombro_cientifico",
+    "misterio_sin_resolver",
+    "conocimiento_exclusivo",
+]
 
 VIRAL_PLAYLIST_KEYWORDS = {
     "casos-completos": ["mysterious medical conditions documentary", "patients who baffled every doctor", "undiagnosed diseases full documentary", "medical mystery diagnosis explained"],

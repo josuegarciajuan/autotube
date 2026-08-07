@@ -1,10 +1,13 @@
 """Channel management router."""
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.concurrency import run_in_threadpool
 from api.deps import get_db
 from api.schemas.models import ChannelCreate, ChannelUpdate, ChannelResponse, ChannelConfigUpdate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -574,6 +577,108 @@ def get_channel_videos_aggregate_stats(channel_id: int):
         raise HTTPException(404, "Channel not found")
     stats = db.get_channel_videos_aggregate(channel_id)
     return {"ok": True, "videos_stats": stats}
+
+
+# ── Marathon Analytics ──────────────────────────────────────────
+
+@router.get("/{channel_id}/analytics/marathons")
+def get_channel_marathon_analytics(channel_id: int):
+    """Rendimiento de maratones del canal: watch hours, CTR, top títulos."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    try:
+        with db._connect() as conn:
+            # Total marathons uploaded
+            total = conn.execute(
+                """SELECT COUNT(*) as cnt FROM videos
+                   WHERE channel_id = ? AND is_marathon = 1 AND yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+
+            # Marathon watch hours (from latest stats snapshot per video)
+            watch = conn.execute(
+                """SELECT COALESCE(SUM(vsh.estimated_minutes_watched), 0) as total_min,
+                          COUNT(DISTINCT vsh.video_id) as videos_with_stats
+                   FROM videos v
+                   LEFT JOIN video_stats_history vsh ON vsh.video_id = v.id
+                   WHERE v.channel_id = ? AND v.is_marathon = 1 AND v.yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+
+            # Average CTR (impressions not normally tracked — estimate from views if available)
+            ctr_row = conn.execute(
+                """SELECT COALESCE(AVG(vsh.views), 0) as avg_views
+                   FROM videos v
+                   LEFT JOIN video_stats_history vsh ON vsh.video_id = v.id
+                   WHERE v.channel_id = ? AND v.is_marathon = 1 AND v.yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+
+            # Top 5 marathon titles by views
+            top_titles = conn.execute(
+                """SELECT v.titulo_final as title,
+                          v.yt_video_id,
+                          COALESCE(MAX(vsh.views), 0) as views,
+                          COALESCE(MAX(vsh.likes), 0) as likes,
+                          COALESCE(MAX(vsh.comments), 0) as comments
+                   FROM videos v
+                   LEFT JOIN video_stats_history vsh ON vsh.video_id = v.id
+                   WHERE v.channel_id = ? AND v.is_marathon = 1 AND v.yt_video_id IS NOT NULL
+                     AND v.titulo_final IS NOT NULL AND v.titulo_final != ''
+                   GROUP BY v.id
+                   ORDER BY views DESC
+                   LIMIT 5""",
+                (channel_id,),
+            ).fetchall()
+
+            # Comparison: marathon vs normal video average views
+            comp = conn.execute(
+                """SELECT
+                     COALESCE(AVG(CASE WHEN v.is_marathon = 1 THEN vsh.views END), 0) as avg_marathon_views,
+                     COALESCE(AVG(CASE WHEN v.is_marathon = 0 THEN vsh.views END), 0) as avg_normal_views,
+                     COALESCE(AVG(CASE WHEN v.is_marathon = 1 THEN v.duracion_seg END), 0) as avg_marathon_duration,
+                     COALESCE(AVG(CASE WHEN v.is_marathon = 0 THEN v.duracion_seg END), 0) as avg_normal_duration
+                   FROM videos v
+                   LEFT JOIN video_stats_history vsh ON vsh.video_id = v.id
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL""",
+                (channel_id,),
+            ).fetchone()
+
+            total_marathons = total["cnt"] if total else 0
+            total_watch_min = watch["total_min"] if watch else 0
+            videos_with_stats = watch["videos_with_stats"] if watch else 0
+
+            return {
+                "ok": True,
+                "marathon_analytics": {
+                    "total_marathons": total_marathons,
+                    "total_watch_hours": round(total_watch_min / 60, 1),
+                    "videos_with_stats": videos_with_stats,
+                    "avg_views": round(ctr_row["avg_views"], 1) if ctr_row else 0,
+                    "top_titles": [
+                        {
+                            "title": r["title"],
+                            "views": r["views"],
+                            "likes": r["likes"],
+                            "comments": r["comments"],
+                        }
+                        for r in (top_titles or [])
+                    ],
+                    "comparison": {
+                        "avg_marathon_views": round(comp["avg_marathon_views"], 1) if comp else 0,
+                        "avg_normal_views": round(comp["avg_normal_views"], 1) if comp else 0,
+                        "avg_marathon_duration_min": round((comp["avg_marathon_duration"] or 0) / 60, 1) if comp else 0,
+                        "avg_normal_duration_min": round((comp["avg_normal_duration"] or 0) / 60, 1) if comp else 0,
+                    },
+                },
+            }
+
+    except Exception as exc:
+        logger.error("Marathon analytics query failed for channel %d: %s", channel_id, exc)
+        raise HTTPException(500, f"Failed to fetch marathon analytics: {exc}")
 
 
 # ── Channel Templates ──────────────────────────────────────────

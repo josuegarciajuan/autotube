@@ -600,7 +600,20 @@ SEASON1_EPISODES = [
 # MARATHON & VIRAL — channel-specific
 # ═══════════════════════════════════════════════════════════════════
 MARATHON_NARRATIVE_FORMAT = "historical_collapse"
-MARATHON_TITLE_FORMAT = "El Colapso de {N} Civilizaciones que la Ciencia Aún No Explica"
+
+MARATHON_TITLE_FORMULAS = [
+    "{topic}: El Secreto Que La Arqueología No Explica",
+    "Civilizaciones Perdidas: {topic} | Documental",
+    "{topic} — Descubrimientos Que Desafían La Historia",
+    "Lo Que Encontraron En {topic} Cambió La Arqueología",
+    "Misterios Sin Resolver: {topic} | Documental HD",
+]
+
+MARATHON_HOOK_TYPES = [
+    "misterio_sin_resolver",
+    "secreto_ancestral",
+    "revelacion_impactante",
+]
 
 NICHE_KEYWORDS_ENG = [
     "lost civilizations", "ancient mysteries", "forgotten civilizations",

@@ -37,15 +37,15 @@ CHANNEL_KEYWORDS = [
 CANAL_INITIALS = "ESR"
 LOGO_SIZE = 180
 
-PROD_SCRIPT_WORDS_MIN = 1500
-PROD_SCRIPT_WORDS_MAX = 1800
+PROD_SCRIPT_WORDS_MIN = 2200
+PROD_SCRIPT_WORDS_MAX = 3800
 PROD_SCRIPT_SCENES_MIN = 10
 PROD_SCRIPT_SCENES_MAX = 18
 PROD_SCRIPT_BLOCKS_MIN = 10
 PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 10
+PROD_VIDEO_DURATION_MIN = 12
 PROD_VIDEO_DURATION_MAX = 16
-VIDEO_AVERAGE_DURATION_MIN = 13
+VIDEO_AVERAGE_DURATION_MIN = 14
 VIDEO_DURATION_DISCREPANCY_MIN = 3
 
 CANAL_TONE = (
@@ -489,7 +489,20 @@ NICHE_KEYWORDS_ENG = [
 ]
 
 MARATHON_NARRATIVE_FORMAT = "tragic_expeditions"
-MARATHON_TITLE_FORMAT = "Las {N} Expediciones Más Trágicas de la Historia de la Exploración"
+
+MARATHON_TITLE_FORMULAS = [
+    "{topic}: La Expedición Que Nadie Debió Intentar",
+    "Expediciones Mortales: {topic} | Documental Completo",
+    "{topic} — La Verdadera Historia De Supervivencia",
+    "Lo Que REALMENTE Pasó En {topic}",
+    "Tragedias Reales: {topic} | Documental HD",
+]
+
+MARATHON_HOOK_TYPES = [
+    "amenaza_inminente",
+    "revelacion_impactante",
+    "misterio_sin_resolver",
+]
 
 VIRAL_PLAYLIST_KEYWORDS = {
     "tragedias-polares": ["arctic expedition disaster documentary", "antarctic survival stories", "polar exploration tragedies", "franklin expedition documentary"],

@@ -221,6 +221,7 @@ export default function ChannelDetail() {
   const [channelYtStats, setChannelYtStats] = useState<any>(null)
   const [channelShortsStats, setChannelShortsStats] = useState<any>(null)
   const [channelVideosAggregate, setChannelVideosAggregate] = useState<any>(null)
+  const [marathonAnalytics, setMarathonAnalytics] = useState<any>(null)
   const [showConfigModal, setShowConfigModal] = useState(false)
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
   const [showSocialModal, setShowSocialModal] = useState(false)
@@ -412,6 +413,14 @@ export default function ChannelDetail() {
     if (!channel?.id) return
     api.getChannelVideosAggregate(channel.id).then(res => {
       if (res?.ok && res.videos_stats) setChannelVideosAggregate(res.videos_stats)
+    }).catch(() => {})
+  }, [channel?.id])
+
+  // Fetch marathon analytics
+  useEffect(() => {
+    if (!channel?.id) return
+    api.getChannelMarathonAnalytics(channel.id).then(res => {
+      if (res?.ok && res.marathon_analytics) setMarathonAnalytics(res.marathon_analytics)
     }).catch(() => {})
   }, [channel?.id])
 
@@ -652,6 +661,10 @@ export default function ChannelDetail() {
       try {
         const aggStats = await api.getChannelVideosAggregate(channelId)
         if (aggStats?.ok && aggStats.videos_stats) setChannelVideosAggregate(aggStats.videos_stats)
+      } catch {}
+      try {
+        const marathonStats = await api.getChannelMarathonAnalytics(channelId)
+        if (marathonStats?.ok && marathonStats.marathon_analytics) setMarathonAnalytics(marathonStats.marathon_analytics)
       } catch {}
     } catch (e: any) {
       setStatsRefreshMsg(`Error: ${e.message || 'desconocido'}`)
@@ -936,6 +949,37 @@ export default function ChannelDetail() {
                   </span>
                   vistas totales
                 </span>
+              </div>
+            )}
+            {/* ── Marathon analytics ── */}
+            {marathonAnalytics && marathonAnalytics.total_marathons > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1.5 border-t border-neon-amber/20">
+                <span className="inline-flex items-center gap-1 bg-neon-amber/10 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-amber/80 border border-neon-amber/15">
+                  <Film size={11} />
+                  <span className="font-mono font-semibold tabular-nums">{marathonAnalytics.total_marathons}</span> maratones
+                </span>
+                {marathonAnalytics.total_watch_hours > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-gray-400">
+                    <Clock size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{marathonAnalytics.total_watch_hours.toLocaleString()}</span> horas
+                  </span>
+                )}
+                {marathonAnalytics.avg_views > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70">
+                    <Eye size={11} />
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(marathonAnalytics.avg_views)}</span> avg views
+                  </span>
+                )}
+                {marathonAnalytics.comparison && marathonAnalytics.comparison.avg_marathon_views > 0 && marathonAnalytics.comparison.avg_normal_views > 0 && (
+                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-gray-400">
+                    vs normal: {marathonAnalytics.comparison.avg_marathon_views > marathonAnalytics.comparison.avg_normal_views ? '↑' : '↓'}
+                    <span className="font-mono tabular-nums">
+                      {marathonAnalytics.comparison.avg_marathon_views > marathonAnalytics.comparison.avg_normal_views
+                        ? `${((marathonAnalytics.comparison.avg_marathon_views / marathonAnalytics.comparison.avg_normal_views - 1) * 100).toFixed(0)}%`
+                        : `${((1 - marathonAnalytics.comparison.avg_normal_views / marathonAnalytics.comparison.avg_marathon_views) * 100).toFixed(0)}%`}
+                    </span>
+                  </span>
+                )}
               </div>
             )}
             {channel.description && (

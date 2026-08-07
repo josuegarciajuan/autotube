@@ -1059,6 +1059,98 @@ def run_job(
                 metadata = None
             
             if metadata and isinstance(metadata, dict):
+                # ── Marathon title validation ──
+                if is_marathon and getattr(cfg, "MARATHON_VALIDATE_TITLE", True):
+                    try:
+                        from pipeline.marathon_title_validator import validate_marathon_title
+                        import random as _rnd
+
+                        # Get the marathon topic from script content
+                        topic = (
+                            script.get("titulo", "")
+                            or (marathon_config.get("narrative_format", "Documental") if marathon_config else "Documental")
+                            or "Documental"
+                        )
+                        # Prefer a more specific topic from the script's keywords or content
+                        if script.get("keywords"):
+                            import json as _jkw
+                            kws = _jkw.loads(script["keywords"]) if isinstance(script.get("keywords"), str) else script.get("keywords", [])
+                            if kws and isinstance(kws, list) and len(kws) > 0:
+                                topic = kws[0] if not isinstance(kws[0], dict) else kws[0].get("keyword", topic)
+
+                        content_summary = script.get("guion", "")[:2000] if script.get("guion") else ""
+
+                        formulas = list(getattr(cfg, "MARATHON_TITLE_FORMULAS", ["{topic}: Documental Completo"]))
+                        hook_types = list(getattr(cfg, "MARATHON_HOOK_TYPES", ["revelacion_impactante"]))
+
+                        title_formula = _rnd.choice(formulas)
+                        hook_type = _rnd.choice(hook_types)
+                        raw_title = title_formula.replace("{topic}", topic)
+
+                        logger.info(
+                            "[MARATHON][%s] Validating marathon title: '%s' (hook=%s, topic=%s)",
+                            canal, raw_title[:80], hook_type, topic[:40],
+                        )
+
+                        best_title = raw_title
+                        best_score = 0.0
+
+                        for attempt in range(3):
+                            result = validate_marathon_title(
+                                title=raw_title,
+                                topic=topic,
+                                content_summary=content_summary,
+                                hook_type=hook_type,
+                            )
+                            score = result["final_score"]
+                            if score > best_score:
+                                best_score = score
+                                best_title = raw_title
+
+                            if result["approved"]:
+                                logger.info(
+                                    "[MARATHON][%s] Marathon title APPROVED on attempt %d: '%s' (score=%.2f, "
+                                    "curiosity=%d, precision=%d, power=%d)",
+                                    canal, attempt + 1, raw_title[:80], score,
+                                    result["curiosity_score"], result["precision_score"],
+                                    result["power_score"],
+                                )
+                                break
+                            else:
+                                logger.warning(
+                                    "[MARATHON][%s] Marathon title REJECTED (attempt %d): '%s' — %s",
+                                    canal, attempt + 1, raw_title[:80], result["feedback"],
+                                )
+                                # Use LLM-suggested alternative for next attempt
+                                alts = result.get("alternative_titles", [])
+                                if alts and alts[0] != raw_title:
+                                    raw_title = alts[0]
+                                    best_title = raw_title  # track the alternative
+                                else:
+                                    # If no good alt, try a different formula
+                                    raw_title = _rnd.choice(formulas).replace("{topic}", topic)
+                        else:
+                            # All 3 attempts failed
+                            logger.error(
+                                "[MARATHON][%s] Marathon title FAILED validation 3 times — "
+                                "using best attempt (score=%.2f): '%s'",
+                                canal, best_score, best_title[:80],
+                            )
+
+                        # Override the AI-generated title with our validated marathon title
+                        metadata["selected_title"] = best_title
+                        logger.info(
+                            "[MARATHON][%s] Final marathon title: '%s'",
+                            canal, best_title[:80],
+                        )
+
+                    except Exception as tv_exc:
+                        logger.error(
+                            "[MARATHON][%s] Title validation crashed: %s — keeping original title",
+                            canal, tv_exc,
+                        )
+                        # Keep the title that phase_metadata() already generated
+
                 db.update_video(video_id, progress=85, progress_phase="metadata")
                 db.update_video(
                     video_id,

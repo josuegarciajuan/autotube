@@ -298,6 +298,48 @@ MARATHON_LLM_MAX_BATCHES = 150
 MARATHON_LLM_MAX_EMPTY_STRIKES = 20
 MARATHON_PUBLISH_MODE = "scheduled"
 
+# ── MARATHON TITLE STRATEGY ──
+
+# Fórmulas de título para maratones. {topic} se reemplaza con el tema.
+# Se elige una aleatoriamente para cada maratón.
+MARATHON_TITLE_FORMULAS = [
+    "{topic}: El Documental Definitivo",
+    "La Historia COMPLETA de {topic} | Documental",
+    "{topic} — Lo Que NADIE Te Ha Contado",
+    "De Principio a Fin: {topic}",
+    "El Misterio de {topic} | Documental Completo HD",
+    "{topic}: La Verdad Que Cambió Todo",
+    "ATENCIÓN: {topic} — Documental Impactante",
+    "Lo Que Descubrieron Sobre {topic} Es Increíble",
+]
+
+# Tipos de hook para el título del maratón. Define la emoción que debe evocar.
+MARATHON_HOOK_TYPES = [
+    "revelacion_impactante",    # "Descubrieron algo que cambió la historia"
+    "misterio_sin_resolver",    # "Nadie ha podido explicar esto"
+    "conocimiento_exclusivo",   # "Información que pocos conocen"
+    "prohibido_u_oculto",       # "Lo que no quieren que sepas"
+    "asombro_cientifico",       # "La ciencia no puede explicarlo"
+    "amenaza_inminente",        # "Esto podría cambiar tu vida"
+    "secreto_ancestral",        # "Secretos que estuvieron enterrados siglos"
+]
+
+# Validación de título pre-publicación (usar LLM)
+MARATHON_VALIDATE_TITLE = True
+
+# Score mínimo de "viralidad" para aprobar el título (1-10)
+MARATHON_MIN_VIRALITY_SCORE = 7
+
+# Requisitos que debe cumplir un título de maratón
+MARATHON_TITLE_REQUIREMENTS = [
+    "Debe generar curiosidad inmediata en las primeras 5 palabras",
+    "Debe incluir al menos 1 power word del nicho",
+    "NO debe ser clickbait engañoso (debe cumplir lo que promete)",
+    "Debe tener entre 40 y 80 caracteres",
+    "Debe sonar a documental/película, no a video amateur de YouTube",
+    "NO debe usar mayúsculas en toda la frase (solo palabras clave)",
+]
+
 # ═══════════════════════════════════════════════════════════════════
 # VIRAL MIRROR DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
@@ -327,6 +369,17 @@ CROSS_PLATFORM_UPLOAD = {
 }
 
 # Per-platform settings for video uploads.
+# ═══════════════════════════════════════════════════════════════════
+# A/B TESTING DEFAULTS (sequential title/thumbnail optimization)
+# ═══════════════════════════════════════════════════════════════════
+
+ENABLE_AB_TESTING = False
+AB_TEST_CTR_THRESHOLD = 3.0
+AB_TEST_FIRST_CHECK_HOURS = 48
+AB_TEST_SECOND_CHECK_HOURS = 48
+AB_TEST_MIN_IMPRESSIONS = 100
+AB_TEST_THUMBNAIL_VARIANTS = 3
+
 CROSS_PLATFORM_SETTINGS = {
     "facebook": {
         "privacy": "public",
@@ -346,4 +399,48 @@ CROSS_PLATFORM_SETTINGS = {
         "cross_reference_yt": False,        # TikTok penalizes external links
         "upload_delay_min": 30,
     },
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# SEO OPTIMIZATION DEFAULTS
+# ═══════════════════════════════════════════════════════════════════
+
+# Enable real-time keyword research via Google Trends / YouTube autocomplete.
+# When True, the MetadataGenerator queries trending keywords for each video topic
+# and injects them into the LLM prompt for higher search relevance.
+SEO_ENABLE_REALTIME_RESEARCH = True
+
+# Number of trending keywords to fetch per topic.
+SEO_TRENDING_KEYWORDS_COUNT = 10
+
+# Optimized description template (timestamp-first format).
+# The LLM will produce descriptions following this structure:
+#   1. Chapter timestamps (YouTube indexes these as Key Moments)
+#   2. Hook paragraph (~150 chars) with primary keyword
+#   3. 2-3 paragraphs with secondary keywords
+#   4. CTA (subscribe + related video link)
+#   5. 3-5 hashtags
+# Channels can override with their own DESCRIPTION_TEMPLATE.
+OPTIMIZED_DESCRIPTION_STRUCTURE = {
+    "timestamps_first": True,
+    "hook_max_chars": 150,
+    "body_paragraphs": 3,
+    "max_hashtags": 5,
+    "include_related_video_link": True,
+    "include_sources_section": True,
+}
+
+# SEO scoring weights (used by /api/channels/{id}/seo-score).
+# Score 0-10 based on:
+#   title_length     (3 pts): avg title 40-65 chars = perfect
+#   power_words      (2 pts): % of titles with at least 1 power word
+#   description_len  (2 pts): avg description > 1500 chars
+#   timestamps       (2 pts): % of videos with chapter timestamps
+#   tag_count        (1 pts): avg tags per video (ideal: 7-10)
+SEO_SCORE_WEIGHTS = {
+    "title_length": 3,
+    "power_words": 2,
+    "description_length": 2,
+    "timestamps": 2,
+    "tag_count": 1,
 }

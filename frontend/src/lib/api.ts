@@ -44,6 +44,7 @@ export const api = {
   getChannelYoutubeStats: (id: number) => request<any>(`/channels/${id}/youtube-stats`),
   getChannelShortsStats: (id: number) => request<any>(`/channels/${id}/shorts-stats`),
   getChannelVideosAggregate: (id: number) => request<any>(`/channels/${id}/videos-aggregate-stats`),
+  getChannelMarathonAnalytics: (id: number) => request<any>(`/channels/${id}/analytics/marathons`),
   generateChannelProfile: (id: number) => request<any>(`/channels/${id}/generate-profile`, { method: 'POST' }),
   
   // Social Media Accounts
@@ -147,7 +148,8 @@ export const api = {
     return request<any>(`/dashboard${qs}`)
   },
   getAllChannelStats: () => request<any>('/channels/stats-summary'),
-  collectStats: () => request<any>('/stats/collect', { method: 'POST' }),
+  collectStats: (deep?: boolean) =>
+    request<any>(`/stats/collect${deep ? '?deep=true' : ''}`, { method: 'POST' }),
   getStatsCollectStatus: () => request<any>('/stats/collect/status'),
   getLogs: (channelId?: number) => request<any[]>(`/logs${channelId ? `?channel_id=${channelId}` : ''}`),
 
@@ -257,6 +259,13 @@ export const api = {
     request<any>('/analytics/comparison'),
   getChannelWatchTime: (channelId: number) =>
     request<any>(`/channels/${channelId}/analytics/watch-time`),
+  // Advanced analytics (CTR, traffic, demographics)
+  getChannelCTR: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analytics/ctr`),
+  getChannelTraffic: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analytics/traffic`),
+  getChannelDemographics: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analytics/demographics`),
 
   // ── Promotion / Lifecycle ──
   // Playlists
