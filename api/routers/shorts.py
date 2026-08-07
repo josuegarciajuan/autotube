@@ -121,7 +121,7 @@ async def extract_clips(video_id: int, background_tasks: BackgroundTasks):
     # Get timestamps from timing_data
     import json as _json
     timing_data = {}
-    if video.get("timing_data"):
+    if video["timing_data"]:
         try:
             timing_data = _json.loads(video["timing_data"])
         except:
@@ -197,7 +197,7 @@ async def render_short(short_id: int, background_tasks: BackgroundTasks):
     import json as _json
     tts_word_ts: list = []
     try:
-        td_raw = source_video.get("timing_data") or "{}"
+        td_raw = source_video["timing_data"] or "{}"
         td = _json.loads(td_raw) if isinstance(td_raw, str) else (td_raw or {})
         tts_word_ts = td.get("phases", {}).get("tts_timestamps", [])
         if not isinstance(tts_word_ts, list):
