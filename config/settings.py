@@ -34,6 +34,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
+PIXABAY_API_TIMEOUT = int(os.getenv("PIXABAY_API_TIMEOUT", "30"))
 GOOGLE_CLIENT_SECRET_PATH = os.getenv(
     "GOOGLE_CLIENT_SECRET_PATH",
     str(PROJECT_ROOT / "config" / "client_secret.json"),

@@ -2100,64 +2100,112 @@ class MediaFetcher:
                 logger.warning("Cached image %s is invalid — re-downloading", filepath)
                 filepath.unlink(missing_ok=True)
 
-        try:
-            headers = {}
-            # Pixabay CDN often requires a Referer for largeImageURL downloads
-            if "pixabay" in url.lower():
-                headers["Referer"] = "https://pixabay.com/"
+        max_retries = 3
+        last_content_len = 0
 
-            resp = requests.get(url, timeout=30, stream=True, headers=headers)
-            resp.raise_for_status()
-
-            # Quick size check before writing
-            content = resp.content
-            content_len = len(content)
-            if content_len < 50000:
-                logger.error(
-                    "Image download too small (%d bytes) — likely HTML/error page: %s",
-                    content_len, url[:100],
-                )
-                self._bad_image_urls.add(url)
-                self._bad_image_urls_ts = _time.time()
-                return None
-
-            # JPEG magic bytes check
-            if content[:3] != b'\xff\xd8\xff':
-                logger.error(
-                    "Downloaded content is not JPEG (magic=%r) — discarding: %s",
-                    content[:8], url[:100],
-                )
-                self._bad_image_urls.add(url)
-                self._bad_image_urls_ts = _time.time()
-                return None
-
-            settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-            filepath.write_bytes(content)
-
-            # Dimension check for Ken Burns viability
+        for attempt in range(max_retries):
             try:
-                from PIL import Image
-                from io import BytesIO
-                pil_img = Image.open(BytesIO(content))
-                w, h = pil_img.size
-                min_dim = min(w, h)
-                if min_dim < 800:
-                    logger.warning(
-                        "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
-                        filename, w, h,
-                    )
-                    # Don't reject — still usable if closest match — but warn
-                pil_img.close()
-            except Exception:
-                logger.warning("Could not verify image dimensions for %s", filename)
+                headers = {}
+                # Pixabay CDN often requires a Referer for largeImageURL downloads
+                if "pixabay" in url.lower():
+                    headers["Referer"] = "https://pixabay.com/"
 
-            logger.info("Downloaded image: %s (%d bytes)", filepath, content_len)
-            return filepath
-        except Exception as exc:
-            logger.error("Image download failed %s: %s", url, exc)
-            self._bad_image_urls.add(url)
-            self._bad_image_urls_ts = _time.time()
-            return None
+                resp = requests.get(url, timeout=30, stream=True, headers=headers)
+                resp.raise_for_status()
+
+                # Quick size check before writing
+                content = resp.content
+                content_len = len(content)
+                if content_len < 50000:
+                    logger.warning(
+                        "Image download too small (%d bytes) — likely HTML/error page "
+                        "(attempt %d/%d): %s",
+                        content_len, attempt + 1, max_retries, url[:100],
+                    )
+                    last_content_len = content_len
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    self._bad_image_urls.add(url)
+                    self._bad_image_urls_ts = _time.time()
+                    return None
+
+                # JPEG magic bytes check
+                if content[:3] != b'\xff\xd8\xff':
+                    logger.warning(
+                        "Downloaded content is not JPEG (magic=%r) — retry or discard "
+                        "(attempt %d/%d): %s",
+                        content[:8], attempt + 1, max_retries, url[:100],
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    self._bad_image_urls.add(url)
+                    self._bad_image_urls_ts = _time.time()
+                    return None
+
+                # ── Success path ─────────────────────────────────
+                settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+                filepath.write_bytes(content)
+
+                # Dimension check for Ken Burns viability
+                try:
+                    from PIL import Image
+                    from io import BytesIO
+                    pil_img = Image.open(BytesIO(content))
+                    w, h = pil_img.size
+                    min_dim = min(w, h)
+                    if min_dim < 800:
+                        logger.warning(
+                            "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
+                            filename, w, h,
+                        )
+                        # Don't reject — still usable if closest match — but warn
+                    pil_img.close()
+                except Exception:
+                    logger.warning("Could not verify image dimensions for %s", filename)
+
+                logger.info("Downloaded image: %s (%d bytes)", filepath, content_len)
+                return filepath
+
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Image download timeout (attempt %d/%d): %s",
+                    attempt + 1, max_retries, url[:80],
+                )
+            except requests.exceptions.ConnectionError as exc:
+                logger.warning(
+                    "Image download connection error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status >= 500:
+                    logger.warning(
+                        "Image download server error %d (attempt %d/%d): %s",
+                        status, attempt + 1, max_retries, url[:80],
+                    )
+                else:
+                    # 4xx — don't retry, blacklist immediately
+                    logger.error("Image download HTTP error %d: %s", status, url[:100])
+                    self._bad_image_urls.add(url)
+                    self._bad_image_urls_ts = _time.time()
+                    return None
+            except Exception as exc:
+                logger.warning(
+                    "Image download error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+
+            if attempt < max_retries - 1:
+                sleep_time = 2 ** attempt  # 1, 2, 4
+                time.sleep(sleep_time)
+
+        # Exhausted all retries — blacklist and return None
+        logger.error("Image download failed after %d attempts: %s", max_retries, url[:100])
+        self._bad_image_urls.add(url)
+        self._bad_image_urls_ts = _time.time()
+        return None
 
     @staticmethod
     def _is_valid_image(filepath: Path) -> bool:

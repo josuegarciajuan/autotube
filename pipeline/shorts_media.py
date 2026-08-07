@@ -610,22 +610,62 @@ def _download_image_asset(
     """Download an image from a photo result dict to disk.
 
     Handles Unsplash (direct download_url) and Pixabay (with fallback).
+    Retries with exponential backoff on timeouts and server errors.
     Returns asset_info dict with path, url, img_id, provider, content_hash,
     or None on failure.
     """
     download_url = photo.get("download_url", "")
     fallback_url = photo.get("fallback_download_url", "")
 
-    # Try primary URL
+    # Try primary URL, then fallback URL
     for attempt_url in (download_url, fallback_url):
         if not attempt_url:
             continue
         if attempt_url in _DEDUP_STATE["bad_urls"]:
             continue
-        try:
-            resp = requests.get(attempt_url, timeout=30)
-            resp.raise_for_status()
-        except requests.RequestException:
+
+        # ── Retry loop with exponential backoff ────────────────
+        resp = None
+        max_retries = 3
+        for retry_attempt in range(max_retries):
+            try:
+                resp = requests.get(attempt_url, timeout=30)
+                resp.raise_for_status()
+                break  # success
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Shorts image download timeout (attempt %d/%d): %s",
+                    retry_attempt + 1, max_retries, attempt_url[:80],
+                )
+            except requests.exceptions.ConnectionError as exc:
+                logger.warning(
+                    "Shorts image download connection error (attempt %d/%d): %s",
+                    retry_attempt + 1, max_retries, exc,
+                )
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status >= 500:
+                    logger.warning(
+                        "Shorts image download server error %d (attempt %d/%d): %s",
+                        status, retry_attempt + 1, max_retries, attempt_url[:80],
+                    )
+                else:
+                    # 4xx — don't retry, mark bad and move on
+                    _DEDUP_STATE["bad_urls"].add(attempt_url)
+                    resp = None
+                    break
+            except requests.RequestException:
+                # Generic request error — mark bad, don't retry
+                _DEDUP_STATE["bad_urls"].add(attempt_url)
+                resp = None
+                break
+
+            if retry_attempt < max_retries - 1:
+                sleep_time = 2 ** retry_attempt  # 1, 2, 4
+                time.sleep(sleep_time)
+
+        # If all retries exhausted or 4xx → try next URL
+        if resp is None:
             _DEDUP_STATE["bad_urls"].add(attempt_url)
             continue
 

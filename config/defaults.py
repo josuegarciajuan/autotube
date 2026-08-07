@@ -153,6 +153,14 @@ SUBTITLE_PHRASE_GAP = 0.4
 SUBTITLES_ENABLED = False
 
 # ═══════════════════════════════════════════════════════════════════
+# MEDIA PROVIDER TIMEOUTS
+# ═══════════════════════════════════════════════════════════════════
+
+# HTTP timeout (seconds) for Pixabay API search requests.
+# Increased from 15s to 30s to reduce timeouts under load.
+PIXABAY_API_TIMEOUT = 30
+
+# ═══════════════════════════════════════════════════════════════════
 # MEDIA STRATEGY DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 

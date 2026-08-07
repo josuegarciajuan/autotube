@@ -200,6 +200,7 @@ class PixabayVideoProvider(BaseVideoProvider):
         """Download the video clip from Pixabay's CDN.
 
         Uses caching based on a hash of the download URL.
+        Retries with exponential backoff on timeouts and server errors.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         url_hash = hashlib.md5(asset.url.encode()).hexdigest()[:12]
@@ -211,34 +212,113 @@ class PixabayVideoProvider(BaseVideoProvider):
             asset.file_path = filepath
             return filepath
 
-        try:
-            resp = requests.get(asset.url, timeout=120, stream=True)
-            resp.raise_for_status()
-            filepath.write_bytes(resp.content)
-            asset.file_path = filepath
-            logger.info("Pixabay: downloaded video to %s (%.1f MB)", filepath,
-                         len(resp.content) / 1024 / 1024)
-            return filepath
-        except Exception as exc:
-            logger.error("Pixabay: download failed for %s: %s", asset.url, exc)
-            raise
+        max_retries = 3
+        last_exc = None
+
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(asset.url, timeout=120, stream=True)
+                resp.raise_for_status()
+                filepath.write_bytes(resp.content)
+                asset.file_path = filepath
+                logger.info("Pixabay: downloaded video to %s (%.1f MB)", filepath,
+                             len(resp.content) / 1024 / 1024)
+                return filepath
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Pixabay video download timeout (attempt %d/%d): %s",
+                    attempt + 1, max_retries, asset.url[:80],
+                )
+                last_exc = f"timeout after {max_retries} attempts"
+            except requests.exceptions.ConnectionError as exc:
+                logger.warning(
+                    "Pixabay video download connection error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status >= 500:
+                    logger.warning(
+                        "Pixabay video download server error %d (attempt %d/%d)",
+                        status, attempt + 1, max_retries,
+                    )
+                    last_exc = exc
+                else:
+                    logger.error("Pixabay: download failed for %s: %s", asset.url, exc)
+                    raise
+            except Exception as exc:
+                logger.warning(
+                    "Pixabay video download error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
+
+            if attempt < max_retries - 1:
+                sleep_time = 2 ** attempt  # 1, 2, 4
+                time.sleep(sleep_time)
+
+        logger.error("Pixabay: download failed after %d attempts for %s", max_retries, asset.url)
+        raise RuntimeError(f"Pixabay download failed: {last_exc}")
 
     # ── Internal helpers ─────────────────────────────────────
 
     def _request_with_retry(self, params: dict) -> Optional[requests.Response]:
-        """GET the Pixabay API with one automatic 429 retry."""
-        try:
-            resp = requests.get(self.BASE_URL, params=params, timeout=15)
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("Retry-After", "60")
-                logger.warning("Pixabay rate limit (429). Retry-After=%s", retry_after)
-                time.sleep(min(int(retry_after), 60))
-                resp = requests.get(self.BASE_URL, params=params, timeout=15)
-            resp.raise_for_status()
-            return resp
-        except requests.RequestException as exc:
-            logger.error("Pixabay API request failed: %s", exc)
-            return None
+        """GET the Pixabay API with exponential-backoff retry.
+
+        Retries on timeouts, connection errors, 5xx, and 429 (rate limit).
+        Uses exponential backoff: 1s → 2s → 4s between attempts.
+        Respects the Retry-After header for 429 responses.
+        """
+        timeout = int(os.getenv("PIXABAY_API_TIMEOUT", "30"))
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(self.BASE_URL, params=params, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Pixabay API timeout (attempt %d/%d, timeout=%ds)",
+                    attempt + 1, max_retries, timeout,
+                )
+            except requests.exceptions.ConnectionError as exc:
+                logger.warning(
+                    "Pixabay API connection error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status == 429:
+                    retry_after = exc.response.headers.get("Retry-After", "60")
+                    logger.warning(
+                        "Pixabay rate limit (429). Retry-After=%s (attempt %d/%d)",
+                        retry_after, attempt + 1, max_retries,
+                    )
+                    time.sleep(min(int(retry_after), 60))
+                elif status >= 500:
+                    logger.warning(
+                        "Pixabay API server error %d (attempt %d/%d)",
+                        status, attempt + 1, max_retries,
+                    )
+                else:
+                    logger.error("Pixabay API HTTP error %d: %s", status, exc)
+                    return None  # 4xx (non-429) — don't retry
+            except requests.RequestException as exc:
+                logger.warning(
+                    "Pixabay API request failed (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+
+            # Exponential backoff: 1s, 2s, 4s (skip sleep on last attempt)
+            if attempt < max_retries - 1:
+                sleep_time = 2 ** attempt  # 1, 2, 4
+                logger.debug("Retrying in %.0fs...", sleep_time)
+                time.sleep(sleep_time)
+
+        logger.error("Pixabay API request failed after %d attempts", max_retries)
+        return None
 
     @staticmethod
     def _pick_best_quality(
