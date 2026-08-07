@@ -145,25 +145,26 @@ def _compute_random_upload_time(
 
 
 def _recover_stuck_uploading_videos(db) -> int:
-    """Safety-net recovery for videos stuck in 'uploading' whose upload job died.
+    """Safety-net recovery for videos stuck in 'uploading' or 'ready' whose upload job died.
 
     Scenarios this catches:
     1. Server restart between `db.update_video(status='uploading')` and
        `asyncio.create_task(...)` — the video gets stuck with no worker.
     2. Worker crashed immediately after dispatch before marking job as `running`.
     3. Startup recovery missed the video due to race condition or timing.
+    4. Upload job failed during dispatch and video reverted to 'ready'
+       instead of 'awaiting_upload' (ghost worker, manual cleanup, etc).
 
-    Strategy: find videos in 'uploading' status whose latest upload_only job is
-    'failed' (dead worker), and revert them to 'awaiting_upload' so the
-    dispatcher retries them on the next cycle.
+    Strategy: find videos in 'uploading' or 'ready' status whose latest
+    upload_only job is 'failed' (dead worker), and revert them to
+    'awaiting_upload' so the dispatcher retries them on the next cycle.
 
     Returns count of recovered videos.
     """
     recovered = 0
     try:
         with db._connect() as conn:
-            # Find videos stuck in 'uploading' with a failed upload_only job
-            # (latest job per video, only consider upload_only jobs)
+            # ── Scenario A: videos stuck in 'uploading' with failed upload job ──
             stuck = conn.execute(
                 """SELECT v.id, v.channel_id
                    FROM videos v
@@ -191,6 +192,42 @@ def _recover_stuck_uploading_videos(db) -> int:
                     recovered += 1
                     logger.warning(
                         "🔁 Recovery: video #%d (ch=%d) stuck in 'uploading' with dead "
+                        "upload job → reverted to 'awaiting_upload' for retry",
+                        video_id, row["channel_id"],
+                    )
+
+            # ── Scenario B: videos stuck in 'ready' with a failed upload job ──
+            # These were generated successfully but the upload dispatch failed
+            # (ghost worker, manual cleanup, concurrency guard, etc). Without
+            # recovery they sit in 'ready' forever with no planned_slot.
+            stuck_ready = conn.execute(
+                """SELECT v.id, v.channel_id
+                   FROM videos v
+                   JOIN (
+                       SELECT video_id, MAX(id) as max_job_id
+                       FROM generation_jobs
+                       WHERE action = 'upload_only'
+                       GROUP BY video_id
+                   ) j_latest ON j_latest.video_id = v.id
+                   JOIN generation_jobs j ON j.id = j_latest.max_job_id
+                   WHERE v.status = 'ready'
+                     AND j.status = 'failed'
+                """
+            ).fetchall()
+
+            for row in stuck_ready:
+                video_id = row["id"]
+                conn.execute(
+                    "UPDATE videos SET status='awaiting_upload', "
+                    "progress=100, progress_phase='upload', "
+                    "scheduled_upload_at=NULL, error_message=NULL "
+                    "WHERE id=? AND status='ready'",
+                    (video_id,)
+                )
+                if conn.total_changes > 0:
+                    recovered += 1
+                    logger.warning(
+                        "🔁 Recovery: video #%d (ch=%d) stuck in 'ready' with failed "
                         "upload job → reverted to 'awaiting_upload' for retry",
                         video_id, row["channel_id"],
                     )
