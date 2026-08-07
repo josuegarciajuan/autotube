@@ -95,8 +95,45 @@ export default function Dashboard() {
   const [recalcSlotsResult, setRecalcSlotsResult] = useState<any>(null)
   const [recalcSlotsError, setRecalcSlotsError] = useState<string | null>(null)
 
+  // SEO scores for channels
+  const [seoScores, setSeoScores] = useState<Record<number, any>>({})
+  const [seoLoading, setSeoLoading] = useState(false)
+  const fetchSEOScores = useCallback(async (chans: any[]) => {
+    if (!chans.length) return
+    setSeoLoading(true)
+    const scores: Record<number, any> = {}
+    // Fetch SEO score + CTR for each channel in parallel
+    const results = await Promise.allSettled(
+      chans.map(async (ch: any) => {
+        const [seoRes, ctrRes] = await Promise.allSettled([
+          api.getChannelSEOScore(ch.id),
+          api.getChannelCTR(ch.id),
+        ])
+        return {
+          channelId: ch.id,
+          seo: seoRes.status === 'fulfilled' ? seoRes.value : null,
+          ctr: ctrRes.status === 'fulfilled' ? ctrRes.value : null,
+        }
+      })
+    )
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        scores[r.value.channelId] = r.value
+      }
+    }
+    setSeoScores(scores)
+    setSeoLoading(false)
+  }, [])
+
   // Console events (via React Query)
   const { data: consoleEvents = [] } = useRecentEvents(20, selectedChannelId ?? undefined)
+
+  // Fetch SEO scores when channels are loaded
+  useEffect(() => {
+    if (data?.channels?.length > 0) {
+      fetchSEOScores(data.channels)
+    }
+  }, [data?.channels, fetchSEOScores])
 
   function summarize(s: any): string {
     const chans = s.channels || []
@@ -205,7 +242,7 @@ export default function Dashboard() {
       in_production: k?.in_production?.value ?? 0,
     })
     try {
-      await api.collectStats()
+      await api.collectStats(true)  // deep=true: includes CTR, traffic, demographics
       pollStatsStatus()
     } catch (e: any) {
       setCollectStatsError(true)
@@ -495,6 +532,95 @@ export default function Dashboard() {
         channelColors={channelColors}
       />
      
+      {/* ═══════ NIVEL 1: SEO Overview (CTR + Score) ═══════ */}
+      <CollapsibleSection title="SEO Overview" icon="🔎" defaultOpen={false}>
+        {seoLoading ? (
+          <div className="flex items-center justify-center py-6">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-neon-red border-t-transparent" />
+            <span className="ml-3 text-xs text-gray-400">Cargando metricas SEO...</span>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {channels.map((ch: any) => {
+              const seoData = seoScores[ch.id]
+              const seo = seoData?.seo
+              const ctr = seoData?.ctr
+              return (
+                <div
+                  key={ch.id}
+                  className="rounded-xl border border-dark-500 bg-dark-800/60 p-4 hover:border-gray-400 transition-all"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span
+                      className="text-sm font-semibold"
+                      style={{ color: channelColors[ch.id] || '#ff3355' }}
+                    >
+                      {ch.name}
+                    </span>
+                    {seo && (
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                        seo.score >= 8 ? 'bg-green-500/20 text-green-400' :
+                        seo.score >= 5 ? 'bg-amber-500/20 text-amber-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        SEO {seo.score}/{seo.score_max}
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-1.5 text-xs text-gray-400">
+                    {ctr?.avg_ctr_30d != null && (
+                      <div className="flex justify-between">
+                        <span>CTR 30d</span>
+                        <span className={ctr.avg_ctr_30d >= 5 ? 'text-green-400' : ctr.avg_ctr_30d >= 2 ? 'text-amber-400' : 'text-red-400'}>
+                          {ctr.avg_ctr_30d}%
+                        </span>
+                      </div>
+                    )}
+                    {ctr?.avg_retention_30d != null && (
+                      <div className="flex justify-between">
+                        <span>Retención</span>
+                        <span className={ctr.avg_retention_30d >= 40 ? 'text-green-400' : ctr.avg_retention_30d >= 25 ? 'text-amber-400' : 'text-red-400'}>
+                          {ctr.avg_retention_30d}%
+                        </span>
+                      </div>
+                    )}
+                    {seo?.videos_analyzed != null && (
+                      <div className="flex justify-between">
+                        <span>Videos anal.</span>
+                        <span className="text-gray-500">{seo.videos_analyzed}</span>
+                      </div>
+                    )}
+                    {seo?.breakdown && (
+                      <div className="flex gap-1 mt-1.5 pt-1.5 border-t border-dark-500">
+                        {Object.entries(seo.breakdown as Record<string, any>).map(([k, v]: [string, any]) => (
+                          <div key={k} className="flex-1" title={v.detail}>
+                            <div className="h-1 rounded-full bg-dark-600 mb-0.5">
+                              <div
+                                className="h-1 rounded-full bg-neon-red"
+                                style={{ width: `${Math.round((v.score / v.max) * 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-[9px] text-gray-500 block text-center">
+                              {k === 'title_length' ? 'Tit' : 
+                               k === 'power_words' ? 'PW' : 
+                               k === 'description_length' ? 'Desc' : 
+                               k === 'timestamps' ? 'Cap' : 'Tags'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {!seo && !ctr && (
+                      <div className="text-[10px] text-gray-600 italic py-1">Sin datos SEO</div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </CollapsibleSection>
+
       {/* ═══════ NIVEL 1: View Gap Monitor ═══════ */}
       <CollapsibleSection title="View Gap Monitor" icon="🔍" defaultOpen={false}>
         <ViewGapPanel />

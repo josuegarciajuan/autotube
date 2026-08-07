@@ -246,6 +246,19 @@ SHORTS_FIRST_COMMENT_LINK = True
 SHORTS_PER_VIDEO_PLAYLIST = True
 SHORTS_PLAYLIST_NAME = "Shorts"
 
+# ── v2: New distribution system (Aug 2026) ──────────────────────
+SHORTS_NATIVE_RATIO = 0.35            # 35% native, 65% clip (aspirational)
+SHORTS_ADAPTIVE_DISTRIBUTION = True   # Auto-adjust based on 14-day performance
+SHORTS_ADAPTIVE_CHECK_DAYS = 14       # Re-evaluation window
+SHORTS_ADAPTIVE_RATIO_MIN = 0.20      # Floor (never below 20% native)
+SHORTS_ADAPTIVE_RATIO_MAX = 0.60      # Ceiling (never above 60% native)
+SHORTS_ADAPTIVE_STEP = 0.10           # ±10% adjustment per evaluation
+SHORTS_MIN_NATIVE_PER_DAY = 2         # Minimum native shorts per day
+SHORTS_CLIPS_PER_LONG = 3             # Fixed: 3 clip shorts per long video
+SHORTS_HOOK_OVERLAY_FONT_SIZE = 48    # Hook text overlay (3s)
+SHORTS_HOOK_OVERLAY_DURATION_SEC = 3.0
+SHORTS_HOOK_OVERLAY_FADE_SEC = 0.3
+
 # ═══════════════════════════════════════════════════════════════════
 # THUMBNAIL DEFAULTS
 # ═══════════════════════════════════════════════════════════════════

@@ -30,6 +30,7 @@ from pipeline.title_enricher import (
     enforce_power_words,
     build_power_words_prompt_section,
 )
+from pipeline.seo_researcher import SEOResearcher, _format_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,106 @@ def select_video_keywords(
     return selected[:max_kw]
 
 
+# ── YouTube chapter timestamps ─────────────────────────────────
+
+def generate_timestamps(scenes: list[dict], script_text: str = "", total_duration_sec: float = 0.0) -> str:
+    """Generate YouTube chapter timestamps from scene data.
+
+    Args:
+        scenes: List of scene dicts with keys: position, audio_start_sec, text, description.
+        script_text: Full script text for context-aware chapter naming.
+        total_duration_sec: Total video duration in seconds (used to cap final timestamp).
+
+    Returns:
+        Multi-line string in YouTube chapter format::
+
+            0:00 - Introduccion: El Misterio Comienza
+            2:15 - Capitulo 1: Los Primeros Descubrimientos
+            5:30 - Capitulo 2: La Evidencia Oculta
+
+    Rules:
+        - First timestamp MUST be 0:00
+        - Each chapter title: 3-7 words, descriptive
+        - Min 3 chapters, max 20
+    """
+    if not scenes:
+        return "0:00 - Introduccion\n3:00 - Desarrollo\n6:00 - Conclusion"
+
+    chapters: list[tuple[int, str]] = []
+
+    for i, scene in enumerate(scenes):
+        if isinstance(scene, dict):
+            # Try to get audio start time from scene data
+            start_sec = scene.get("audio_start_sec")
+            if start_sec is None:
+                # Estimate from position: ~40-70 seconds per scene
+                start_sec = i * 60
+            else:
+                start_sec = int(start_sec)
+
+            # Generate chapter title from scene description
+            desc = scene.get("description") or scene.get("text") or scene.get("descripcion", "")
+            if isinstance(desc, dict):
+                desc = desc.get("description", "")
+            desc = str(desc).strip()
+
+            # Extract a short title: first 5-7 words from description
+            if desc:
+                words = desc.split()[:7]
+                title = " ".join(words)
+                # Capitalize first letter
+                if title and title[0].islower():
+                    title = title[0].upper() + title[1:]
+            else:
+                # Fallback titles by position
+                phase_labels = [
+                    "Introduccion",
+                    "El Contexto",
+                    "Los Hechos",
+                    "El Misterio",
+                    "La Revelacion",
+                    "Las Consecuencias",
+                    "El Legado",
+                    "Conclusion",
+                ]
+                idx = min(i, len(phase_labels) - 1)
+                title = f"Capitulo {i + 1}: {phase_labels[idx]}"
+        elif isinstance(scene, str):
+            start_sec = i * 60
+            words = scene.split()[:7]
+            title = " ".join(words) if words else f"Capitulo {i + 1}"
+        else:
+            start_sec = i * 60
+            title = f"Capitulo {i + 1}"
+
+        chapters.append((int(start_sec), title))
+
+    # Ensure first chapter starts at 0:00
+    if chapters and chapters[0][0] != 0:
+        chapters[0] = (0, chapters[0][1])
+
+    # Cap at 3-20 chapters
+    chapters = chapters[:20]
+    if len(chapters) < 3:
+        # Pad to minimum 3
+        last_time = chapters[-1][0] + 120 if chapters else 0
+        for i in range(len(chapters), 3):
+            chapters.append((last_time + (i - len(chapters)) * 90, f"Capitulo {i + 1}"))
+
+    # Build output string
+    lines = []
+    for ts, title in chapters:
+        # Ensure title is 3-7 words
+        words = title.split()
+        if len(words) > 7:
+            title = " ".join(words[:7]) + "..."
+
+        formatted_ts = _format_seconds(ts)
+        lines.append(f"{formatted_ts} - {title}")
+
+    return "\n".join(lines)
+
+
 class MetadataGenerator:
     """Generate YouTube-optimized metadata (titles, description, tags, thumbnail text)
     using the same LLM provider as the script generator.
@@ -371,6 +472,24 @@ CATEGORÍA: Educación (ID 27)"""
         )
         keyword_bank_str = ", ".join(keyword_bank) if keyword_bank else keywords_str
         
+        # ── Real-time SEO keyword research ──────────────────────
+        # Get trending keywords from Google Trends / YouTube autocomplete
+        # to boost CTR with fresh, high-volume search terms.
+        trending_keywords_str = ""
+        optimized_tags = None
+        try:
+            seo = SEOResearcher(self.config.CANAL_NAME, self.config)
+            trending = seo.get_trending_keywords(keywords_str)
+            if trending:
+                trending_keywords_str = ", ".join(trending[:10])
+                logger.debug("SEO: %d trending keywords for '%s': %s",
+                           len(trending), keywords_str[:30], trending_keywords_str[:80])
+            # Pre-compute optimized tags (will be used as fallback if LLM tags are empty)
+            base_tags = getattr(self.config, "YT_DEFAULT_TAGS", [])
+            optimized_tags = seo.optimize_tags(base_tags, keywords_str)
+        except Exception as exc:
+            logger.debug("SEO research failed (non-critical): %s", exc)
+        
         # Build scene chapters for description
         escenas_raw = script.get("escenas") or script.get("escenas_json", "[]")
         if isinstance(escenas_raw, str):
@@ -405,6 +524,9 @@ Tema principal: {keywords_str}
 
 BANCO DE KEYWORDS ÚNICAS (selección variada para este video):
 {keyword_bank_str}
+
+{"KEYWORDS TRENDING ACTUALES (DEBES incluirlas naturalmente en titulo y descripcion):" if trending_keywords_str else ""}
+{"  " + trending_keywords_str if trending_keywords_str else ""}
 
 RESUMEN DEL GUIÓN:
 {script_snippet[:2500]}
@@ -481,6 +603,15 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             tags = result.get("tags", [])
             # Validate total tags chars ≤ 500
             tags_validated = self._validate_tags(tags[:10])
+            
+            # ── SEO fallback: if LLM tags are insufficient, use optimized tags ──
+            if not tags_validated or len(tags_validated) < 3:
+                if optimized_tags and len(optimized_tags) >= 3:
+                    tags_validated = self._validate_tags(optimized_tags)
+                    logger.debug("MetadataGenerator: using SEO-optimized tags (LLM tags insufficient)")
+                elif keyword_bank:
+                    tags_validated = self._validate_tags(keyword_bank[:10])
+                    logger.debug("MetadataGenerator: using keyword bank as tag fallback")
             
             # Parse thumbnail text — new format: "L1 | L2" or legacy single line
             thumbnail_text_raw = result.get("thumbnail_text", "")
@@ -628,3 +759,145 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             "token_count": 0,
             "cost_estimate": 0.0,
         }
+
+    # ── A/B Testing: Alternative Title Generation ────────────────
+
+    def generate_alternative_title(
+        self,
+        title_v1: str,
+        script_text: str,
+        keywords: list[str],
+        ctr_v1: float,
+    ) -> str:
+        """Generate an alternative title for A/B testing when CTR is low.
+
+        Strategy:
+        1. Classify title_v1's formula type (question, curiosity_gap, shock, etc.)
+        2. Pick a DIFFERENT formula type
+        3. Generate title_v2 with the same length and keywords, but
+           different angle — no repeated power words.
+
+        Args:
+            title_v1: Original title (low CTR).
+            script_text: Full script text for content context.
+            keywords: Primary keywords to preserve.
+            ctr_v1: Current CTR (as percentage, e.g. 2.1 = 2.1%).
+
+        Returns:
+            Alternative title string. Falls back to title_v1 on error.
+        """
+        import time
+
+        start = time.time()
+        
+        # Build keywords string
+        kw_str = ", ".join(keywords[:10]) if keywords else "historias, documental, misterio"
+        
+        # Get power words from channel config
+        power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
+        pw_str = ", ".join(power_words[:20]) if power_words else ""
+        
+        # Build formula type classifier
+        formula_classifier = self._classify_title_formula(title_v1)
+        
+        system_prompt = """Eres un copywriter experto en YouTube SEO especializado en A/B testing de títulos.
+
+Tu trabajo: generar un título ALTERNATIVO para un video cuyo CTR (Click-Through Rate) está bajo.
+
+REGLAS CRÍTICAS:
+1. El título nuevo DEBE tener un enfoque DIFERENTE al original.
+2. Si el original era pregunta → nuevo debe ser afirmación/de dato
+3. Si el original era misterio/curiosidad → nuevo debe ser urgencia/revelación
+4. Si el original era shock → nuevo debe ser curiosidad/documental
+5. MISMA longitud (caracteres), mismas keywords principales
+6. NO repetir las mismas power words del título original
+7. NO hacer el título más largo — mismo rango de caracteres
+
+Devuelve SOLO el título nuevo, sin comillas ni explicaciones."""
+
+        user_prompt = f"""CANAL: {self.channel_name}
+TONO: {self.channel_tone}
+
+TÍTULO ORIGINAL (CTR bajo: {ctr_v1}%):
+"{title_v1}"
+
+FÓRMULA DETECTADA: {formula_classifier}
+
+KEYWORDS PRINCIPALES: {kw_str}
+POWER WORDS DEL CANAL: {pw_str}
+
+CONTENIDO DEL VIDEO: {script_text[:1500]}
+
+INSTRUCCIÓN: Genera un título alternativo con enfoque OPUESTO al original.
+Si era pregunta → dato. Si era misterio → revelación. Si era shock → curiosidad.
+Mantén MISMA longitud. NO uses las mismas power words."""
+
+        try:
+            from datetime import datetime as _dt
+            import hashlib as _hashlib
+            
+            # Seed for unique generation
+            seed = int(_hashlib.md5(f"{title_v1}{_dt.now().isoformat()}".encode()).hexdigest()[:8], 16)
+            
+            result = llm_json_call(
+                create_llm_client(enable_thinking=False, timeout=45.0, max_retries=2),
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.85,
+                max_tokens=150,
+                max_retries=2,
+                retry_delay=1.0,
+            )
+            
+            if result and isinstance(result, dict):
+                alt_title = result.get("alternative_title", "") or result.get("title", "") or ""
+                if alt_title and len(alt_title) >= 20:
+                    # Enforce power words on the new title
+                    alt_title = enforce_power_words(alt_title, power_words) if power_words else alt_title
+                    elapsed = time.time() - start
+                    logger.info(
+                        "Alternative title generated in %.1fs: '%s' → '%s' (CTR %.1f%%)",
+                        elapsed, title_v1[:40], alt_title[:60], ctr_v1,
+                    )
+                    return alt_title[:100]
+            
+        except Exception as exc:
+            logger.warning("Alternative title generation failed: %s — falling back to original", exc)
+
+        # Fallback: return a tweaked version of the original
+        logger.info("Fallback alternative title: applying prefix transformation to original")
+        fallback = title_v1
+        # Try simple transformations as last resort
+        if "?" in fallback:
+            fallback = fallback.replace("?", ". La verdad que NADIE contó.")
+        elif fallback.startswith("El ") or fallback.startswith("La "):
+            fallback = "Esto es " + fallback[0].lower() + fallback[1:]
+        
+        return fallback[:100]
+
+    def _classify_title_formula(self, title: str) -> str:
+        """Classify a title into its dominant formula type.
+        
+        Returns one of: question, curiosity_gap, shock, urgency, list,
+                        how_to, statement, revelation, warning
+        """
+        t = title.strip()
+        
+        if "?" in t:
+            return "question"
+        if any(w in t.lower() for w in ["revelado", "filtrado", "censurado", "prohibido", "secreto", "exclusiva"]):
+            return "revelation"
+        if any(w in t.lower() for w in ["impactante", "shock", "aterrador", "horror", "pesadilla"]):
+            return "shock"
+        if any(w in t.lower() for w in ["urgente", "última hora", "ahora", "no verás", "antes de"]):
+            return "urgency"
+        if any(c.isdigit() for c in t[:10]) and any(w in t.lower() for w in ["cosas", "casos", "datos", "secretos", "razones", "historias"]):
+            return "list"
+        if t.lower().startswith("cómo") or t.lower().startswith("como"):
+            return "how_to"
+        if any(w in t for w in ["nadie", "nunca", "jamás", "imposible"]):
+            return "curiosity_gap"
+        return "statement"

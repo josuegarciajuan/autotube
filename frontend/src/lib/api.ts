@@ -267,6 +267,14 @@ export const api = {
   getChannelDemographics: (channelId: number) =>
     request<any>(`/channels/${channelId}/analytics/demographics`),
 
+  // ── SEO ──
+  getChannelSEOScore: (channelId: number) =>
+    request<any>(`/channels/${channelId}/seo-score`),
+  keywordResearch: (topic: string, channelId: number, geo = 'ES') =>
+    request<any>(`/seo/keyword-research?topic=${encodeURIComponent(topic)}&channel_id=${channelId}&geo=${geo}`, { method: 'POST' }),
+  getChannelsSEO: () =>
+    request<any>('/analytics/comparison'),  // includes CTR data per channel
+
   // ── Promotion / Lifecycle ──
   // Playlists
   getChannelPlaylists: (channelId: number) =>

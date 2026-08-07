@@ -1,6 +1,7 @@
 """Analytics router — growth charts, content performance, and detailed video analytics."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from api.deps import get_db
+from config.config_bridge import get_channel_config
 
 router = APIRouter()
 
@@ -111,9 +112,18 @@ def get_video_analytics(video_id: int):
 
 @router.get("/analytics/comparison")
 def get_channels_comparison():
-    """Cross-channel comparison: growth rates and revenue per 1K views."""
+    """Cross-channel comparison: growth rates, revenue per 1K views, CTR, and retention."""
     db = get_db()
     channels = db.get_channels(active_only=True)
+    channel_ids = [ch["id"] for ch in channels]
+
+    # Fetch CTR/retention aggregates for all channels at once
+    ctr_retention = {}
+    if channel_ids:
+        try:
+            ctr_retention = db.get_channels_ctr_retention(channel_ids)
+        except Exception:
+            pass
 
     result = []
     for ch in channels:
@@ -135,6 +145,9 @@ def get_channels_comparison():
         total_rev_max = last.get("revenue_max") or 0
         rev_per_1k = round(total_rev_max / (total_views / 1000.0), 2) if total_views > 0 else 0
 
+        # CTR and retention from deep analytics
+        cr_data = ctr_retention.get(ch["id"], {})
+
         result.append({
             "channel_id": ch["id"],
             "name": ch["name"],
@@ -147,6 +160,9 @@ def get_channels_comparison():
             "revenue_per_1k_views": rev_per_1k,
             "latest_subs": last.get("subscribers", 0) or 0,
             "latest_views": last.get("total_views", 0) or 0,
+            "avg_ctr": cr_data.get("avg_ctr"),
+            "avg_retention": cr_data.get("avg_retention"),
+            "total_impressions": cr_data.get("total_impressions"),
         })
 
     return {"channels": result}
@@ -188,3 +204,292 @@ def get_generation_failures(channel_id: int, days: int = 7):
     patterns["channel_slug"] = ch["slug"]
     patterns["days"] = days
     return patterns
+
+
+# ── Advanced Analytics: CTR, retention, traffic, demographics ──
+
+
+@router.get("/channels/{channel_id}/analytics/ctr")
+def get_channel_ctr(channel_id: int):
+    """Get CTR, retention, and impressions summary for a channel.
+
+    Returns avg CTR, avg retention, total impressions, and per-video
+    breakdown from the last deep analytics collection.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    summary = db.get_channel_ctr_summary(channel_id)
+    summary["channel_name"] = ch["name"]
+    summary["channel_slug"] = ch["slug"]
+    return summary
+
+
+@router.get("/channels/{channel_id}/analytics/traffic")
+def get_channel_traffic(channel_id: int):
+    """Get traffic source breakdown for a channel.
+
+    Aggregates views by source type (YT_SEARCH, SUGGESTED, EXTERNAL, etc.)
+    from the last deep analytics collection.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    sources = db.get_channel_traffic_summary(channel_id)
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch["name"],
+        "channel_slug": ch["slug"],
+        "sources": sources,
+    }
+
+
+@router.get("/channels/{channel_id}/analytics/demographics")
+def get_channel_demographics_endpoint(channel_id: int):
+    """Get audience demographics (age + gender) for a channel.
+
+    Returns the latest snapshot from the deep analytics collection.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    demographics = db.get_channel_demographics(channel_id)
+    fetched_at = demographics[0]["fetched_at"] if demographics else None
+
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch["name"],
+        "channel_slug": ch["slug"],
+        "age_gender": [
+            {"age_group": d["age_group"], "gender": d["gender"],
+             "views_pct": d["views_pct"]}
+            for d in demographics
+        ],
+        "fetched_at": fetched_at,
+    }
+
+
+# ── SEO Research & Scoring ──────────────────────────────────────
+
+
+@router.post("/seo/keyword-research")
+def keyword_research(topic: str, channel_id: int, geo: str = "ES"):
+    """Get trending keywords for a topic.
+
+    Used by frontend for manual keyword research.  Uses the same
+    fallback chain as the pipeline (pytrends → YouTube autocomplete
+    → static channel keywords).
+
+    Args:
+        topic: Search topic (e.g. "civilizaciones antiguas").
+        channel_id: Channel ID for config context.
+        geo: Google Trends country code (default "ES").
+
+    Returns trending keywords, autocomplete suggestions, and
+    optimized tag recommendations.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    cfg = get_channel_config(ch["slug"])
+    from pipeline.seo_researcher import SEOResearcher
+    seo = SEOResearcher(ch["slug"], cfg)
+
+    return {
+        "topic": topic,
+        "channel": ch["name"],
+        "trending_keywords": seo.get_trending_keywords(topic, geo=geo),
+        "autocomplete_suggestions": seo.get_youtube_autocomplete(topic),
+        "recommended_tags": seo.optimize_tags(getattr(cfg, "CHANNEL_KEYWORDS", []), topic),
+    }
+
+
+@router.get("/channels/{channel_id}/seo-score")
+def get_channel_seo_score(channel_id: int):
+    """Calculate SEO health score for a channel.
+
+    Evaluates recent videos (last 30 days) across 5 dimensions:
+      - **title_length** (0-3 pts): avg title in 40-65 char sweet spot
+      - **power_words** (0-2 pts): % of titles with at least 1 power word
+      - **description_length** (0-2 pts): avg description > 1500 chars
+      - **timestamps** (0-2 pts): % of videos with chapter timestamps
+      - **tag_count** (0-1 pts): avg 7-10 tags per video
+
+    Returns an integer score 0-10 with per-dimension breakdown.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    cfg = get_channel_config(ch["slug"])
+
+    # Fetch recent videos from DB
+    videos = db.get_videos(channel_id=channel_id, limit=50) or []
+    if not videos:
+        return {
+            "channel_id": channel_id,
+            "channel_name": ch["name"],
+            "score": 0,
+            "score_max": 10,
+            "videos_analyzed": 0,
+            "breakdown": {
+                "title_length": {"score": 0, "max": 3, "detail": "no videos"},
+                "power_words": {"score": 0, "max": 2, "detail": "no videos"},
+                "description_length": {"score": 0, "max": 2, "detail": "no videos"},
+                "timestamps": {"score": 0, "max": 2, "detail": "no videos"},
+                "tag_count": {"score": 0, "max": 1, "detail": "no videos"},
+            },
+        }
+
+    # ── Analyze videos ─────────────────────────────────────────
+    power_words = getattr(cfg, "TITLE_POWER_WORDS", []) or []
+    pw_set = set(w.lower() for w in power_words)
+
+    title_lengths: list[int] = []
+    title_has_pw: list[bool] = []
+    desc_lengths: list[int] = []
+    has_timestamps: list[bool] = []
+    tag_counts: list[int] = []
+
+    import re as _re
+
+    for v in videos:
+        title = (v.get("titulo_final") or v.get("title") or "").strip()
+        # Description may be stored in metadata_json or similar fields
+        description = (
+            v.get("description") or
+            (v.get("metadata_json") or "")
+        ).strip()
+        if isinstance(description, dict):
+            description = description.get("description", "")
+        # Tags: try tags column, then keywords_json, then extract from metadata
+        tags_raw = v.get("tags")
+        if not tags_raw:
+            tags_raw = v.get("keywords_json") or v.get("metadata_json", {}).get("tags", []) or []
+
+        # Title length
+        if title:
+            title_lengths.append(len(title))
+            # Power word check
+            title_lower = title.lower()
+            has_pw = any(pw in title_lower for pw in pw_set)
+            title_has_pw.append(has_pw)
+
+        # Description length
+        if description:
+            desc_lengths.append(len(description))
+            # Timestamp check: "0:00" or "0:00 -" or "0:00 —" at start
+            ts_match = _re.search(r"\b\d{1,2}:\d{2}\b", description)
+            has_timestamps.append(bool(ts_match))
+
+        # Tag count
+        if tags_raw:
+            if isinstance(tags_raw, str):
+                try:
+                    import json as _json
+                    tags_list = _json.loads(tags_raw)
+                except Exception:
+                    tags_list = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            elif isinstance(tags_raw, list):
+                tags_list = tags_raw
+            else:
+                tags_list = []
+            tag_counts.append(len(tags_list))
+
+    n = len(videos)
+    weights = getattr(cfg, "SEO_SCORE_WEIGHTS", {
+        "title_length": 3, "power_words": 2,
+        "description_length": 2, "timestamps": 2, "tag_count": 1,
+    })
+
+    # ── Score: title_length (3 pts) ──────────────────────────────
+    if title_lengths:
+        avg_len = sum(title_lengths) / len(title_lengths)
+        # Ideal: 40-65 chars. Graded linearly.
+        if 40 <= avg_len <= 65:
+            tl_score = weights["title_length"]
+            tl_detail = f"avg {avg_len:.0f} chars (ideal 40-65)"
+        elif avg_len < 40:
+            tl_score = round(weights["title_length"] * (avg_len / 40), 1)
+            tl_detail = f"avg {avg_len:.0f} chars (too short, target 40-65)"
+        else:
+            # > 65 — still good but slight penalty above 100
+            ratio = max(0, 1 - (avg_len - 65) / 35)
+            tl_score = round(weights["title_length"] * ratio, 1)
+            tl_detail = f"avg {avg_len:.0f} chars (slightly long, target 40-65)"
+    else:
+        tl_score = 0
+        tl_detail = "no titles analyzed"
+
+    # ── Score: power_words (2 pts) ────────────────────────────────
+    if title_has_pw:
+        pw_ratio = sum(title_has_pw) / len(title_has_pw)
+        pw_score = round(weights["power_words"] * pw_ratio, 1)
+        pw_detail = f"{sum(title_has_pw)}/{len(title_has_pw)} titles ({pw_ratio:.0%})"
+    else:
+        pw_score = 0
+        pw_detail = "no titles analyzed"
+
+    # ── Score: description_length (2 pts) ─────────────────────────
+    if desc_lengths:
+        avg_desc = sum(desc_lengths) / len(desc_lengths)
+        # Target: > 1500 chars
+        ratio = min(1.0, avg_desc / 1500)
+        dl_score = round(weights["description_length"] * ratio, 1)
+        dl_detail = f"avg {avg_desc:.0f} chars (target 1500+)"
+    else:
+        dl_score = 0
+        dl_detail = "no descriptions analyzed"
+
+    # ── Score: timestamps (2 pts) ─────────────────────────────────
+    if has_timestamps:
+        ts_ratio = sum(has_timestamps) / len(has_timestamps)
+        ts_score = round(weights["timestamps"] * ts_ratio, 1)
+        ts_detail = f"{sum(has_timestamps)}/{len(has_timestamps)} videos ({ts_ratio:.0%})"
+    else:
+        ts_score = 0
+        ts_detail = "no descriptions analyzed"
+
+    # ── Score: tag_count (1 pts) ──────────────────────────────────
+    if tag_counts:
+        avg_tags = sum(tag_counts) / len(tag_counts)
+        # Ideal: 7-10 tags
+        if 7 <= avg_tags <= 10:
+            tc_score = weights["tag_count"]
+            tc_detail = f"avg {avg_tags:.1f} tags (ideal 7-10)"
+        elif avg_tags < 7:
+            tc_score = round(weights["tag_count"] * (avg_tags / 7), 1)
+            tc_detail = f"avg {avg_tags:.1f} tags (low, target 7-10)"
+        else:
+            tc_score = weights["tag_count"]
+            tc_detail = f"avg {avg_tags:.1f} tags (ideal 7-10)"
+    else:
+        tc_score = 0
+        tc_detail = "no tags analyzed"
+
+    total_score = round(tl_score + pw_score + dl_score + ts_score + tc_score, 1)
+
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch["name"],
+        "channel_slug": ch["slug"],
+        "score": total_score,
+        "score_max": 10,
+        "videos_analyzed": n,
+        "breakdown": {
+            "title_length": {"score": tl_score, "max": weights["title_length"], "detail": tl_detail},
+            "power_words": {"score": pw_score, "max": weights["power_words"], "detail": pw_detail},
+            "description_length": {"score": dl_score, "max": weights["description_length"], "detail": dl_detail},
+            "timestamps": {"score": ts_score, "max": weights["timestamps"], "detail": ts_detail},
+            "tag_count": {"score": tc_score, "max": weights["tag_count"], "detail": tc_detail},
+        },
+    }
