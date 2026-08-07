@@ -36,6 +36,9 @@ logs/*
 .DS_Store
 Thumbs.db
 
+# Frontend
+frontend/node_modules/
+
 # Database
 *.db
 *.sqlite

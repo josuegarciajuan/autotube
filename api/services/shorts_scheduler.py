@@ -264,14 +264,15 @@ NATIVE_WINDOWS = [
     (21, 0),     # prime time
 ]
 
-# ── Filler windows: low-audience hours for extra slots ──────
-# Used when (native + clip) < MIN_DAILY_SHORTS to pad the schedule
-# without cannibalizing prime-time slots.
+# v2 (Aug 2026): expanded from 4 to 7 filler windows to support 10 shorts/day.
 FILLER_WINDOWS = [
     (2, 0),     # madrugada
     (4, 0),     # madrugada
+    (6, 0),     # amanecer
+    (11, 0),    # media mañana
     (14, 0),    # mediodía (post-almuerzo)
     (15, 0),    # mediodía
+    (16, 0),    # tarde
 ]
 
 
@@ -761,13 +762,180 @@ def _get_planned_long_video_count(channel_id: int, date_str: str) -> tuple[int, 
         return 0, []
 
 
+# ═══════════════════════════════════════════════════════════════════
+# v2: Adaptive native/clip distribution
+# ═══════════════════════════════════════════════════════════════════
+
+def _load_native_ratio(channel_id: int, db) -> float:
+    """Load shorts_native_ratio from DB, falling back to config default."""
+    try:
+        configs = db.get_shorts_planning_config(channel_id=channel_id)
+        if configs and configs[0].get("shorts_native_ratio") is not None:
+            ratio = float(configs[0]["shorts_native_ratio"])
+            return max(0.10, min(0.90, ratio))
+    except Exception:
+        pass
+    from config.defaults import SHORTS_NATIVE_RATIO
+    return SHORTS_NATIVE_RATIO
+
+
+def _evaluate_adaptive_ratio(channel_id: int, db, current_ratio: float) -> float:
+    """Evaluate native vs clip performance and adjust ratio by ±10%.
+
+    Checks every SHORTS_ADAPTIVE_CHECK_DAYS (default 14).
+    - If native subs/short > clip * 1.3 → increase native ratio
+    - If clip avg_views > native * 1.3 → decrease native ratio
+    - Otherwise → maintain
+    Clamped to [SHORTS_ADAPTIVE_RATIO_MIN, SHORTS_ADAPTIVE_RATIO_MAX].
+    Saves the adjusted ratio back to DB.
+    """
+    from config.defaults import (
+        SHORTS_ADAPTIVE_DISTRIBUTION, SHORTS_ADAPTIVE_CHECK_DAYS,
+        SHORTS_ADAPTIVE_RATIO_MIN, SHORTS_ADAPTIVE_RATIO_MAX, SHORTS_ADAPTIVE_STEP,
+    )
+    if not SHORTS_ADAPTIVE_DISTRIBUTION:
+        return current_ratio
+
+    # ── Check if evaluation is due ──
+    try:
+        last_check_raw = None
+        try:
+            conn = db._connect()
+            row = conn.execute(
+                """SELECT value FROM system_state WHERE key = ?""",
+                (f"shorts_adaptive_last_check_{channel_id}",),
+            ).fetchone()
+            conn.close()
+            if row:
+                last_check_raw = row["value"]
+        except Exception:
+            pass
+
+        import time as _time
+        now_ts = _time.time()
+        if last_check_raw:
+            last_check_ts = float(last_check_raw)
+            days_since = (now_ts - last_check_ts) / 86400
+            if days_since < SHORTS_ADAPTIVE_CHECK_DAYS:
+                logger.debug(
+                    "[shorts_adaptive] ch%d: last check %.1f days ago (<%d) — skipping",
+                    channel_id, days_since, SHORTS_ADAPTIVE_CHECK_DAYS,
+                )
+                return current_ratio
+    except Exception:
+        pass  # proceed with evaluation if state check fails
+
+    # ── Fetch performance data ──
+    try:
+        native = db.get_short_type_stats(channel_id, "native", SHORTS_ADAPTIVE_CHECK_DAYS)
+        clip = db.get_short_type_stats(channel_id, "clip", SHORTS_ADAPTIVE_CHECK_DAYS)
+    except Exception as e:
+        logger.warning("[shorts_adaptive] ch%d: stats fetch failed: %s — keeping ratio %.2f",
+                       channel_id, e, current_ratio)
+        return current_ratio
+
+    # ── Compare ──
+    new_ratio = current_ratio
+    native_subs = native.get("subs_per_short", 0)
+    clip_subs = clip.get("subs_per_short", 0)
+    native_views = native.get("avg_views", 0)
+    clip_views = clip.get("avg_views", 0)
+
+    logger.info(
+        "[shorts_adaptive] ch%d — native: %d shorts, %.1f avg_views, %.1f subs/short | "
+        "clip: %d shorts, %.1f avg_views, %.1f subs/short",
+        channel_id,
+        native.get("total_shorts", 0), native_views, native_subs,
+        clip.get("total_shorts", 0), clip_views, clip_subs,
+    )
+
+    # Need a minimum of 3 shorts of each type for meaningful comparison
+    if native.get("total_shorts", 0) < 3 or clip.get("total_shorts", 0) < 3:
+        logger.info(
+            "[shorts_adaptive] ch%d: insufficient data (native=%d, clip=%d) — keeping ratio %.2f",
+            channel_id,
+            native.get("total_shorts", 0), clip.get("total_shorts", 0), current_ratio,
+        )
+        return current_ratio
+
+    if native_subs > 0 and native_subs > clip_subs * 1.3:
+        new_ratio = min(SHORTS_ADAPTIVE_RATIO_MAX, current_ratio + SHORTS_ADAPTIVE_STEP)
+        logger.info(
+            "[shorts_adaptive] ch%d: native subs/short (%.1f) > clip subs/short (%.1f) ×1.3 "
+            "→ INCREASE native ratio %.2f → %.2f",
+            channel_id, native_subs, clip_subs, current_ratio, new_ratio,
+        )
+    elif clip_views > 0 and clip_views > native_views * 1.3:
+        new_ratio = max(SHORTS_ADAPTIVE_RATIO_MIN, current_ratio - SHORTS_ADAPTIVE_STEP)
+        logger.info(
+            "[shorts_adaptive] ch%d: clip avg_views (%.1f) > native avg_views (%.1f) ×1.3 "
+            "→ DECREASE native ratio %.2f → %.2f",
+            channel_id, clip_views, native_views, current_ratio, new_ratio,
+        )
+    else:
+        logger.info(
+            "[shorts_adaptive] ch%d: performance similar — maintaining ratio %.2f",
+            channel_id, current_ratio,
+        )
+
+    # ── Persist updated ratio and timestamp ──
+    if abs(new_ratio - current_ratio) > 0.001:
+        try:
+            db.update_shorts_planning_config(channel_id, {"shorts_native_ratio": new_ratio})
+        except Exception as e:
+            logger.warning("[shorts_adaptive] ch%d: failed to persist ratio: %s", channel_id, e)
+
+    try:
+        conn = db._connect()
+        conn.execute(
+            """INSERT OR REPLACE INTO system_state (key, value)
+               VALUES (?, ?)""",
+            (f"shorts_adaptive_last_check_{channel_id}", str(int(now_ts))),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return new_ratio
+
+
+def get_shorts_distribution(channel_id: int, db, date_str: str) -> tuple[int, int]:
+    """Return (native_count, clip_count) for today based on adaptive ratio.
+
+    Clips are fixed at SHORTS_CLIPS_PER_LONG × yesterday's published long videos.
+    Natives fill the rest of the daily quota, floored at SHORTS_MIN_NATIVE_PER_DAY.
+    """
+    from config.settings import MAX_DAILY_SHORTS
+    from config.defaults import SHORTS_CLIPS_PER_LONG, SHORTS_MIN_NATIVE_PER_DAY
+
+    ratio = _evaluate_adaptive_ratio(channel_id, db,
+                                    _load_native_ratio(channel_id, db))
+
+    # Clip count is deterministic: clips_per_long × long videos published yesterday
+    yesterday_clips = SHORTS_CLIPS_PER_LONG * _get_yesterday_published_count(channel_id, date_str, db)
+
+    total = MAX_DAILY_SHORTS
+    # Natives fill the remaining slots (with floor)
+    target_natives = max(0, round(total * ratio))
+    natives = max(SHORTS_MIN_NATIVE_PER_DAY, target_natives)
+    # Real clip capability: don't claim more clips than we can actually produce
+    clips = min(yesterday_clips, total)
+
+    logger.info(
+        "[shorts_adaptive] ch%d (%s): ratio=%.2f, natives=%d, clips_available=%d, "
+        "clips_scheduled=%d, total=%d",
+        channel_id, date_str, ratio, natives, yesterday_clips, clips, natives,
+    )
+    return natives, clips
+
+
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
-    v14: clip count is dynamic — clips_per_long × long_videos_published_yesterday.
-    Native count is fixed at shorts_native_per_day.
-    Filler slots are added when (native + clip) < MIN_DAILY_SHORTS to
-    guarantee the daily floor. Fillers go to low-audience windows.
+    v2: Native count determined by adaptive native_ratio (35% default).
+    Clips are 3 × long_videos_published_yesterday, generated ad-hoc.
+    Fillers pad to MIN_DAILY_SHORTS (8) using low-audience windows.
     Timestamps are converted to UTC for storage.
 
     Returns list of dicts sorted by scheduled_at.
@@ -802,6 +970,15 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
         native_count = sc.get("shorts_native_per_day", 3)
         clips_per_long = sc.get("shorts_clips_per_long", 3)
+
+        # ── v2: Use adaptive distribution if enabled ──
+        try:
+            v2_native, v2_clips = get_shorts_distribution(ch_id, db, date_str)
+            native_count = v2_native
+            # clips_per_long stays for _build_shorts_slots_for_channel compat,
+            # but actual clip slots are generated ad-hoc (v26)
+        except Exception as e:
+            logger.warning("[%s] Adaptive distribution failed, using static config: %s", slug, e)
 
         if native_count == 0 and clips_per_long == 0:
             continue
@@ -839,14 +1016,14 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         )
 
         # ── Filler: guarantee MIN_DAILY_SHORTS floor ──────────────
-        # v26: Clip shorts are generated ad-hoc (not pre-planned), so only
-        # native shorts count toward the daily floor.
+        # v2: Native shorts count toward the daily floor.
+        # Clips are generated ad-hoc after long videos (v26).
         total_planned = native_count
 
         if total_planned < MIN_DAILY_SHORTS:
             fillers_needed = min(
                 MIN_DAILY_SHORTS - total_planned,
-                MAX_DAILY_SHORTS - (total_planned + 0),
+                MAX_DAILY_SHORTS - total_planned,
             )
             if fillers_needed > 0:
                 logger.info(
@@ -3044,12 +3221,261 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         logger.info("Scheduled clip Short published: %s → %s", title[:40], result.get("url", ""))
         return short_id
 
+    except Exception as e:
+        logger.error("[%s] Clip short generation failed in phase 4: %s", channel_slug, e)
+        return None
     finally:
         if _downloaded_temp and str(_downloaded_temp).startswith("/tmp/"):
             try:
                 _downloaded_temp.unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v2: Emotional arc scoring for clip short selection
+# ═══════════════════════════════════════════════════════════════════
+
+# ── v2: Quick LLM hook text generation (3-5 words) ─────────────
+
+def _generate_hook_overlay_text(scene_text: str, max_words: int = 6) -> str:
+    """Generate a short hook overlay text (3-6 words) via LLM for clip shorts.
+
+    Falls back to extracting the first short sentence if LLM fails.
+    """
+    if not scene_text or len(scene_text.strip()) < 20:
+        return ""
+
+    try:
+        from config.llm_client import create_llm_client
+        from config.llm_helpers import llm_json_call
+        from config.settings import LLM_MODEL
+
+        client = create_llm_client(enable_thinking=False)
+        result = llm_json_call(
+            client,
+            max_retries=2,
+            retry_delay=1.0,
+            model=LLM_MODEL,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Extrae la frase más impactante y corta (máximo {max_words} palabras, en español) "
+                    f"de este texto para usarla como hook visual de un YouTube Short. "
+                    f"Responde SOLO JSON: {{\"hook\": \"...\"}}. "
+                    f"La frase debe generar curiosidad o asombro inmediato.\n\n"
+                    f"Texto: {scene_text[:800]}"
+                ),
+            }],
+            temperature=0.8,
+            max_tokens=80,
+        )
+        hook = (result.get("hook") or "").strip()
+        if hook and len(hook.split()) <= max_words + 2:
+            return hook
+    except Exception as e:
+        logger.debug("Hook LLM generation failed (non-fatal): %s", e)
+
+    # Fallback: first short sentence
+    import re
+    sentences = re.split(r'[.!?]', scene_text[:500])
+    for s in sentences:
+        words = s.strip().split()
+        if 3 <= len(words) <= max_words + 2:
+            return s.strip()
+    return ""
+
+# Key emotion words (Spanish) mapped to scoring weights.
+# These appear in SCRIPT_EMOTIONAL_ARC values across all 4 channels.
+_EMOTION_WEIGHTS: dict[str, int] = {
+    "asombro": 20, "shock": 22, "impacto": 22,
+    "revelación": 20, "revelacion": 20,
+    "clímax": 25, "climax": 25,
+    "misterio": 15, "intriga": 16, "tensión": 16, "tension": 16,
+    "curiosidad": 12, "anticipación": 12, "anticipacion": 12,
+    "fascinación": 14, "fascinacion": 14,
+    "estupefacción": 18, "estupefaccion": 18,
+    "horror": 22, "angustia": 18, "desesperación": 18, "desesperacion": 18,
+    "inspiración": 10, "inspiracion": 10, "maravilla": 12,
+    "admiración": 10, "admiracion": 10,
+    "reflexión": 8, "reflexion": 8, "solemnidad": 8,
+    "gratitud": 6, "respeto": 6,
+    "empatía": 10, "empatia": 10,
+    "esperanza": 8, "comprensión": 8, "comprension": 8,
+    "alivio": 8, "duelo": 14,
+    "instinto": 10,
+}
+
+
+def _extract_emotion_keywords(emotional_arc: dict) -> list[str]:
+    """Extract all emotion keywords from a SCRIPT_EMOTIONAL_ARC config.
+
+    Handles both simple values ("asombro") and compound values
+    ("esperanza → inspiración", "alivio amargo / duelo").
+    """
+    keywords = []
+    for val in emotional_arc.values():
+        if not isinstance(val, str):
+            continue
+        # Split on arrows, slashes, or commas
+        parts = [p.strip().lower() for p in val.replace("→", ",").replace("/", ",").split(",")]
+        for p in parts:
+            if p:
+                keywords.append(p)
+    return keywords
+
+
+def _has_emotion_keywords(text: str, keywords: list[str]) -> tuple[int, list[str]]:
+    """Check how many emotion keywords appear in the text.
+
+    Returns (total_score, matched_keywords).
+    """
+    total = 0
+    matched = []
+    text_lower = text.lower()
+    for kw in keywords:
+        if kw in text_lower or kw in _EMOTION_WEIGHTS:
+            weight = _EMOTION_WEIGHTS.get(kw, 5)
+            if kw in text_lower:
+                total += weight
+                matched.append(kw)
+    return total, matched
+
+
+def score_blocks_by_emotional_arc(
+    bloques: list[dict],
+    emotional_arc: dict,
+    total_duration: float,
+) -> list[tuple[int, dict, float]]:
+    """Score each script block by alignment with the channel's emotional arc.
+
+    Scoring criteria:
+      - Position in video (0-100%) matched against EMOTIONAL_ARC percent buckets
+      - Emotion keywords in block text matched against arc emotion words
+      - Duration estimation (30-60s ideal)
+
+    Returns list of (score, block, position_pct) sorted by score descending.
+    """
+    if not bloques or not emotional_arc:
+        return []
+
+    emotion_keywords = _extract_emotion_keywords(emotional_arc)
+    n = len(bloques)
+
+    # Parse arc buckets once
+    arc_buckets: list[tuple[float, float, list[str]]] = []
+    for pct_key, emo_val in emotional_arc.items():
+        if not isinstance(emo_val, str):
+            continue
+        try:
+            clean = pct_key.replace("%", "").strip()
+            parts = clean.split("-")
+            if len(parts) == 2:
+                lo = float(parts[0])
+                hi = float(parts[1])
+                emos = [e.strip().lower() for e in
+                        emo_val.replace("→", ",").replace("/", ",").split(",") if e.strip()]
+                arc_buckets.append((lo, hi, emos))
+        except (ValueError, IndexError):
+            continue
+
+    arc_buckets.sort(key=lambda x: x[0])
+
+    # Position-based base scores (clímax zone gets highest)
+    def _position_base(pct: float) -> int:
+        if 60 <= pct <= 90:
+            return 30  # climax zone
+        elif 30 <= pct < 60:
+            return 15  # development zone
+        elif 10 <= pct < 30:
+            return 10  # early development
+        else:
+            return 5   # hook (0-10%) or close (90-100%)
+
+    scored = []
+    for idx, block in enumerate(bloques):
+        if not block.get("texto"):
+            continue
+        text = block["texto"]
+        score = 0
+
+        # Position
+        pos_pct = (idx / max(n - 1, 1)) * 100 if n > 1 else 50
+        score += _position_base(pos_pct)
+
+        # Arc bucket bonus: if the position falls in a bucket, score its emotions
+        for lo, hi, emos in arc_buckets:
+            if lo <= pos_pct <= hi:
+                for e in emos:
+                    score += _EMOTION_WEIGHTS.get(e, 5)
+                break
+
+        # Emotion keywords in text
+        kw_score, matched = _has_emotion_keywords(text, emotion_keywords)
+        score += kw_score
+
+        # Duration bonus (approximate: 12 words ≈ 5 seconds)
+        word_count = len(text.split())
+        approx_dur = word_count * 0.42  # ~2.4 words/sec → 0.42s per word
+        if 30 <= approx_dur <= 60:
+            score += 10
+        elif 20 <= approx_dur <= 80:
+            score += 5
+
+        scored.append((score, block, pos_pct))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return scored
+
+
+def select_best_clips_from_blocks(
+    clips: list[dict],
+    bloques: list[dict],
+    emotional_arc: dict,
+    total_duration: float,
+    max_clips: int = 5,
+    min_score: int = 15,
+) -> list[dict]:
+    """Reorder and filter LLM-returned clips by emotional arc alignment.
+
+    Uses score_blocks_by_emotional_arc to re-rank clips so the most
+    emotionally impactful ones are rendered first.
+    """
+    if not emotional_arc or not bloques:
+        return clips[:max_clips]
+
+    # Score each clip by finding the nearest block(s) it overlaps with
+    scored_blocks = score_blocks_by_emotional_arc(bloques, emotional_arc, total_duration)
+    if not scored_blocks:
+        return clips[:max_clips]
+
+    # Map block index → score
+    block_score_map = {}
+    for idx, (score, block, pct) in enumerate(scored_blocks):
+        for bi, b in enumerate(bloques):
+            if b.get("texto") == block.get("texto"):
+                block_score_map[bi] = score
+                break
+
+    # Score each clip based on which blocks it overlaps
+    n_blocks = len(bloques)
+    clip_scores = []
+    for c in clips:
+        clip_start = c.get("start_time", 0)
+        clip_end = c.get("end_time", clip_start + 60)
+        # Approximate block range from timecodes
+        block_dur = total_duration / max(n_blocks, 1)
+        start_block = max(0, int(clip_start / block_dur))
+        end_block = min(n_blocks - 1, int(clip_end / block_dur))
+
+        score = 0
+        for bi in range(start_block, end_block + 1):
+            score += block_score_map.get(bi, 5)
+        score += c.get("ranking", 5) * 2  # LLM ranking still counts
+        clip_scores.append((score, c))
+
+    clip_scores.sort(reverse=True, key=lambda x: x[0])
+    return [c for s, c in clip_scores if s >= min_score][:max_clips]
 
 
 def pre_render_clip_shorts_for_video(
@@ -3131,6 +3557,7 @@ def pre_render_clip_shorts_for_video(
 
         # Get channel timezone for date calculations
         channel_tz = _timezone.utc
+        emotional_arc = {}
         try:
             from config.config_bridge import get_channel_config
             ch_config = get_channel_config(channel_slug)
@@ -3138,6 +3565,8 @@ def pre_render_clip_shorts_for_video(
             if tz_str:
                 from zoneinfo import ZoneInfo
                 channel_tz = ZoneInfo(tz_str)
+            # v2: Load emotional arc for clip scoring
+            emotional_arc = getattr(ch_config, "SCRIPT_EMOTIONAL_ARC", {}) or {}
         except Exception:
             pass
 
@@ -3338,6 +3767,22 @@ def pre_render_clip_shorts_for_video(
             logger.error("pre_render: LLM returned no clips for video #%d", video_id)
             return []
 
+        # ── v2: Re-rank clips by emotional arc alignment ──
+        if emotional_arc and bloques:
+            try:
+                reordered = select_best_clips_from_blocks(
+                    clips, bloques, emotional_arc, total_duration,
+                    max_clips=max_clips, min_score=15,
+                )
+                if reordered:
+                    logger.info(
+                        "pre_render: emotional arc scoring — %d clips → %d (top scores from %d candidates)",
+                        len(clips), len(reordered), len(clips),
+                    )
+                    clips = reordered
+            except Exception as e_arc:
+                logger.debug("pre_render: emotional arc scoring failed (non-fatal): %s", e_arc)
+
         logger.info(
             "pre_render: LLM returned %d clip(s) for video #%d — rendering now",
             len(clips), video_id,
@@ -3376,8 +3821,25 @@ def pre_render_clip_shorts_for_video(
                 render_word_ts = block_ts
 
             try:
+                # v2: Pass hook_text for 3-second overlay on clip
+                hook_txt = clip.get("hook_text", "") or clip.get("hook_title", "")
+                # If hook_text is too long (>10 words), generate a short one via LLM
+                if hook_txt and len(hook_txt.split()) > 10:
+                    short_hook = _generate_hook_overlay_text(hook_txt, max_words=6)
+                    if short_hook:
+                        hook_txt = short_hook
+                elif not hook_txt:
+                    # Extract scene text and generate hook
+                    scene_words = []
+                    for ts in (tts_word_ts if tts_word_ts else timestamps):
+                        if ts.get("start_ms", 0) / 1000 >= clip.get("start_time", 0) and \
+                           ts.get("end_ms", 0) / 1000 <= clip.get("end_time", 0):
+                            scene_words.append(ts.get("word", ""))
+                    if scene_words:
+                        hook_txt = _generate_hook_overlay_text(" ".join(scene_words[:100]))
                 output_path = renderer.render(
                     source_video, clip, word_timestamps=render_word_ts,
+                    hook_text=hook_txt if hook_txt else None,
                 )
             except Exception as render_err:
                 logger.error(

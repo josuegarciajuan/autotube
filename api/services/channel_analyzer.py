@@ -514,6 +514,68 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
     since_last = _compute_since_last_analysis(db, channel_id, now)
     data["since_last_analysis"] = since_last
 
+    # ── Section 11: CTR, retention, traffic, demographics ─────
+    # Feed the LLM with real analytics data so it can make data-driven
+    # recommendations about CTR optimization, retention hooks, traffic
+    # source diversification, and audience targeting.
+    try:
+        ctr_summary = db.get_channel_ctr_summary(channel_id)
+        data["ctr_retention_summary"] = {
+            "avg_ctr_pct": ctr_summary.get("avg_ctr_30d"),
+            "avg_retention_pct": ctr_summary.get("avg_retention_30d"),
+            "total_impressions": ctr_summary.get("total_impressions_30d"),
+            "videos_with_ctr_data": ctr_summary.get("ctr_video_count", 0),
+            "videos_with_retention_data": ctr_summary.get("retention_video_count", 0),
+            # Top 20 videos with CTR/retention data for the LLM to analyze patterns
+            "per_video": ctr_summary.get("videos", [])[:20],
+        }
+    except Exception:
+        data["ctr_retention_summary"] = None
+
+    try:
+        traffic = db.get_channel_traffic_summary(channel_id)
+        data["traffic_sources_summary"] = traffic[:15]  # top 15 sources
+        data["traffic_top_source"] = traffic[0]["source"] if traffic else None
+    except Exception:
+        data["traffic_sources_summary"] = None
+
+    try:
+        demographics = db.get_channel_demographics(channel_id)
+        # Simplify: group by age_group for the LLM
+        age_groups = {}
+        for d in demographics:
+            age = d["age_group"]
+            if age not in age_groups:
+                age_groups[age] = {"male": 0, "female": 0, "other": 0}
+            g = d["gender"]
+            if g == "male":
+                age_groups[age]["male"] += d["views_pct"]
+            elif g == "female":
+                age_groups[age]["female"] += d["views_pct"]
+            else:
+                age_groups[age]["other"] += d["views_pct"]
+        # Dominant age group
+        dominant_age = max(age_groups, key=lambda a: sum(age_groups[a].values())) if age_groups else None
+        dominant_gender_pcts = {"male": 0, "female": 0, "other": 0}
+        for d in demographics:
+            if d["gender"] == "male":
+                dominant_gender_pcts["male"] += d["views_pct"]
+            elif d["gender"] == "female":
+                dominant_gender_pcts["female"] += d["views_pct"]
+            else:
+                dominant_gender_pcts["other"] += d["views_pct"]
+        dominant_gender = max(dominant_gender_pcts, key=dominant_gender_pcts.get)
+        data["audience_demographics"] = {
+            "fetched_at": demographics[0]["fetched_at"] if demographics else None,
+            "segments_count": len(demographics),
+            "dominant_age_group": dominant_age,
+            "dominant_gender": dominant_gender,
+            "gender_split": dominant_gender_pcts,
+            "age_groups": age_groups,
+        }
+    except Exception:
+        data["audience_demographics"] = None
+
     return data
 
 

@@ -122,17 +122,19 @@ class ShortsRenderer:
         clip_spec: dict,
         output_dir: Optional[Path] = None,
         word_timestamps: Optional[list[dict]] = None,
+        hook_text: Optional[str] = None,
     ) -> Optional[Path]:
         """Render a single Short from a source video clip.
 
         Args:
             source_video: Path to the full 16:9 video file.
-            clip_spec: Dict with {start_time, end_time, hook_title, ...}.
+            clip_spec: Dict with {start_time, end_time, hook_title, hook_text, ...}.
             output_dir: Directory for output file (defaults to output/videos/shorts/).
             word_timestamps: Optional list of word-level timestamps for the
                 entire source video.  If provided, only those falling inside
                 [start_time, end_time] are used to generate synced subtitles.
                 Each entry needs {word, start_ms, end_ms}.
+            hook_text: Optional hook text (3-5 words) to overlay on the first 3 seconds.
 
         Returns:
             Path to rendered Short .mp4 file, or None on failure.
@@ -145,6 +147,10 @@ class ShortsRenderer:
         start = clip_spec.get("start_time", 0)
         end = clip_spec.get("end_time", start + 60)
         duration = end - start
+
+        # v2: Resolve hook_text from clip_spec if not explicitly passed
+        if hook_text is None:
+            hook_text = clip_spec.get("hook_text", "")
 
         if output_dir is None:
             output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -164,6 +170,7 @@ class ShortsRenderer:
             self._render_with_ffmpeg(
                 source_video, output_path, start, duration,
                 word_timestamps=word_timestamps,
+                hook_text=hook_text,
             )
             return output_path
         except Exception as e:
@@ -177,8 +184,14 @@ class ShortsRenderer:
         start_sec: float,
         duration_sec: float,
         word_timestamps: Optional[list[dict]] = None,
+        hook_text: Optional[str] = None,
     ):
-        """Render using FFmpeg with efficient crop, scale, and subtitle burn.
+        """Render using FFmpeg with efficient crop, scale, subtitle burn, and hook overlay.
+
+        Args:
+            hook_text: If provided, rendered as large centered text with
+                       semi-transparent background during the first 3 seconds.
+                       Uses fade-in/fade-out for smooth appearance.
 
         Subtitles are generated from word_timestamps filtered to the clip
         segment, converted to SRT, and burned via the ``subtitles`` filter
@@ -260,6 +273,39 @@ class ShortsRenderer:
                 f"force_style='{SUBTITLE_FORCE_STYLE}'"
             )
             vf += "," + subtitles_filter
+
+        # ── v2: Hook overlay (first 3 seconds) ─────────────────────────
+        if hook_text and hook_text.strip():
+            try:
+                from config.defaults import (
+                    SHORTS_HOOK_OVERLAY_FONT_SIZE as HOOK_FS,
+                    SHORTS_HOOK_OVERLAY_DURATION_SEC as HOOK_DUR,
+                    SHORTS_HOOK_OVERLAY_FADE_SEC as HOOK_FADE,
+                )
+            except ImportError:
+                HOOK_FS = 48
+                HOOK_DUR = 3.0
+                HOOK_FADE = 0.3
+
+            # Escape special characters for FFmpeg drawtext
+            escaped = hook_text.replace("'", "'\\''").replace("%", "\\%").replace(":", "\\:")
+            # Fade in/out alpha expression
+            alpha_expr = (
+                f"if(lt(t,{HOOK_FADE}),t/{HOOK_FADE},"
+                f"if(gt(t,{HOOK_DUR - HOOK_FADE}),"
+                f"({HOOK_DUR}-t)/{HOOK_FADE},1))"
+            )
+            drawtext = (
+                f"drawtext=text='{escaped}':"
+                f"fontsize={HOOK_FS}:"
+                f"fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=10:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"enable='between(t,0,{HOOK_DUR})':"
+                f"alpha='{alpha_expr}'"
+            )
+            vf += "," + drawtext
+            logger.info("Hook overlay applied: '%s' (%.1fs)", hook_text, HOOK_DUR)
 
         cmd = [
             "ffmpeg",

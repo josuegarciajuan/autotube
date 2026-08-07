@@ -683,6 +683,20 @@ def migrate_v2(db_path: str = None):
         except sqlite3.OperationalError:
             pass
 
+    # v2: Add short_type and subscribers_gained to short_stats (idempotent)
+    if "short_type" not in existing_ss_cols:
+        try:
+            conn.execute("ALTER TABLE short_stats ADD COLUMN short_type TEXT DEFAULT 'clip'")
+            logger.info("Migration: added short_type column to short_stats")
+        except sqlite3.OperationalError:
+            pass
+    if "subscribers_gained" not in existing_ss_cols:
+        try:
+            conn.execute("ALTER TABLE short_stats ADD COLUMN subscribers_gained INTEGER DEFAULT 0")
+            logger.info("Migration: added subscribers_gained column to short_stats")
+        except sqlite3.OperationalError:
+            pass
+
     # Ensure channel_templates table exists (idempotent — may also be in schema_v3.sql)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_templates (
@@ -981,6 +995,12 @@ def migrate_v2(db_path: str = None):
     # ── v29: llm_credit_status (credit/balance monitoring for DeepSeek, OpenAI, YouTube) ──
     _migrate_v29(conn, logger)
     
+    # ── v30: channel_demographics + analytics_data_exists in video_stats_history ──
+    _migrate_v30(conn, logger)
+    
+    # ── v31: A/B testing tables (video_ab_tests, title_formula_performance) ──
+    _migrate_v31(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -1015,6 +1035,7 @@ def _migrate_shorts_planning_config(conn, logger):
         ("shorts_clip_per_day", "INTEGER DEFAULT 2"),
         ("shorts_clips_per_long", "INTEGER DEFAULT 3"),
         ("shorts_standalone_per_day", "INTEGER DEFAULT 2"),
+        ("shorts_native_ratio", "REAL DEFAULT 0.35"),
     ]
     had_old_column = "shorts_per_day" in existing
     columns_added = False
@@ -1955,6 +1976,73 @@ def _migrate_v29(conn, logger):
         logger.info("Migration v29: applied")
     else:
         logger.warning("Migration v29: schema_v19.sql not found")
+
+
+def _migrate_v30(conn, logger):
+    """Idempotent v30: channel_demographics table + analytics_data_exists in video_stats_history."""
+    import os
+
+    # 1. Create channel_demographics table
+    schema_v30 = os.path.join(os.path.dirname(__file__), "schema_v30.sql")
+    if os.path.exists(schema_v30):
+        with open(schema_v30) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v30: channel_demographics table created (or already exists)")
+    else:
+        logger.warning("Migration v30: schema_v30.sql not found")
+
+    # 2. Add analytics_data_exists column to video_stats_history (idempotent)
+    existing_vsh = {row[1] for row in conn.execute("PRAGMA table_info(video_stats_history)").fetchall()}
+    if "analytics_data_exists" not in existing_vsh:
+        try:
+            conn.execute("ALTER TABLE video_stats_history ADD COLUMN analytics_data_exists INTEGER DEFAULT 0")
+            logger.info("Migration v30: added analytics_data_exists column to video_stats_history")
+        except Exception as exc:
+            logger.warning("Migration v30: failed to add analytics_data_exists: %s", exc)
+    else:
+        logger.info("Migration v30: analytics_data_exists already exists")
+
+
+def _migrate_v31(conn, logger):
+    """Idempotent v31 migration: A/B testing tables for sequential title/thumbnail optimization.
+    
+    Creates:
+      - video_ab_tests: per-video state machine for sequential A/B testing
+      - title_formula_performance: accumulated learnings per formula type
+    
+    Protocol:
+      Día 0: Upload with title_v1 + 1 thumbnail
+      Día 2 (+48h): If CTR < threshold, rotate thumbnail or title (never both)
+      Día 4 (+48h more): Compare CTR_v1 vs CTR_v2, keep winner
+    """
+    import os
+    
+    # 1. Run schema file (CREATE TABLE IF NOT EXISTS — idempotent)
+    schema_v31 = os.path.join(os.path.dirname(__file__), "schema_v31.sql")
+    if os.path.exists(schema_v31):
+        with open(schema_v31) as f:
+            conn.executescript(f.read())
+        conn.commit()
+        logger.info("Migration v31: AB testing tables created (or already exist)")
+    else:
+        logger.warning("Migration v31: schema_v31.sql not found")
+    
+    # 2. Add ctr + impressions columns to video_stats_history (idempotent)
+    existing_vsh = {row[1] for row in conn.execute("PRAGMA table_info(video_stats_history)").fetchall()}
+    vsh_columns = [
+        ("ctr", "REAL"),
+        ("impressions", "INTEGER"),
+    ]
+    for col_name, col_def in vsh_columns:
+        if col_name not in existing_vsh:
+            try:
+                conn.execute(f"ALTER TABLE video_stats_history ADD COLUMN {col_name} {col_def}")
+                logger.info("Migration v31: added %s column to video_stats_history", col_name)
+            except Exception as exc:
+                logger.warning("Migration v31: failed to add %s: %s", col_name, exc)
+    
+    conn.commit()
 
 
 def _migrate_v10(conn, logger):
@@ -3267,15 +3355,21 @@ class ExtendedDatabase(Database):
             conn.commit()
             return cursor.lastrowid
 
-    def insert_short_stats(self, short_id: int, yt_video_id: str, stats: dict) -> int | None:
+    def insert_short_stats(self, short_id: int, yt_video_id: str, stats: dict,
+                           short_type: str = None) -> int | None:
         """Insert a snapshot of YouTube statistics for a short."""
         with self._connect() as conn:
+            # Resolve short_type if not explicitly provided
+            if short_type is None:
+                resolved_type = stats.get("short_type") or "clip"
+            else:
+                resolved_type = short_type
             cursor = conn.execute(
                 """INSERT INTO short_stats
                    (short_id, yt_video_id, views, likes, comments,
                     estimated_minutes_watched, average_view_duration,
-                    embeddable)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subscribers_gained, short_type, embeddable)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     short_id,
                     yt_video_id,
@@ -3284,6 +3378,8 @@ class ExtendedDatabase(Database):
                     int(stats.get("commentCount", 0)),
                     float(stats.get("estimatedMinutesWatched", 0)),
                     float(stats.get("averageViewDuration", 0)),
+                    int(stats.get("subscribersGained", 0)),
+                    resolved_type,
                     1 if stats.get("embeddable", True) else 0,
                 ),
             )
@@ -3321,38 +3417,73 @@ class ExtendedDatabase(Database):
         if not analytics_data or not video_id_map:
             return 0
 
+        # Diagnostic: compare what we have in analytics vs video_id_map
+        analytics_keys = set(analytics_data.keys())
+        map_keys = set(video_id_map.keys())
+        in_analytics_not_in_map = analytics_keys - map_keys
+        in_map_not_in_analytics = map_keys - analytics_keys
+        logger = logging.getLogger("autotube.db")
+        logger.info(
+            "batch_update_video_analytics: analytics=%d videos, map=%d videos, "
+            "shared=%d, in_analytics_not_in_map=%d, in_map_not_in_analytics=%d",
+            len(analytics_keys), len(map_keys),
+            len(analytics_keys & map_keys),
+            len(in_analytics_not_in_map), len(in_map_not_in_analytics),
+        )
+        if in_analytics_not_in_map:
+            logger.warning(
+                "batch_update_video_analytics: %d yt_video_ids in analytics but "
+                "NOT in video_id_map (first 5): %s",
+                len(in_analytics_not_in_map),
+                list(in_analytics_not_in_map)[:5],
+            )
+
         with self._connect() as conn:
-            count = 0
+            updated = 0
+            skipped_no_data = 0
+            skipped_no_row = 0
             for yt_id, aid in video_id_map.items():
                 data = analytics_data.get(yt_id)
                 if not data:
+                    skipped_no_data += 1
                     continue
-                conn.execute(
+                emw = float(data.get("estimatedMinutesWatched", 0))
+                avd = float(data.get("averageViewDuration", 0))
+                subg = int(float(data.get("subscribersGained", 0)))
+                has_analytics = 1 if emw > 0 or data.get("averageViewPercentage", "0") != "0" else 0
+                cursor = conn.execute(
                     """UPDATE video_stats_history
                        SET estimated_minutes_watched = ?,
                            average_view_duration = ?,
-                           subscribers_gained = ?
+                           subscribers_gained = ?,
+                           analytics_data_exists = ?
                        WHERE id = (
                            SELECT MAX(id) FROM video_stats_history
                            WHERE video_id = ? AND yt_video_id = ?
                        )""",
-                    (
-                        float(data.get("estimatedMinutesWatched", 0)),
-                        float(data.get("averageViewDuration", 0)),
-                        int(float(data.get("subscribersGained", 0))),
-                        aid,
-                        yt_id,
-                    ),
+                    (emw, avd, subg, has_analytics, aid, yt_id),
                 )
-                count += conn.total_changes
+                if cursor.rowcount > 0:
+                    updated += 1
+                else:
+                    skipped_no_row += 1
+                    logger.debug(
+                        "batch_update: no video_stats_history row for video_id=%d yt=%s",
+                        aid, yt_id,
+                    )
             conn.commit()
-        return count
+            logger.info(
+                "batch_update_video_analytics: updated=%d, skipped_no_data=%d, "
+                "skipped_no_row=%d, total_in_map=%d",
+                updated, skipped_no_data, skipped_no_row, len(video_id_map),
+            )
+        return updated
 
     def batch_update_short_analytics(
         self, short_id_map: dict[str, int], analytics_data: dict[str, dict]
     ) -> int:
-        """Update estimated_minutes_watched, average_view_duration for shorts
-        from bulk analytics data.
+        """Update estimated_minutes_watched, average_view_duration and subscribers_gained
+        for shorts from bulk analytics data.
 
         Args:
             short_id_map: Dict mapping youtube_id → internal short id.
@@ -3371,10 +3502,12 @@ class ExtendedDatabase(Database):
                 data = analytics_data.get(yt_id)
                 if not data:
                     continue
+                subg = int(float(data.get("subscribersGained", 0)))
                 conn.execute(
                     """UPDATE short_stats
                        SET estimated_minutes_watched = ?,
-                           average_view_duration = ?
+                           average_view_duration = ?,
+                           subscribers_gained = ?
                        WHERE id = (
                            SELECT MAX(id) FROM short_stats
                            WHERE short_id = ? AND yt_video_id = ?
@@ -3382,6 +3515,7 @@ class ExtendedDatabase(Database):
                     (
                         float(data.get("estimatedMinutesWatched", 0)),
                         float(data.get("averageViewDuration", 0)),
+                        subg,
                         sid,
                         yt_id,
                     ),
@@ -3895,6 +4029,169 @@ class ExtendedDatabase(Database):
                 (video_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Channel-level Analytics Queries ────────────────────────
+
+    def insert_channel_demographics(self, channel_id: int, demographics: list[dict]) -> int:
+        """Store audience demographics data for a channel.
+
+        Deletes previous data for this channel before inserting fresh snapshot.
+        """
+        count = 0
+        with self._connect() as conn:
+            conn.execute("DELETE FROM channel_demographics WHERE channel_id = ?", (channel_id,))
+            for d in demographics:
+                conn.execute(
+                    """INSERT OR IGNORE INTO channel_demographics
+                       (channel_id, age_group, gender, views_pct)
+                       VALUES (?, ?, ?, ?)""",
+                    (channel_id, d["age_group"], d["gender"], d["views_pct"]),
+                )
+                count += 1
+            conn.commit()
+        return count
+
+    def get_channel_demographics(self, channel_id: int) -> list[dict]:
+        """Get the latest audience demographics snapshot for a channel."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT age_group, gender, views_pct, fetched_at
+                   FROM channel_demographics
+                   WHERE channel_id = ?
+                   ORDER BY fetched_at DESC""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_channel_ctr_summary(self, channel_id: int) -> dict:
+        """Get aggregated CTR and retention metrics for a channel.
+
+        Returns avg_ctr, avg_retention, total_impressions across all videos
+        with analytics data from video_analytics_detailed.
+        """
+        with self._connect() as conn:
+            # Average CTR
+            ctr_row = conn.execute(
+                """SELECT AVG(vad.metric_value) as avg_ctr, COUNT(*) as cnt
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE v.channel_id = ? AND vad.report_type = 'ctr'
+                     AND vad.metric_value > 0""",
+                (channel_id,),
+            ).fetchone()
+
+            # Average retention
+            ret_row = conn.execute(
+                """SELECT AVG(vad.metric_value) as avg_ret, COUNT(*) as cnt
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE v.channel_id = ? AND vad.report_type = 'retention_pct'
+                     AND vad.metric_value > 0""",
+                (channel_id,),
+            ).fetchone()
+
+            # Total impressions
+            imp_row = conn.execute(
+                """SELECT COALESCE(SUM(vad.metric_value), 0) as total
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE v.channel_id = ? AND vad.report_type = 'impressions'""",
+                (channel_id,),
+            ).fetchone()
+
+            # Per-video CTR + retention
+            video_rows = conn.execute(
+                """SELECT v.id, v.titulo_final, v.yt_video_id,
+                          MAX(CASE WHEN vad.report_type = 'ctr' THEN vad.metric_value END) as ctr,
+                          MAX(CASE WHEN vad.report_type = 'retention_pct' THEN vad.metric_value END) as retention,
+                          MAX(CASE WHEN vad.report_type = 'impressions' THEN vad.metric_value END) as impressions
+                   FROM videos v
+                   LEFT JOIN video_analytics_detailed vad ON v.id = vad.video_id
+                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL
+                   GROUP BY v.id, v.titulo_final, v.yt_video_id
+                   HAVING ctr IS NOT NULL OR retention IS NOT NULL OR impressions IS NOT NULL
+                   ORDER BY COALESCE(impressions, 0) DESC
+                   LIMIT 50""",
+                (channel_id,),
+            ).fetchall()
+
+        return {
+            "channel_id": channel_id,
+            "avg_ctr_30d": round(ctr_row["avg_ctr"] or 0, 2),
+            "avg_retention_30d": round(ret_row["avg_ret"] or 0, 2),
+            "total_impressions_30d": int(imp_row["total"] or 0),
+            "ctr_video_count": ctr_row["cnt"] or 0,
+            "retention_video_count": ret_row["cnt"] or 0,
+            "videos": [
+                {
+                    "id": row["id"],
+                    "title": row["titulo_final"] or "Sin título",
+                    "ctr": round(row["ctr"] or 0, 2),
+                    "retention": round(row["retention"] or 0, 2),
+                    "impressions": int(row["impressions"] or 0),
+                }
+                for row in video_rows
+            ],
+        }
+
+    def get_channel_traffic_summary(self, channel_id: int) -> list[dict]:
+        """Get aggregated traffic source breakdown for a channel.
+
+        Aggregates all video_analytics_detailed rows with report_type='traffic_source'.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT vad.dimension as source,
+                          SUM(vad.metric_value) as total_views,
+                          COUNT(DISTINCT vad.video_id) as video_count
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE v.channel_id = ? AND vad.report_type = 'traffic_source'
+                   GROUP BY vad.dimension
+                   ORDER BY total_views DESC""",
+                (channel_id,),
+            ).fetchall()
+
+        results = [dict(r) for r in rows]
+        total_views = sum(r["total_views"] for r in results) or 1
+
+        return [
+            {
+                "source": r["source"],
+                "views": int(r["total_views"]),
+                "pct": round(r["total_views"] / total_views * 100, 1),
+                "video_count": r["video_count"],
+            }
+            for r in results
+        ]
+
+    def get_channels_ctr_retention(self, channel_ids: list[int]) -> dict[int, dict]:
+        """Get CTR and retention aggregates for multiple channels at once.
+
+        Returns: {channel_id: {avg_ctr, avg_retention, total_impressions}}
+        """
+        result = {}
+        with self._connect() as conn:
+            for cid in channel_ids:
+                row = conn.execute(
+                    """SELECT
+                          AVG(CASE WHEN vad.report_type = 'ctr' AND vad.metric_value > 0
+                              THEN vad.metric_value END) as avg_ctr,
+                          AVG(CASE WHEN vad.report_type = 'retention_pct' AND vad.metric_value > 0
+                              THEN vad.metric_value END) as avg_retention,
+                          COALESCE(SUM(CASE WHEN vad.report_type = 'impressions'
+                              THEN vad.metric_value END), 0) as total_impressions
+                       FROM video_analytics_detailed vad
+                       JOIN videos v ON v.id = vad.video_id
+                       WHERE v.channel_id = ?""",
+                    (cid,),
+                ).fetchone()
+                result[cid] = {
+                    "avg_ctr": round(row["avg_ctr"] or 0, 2),
+                    "avg_retention": round(row["avg_retention"] or 0, 2),
+                    "total_impressions": int(row["total_impressions"] or 0),
+                }
+        return result
 
     # ── Growth Data for Charts ───────────────────────────────
 
@@ -5708,6 +6005,66 @@ class ExtendedDatabase(Database):
             "cta_pct": cta_pct,
         }
     
+    def get_short_type_stats(self, channel_id: int, short_type: str, days: int = 14) -> dict:
+        """Get aggregated performance stats for a specific short type (native/clip).
+
+        Returns dict with counts, avg views, avg likes, avg view duration,
+        total subscribers gained, and a simple CTR proxy (avg_view_duration ratio).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(DISTINCT s.id) as total_shorts,
+                          AVG(ss.views) as avg_views,
+                          AVG(ss.likes) as avg_likes,
+                          SUM(ss.views) as total_views,
+                          SUM(ss.likes) as total_likes,
+                          AVG(ss.average_view_duration) as avg_view_duration,
+                          SUM(ss.subscribers_gained) as total_subs_gained,
+                          AVG(CASE WHEN ss.views > 0
+                              THEN CAST(ss.subscribers_gained AS REAL) / ss.views
+                              ELSE 0 END) as subs_per_view_avg
+                   FROM shorts s
+                   JOIN short_stats ss ON ss.id = (
+                       SELECT MAX(ss2.id) FROM short_stats ss2
+                       WHERE ss2.short_id = s.id
+                   )
+                   WHERE s.channel_id = ?
+                     AND s.type = ?
+                     AND s.status = 'published'
+                     AND s.published_at >= datetime('now', '-' || ? || ' days')
+                """,
+                (channel_id, short_type, days),
+            ).fetchone()
+
+            if not row or not row["total_shorts"]:
+                return {
+                    "total_shorts": 0,
+                    "avg_views": 0,
+                    "avg_likes": 0,
+                    "total_views": 0,
+                    "total_likes": 0,
+                    "avg_view_duration": 0,
+                    "total_subs_gained": 0,
+                    "subs_per_short": 0,
+                    "short_type": short_type,
+                    "days": days,
+                }
+
+            total = int(row["total_shorts"])
+            return {
+                "total_shorts": total,
+                "avg_views": round(row["avg_views"] or 0, 1),
+                "avg_likes": round(row["avg_likes"] or 0, 1),
+                "total_views": int(row["total_views"] or 0),
+                "total_likes": int(row["total_likes"] or 0),
+                "avg_view_duration": round(row["avg_view_duration"] or 0, 1),
+                "total_subs_gained": int(row["total_subs_gained"] or 0),
+                "subs_per_short": round((row["total_subs_gained"] or 0) / max(total, 1), 1),
+                "subs_per_view_avg": round(row["subs_per_view_avg"] or 0, 4),
+                "short_type": short_type,
+                "days": days,
+            }
+    
     def get_channel_videos_aggregate(self, channel_id: int) -> dict:
         """Aggregate stats from long-form videos for a specific channel.
 
@@ -6132,13 +6489,16 @@ class ExtendedDatabase(Database):
                 "shorts_native_per_day": r.get("shorts_native_per_day", 3),
                 "shorts_clip_per_day": r.get("shorts_clip_per_day", 2),
                 "shorts_clips_per_long": r.get("shorts_clips_per_long", 3),
+                "shorts_per_day": r.get("shorts_per_day", r.get("shorts_native_per_day", 3)),
+                "shorts_native_ratio": r.get("shorts_native_ratio", 0.35),
             })
         return configs
 
     def update_shorts_planning_config(self, channel_id: int, data: dict) -> bool:
         """Update shorts planning config for one channel.
         
-        Accepted keys: shorts_enabled, shorts_native_per_day, shorts_clip_per_day, shorts_clips_per_long.
+        Accepted keys: shorts_enabled, shorts_native_per_day, shorts_clip_per_day,
+        shorts_clips_per_long, shorts_per_day, shorts_native_ratio.
         """
         with self._connect() as conn:
             columns = {r[1] for r in conn.execute("PRAGMA table_info(shorts_planning_config)").fetchall()}
@@ -6157,6 +6517,12 @@ class ExtendedDatabase(Database):
                 elif k == "shorts_clips_per_long":
                     col = "shorts_clips_per_long"
                     v = max(0, min(5, v))
+                elif k == "shorts_per_day":
+                    col = "shorts_per_day"
+                    v = max(1, min(15, v))
+                elif k == "shorts_native_ratio":
+                    col = "shorts_native_ratio"
+                    v = max(0.10, min(0.90, float(v)))
                 if col and col in columns:
                     fields.append(f"{col} = ?")
                     values.append(v)

@@ -43,6 +43,8 @@ export const api = {
   getManualSetup: (id: number) => request<any>(`/channels/${id}/manual-setup`),
   getChannelYoutubeStats: (id: number) => request<any>(`/channels/${id}/youtube-stats`),
   getChannelShortsStats: (id: number) => request<any>(`/channels/${id}/shorts-stats`),
+  getShortTypeComparison: (id: number, days: number = 30) =>
+    request<any>(`/channels/${id}/analytics/short-types?days=${days}`),
   getChannelVideosAggregate: (id: number) => request<any>(`/channels/${id}/videos-aggregate-stats`),
   getChannelMarathonAnalytics: (id: number) => request<any>(`/channels/${id}/analytics/marathons`),
   generateChannelProfile: (id: number) => request<any>(`/channels/${id}/generate-profile`, { method: 'POST' }),
@@ -162,6 +164,14 @@ export const api = {
     request<Record<string, any>>('/videos/stats', { method: 'POST', body: JSON.stringify({ video_ids: videoIds }) }),
   getVideoStatsHistory: (videoId: number, days = 30) =>
     request<any[]>(`/videos/${videoId}/stats-history?days=${days}`),
+
+  // A/B Testing (v31 — sequential title/thumbnail optimization)
+  getVideoABTestStatus: (videoId: number) =>
+    request<any>(`/videos/${videoId}/ab-test/status`),
+  triggerABTest: (videoId: number, phase?: string) => {
+    const qs = phase ? `?phase=${encodeURIComponent(phase)}` : ''
+    return request<any>(`/videos/${videoId}/ab-test/trigger${qs}`, { method: 'POST' })
+  },
 
   // Schedules
   getSchedules: (channelId?: number, activeOnly = false) => {

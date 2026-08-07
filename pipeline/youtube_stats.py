@@ -143,18 +143,89 @@ class YouTubeStatsFetcher:
 
         return self.get_video_stats(yt_video_id)
 
+    def get_video_ctr_analytics(
+        self,
+        yt_video_id: str,
+        start_date: str = None,
+        end_date: str = None,
+        days: int = 30,
+    ) -> dict:
+        """Fetch impressions + CTR for a single video via YouTube Analytics API.
+
+        Uses the youtubeAnalytics v2 API with metrics impressions and
+        impressionsClickThroughRate, filtered to a single video.
+
+        This is separate from get_video_analytics() because CTR/impressions
+        are not available from the YouTube Data API v3 (videos().list())
+        and require the Analytics API.
+
+        Args:
+            yt_video_id: YouTube video ID (e.g. "dQw4w9WgXcQ")
+            start_date: Optional start date in YYYY-MM-DD format.
+                        If provided, used with end_date for a precise
+                        window (e.g. 48h post-title-change).
+            end_date: Optional end date in YYYY-MM-DD format.
+            days: Fallback window if start_date not provided (default 30).
+
+        Returns:
+            Dict with keys:
+                impressions: int — total impressions in window
+                impressionsClickThroughRate: float — CTR as fraction (0.05 = 5%)
+                averageViewDuration: float — seconds
+            Empty dict if Analytics API is unavailable or returns no data.
+        """
+        if not self._analytics_service:
+            logger.debug("Analytics API not available for CTR fetch — %s", self.slug)
+            return {}
+
+        from datetime import datetime as _dt, timedelta
+
+        if not start_date:
+            start_date = (_dt.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = _dt.now().strftime("%Y-%m-%d")
+
+        try:
+            resp = (
+                self._analytics_service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="impressions,impressionsClickThroughRate,averageViewDuration",
+                    filters=f"video=={yt_video_id}",
+                )
+                .execute()
+            )
+            rows = resp.get("rows", [])
+            if rows and len(rows[0]) >= 3:
+                return {
+                    "impressions": int(rows[0][0]) if rows[0][0] else 0,
+                    "impressionsClickThroughRate": float(rows[0][1]) if rows[0][1] else 0.0,
+                    "averageViewDuration": float(rows[0][2]) if rows[0][2] else 0.0,
+                }
+        except HttpError as exc:
+            logger.debug("CTR analytics fetch failed for %s: %s", yt_video_id, exc)
+        except Exception as exc:
+            logger.debug("CTR analytics fetch error for %s: %s", yt_video_id, exc)
+
+        return {}
+
     def get_all_videos_analytics(self, video_ids: list[str], days: int = 365) -> dict[str, dict]:
         """Get analytics for multiple videos in a single API call.
 
         Uses dimensions=video to fetch estimatedMinutesWatched,
-        averageViewDuration, and subscribersGained for all videos at once.
+        averageViewDuration, subscribersGained, averageViewPercentage, and
+        analytics-sourced views for all videos at once.
 
         Args:
             video_ids: List of YouTube video IDs.
             days: Lookback window in days.
 
         Returns:
-            Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration, subscribersGained}
+            Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration,
+                                         subscribersGained, averageViewPercentage,
+                                         analyticsViews}
             Empty dict if no analytics data available.
         """
         if not self._analytics_service:
@@ -179,7 +250,7 @@ class YouTubeStatsFetcher:
                         ids="channel==MINE",
                         startDate=start_date,
                         endDate=end_date,
-                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained",
+                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
@@ -188,12 +259,14 @@ class YouTubeStatsFetcher:
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
-                    # rows: [video_id, estimatedMinutesWatched, averageViewDuration, subscribersGained]
+                    # row: [video_id, estMinWatched, avgViewDur, subsGained, avgViewPct, views]
                     vid = row[0]
                     result[vid] = {
-                        "estimatedMinutesWatched": str(row[1]) if row[1] else "0",
-                        "averageViewDuration": str(row[2]) if row[2] else "0",
-                        "subscribersGained": str(row[3]) if row[3] else "0",
+                        "estimatedMinutesWatched": str(row[1]) if len(row) > 1 and row[1] else "0",
+                        "averageViewDuration": str(row[2]) if len(row) > 2 and row[2] else "0",
+                        "subscribersGained": str(row[3]) if len(row) > 3 and row[3] else "0",
+                        "averageViewPercentage": str(row[4]) if len(row) > 4 and row[4] else "0",
+                        "analyticsViews": str(row[5]) if len(row) > 5 and row[5] else "0",
                     }
                 logger.debug(
                     "Bulk analytics: %d videos returned for %d requested (batch %d/%d)",
@@ -606,9 +679,224 @@ class YouTubeStatsFetcher:
         )
         return videos
 
+    # ── Advanced Analytics ──────────────────────────────────────
+
+    def get_video_impressions_ctr(
+        self, video_ids: list[str], days: int = 30
+    ) -> dict[str, dict]:
+        """Get impressions and CTR for multiple videos.
+
+        NOTE: The `impressions` metric requires YouTube Studio Analytics scope
+        which is NOT available in the standard YouTube Analytics v2 API.
+        This method works around the limitation by collecting
+        `impressionClickThroughRate` where available.
+
+        Returns:
+            Dict mapping yt_video_id → {impressions: int, ctr_percent: float}
+            Impressions will be 0 if the metric is not available for this channel.
+        """
+        if not self._analytics_service or not video_ids:
+            return {}
+
+        MAX_IDS_PER_CALL = 200
+        result = {}
+
+        for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
+            batch = video_ids[i : i + MAX_IDS_PER_CALL]
+            try:
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                resp = (
+                    self._analytics_service.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=start_date,
+                        endDate=end_date,
+                        metrics="impressions,impressionClickThroughRate",
+                        dimensions="video",
+                        filters=f"video=={','.join(batch)}",
+                        maxResults=200,
+                    )
+                    .execute()
+                )
+                rows = resp.get("rows", [])
+                for row in rows:
+                    # row: [video_id, impressions, ctr]
+                    vid = row[0]
+                    result[vid] = {
+                        "impressions": int(row[1]) if len(row) > 1 and row[1] else 0,
+                        "ctr_percent": round(float(row[2]), 2) if len(row) > 2 and row[2] else 0.0,
+                    }
+                logger.debug(
+                    "Impressions/CTR: %d videos returned (batch %d/%d)",
+                    len(rows), i // MAX_IDS_PER_CALL + 1,
+                    (len(video_ids) + MAX_IDS_PER_CALL - 1) // MAX_IDS_PER_CALL,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Impressions/CTR API failed for batch (size=%d): %s", len(batch), exc
+                )
+
+        return result
+
+    def get_video_traffic_sources(
+        self, video_ids: list[str], days: int = 30
+    ) -> dict[str, list[dict]]:
+        """Get traffic source breakdown for multiple videos.
+
+        Uses dimensions=video,insightTrafficSourceType to break down
+        views and watch minutes by traffic source.
+
+        Returns:
+            Dict mapping yt_video_id → [{source, views, watch_minutes}, ...]
+        """
+        if not self._analytics_service or not video_ids:
+            return {}
+
+        MAX_IDS_PER_CALL = 200
+        result: dict[str, list[dict]] = {}
+
+        for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
+            batch = video_ids[i : i + MAX_IDS_PER_CALL]
+            try:
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                resp = (
+                    self._analytics_service.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=start_date,
+                        endDate=end_date,
+                        metrics="views,estimatedMinutesWatched",
+                        dimensions="video,insightTrafficSourceType",
+                        filters=f"video=={','.join(batch)}",
+                        maxResults=2000,
+                    )
+                    .execute()
+                )
+                rows = resp.get("rows", [])
+                for row in rows:
+                    # row: [video_id, trafficSourceType, views, estimatedMinutesWatched]
+                    vid = row[0]
+                    source = row[1] if len(row) > 1 else "UNKNOWN"
+                    views = int(row[2]) if len(row) > 2 and row[2] else 0
+                    watch_min = float(row[3]) if len(row) > 3 and row[3] else 0.0
+                    if vid not in result:
+                        result[vid] = []
+                    result[vid].append({
+                        "dimension": source,
+                        "metric_value": views,
+                        "watch_minutes": watch_min,
+                    })
+                logger.debug(
+                    "Traffic sources: %d rows returned (batch %d/%d)",
+                    len(rows), i // MAX_IDS_PER_CALL + 1,
+                    (len(video_ids) + MAX_IDS_PER_CALL - 1) // MAX_IDS_PER_CALL,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Traffic sources API failed for batch (size=%d): %s", len(batch), exc
+                )
+
+        return result
+
+    def get_video_retention_pct(
+        self, video_ids: list[str], days: int = 30
+    ) -> dict[str, float]:
+        """Get average view percentage (retention %) for multiple videos.
+
+        Uses dimensions=video to fetch averageViewPercentage per video.
+        This tells us what % of the video people watch on average.
+
+        Returns:
+            Dict mapping yt_video_id → average_view_percentage (0-100)
+        """
+        if not self._analytics_service or not video_ids:
+            return {}
+
+        MAX_IDS_PER_CALL = 200
+        result = {}
+
+        for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
+            batch = video_ids[i : i + MAX_IDS_PER_CALL]
+            try:
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                resp = (
+                    self._analytics_service.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=start_date,
+                        endDate=end_date,
+                        metrics="averageViewPercentage",
+                        dimensions="video",
+                        filters=f"video=={','.join(batch)}",
+                        maxResults=200,
+                    )
+                    .execute()
+                )
+                rows = resp.get("rows", [])
+                for row in rows:
+                    # row: [video_id, averageViewPercentage]
+                    vid = row[0]
+                    result[vid] = round(float(row[1]), 2) if len(row) > 1 and row[1] else 0.0
+                logger.debug(
+                    "Retention pct: %d videos returned (batch %d/%d)",
+                    len(rows), i // MAX_IDS_PER_CALL + 1,
+                    (len(video_ids) + MAX_IDS_PER_CALL - 1) // MAX_IDS_PER_CALL,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Retention pct API failed for batch (size=%d): %s", len(batch), exc
+                )
+
+        return result
+
+    def get_channel_demographics(self, days: int = 90) -> list[dict]:
+        """Get audience demographics (age + gender) for the channel.
+
+        Uses dimensions=ageGroup,gender to fetch viewerPercentage per segment.
+
+        Returns:
+            List of {age_group, gender, views_pct}
+        """
+        if not self._analytics_service:
+            logger.debug("Analytics API not available for demographics")
+            return []
+
+        try:
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            resp = (
+                self._analytics_service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="viewerPercentage",
+                    dimensions="ageGroup,gender",
+                    maxResults=200,
+                )
+                .execute()
+            )
+            rows = resp.get("rows", [])
+            result = []
+            for row in rows:
+                # row: [ageGroup, gender, viewerPercentage]
+                result.append({
+                    "age_group": row[0] if len(row) > 0 else "unknown",
+                    "gender": row[1] if len(row) > 1 else "unknown",
+                    "views_pct": round(float(row[2]), 2) if len(row) > 2 and row[2] else 0.0,
+                })
+            logger.info("Channel demographics: %d segments returned", len(result))
+            return result
+        except Exception as exc:
+            logger.warning("Channel demographics API failed: %s", exc)
+            return []
+
     # ── Batch collection ───────────────────────────────────────
 
-    def collect_and_store(self, db) -> dict:
+    def collect_and_store(self, db, deep: bool = False) -> dict:
         """Collect stats for all uploaded videos and the channel, store in DB.
 
         Args:
@@ -670,7 +958,9 @@ class YouTubeStatsFetcher:
                         logger.debug("Skipping mock stats for short %s (%s)", s.get("id"), yt_id)
                         continue
                     if "error" not in stats:
-                        db.insert_short_stats(s["id"], yt_id, stats)
+                        # v2: Pass short_type so native/clip performance can be compared
+                        short_type = s.get("type", "clip")
+                        db.insert_short_stats(s["id"], yt_id, stats, short_type=short_type)
                         result["shorts_updated"] += 1
                 except Exception as exc:
                     logger.error("Failed to store stats for short %s: %s", s.get("id"), exc)
@@ -686,6 +976,25 @@ class YouTubeStatsFetcher:
                     result["analytics_updated"] = count
                     logger.info("Analytics updated for %d videos via bulk query", count)
 
+                    # Store averageViewPercentage (retention %) from expanded bulk query
+                    # into video_analytics_detailed
+                    retention_stored = 0
+                    for v in videos:
+                        yt_id = v.get("yt_video_id")
+                        if not yt_id:
+                            continue
+                        bdata = bulk_analytics.get(yt_id, {})
+                        avg_pct = float(bdata.get("averageViewPercentage", 0) or 0)
+                        if avg_pct > 0:
+                            db.insert_video_analytics_batch(
+                                v["id"], yt_id, "retention_pct",
+                                [{"dimension": None, "metric_value": avg_pct}],
+                            )
+                            retention_stored += 1
+                    if retention_stored:
+                        logger.info("Retention pct stored for %d videos via bulk query", retention_stored)
+                        result["retention_stored"] = retention_stored
+
                     # Also update shorts with analytics data (shorts can have watch time too)
                     if short_yt_ids:
                         short_id_map = {s.get("youtube_id"): s["id"] for s in shorts if s.get("youtube_id")}
@@ -694,6 +1003,75 @@ class YouTubeStatsFetcher:
                         logger.info("Analytics updated for %d shorts via bulk query", short_count)
             except Exception as exc:
                 logger.error("Bulk analytics update failed for %s: %s", self.slug, exc)
+
+        # ── Deep analytics (CTR, traffic, demographics) ──
+        if deep and channel and video_yt_ids and self._analytics_service:
+            logger.info("Deep analytics collection starting for %s (%d videos)", self.slug, len(video_yt_ids))
+
+            # Collect impressions + CTR
+            try:
+                impressions_data = self.get_video_impressions_ctr(video_yt_ids, days=30)
+                stored_imp = 0
+                stored_ctr = 0
+                for v in videos:
+                    yt_id = v.get("yt_video_id")
+                    if not yt_id:
+                        continue
+                    idata = impressions_data.get(yt_id, {})
+                    impressions = idata.get("impressions", 0)
+                    ctr = idata.get("ctr_percent", 0.0)
+                    if impressions > 0 or ctr > 0:
+                        db.insert_video_analytics_batch(
+                            v["id"], yt_id, "impressions",
+                            [{"dimension": None, "metric_value": impressions}],
+                        )
+                        stored_imp += 1
+                        if ctr > 0:
+                            db.insert_video_analytics_batch(
+                                v["id"], yt_id, "ctr",
+                                [{"dimension": None, "metric_value": ctr}],
+                            )
+                            stored_ctr += 1
+                result["impressions_stored"] = stored_imp
+                result["ctr_stored"] = stored_ctr
+                logger.info("Deep analytics: %d impressions, %d CTR stored for %s",
+                           stored_imp, stored_ctr, self.slug)
+            except Exception as exc:
+                logger.error("Deep analytics (CTR/impressions) failed for %s: %s", self.slug, exc)
+
+            # Collect traffic sources
+            try:
+                traffic_data = self.get_video_traffic_sources(video_yt_ids, days=30)
+                stored_traffic = 0
+                for v in videos:
+                    yt_id = v.get("yt_video_id")
+                    if not yt_id:
+                        continue
+                    sources = traffic_data.get(yt_id, [])
+                    if sources:
+                        db.insert_video_analytics_batch(
+                            v["id"], yt_id, "traffic_source", sources,
+                        )
+                        stored_traffic += 1
+                result["traffic_stored"] = stored_traffic
+                logger.info("Deep analytics: %d traffic source sets stored for %s",
+                           stored_traffic, self.slug)
+            except Exception as exc:
+                logger.error("Deep analytics (traffic sources) failed for %s: %s", self.slug, exc)
+
+            # Collect channel demographics
+            try:
+                demo_data = self.get_channel_demographics(days=90)
+                if demo_data:
+                    db.insert_channel_demographics(channel["id"], demo_data)
+                    result["demographics_stored"] = len(demo_data)
+                    logger.info("Deep analytics: %d demographic segments stored for %s",
+                               len(demo_data), self.slug)
+                else:
+                    result["demographics_stored"] = 0
+            except Exception as exc:
+                logger.error("Deep analytics (demographics) failed for %s: %s", self.slug, exc)
+                result["demographics_stored"] = 0
 
         # ── Daily channel analytics ──
         if channel and self._analytics_service:
@@ -706,11 +1084,12 @@ class YouTubeStatsFetcher:
                 logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
 
         logger.info(
-            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s",
+            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s%s",
             result["videos_updated"],
             result["shorts_updated"],
             result["analytics_updated"],
             result["channel_updated"],
+            " (deep)" if deep else "",
         )
         return result
 

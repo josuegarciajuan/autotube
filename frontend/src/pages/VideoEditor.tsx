@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api, formatDuration, formatDate, formatDateTime, formatTimingMs, statusBadge, statusLabel, truncate, mediaUrl, apiUrl } from '../lib/api'
-import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2, CheckCircle, XCircle, Loader2, ExternalLink } from 'lucide-react'
+  import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2, CheckCircle, XCircle, Loader2, ExternalLink, BarChart3 } from 'lucide-react'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import ScheduledPublishPanel from '../components/ScheduledPublishPanel'
 
@@ -30,8 +30,21 @@ export default function VideoEditor() {
   const [uploadToast, setUploadToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const { progress } = useGenerationProgress(uploadJobId)
 
+  // A/B Testing state (v31)
+  const [abTest, setAbTest] = useState<any>(null)
+  const [abTestLoading, setAbTestLoading] = useState(false)
+
   useEffect(() => {
     loadVideo()
+  }, [videoId])
+
+  useEffect(() => {
+    if (!videoId) return
+    setAbTestLoading(true)
+    api.getVideoABTestStatus(videoId)
+      .then(data => { if (data && data.status !== 'not_found') setAbTest(data) })
+      .catch(() => {})
+      .finally(() => setAbTestLoading(false))
   }, [videoId])
 
   async function loadVideo() {
@@ -443,6 +456,194 @@ export default function VideoEditor() {
         <ScheduledPublishPanel videoId={videoId} onRefresh={loadVideo} />
       )}
 
+      {/* ── A/B Test Panel (v31) ── */}
+      {abTest && abTest.status === 'ok' && (
+        <div className="glass rounded-xl p-5 space-y-4 animate-fade-in border border-neon-cyan/20">
+          <div className="flex items-center justify-between">
+            <h3 className="font-display text-sm font-semibold text-neon-cyan flex items-center gap-2">
+              <BarChart3 size={16} />
+              A/B Test — {abTestPhaseLabel(abTest.phase)}
+            </h3>
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${abTestPhaseBadge(abTest.phase)}`}>
+              {abTestPhaseLabel(abTest.phase)}
+            </span>
+          </div>
+
+          {/* Timeline de 3 pasos */}
+          <div className="flex items-center gap-1">
+            {[0, 1, 2].map((i) => {
+              const steps = ['pending', 'active', 'completed']
+              const currentIdx = abTest.phase === 'completed' || abTest.phase === 'skipped' ? 2
+                : abTest.phase === 'title_rotated' || abTest.phase === 'thumbnail_rotated' || abTest.phase === 'second_check' ? 1 : 0
+              const isDone = i < currentIdx || (i === 2 && (abTest.phase === 'completed' || abTest.phase === 'skipped'))
+              const isCurrent = i === currentIdx && !(abTest.phase === 'completed' || abTest.phase === 'skipped' || abTest.phase === 'insufficient_data')
+              return (
+                <div key={i} className="flex-1 flex items-center">
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                    isDone ? 'bg-green-500 text-white' : isCurrent ? 'bg-neon-cyan text-black animate-pulse' : 'bg-dark-600 text-gray-500'
+                  }`}>
+                    {isDone ? '\u2713' : i + 1}
+                  </div>
+                  {i < 2 && (
+                    <div className={`flex-1 h-0.5 mx-0.5 ${isDone ? 'bg-green-500' : 'bg-dark-600'}`} />
+                  )}
+                </div>
+              )
+            })}
+            <span className="text-[10px] text-gray-500 ml-2">
+              {['Subida', 'Optimización', 'Resultado'][
+                (abTest.phase === 'completed' || abTest.phase === 'skipped') ? 2
+                : abTest.phase === 'title_rotated' || abTest.phase === 'thumbnail_rotated' || abTest.phase === 'second_check' ? 1 : 0
+              ]}
+            </span>
+          </div>
+
+          {/* Títulos */}
+          {(abTest.title_v1 || abTest.title_v2) && (
+            <div className="space-y-2">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Títulos probados</p>
+              {abTest.title_v1 && (
+                <div className="flex items-start gap-2 p-2 rounded-lg bg-dark-700/50 border border-surface-border">
+                  <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                    abTest.winner_title === abTest.title_v1 || abTest.phase === 'skipped' ? 'bg-green-500/20 text-green-400'
+                    : abTest.phase === 'completed' && abTest.winner_title && abTest.winner_title !== abTest.title_v1 ? 'bg-red-500/20 text-red-400'
+                    : 'bg-gray-500/20 text-gray-400'
+                  }`}>
+                    {abTest.winner_title === abTest.title_v1 || abTest.phase === 'skipped' ? 'GANADOR'
+                     : abTest.phase === 'completed' && abTest.winner_title ? 'DESCARTADO' : 'Original'}
+                  </span>
+                  <p className="text-xs text-white flex-1 leading-relaxed">{abTest.title_v1}</p>
+                </div>
+              )}
+              {abTest.title_v2 && (
+                <div className="flex items-start gap-2 p-2 rounded-lg bg-dark-700/50 border border-neon-cyan/30">
+                  <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                    abTest.winner_title === abTest.title_v2 ? 'bg-green-500/20 text-green-400'
+                    : abTest.phase !== 'completed' ? 'bg-neon-cyan/20 text-neon-cyan'
+                    : 'bg-gray-500/20 text-gray-400'
+                  }`}>
+                    {abTest.winner_title === abTest.title_v2 ? 'GANADOR'
+                     : abTest.phase !== 'completed' ? 'En prueba' : 'Alternativo'}
+                  </span>
+                  <p className="text-xs text-neon-cyan flex-1 leading-relaxed">{abTest.title_v2}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Thumbnails — grid de 3 */}
+          {abTest.thumbnail_variant_paths && abTest.thumbnail_variant_paths.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">
+                Miniaturas generadas ({abTest.thumbnail_variant_paths.length} variantes)
+                {abTest.thumbnail_variant_active ? ` — Activa: variante ${abTest.thumbnail_variant_active}` : ''}
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {abTest.thumbnail_variant_paths.map((path: string, i: number) => (
+                  <div key={i} className={`relative rounded-lg overflow-hidden border-2 transition-all ${
+                    (i + 1) === abTest.thumbnail_variant_active
+                      ? 'border-neon-cyan shadow-lg shadow-neon-cyan/20'
+                      : 'border-surface-border opacity-70 hover:opacity-90'
+                  }`}>
+                    <img src={mediaUrl(path)} alt={`Variante ${i + 1}`} className="w-full aspect-video object-cover" />
+                    <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-bold text-white">
+                      V{i + 1}
+                    </span>
+                    {(i + 1) === abTest.thumbnail_variant_active && (
+                      <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-neon-cyan text-[10px] font-bold text-black">
+                        ACTIVA
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* CTR Data */}
+          {(abTest.ctr_v1 != null) && (
+            <div className="grid grid-cols-2 gap-3 p-3 rounded-lg bg-dark-700/50">
+              <div className="text-center">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">CTR antes</p>
+                <p className="text-lg font-mono font-bold text-white">{abTest.ctr_v1?.toFixed(1)}%</p>
+                <p className="text-[10px] text-gray-500">{(abTest.impressions_v1 || 0).toLocaleString()} impresiones</p>
+              </div>
+              {abTest.ctr_v2 != null ? (
+                <div className="text-center">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">CTR después</p>
+                  <p className={`text-lg font-mono font-bold ${abTest.ctr_v2 > (abTest.ctr_v1 || 0) ? 'text-green-400' : 'text-red-400'}`}>
+                    {abTest.ctr_v2?.toFixed(1)}%
+                  </p>
+                  <p className="text-[10px]">
+                    {abTest.ctr_v1 != null && abTest.ctr_v1 > 0 ? (
+                      <span className={abTest.ctr_v2 > abTest.ctr_v1 ? 'text-green-400' : 'text-red-400'}>
+                        {abTest.ctr_v2 > abTest.ctr_v1 ? '\u25B2' : '\u25BC'} {Math.abs(abTest.ctr_v2 - abTest.ctr_v1).toFixed(1)}%
+                      </span>
+                    ) : null}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center text-gray-500 text-xs">
+                  Esperando datos post-cambio...
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Winner / Resultado */}
+          {abTest.phase === 'completed' && abTest.winner_title && (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+              <p className="text-xs text-green-400 font-medium">Ganador del test</p>
+              <p className="text-sm text-white font-bold mt-0.5">{truncate(abTest.winner_title, 100)}</p>
+              {abTest.winner_thumbnail_variant && (
+                <p className="text-xs text-green-300 mt-0.5">Miniatura ganadora: variante {abTest.winner_thumbnail_variant}</p>
+              )}
+            </div>
+          )}
+          {abTest.phase === 'skipped' && (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+              <p className="text-xs text-green-400 font-medium">CTR ya óptimo ({'≥'}{abTest.ctr_v1 || 3}%)</p>
+              <p className="text-xs text-green-300 mt-0.5">No se necesita optimización — el título/miniatura ya funcionan bien.</p>
+            </div>
+          )}
+          {abTest.phase === 'insufficient_data' && (
+            <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+              <p className="text-xs text-yellow-400 font-medium">Datos insuficientes</p>
+              <p className="text-xs text-yellow-300 mt-0.5">Tras 7 días no se alcanzaron las {abTest.impressions_v1 || 0} impresiones mínimas para decidir.</p>
+            </div>
+          )}
+
+          {/* Formula learnings */}
+          {abTest.formula_learnings && abTest.formula_learnings.length > 0 && (
+            <details className="space-y-1">
+              <summary className="text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300">
+                Aprendizaje acumulado del canal ({abTest.formula_learnings.length} fórmulas)
+              </summary>
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {abTest.formula_learnings.map((f: any, i: number) => (
+                  <span key={i} className="px-2 py-0.5 rounded-full text-[10px] bg-neon-cyan/10 text-neon-cyan border border-neon-cyan/20">
+                    {f.formula_type}: {f.total_wins}/{f.total_tests} wins {f.avg_ctr_improvement > 0 ? `(+${f.avg_ctr_improvement?.toFixed(1)}%)` : ''}
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
+
+          {/* Timestamps */}
+          <details className="text-[10px] text-gray-600">
+            <summary className="cursor-pointer hover:text-gray-400">Timestamps del test</summary>
+            <div className="space-y-0.5 mt-1.5 ml-2">
+              {abTest.timestamps?.created && <p>Creado: {formatDateTime(abTest.timestamps.created)}</p>}
+              {abTest.timestamps?.first_checked && <p>1ª revisión: {formatDateTime(abTest.timestamps.first_checked)}</p>}
+              {abTest.timestamps?.title_rotated && <p>Título rotado: {formatDateTime(abTest.timestamps.title_rotated)}</p>}
+              {abTest.timestamps?.thumbnail_rotated && <p>Thumbnail rotada: {formatDateTime(abTest.timestamps.thumbnail_rotated)}</p>}
+              {abTest.timestamps?.second_checked && <p>2ª revisión: {formatDateTime(abTest.timestamps.second_checked)}</p>}
+              {abTest.timestamps?.completed && <p>Completado: {formatDateTime(abTest.timestamps.completed)}</p>}
+            </div>
+          </details>
+        </div>
+      )}
+
       {/* Scenes Editor */}
       <div className="glass rounded-xl p-5">
         <h3 className="font-display text-lg font-semibold text-white mb-4 flex items-center gap-2">
@@ -583,4 +784,35 @@ export default function VideoEditor() {
       )}
     </div>
   )
+}
+
+// ═══════════════════════════════════════════════════════════════
+// A/B Testing helpers (v31)
+// ═══════════════════════════════════════════════════════════════
+
+const AB_PHASE_LABELS: Record<string, string> = {
+  pending: 'Esperando primeras 48h',
+  first_check: 'Evaluando CTR inicial',
+  title_rotated: 'Probando título alternativo',
+  thumbnail_rotated: 'Probando miniatura variante',
+  second_check: 'Comparando resultados',
+  completed: 'Test completado',
+  skipped: 'CTR ya óptimo',
+  insufficient_data: 'Datos insuficientes',
+}
+function abTestPhaseLabel(phase: string): string {
+  return AB_PHASE_LABELS[phase] || phase
+}
+function abTestPhaseBadge(phase: string): string {
+  const map: Record<string, string> = {
+    completed: 'bg-green-500/20 text-green-400 border border-green-500/30',
+    skipped: 'bg-green-500/10 text-green-400 border border-green-500/20',
+    title_rotated: 'bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/30 animate-pulse',
+    thumbnail_rotated: 'bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/30 animate-pulse',
+    second_check: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30',
+    pending: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30',
+    first_check: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30',
+    insufficient_data: 'bg-gray-500/20 text-gray-400 border border-gray-500/20',
+  }
+  return map[phase] || 'bg-gray-500/20 text-gray-400'
 }

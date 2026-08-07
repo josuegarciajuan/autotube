@@ -389,6 +389,124 @@ class ThumbnailMaker:
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
         return thumb_path
 
+    def make_variant_thumbnails(
+        self,
+        title: str,
+        script_text: str = "",
+        keywords: list | None = None,
+        canal_slug: str = "",
+        channel_display_name: str = "",
+        channel_description: str = "",
+        channel_theme: str = "",
+        video_id: int = 0,
+        variant_briefs: list | None = None,
+        num_variants: int = 3,
+    ) -> list[Path]:
+        """Generate multiple thumbnail variants for A/B testing.
+        
+        Strategy: generate ONE base image via Pollo AI (expensive),
+        then recompose N variants with different text overlays (cheap).
+        
+        Each variant gets a different ThumbnailBrief from brainstorm_variants()
+        or from the provided variant_briefs list. Only F4 (composition) runs
+        for each variant — the base image is reused.
+
+        Args:
+            title: Full YouTube title.
+            script_text: First ~1500 chars of script for context.
+            keywords: SEO keywords for context.
+            canal_slug: Channel slug for cache key.
+            channel_display_name: Display name for style engine.
+            channel_description: About section for style engine.
+            channel_theme: Theme summary for style engine.
+            video_id: Database video ID for unique naming.
+            variant_briefs: Optional pre-generated list of ThumbnailBrief.
+                If None, brainstorm_variants() is called to generate them.
+            num_variants: Number of variants to generate (default 3).
+
+        Returns:
+            List of Path objects, one per generated thumbnail variant.
+        """
+        slug = canal_slug or ""
+        
+        # ── F1: Style Engine (shared, cached) ──────────────────
+        style = self._get_or_create_style(
+            slug=slug,
+            channel_name=channel_display_name or self.channel_name,
+            description=channel_description,
+            theme=channel_theme,
+            keywords=keywords or [],
+        )
+        
+        # ── F2: Generate variant briefs if not provided ───────
+        if variant_briefs is None or len(variant_briefs) == 0:
+            try:
+                from pipeline.thumbnail_brainstorm import ThumbnailBrainstorm
+                brainstormer = ThumbnailBrainstorm()
+                variant_briefs = brainstormer.brainstorm_variants(
+                    script_text=script_text,
+                    title=title,
+                    keywords=keywords or [],
+                    style_profile=style,
+                    channel_name=channel_display_name or self.channel_name,
+                    channel_theme=channel_theme,
+                    num_variants=num_variants,
+                )
+            except Exception as exc:
+                logger.warning("Brainstorm variants failed: %s — using single brief fallback", exc)
+                brief = self._run_brainstorm(
+                    script_text=script_text,
+                    title=title,
+                    keywords=keywords or [],
+                    style=style,
+                    channel_name=channel_display_name or self.channel_name,
+                    channel_theme=channel_theme,
+                )
+                variant_briefs = [brief]  # Fallback: single variant
+        
+        # ── F3: Generate ONE base image (shared across variants) ──
+        logger.info("[Thumbnail v2] F3: Generating shared base image for %d variants", len(variant_briefs))
+        base_image = self._generate_with_quality_control(
+            brief=variant_briefs[0],  # Use first brief for image gen
+            style=style,
+            slug=slug,
+        )
+        # Store for metadata recompose
+        self._last_raw_base = base_image
+        
+        # ── F4: Compose each variant on the same base image ────
+        variant_paths: list[Path] = []
+        for i, brief in enumerate(variant_briefs):
+            # Build overlay text from brief fields
+            l1 = getattr(brief, 'text_gancho', '') or ''
+            l2 = getattr(brief, 'text_complemento', '') or ''
+            overlay = f"{l1} {l2}".strip() if l1 or l2 else getattr(brief, 'text_overlay', '')
+            badge = getattr(brief, 'badge_text', '') or ''
+            secondary = getattr(brief, 'secondary_scene', '') or ''
+            layout = getattr(brief, 'layout', '') or ''
+            
+            thumb_path = self._compose_final(
+                base_image=base_image,
+                brief=brief,
+                style=style,
+                overlay_text=overlay,
+                title=title,
+                canal_slug=slug,
+                video_id=video_id,
+                text_gancho=l1,
+                text_complemento=l2,
+                badge_text=badge,
+                secondary_scene=secondary,
+                layout=layout,
+            )
+            variant_paths.append(thumb_path)
+            logger.info(
+                "[Thumbnail v2] Variant %d/%d: %s (overlay: '%s')",
+                i + 1, len(variant_briefs), thumb_path.name, overlay[:40],
+            )
+        
+        return variant_paths
+
     # ── F1: Style Engine helpers ──────────────────────────────
 
     def _get_or_create_style(

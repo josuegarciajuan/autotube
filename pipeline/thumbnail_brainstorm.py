@@ -232,6 +232,197 @@ class ThumbnailBrainstorm:
             logger.warning("Brainstorm failed: %s — using fallback brief", exc)
             return self._fallback_brief(title, style, allow_faces=allow_faces)
 
+    def brainstorm_variants(
+        self,
+        script_text: str,
+        title: str,
+        keywords: list[str] | None = None,
+        style_profile: dict | None = None,
+        channel_name: str = "",
+        channel_theme: str = "",
+        allow_faces: bool = True,
+        concept_directive: str = "",
+        num_variants: int = 3,
+    ) -> list[ThumbnailBrief]:
+        """Generate N visually distinct thumbnail briefs for A/B testing.
+        
+        Each variant uses a different design strategy to maximize the
+        chance that at least one achieves high CTR:
+        
+        Variant 1 (default): Emotional/intrigue — same as current brainstorm()
+        Variant 2 (text-heavy): Text dominates 60%, curiosity question,  
+                                secondary background image
+        Variant 3 (image-heavy): Image dominates 80%, max 3 words,  
+                                 strong emotional reaction (shock/awe/fear)
+        
+        Only variant 1 uses the full LLM pipeline (psychology + marketing agents).
+        Variants 2 and 3 reuse the psychology analysis and adapt the marketing
+        text overlay with directive-guided composition.
+
+        Args:
+            Same as brainstorm(), plus:
+            num_variants: Number of variants to generate (2-3, default 3).
+
+        Returns:
+            List of ThumbnailBrief objects, one per variant.
+        """
+        if num_variants < 2:
+            num_variants = 2
+        
+        variants: list[ThumbnailBrief] = []
+        
+        # ── Variant 1: Default (emotional / intrigue) ──────────
+        try:
+            brief_default = self.brainstorm(
+                script_text=script_text,
+                title=title,
+                keywords=keywords,
+                style_profile=style_profile,
+                channel_name=channel_name,
+                channel_theme=channel_theme,
+                allow_faces=allow_faces,
+                concept_directive=concept_directive,
+            )
+        except Exception as exc:
+            logger.warning("Variant 1 brainstorm failed: %s — using fallback", exc)
+            style = style_profile or {}
+            brief_default = self._fallback_brief(title, style, allow_faces=allow_faces)
+        variants.append(brief_default)
+        
+        if num_variants < 2:
+            return variants
+        
+        # ── Variant 2: Text-heavy (curiosity question) ─────────
+        # Reuses the same base image concept but changes composition
+        brief_text = self._clone_brief_with_directive(
+            brief_default,
+            variant_directive=(
+                "Crea un diseño donde el TEXTO domine el 60% de la miniatura. "
+                "Usa una pregunta intrigante o dato impactante como texto principal "
+                "en letras GRANDES que ocupan la mayor parte del espacio. "
+                "La imagen de fondo debe ser secundaria, textura o patrón difuminado. "
+                "El texto debe ser imposible de ignorar al hacer scroll."
+            ),
+            channel_name=channel_name,
+        )
+        variants.append(brief_text)
+        
+        if num_variants < 3:
+            return variants
+        
+        # ── Variant 3: Image-heavy (emotional shock) ───────────
+        brief_image = self._clone_brief_with_directive(
+            brief_default,
+            variant_directive=(
+                "Crea un diseño donde la IMAGEN domine el 80% de la miniatura. "
+                "Máximo 3 palabras de texto en total (una sola palabra grande o "
+                "una frase cortísima de 2-3 palabras). La imagen debe provocar una "
+                "reacción emocional fuerte: asombro, miedo, curiosidad intensa, shock. "
+                "Fotorealista, 8K, iluminación dramática, alto contraste."
+            ),
+            channel_name=channel_name,
+        )
+        variants.append(brief_image)
+        
+        logger.info(
+            "Brainstorm variants: %d briefs generated for '%s'",
+            len(variants), title[:50],
+        )
+        return variants
+
+    def _clone_brief_with_directive(
+        self,
+        base: ThumbnailBrief,
+        variant_directive: str,
+        channel_name: str = "",
+    ) -> ThumbnailBrief:
+        """Create a variant brief by cloning the base and adjusting 
+        composition notes and text overlay for a different strategy.
+        
+        Uses a lightweight LLM call only for the text overlay — the
+        image concept and visual focus are inherited from the base.
+        """
+        # Build a lightweight prompt for text overlay only
+        from config.llm_client import create_llm_client
+        from config.settings import LLM_MODEL_CREATIVE
+        from config.llm_helpers import llm_json_call
+        
+        client = create_llm_client(enable_thinking=False, timeout=30.0, max_retries=1)
+        
+        system = """Eres un diseñador de miniaturas de YouTube.
+Genera el TEXTO SUPERPUESTO para una miniatura basado en una directiva de diseño.
+Devuelve JSON con: text_gancho (L1, max 12 chars, UPPERCASE), text_complemento (L2, max 24 chars), badge_text (L3, corto), composition_notes (breve).
+El texto_gancho y texto_complemento DEBEN ser en español."""
+        
+        prompt = f"""TÍTULO DEL VIDEO: {base.text_overlay or 'Sin título'}
+CONCEPTO VISUAL: {base.image_concept[:200]}
+EMOCIÓN OBJETIVO: {base.emotion_target}
+CANAL: {channel_name}
+
+DIRECTIVA DE DISEÑO: {variant_directive}
+
+Genera el texto superpuesto para esta variante."""
+        
+        try:
+            result = llm_json_call(
+                client,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.85,
+                max_tokens=300,
+                max_retries=1,
+                retry_delay=0.5,
+            )
+            
+            if result and isinstance(result, dict):
+                return ThumbnailBrief(
+                    image_concept=base.image_concept,
+                    visual_focus=base.visual_focus,
+                    emotion_target=base.emotion_target,
+                    curiosity_gap=base.curiosity_gap,
+                    text_overlay=result.get("text_gancho", "") + " " + result.get("text_complemento", ""),
+                    text_gancho=result.get("text_gancho", base.text_gancho),
+                    text_complemento=result.get("text_complemento", ""),
+                    badge_text=result.get("badge_text", base.badge_text),
+                    secondary_scene=base.secondary_scene,
+                    text_color_hex=base.text_color_hex,
+                    composition_notes=result.get("composition_notes", variant_directive[:200]),
+                    layout=base.layout,
+                    psych_hooks=list(base.psych_hooks),
+                    psych_score=base.psych_score,
+                    marketing_ctr_estimate=base.marketing_ctr_estimate,
+                    marketing_text_variants=[
+                        result.get("text_gancho", ""),
+                        result.get("text_complemento", ""),
+                        result.get("badge_text", ""),
+                    ],
+                )
+        except Exception as exc:
+            logger.debug("Variant brief generation failed: %s — cloning base with directive", exc)
+        
+        # Fallback: clone base with directive as composition_notes
+        return ThumbnailBrief(
+            image_concept=base.image_concept,
+            visual_focus=base.visual_focus,
+            emotion_target=base.emotion_target,
+            curiosity_gap=base.curiosity_gap,
+            text_overlay=base.text_overlay,
+            text_gancho=base.text_gancho,
+            text_complemento=base.text_complemento,
+            badge_text=base.badge_text,
+            secondary_scene=base.secondary_scene,
+            text_color_hex=base.text_color_hex,
+            composition_notes=variant_directive[:200],
+            layout=base.layout,
+            psych_hooks=list(base.psych_hooks),
+            psych_score=base.psych_score,
+            marketing_ctr_estimate=base.marketing_ctr_estimate,
+            marketing_text_variants=list(base.marketing_text_variants),
+        )
+
     # ── Agent runners ────────────────────────────────────────
 
     def _run_psychology_agent(

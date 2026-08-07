@@ -131,6 +131,9 @@ def check_all_health(db) -> dict:
     # ── Check 5: Videos uploaded_private too long ──
     created += _check_publish_delayed(db)
 
+    # ── Check 5.5: A/B tests stuck in rotation phase (v31) ──
+    created += _check_ab_test_stuck(db)
+
     # ── Check 6: Auto-resolve alerts for completed entities ──
     resolved += _auto_resolve_completed(db)
 
@@ -489,6 +492,61 @@ def _check_publish_delayed(db) -> int:
                 )
     except Exception as exc:
         logger.warning("Publish delayed check failed: %s", exc)
+    return created
+
+
+def _check_ab_test_stuck(db) -> int:
+    """Alert on A/B tests stuck in rotation phase >72h without second check.
+    
+    Detects videos that had their title or thumbnail changed via A/B testing
+    but haven't progressed to the second check phase within 72 hours. This
+    usually indicates the ABTestWorker is not running or has crashed.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute("""
+                SELECT vab.id, vab.video_id, vab.channel_id, vab.phase,
+                       vab.yt_video_id, vab.title_rotated_at, vab.thumbnail_rotated_at,
+                       v.titulo_final, ch.slug as channel_slug
+                FROM video_ab_tests vab
+                JOIN videos v ON vab.video_id = v.id
+                JOIN channels ch ON vab.channel_id = ch.id
+                WHERE vab.phase IN ('title_rotated', 'thumbnail_rotated')
+                  AND (
+                    (vab.phase = 'title_rotated' AND vab.title_rotated_at IS NOT NULL AND vab.title_rotated_at < datetime('now', '-72 hours'))
+                    OR
+                    (vab.phase = 'thumbnail_rotated' AND vab.thumbnail_rotated_at IS NOT NULL AND vab.thumbnail_rotated_at < datetime('now', '-72 hours'))
+                  )
+            """).fetchall()
+            
+            for row in rows:
+                row_dict = dict(row)
+                video_id = row_dict["video_id"]
+                channel_id = row_dict["channel_id"]
+                phase = row_dict["phase"]
+                yt_id = row_dict.get("yt_video_id", "?")
+                rotated_at = row_dict.get("title_rotated_at") or row_dict.get("thumbnail_rotated_at") or "?"
+                what_changed = "título" if phase == "title_rotated" else "miniatura"
+                
+                create_alert(
+                    db,
+                    entity_type='video',
+                    entity_id=video_id,
+                    channel_id=channel_id,
+                    alert_type='ab_test_stuck',
+                    severity='warning',
+                    title=f'A/B test stuck en {phase} para video {video_id}',
+                    message=(
+                        f'El test del video {video_id} (YT: {yt_id}) '
+                        f'lleva >72h en fase {phase} desde {rotated_at}. '
+                        f'Se cambió el {what_changed} pero nunca se ejecutó el second check. '
+                        f'Verificar que ENABLE_AB_TESTING=true y que el scheduler está corriendo.'
+                    ),
+                )
+                created += 1
+    except Exception as exc:
+        logger.warning("AB test stuck check failed: %s", exc)
     return created
 
 

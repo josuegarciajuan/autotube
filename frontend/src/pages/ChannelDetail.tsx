@@ -12,6 +12,7 @@ import HorariosTab from '../components/HorariosTab'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType, SOCIAL_PLATFORMS, type ChannelInsight } from '../types/channel'
 import SocialAccountsPanel from '../components/SocialAccountsPanel'
 import InsightsTab from '../components/InsightsTab'
+import ShortTypeComparison from '../components/ShortTypeComparison'
 
 // ── PromotionTab (inline component) ─────────────────────────
 
@@ -939,6 +940,13 @@ export default function ChannelDetail() {
               </>
             )}
             </div>
+
+            {/* v2: Native vs Clip comparison */}
+            {channel?.id && channelShortsStats?.published > 3 && (
+              <div className="mt-4">
+                <ShortTypeComparison channelId={channel.id} />
+              </div>
+            )}
             {/* Combined total */}
             {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
               <div className="flex items-center gap-2 text-xs sm:text-sm mt-1.5 pt-1.5 border-t border-surface-border/40">

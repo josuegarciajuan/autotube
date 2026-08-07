@@ -724,6 +724,7 @@ async def _schedule_checker_loop():
     last_view_gap_check = 0
     last_standalone_dispatch = 0  # standalone shorts auto-dispatch
     last_collab_run = 0  # daily collaboration engine
+    last_ab_test_check = 0  # v31: A/B test sequential optimization
     first_run = True
 
     # Restore last_view_gap_check from DB
@@ -883,6 +884,21 @@ async def _schedule_checker_loop():
                     except Exception as exc:
                         logger.debug("Smart replan: %s", exc)
                     last_smart_replan = now
+
+                # ── A/B Testing: sequential title/thumbnail optimization (v31) ──
+                # Runs every 60 minutes. Scans for videos needing first-check
+                # (48h after upload) or second-check (48h after change).
+                # Quota-aware: reads local DB, only hits YT API if data is stale.
+                if now - last_ab_test_check > 3600:  # every hour
+                    try:
+                        from config.settings import ENABLE_AB_TESTING
+                        if ENABLE_AB_TESTING:
+                            from api.services.ab_test_worker import ABTestWorker
+                            _ab = ABTestWorker(_sched_db)
+                            await asyncio.to_thread(_ab.run_cycle)
+                    except Exception as exc:
+                        logger.warning("AB test cycle error: %s", exc)
+                    last_ab_test_check = now
 
                 # Shorts auto-recovery: rebalance shorts every 120 minutes (v14: reduced from 60min)
                 # to prevent runaway recovery slot creation during normal operation
@@ -2251,8 +2267,13 @@ def _reset_stale_collection_state():
     return False
 
 
-async def _collect_youtube_stats():
-    """Collect YouTube stats for all active channels with valid tokens."""
+async def _collect_youtube_stats(deep: bool = False):
+    """Collect YouTube stats for all active channels with valid tokens.
+
+    Args:
+        deep: If True, also collects CTR, traffic sources, demographics,
+              and retention % per video (extra API quota cost).
+    """
     import logging
     logger = logging.getLogger("autotube.stats")
 
@@ -2285,7 +2306,7 @@ async def _collect_youtube_stats():
             
             try:
                 fetcher = YouTubeStatsFetcher(slug)
-                result = fetcher.collect_and_store(db)
+                result = fetcher.collect_and_store(db, deep=deep)
                 logger.info(
                     "Stats collected for %s: %s videos, %s shorts, %s analytics, channel=%s",
                     slug,
@@ -2301,6 +2322,12 @@ async def _collect_youtube_stats():
                     "shorts_updated": result.get("shorts_updated", 0),
                     "analytics_updated": result.get("analytics_updated", 0),
                     "channel_updated": result.get("channel_updated", False),
+                    "deep": deep,
+                    "impressions_stored": result.get("impressions_stored", 0),
+                    "ctr_stored": result.get("ctr_stored", 0),
+                    "traffic_stored": result.get("traffic_stored", 0),
+                    "retention_stored": result.get("retention_stored", 0),
+                    "demographics_stored": result.get("demographics_stored", 0),
                     "error": result.get("error"),
                 })
                 
@@ -2502,8 +2529,13 @@ def get_stats():
 
 
 @app.post("/api/stats/collect")
-async def trigger_stats_collection(background_tasks: BackgroundTasks):
+async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool = False):
     """Trigger on-demand YouTube stats collection for all active channels.
+
+    Query params:
+        deep: If true, also collects CTR, traffic sources, demographics, and
+              retention % (consumes ~7 extra YouTube Analytics API quota units
+              per channel). Default false = basic stats only.
 
     Runs _collect_youtube_stats() as a background task and returns immediately.
     Poll GET /api/stats/collect/status to know when it finishes and its result.
@@ -2515,11 +2547,12 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks):
             "message": "Ya hay una recoleccion en curso",
             "state": STATS_COLLECTION_STATE,
         }
-    background_tasks.add_task(_collect_youtube_stats)
+    background_tasks.add_task(_collect_youtube_stats, deep=deep)
     return {
         "ok": True,
         "message": "Recoleccion de stats iniciada para los canales activos",
         "state": STATS_COLLECTION_STATE,
+        "deep": deep,
     }
 
 
@@ -2528,6 +2561,224 @@ async def stats_collection_status():
     """Return current/last state of the on-demand stats collection."""
     _reset_stale_collection_state()  # auto-recover from stuck "running"
     return STATS_COLLECTION_STATE
+
+
+# ═══════════════════════════════════════════════════════════════════
+# A/B Testing Endpoints (v31 — Sequential title/thumbnail optimization)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.post("/api/videos/{video_id}/ab-test/trigger")
+async def trigger_ab_test(video_id: int, phase: str = None, channel_id: int = None):
+    """Manually trigger an A/B test cycle for a specific video.
+
+    Args:
+        video_id: Database video ID.
+        phase: Optional phase override. One of:
+            None (auto) — let the worker decide the phase
+            'first_check' — force first CTR evaluation
+            'second_check' — force post-change comparison
+            'rotate_title' — force title rotation
+            'rotate_thumbnail' — force thumbnail rotation to next variant
+        channel_id: Optional — if provided, used for channel slug resolution.
+
+    Returns:
+        dict with status, message, and video details.
+    """
+    import logging as _logging
+    _log = _logging.getLogger("autotube.ab_test")
+
+    if not video_id:
+        return {"status": "error", "message": "video_id is required"}
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        import sqlite3
+        from database.db_extended import ExtendedDatabase
+        from api.services.ab_test_worker import ABTestWorker
+
+        db = ExtendedDatabase()
+        worker = ABTestWorker(db)
+
+        # Fetch the A/B test record via db connection
+        row_dict = None
+        with db._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT vab.*, v.*, ch.slug as channel_slug "
+                "FROM video_ab_tests vab "
+                "JOIN videos v ON vab.video_id = v.id "
+                "JOIN channels ch ON vab.channel_id = ch.id "
+                "WHERE vab.video_id = ?",
+                (video_id,),
+            ).fetchone()
+            if row:
+                row_dict = dict(row)
+
+        if not row_dict:
+            return {"status": "error", "message": f"No A/B test record found for video {video_id}"}
+
+        current_phase = row_dict.get("phase", "unknown")
+        yt_video_id = row_dict.get("yt_video_id", "")
+
+        now = _dt.now(_tz.utc)
+
+        if phase == "first_check" or (phase is None and current_phase == "pending"):
+            _log.info("[AB API] Triggering first_check for video %s", video_id)
+            worker._process_first_check(row_dict, now)
+            # Re-fetch updated state
+            new_phase = "unknown"
+            with db._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                updated = conn.execute(
+                    "SELECT * FROM video_ab_tests WHERE video_id = ?", (video_id,)
+                ).fetchone()
+                if updated:
+                    new_phase = dict(updated).get("phase", "unknown")
+            return {
+                "status": "ok",
+                "message": f"First check processed. Phase: {current_phase} → {new_phase}",
+                "video_id": video_id,
+                "yt_video_id": yt_video_id,
+                "phase": new_phase,
+            }
+
+        elif phase == "second_check" or (phase is None and current_phase in ("title_rotated", "thumbnail_rotated")):
+            _log.info("[AB API] Triggering second_check for video %s", video_id)
+            worker._process_second_check(row_dict, now)
+            new_phase = "unknown"
+            winner = ""
+            with db._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                updated = conn.execute(
+                    "SELECT * FROM video_ab_tests WHERE video_id = ?", (video_id,)
+                ).fetchone()
+                if updated:
+                    updated_dict = dict(updated)
+                    new_phase = updated_dict.get("phase", "unknown")
+                    winner = updated_dict.get("winner_title", "")
+            return {
+                "status": "ok",
+                "message": f"Second check processed. Phase: {current_phase} → {new_phase}",
+                "video_id": video_id,
+                "yt_video_id": yt_video_id,
+                "phase": new_phase,
+                "winner_title": winner,
+            }
+
+        elif phase == "rotate_title":
+            title_v1 = row_dict.get("title_v1", "")
+            ctr_v1 = row_dict.get("ctr_v1", 0) or 0
+            _log.info("[AB API] Triggering title rotation for video %s", video_id)
+            worker._rotate_title(row_dict, title_v1, ctr_v1)
+            return {
+                "status": "ok",
+                "message": "Title rotation triggered",
+                "video_id": video_id,
+                "yt_video_id": yt_video_id,
+            }
+
+        elif phase:
+            return {"status": "error", "message": f"Unknown phase: {phase}. Use: first_check, second_check, rotate_title, rotate_thumbnail"}
+
+        else:
+            return {
+                "status": "info",
+                "message": f"No action needed. Current phase: {current_phase}",
+                "video_id": video_id,
+                "yt_video_id": yt_video_id,
+                "phase": current_phase,
+            }
+
+    except Exception as exc:
+        _log.error("[AB API] Trigger failed: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
+@app.get("/api/videos/{video_id}/ab-test/status")
+async def get_ab_test_status(video_id: int):
+    """Get current A/B test status and history for a video.
+
+    Returns:
+        dict with current phase, title variants, CTR data, thumbnail paths,
+        and accumulated formula learnings for the channel.
+    """
+    if not video_id:
+        return {"status": "error", "message": "video_id is required"}
+
+    try:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+        # Get A/B test record
+        conn = db._get_conn()
+        row = conn.execute(
+            "SELECT vab.*, v.yt_video_id as v_yt, v.titulo_final, v.created_at as v_created, "
+            "ch.slug as channel_slug, ch.name as channel_name "
+            "FROM video_ab_tests vab "
+            "JOIN videos v ON vab.video_id = v.id "
+            "JOIN channels ch ON vab.channel_id = ch.id "
+            "WHERE vab.video_id = ?",
+            (video_id,),
+        ).fetchone()
+
+        if not row:
+            return {"status": "not_found", "message": f"No A/B test record for video {video_id}"}
+
+        row_dict = dict(row)
+
+        # Build response
+        result = {
+            "status": "ok",
+            "video_id": video_id,
+            "yt_video_id": row_dict.get("v_yt") or row_dict.get("yt_video_id"),
+            "channel": row_dict.get("channel_slug"),
+            "phase": row_dict.get("phase"),
+            "title_v1": row_dict.get("title_v1"),
+            "title_v2": row_dict.get("title_v2"),
+            "ctr_v1": row_dict.get("ctr_v1"),
+            "ctr_v2": row_dict.get("ctr_v2"),
+            "impressions_v1": row_dict.get("impressions_v1"),
+            "impressions_v2": row_dict.get("impressions_v2"),
+            "retention_v1": row_dict.get("retention_v1"),
+            "retention_v2": row_dict.get("retention_v2"),
+            "winner_title": row_dict.get("winner_title"),
+            "thumbnail_variant_active": row_dict.get("thumbnail_variant_active"),
+            "timestamps": {
+                "first_checked": row_dict.get("first_checked_at"),
+                "title_rotated": row_dict.get("title_rotated_at"),
+                "thumbnail_rotated": row_dict.get("thumbnail_rotated_at"),
+                "second_checked": row_dict.get("second_checked_at"),
+                "completed": row_dict.get("completed_at"),
+                "created": row_dict.get("created_at"),
+            },
+        }
+
+        # Parse thumbnail paths
+        try:
+            import json
+            paths_json = row_dict.get("thumbnail_variant_paths", "[]") or "[]"
+            result["thumbnail_variant_paths"] = json.loads(paths_json)
+        except Exception:
+            result["thumbnail_variant_paths"] = []
+
+        # Get channel learnings
+        channel_id = row_dict.get("channel_id")
+        if channel_id:
+            learnings = conn.execute(
+                "SELECT formula_type, total_tests, total_wins, avg_ctr_improvement "
+                "FROM title_formula_performance WHERE channel_id = ? "
+                "ORDER BY total_wins DESC",
+                (channel_id,),
+            ).fetchall()
+            result["formula_learnings"] = [dict(l) for l in learnings] if learnings else []
+
+        return result
+
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger("autotube.ab_test").error("Status fetch failed: %s", exc)
+        return {"status": "error", "message": str(exc)}
 
 
 @app.get("/api/logs")

@@ -168,17 +168,16 @@ SHORTS_NATIVE_SCHEDULE = [
 ]
 SHORTS_NATIVE_MAX_DAILY = 4
 
-# ── Shorts frequency targets (v14: 4/day per channel) ──────
+# ── Shorts frequency targets (v2: 8-10/day per channel) ──────
 # Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots).
-# v14: lowered from 6 to 4 — matches per-channel shorts_native_per_day (4).
-# Recovery planner no longer uses this floor (uses native_target + clip_target directly).
-MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "4"))
-MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "6"))
+# v2 (Aug 2026): Raised from 4/6 to 8/10 to support 65/35 clip/native split.
+MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "8"))
+MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "10"))
 
 # Conservative QUOTA cap: YouTube API default 10,000 units/day.
-# v14: aligned with updated per-channel config (4 native + ~6 clips = ~10/day).
+# v2: aligned with updated per-channel target (4 native + ~6 clips = ~10/day).
 MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
-    "MAX_DAILY_SHORTS_QUOTA_SAFE", "6"
+    "MAX_DAILY_SHORTS_QUOTA_SAFE", "10"
 ))  # Safe with default 10,000 unit quota
 
 # ── Shorts video/image mix strategy ──────────────────────────
@@ -302,6 +301,20 @@ COMMENT_REPLY_ENABLED = os.getenv("COMMENT_REPLY_ENABLED", "true").lower() == "t
 # ── Metadata reoptimization ────────────────────────────────────
 METADATA_OPTIMIZE_ENABLED = os.getenv("METADATA_OPTIMIZE_ENABLED", "true").lower() == "true"
 METADATA_OPTIMIZE_CTR_THRESHOLD = float(os.getenv("METADATA_OPTIMIZE_CTR_THRESHOLD", "3.0"))
+
+# ── A/B Testing (sequential title/thumbnail optimization) ───────
+# Global flag — enables the ABTestWorker in the scheduler loop.
+# When enabled, videos are tracked post-upload and titles/thumbnails
+# are optimized sequentially (never both in the same 48h window).
+# Quota-aware: prioritizes local DB reads, falls back to YouTube
+# Analytics API only when data is stale (>24h).
+ENABLE_AB_TESTING = os.getenv("ENABLE_AB_TESTING", "false").lower() == "true"
+AB_TEST_CTR_THRESHOLD = float(os.getenv("AB_TEST_CTR_THRESHOLD", "3.0"))
+AB_TEST_FIRST_CHECK_HOURS = int(os.getenv("AB_TEST_FIRST_CHECK_HOURS", "48"))
+AB_TEST_SECOND_CHECK_HOURS = int(os.getenv("AB_TEST_SECOND_CHECK_HOURS", "48"))
+AB_TEST_MIN_IMPRESSIONS = int(os.getenv("AB_TEST_MIN_IMPRESSIONS", "100"))
+AB_TEST_MAX_STALE_DAYS = int(os.getenv("AB_TEST_MAX_STALE_DAYS", "7"))
+AB_TEST_MIN_IMPRESSIONS_POST_CHANGE = int(os.getenv("AB_TEST_MIN_IMPRESSIONS_POST_CHANGE", "50"))
 
 # ── Logging ────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

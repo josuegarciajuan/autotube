@@ -334,13 +334,16 @@ class ShortsConfigUpdate(BaseModel):
     shorts_native_per_day: Optional[int] = None
     shorts_clip_per_day: Optional[int] = None
     shorts_clips_per_long: Optional[int] = None
+    shorts_per_day: Optional[int] = None          # v2: total daily target
+    shorts_native_ratio: Optional[float] = None   # v2: native/clip ratio
 
 
 @router.put("/shorts-config/{channel_id}")
 def update_shorts_planning(channel_id: int, data: ShortsConfigUpdate):
     """Update shorts planning config for a channel.
 
-    Accepts: shorts_enabled, shorts_native_per_day, shorts_clip_per_day.
+    Accepts: shorts_enabled, shorts_native_per_day, shorts_clip_per_day,
+             shorts_clips_per_long, shorts_per_day, shorts_native_ratio.
     Triggers shorts replan after update.
     """
     db = get_db()
@@ -357,6 +360,10 @@ def update_shorts_planning(channel_id: int, data: ShortsConfigUpdate):
         update_data["shorts_clip_per_day"] = max(0, min(10, data.shorts_clip_per_day))
     if data.shorts_clips_per_long is not None:
         update_data["shorts_clips_per_long"] = max(0, min(5, data.shorts_clips_per_long))
+    if data.shorts_per_day is not None:
+        update_data["shorts_per_day"] = max(1, min(15, data.shorts_per_day))
+    if data.shorts_native_ratio is not None:
+        update_data["shorts_native_ratio"] = max(0.10, min(0.90, data.shorts_native_ratio))
 
     ok = db.update_shorts_planning_config(channel_id, update_data)
     if not ok:

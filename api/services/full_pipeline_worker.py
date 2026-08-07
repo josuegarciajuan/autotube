@@ -1247,6 +1247,63 @@ def run_job(
                 return False
 
         # ═══════════════════════════════════════════════════════
+        # Phase 5.8: A/B Testing — generate thumbnail variants (if enabled)
+        # ═══════════════════════════════════════════════════════
+        ab_test_variant_paths = []
+        try:
+            from config.settings import ENABLE_AB_TESTING
+        except ImportError:
+            ENABLE_AB_TESTING = False
+        
+        if ENABLE_AB_TESTING and not skip_upload and action != "generate_only":
+            db.update_video(video_id, progress=88, progress_phase="ab_test_thumbnails")
+            logger.info("Phase 5.8/7: Generating A/B thumbnail variants...")
+            
+            try:
+                from pipeline.thumbnail_maker import ThumbnailMaker
+                from pipeline.thumbnail_brainstorm import ThumbnailBrainstorm
+                
+                title_for_thumb = (
+                    metadata.get("selected_title") if metadata else
+                    (video_data.get("titulo", titulo) if video_data else titulo)
+                )[:100]
+                script_text = script.get("guion", "") if script else ""
+                keywords = metadata.get("tags", []) if metadata else []
+                
+                channel_display = getattr(config, "CANAL_DISPLAY_NAME", canal)
+                channel_desc = getattr(config, "CHANNEL_ABOUT_SECTION", "")
+                channel_theme = getattr(config, "CANAL_NARRATIVE_STYLE", "")
+                
+                maker = ThumbnailMaker(config=config)
+                
+                ab_test_variant_paths = maker.make_variant_thumbnails(
+                    title=title_for_thumb,
+                    script_text=script_text,
+                    keywords=keywords,
+                    canal_slug=canal,
+                    channel_display_name=channel_display,
+                    channel_description=channel_desc,
+                    channel_theme=channel_theme,
+                    video_id=video_id,
+                    num_variants=3,
+                )
+                
+                if ab_test_variant_paths:
+                    # Update thumbnail_path to the first variant (will be uploaded)
+                    video_data["thumbnail_path"] = str(ab_test_variant_paths[0])
+                    db.update_video(
+                        video_id,
+                        thumbnail_path=str(ab_test_variant_paths[0]),
+                    )
+                    logger.info(
+                        "[AB] Generated %d thumbnail variants for video %s",
+                        len(ab_test_variant_paths), video_id,
+                    )
+            except Exception as ab_exc:
+                logger.warning("[AB] Thumbnail variant generation failed (non-fatal): %s", ab_exc)
+                ab_test_variant_paths = []
+
+        # ═══════════════════════════════════════════════════════
         # Phase 6: Upload
         # ═══════════════════════════════════════════════════════
         skip_upload = not upload or test_mode or action == "generate_only"
@@ -1383,6 +1440,28 @@ def run_job(
                 worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
                 db.update_video(video_id, progress=100, status=worker_status)
+
+                # ── A/B Testing: create initial test record ──────────
+                if ab_test_variant_paths:
+                    try:
+                        title_v1 = (
+                            metadata.get("selected_title") if metadata else
+                            (video_data.get("titulo", titulo) if video_data else titulo)
+                        )
+                        db.conn.execute("""
+                            INSERT INTO video_ab_tests
+                            (video_id, yt_video_id, channel_id, phase, title_v1,
+                             thumbnail_variant_paths, thumbnail_variant_active)
+                            VALUES (?, ?, ?, 'pending', ?, ?, 1)
+                        """, (
+                            video_id, yt_video_id, channel_id,
+                            (title_v1 or "")[:100],
+                            json.dumps([str(p) for p in ab_test_variant_paths]),
+                        ))
+                        db.conn.commit()
+                        logger.info("[AB] A/B test record created for video %s (3 thumbnail variants)", video_id)
+                    except Exception as ab_record_exc:
+                        logger.warning("[AB] Failed to create A/B test record: %s", ab_record_exc)
 
                 # ── Cross-platform video publishing (Facebook, Rumble, TikTok) ──
                 # Uploads the same video file to other monetizable platforms.

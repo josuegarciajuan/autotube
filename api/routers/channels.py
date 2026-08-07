@@ -568,6 +568,52 @@ def get_channel_shorts_stats(channel_id: int):
     return {"ok": True, "shorts_stats": stats}
 
 
+@router.get("/{channel_id}/analytics/short-types")
+def get_short_type_comparison(channel_id: int, days: int = 30):
+    """Comparativa native vs clip shorts: views, subs, retention, CTR.
+
+    Args:
+        channel_id: Channel ID.
+        days: Lookback window for performance analysis (default 30).
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    native = db.get_short_type_stats(channel_id, "native", days)
+    clip = db.get_short_type_stats(channel_id, "clip", days)
+
+    # ── Ratio summary ──
+    total_shorts = native["total_shorts"] + clip["total_shorts"]
+    native_pct = round(native["total_shorts"] / max(total_shorts, 1) * 100, 1)
+
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "channel_slug": ch.get("slug", ""),
+        "days": days,
+        "total_shorts": total_shorts,
+        "native_pct": native_pct,
+        "native": native,
+        "clip": clip,
+        "comparison": {
+            "views_ratio": (
+                round(native["avg_views"] / max(clip["avg_views"], 1), 2)
+                if native["avg_views"] and clip["avg_views"] else None
+            ),
+            "subs_per_short_ratio": (
+                round(native["subs_per_short"] / max(clip["subs_per_short"], 0.001), 2)
+                if native["subs_per_short"] and clip["subs_per_short"] else None
+            ),
+            "retention_ratio": (
+                round(native["avg_view_duration"] / max(clip["avg_view_duration"], 0.1), 2)
+                if native["avg_view_duration"] and clip["avg_view_duration"] else None
+            ),
+        },
+    }
+
+
 @router.get("/{channel_id}/videos-aggregate-stats")
 def get_channel_videos_aggregate_stats(channel_id: int):
     """Vistas/likes/comentarios agregados de vídeos largos del canal (desde BD)."""
