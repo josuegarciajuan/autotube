@@ -10,6 +10,7 @@ import importlib
 import inspect
 import json
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -30,9 +31,19 @@ def _load_defaults_module() -> object | None:
 
 
 def _load_python_module(slug: str) -> object | None:
-    """Import ``config.{slug}_config`` as a Python module."""
+    """Import ``config.{slug}_config`` as a Python module.
+
+    Forces a reload if the module was already imported — this ensures
+    ``sync_config_to_db`` always picks up the latest on-disk values
+    instead of stale cached module attributes.
+    """
+    module_name = f"config.{slug}_config"
     try:
-        return importlib.import_module(f"config.{slug}_config")
+        mod = importlib.import_module(module_name)
+        # If already cached, reload to pick up file changes since last import
+        if module_name in sys.modules:
+            mod = importlib.reload(mod)
+        return mod
     except ImportError:
         logger.warning("No Python config module for slug=%s", slug)
         return None
