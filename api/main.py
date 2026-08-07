@@ -764,6 +764,7 @@ async def _schedule_checker_loop():
             now = time.time()
 
             if not _paused:
+                local_hour = time.localtime().tm_hour
                 await _process_due_schedules()
                 await _process_shorts_slots()
                 await _process_upload_slots()
@@ -867,7 +868,6 @@ async def _schedule_checker_loop():
                     last_collab_run = now
 
                 # Smart replan: every 30 min during active hours (10:00-23:00)
-                local_hour = time.localtime().tm_hour
                 if 10 <= local_hour <= 23 and now - last_smart_replan > 1800:
                     try:
                         from api.services.planning_service import smart_replan

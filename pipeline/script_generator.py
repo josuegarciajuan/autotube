@@ -574,6 +574,11 @@ class ScriptGenerator:
                 model_name, pool_position, phase,
             )
 
+            # Inject the correct model_id for this pool entry so that
+            # OpenAI-compatible clients receive their actual model name
+            # rather than the hardcoded LLM_MODEL_SCRIPT from call sites.
+            call_kwargs["model"] = entry.model_id
+
             for attempt_num in range(1, self._llm_retries + 1):
                 t0 = time.time()
                 try:
