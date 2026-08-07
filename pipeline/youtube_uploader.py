@@ -584,15 +584,31 @@ class YouTubeUploader:
     def update_description(self, video_id: str, description: str) -> dict:
         """Update the description of an existing YouTube video.
 
-        Uses videos().update() — quota cost: 50 units.
+        Uses videos().list() to fetch current title (1 unit) + update() (50 units)
+        because the YouTube API requires `title` on any snippet update.
 
         Returns {updated: True, yt_video_id: str} or raises HttpError.
         """
         service = self._get_service()
 
+        # Fetch current title — YouTube API requires `title` on snippet updates
+        # and rejects the request with HTTP 400 if title is missing or empty.
+        list_response = service.videos().list(
+            part="snippet",
+            id=video_id,
+        ).execute()
+
+        items = list_response.get("items", [])
+        if not items:
+            raise ValueError(f"Video {video_id} not found or not accessible "
+                             f"(channel: {self.channel_slug})")
+
+        current_title = items[0]["snippet"]["title"]
+
         body = {
             "id": video_id,
             "snippet": {
+                "title": current_title,
                 "description": description[:5000],
             },
         }
