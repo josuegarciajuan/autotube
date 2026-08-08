@@ -1061,7 +1061,7 @@ def run_job(
             
             if metadata and isinstance(metadata, dict):
                 # ── Marathon title validation ──
-                if is_marathon and getattr(cfg, "MARATHON_VALIDATE_TITLE", True):
+                if is_marathon and getattr(config, "MARATHON_VALIDATE_TITLE", True):
                     try:
                         from pipeline.marathon_title_validator import validate_marathon_title
                         import random as _rnd
@@ -1081,8 +1081,8 @@ def run_job(
 
                         content_summary = script.get("guion", "")[:2000] if script.get("guion") else ""
 
-                        formulas = list(getattr(cfg, "MARATHON_TITLE_FORMULAS", ["{topic}: Documental Completo"]))
-                        hook_types = list(getattr(cfg, "MARATHON_HOOK_TYPES", ["revelacion_impactante"]))
+                        formulas = list(getattr(config, "MARATHON_TITLE_FORMULAS", ["{topic}: Documental Completo"]))
+                        hook_types = list(getattr(config, "MARATHON_HOOK_TYPES", ["revelacion_impactante"]))
 
                         title_formula = _rnd.choice(formulas)
                         hook_type = _rnd.choice(hook_types)
