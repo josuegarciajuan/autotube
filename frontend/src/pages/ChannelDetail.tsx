@@ -255,6 +255,7 @@ export default function ChannelDetail() {
   // Upload confirmation modal (before generation)
   const [showUploadConfirm, setShowUploadConfirm] = useState(false)
   const [showSourceModeModal, setShowSourceModeModal] = useState(false)
+  const [showTypeComparison, setShowTypeComparison] = useState(false)
   const [sourceMode, setSourceMode] = useState<'original' | 'viral'>('original')
   
   // Short creation state (per video)
@@ -941,12 +942,6 @@ export default function ChannelDetail() {
             )}
             </div>
 
-            {/* v2: Native vs Clip comparison */}
-            {channel?.id && channelShortsStats?.published > 3 && (
-              <div className="mt-4">
-                <ShortTypeComparison channelId={channel.id} />
-              </div>
-            )}
             {/* Combined total */}
             {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
               <div className="flex items-center gap-2 text-xs sm:text-sm mt-1.5 pt-1.5 border-t border-surface-border/40">
@@ -1020,6 +1015,13 @@ export default function ChannelDetail() {
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-neon-cyan/30 text-neon-cyan rounded-full text-xs hover:bg-dark-600 transition-colors">
               <Settings size={12} /> <span className="hidden sm:inline">Config</span><Zap size={12} className="sm:hidden" />
             </button>
+            {channelShortsStats?.published > 3 && (
+              <button onClick={() => setShowTypeComparison(true)}
+                title="Comparativa: Shorts Nativos vs Clips — rendimiento relativo"
+                className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-indigo-500/30 text-indigo-400 rounded-full text-xs hover:bg-dark-600 transition-colors">
+                <BarChart3 size={12} /> <span className="hidden sm:inline">Native vs Clip</span><Scissors size={12} className="sm:hidden" />
+              </button>
+            )}
             <button onClick={() => setShowSourceModeModal(true)}
               title="Generar video con IA y publicar en YouTube"
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-red-600/80 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
@@ -1901,6 +1903,24 @@ export default function ChannelDetail() {
               </button>
               <button onClick={() => setShowAuthModal(false)} className="px-4 py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500">Cancelar</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Native vs Clip Modal --- */}
+      {showTypeComparison && channel?.id && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowTypeComparison(false)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto animate-slide-up space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+                <BarChart3 size={20} className="text-indigo-400" /> Native vs Clip
+              </h3>
+              <button onClick={() => setShowTypeComparison(false)}
+                className="p-1.5 bg-dark-600 text-gray-400 rounded-lg hover:bg-dark-500 transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <ShortTypeComparison channelId={channel.id} />
           </div>
         </div>
       )}

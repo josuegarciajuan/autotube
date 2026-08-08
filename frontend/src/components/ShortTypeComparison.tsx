@@ -189,6 +189,19 @@ export default function ShortTypeComparison({ channelId }: Props) {
 
   return (
     <div className="space-y-4">
+      {/* ── Explanatory block ─────────────────────────────────────── */}
+      <div className="rounded-xl border border-indigo-500/15 bg-indigo-500/[0.04] p-3 text-xs text-slate-400 leading-relaxed space-y-1.5">
+        <p>
+          <strong className="text-indigo-400">Nativo:</strong> Short creado desde cero con producci&oacute;n original (IA genera guion, voz, im&aacute;genes/video para formato vertical 9:16).
+        </p>
+        <p>
+          <strong className="text-amber-400">Clip:</strong> Recorte autom&aacute;tico extra&iacute;do de un video largo ya publicado, reencuadrado a formato vertical (estrategia de reutilizaci&oacute;n de contenido).
+        </p>
+        <p className="text-[10px] text-slate-500 pt-0.5">
+          Los ratios <strong>N/C</strong> del pie indican la relaci&oacute;n Native &divide; Clip. Un valor &gt;1 significa que el formato nativo rinde mejor en esa m&eacute;trica.
+        </p>
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -256,7 +269,8 @@ export default function ShortTypeComparison({ channelId }: Props) {
 
       {/* Comparison footer */}
       <div className="grid grid-cols-3 gap-3">
-        <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+          <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3"
+               title="Vistas promedio Native ÷ Vistas promedio Clip. >1 = los nativos tienen más visitas.">
           <TrendingUp className={`w-4 h-4 ${ratioColor(comparison.views_ratio)}`} />
           <div>
             <div className="text-[10px] text-slate-500">Vistas (N/C)</div>
@@ -266,7 +280,8 @@ export default function ShortTypeComparison({ channelId }: Props) {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+        <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3"
+             title="Suscriptores ganados por short Native ÷ suscriptores por short Clip. >1 = los nativos atraen más suscriptores.">
           <Users className={`w-4 h-4 ${ratioColor(comparison.subs_per_short_ratio)}`} />
           <div>
             <div className="text-[10px] text-slate-500">Subs/short (N/C)</div>
@@ -276,7 +291,8 @@ export default function ShortTypeComparison({ channelId }: Props) {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+        <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] p-3"
+             title="Duración media de visualización Native ÷ Clip. >1 = los nativos retienen más tiempo al espectador.">
           <Clock className={`w-4 h-4 ${ratioColor(comparison.retention_ratio)}`} />
           <div>
             <div className="text-[10px] text-slate-500">Retención (N/C)</div>
