@@ -7,6 +7,8 @@ import StatusBar from './StatusBar'
 import { api } from '../../lib/api'
 import { useQuotaStatus } from '../../hooks/useQueries'
 
+const SHELL_BUILD_ID = 'quota-v2.6'
+
 export default function Shell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [sessionWarnings, setSessionWarnings] = useState<{account: string; channels: string[]}[]>([])
@@ -90,6 +92,7 @@ export default function Shell() {
                 <span className="text-red-200/80 text-xs flex items-center gap-1">
                   <Clock size={12} />
                   Recarga a las {resetTimeDisplay}
+                  <span className="hidden">{SHELL_BUILD_ID}</span>
                 </span>
               )}
               {quotaStatus.remaining_hours != null && quotaStatus.remaining_hours > 0 && (
