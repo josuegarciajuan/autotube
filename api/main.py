@@ -309,8 +309,11 @@ async def lifespan(app: FastAPI):
     # Launch upload health checker in background (processing status monitoring)
     health_checker_task = asyncio.create_task(_upload_health_checker_loop())
     
-    # Launch shorts backfill in background (gradual long-form linking)
-    shorts_backfill_task = asyncio.create_task(_shorts_backfill_loop())
+    # ── Shorts backfill PERMANENTLY DISABLED (see AGENTS.md invariant) ──
+    # New shorts already include long-form links via build_short_description() at upload time.
+    # The backfill loop consumed ~36k YT API quota units/day on already-linked shorts.
+    # shorts_backfill_task = asyncio.create_task(_shorts_backfill_loop())
+    shorts_backfill_task = None
     
     # Launch quota recovery loop (auto-resume scheduler after 6h)
     quota_recovery_task = asyncio.create_task(_quota_recovery_loop())
@@ -328,7 +331,7 @@ async def lifespan(app: FastAPI):
     health_monitor_task.cancel()
     publish_verify_task.cancel()
     health_checker_task.cancel()
-    shorts_backfill_task.cancel()
+    shorts_backfill_task = None  # permanently disabled
     quota_recovery_task.cancel()
     try:
         await schedule_task
@@ -344,10 +347,6 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await health_checker_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await shorts_backfill_task
     except asyncio.CancelledError:
         pass
     try:

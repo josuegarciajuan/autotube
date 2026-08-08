@@ -1009,6 +1009,9 @@ def migrate_v2(db_path: str = None):
     # ── v31: A/B testing tables (video_ab_tests, title_formula_performance) ──
     _migrate_v31(conn, logger)
     
+    # ── v32: Shorts backfill disablement cleanup ──
+    _migrate_v32(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -2049,6 +2052,55 @@ def _migrate_v31(conn, logger):
                 logger.info("Migration v31: added %s column to video_stats_history", col_name)
             except Exception as exc:
                 logger.warning("Migration v31: failed to add %s: %s", col_name, exc)
+    
+    conn.commit()
+
+
+def _migrate_v32(conn, logger):
+    """Idempotent v32 migration: mark all published shorts as longform_linked.
+    
+    BACKGROUND: The shorts backfill service consumed ~36k YT API quota units/day
+    by calling videos().update() for 15 shorts every 30 min. This was permanently
+    disabled because ALL new shorts already include long-form links at upload time
+    via build_short_description() in all 7 upload code paths.
+    
+    This migration:
+    1. Marks all published shorts as longform_linked=1 (description already has the link)
+    2. Sets system_state.shorts_backfill_completed = "true"
+    
+    Zero YouTube API calls — database-only.
+    """
+    import time as _time
+    
+    # 1. Mark all published shorts with youtube_ids as already linked
+    result = conn.execute("""
+        UPDATE shorts 
+        SET longform_linked = 1, 
+            longform_linked_at = datetime('now','localtime')
+        WHERE status = 'published' 
+          AND youtube_id IS NOT NULL 
+          AND youtube_id != ''
+          AND (longform_linked = 0 OR longform_linked IS NULL)
+    """)
+    updated = conn.rowcount if hasattr(conn, 'rowcount') else result.rowcount
+    if updated:
+        logger.info("Migration v32: marked %d published shorts as longform_linked=1", updated)
+    else:
+        logger.debug("Migration v32: no shorts needed longform_linked update")
+    
+    # 2. Set backfill state to completed
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO system_state (key, value, updated_at)
+            VALUES ('shorts_backfill_completed', 'true', datetime('now','localtime'))
+        """)
+        conn.execute("""
+            INSERT OR REPLACE INTO system_state (key, value, updated_at)
+            VALUES ('shorts_backfill_updated', ?, datetime('now','localtime'))
+        """, (str(updated if updated else 0),))
+        logger.info("Migration v32: shorts_backfill state marked as completed")
+    except Exception as exc:
+        logger.debug("Migration v32: system_state update skipped (%s)", exc)
     
     conn.commit()
 

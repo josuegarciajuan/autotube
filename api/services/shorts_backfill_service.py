@@ -1,10 +1,14 @@
 """Gradual backfill: add long-form links to existing short descriptions.
 
-Processes shorts in small batches (10-15 at a time) every 30 minutes
-to stay well under YouTube API quota (50 units per video update).
+⚠️  PERMANENTLY DISABLED — see AGENTS.md invariant "Shorts Backfill DESACTIVADO".
 
-Survives server restarts via system_state persistence.
-Runs until all published shorts have been backfilled.
+New shorts already include long-form links via build_short_description() at
+upload time (7 code paths). This service only existed for legacy shorts
+published before cross-promotion was implemented, and consumed ~36k YT API
+quota units/day (15 shorts × 51 units every 30 min).
+
+To re-enable: set BACKFILL_ENABLED = True and uncomment the loop in api/main.py.
+You MUST justify quota impact before doing so.
 """
 
 import logging
@@ -13,6 +17,9 @@ import time
 from pathlib import Path
 
 logger = logging.getLogger("autotube.backfill")
+
+# ── Master kill-switch ─────────────────────────────────────
+BACKFILL_ENABLED = False  # PERMANENTLY DISABLED per AGENTS.md invariant
 
 # ── Tuning ────────────────────────────────────────────────
 BATCH_SIZE = 15               # shorts per batch (15 × 50 = 750 quota units)
@@ -52,6 +59,9 @@ def _get_pending_count() -> int:
 
 def is_backfill_complete() -> bool:
     """Quick check: are all shorts already linked?"""
+    # ── Master kill-switch: always report complete ──
+    if not BACKFILL_ENABLED:
+        return True
     from database.db_extended import ExtendedDatabase
     db = ExtendedDatabase()
     # If the state says completed, double-check with a real count
@@ -71,6 +81,10 @@ def run_backfill_batch() -> dict:
     Returns:
         {"updated": N, "errors": N, "done": bool}
     """
+    # ── Master kill-switch ──
+    if not BACKFILL_ENABLED:
+        return {"updated": 0, "errors": 0, "done": True}
+
     from database.db_extended import ExtendedDatabase
     from config.config_bridge import get_channel_config
     from pipeline.shorts_cross_promote import (

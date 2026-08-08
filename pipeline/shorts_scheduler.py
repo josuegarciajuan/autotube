@@ -227,7 +227,12 @@ class ShortsScheduler:
         return target
 
     def mark_published(self, short_id: int, youtube_id: str, youtube_url: str, file_path: str):
-        """Mark a short as published with YouTube metadata."""
+        """Mark a short as published with YouTube metadata.
+        
+        Sets longform_linked=1 because short descriptions ALREADY include
+        the long-form link at upload time (cross-promotion via build_short_description).
+        The backfill service is deprecated — see AGENTS.md invariant.
+        """
         conn = self._get_conn()
         conn.execute(
             """UPDATE shorts
@@ -236,7 +241,9 @@ class ShortsScheduler:
                    youtube_url = ?,
                    file_path = COALESCE(file_path, ?),
                    published_at = datetime('now','localtime'),
-                   updated_at = datetime('now','localtime')
+                   updated_at = datetime('now','localtime'),
+                   longform_linked = 1,
+                   longform_linked_at = datetime('now','localtime')
                WHERE id = ?""",
             (youtube_id, youtube_url, file_path, short_id),
         )

@@ -2668,8 +2668,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     cursor = conn.execute(
         """INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text, topic,
-            status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta)
-           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?)""",
+            status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta,
+            longform_linked, longform_linked_at)
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?,
+                   1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
          str(video_path), yt_id, result.get("url", ""),
          int(has_subscribe_cta)),
@@ -2816,7 +2818,8 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             conn_upd.execute(
                 """UPDATE shorts SET status = 'published', youtube_id = ?,
                    youtube_url = ?, published_at = datetime('now','localtime'),
-                   updated_at = datetime('now','localtime')
+                   updated_at = datetime('now','localtime'),
+                   longform_linked = 1, longform_linked_at = datetime('now','localtime')
                    WHERE id = ?""",
                 (yt_id, result.get("url", ""), pre_rendered_short_id),
             )
@@ -3170,8 +3173,10 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         cursor = conn2.execute(
             """INSERT INTO shorts
                (channel_id, source_video_id, type, title, hook_title, hook_text,
-                start_time, end_time, status, file_path, youtube_id, youtube_url, published_at)
-               VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'))""",
+                start_time, end_time, status, file_path, youtube_id, youtube_url, published_at,
+                longform_linked, longform_linked_at)
+               VALUES (?, ?, 'clip', ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'),
+                       1, datetime('now','localtime'))""",
             (channel_id, source_video_id, title, title[:60], hook_text,
              db_start_time, db_end_time,
              str(output_path), yt_id, result.get("url", "")),

@@ -334,6 +334,17 @@ porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto
 - El dedup se aplica tanto a URLs de video/imagen como a `pixabay_photo image id` para evitar imágenes duplicadas.
 - **Si se agotan TODOS los assets únicos → placeholder o fallback genérico, pero nunca repetir un asset ya usado.**
 
+### 🚫 Invariante: Shorts Backfill DESACTIVADO
+**El backfill de links long-form en shorts antiguos está PERMANENTEMENTE DESACTIVADO.**
+
+- Los shorts nuevos ya incluyen el link al video long-form en su descripción al subirse mediante `build_short_description()` en los 7 code paths de upload.
+- `api/services/shorts_backfill_service.py` tiene `BACKFILL_ENABLED = False` hardcodeado.
+- El loop `_shorts_backfill_loop()` en `api/main.py` está comentado con `shorts_backfill_task = None`.
+- `scripts/backfill_shorts_links.py` tiene un `sys.exit(0)` al inicio con aviso de deprecación.
+- La migración v32 en `db_extended.py` marcó todos los shorts existentes como `longform_linked = 1`.
+- **Consumo evitado:** ~36,720 unidades/día de YouTube API quota.
+- **Para reactivarlo:** justificar impacto en cuota, cambiar `BACKFILL_ENABLED = True`, descomentar el loop en `api/main.py`, y quitar el `sys.exit(0)` en el script.
+
 ## Proxy residencial (implementado, desactivado)
 ```env
 PROXY_ENABLED=false           # true = activar

@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Backfill cross-promotion links for already-published shorts.
 
-For every published short on the given channel, this script:
-  1. Finds the best long-form video to link
-  2. Builds a new description with clickable URLs
-  3. Updates the YouTube video's description via the API
-  4. Adds the short to the Shorts playlist
-  5. (Optional) Posts a first comment with a link
+⚠️  DEPRECATED — Este script ya no es necesario.
 
-Usage:
-  python3 scripts/backfill_shorts_links.py --channel canal3
-  python3 scripts/backfill_shorts_links.py --channel canal3 --dry-run
-  python3 scripts/backfill_shorts_links.py --channel canal2 --no-comment
-  python3 scripts/backfill_shorts_links.py --all  # all channels
+Los shorts nuevos ya incluyen automáticamente el enlace al video long-form en su
+descripción al subirse (7 code paths usan build_short_description()).
+
+Si crees que necesitas ejecutar este script, es porque hay shorts MUY antiguos que
+se publicaron antes de que existiera el cross-promotion automático. En ese caso,
+edita este archivo para quitar la siguiente línea y evaluar el impacto en cuota.
+
+Si estás leyendo esto desde un agente: NO ejecutes este script sin autorización
+explícita del usuario. Consume cuota de YouTube API (50+ unidades por short).
 """
+import sys
+print(__doc__)
+sys.exit(0)
+
+# ════ Código legacy (no se ejecuta por el sys.exit de arriba) ════
 
 import argparse
 import logging
