@@ -221,9 +221,14 @@ def _check_and_alert_pollo_credits(db) -> None:
         already_alerted = acc_status.get("alerted", False)
 
         if credits_exhausted and not already_alerted:
+            # Use deterministic hash of account label as entity_id so each
+            # account gets its own alert row (prevents dedup treating both
+            # accounts as the same alert when entity_id=NULL).
+            account_entity_id = abs(hash(label)) % (2**31)
             create_alert(
                 db,
                 entity_type="system",
+                entity_id=account_entity_id,
                 alert_type="pollo_credits_exhausted",
                 severity="warning",
                 title=f"Pollo.ai: cuenta {label} sin créditos",
