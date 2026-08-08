@@ -946,7 +946,8 @@ def run_job(
                 error_msg = "No se encontraron imagenes ni videos"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-                db.update_video(video_id, status="error", progress_phase="media")
+                db.update_video(video_id, status="error", progress_phase="media",
+                                error_message=error_msg)
                 return False
             
             db.update_video(video_id, progress=55, progress_phase="media")
@@ -1255,6 +1256,8 @@ def run_job(
         except ImportError:
             ENABLE_AB_TESTING = False
         
+        skip_upload = not upload or test_mode or action == "generate_only"
+        
         if ENABLE_AB_TESTING and not skip_upload and action != "generate_only":
             db.update_video(video_id, progress=88, progress_phase="ab_test_thumbnails")
             logger.info("Phase 5.8/7: Generating A/B thumbnail variants...")
@@ -1306,7 +1309,6 @@ def run_job(
         # ═══════════════════════════════════════════════════════
         # Phase 6: Upload
         # ═══════════════════════════════════════════════════════
-        skip_upload = not upload or test_mode or action == "generate_only"
         if skip_upload:
             skip_reason = "Test mode" if test_mode else ("Phase 1 only (generate_only)" if action == "generate_only" else "Upload disabled")
             logger.info("Phase 7/7: %s — skipping upload (video stays local)", skip_reason)
