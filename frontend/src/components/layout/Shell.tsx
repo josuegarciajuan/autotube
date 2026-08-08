@@ -1,15 +1,23 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Outlet } from 'react-router-dom'
-import { AlertTriangle, ExternalLink } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Clock } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import StatusBar from './StatusBar'
 import { api } from '../../lib/api'
+import { useQuotaStatus } from '../../hooks/useQueries'
 
 export default function Shell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [sessionWarnings, setSessionWarnings] = useState<{account: string; channels: string[]}[]>([])
   const [sessionLoading, setSessionLoading] = useState(true)
+  const { data: quotaStatus } = useQuotaStatus()
+
+  const resetTimeDisplay = useMemo(() => {
+    if (!quotaStatus?.exhausted || !quotaStatus?.reset_at_utc) return null
+    const local = new Date(quotaStatus.reset_at_utc)
+    return local.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+  }, [quotaStatus])
 
   useEffect(() => {
     const checkSessions = async () => {
@@ -65,6 +73,32 @@ export default function Shell() {
                     python3 scripts/yt_browser_login.py --account {w.account}
                   </code>
                 ))}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ── YouTube API quota warning banner ── */}
+        {quotaStatus?.exhausted && (
+          <div className="flex-shrink-0 bg-red-500/10 border-b border-red-500/25 px-4 py-2.5">
+            <div className="flex items-center gap-2.5 text-sm">
+              <AlertTriangle size={16} className="text-red-400 flex-shrink-0" />
+              <span className="text-red-300 font-medium">
+                Cuota YouTube API agotada
+              </span>
+              {resetTimeDisplay && (
+                <span className="text-red-200/80 text-xs flex items-center gap-1">
+                  <Clock size={12} />
+                  Recarga a las {resetTimeDisplay}
+                </span>
+              )}
+              {quotaStatus.remaining_hours != null && quotaStatus.remaining_hours > 0 && (
+                <span className="text-red-400/70 text-xs">
+                  (en ~{quotaStatus.remaining_hours.toFixed(1)}h)
+                </span>
+              )}
+              <span className="text-red-300/60 text-xs ml-auto">
+                No se harán publicaciones ni recolecciones hasta entonces
               </span>
             </div>
           </div>

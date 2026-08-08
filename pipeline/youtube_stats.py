@@ -19,6 +19,22 @@ from config.settings import TOKENS_DIR
 logger = logging.getLogger(__name__)
 
 
+def _set_quota_exhausted_global(channel_slug: str = "stats_collector"):
+    """Set global quota exhausted flag so all YT API callers know to pause.
+    
+    Called from within stats collection when a 403 quotaExceeded is detected.
+    This ensures the scheduler and UI both become aware immediately,
+    not just when the uploader eventually hits the same error.
+    """
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        _db.set_quota_exhausted(channel_slug=channel_slug)
+        logger.warning("YouTube Data API quota exhausted — scheduler paused globally")
+    except Exception as exc:
+        logger.debug("Could not set global quota flag: %s", exc)
+
+
 class YouTubeStatsFetcher:
     """Fetch YouTube stats for videos and channels."""
 
@@ -107,9 +123,10 @@ class YouTubeStatsFetcher:
             logger.warning("Stats fetch failed for %s: %s", yt_video_id, exc)
             result = self._mock_stats(yt_video_id)
             result["is_mock"] = True
-            # Detect quota exhaustion early
+            # Detect quota exhaustion early — set global flag
             if "quotaExceeded" in str(exc):
                 result["_quota_exhausted"] = True
+                _set_quota_exhausted_global("stats_collector")
             return result
 
     # ── Batch Video Stats (50 IDs per call — 50x less quota usage) ──
@@ -180,6 +197,7 @@ class YouTubeStatsFetcher:
                         // self._DATA_API_BATCH_SIZE,
                     )
                     result["_quota_exhausted"] = True
+                    _set_quota_exhausted_global("stats_collector")
                     return result
                 logger.warning("Batch stats fetch failed: %s", exc)
                 for vid in batch:

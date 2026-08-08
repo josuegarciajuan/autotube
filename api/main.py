@@ -566,73 +566,77 @@ async def _quota_recovery_loop():
     
     await _asyncio.sleep(120)  # Let API stabilize first
     
-    _logger.info("Quota recovery loop started (check every 30 min, auto-resume after 6h)")
-    
-    RECOVERY_HOURS = 6
-    
+    _logger.info("Quota recovery loop started (check every 30 min, auto-resume at midnight PT + safety buffer)")
+
+    SAFETY_MINUTES = 15  # extra buffer after reset before resuming
+
     while True:
         try:
             from database.db_extended import ExtendedDatabase
             _db = ExtendedDatabase()
-            
+
             paused = _db.get_system_state("scheduler_paused") == "true"
             exhausted_at_str = _db.get_system_state("quota_exhausted_at")
-            
+
             if paused and exhausted_at_str:
-                try:
-                    exhausted_at = _dt.fromisoformat(exhausted_at_str)
-                    if exhausted_at.tzinfo is None:
-                        exhausted_at = exhausted_at.replace(tzinfo=_tz.utc)
-                    elapsed = _dt.now(_tz.utc) - exhausted_at
-                    
-                    if elapsed >= _td(hours=RECOVERY_HOURS):
+                # Calculate actual reset time (midnight PT) instead of blind 6h
+                reset_info = _db.get_quota_reset_time()
+                now_utc = _dt.now(_tz.utc)
+
+                if reset_info["exhausted"] and reset_info["reset_at_utc"]:
+                    reset_at = _dt.fromisoformat(reset_info["reset_at_utc"])
+                    if reset_at.tzinfo is None:
+                        reset_at = reset_at.replace(tzinfo=_tz.utc)
+                    reset_with_safety = reset_at + _td(minutes=SAFETY_MINUTES)
+
+                    if now_utc >= reset_with_safety:
                         _logger.info(
-                            "Quota recovery: %s elapsed since quota exhausted — auto-resuming scheduler",
-                            elapsed,
+                            "Quota recovery: reset time %s reached (+%dmin buffer) — auto-resuming scheduler",
+                            reset_at.strftime("%Y-%m-%d %H:%M UTC"), SAFETY_MINUTES,
                         )
-                        _db.clear_quota_exhausted()
-                        
-                        # Resolve quota alerts
-                        try:
-                            with _db._connect() as _conn:
-                                _conn.execute(
-                                    """UPDATE pipeline_alerts 
-                                       SET resolved = 1, resolved_at = datetime('now')
-                                       WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
-                                )
-                                _conn.commit()
-                        except Exception:
-                            pass
-                        
-                        # Log lifecycle event
-                        try:
-                            from api.services.lifecycle_monitor import log_event as _le
-                            _le(_db, entity_type='system', entity_id=0, channel_id=None,
-                                event='quota_recovered', status='info',
-                                message=f'Scheduler auto-resumed after {elapsed}')
-                        except Exception:
-                            pass
-                        
-                        # Broadcast update to WebSocket clients
-                        try:
-                            from api.routers.monitor import broadcast_monitor_update
-                            await broadcast_monitor_update({
-                                "type": "quota_recovered",
-                                "message": "Scheduler auto-resumed after quota exhaustion",
-                                "elapsed_hours": round(elapsed.total_seconds() / 3600, 1),
-                            })
-                        except Exception:
-                            pass
-                        
-                        _logger.info("Quota recovery complete — scheduler resumed")
                     else:
-                        remaining = _td(hours=RECOVERY_HOURS) - elapsed
+                        remaining = (reset_with_safety - now_utc).total_seconds() / 3600
                         _logger.debug(
-                            "Quota recovery: %s elapsed, %s remaining until auto-resume",
-                            elapsed, remaining,
+                            "Quota recovery: %s until reset + safety buffer (%.1fh remaining)",
+                            reset_with_safety.strftime("%Y-%m-%d %H:%M UTC"), remaining,
                         )
-                except Exception as _parse_err:
-                    _logger.debug("Could not parse exhausted_at timestamp: %s", _parse_err)
+                        await _asyncio.sleep(1800)  # 30 min
+                        continue
+
+                    _db.clear_quota_exhausted()
+
+                    # Resolve quota alerts
+                    try:
+                        with _db._connect() as _conn:
+                            _conn.execute(
+                                """UPDATE pipeline_alerts 
+                                   SET resolved = 1, resolved_at = datetime('now')
+                                   WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
+                            )
+                            _conn.commit()
+                    except Exception:
+                        pass
+
+                    # Log lifecycle event
+                    try:
+                        from api.services.lifecycle_monitor import log_event as _le
+                        _le(_db, entity_type='system', entity_id=0, channel_id=None,
+                            event='quota_recovered', status='info',
+                            message='Scheduler auto-resumed (midnight PT reached)')
+                    except Exception:
+                        pass
+
+                    # Broadcast update to WebSocket clients
+                    try:
+                        from api.routers.monitor import broadcast_monitor_update
+                        await broadcast_monitor_update({
+                            "type": "quota_recovered",
+                            "message": "Scheduler auto-resumed after midnight PT quota reset",
+                        })
+                    except Exception:
+                        pass
+
+                    _logger.info("Quota recovery complete — scheduler resumed")
         except Exception as _exc:
             _logger.debug("Quota recovery loop error: %s", _exc)
         
@@ -689,6 +693,20 @@ async def _shorts_backfill_loop():
         except Exception as exc:
             logger.warning("Shorts backfill error: %s", exc)
             await asyncio.sleep(600)  # 10 min on error, then retry
+
+
+def _quota_exhausted_safe() -> bool:
+    """Check if YouTube quota is exhausted, catching all errors safely.
+    
+    Returns True if quota IS exhausted (skip API calls).
+    Returns False if quota is OK or if the check itself failed (fail open).
+    """
+    try:
+        from database.db_extended import ExtendedDatabase
+        _qdb = ExtendedDatabase()
+        return _qdb.is_quota_exhausted()
+    except Exception:
+        return False  # fail open — allow calls if DB is unreachable
 
 
 async def _schedule_checker_loop():
@@ -858,7 +876,8 @@ async def _schedule_checker_loop():
                     last_standalone_dispatch = now
 
                 # Collaboration engine: daily at 3:00-4:00 UTC (off-peak)
-                if 3 <= local_hour <= 4 and now - last_collab_run > 82800:  # ~23h
+                # ── Quota guard: skip if exhausted ──
+                if not _quota_exhausted_safe() and 3 <= local_hour <= 4 and now - last_collab_run > 82800:  # ~23h
                     try:
                         from pipeline.collaboration_engine import run_all_channels_collab
                         await asyncio.to_thread(run_all_channels_collab)
@@ -906,7 +925,14 @@ async def _schedule_checker_loop():
                     last_shorts_recovery_check = now
 
                 # ── Optimal publish slots: calculate once per day ──
-                if now - last_slot_calculation > 86400:
+                # ── Quota guard: skip if exhausted; persist timestamp to avoid retry storm ──
+                if not _quota_exhausted_safe():
+                    try:
+                        _sched_db.set_system_state("last_slot_calculation", str(int(now)))
+                    except Exception:
+                        pass
+                    last_slot_calculation = now
+                elif now - last_slot_calculation > 86400:
                     await _calculate_optimal_slots()
                     last_slot_calculation = now
 
@@ -975,7 +1001,14 @@ async def _schedule_checker_loop():
             # Compares YouTube total channel views vs DB-tracked
             # views and alerts when untracked views grow beyond
             # the VIEW_GAP_THRESHOLD in a 24h period.
-            if STATS_ENABLED and now - last_view_gap_check > 86400:  # 24 hours
+            # ── Quota guard: skip if exhausted; persist timestamp to avoid retry storm ──
+            if not _quota_exhausted_safe():
+                try:
+                    _sched_db.set_system_state("last_view_gap_check", str(int(now)))
+                except Exception:
+                    pass
+                last_view_gap_check = now
+            elif STATS_ENABLED and now - last_view_gap_check > 86400:  # 24 hours
                 try:
                     from api.services.view_gap_monitor import ViewGapMonitor
                     logger.info("Starting daily view gap check...")
@@ -2536,17 +2569,39 @@ def get_stats():
 
 
 @app.post("/api/stats/collect")
-async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool = False):
+async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool = False, force: bool = False):
     """Trigger on-demand YouTube stats collection for all active channels.
 
     Query params:
         deep: If true, also collects CTR, traffic sources, demographics, and
               retention % (consumes ~7 extra YouTube Analytics API quota units
               per channel). Default false = basic stats only.
+        force: Override quota exhaustion guard.
 
     Runs _collect_youtube_stats() as a background task and returns immediately.
     Poll GET /api/stats/collect/status to know when it finishes and its result.
     """
+    # ── Quota guard: abort early if quota is exhausted (unless forced) ──
+    if not force:
+        try:
+            from database.db_extended import ExtendedDatabase
+            _qdb = ExtendedDatabase()
+            if _qdb.is_quota_exhausted():
+                reset_info = _qdb.get_quota_reset_time()
+                return {
+                    "ok": False,
+                    "message": (
+                        f"YouTube API quota agotada. Recarga en "
+                        f"{reset_info['remaining_hours']:.1f}h "
+                        f"(aprox {reset_info['reset_at_utc']} UTC). "
+                        f"Usa ?force=true para recolectar de todos modos."
+                    ),
+                    "quota_exhausted": True,
+                    "reset_info": reset_info,
+                }
+        except Exception:
+            pass  # allow if DB check fails
+
     _reset_stale_collection_state()  # auto-recover from stuck "running"
     if STATS_COLLECTION_STATE["status"] == "running":
         return {

@@ -7,6 +7,8 @@ interface StatusBarData {
   shorts_running: number
   ram_available_mb: number | null
   critical_alerts: number
+  quota_exhausted?: boolean
+  quota_reset_hours?: number | null
 }
 
 export default function StatusBar() {
@@ -72,6 +74,23 @@ export default function StatusBar() {
           </span>
         ) : (
           <span className="text-gray-600 font-mono">0</span>
+        )}
+      </div>
+
+      {/* Separator */}
+      <div className="w-px h-3 bg-surface-border" />
+
+      {/* YouTube Quota */}
+      <div className="flex items-center gap-1.5">
+        <span className={data.quota_exhausted ? 'text-red-400' : 'text-emerald-500'} style={{fontSize:'8px'}}>●</span>
+        <span className="text-gray-400">YT Quota:</span>
+        {data.quota_exhausted ? (
+          <span className="font-mono font-bold text-red-400 bg-red-500/10 px-1.5 rounded text-[11px]"
+                title={data.quota_reset_hours != null ? `Recarga en ~${data.quota_reset_hours.toFixed(1)}h` : 'Recarga desconocida'}>
+            AGOTADA{data.quota_reset_hours != null ? ` (${data.quota_reset_hours.toFixed(1)}h)` : ''}
+          </span>
+        ) : (
+          <span className="font-mono text-emerald-400 text-xs">OK</span>
         )}
       </div>
 

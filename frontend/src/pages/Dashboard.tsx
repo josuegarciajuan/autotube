@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import { useDashboard, useRecentEvents } from '../hooks/useQueries'
+import { useDashboard, useRecentEvents, useQuotaStatus } from '../hooks/useQueries'
 import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChannelFilter } from '../context/ChannelFilterContext'
@@ -72,6 +72,10 @@ export default function Dashboard() {
   // React Query: auto-fetches and caches dashboard data
   const { data, isLoading: loading, dataUpdatedAt, refetch: refetchDashboard } =
     useDashboard(selectedChannelId ?? undefined)
+
+  // YouTube API quota status (for disabling stats collection button)
+  const { data: quotaStatus } = useQuotaStatus()
+  const quotaExhausted = quotaStatus?.exhausted ?? false
 
   const [deepDiveChannel, setDeepDiveChannel] = useState<any>(null)
 
@@ -424,9 +428,11 @@ export default function Dashboard() {
         </button>
         <button
           onClick={handleCollectStats}
-          disabled={collectingStats}
+          disabled={collectingStats || quotaExhausted}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Recolectar estadisticas de YouTube bajo demanda"
+          title={quotaExhausted 
+            ? `Cuota agotada — recarga en ~${quotaStatus?.remaining_hours?.toFixed(1) ?? '?'}h` 
+            : 'Recolectar estadisticas de YouTube bajo demanda'}
         >
           {collectingStats ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
           <span>{collectingStats ? 'Recolectando...' : 'Recolectar stats'}</span>

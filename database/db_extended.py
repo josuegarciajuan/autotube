@@ -7273,6 +7273,70 @@ class ExtendedDatabase(Database):
         self.set_system_state("quota_exhausted_at", "")
         self.set_system_state("quota_exhausted_channel", "")
 
+    def get_quota_reset_time(self) -> dict:
+        """Calculate next YouTube API quota reset (midnight Pacific Time).
+
+        YouTube Data API v3 quota resets at midnight Pacific Time:
+          - Summer (PDT, ~Mar-Nov): UTC-7  → reset at 07:00 UTC
+          - Winter (PST, ~Nov-Mar):  UTC-8  → reset at 08:00 UTC
+
+        This method auto-detects via a DST heuristic. It adds a 15-minute
+        safety buffer to avoid calling the API just before reset.
+
+        Returns:
+            {
+                "exhausted": bool,
+                "exhausted_at": ISO str | None,
+                "reset_at_utc": ISO str,
+                "remaining_hours": float,
+                "remaining_minutes": int,
+                "safety_margin_minutes": int,
+            }
+            If not exhausted: {"exhausted": False, ... rest is None/0}
+        """
+        from datetime import datetime, timezone, timedelta
+
+        paused = self.get_system_state("scheduler_paused") == "true"
+        exhausted_at_str = self.get_system_state("quota_exhausted_at")
+
+        if not (paused and exhausted_at_str):
+            return {
+                "exhausted": False,
+                "exhausted_at": None,
+                "reset_at_utc": None,
+                "remaining_hours": 0,
+                "remaining_minutes": 0,
+                "safety_margin_minutes": 15,
+            }
+
+        now = datetime.now(timezone.utc)
+
+        # Detect DST: mid-Jul is PDT (UTC-7), mid-Jan is PST (UTC-8).
+        # YouTube reset is always midnight Pacific Time.
+        # Simple heuristic: PDT if month is Mar-Nov, PST if Dec-Feb.
+        month = now.month
+        pt_offset = -7 if 3 <= month <= 11 else -8  # PDT or PST
+        reset_hour_utc = abs(pt_offset)  # 7 or 8
+
+        # Build midnight PT in UTC
+        midnight_pt = now.replace(
+            hour=reset_hour_utc, minute=0, second=0, microsecond=0,
+        )
+        if now >= midnight_pt:
+            midnight_pt += timedelta(days=1)
+
+        remaining_seconds = max(0, (midnight_pt - now).total_seconds())
+        safety = 15  # minutes of buffer
+
+        return {
+            "exhausted": True,
+            "exhausted_at": exhausted_at_str,
+            "reset_at_utc": midnight_pt.isoformat(),
+            "remaining_hours": round(remaining_seconds / 3600, 1),
+            "remaining_minutes": int(remaining_seconds / 60),
+            "safety_margin_minutes": safety,
+        }
+
     # ── Social Media Accounts ──────────────────────────────────
 
     def get_channel_social_accounts(self, channel_id: int) -> list[dict]:

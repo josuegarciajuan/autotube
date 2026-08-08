@@ -21,6 +21,16 @@ export function useStatusBar() {
   })
 }
 
+// ── YouTube API Quota Status (poll every 60s) ──
+export function useQuotaStatus() {
+  return useQuery({
+    queryKey: ['quota-status'],
+    queryFn: () => api.getQuotaStatus(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}
+
 // ── Monitor page ──
 export function useMonitorDashboard() {
   return useQuery({

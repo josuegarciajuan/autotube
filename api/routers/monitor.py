@@ -661,6 +661,14 @@ def get_status_bar():
                 "ram_available_mb": ram_free,
                 "critical_alerts": critical_alerts,
             }
+            # ── Quota status (lightweight, reads system_state only) ──
+            try:
+                quota_info = db.get_quota_reset_time()
+                result["quota_exhausted"] = quota_info.get("exhausted", False)
+                result["quota_reset_hours"] = quota_info.get("remaining_hours")
+            except Exception:
+                result["quota_exhausted"] = False
+                result["quota_reset_hours"] = None
             with lock:
                 _STATUS_BAR_CACHE["status"] = {"data": result, "ts": time_mod.time()}
             return result

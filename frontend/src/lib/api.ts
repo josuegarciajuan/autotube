@@ -415,9 +415,7 @@ export const api = {
   getSystemMetrics: () => request<any>('/monitor/system'),
   getActiveWorkers: () => request<any>('/monitor/workers'),
   getStatusBar: () => request<any>('/monitor/status-bar'),
-  getJobEta: (jobId: number) => request<any>(`/monitor/eta/${jobId}`),
-
-  // ── LLM Credit monitoring ──
+  getQuotaStatus: () => request<any>('/system/quota-status'),
   getLLMCredits: () => request<any>('/monitor/llm-credits'),
   triggerLLMCreditCheck: () => request<any>('/monitor/llm-credits/check', { method: 'POST' }),
 

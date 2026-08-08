@@ -313,6 +313,18 @@ def scheduler_resume():
     return {"ok": True, "scheduler_paused": False, "message": "Scheduler reanudado. Subidas activas."}
 
 
+@router.get("/system/quota-status")
+def quota_status():
+    """Estado actual de la cuota YouTube Data API v3.
+    
+    Devuelve si la cuota está agotada y cuándo se recarga (medianoche PT).
+    Ligero — solo lee system_state, sin llamadas a YouTube API.
+    """
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    return db.get_quota_reset_time()
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 def _purge_dir(dir_path: Path) -> int:

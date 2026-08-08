@@ -301,7 +301,14 @@ def get_youtube_quota_status(db) -> dict:
 
         now = datetime.now(timezone.utc)
         elapsed = (now - exhausted_at).total_seconds() / 3600
-        remaining = max(0, 6 - elapsed)  # quota resets after ~6 hours
+        # Calculate actual reset time (midnight Pacific Time) instead of blind 6h
+        try:
+            from database.db_extended import ExtendedDatabase
+            _qdb = ExtendedDatabase()
+            reset_info = _qdb.get_quota_reset_time()
+            remaining = reset_info.get("remaining_hours", max(0, 6 - elapsed))
+        except Exception:
+            remaining = max(0, 6 - elapsed)  # fallback to 6h blind
 
         return {
             "exhausted": True,
