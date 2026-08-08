@@ -605,11 +605,13 @@ class YouTubeUploader:
 
         current_title = items[0]["snippet"]["title"]
 
+        category_id = self._get_config_attr("YT_CATEGORY_ID", "22")
         body = {
             "id": video_id,
             "snippet": {
                 "title": current_title,
                 "description": description[:5000],
+                "categoryId": category_id,
             },
         }
 

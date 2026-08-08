@@ -190,7 +190,7 @@ def generate_value_comment(
     - NEVER contain links
     - Sound like a real human wrote it (imperfect Spanish is OK)
     """
-    from config.llm_helpers import create_llm_client
+    from config.llm_client import create_llm_client
     from config.settings import LLM_MODEL
 
     client = create_llm_client(enable_thinking=False, timeout=30.0, max_retries=1)

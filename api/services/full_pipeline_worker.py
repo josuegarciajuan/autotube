@@ -1450,17 +1450,18 @@ def run_job(
                             metadata.get("selected_title") if metadata else
                             (video_data.get("titulo", titulo) if video_data else titulo)
                         )
-                        db.conn.execute("""
-                            INSERT INTO video_ab_tests
-                            (video_id, yt_video_id, channel_id, phase, title_v1,
-                             thumbnail_variant_paths, thumbnail_variant_active)
-                            VALUES (?, ?, ?, 'pending', ?, ?, 1)
-                        """, (
-                            video_id, yt_video_id, channel_id,
-                            (title_v1 or "")[:100],
-                            json.dumps([str(p) for p in ab_test_variant_paths]),
-                        ))
-                        db.conn.commit()
+                        with db._connect() as conn:
+                            conn.execute("""
+                                INSERT INTO video_ab_tests
+                                (video_id, yt_video_id, channel_id, phase, title_v1,
+                                 thumbnail_variant_paths, thumbnail_variant_active)
+                                VALUES (?, ?, ?, 'pending', ?, ?, 1)
+                            """, (
+                                video_id, yt_video_id, channel_id,
+                                (title_v1 or "")[:100],
+                                json.dumps([str(p) for p in ab_test_variant_paths]),
+                            ))
+                            conn.commit()
                         logger.info("[AB] A/B test record created for video %s (3 thumbnail variants)", video_id)
                     except Exception as ab_record_exc:
                         logger.warning("[AB] Failed to create A/B test record: %s", ab_record_exc)

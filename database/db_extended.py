@@ -785,6 +785,14 @@ def migrate_v2(db_path: str = None):
         conn.execute("UPDATE videos SET channel_id = 1 WHERE channel_id IS NULL")
         logger.warning("Migration: channels table empty — bootstrapped with %s", ACTIVE_CHANNELS[0])
 
+    # Add google_account column to channels (idempotent)
+    if "google_account" not in existing_ch:
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN google_account TEXT")
+            logger.info("Migration: added google_account column to channels")
+        except sqlite3.OperationalError:
+            pass
+
     # ── v26: seed google_account from legacy CHANNEL_ACCOUNT_MAP (ONE-TIME) ──
     _legacy_accounts = {
         "canal2": "tracatrack", "canal3": "tracatrack",

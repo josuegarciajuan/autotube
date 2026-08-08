@@ -22,7 +22,8 @@ def discover_standalone_topics(channel_slug: str, count: int = 3) -> list[dict]:
     suitable for feeding into a standalone short pipeline.
     """
     from config.config_bridge import get_channel_config
-    from config.llm_helpers import create_llm_client, llm_json_call
+    from config.llm_client import create_llm_client
+    from config.llm_helpers import llm_json_call
     from config.settings import LLM_MODEL_CREATIVE
 
     ch_config = get_channel_config(channel_slug)

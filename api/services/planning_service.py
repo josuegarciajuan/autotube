@@ -656,6 +656,8 @@ def compute_horizon_slots(
                 upload_windows = ch.get("upload_windows")
                 win_start = ch.get("upload_window_start", 9)
                 win_end = ch.get("upload_window_end", 11)
+                ws_start = win_start
+                ws_end = win_end
                 if not is_scheduled:
                     # Immediate mode: upload = right after gen (use target_public_at as deadline)
                     up_h, up_m = peak_h, peak_m
