@@ -2322,6 +2322,8 @@ async def _collect_youtube_stats(deep: bool = False):
                     "shorts_updated": result.get("shorts_updated", 0),
                     "analytics_updated": result.get("analytics_updated", 0),
                     "channel_updated": result.get("channel_updated", False),
+                    "quota_exhausted": result.get("quota_exhausted", False),
+                    "analytics_fallback_videos": result.get("analytics_fallback_videos", 0),
                     "deep": deep,
                     "impressions_stored": result.get("impressions_stored", 0),
                     "ctr_stored": result.get("ctr_stored", 0),

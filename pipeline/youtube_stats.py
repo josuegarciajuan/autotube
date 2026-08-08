@@ -107,7 +107,87 @@ class YouTubeStatsFetcher:
             logger.warning("Stats fetch failed for %s: %s", yt_video_id, exc)
             result = self._mock_stats(yt_video_id)
             result["is_mock"] = True
+            # Detect quota exhaustion early
+            if "quotaExceeded" in str(exc):
+                result["_quota_exhausted"] = True
             return result
+
+    # ── Batch Video Stats (50 IDs per call — 50x less quota usage) ──
+
+    _DATA_API_BATCH_SIZE = 50  # YouTube's max IDs per videos().list() call
+
+    def get_video_stats_batch(self, yt_video_ids: list[str]) -> dict[str, dict]:
+        """Get basic stats for multiple videos in a single API call.
+
+        Args:
+            yt_video_ids: List of YouTube video IDs (max 50 per call).
+
+        Returns:
+            Dict mapping yt_video_id → {viewCount, likeCount, commentCount, title,
+                                         embeddable, is_mock}.
+            If quota is exhausted, returns {'_quota_exhausted': True} immediately.
+        """
+        if not yt_video_ids:
+            return {}
+
+        if not self._service:
+            if not self.authenticate():
+                return {"_quota_exhausted": True}
+
+        from googleapiclient.errors import HttpError as _HttpError
+
+        # Split into batches of 50 (API limit)
+        result: dict[str, dict] = {}
+        for i in range(0, len(yt_video_ids), self._DATA_API_BATCH_SIZE):
+            batch = yt_video_ids[i : i + self._DATA_API_BATCH_SIZE]
+            try:
+                resp = (
+                    self._service.videos()
+                    .list(
+                        part="statistics,snippet,contentDetails,status",
+                        id=",".join(batch),
+                        maxResults=50,
+                    )
+                    .execute()
+                )
+                items = resp.get("items", [])
+                returned_ids = set()
+                for item in items:
+                    vid = item["id"]
+                    returned_ids.add(vid)
+                    stats = item.get("statistics", {})
+                    status_obj = item.get("status", {})
+                    result[vid] = {
+                        "viewCount": stats.get("viewCount", "0"),
+                        "likeCount": stats.get("likeCount", "0"),
+                        "commentCount": stats.get("commentCount", "0"),
+                        "title": item.get("snippet", {}).get("title", ""),
+                        "embeddable": status_obj.get("embeddable", True),
+                        "is_mock": False,
+                    }
+                # Videos not returned by the API (deleted, private, etc.)
+                for vid in batch:
+                    if vid not in returned_ids:
+                        mock = self._mock_stats(vid)
+                        mock["is_mock"] = True
+                        result[vid] = mock
+            except _HttpError as exc:
+                if "quotaExceeded" in str(exc):
+                    logger.warning(
+                        "Data API quota exhausted (batch %d/%d) — stopping individual video calls",
+                        i // self._DATA_API_BATCH_SIZE + 1,
+                        (len(yt_video_ids) + self._DATA_API_BATCH_SIZE - 1)
+                        // self._DATA_API_BATCH_SIZE,
+                    )
+                    result["_quota_exhausted"] = True
+                    return result
+                logger.warning("Batch stats fetch failed: %s", exc)
+                for vid in batch:
+                    mock = self._mock_stats(vid)
+                    mock["is_mock"] = True
+                    result[vid] = mock
+
+        return result
 
     def get_video_analytics(self, yt_video_id: str, days: int = 30) -> dict:
         """Get advanced analytics via YouTube Analytics API.
@@ -899,52 +979,71 @@ class YouTubeStatsFetcher:
     def collect_and_store(self, db, deep: bool = False) -> dict:
         """Collect stats for all uploaded videos and the channel, store in DB.
 
-        Args:
-            db: ExtendedDatabase instance.
+        Uses batch Data API calls (50 IDs per call) and falls back to
+        YouTube Analytics API when Data API quota is exhausted.
 
-        Returns summary dict including analytics_updated count.
+        Returns summary dict including analytics_updated count and
+        quota_exhausted flag for UI feedback.
         """
         if not self.authenticate():
             return {"error": "Authentication failed"}
 
-        result = {"videos_updated": 0, "channel_updated": False, "analytics_updated": 0}
+        result = {
+            "videos_updated": 0,
+            "shorts_updated": 0,
+            "channel_updated": False,
+            "analytics_updated": 0,
+            "quota_exhausted": False,
+            "analytics_fallback_videos": 0,
+            "analytics_fallback_shorts": 0,
+        }
 
-        # Channel stats
+        # ── Channel stats (Data API → Analytics fallback) ──
         channel = db.get_channel_by_slug(self.slug)
+        channel_stats = None
         if channel:
             channel_stats = self.get_channel_stats()
+            channel_analytics = self.get_channel_analytics()
+
             if channel_stats:
-                # Merge channel analytics (watch time) into stats dict
-                analytics = self.get_channel_analytics()
-                if analytics:
-                    channel_stats.update(analytics)
+                # Data API succeeded — merge analytics data
+                if channel_analytics:
+                    channel_stats.update(channel_analytics)
                 db.insert_channel_stats(channel["id"], channel_stats)
                 result["channel_updated"] = True
                 result["channel_stats"] = channel_stats
+                logger.info(
+                    "Channel stats: subs=%s, views=%s, watch_mins=%s",
+                    channel_stats.get("subscriberCount"),
+                    channel_stats.get("viewCount"),
+                    channel_stats.get("estimatedMinutesWatched"),
+                )
+            elif channel_analytics:
+                # Data API down — Analytics API has watch time
+                result["quota_exhausted"] = True
+                db.insert_channel_stats(channel["id"], channel_analytics)
+                result["channel_updated"] = True
+                result["channel_stats"] = channel_analytics
+                logger.warning(
+                    "Channel stats from Analytics API only (Data API quota exhausted)"
+                )
+            else:
+                logger.warning("No channel stats at all for %s", self.slug)
 
-        # Video stats — use high limit to cover all videos, not just the 50 most recent
+        # ── Gather all video/short IDs ──
         videos = db.get_videos(channel_id=channel["id"] if channel else None, limit=10000)
         video_yt_ids: list[str] = []
+        video_map: dict[str, dict] = {}  # yt_id → video row
         for v in videos:
             yt_id = v.get("yt_video_id")
             if not yt_id:
                 continue
             video_yt_ids.append(yt_id)
-            try:
-                stats = self.get_video_stats(yt_id)
-                # Skip mock/synthetic stats — only store real YouTube API data
-                if stats.get("is_mock"):
-                    logger.debug("Skipping mock stats for video %s (%s)", v.get("id"), yt_id)
-                    continue
-                if "error" not in stats:
-                    db.insert_video_stats(v["id"], yt_id, stats)
-                    result["videos_updated"] += 1
-            except Exception as exc:
-                logger.error("Failed to store stats for video %s: %s", v.get("id"), exc)
+            video_map[yt_id] = v
 
-        # Shorts stats
         result["shorts_updated"] = 0
         short_yt_ids: list[str] = []
+        shorts: list = []
         if channel:
             shorts = db.get_shorts(channel_id=channel["id"], status="published", limit=10000)
             for s in shorts:
@@ -952,32 +1051,106 @@ class YouTubeStatsFetcher:
                 if not yt_id:
                     continue
                 short_yt_ids.append(yt_id)
-                try:
-                    stats = self.get_video_stats(yt_id)
+
+        # ── Video stats — BATCH via Data API (50 IDs per call) ──
+        quota_exhausted = result.get("quota_exhausted", False)
+        inserted_video_ids: set[int] = set()  # track which videos got real Data API rows
+        if not quota_exhausted and video_yt_ids:
+            batch_result = self.get_video_stats_batch(video_yt_ids)
+            if batch_result.get("_quota_exhausted"):
+                quota_exhausted = True
+                result["quota_exhausted"] = True
+            else:
+                for yt_id, stats in batch_result.items():
+                    if yt_id.startswith("_"):  # skip meta keys
+                        continue
+                    v = video_map.get(yt_id)
+                    if not v:
+                        continue
                     if stats.get("is_mock"):
-                        logger.debug("Skipping mock stats for short %s (%s)", s.get("id"), yt_id)
                         continue
                     if "error" not in stats:
-                        # v2: Pass short_type so native/clip performance can be compared
+                        db.insert_video_stats(v["id"], yt_id, stats)
+                        result["videos_updated"] += 1
+                        inserted_video_ids.add(v["id"])
+
+        # ── Shorts stats — batch via Data API (skip if quota already gone) ──
+        inserted_short_ids: set[int] = set()
+        if not quota_exhausted and short_yt_ids:
+            batch_result = self.get_video_stats_batch(short_yt_ids)
+            if batch_result.get("_quota_exhausted"):
+                quota_exhausted = True
+                result["quota_exhausted"] = True
+            else:
+                short_map = {s["youtube_id"]: s for s in shorts if s.get("youtube_id")}
+                for yt_id, stats in batch_result.items():
+                    if yt_id.startswith("_"):
+                        continue
+                    s = short_map.get(yt_id)
+                    if not s:
+                        continue
+                    if stats.get("is_mock"):
+                        continue
+                    if "error" not in stats:
                         short_type = s.get("type", "clip")
                         db.insert_short_stats(s["id"], yt_id, stats, short_type=short_type)
                         result["shorts_updated"] += 1
-                except Exception as exc:
-                    logger.error("Failed to store stats for short %s: %s", s.get("id"), exc)
+                        inserted_short_ids.add(s["id"])
 
-        # ── Bulk video analytics (1 API call for ALL videos) ──
+        # ── Bulk video analytics (Analytics API — separate quota, always works) ──
         if video_yt_ids and self._analytics_service:
             try:
                 bulk_analytics = self.get_all_videos_analytics(video_yt_ids)
                 if bulk_analytics:
-                    # Map yt_video_id → video DB id
-                    video_id_map = {v.get("yt_video_id"): v["id"] for v in videos if v.get("yt_video_id")}
+                    video_id_map = {
+                        v["yt_video_id"]: v["id"]
+                        for v in videos
+                        if v.get("yt_video_id")
+                    }
+
+                    # ── Analytics fallback: INSERT rows when Data API was down ──
+                    if quota_exhausted:
+                        fallback_inserted = 0
+                        for v in videos:
+                            yt_id = v.get("yt_video_id")
+                            if not yt_id:
+                                continue
+                            # Skip videos that already got real Data API rows this run
+                            if v["id"] in inserted_video_ids:
+                                continue
+                            bdata = bulk_analytics.get(yt_id, {})
+                            if not bdata:
+                                continue
+                            analytics_stats = {
+                                "viewCount": bdata.get("analyticsViews", "0"),
+                                "likeCount": "0",
+                                "commentCount": "0",
+                                "estimatedMinutesWatched": float(
+                                    bdata.get("estimatedMinutesWatched", 0) or 0
+                                ),
+                                "averageViewDuration": float(
+                                    bdata.get("averageViewDuration", 0) or 0
+                                ),
+                                "subscribersGained": int(
+                                    float(bdata.get("subscribersGained", 0) or 0)
+                                ),
+                                "is_analytics_fallback": True,
+                            }
+                            db.insert_video_stats(v["id"], yt_id, analytics_stats)
+                            fallback_inserted += 1
+                        result["analytics_fallback_videos"] = fallback_inserted
+                        if fallback_inserted:
+                            logger.info(
+                                "Analytics fallback: inserted %d video_stats_history rows (Data API was down)",
+                                fallback_inserted,
+                            )
+
+                    # Update existing rows with precise analytics data
                     count = db.batch_update_video_analytics(video_id_map, bulk_analytics)
                     result["analytics_updated"] = count
                     logger.info("Analytics updated for %d videos via bulk query", count)
 
                     # Store averageViewPercentage (retention %) from expanded bulk query
-                    # into video_analytics_detailed
                     retention_stored = 0
                     for v in videos:
                         yt_id = v.get("yt_video_id")
@@ -987,20 +1160,74 @@ class YouTubeStatsFetcher:
                         avg_pct = float(bdata.get("averageViewPercentage", 0) or 0)
                         if avg_pct > 0:
                             db.insert_video_analytics_batch(
-                                v["id"], yt_id, "retention_pct",
+                                v["id"],
+                                yt_id,
+                                "retention_pct",
                                 [{"dimension": None, "metric_value": avg_pct}],
                             )
                             retention_stored += 1
                     if retention_stored:
-                        logger.info("Retention pct stored for %d videos via bulk query", retention_stored)
+                        logger.info(
+                            "Retention pct stored for %d videos via bulk query",
+                            retention_stored,
+                        )
                         result["retention_stored"] = retention_stored
 
-                    # Also update shorts with analytics data (shorts can have watch time too)
+                    # Also update shorts with analytics data
                     if short_yt_ids:
-                        short_id_map = {s.get("youtube_id"): s["id"] for s in shorts if s.get("youtube_id")}
-                        short_count = db.batch_update_short_analytics(short_id_map, bulk_analytics)
+                        short_id_map = {
+                            s["youtube_id"]: s["id"]
+                            for s in shorts
+                            if s.get("youtube_id")
+                        }
+                        short_count = db.batch_update_short_analytics(
+                            short_id_map, bulk_analytics
+                        )
                         result["analytics_updated"] += short_count
-                        logger.info("Analytics updated for %d shorts via bulk query", short_count)
+                        logger.info(
+                            "Analytics updated for %d shorts via bulk query",
+                            short_count,
+                        )
+
+                        # Analytics fallback for shorts too
+                        if quota_exhausted:
+                            fallback_short_inserted = 0
+                            for s in shorts:
+                                yt_id = s.get("youtube_id")
+                                if not yt_id:
+                                    continue
+                                # Skip shorts that already got real Data API rows this run
+                                if s["id"] in inserted_short_ids:
+                                    continue
+                                bdata = bulk_analytics.get(yt_id, {})
+                                if not bdata:
+                                    continue
+                                analytics_short_stats = {
+                                    "viewCount": bdata.get("analyticsViews", "0"),
+                                    "likeCount": "0",
+                                    "commentCount": "0",
+                                    "estimatedMinutesWatched": float(
+                                        bdata.get("estimatedMinutesWatched", 0) or 0
+                                    ),
+                                    "averageViewDuration": float(
+                                        bdata.get("averageViewDuration", 0) or 0
+                                    ),
+                                    "subscribersGained": int(
+                                        float(bdata.get("subscribersGained", 0) or 0)
+                                    ),
+                                }
+                                short_type = s.get("type", "clip")
+                                db.insert_short_stats(
+                                    s["id"], yt_id, analytics_short_stats,
+                                    short_type=short_type,
+                                )
+                                fallback_short_inserted += 1
+                            result["analytics_fallback_shorts"] = fallback_short_inserted
+                            if fallback_short_inserted:
+                                logger.info(
+                                    "Analytics fallback: inserted %d short_stats rows (Data API was down)",
+                                    fallback_short_inserted,
+                                )
             except Exception as exc:
                 logger.error("Bulk analytics update failed for %s: %s", self.slug, exc)
 
@@ -1084,12 +1311,15 @@ class YouTubeStatsFetcher:
                 logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
 
         logger.info(
-            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s%s",
+            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s%s%s%s",
             result["videos_updated"],
             result["shorts_updated"],
             result["analytics_updated"],
             result["channel_updated"],
             " (deep)" if deep else "",
+            " (quota_exhausted)" if result.get("quota_exhausted") else "",
+            f" (+{result.get('analytics_fallback_videos', 0)} analytics-fallback)" 
+            if result.get("analytics_fallback_videos", 0) else "",
         )
         return result
 

@@ -142,16 +142,32 @@ export default function Dashboard() {
     const totalVideos = ok.reduce((n: number, c: any) => n + (c.videos_updated || 0), 0)
     const totalShorts = ok.reduce((n: number, c: any) => n + (c.shorts_updated || 0), 0)
     const totalAnalytics = ok.reduce((n: number, c: any) => n + (c.analytics_updated || 0), 0)
-    let msg = `${ok.length} canal(es) OK · ${totalVideos} videos · ${totalShorts} shorts`
+    const totalFallback = ok.reduce((n: number, c: any) => n + (c.analytics_fallback_videos || 0), 0)
+    const quotaExhausted = ok.some((c: any) => c.quota_exhausted)
+    let msg = `${ok.length} canal(es)`
+    if (quotaExhausted) {
+      msg += ` · ⚠️ Cuota Data API agotada`
+    }
+    if (totalVideos > 0) msg += ` · ${totalVideos} videos`
+    else if (quotaExhausted) msg += ` · 0 videos (sin quota)`
+    if (totalShorts > 0) msg += ` · ${totalShorts} shorts`
     if (totalAnalytics > 0) msg += ` · ${totalAnalytics} analytics`
+    if (totalFallback > 0) msg += ` · ${totalFallback} via analytics`
     if (failed.length) msg += ` · ${failed.length} con error`
     return msg
+  }
+
+  function hasQuotaWarning(s: any): boolean {
+    const chans = s.channels || []
+    const ok = chans.filter((c: any) => c.ok)
+    return ok.some((c: any) => c.quota_exhausted)
   }
 
   function applyStatsStatus(s: any, showBanner = true) {
     setCollectStatsState(s)
     if (s.status === 'success') {
-      setCollectStatsError(false)
+      const quota = hasQuotaWarning(s)
+      setCollectStatsError(quota)
       if (showBanner) {
         setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
       }
@@ -437,12 +453,12 @@ export default function Dashboard() {
       {/* Stats collection feedback */}
       {collectStatsMsg && (
         <div className={`rounded-lg border animate-fade-in ${
-          collectStatsError ? 'bg-red-500/5 border-red-500/20'
-            : collectingStats ? 'bg-cyan-500/5 border-cyan-500/20'
+          collectingStats ? 'bg-cyan-500/5 border-cyan-500/20'
+            : collectStatsError ? 'bg-amber-500/5 border-amber-500/20'
             : 'bg-green-500/5 border-green-500/20'
         }`}>
           <div className={`flex items-center justify-between gap-2 text-xs py-2 px-3 ${
-            collectStatsError ? 'text-red-400' : collectingStats ? 'text-cyan-400' : 'text-green-400'
+            collectingStats ? 'text-cyan-400' : collectStatsError ? 'text-amber-400' : 'text-green-400'
           }`}>
             <span className="flex items-center gap-1.5 font-medium">
               {collectingStats ? <Loader2 size={12} className="animate-spin" /> : collectStatsError ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
