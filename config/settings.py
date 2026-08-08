@@ -231,6 +231,18 @@ POLLO_IMAGE_MODEL = os.getenv("POLLO_IMAGE_MODEL", "pollo-image-v2")
 # Legacy x-api-key (kept for reference; the active integration uses cookie+tRPC).
 POLLO_AI_API_KEY = os.getenv("POLLO_AI_API_KEY", "")
 
+# Dual-cookie rotation: shared state file between Autotube and CRM.
+# The worker writes exhausted-account flags here; AIImageGenerator reads them
+# and creates pipeline_alerts when an account runs out of credits.
+POLLO_STATUS_FILE = os.getenv(
+    "POLLO_STATUS_FILE",
+    "/root/lamamionline-control/data/pollo_accounts_status.json",
+)
+POLLO_ACCOUNTS_SETTINGS_PATH = os.getenv(
+    "POLLO_ACCOUNTS_SETTINGS_PATH",
+    "/root/lamamionline-control/data/settings.json",
+)
+
 # ── Thumbnail Quality Control ──────────────────────────────────
 THUMBNAIL_QUALITY_THRESHOLD = int(os.getenv("THUMBNAIL_QUALITY_THRESHOLD", "7"))  # 0-10
 THUMBNAIL_MAX_QC_ATTEMPTS = int(os.getenv("THUMBNAIL_MAX_QC_ATTEMPTS", "2"))

@@ -48,8 +48,10 @@ MAX_PROMPT_CHARS = 2000
 # Nota: chrome147+ no está realmente soportado por curl-cffi 0.15.0 (libcurl)
 # a nivel de red; fallan con "Impersonating X is not supported".
 IMPERSONATION_TARGETS = [
+    # ── Probados operativos (Autotube + CRM) ──
     "chrome146",
     "edge101",
+    "safari17_0",
     "chrome145",
     "chrome142",
     "chrome136",
@@ -579,6 +581,148 @@ def save_multiple_outputs(client, result, generation_id, output_dir, output_pref
         )
     return saved
 
+
+# ── Dual-cookie rotation support ──────────────────────────
+
+def _write_exhausted_status(status_file, label):
+    """Actualiza el archivo de estado marcando una cuenta como agotada."""
+    if not status_file:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(status_file)), exist_ok=True)
+        data = {}
+        if os.path.exists(status_file):
+            with open(status_file, "r") as fh:
+                data = json.loads(fh.read() or "{}")
+        if label not in data:
+            data[label] = {}
+        data[label]["credits_exhausted"] = True
+        data[label]["exhausted_at"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        with open(status_file, "w") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+        print("POLLO_STATUS: cuenta '%s' marcada como sin créditos en %s" % (label, status_file), file=sys.stderr)
+    except Exception as exc:
+        print("POLLO_STATUS: no se pudo escribir %s: %s" % (status_file, exc), file=sys.stderr)
+
+
+def _is_credits_or_expired(err_str):
+    """Devuelve True si el error es de cuenta (créditos/cookie expirada),
+    es decir, errores que justifican probar la cuenta de fallback."""
+    err_lower = err_str.lower()
+    return (
+        "sin créditos" in err_lower
+        or "video limit" in err_lower
+        or "401" in err_str
+        or "caducada" in err_lower
+        or "sesion caducada" in err_lower
+    )
+
+
+def _try_generate_with_cookie(cookie_value, args):
+    """Intenta generar imagen con una cookie. Retorna (gen_id, poll_result, client, fingerprint).
+    Lanza RuntimeError en caso de error (creditos, Cloudflare, timeout, etc.)."""
+    model_key = args.model if args.model in MODEL_CONFIG else "flux-dev"
+    model_cfg = MODEL_CONFIG[model_key]
+    num_outputs = max(1, int(args.num_outputs or 1))
+
+    last_error = ""
+    working_fingerprint = None
+    gen_id = None
+    poll_result = None
+    client = None
+
+    for fp in IMPERSONATION_TARGETS:
+        try:
+            client = make_client(cookie_value, impersonate=fp)
+            gen_id = create_generation(
+                client,
+                args.prompt,
+                model_cfg,
+                args.aspect_ratio or model_cfg["aspectRatio"],
+                num_outputs,
+            )
+            poll_result = poll_generation(client, gen_id,
+                                          int(args.timeout or 300),
+                                          expected_outputs=num_outputs)
+            working_fingerprint = fp
+            print("CLOUDFLARE_BYPASS: fingerprint=%s OK" % fp, file=sys.stderr)
+            break
+        except Exception as exc:
+            err = str(exc)
+            non_retryable = (
+                "401" in err
+                or "sin créditos" in err.lower()
+                or "video limit" in err.lower()
+                or "caducada" in err.lower()
+            )
+            if non_retryable:
+                raise
+            retryable = (
+                "403" in err
+                or "Cloudflare" in err.lower()
+                or "denegado" in err.lower()
+                or "not supported" in err.lower()
+                or "Impersonating" in err
+            )
+            if retryable:
+                print("CLOUDFLARE_BYPASS: fingerprint=%s FAILED — probando siguiente..." % fp, file=sys.stderr)
+                last_error = err
+                continue
+            raise
+
+    if not working_fingerprint:
+        attempted = ", ".join(IMPERSONATION_TARGETS[:6]) + "..."
+        raise RuntimeError(
+            "Cloudflare no pudo ser burlado con ningun fingerprint TLS. "
+            "Intentados: %s. Ultimo error: %s" % (attempted, last_error)
+        )
+
+    return gen_id, poll_result, client, working_fingerprint
+
+
+def _download_and_fill_result(result, gen_id, poll_result, client, num_outputs, args):
+    """Descarga las imagenes y rellena el dict de resultado."""
+    if num_outputs <= 1:
+        url = get_nowatermark_url(client, poll_result, generation_id=gen_id)
+        if not url:
+            items = extract_output_items(poll_result)
+            if items:
+                url = get_nowatermark_url(client, items[0], generation_id=gen_id)
+        if not url:
+            raise RuntimeError("Generacion terminada pero no se encontro URL de imagen sin watermark.")
+        output_path = args.output_image
+        if not output_path:
+            raise RuntimeError("Falta --output-image para la generacion individual.")
+        image_path, size_bytes, ext = save_single_output(url, output_path, client=client)
+        result["ok"] = True
+        result["image_path"] = image_path
+        result["image_url"] = url
+        result["image_size_bytes"] = size_bytes
+        result["image_ext"] = ext
+        result["images"] = [{
+            "index": 1, "path": image_path, "url": url,
+            "size_bytes": size_bytes, "ext": ext,
+        }]
+    else:
+        output_dir = args.output_dir
+        if not output_dir:
+            raise RuntimeError("Falta --output-dir para la generacion por lotes.")
+        output_prefix = args.output_prefix or "candidate_"
+        images = save_multiple_outputs(
+            client, poll_result, gen_id, output_dir, output_prefix,
+            expected_outputs=num_outputs,
+        )
+        if not images:
+            raise RuntimeError("La generacion termino, pero no se pudo descargar ninguna imagen sin watermark.")
+        result["ok"] = True
+        result["images"] = images
+        result["image_count"] = len(images)
+        result["image_path"] = images[0]["path"]
+        result["image_url"] = images[0]["url"]
+
+
+# ── Main entry point ──────────────────────────────────────
+
 def cmd_generate(args):
     result = {
         "ok": False,
@@ -588,14 +732,13 @@ def cmd_generate(args):
         "generation_id": "",
         "images": [],
         "backend": HTTP_BACKEND,
+        "cookie_used": "",
     }
+    status_file = getattr(args, 'status_file', '') or ''
+
     try:
         if HTTP_BACKEND == "none":
             raise RuntimeError("No hay libreria HTTP disponible. Instala: pip install curl-cffi")
-
-        cookie_value = extract_cookie_value(args.cookie)
-        if not cookie_value:
-            raise RuntimeError("Cookie vacia. Configurala en Josue > ConfigM.")
 
         prompt_len = len(args.prompt or "")
         result["prompt_length"] = prompt_len
@@ -603,110 +746,65 @@ def cmd_generate(args):
             raise RuntimeError("El prompt supera el limite de %d caracteres para Pollo.ai (%d)." % (MAX_PROMPT_CHARS, prompt_len))
 
         model_key = args.model if args.model in MODEL_CONFIG else "flux-dev"
-        model_cfg = MODEL_CONFIG[model_key]
         num_outputs = max(1, int(args.num_outputs or 1))
         result["requested_num_outputs"] = num_outputs
 
-        # ── Cascada de fingerprints TLS ─────────────────────
-        last_error = ""
-        working_fingerprint = None
+        # ── Cookies a intentar en orden ──────────────────────
+        cookies_to_try = [
+            (getattr(args, 'account_label', 'primary') or 'primary', args.cookie),
+        ]
+        fallback_cookie = getattr(args, 'fallback_cookie', '') or ''
+        if fallback_cookie:
+            fallback_label = getattr(args, 'fallback_label', 'fallback') or 'fallback'
+            cookies_to_try.append((fallback_label, fallback_cookie))
+
+        last_credits_errors = []
         gen_id = None
         poll_result = None
         client = None
-        for fp in IMPERSONATION_TARGETS:
+        working_fingerprint = None
+        used_label = None
+
+        for account_label, cookie_raw in cookies_to_try:
+            cookie_value = extract_cookie_value(cookie_raw)
+            if not cookie_value:
+                print("POLLO: cookie vacia para cuenta '%s', saltando..." % account_label, file=sys.stderr)
+                continue
+
             try:
-                client = make_client(cookie_value, impersonate=fp)
-                gen_id = create_generation(
-                    client,
-                    args.prompt,
-                    model_cfg,
-                    args.aspect_ratio or model_cfg["aspectRatio"],
-                    num_outputs,
+                gen_id, poll_result, client, working_fingerprint = _try_generate_with_cookie(
+                    cookie_value, args
                 )
-                # Poll también puede fallar con 403 si Cloudflare rota midway
-                poll_result = poll_generation(client, gen_id,
-                                              int(args.timeout or 300),
-                                              expected_outputs=num_outputs)
-                working_fingerprint = fp
-                print("CLOUDFLARE_BYPASS: fingerprint=%s OK" % fp, file=sys.stderr)
-                break
-            except Exception as exc:
+                used_label = account_label
+                result["cloudflare_fingerprint"] = working_fingerprint
+                result["generation_id"] = str(gen_id)
+                result["cookie_used"] = used_label
+                print("POLLO: generacion OK con cuenta '%s'" % used_label, file=sys.stderr)
+                break  # exito — salir del bucle de cookies
+            except RuntimeError as exc:
                 err = str(exc)
-                # Errores que justifican probar el siguiente fingerprint:
-                #   - Cloudflare 403 (WAF bloquea el fingerprint)
-                #   - "not supported" (fingerprint no soportado por libcurl)
-                retryable = (
-                    "403" in err
-                    or "Cloudflare" in err.lower()
-                    or "denegado" in err.lower()
-                    or "not supported" in err.lower()
-                    or "Impersonating" in err
-                )
-                if retryable:
-                    print("CLOUDFLARE_BYPASS: fingerprint=%s FAILED — probando siguiente..." % fp, file=sys.stderr)
-                    last_error = err
+                if _is_credits_or_expired(err):
+                    last_credits_errors.append((account_label, err))
+                    _write_exhausted_status(status_file, account_label)
+                    print("POLLO: cuenta '%s' sin créditos/caducada, probando siguiente..." % account_label, file=sys.stderr)
                     continue
-                raise  # error fatal (401 cookie expirada, timeout, etc.) — no reintentar
+                else:
+                    raise  # Cloudflare, timeout, etc — no reintentar con otra cookie
 
-        if not working_fingerprint:
-            attempted = ", ".join(IMPERSONATION_TARGETS[:6]) + "..."
-            raise RuntimeError(
-                "Cloudflare no pudo ser burlado con ningun fingerprint TLS. "
-                "Intentados: %s. Ultimo error: %s" % (attempted, last_error)
-            )
+        if used_label is None:
+            if last_credits_errors:
+                parts = ["%s: %s" % (label, err[:120]) for label, err in last_credits_errors]
+                raise RuntimeError("Todas las cuentas Pollo.ai sin créditos disponibles. %s" % " | ".join(parts))
+            raise RuntimeError("No se pudo generar con ninguna cuenta Pollo.ai.")
 
-        result["cloudflare_fingerprint"] = working_fingerprint
-        result["generation_id"] = str(gen_id)
-
-        if num_outputs <= 1:
-            url = get_nowatermark_url(client, poll_result, generation_id=gen_id)
-            if not url:
-                items = extract_output_items(poll_result)
-                if items:
-                    url = get_nowatermark_url(client, items[0], generation_id=gen_id)
-            if not url:
-                raise RuntimeError("Generacion terminada pero no se encontro URL de imagen sin watermark.")
-            output_path = args.output_image
-            if not output_path:
-                raise RuntimeError("Falta --output-image para la generacion individual.")
-            image_path, size_bytes, ext = save_single_output(url, output_path, client=client)
-            result["ok"] = True
-            result["image_path"] = image_path
-            result["image_url"] = url
-            result["image_size_bytes"] = size_bytes
-            result["image_ext"] = ext
-            result["images"] = [{
-                "index": 1,
-                "path": image_path,
-                "url": url,
-                "size_bytes": size_bytes,
-                "ext": ext,
-            }]
-        else:
-            output_dir = args.output_dir
-            if not output_dir:
-                raise RuntimeError("Falta --output-dir para la generacion por lotes.")
-            output_prefix = args.output_prefix or "candidate_"
-            images = save_multiple_outputs(
-                client,
-                poll_result,
-                gen_id,
-                output_dir,
-                output_prefix,
-                expected_outputs=num_outputs,
-            )
-            if not images:
-                raise RuntimeError("La generacion termino, pero no se pudo descargar ninguna imagen sin watermark.")
-            result["ok"] = True
-            result["images"] = images
-            result["image_count"] = len(images)
-            result["image_path"] = images[0]["path"]
-            result["image_url"] = images[0]["url"]
+        # ── Descargar imagenes ───────────────────────────────
+        _download_and_fill_result(result, gen_id, poll_result, client, num_outputs, args)
 
     except Exception as exc:
         result["ok"] = False
         result["error"] = str(exc)
 
+    # ── Escribir JSON de resultado ──────────────────────────
     json_out = json.dumps(result, ensure_ascii=False)
     if args.output_json:
         try:
@@ -726,7 +824,11 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     gen = sub.add_parser("generate")
-    gen.add_argument("--cookie", required=True, help="Cookie de sesion completa")
+    gen.add_argument("--cookie", required=True, help="Cookie de sesion completa (primaria)")
+    gen.add_argument("--fallback-cookie", default="", help="Cookie secundaria para fallback si primaria sin creditos")
+    gen.add_argument("--account-label", default="primary", help="Etiqueta de la cuenta primaria")
+    gen.add_argument("--fallback-label", default="fallback", help="Etiqueta de la cuenta secundaria")
+    gen.add_argument("--status-file", default="", help="Ruta JSON para escribir estado de cuentas agotadas")
     gen.add_argument("--prompt", required=True, help="Prompt de texto")
     gen.add_argument("--model", default="flux-dev", help="Modelo Pollo.ai")
     gen.add_argument("--aspect-ratio", default="", help="Ratio (2:3, 4:3, 1:1...)")
