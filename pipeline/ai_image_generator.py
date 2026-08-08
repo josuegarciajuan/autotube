@@ -34,6 +34,7 @@ import random
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -221,10 +222,9 @@ def _check_and_alert_pollo_credits(db) -> None:
         already_alerted = acc_status.get("alerted", False)
 
         if credits_exhausted and not already_alerted:
-            # Use deterministic hash of account label as entity_id so each
-            # account gets its own alert row (prevents dedup treating both
-            # accounts as the same alert when entity_id=NULL).
-            account_entity_id = abs(hash(label)) % (2**31)
+            # Use deterministic hash (zlib.crc32) so entity_id is stable across
+            # Python runs — prevents duplicate alerts when hash() randomized.
+            account_entity_id = zlib.crc32(label.encode("utf-8")) & 0x7FFFFFFF
             create_alert(
                 db,
                 entity_type="system",
