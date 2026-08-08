@@ -2400,6 +2400,12 @@ async def _collect_youtube_stats(deep: bool = False):
             "finished_at": _time_module.time(),
         })
         _pin_stats_state("stats_collection_state")
+        # Force dashboard cache invalidation so the frontend sees fresh data
+        try:
+            from api.routers.dashboard import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            pass
     except Exception as exc:
         logger.error("Stats collector error: %s", exc)
         STATS_COLLECTION_STATE.update({

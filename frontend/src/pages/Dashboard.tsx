@@ -176,6 +176,8 @@ export default function Dashboard() {
           setTimeout(poll, 2000)
         } else {
           setCollectingStats(false)
+          // Force-invalidate React Query cache so refetch fetches fresh data from the API
+          queryClient.invalidateQueries({ queryKey: ['dashboard'] })
           refetchDashboard()
         }
       } catch {
@@ -195,6 +197,9 @@ export default function Dashboard() {
         if (s.status === 'running') {
           setCollectingStats(true)
           pollStatsStatus()
+        } else if (s.status === 'success' && !cancelled) {
+          // Dashboard was served stale cache — force-refresh when last collection succeeded
+          queryClient.invalidateQueries({ queryKey: ['dashboard'] })
         }
       } catch { /* ignore */ }
     }
