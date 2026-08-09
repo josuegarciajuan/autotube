@@ -295,6 +295,33 @@ KOKORO_VOICE = "em_santa"
 KOKORO_PAUSE_BETWEEN_BLOCKS = 0.8
 
 # ═══════════════════════════════════════════════════════════════════
+# DYNAMIC VIDEOS PER DAY (auto-adjust by recovery planner)
+# ═══════════════════════════════════════════════════════════════════
+# Master switch — set False to disable auto-adjust entirely
+DYNAMIC_VPD_ENABLED = True
+# Starting point for all channels (overridable per-channel)
+VIDEOS_PER_DAY_BASE = 2
+# Floor and ceiling — dynamic algorithm will never go outside [MIN, MAX]
+VIDEOS_PER_DAY_MIN = 1
+VIDEOS_PER_DAY_MAX = 4
+# Re-evaluate every N hours
+DYNAMIC_VPD_CHECK_INTERVAL_H = 6
+# Last N jobs to compute success rate
+DYNAMIC_VPD_SUCCESS_WINDOW = 10
+# Success rate threshold: >= this value → eligible for +1 boost
+DYNAMIC_VPD_SUCCESS_THRESHOLD = 0.7
+# If awaiting_upload >= this, may reduce slots (pipeline pressure)
+DYNAMIC_VPD_BACKLOG_BOOST = 4
+# Extra slots when recovering from scheduler pause (quota exhaustion)
+DYNAMIC_VPD_CATCHUP_BOOST = 2
+# Catch-up boost duration in hours after pause recovery
+DYNAMIC_VPD_CATCHUP_DURATION_H = 48
+# New channels (< this many published) get +1 slot boost
+DYNAMIC_VPD_NEW_CHANNEL_THRESHOLD = 30
+# Maximum total vpd for channels sharing a Google account
+DYNAMIC_VPD_SHARED_ACCOUNT_MAX = 6
+
+# ═══════════════════════════════════════════════════════════════════
 # MARATHON DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 

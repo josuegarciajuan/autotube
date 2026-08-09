@@ -10,6 +10,8 @@ CANAL_TAGLINE = ("Historias reales de expediciones que terminaron catastróficam
                  "y los pocos que lograron volver.")
 CANAL_OUTRO_TAGLINE = ("La historia de esta expedición es real. Los nombres, las fechas, "
                        "lo que encontraron... todo ocurrió.")
+YOUTUBE_HANDLE = "@ExpedicionesSinRetorno"
+YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@ExpedicionesSinRetorno"
 CANAL_NARRATIVE_STYLE = "documental de supervivencia"
 CANAL_STYLE_DESCRIPTION = (
     "Expediciones reales llevadas al límite. Hielo, desierto, montaña, océano. "
@@ -258,8 +260,8 @@ OUTRO_VOICE_TEXT = "Gracias por ver. Nos vemos en la proxima expedicion."
 
 # YouTube
 YT_CATEGORY_ID = "27"
-PUBLISH_MODE = "immediate"
-PUBLISH_WARMUP_MIN = 5
+PUBLISH_MODE = "scheduled"
+PUBLISH_WARMUP_MIN = 30
 UPLOAD_WINDOWS = [{"start": 10, "end": 13}, {"start": 14, "end": 17}, {"start": 20, "end": 22}]
 YT_DEFAULT_TAGS = [
     "expediciones fallidas", "exploraciones que salieron mal", "tragedias en expediciones",

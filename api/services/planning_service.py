@@ -27,6 +27,215 @@ from api.services.generation_service import _DISPATCH_LOCK
 _last_horizon_replan_ts: Optional[datetime] = None
 _HORIZON_REPLAN_COOLDOWN_MIN = 5  # minimum minutes between replans
 
+# ── Dynamic VPD adjuster ───────────────────────────────────
+class DynamicSlotAdjuster:
+    """
+    Auto-adjusts videos_per_day per channel based on pipeline health.
+    
+    Called by _readjust_pending_slots after slot reconciliation.
+    Evaluates success rate, backlog, account quota sharing, and channel
+    maturity to determine optimal daily slot allocation.
+    """
+    
+    def __init__(self, db):
+        self.db = db
+        self._last_check: dict[str, float] = {}
+    
+    def should_check(self, slug: str, interval_h: int = 6) -> bool:
+        import time
+        now = time.time()
+        last = self._last_check.get(slug, 0)
+        if now - last > interval_h * 3600:
+            self._last_check[slug] = now
+            return True
+        return False
+    
+    def evaluate_channel(self, slug: str) -> dict:
+        from config.config_bridge import get_channel_config
+        cfg = get_channel_config(slug)
+        
+        base = getattr(cfg, 'VIDEOS_PER_DAY_BASE', 2)
+        vpd_min = getattr(cfg, 'VIDEOS_PER_DAY_MIN', 1)
+        vpd_max = getattr(cfg, 'VIDEOS_PER_DAY_MAX', 4)
+        
+        if not getattr(cfg, 'DYNAMIC_VPD_ENABLED', True):
+            return {'recommended': base, 'reason': 'dynamic_disabled'}
+        
+        success_rate = self._compute_success_rate(
+            slug, getattr(cfg, 'DYNAMIC_VPD_SUCCESS_WINDOW', 10)
+        )
+        awaiting = self._count_awaiting(slug)
+        backlog_boost = getattr(cfg, 'DYNAMIC_VPD_BACKLOG_BOOST', 4)
+        account = self._get_google_account(slug)
+        sibling_slugs = self._get_sibling_channels(account)
+        account_total = self._sum_vpd_for_slugs(sibling_slugs)
+        account_max = getattr(cfg, 'DYNAMIC_VPD_SHARED_ACCOUNT_MAX', 6)
+        published_count = self._count_published(slug)
+        new_boost = 1 if published_count < getattr(cfg, 'DYNAMIC_VPD_NEW_CHANNEL_THRESHOLD', 30) else 0
+        catchup = self._get_catchup_boost(slug, cfg)
+        
+        recommended = base
+        if success_rate >= getattr(cfg, 'DYNAMIC_VPD_SUCCESS_THRESHOLD', 0.7) and awaiting < backlog_boost:
+            recommended += 1
+        elif success_rate < 0.5 or awaiting >= backlog_boost * 2:
+            recommended -= 1
+        recommended += new_boost
+        recommended += catchup
+        recommended = max(vpd_min, min(vpd_max, recommended))
+        
+        if len(sibling_slugs) > 1:
+            others_total = account_total - self._get_current_vpd(slug)
+            available = account_max - others_total
+            recommended = min(recommended, max(vpd_min, available))
+        
+        return {
+            'recommended': recommended,
+            'success_rate': round(success_rate, 2),
+            'awaiting_upload': awaiting,
+            'published_count': published_count,
+            'new_boost': new_boost,
+            'catchup_boost': catchup,
+            'account_siblings': len(sibling_slugs),
+            'reason': self._build_reason(success_rate, awaiting, new_boost, catchup),
+        }
+    
+    def apply(self, slug: str) -> int:
+        result = self.evaluate_channel(slug)
+        recommended = result['recommended']
+        
+        try:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "UPDATE channels SET config_json = json_set(config_json, '$.videos_per_day', ?) "
+                    "WHERE slug = ?",
+                    (recommended, slug),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[{slug}] Dynamic VPD apply failed: {e}")
+            return -1
+        
+        logger.info(f"[{slug}] Dynamic VPD: vpd={recommended} — {result['reason']}")
+        return recommended
+    
+    def apply_all(self) -> dict[str, int]:
+        try:
+            channels = self.db.fetch_all("SELECT slug FROM channels WHERE active = 1")
+        except Exception:
+            return {}
+        results = {}
+        for ch in channels:
+            slug = ch['slug']
+            if not self.should_check(slug):
+                continue
+            results[slug] = self.apply(slug)
+        return results
+    
+    # ── private helpers ───────────────────────────────
+    
+    def _compute_success_rate(self, slug: str, window: int) -> float:
+        try:
+            jobs = self.db.fetch_all("""
+                SELECT status FROM generation_jobs
+                WHERE channel_slug = ? AND status IN ('completed', 'failed')
+                ORDER BY created_at DESC LIMIT ?
+            """, (slug, window))
+        except Exception:
+            return 1.0
+        if not jobs:
+            return 1.0
+        completed = sum(1 for j in jobs if j['status'] == 'completed')
+        return completed / len(jobs)
+    
+    def _count_awaiting(self, slug: str) -> int:
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM videos WHERE canal = ? AND status = 'awaiting_upload'",
+                    (slug,),
+                ).fetchone()
+            return row['cnt'] if row else 0
+        except Exception:
+            return 0
+    
+    def _count_published(self, slug: str) -> int:
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM videos WHERE canal = ? AND status = 'published'",
+                    (slug,),
+                ).fetchone()
+            return row['cnt'] if row else 0
+        except Exception:
+            return 0
+    
+    def _get_google_account(self, slug: str) -> str:
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT google_account FROM channels WHERE slug = ?", (slug,)
+                ).fetchone()
+            return row['google_account'] if row else ''
+        except Exception:
+            return ''
+    
+    def _get_sibling_channels(self, account: str) -> list:
+        if not account:
+            return []
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT slug FROM channels WHERE google_account = ? AND active = 1",
+                    (account,),
+                ).fetchall()
+            return [r['slug'] for r in rows]
+        except Exception:
+            return []
+    
+    def _get_current_vpd(self, slug: str) -> int:
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT json_extract(config_json, '$.videos_per_day') as vpd "
+                    "FROM channels WHERE slug = ?",
+                    (slug,),
+                ).fetchone()
+            return int(row['vpd']) if row and row['vpd'] else 2
+        except Exception:
+            return 2
+    
+    def _sum_vpd_for_slugs(self, slugs: list) -> int:
+        return sum(self._get_current_vpd(s) for s in slugs)
+    
+    def _get_catchup_boost(self, slug: str, cfg) -> int:
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT value FROM system_state WHERE key = 'quota_exhausted_at'"
+                ).fetchone()
+            if not row or not row['value']:
+                return 0
+            paused_dt = datetime.fromisoformat(row['value'])
+            hours_paused = (datetime.now(timezone.utc) - paused_dt).total_seconds() / 3600
+        except Exception:
+            return 0
+        
+        catchup_duration = getattr(cfg, 'DYNAMIC_VPD_CATCHUP_DURATION_H', 48)
+        if hours_paused > 6 and hours_paused < catchup_duration:
+            return getattr(cfg, 'DYNAMIC_VPD_CATCHUP_BOOST', 2)
+        return 0
+    
+    def _build_reason(self, success_rate: float, awaiting: int, new_boost: int, catchup: int) -> str:
+        parts = [f"success_rate={success_rate:.0%}"]
+        if awaiting > 0:
+            parts.append(f"backlog={awaiting}")
+        if new_boost:
+            parts.append(f"new_channel_boost=+{new_boost}")
+        if catchup:
+            parts.append(f"catchup_boost=+{catchup}")
+        return ", ".join(parts)
+
+
 # ── Constants ────────────────────────────────────────────────
 
 # Spain-optimal UPLOAD windows (CEST = UTC+2).  These are the target publish
@@ -2192,6 +2401,31 @@ def _readjust_pending_slots(db):
             conn.commit()
         
         next_start = next_start + timedelta(minutes=ch_dur + GAP)
+    
+    # ── Dynamic VPD auto-adjustment ────────────────────────
+    _dynamic_vpd_adjust(db, pending_sorted)
+
+
+def _dynamic_vpd_adjust(db, pending_sorted):
+    """Evaluate and apply Dynamic VPD for channels with recently adjusted slots."""
+    try:
+        from config.config_bridge import get_channel_config
+    except Exception:
+        return
+    
+    unique_slugs = set()
+    for slot in pending_sorted:
+        slug = slot.get('channel_slug') or slot.get('canal')
+        if slug:
+            unique_slugs.add(slug)
+    
+    adjuster = DynamicSlotAdjuster(db)
+    for slug in unique_slugs:
+        cfg = get_channel_config(slug)
+        interval = getattr(cfg, 'DYNAMIC_VPD_CHECK_INTERVAL_H', 6)
+        if not adjuster.should_check(slug, interval_h=interval):
+            continue
+        adjuster.apply(slug)
 
 
 def _cancel_stale_slots(db):

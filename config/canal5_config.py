@@ -9,7 +9,7 @@ CANAL_DISPLAY_NAME = "Anomalias Medicas"
 CANAL_TAGLINE = "Casos clinicos reales que la ciencia aun no puede explicar"
 CANAL_OUTRO_TAGLINE = "La medicina avanza cada dia. Pero este caso... la ciencia todavia no tiene respuesta."
 YOUTUBE_HANDLE = "@AnomaliasMedicas"
-YOUTUBE_CHANNEL_URL = "https://www.youtube.com/channel/UCDZi5NrlYnncYVlnZ0O7wKA"
+YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@AnomaliasMedicas"
 CANAL_NARRATIVE_STYLE = "documental medico de asombro"
 CANAL_STYLE_DESCRIPTION = (
     "Casos medicos reales que desafian la ciencia. Enfermedades que "
@@ -265,8 +265,8 @@ OUTRO_VOICE_TEXT = "Gracias por acompanarnos. Hasta el proximo misterio medico."
 
 # YouTube
 YT_CATEGORY_ID = "27"
-PUBLISH_MODE = "immediate"
-PUBLISH_WARMUP_MIN = 5
+PUBLISH_MODE = "scheduled"
+PUBLISH_WARMUP_MIN = 30
 UPLOAD_WINDOWS = [{"start": 10, "end": 13}, {"start": 17, "end": 20}, {"start": 20, "end": 22}]
 YT_DEFAULT_TAGS = [
     "enfermedades raras", "anomalias medicas", "casos medicos inexplicables",

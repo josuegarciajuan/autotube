@@ -23,8 +23,8 @@ CANAL_OUTRO_TAGLINE = (
     "La realidad siempre supera la ficción. Y esto que acabas de ver es real."
 )
 
-YOUTUBE_HANDLE = "@cleanthelistemaillistclean7103"
-YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@cleanthelistemaillistclean7103"
+YOUTUBE_HANDLE = "@Sincronías-q1y"
+YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@Sincronías-q1y"
 
 CANAL_NARRATIVE_STYLE = "documental de asombro"
 CANAL_STYLE_DESCRIPTION = (
@@ -348,6 +348,30 @@ KOKORO_BLOCK_SPEEDS = {
 KOKORO_PAUSE_BETWEEN_BLOCKS = 0.9
 
 # ═══════════════════════════════════════════════════════════════════
+# MARATHON CONFIG
+# ═══════════════════════════════════════════════════════════════════
+
+MARATHON_NARRATIVE_FORMAT = "miracles_and_coincidences"
+
+MARATHON_TITLE_FORMULAS = [
+    "{topic}: El Documental Que Cambiará Tu Visión De La Realidad",
+    "Sincronías Imposibles: {topic} | Documental Completo",
+    "{topic} — Casualidades Que La Ciencia No Puede Explicar",
+    "Milagros Modernos: {topic} — Historias Reales",
+    "El Misterio De {topic}: Sincronías Que Desafían La Lógica",
+    "{topic}: Cuando El Universo Conspira | Documental HD",
+    "Señales Del Destino: {topic} — Casos Documentados",
+    "Lo Increíble De {topic}: Pruebas De Que Nada Es Casualidad",
+]
+
+MARATHON_HOOK_TYPES = [
+    "misterio_sin_resolver",
+    "revelacion_impactante",
+    "asombro_cientifico",
+    "conocimiento_exclusivo",
+]
+
+# ═══════════════════════════════════════════════════════════════════
 # CONTENT SOURCES
 # ═══════════════════════════════════════════════════════════════════
 
@@ -462,8 +486,8 @@ OUTRO_VOICE_TEXT = "Gracias por acompañarnos. Hasta la próxima sincronía."
 # ═══════════════════════════════════════════════════════════════════
 
 YT_CATEGORY_ID = "24"  # Entertainment
-PUBLISH_MODE = "immediate"
-PUBLISH_WARMUP_MIN = 5
+PUBLISH_MODE = "scheduled"
+PUBLISH_WARMUP_MIN = 30
 
 UPLOAD_WINDOWS = [
     {"start": 10, "end": 13},
@@ -747,6 +771,43 @@ PLAYLISTS = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════
+# VIRAL PLAYLIST KEYWORDS (English mirror)
+# ═══════════════════════════════════════════════════════════════════
+
+VIRAL_PLAYLIST_KEYWORDS = {
+    "historias-completas": [
+        "unexplained miracles documentary",
+        "real life miracles caught on camera",
+        "incredible true stories documentary",
+        "synchronicity explained documentary",
+    ],
+    "lo-mas-increible": [
+        "most incredible coincidences in history",
+        "unbelievable true stories",
+        "mind blowing coincidences",
+        "things science cannot explain",
+    ],
+    "milagros-modernos": [
+        "modern day miracles documentary",
+        "medical miracles unexplained",
+        "real miracles documentary 2025",
+        "miraculous events caught on camera",
+    ],
+    "casualidades-imposibles": [
+        "impossible coincidences documentary",
+        "twin strangers documentary",
+        "synchronicity real cases",
+        "meaningful coincidences documentary",
+    ],
+    "predicciones-que-se-cumplieron": [
+        "predictions that came true documentary",
+        "prophecies fulfilled throughout history",
+        "nostradamus predictions that came true",
+        "future predictions that were right",
+    ],
+}
+
+# ═══════════════════════════════════════════════════════════════════
 # FIRST 48 HOURS STRATEGY
 # ═══════════════════════════════════════════════════════════════════
 
@@ -772,6 +833,37 @@ FIRST_48H_STRATEGY = {
         "If CTR < 5%: swap thumbnail variant",
         "Second Community Tab: cerrar el loop de la encuesta pre-upload",
     ],
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# CROSS-PLATFORM
+# ═══════════════════════════════════════════════════════════════════
+
+CROSS_PLATFORM = {
+    "tiktok": {
+        "enabled": True,
+        "posts_per_day": 2,
+        "format": "clip_vertical_60s",
+        "hook_template": "¿Sabías que {hook_frase}? #sincronias #misterio #documental",
+        "cadence": "morning_evening",
+    },
+    "youtube_shorts": {
+        "enabled": True,
+        "posts_per_day": 3,
+        "format": "shorts_vertical_60s",
+        "hook_template": "{hook_frase} #Shorts",
+    },
+    "twitter_x": {
+        "enabled": True,
+        "posts_per_day": 3,
+        "format": "text_thread",
+        "hook_template": "{titulo_video}\n\n{hook_frase}\n\n🧵 Abro hilo...",
+    },
+    "spotify_podcast": {
+        "enabled": True,
+        "format": "audio_only",
+        "cadence": "per_video",
+    },
 }
 
 # ═══════════════════════════════════════════════════════════════════
