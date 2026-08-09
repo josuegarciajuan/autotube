@@ -874,8 +874,8 @@ export default function ChannelDetail() {
               <span className="hidden sm:inline text-gray-600">·</span>
               <span className="hidden sm:inline text-gray-500">{channel.slug}</span>
             </div>
-            {/* Channel YouTube Stats — pills mejoradas */}
-            <div className="flex flex-wrap items-center gap-1.5 mt-2">
+            {/* All channel & video stats — single compact row */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
             {channelYtStats && (
               <>
                 <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan border border-neon-cyan/10">
@@ -894,9 +894,6 @@ export default function ChannelDetail() {
                 )}
               </>
             )}
-            </div>
-            {/* Shorts aggregate stats */}
-            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
             {channelShortsStats && channelShortsStats.total > 0 && (
               <>
                 <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-purple border border-neon-purple/10">
@@ -917,9 +914,6 @@ export default function ChannelDetail() {
                 )}
               </>
             )}
-            </div>
-            {/* Long-form videos aggregate */}
-            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
             {channelVideosAggregate && (channelVideosAggregate.video_count > 0 || channelVideosAggregate.total_views > 0) && (
               <>
                 <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-gold/80 border border-neon-gold/10">
@@ -940,23 +934,20 @@ export default function ChannelDetail() {
                 )}
               </>
             )}
-            </div>
-
-            {/* Combined total */}
+            {/* Combined total — inline as last pill */}
             {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
-              <div className="flex items-center gap-2 text-xs sm:text-sm mt-1.5 pt-1.5 border-t border-surface-border/40">
-                <span className="inline-flex items-center gap-1.5 bg-neon-red/10 rounded-md px-2.5 py-1 text-neon-red font-semibold border border-neon-red/20">
-                  <Eye size={13} />
-                  <span className="font-mono tabular-nums">
-                    {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
-                  </span>
-                  vistas totales
+              <span className="inline-flex items-center gap-1.5 bg-neon-red/10 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-red font-semibold border border-neon-red/20">
+                <Eye size={11} />
+                <span className="font-mono tabular-nums">
+                  {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
                 </span>
-              </div>
+                vistas totales
+              </span>
             )}
+            </div>
             {/* ── Marathon analytics ── */}
             {marathonAnalytics && marathonAnalytics.total_marathons > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1.5 border-t border-neon-amber/20">
+              <div className="flex flex-wrap items-center gap-1.5 mt-1">
                 <span className="inline-flex items-center gap-1 bg-neon-amber/10 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-amber/80 border border-neon-amber/15">
                   <Film size={11} />
                   <span className="font-mono font-semibold tabular-nums">{marathonAnalytics.total_marathons}</span> maratones
