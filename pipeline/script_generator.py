@@ -310,7 +310,11 @@ class ScriptGenerator:
                             attempt + 1, self._llm_retries,
                         )
                     )
-                return json.loads(content.strip())
+                # raw_decode tolerates trailing text after valid JSON
+                # (LLMs sometimes append explanations after closing brace)
+                decoder = json.JSONDecoder()
+                obj, _ = decoder.raw_decode(content.strip())
+                return obj
             except json.JSONDecodeError as exc:
                 last_exc = exc
                 if attempt < self._llm_retries - 1:

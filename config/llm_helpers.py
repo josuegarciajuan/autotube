@@ -127,7 +127,13 @@ def llm_json_call(
                 if m:
                     text = m.group(0)
 
-            return json.loads(text)
+            # 3. Parse JSON — use raw_decode to gracefully handle
+            #    trailing text that LLMs sometimes append after valid
+            #    JSON (e.g., "...This topic is suitable because...")
+            #    Fixes ~399 daily Extra data parse failures (Aug 2026)
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(text)
+            return obj
 
         except json.JSONDecodeError as exc:
             last_exc = exc

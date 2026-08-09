@@ -943,7 +943,12 @@ def run_job(
             
             media_assets = orch.phase_media(script, audio_data, job_id=job_id)
             if not media_assets:
-                error_msg = "No se encontraron imagenes ni videos"
+                if media_assets is None:
+                    # Exception/timeout inside orchestrator (real cause already
+                    # logged by orchestrator.phase_media → see worker log)
+                    error_msg = "Media fetch failed: error de proveedores o timeout — revisar log del worker para causa raíz"
+                else:
+                    error_msg = "No se encontraron imagenes ni videos"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="media",
