@@ -153,13 +153,21 @@ def run_standalone_short(
             channel_slug=channel_slug,
         )
 
-        # Build scene ranges
-        timestamps = tts_result.get("timestamps", [])
-        scene_ranges = []
-        for i, _ in enumerate(script["bloques"]):
-            start = timestamps[i]["start"] if i < len(timestamps) else 0
-            end = timestamps[i]["end"] if i < len(timestamps) else audio_duration
-            scene_ranges.append({"start": start, "end": end, "block_index": i})
+        # Build scene ranges — canonical pattern (normalises ms→sec via
+        # _compute_block_ranges, same as NativeShortsPipeline + shorts_scheduler)
+        scene_ranges = None
+        try:
+            from pipeline.video_editor import VideoEditor
+            editor = VideoEditor(ch_config=pipeline.config)
+            bloques = script["bloques"]
+            ts = tts_result.get("timestamps", [])
+            if bloques and ts:
+                scene_ranges = editor._compute_block_ranges(bloques, ts)
+                for sr in scene_ranges:
+                    sr["duracion_sec"] = sr.get("duration", 5.0)
+        except Exception as e:
+            logger.warning("[standalone] scene_ranges compute failed (will use uniform): %s", e)
+            scene_ranges = None
 
         # ── Render ─────────────────────────────────────────
         render_path = output_dir / f"standalone_render_{os.getpid()}.mp4"

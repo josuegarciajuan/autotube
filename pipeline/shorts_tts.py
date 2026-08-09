@@ -287,7 +287,7 @@ def synthesize_shorts_blocks(
     output_audio_path: Path,
     output_srt_path: Path,
     voice: Optional[str] = None,
-    max_duration_sec: float = SHORTS_MAX_DURATION_SEC,
+    max_duration_sec: Optional[float] = None,
     progress_cb: callable = None,
 ) -> dict:
     """Synthesise TTS for a Short block-by-block.
@@ -315,6 +315,10 @@ def synthesize_shorts_blocks(
     output_audio_path = Path(output_audio_path)
     output_srt_path   = Path(output_srt_path)
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Resolve max duration from channel config (default: global constant)
+    if max_duration_sec is None:
+        max_duration_sec = getattr(ch_config, "SHORTS_MAX_DURATION_SEC", SHORTS_MAX_DURATION_SEC)
 
     # ── Dispatch: Kokoro vs edge-tts based on channel config ──
     from config.voice_resolver import resolve_channel_voice, build_tts_engine

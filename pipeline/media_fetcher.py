@@ -560,7 +560,7 @@ class MediaFetcher:
 
         # ── Phase timeout guard ───────────────────────────────────
         _cb_phase_start = time.time()
-        _cb_phase_timeout = max(1200, n_scenes * 15)  # Scale timeout by scene count (floor 20min, ~15s/scene)
+        _cb_phase_timeout = max(1800, n_scenes * 30)  # Scale timeout by scene count (floor 30min, ~30s/scene — raised from 15s for Pixabay HTTP 502/timeout resilience)
 
         # ── Reset video provider circuit breaker for this job ──
         self._vp_hard_fail.clear()

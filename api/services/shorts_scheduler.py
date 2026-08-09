@@ -17,12 +17,22 @@ Key v12 changes:
 import hashlib
 import logging
 import random
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("autotube.shorts_scheduler")
+
+# ── Module-level state for clip source dedup across scheduler invocations ──
+# Tracks source videos confirmed to have no usable script text.
+# Cleared each calendar day at first invocation.
+_VIDEOS_WITHOUT_SCRIPT: set[int] = set()
+_VIDEOS_WITHOUT_SCRIPT_DATE: str = ""
+# Cooldown after all slots exhausted to prevent log spam and CPU waste
+_LAST_ALL_EXHAUSTED_AT: float = 0.0
+_ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 
 # ── Auto-mark altered content helper (shorts) ─────────────────
 
@@ -1386,6 +1396,24 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     # 2. Cancel stale pending slots (>24h past scheduled_at)
     _cancel_stale_shorts_slots(db)
 
+    # 2b. Daily reset of dedup sets
+    global _VIDEOS_WITHOUT_SCRIPT, _VIDEOS_WITHOUT_SCRIPT_DATE
+    today = date.today().isoformat()
+    if _VIDEOS_WITHOUT_SCRIPT_DATE != today:
+        _VIDEOS_WITHOUT_SCRIPT.clear()
+        _VIDEOS_WITHOUT_SCRIPT_DATE = today
+
+    # 2c. Cooldown: if all slots were recently exhausted, skip this tick to reduce
+    #     log spam and wasted DB queries (9 slots × 3 retries × 2 loops = 54 queries)
+    global _LAST_ALL_EXHAUSTED_AT
+    if _LAST_ALL_EXHAUSTED_AT > 0:
+        elapsed = time.time() - _LAST_ALL_EXHAUSTED_AT
+        if elapsed < _ALL_EXHAUSTED_COOLDOWN_SEC:
+            logger.debug("Shorts dispatch cooldown: all slots exhausted %.0fs ago, skipping tick",
+                         elapsed)
+            return None
+        _LAST_ALL_EXHAUSTED_AT = 0.0  # reset, cooldown expired
+
     # 3. Allowed concurrency: shorts coexist with long-form generation and uploads.
     #    Per AGENTS.md, shorts are excluded from the sequential-only limit.
     #    Guards #4 (per-channel short job check), #5 (min 1GB RAM), and #6 (per-channel
@@ -1619,6 +1647,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     }
 
                 logger.warning("Force dispatch: exhausted %d attempts", _MAX_CLIP_RETRIES)
+                _LAST_ALL_EXHAUSTED_AT = time.time()
                 return None
             else:
                 # Check if there are any pending slots at all (even outside window)
@@ -1874,6 +1903,9 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
     found = None
     for video in videos:
         if video["id"] not in already_used_ids:
+            # v22: skip videos known to have no usable script (avoids retry loops)
+            if video["id"] in _VIDEOS_WITHOUT_SCRIPT:
+                continue
             found = video
             break
 
@@ -2935,7 +2967,9 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
 
     if not script_text:
         conn.close()
-        logger.error("Source video #%d has no script text", source_video_id)
+        _VIDEOS_WITHOUT_SCRIPT.add(source_video_id)
+        logger.warning("Source video #%d has no script text — marked as unusable for clips today",
+                       source_video_id)
         return None
 
     _update_short_job_progress(job_id, 10, "script")
@@ -3715,7 +3749,9 @@ def pre_render_clip_shorts_for_video(
             script_text = str(fallback.get("script", "")) or script_text
 
         if not script_text:
-            logger.error("pre_render: video #%d has no script text", video_id)
+            _VIDEOS_WITHOUT_SCRIPT.add(video_id)
+            logger.warning("pre_render: video #%d has no script text — marked as unusable for clips",
+                          video_id)
             return []
 
         # 3. Build approximate word-level timestamps from blocks

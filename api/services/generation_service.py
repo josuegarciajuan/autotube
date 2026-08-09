@@ -608,7 +608,7 @@ PHASE_TIMEOUTS = {
     "script":   3600,   # 60 min (sequential block generation with stop_event)
     "pre_validate": 30, # 30s (cheap sanity checks, no LLM calls)
     "tts":      _TTS_PHASE_TIMEOUT,   # configurable, default 6h (Kokoro CPU)
-    "media":    1800,   # 30 min (multi-provider + Pollo AI) — raised from 900
+    "media":    5400,   # 90 min ceiling (scaled by scene count in media_fetcher; outer timeout is safety net for hung providers)
     "video":    None,   # infinite (no ceiling for MoviePy rendering)
     "metadata": 300,    # 5 min (LLM)
     "post_validate": 180,  # 3 min (ffprobe checks + possible LLM auto-fix regen)

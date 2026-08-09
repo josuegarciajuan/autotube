@@ -259,6 +259,8 @@ SHORTS_HOOK_OVERLAY_FONT_SIZE = 48    # Hook text overlay (3s)
 SHORTS_HOOK_OVERLAY_DURATION_SEC = 3.0
 SHORTS_HOOK_OVERLAY_FADE_SEC = 0.3
 
+SHORTS_MAX_DURATION_SEC = 58.0          # YouTube Shorts max = 60 s; leave 2 s buffer. Per-channel overridable.
+
 # ═══════════════════════════════════════════════════════════════════
 # THUMBNAIL DEFAULTS
 # ═══════════════════════════════════════════════════════════════════

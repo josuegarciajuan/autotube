@@ -989,7 +989,7 @@ def fetch_short_assets_exhaustive(
 
     # Load cross-short filenames from DB
     try:
-        db = DatabaseExtended(settings.DATABASE_PATH)
+        db = ExtendedDatabase(settings.DATABASE_PATH)
         _DEDUP_STATE["cross_short_filenames"] = db.get_all_used_filenames()
         logger.info("Loaded %d cross-short filenames for dedup",
                     len(_DEDUP_STATE["cross_short_filenames"]))
