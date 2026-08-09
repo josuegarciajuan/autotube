@@ -2751,122 +2751,267 @@ def full_replan(db=None) -> dict:
     )
 
     # ═══════════════════════════════════════════════════════════
-    #  FASE 3 -- Planificar horizonte (videos)
+    #  FASE 3 -- Continuous pipeline: chain from NOW using per-channel durations
     # ═══════════════════════════════════════════════════════════
-    video_slots_all = []
-    channel_cfgs_for_today = []
-    channel_cfgs_for_future = []
+    # Old approach: distributed slots across fixed windows (10-13, 14-17, 18-22)
+    #   → created dead zones (e.g. 02:45→08:49 gap) and overlapped when gen took >2h
+    # New approach: chain slots back-to-back starting NOW, using real per-channel
+    #   pipeline durations from historical timing_data. Slots interleave channels
+    #   via round-robin so no channel starves.
 
+    # 3a. Get per-channel pipeline duration (from history or heuristic)
+    from api.services.schedule_engine import get_avg_creation_minutes
+
+    channel_pipeline = {}  # channel_id → pipeline_minutes
+    channel_upload_windows = {}  # channel_id → [(start, end), ...]
     for ch in channels:
         ch_id = ch["id"]
         slug = ch["slug"]
         if slug == "test":
             continue
-
         cfg = db.get_channel_planning_config(ch_id)
         if not cfg.get("planning_enabled", True):
             continue
 
-        is_scheduled = cfg.get("publish_mode") == "scheduled"
+        # Pipeline duration from real historical data
+        raw_avg = None
+        try:
+            raw_avg = get_avg_creation_minutes(ch_id, n=5)
+            pipeline_min = raw_avg * (1 + BUFFER_PCT)  # +15% safety buffer
+        except Exception:
+            pipeline_min = ESTIMATED_PIPELINE_MINUTES
 
-        base_cfg = {
-            "channel_id": ch_id,
-            "slug": slug,
-            "name": ch["name"],
-            "planning_enabled": True,
-            "publish_mode": cfg.get("publish_mode", "immediate"),
-            "publish_target_hour": cfg.get("publish_target_hour"),
-            "publish_jitter_min": cfg.get("publish_jitter_min", 20),
-            "publish_warmup_min": cfg.get("publish_warmup_min", 120),
-            "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
-            "seo_primary_keyword": cfg.get("seo_primary_keyword", ""),
-            "seo_secondary_keywords": cfg.get("seo_secondary_keywords", []),
-            "viral_per_day": cfg.get("viral_per_day", 0),
-            "videos_day_boost_weight": cfg.get("videos_day_boost_weight", 0.7),
-            "viral_day_boost_weight": cfg.get("viral_day_boost_weight", 0.2),
-            "upload_window_start": cfg.get("upload_window_start", 9),
-            "upload_window_end": cfg.get("upload_window_end", 11),
-            "upload_windows": cfg.get("upload_windows"),
-        }
+        # Floor: minimum 90 min (never schedule tighter than this)
+        pipeline_min = max(pipeline_min, 90)
 
-        # Today: residual quota
-        state = channel_states.get(ch_id, {"videos_committed": 0, "videos_per_day": 2})
-        full_vpd = state["videos_per_day"]
-        committed = state["videos_committed"]
-        residual_vpd = max(0, full_vpd - committed)
+        channel_pipeline[ch_id] = pipeline_min
 
-        today_cfg = {**base_cfg, "videos_per_day": residual_vpd}
-        future_cfg = {
-            **base_cfg,
-            "videos_per_day": 0,  # placeholder, resolved per-day below
-        }
-
-        channel_cfgs_for_today.append(today_cfg)
-        channel_cfgs_for_future.append(future_cfg)
-
-    # 3a. Plan today with residual
-    if channel_cfgs_for_today:
-        today_raw = compute_daily_slots(today.isoformat(), channel_cfgs_for_today)
-        # now_local is needed to compare with DB-local timestamps
-        now_local = _dt.now()
-        for s in today_raw:
-            sched_dt = _dt.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S")
-            if sched_dt < now_local:
-                new_sched = now_local + _td(minutes=2)
-                s["scheduled_at"] = new_sched.strftime("%Y-%m-%d %H:%M:%S")
-                s["catchup"] = True
-                up_total = new_sched.hour * 60 + new_sched.minute + ESTIMATED_PIPELINE_MINUTES
-                uh = min(up_total // 60, 23)
-                um = up_total % 60
-                if s.get("publish_mode") != "scheduled":
-                    s["target_upload_at"] = f"{today.isoformat()} {uh:02d}:{um:02d}:00"
-            else:
-                s["catchup"] = False
-        video_slots_all.extend(today_raw)
-
-    # 3b. Plan future days with full quota
-    for day_offset in range(1, horizon_days):
-        day_str = (today + _td(days=day_offset)).isoformat()
-        futures_for_day = []
-        for fcfg in channel_cfgs_for_future:
-            ch_id = fcfg["channel_id"]
-            cfg = db.get_channel_planning_config(ch_id)
-            resolved_vpd = _resolve_videos_per_day(fcfg, day_str)
-            if resolved_vpd <= 0:
+        # Parse upload windows for scheduled channels
+        upload_windows_raw = cfg.get("upload_windows")
+        if upload_windows_raw and isinstance(upload_windows_raw, list):
+            wins = []
+            for w in upload_windows_raw:
+                if isinstance(w, dict) and "start" in w and "end" in w:
+                    wins.append((int(w["start"]), int(w["end"])))
+            if wins:
+                channel_upload_windows[ch_id] = wins
                 continue
-            day_cfg = {**fcfg, "videos_per_day": resolved_vpd}
-            futures_for_day.append(day_cfg)
-        if futures_for_day:
-            day_slots = compute_daily_slots(day_str, futures_for_day)
-            for s in day_slots:
-                s["catchup"] = False
-            video_slots_all.extend(day_slots)
+        # Backward-compat fallback
+        ws = int(cfg.get("upload_window_start", 9))
+        we = int(cfg.get("upload_window_end", 11))
+        channel_upload_windows[ch_id] = [(ws, we)]
 
-    # 3c. Global collision resolution (cross-day, cross-channel)
-    video_slots_all.sort(key=lambda s: s["scheduled_at"])
+        logger.info(
+            "Full replan pipeline: %s avg=%.0f min (historical=%.0f min + %.0f%% buffer)",
+            slug, pipeline_min, raw_avg if raw_avg else 0, BUFFER_PCT * 100,
+        )
+
+    # 3b. Build flat round-robin slot list across all 7 days — TRUE per-slot interleaving
+    # Each round adds 1 slot per active channel. Channels that hit their daily quota skip.
+    # This ensures fair distribution: C4, C3, C2, C5, C4, C3, C2, C5, ... not C4×6, C3×2, ...
+
+    ch_order = [ch["id"] for ch in channels if ch["id"] in channel_pipeline]
+    # Deterministic starting offset per day
+    day_seed_global = _day_seed(today.isoformat())
+    rr_start = day_seed_global % len(ch_order) if ch_order else 0
+
+    # Pre-compute daily quotas for all channels across all days
+    daily_quotas = {}  # (channel_id, date_key) → total_vpd
+    for day_offset in range(horizon_days):
+        day_str = (today + _td(days=day_offset)).isoformat()
+        for ch_id in ch_order:
+            cfg = db.get_channel_planning_config(ch_id)
+            if day_offset == 0:
+                state = channel_states.get(ch_id, {"videos_committed": 0, "videos_per_day": 2})
+                vpd = max(0, state["videos_per_day"] - state["videos_committed"])
+            else:
+                vpd = _resolve_videos_per_day(
+                    {"channel_id": ch_id, "videos_per_day": cfg.get("videos_per_day", 2),
+                     "videos_day_boost_weight": cfg.get("videos_day_boost_weight", 0.7)},
+                    day_str,
+                )
+            daily_quotas[(ch_id, day_str)] = vpd
+
+    # Build interleaved slot queue: one round = one slot per channel that still has quota
+    slot_queue = []
+    remaining = dict(daily_quotas)  # (ch_id, day_str) → slots left
+    max_remaining = sum(remaining.values())
+    round_idx = 0
+
+    while max_remaining > 0:
+        # Round-robin: start at offset position, cycle through all channels
+        for offset in range(len(ch_order)):
+            ch_id = ch_order[(rr_start + offset) % len(ch_order)]
+
+            # Find the earliest day for this channel that still has remaining slots
+            for day_offset in range(horizon_days):
+                day_str = (today + _td(days=day_offset)).isoformat()
+                key = (ch_id, day_str)
+                if remaining.get(key, 0) > 0:
+                    remaining[key] -= 1
+                    vpd_used = daily_quotas[key] - remaining[key]  # 1-indexed position
+
+                    slug = next((c["slug"] for c in channels if c["id"] == ch_id), "?")
+                    cfg = db.get_channel_planning_config(ch_id)
+                    mode_seq = _build_source_mode_sequence(
+                        daily_quotas[key], cfg, day_str,
+                    ) if daily_quotas[key] > 0 else ["original"] * max(1, daily_quotas[key])
+                    source_mode = mode_seq[vpd_used - 1] if (vpd_used - 1) < len(mode_seq) else "original"
+
+                    slot_queue.append({
+                        "channel_id": ch_id,
+                        "channel_slug": slug,
+                        "date_key": day_str,
+                        "source_mode": source_mode,
+                        "pipeline_minutes": channel_pipeline.get(ch_id, ESTIMATED_PIPELINE_MINUTES),
+                        "slot_number_within_day": vpd_used,
+                        "publish_mode": cfg.get("publish_mode", "immediate"),
+                        "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
+                        "publish_warmup_min": cfg.get("publish_warmup_min", 120),
+                        "upload_windows": channel_upload_windows.get(ch_id, [(9, 11)]),
+                    })
+                    break  # one slot per channel per round
+
+            if max(remaining.values()) == 0:
+                break
+
+        max_remaining = max(remaining.values())
+        round_idx += 1
+
+    # 3c. Chain slots from NOW (pipeline continua)
+    pipeline_cursor = now  # current time in the pipeline chain
+    last_channel_target = {}  # channel_id → last target_upload_at (for same-channel gap)
     resolved_videos = []
-    for slot in video_slots_all:
-        if resolved_videos:
-            last = resolved_videos[-1]
-            last_h, last_m = map(int, last["scheduled_at"][11:16].split(":"))
-            this_h, this_m = map(int, slot["scheduled_at"][11:16].split(":"))
+    channel_day_count = {}  # (channel_id, date_key) → count (for slot_position within day)
 
-            last_total = last_h * 60 + last_m
-            this_total = this_h * 60 + this_m
+    for idx, slot in enumerate(slot_queue):
+        ch_id = slot["channel_id"]
+        slug = slot["channel_slug"]
+        date_key = slot["date_key"]
+        pipeline_min = slot["pipeline_minutes"]
+        is_scheduled = slot["publish_mode"] == "scheduled"
+        warmup_min = slot["publish_warmup_min"]
+        windows = slot["upload_windows"]
 
-            diff = this_total - last_total
-            if diff < GLOBAL_GAP_MINUTES:
-                new_total = last_total + GLOBAL_GAP_MINUTES
-                nh = new_total // 60
-                nm = new_total % 60
-                nh = min(nh, 23)
-                nm = min(nm, 59)
-                slot["scheduled_at"] = f"{slot['date_key']} {nh:02d}:{nm:02d}:00"
+        # ── Scheduled_at: starts right after previous slot finishes ──
+        scheduled_at = pipeline_cursor
 
-        resolved_videos.append(slot)
+        # ── Target_upload_at: when the video should be uploading ──
+        upload_target = scheduled_at + _td(minutes=pipeline_min)
 
-    # Recalculate target_upload_at + enforce same-channel publish spread
-    _resolve_cross_day_collisions(resolved_videos)
+        # ── For scheduled channels: align upload to next available window ──
+        actual_target_public_at = None
+        if is_scheduled and windows:
+            # Check if upload_target falls within any upload window for this channel
+            upload_hour = upload_target.hour
+            upload_min = upload_target.minute
+            in_window = any(
+                w[0] <= upload_hour < w[1] or (upload_hour == w[1] - 1 and upload_min < 30)
+                for w in windows
+            )
+            if not in_window:
+                # Upload is outside permitted windows → push to next available window
+                found = False
+                for attempt_day in range(4):  # try up to 4 days ahead
+                    check_date = upload_target.date() + _td(days=attempt_day)
+                    for w in windows:
+                        # Build a candidate at the start of this window
+                        jitter = hash(f"{ch_id}|{idx}|{check_date}") % 60
+                        candidate_h = w[0]
+                        candidate_m = jitter
+                        candidate = _dt(check_date.year, check_date.month, check_date.day,
+                                        candidate_h, candidate_m, 0)
+                        if candidate > upload_target:
+                            upload_target = candidate
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    # Extreme fallback: keep original, video sits in upload queue
+                    pass
+
+            # ── target_public_at = upload + warmup (for scheduled channels) ──
+            actual_target_public_at = upload_target + _td(minutes=warmup_min)
+
+        # ── Same-channel publish gap: 3h minimum ──
+        if is_scheduled and ch_id in last_channel_target:
+            last_target = last_channel_target[ch_id]
+            min_gap = _td(hours=MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS)
+            if upload_target - last_target < min_gap:
+                upload_target = last_target + min_gap
+                # Recalculate scheduled_at backwards
+                scheduled_at = upload_target - _td(minutes=pipeline_min + warmup_min)
+
+        # ── Floor: never schedule in the past ──
+        if scheduled_at < now + _td(minutes=1):
+            scheduled_at = now + _td(minutes=2)
+            upload_target = scheduled_at + _td(minutes=pipeline_min)
+
+        # ── Update pipeline cursor for next slot ──
+        # Generation finishes at scheduled_at + pipeline_minutes.
+        # The NEXT slot can start after that (with gap), regardless of when
+        # the upload actually happens. For scheduled channels, the video
+        # sits in the upload queue — the pipeline doesn't block on it.
+        gen_finish = scheduled_at + _td(minutes=pipeline_min)
+        pipeline_cursor = gen_finish + _td(minutes=GLOBAL_GAP_MINUTES)
+
+        # Track last target per channel
+        last_channel_target[ch_id] = upload_target
+
+        # Per-day slot position
+        key = (ch_id, date_key)
+        channel_day_count[key] = channel_day_count.get(key, 0) + 1
+
+        # Determine if it's a catchup slot (scheduled before now + was overridden)
+        is_catchup = abs((scheduled_at - (now + _td(minutes=2))).total_seconds()) < 5
+
+        # ── Build slot dict ──
+        date_key_str = scheduled_at.strftime("%Y-%m-%d")  # actual gen date (may differ from planned if spans midnight)
+
+        # target_public_at for scheduled channels
+        target_public_at = None
+        if is_scheduled:
+            target_public_at = upload_target + _td(minutes=warmup_min)
+            # Convert to UTC ISO for DB storage
+            target_public_at_str = _naive_local_to_utc(
+                target_public_at.strftime("%Y-%m-%d %H:%M:%S"),
+                slot["publish_timezone"],
+            )
+        else:
+            target_public_at_str = None
+
+        resolved_videos.append({
+            "channel_id": ch_id,
+            "date_key": date_key_str,
+            "scheduled_at": scheduled_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "target_upload_at": upload_target.strftime("%Y-%m-%d %H:%M:%S"),
+            "target_public_at": target_public_at_str,
+            "slot_position": channel_day_count[key],
+            "channel_name": slot.get("channel_name", slug),
+            "channel_slug": slug,
+            "source_mode": slot["source_mode"],
+            "catchup": is_catchup,
+            "publish_mode": slot["publish_mode"],
+            "publish_timezone": slot["publish_timezone"],
+            "upload_window_start": windows[0][0] if windows else 9,
+            "upload_window_end": windows[0][1] if windows else 11,
+        })
+
+    # ── Log pipeline summary ──
+    if resolved_videos:
+        first = resolved_videos[0]
+        last = resolved_videos[-1]
+        total_gen_hours = sum(s["pipeline_minutes"] for s in slot_queue) / 60 if slot_queue else 0
+        logger.info(
+            "Full replan pipeline: %d slots, first=%s @%s, last=%s @%s, "
+            "total gen time=%.1fh, pipeline fills until %s",
+            len(resolved_videos),
+            first.get("channel_slug", "?"), first["scheduled_at"][11:16],
+            last.get("channel_slug", "?"), last["scheduled_at"][11:16],
+            total_gen_hours,
+            pipeline_cursor.strftime("%Y-%m-%d %H:%M"),
+        )
 
     # Persist video slots
     stored_videos = 0
