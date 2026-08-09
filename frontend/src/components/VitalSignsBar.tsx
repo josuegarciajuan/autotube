@@ -22,9 +22,10 @@ interface VitalSignsBarProps {
   previousKpis?: Record<string, number> | null
 }
 
-// Build sparkline data for Recharts
+// Build sparkline data for Recharts — convert zeros to null so Recharts skips them
+// (zero values in channel_stats_history are false valleys from failed YT API fetches)
 function buildSparkData(values: number[]) {
-  return values.map((v, i) => ({ day: i, value: v }))
+  return values.map((v, i) => ({ day: i, value: v === 0 ? null : v }))
 }
 
 export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, previousKpis }: VitalSignsBarProps) {

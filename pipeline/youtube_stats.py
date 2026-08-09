@@ -1038,13 +1038,23 @@ class YouTubeStatsFetcher:
                 )
             elif channel_analytics:
                 # Data API down — Analytics API has watch time
+                # Guard: analytics fallback often returns 0 for subscriberCount/viewCount,
+                # which creates false valleys in dashboard charts → skip insert
                 result["quota_exhausted"] = True
-                db.insert_channel_stats(channel["id"], channel_analytics)
-                result["channel_updated"] = True
-                result["channel_stats"] = channel_analytics
-                logger.warning(
-                    "Channel stats from Analytics API only (Data API quota exhausted)"
-                )
+                sc = int(channel_analytics.get("subscriberCount", 0))
+                vc = int(channel_analytics.get("viewCount", 0))
+                if sc > 0 or vc > 0:
+                    db.insert_channel_stats(channel["id"], channel_analytics)
+                    result["channel_updated"] = True
+                    result["channel_stats"] = channel_analytics
+                    logger.warning(
+                        "Channel stats from Analytics API only (Data API quota exhausted)"
+                    )
+                else:
+                    logger.warning(
+                        "Analytics fallback returned 0 subscribers+views for %s — skipping insert to avoid false valleys",
+                        self.slug,
+                    )
             else:
                 logger.warning("No channel stats at all for %s", self.slug)
 

@@ -1350,8 +1350,12 @@ export default function ChannelDetail() {
                   </div>
                 </div>
                 <div className="h-32 flex items-end gap-0.5">
-                  {growthData.data.map((point: any, i: number) => {
-                    const maxSubs = Math.max(...growthData.data.map((p: any) => p.subscribers || 0), 1)
+                  {growthData.data
+                    .filter((p: any) => (p.subscribers || 0) > 0)  // skip zero-rows from failed API fetches
+                    .map((point: any, i: number) => {
+                    const maxSubs = Math.max(...growthData.data
+                      .filter((p: any) => (p.subscribers || 0) > 0)
+                      .map((p: any) => p.subscribers || 0), 1)
                     const height = ((point.subscribers || 0) / maxSubs) * 100
                     return (
                       <div key={i} className="flex-1 flex flex-col items-center justify-end group relative" style={{ height: '100%' }}>

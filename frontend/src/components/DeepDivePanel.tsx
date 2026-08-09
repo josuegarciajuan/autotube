@@ -128,7 +128,7 @@ export default function DeepDivePanel({ channel, open, onClose, comparisonChanne
                   <div className="glass rounded-xl p-4">
                     <h3 className="text-sm font-semibold text-gray-300 mb-3">Subs + Views (90d)</h3>
                     <ResponsiveContainer width="100%" height={200}>
-                      <AreaChart data={growthData.daily || []}>
+                      <AreaChart data={(growthData?.data || []).filter((d: any) => d.subscribers > 0 && d.total_views > 0)}>
                         <defs>
                           <linearGradient id="dv-views" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="0%" stopColor="#ff3355" stopOpacity={0.3} />
@@ -140,12 +140,12 @@ export default function DeepDivePanel({ channel, open, onClose, comparisonChanne
                           </linearGradient>
                         </defs>
                         <CartesianGrid strokeDasharray="3 3" stroke="#1a1a2e" />
-                        <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} />
+                        <XAxis dataKey="date_key" tick={{ fontSize: 10, fill: '#666' }} />
                         <YAxis yAxisId="views" tick={{ fontSize: 10, fill: '#666' }} tickFormatter={v => formatShortNumber(v)} />
                         <YAxis yAxisId="subs" orientation="right" tick={{ fontSize: 10, fill: '#00e5ff' }} tickFormatter={v => formatShortNumber(v)} />
                         <Tooltip contentStyle={{ background: '#0f0f16', border: '1px solid #2a2a4a', borderRadius: '8px', fontSize: '11px' }}
                           formatter={(v: any) => formatShortNumber(v)} />
-                        <Area yAxisId="views" type="monotone" dataKey="views" stroke="#ff3355" fill="url(#dv-views)" strokeWidth={2} dot={false} />
+                        <Area yAxisId="views" type="monotone" dataKey="total_views" stroke="#ff3355" fill="url(#dv-views)" strokeWidth={2} dot={false} />
                         <Area yAxisId="subs" type="monotone" dataKey="subscribers" stroke="#00e5ff" fill="url(#dv-subs)" strokeWidth={2} dot={false} />
                       </AreaChart>
                     </ResponsiveContainer>

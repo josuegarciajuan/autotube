@@ -1012,6 +1012,9 @@ def migrate_v2(db_path: str = None):
     # ── v32: Shorts backfill disablement cleanup ──
     _migrate_v32(conn, logger)
     
+    # ── v33: Cleanup zero-valued channel_stats_history rows (false valleys) ──
+    _migrate_v33(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -2102,6 +2105,43 @@ def _migrate_v32(conn, logger):
     except Exception as exc:
         logger.debug("Migration v32: system_state update skipped (%s)", exc)
     
+    conn.commit()
+
+
+def _migrate_v33(conn, logger):
+    """Idempotent v33 migration: delete zero-valued channel_stats_history rows
+    that create false valleys in dashboard growth charts.
+
+    Root cause: when the YT Data API fails and falls back to Analytics API,
+    channel_analytics dicts often lack subscriberCount/viewCount, so
+    insert_channel_stats() stored rows with subscribers=0 + total_views=0.
+
+    This migration only targets channels that have at least one non-zero
+    snapshot (to avoid deleting legitimate initial-zero rows).
+    """
+    # Delete zero rows for channels that have at least one non-zero snapshot
+    result = conn.execute("""
+        DELETE FROM channel_stats_history
+        WHERE id IN (
+            SELECT csh.id FROM channel_stats_history csh
+            WHERE csh.subscribers = 0 AND csh.total_views = 0
+              AND csh.channel_id IN (
+                  SELECT DISTINCT channel_id FROM channel_stats_history
+                  WHERE subscribers > 0 OR total_views > 0
+              )
+        )
+    """)
+    deleted = conn.rowcount if hasattr(conn, 'rowcount') else result.rowcount
+    if deleted:
+        logger.info(
+            "Migration v33: deleted %d zero-valued channel_stats_history rows (false valleys)",
+            deleted,
+        )
+    else:
+        logger.debug(
+            "Migration v33: no zero-valued channel_stats_history rows to clean up"
+        )
+
     conn.commit()
 
 
@@ -4268,6 +4308,7 @@ class ExtendedDatabase(Database):
                    FROM channel_stats_history
                    WHERE channel_id = ?
                      AND fetched_at >= datetime('now', ?)
+                     AND subscribers > 0  -- skip zero-rows from failed API fetches (false valleys)
                    GROUP BY DATE(fetched_at)
                    ORDER BY date_key ASC""",
                 (channel_id, f"-{days} days"),
@@ -4541,6 +4582,7 @@ class ExtendedDatabase(Database):
                      SELECT channel_id, MAX(id) as max_id
                      FROM channel_stats_history
                      WHERE fetched_at <= datetime('now', '-{days_ago} days')
+                       AND subscribers > 0  -- skip zero-rows from failed API fetches
                      GROUP BY channel_id
                  ) latest ON csh.id = latest.max_id
                  WHERE 1=1 {spark_ch_filter}""")
