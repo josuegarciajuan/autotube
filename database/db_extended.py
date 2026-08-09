@@ -315,6 +315,58 @@ def _maybe_trigger_publish_verification(video: dict):
     t.start()
 
 
+def _maybe_trigger_orphaned_verification(video_id: int, channel_slug: str, yt_video_id: str):
+    """Verify an orphaned 'uploaded' video that has no target_public_at.
+    
+    These are videos uploaded in 'immediate' mode that were never transitioned
+    to 'published'. Unlike warming videos, we don't check target_public_at —
+    we just verify if uploaded_at is old enough (>1h) to ensure YouTube
+    processing is complete.
+    """
+    now_utc = datetime.now(_dt_timezone.utc)
+    
+    # ── Rate-limit: max 1 orphan verification per channel per cycle ──
+    orphan_key = f"{channel_slug}_orphan"
+    last = _CHANNEL_LAST_VERIFY.get(orphan_key)
+    if last and (now_utc - last).total_seconds() < _CHANNEL_VERIFY_COOLDOWN:
+        return
+    _CHANNEL_LAST_VERIFY[orphan_key] = now_utc
+    
+    # ── Don't verify if already in-flight ──
+    with _PUBLISH_VERIFY_LOCK:
+        if video_id in _PUBLISH_VERIFY_INFLIGHT:
+            return
+        _PUBLISH_VERIFY_INFLIGHT.add(video_id)
+    
+    # ── Only verify if uploaded >1h ago (let YouTube finish processing) ──
+    db = ExtendedDatabase()
+    video = db.get_video(video_id)
+    uploaded_at = video.get("uploaded_at") if video else None
+    if uploaded_at:
+        try:
+            up_dt = datetime.fromisoformat(str(uploaded_at).replace("Z", "+00:00").replace(" ", "T"))
+            if up_dt.tzinfo is None:
+                up_dt = up_dt.replace(tzinfo=_dt_timezone.utc)
+            if (now_utc - up_dt).total_seconds() < 3600:
+                with _PUBLISH_VERIFY_LOCK:
+                    _PUBLISH_VERIFY_INFLIGHT.discard(video_id)
+                return  # too recent, wait
+        except (ValueError, TypeError):
+            pass
+    
+    vlog = logger.getChild("publish_verify")
+    vlog.info(
+        "[%s] 🔍 Orphaned video #%d (yt=%s) — triggering verification",
+        channel_slug, video_id, yt_video_id,
+    )
+    t = threading.Thread(
+        target=_verify_published_status_bg,
+        args=(video_id, channel_slug, yt_video_id),
+        daemon=True,
+    )
+    t.start()
+
+
 SCHEMA_V2_PATH = Path(__file__).parent / "schema_v2.sql"
 
 
@@ -7036,6 +7088,37 @@ class ExtendedDatabase(Database):
             # on-demand verification without a persistent background loop.
             for row in warming:
                 _maybe_trigger_publish_verification(dict(row))
+
+            # ── 4b. Orphaned 'uploaded' videos (no target_public_at, no published_at) ──
+            # Videos uploaded in 'immediate' mode (marathon, viral, or legacy code paths)
+            # that were never transitioned to 'published'. Verify directly via YouTube API.
+            orphaned = conn.execute(
+                """SELECT
+                    v.id as video_id,
+                    v.channel_id,
+                    v.yt_video_id,
+                    v.titulo_final,
+                    v.uploaded_at,
+                    v.publish_mode,
+                    v.created_at,
+                    ch.slug as channel_slug,
+                    ch.name as channel_name
+                   FROM videos v
+                   JOIN channels ch ON ch.id = v.channel_id
+                   WHERE v.status = 'uploaded'
+                     AND v.yt_video_id IS NOT NULL
+                     AND v.yt_video_id != ''
+                     AND v.published_at IS NULL
+                   ORDER BY v.uploaded_at DESC""",
+            ).fetchall()
+            result["orphaned"] = [dict(r) for r in orphaned]
+            for row in orphaned:
+                d = dict(row)
+                vid = d.get("video_id")
+                ch_slug = d.get("channel_slug", "")
+                yt_id = d.get("yt_video_id", "")
+                if vid and yt_id and ch_slug:
+                    _maybe_trigger_orphaned_verification(vid, ch_slug, yt_id)
 
             # ── 5. Shorts pending (slots for today, not dispatched yet) ──
             # v26: Exclude slots that already have a short_id linked (pre-rendered

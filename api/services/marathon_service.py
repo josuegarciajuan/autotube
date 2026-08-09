@@ -215,13 +215,15 @@ def check_and_dispatch_marathon(db) -> dict | None:
         return None
 
     # 6. Create video record (no planned_slot — marathon is outside the planning system)
+    # Use PUBLISH_MODE from channel config (defaults to scheduled as in MARATHON_PUBLISH_MODE)
+    marathon_publish_mode = cfg.get("PUBLISH_MODE", cfg.get("MARATHON_PUBLISH_MODE", "scheduled"))
     with db._connect() as conn:
         cursor = conn.execute(
             """INSERT INTO videos 
-               (canal, channel_id, video_path, status, progress, is_marathon,
-                marathon_config, publish_mode, created_at)
-               VALUES (?, ?, '', 'generating', 0, 1, ?, 'immediate', CURRENT_TIMESTAMP)""",
-            (slug, channel_id, json.dumps(marathon_cfg)),
+               (canal, channel_id, video_path, status, progress, publish_mode,
+                is_marathon, marathon_config, created_at)
+               VALUES (?, ?, '', 'generating', 0, ?, 1, ?, CURRENT_TIMESTAMP)""",
+            (slug, channel_id, marathon_publish_mode, json.dumps(marathon_cfg)),
         )
         conn.commit()
         video_id = cursor.lastrowid

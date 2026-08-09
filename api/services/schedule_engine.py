@@ -460,12 +460,15 @@ def dispatch_next_due_slot(db=None) -> dict | None:
         # 6. Mark slot as running
         db.update_slot_status(slot_id, "running")
 
-        # 7. Create video record
+        # 7. Create video record with correct publish_mode from channel config
+        from config.config_bridge import get_channel_config
+        ch_cfg = get_channel_config(slug)
+        publish_mode = getattr(ch_cfg, "PUBLISH_MODE", "scheduled")
         conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
         cursor = conn.execute(
-            "INSERT INTO videos (canal, channel_id, video_path, status, progress, created_at) "
-            "VALUES (?, ?, '', 'generating', 0, CURRENT_TIMESTAMP)",
-            (slug, channel_id),
+            "INSERT INTO videos (canal, channel_id, video_path, status, progress, publish_mode, created_at) "
+            "VALUES (?, ?, '', 'generating', 0, ?, CURRENT_TIMESTAMP)",
+            (slug, channel_id, publish_mode),
         )
         conn.commit()
         video_id = cursor.lastrowid
