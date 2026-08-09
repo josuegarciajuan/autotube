@@ -2614,3 +2614,400 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         return short_id
 
     return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Full Replan — "Reprogramar Ahora" button
+# ═══════════════════════════════════════════════════════════════
+
+_FULL_REPLAN_COOLDOWN_MIN = 2  # minimum minutes between full replans
+_last_full_replan_ts: Optional[datetime] = None
+
+
+def full_replan(db=None) -> dict:
+    """Force a complete planning reset: delete ALL pending planned slots
+    (videos + shorts) and recreate from scratch across the 7-day horizon.
+
+    Key differences from compute_and_store_horizon:
+        1. Also nukes shorts pending slots
+        2. Cancels ALL queued generation_jobs (orphaned)
+        3. For today: computes RESIDUAL quota (full quota - already committed)
+           so slots match reality -- no double-booking
+        4. Returns detailed summary for frontend notification
+
+    Returns:
+        dict with {ok, videos, shorts, jobs_cancelled, catchup_slots, next_slot, summary}.
+    """
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+
+    # ── Cooldown guard ──────────────────────────────────
+    global _last_full_replan_ts
+    now = _dt.now()
+    if _last_full_replan_ts is not None:
+        elapsed = (now - _last_full_replan_ts).total_seconds() / 60
+        if elapsed < _FULL_REPLAN_COOLDOWN_MIN:
+            logger.info(
+                "full_replan: skipped -- last replan %.0f min ago (cooldown=%d min)",
+                elapsed, _FULL_REPLAN_COOLDOWN_MIN,
+            )
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": f"Cooldown activo -- espera {_FULL_REPLAN_COOLDOWN_MIN - int(elapsed)} min",
+            }
+    _last_full_replan_ts = now
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    today = _date.today()
+    horizon_days = 7
+
+    # ═══════════════════════════════════════════════════════════
+    #  FASE 1 -- Auditar estado actual (que hay en vuelo)
+    # ═══════════════════════════════════════════════════════════
+    channels = db.get_channels(active_only=True)
+    channel_states = {}
+
+    for ch in channels:
+        ch_id = ch["id"]
+        slug = ch["slug"]
+        if slug == "test":
+            continue
+
+        cfg = db.get_channel_planning_config(ch_id)
+        if not cfg.get("planning_enabled", True):
+            continue
+
+        # Videos committed (in-flight, cannot be touched)
+        with db._connect() as conn:
+            running_row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos WHERE channel_id=? AND status='running'",
+                (ch_id,),
+            ).fetchone()
+            running = running_row["cnt"] if running_row else 0
+
+        awaiting = db.count_awaiting_upload(ch_id)
+        published_today = db.get_videos_published_today(ch_id)
+
+        # Warming (uploaded_private) = already on YT as private
+        with db._connect() as conn:
+            warming_row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos "
+                "WHERE channel_id=? AND status='uploaded_private' AND published_at IS NULL",
+                (ch_id,),
+            ).fetchone()
+            warming = warming_row["cnt"] if warming_row else 0
+
+        videos_committed = running + awaiting + published_today + warming
+
+        # Shorts committed
+        with db._connect() as conn:
+            shorts_running = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shorts WHERE channel_id=? AND status IN ('rendering','uploading')",
+                (ch_id,),
+            ).fetchone()["cnt"]
+
+        shorts_published_today = db.get_shorts_published_today(ch_id)
+
+        with db._connect() as conn:
+            shorts_slots_running = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shorts_planned_slots WHERE channel_id=? AND status='running'",
+                (ch_id,),
+            ).fetchone()["cnt"]
+
+        shorts_committed = shorts_running + shorts_published_today + shorts_slots_running
+
+        channel_states[ch_id] = {
+            "slug": slug,
+            "name": ch["name"],
+            "videos_committed": videos_committed,
+            "shorts_committed": shorts_committed,
+            "videos_per_day": _resolve_videos_per_day(cfg, today.isoformat()),
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    #  FASE 2 -- Borrar TODOS los slots pendientes
+    # ═══════════════════════════════════════════════════════════
+    with db._connect() as conn:
+        deleted_videos = conn.execute(
+            "DELETE FROM planned_slots WHERE status = 'pending'"
+        ).rowcount
+        deleted_shorts = conn.execute(
+            "DELETE FROM shorts_planned_slots WHERE status = 'pending'"
+        ).rowcount
+        orphaned = conn.execute(
+            "UPDATE generation_jobs SET status = 'cancelled', "
+            "error_msg = 'Full replan: slot was deleted', "
+            "finished_at = datetime('now') "
+            "WHERE status = 'queued'"
+        ).rowcount
+        conn.commit()
+
+    logger.info(
+        "Full replan: cleared %d video slots, %d shorts slots, cancelled %d orphaned jobs",
+        deleted_videos, deleted_shorts, orphaned,
+    )
+
+    # ═══════════════════════════════════════════════════════════
+    #  FASE 3 -- Planificar horizonte (videos)
+    # ═══════════════════════════════════════════════════════════
+    video_slots_all = []
+    channel_cfgs_for_today = []
+    channel_cfgs_for_future = []
+
+    for ch in channels:
+        ch_id = ch["id"]
+        slug = ch["slug"]
+        if slug == "test":
+            continue
+
+        cfg = db.get_channel_planning_config(ch_id)
+        if not cfg.get("planning_enabled", True):
+            continue
+
+        is_scheduled = cfg.get("publish_mode") == "scheduled"
+
+        base_cfg = {
+            "channel_id": ch_id,
+            "slug": slug,
+            "name": ch["name"],
+            "planning_enabled": True,
+            "publish_mode": cfg.get("publish_mode", "immediate"),
+            "publish_target_hour": cfg.get("publish_target_hour"),
+            "publish_jitter_min": cfg.get("publish_jitter_min", 20),
+            "publish_warmup_min": cfg.get("publish_warmup_min", 120),
+            "publish_timezone": cfg.get("publish_timezone", "Europe/Madrid"),
+            "seo_primary_keyword": cfg.get("seo_primary_keyword", ""),
+            "seo_secondary_keywords": cfg.get("seo_secondary_keywords", []),
+            "viral_per_day": cfg.get("viral_per_day", 0),
+            "videos_day_boost_weight": cfg.get("videos_day_boost_weight", 0.7),
+            "viral_day_boost_weight": cfg.get("viral_day_boost_weight", 0.2),
+            "upload_window_start": cfg.get("upload_window_start", 9),
+            "upload_window_end": cfg.get("upload_window_end", 11),
+            "upload_windows": cfg.get("upload_windows"),
+        }
+
+        # Today: residual quota
+        state = channel_states.get(ch_id, {"videos_committed": 0, "videos_per_day": 2})
+        full_vpd = state["videos_per_day"]
+        committed = state["videos_committed"]
+        residual_vpd = max(0, full_vpd - committed)
+
+        today_cfg = {**base_cfg, "videos_per_day": residual_vpd}
+        future_cfg = {
+            **base_cfg,
+            "videos_per_day": 0,  # placeholder, resolved per-day below
+        }
+
+        channel_cfgs_for_today.append(today_cfg)
+        channel_cfgs_for_future.append(future_cfg)
+
+    # 3a. Plan today with residual
+    if channel_cfgs_for_today:
+        today_raw = compute_daily_slots(today.isoformat(), channel_cfgs_for_today)
+        # now_local is needed to compare with DB-local timestamps
+        now_local = _dt.now()
+        for s in today_raw:
+            sched_dt = _dt.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S")
+            if sched_dt < now_local:
+                new_sched = now_local + _td(minutes=2)
+                s["scheduled_at"] = new_sched.strftime("%Y-%m-%d %H:%M:%S")
+                s["catchup"] = True
+                up_total = new_sched.hour * 60 + new_sched.minute + ESTIMATED_PIPELINE_MINUTES
+                uh = min(up_total // 60, 23)
+                um = up_total % 60
+                if s.get("publish_mode") != "scheduled":
+                    s["target_upload_at"] = f"{today.isoformat()} {uh:02d}:{um:02d}:00"
+            else:
+                s["catchup"] = False
+        video_slots_all.extend(today_raw)
+
+    # 3b. Plan future days with full quota
+    for day_offset in range(1, horizon_days):
+        day_str = (today + _td(days=day_offset)).isoformat()
+        futures_for_day = []
+        for fcfg in channel_cfgs_for_future:
+            ch_id = fcfg["channel_id"]
+            cfg = db.get_channel_planning_config(ch_id)
+            resolved_vpd = _resolve_videos_per_day(fcfg, day_str)
+            if resolved_vpd <= 0:
+                continue
+            day_cfg = {**fcfg, "videos_per_day": resolved_vpd}
+            futures_for_day.append(day_cfg)
+        if futures_for_day:
+            day_slots = compute_daily_slots(day_str, futures_for_day)
+            for s in day_slots:
+                s["catchup"] = False
+            video_slots_all.extend(day_slots)
+
+    # 3c. Global collision resolution (cross-day, cross-channel)
+    video_slots_all.sort(key=lambda s: s["scheduled_at"])
+    resolved_videos = []
+    for slot in video_slots_all:
+        if resolved_videos:
+            last = resolved_videos[-1]
+            last_h, last_m = map(int, last["scheduled_at"][11:16].split(":"))
+            this_h, this_m = map(int, slot["scheduled_at"][11:16].split(":"))
+
+            last_total = last_h * 60 + last_m
+            this_total = this_h * 60 + this_m
+
+            diff = this_total - last_total
+            if diff < GLOBAL_GAP_MINUTES:
+                new_total = last_total + GLOBAL_GAP_MINUTES
+                nh = new_total // 60
+                nm = new_total % 60
+                nh = min(nh, 23)
+                nm = min(nm, 59)
+                slot["scheduled_at"] = f"{slot['date_key']} {nh:02d}:{nm:02d}:00"
+
+        resolved_videos.append(slot)
+
+    # Recalculate target_upload_at + enforce same-channel publish spread
+    _resolve_cross_day_collisions(resolved_videos)
+
+    # Persist video slots
+    stored_videos = 0
+    if resolved_videos:
+        stored_videos = db.create_planned_slots_batch(resolved_videos)
+
+    # ═══════════════════════════════════════════════════════════
+    #  FASE 4 -- Planificar shorts (horizonte completo)
+    # ═══════════════════════════════════════════════════════════
+    stored_shorts = 0
+    try:
+        from api.services.shorts_scheduler import generate_upcoming_shorts
+        shorts_result = generate_upcoming_shorts(days=horizon_days, db=db)
+        stored_shorts = sum(
+            int(v.split()[0]) for v in shorts_result.values()
+            if v and isinstance(v, str) and v[0].isdigit()
+        )
+    except Exception as e:
+        logger.error("Full replan: shorts generation failed: %s", e)
+        shorts_result = {"error": str(e)}
+
+    # 4a. Cancel excess shorts for today (beyond residual)
+    for ch in channels:
+        ch_id = ch["id"]
+        slug = ch["slug"]
+        if slug == "test":
+            continue
+
+        state = channel_states.get(ch_id, {"shorts_committed": 0})
+        shorts_committed = state["shorts_committed"]
+
+        cfg = db.get_channel_planning_config(ch_id)
+        shorts_native_per_day = cfg.get("shorts_native_per_day", 3)
+
+        # Count today's pending shorts per type
+        with db._connect() as conn:
+            native_count = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shorts_planned_slots "
+                "WHERE channel_id=? AND date_key=? AND status='pending' AND short_type='native'",
+                (ch_id, today.isoformat()),
+            ).fetchone()["cnt"]
+
+        excess_native = max(0, native_count + shorts_committed - shorts_native_per_day)
+        if excess_native > 0:
+            with db._connect() as conn:
+                conn.execute(
+                    "DELETE FROM shorts_planned_slots WHERE id IN ("
+                    "SELECT id FROM shorts_planned_slots "
+                    "WHERE channel_id=? AND date_key=? AND status='pending' AND short_type='native' "
+                    "ORDER BY scheduled_at DESC LIMIT ?)",
+                    (ch_id, today.isoformat(), excess_native),
+                )
+                conn.commit()
+            logger.info(
+                "Full replan: cancelled %d excess native shorts for %s (quota %d)",
+                excess_native, slug, shorts_native_per_day,
+            )
+
+    # ═══════════════════════════════════════════════════════════
+    #  FASE 5 -- Build summary
+    # ═══════════════════════════════════════════════════════════
+    catchup_slots = sum(1 for s in resolved_videos if s.get("catchup"))
+    next_slot = None
+    if resolved_videos:
+        next_s = resolved_videos[0]
+        next_slot = {
+            "time": next_s["scheduled_at"][11:16],
+            "channel": next_s.get("channel_slug", "?"),
+            "kind": "video",
+            "catchup": next_s.get("catchup", False),
+        }
+
+    videos_by_channel = {}
+    for s in resolved_videos:
+        slug = s.get("channel_slug", "?")
+        if slug not in videos_by_channel:
+            videos_by_channel[slug] = 0
+        videos_by_channel[slug] += 1
+
+    return {
+        "ok": True,
+        "videos": {
+            "deleted": deleted_videos,
+            "created": stored_videos,
+            "by_channel": videos_by_channel,
+        },
+        "shorts": {
+            "deleted": deleted_shorts,
+            "created": stored_shorts,
+        },
+        "jobs_cancelled": orphaned,
+        "catchup_slots": catchup_slots,
+        "next_slot": next_slot,
+        "summary": (
+            f"Borrados {deleted_videos} videos + {deleted_shorts} shorts pendientes. "
+            f"Creados {stored_videos} videos + {stored_shorts} shorts. "
+            f"Jobs huefanos cancelados: {orphaned}. "
+            f"Slots catchup (atrasados): {catchup_slots}."
+        ),
+    }
+
+
+def _resolve_cross_day_collisions(slots: list[dict]) -> None:
+    """Post-processing: resolve target_upload_at collisions after global sort.
+
+    Walk the globally sorted list and push overlapping same-channel
+    target_upload_at forward by MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS.
+    Also recalculate target_upload_at from scheduled_at for non-scheduled channels.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    # Group by channel and sort
+    by_channel = {}
+    for s in slots:
+        ch_id = s["channel_id"]
+        if ch_id not in by_channel:
+            by_channel[ch_id] = []
+        by_channel[ch_id].append(s)
+
+    min_gap = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+    for ch_slots in by_channel.values():
+        ch_slots.sort(key=lambda s: s["target_upload_at"])
+        for i in range(1, len(ch_slots)):
+            prev = ch_slots[i - 1]
+            curr = ch_slots[i]
+            prev_h, prev_m = map(int, prev["target_upload_at"][11:16].split(":"))
+            curr_h, curr_m = map(int, curr["target_upload_at"][11:16].split(":"))
+            gap = (curr_h * 60 + curr_m) - (prev_h * 60 + prev_m)
+            if gap < min_gap:
+                new_total = prev_h * 60 + prev_m + min_gap
+                nh = min(new_total // 60, 23)
+                nm = new_total % 60
+                curr["target_upload_at"] = (
+                    f"{curr['date_key']} {nh:02d}:{nm:02d}:00"
+                )
+
+    # Recalculate target_upload_at for non-scheduled
+    for s in slots:
+        if s.get("publish_mode") != "scheduled":
+            sched_h, sched_m = map(int, s["scheduled_at"][11:16].split(":"))
+            up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES
+            uh = min(up_total // 60, 23)
+            um = up_total % 60
+            s["target_upload_at"] = f"{s['date_key']} {uh:02d}:{um:02d}:00"

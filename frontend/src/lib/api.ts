@@ -222,6 +222,9 @@ export const api = {
     request<any>(`/planning/shorts-config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   replanShorts: () => request<any>('/planning/shorts-replan', { method: 'POST' }),
 
+  // Full Replan — reset complete de programacion (videos + shorts)
+  fullReplan: () => request<any>('/planning/full-replan', { method: 'POST' }),
+
   // Optimal Publish Slots (v10)
   getOptimalSlots: (channelId: number) =>
     request<any>(`/channels/${channelId}/optimal-slots`),

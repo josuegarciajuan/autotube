@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { api } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
-import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
 import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
@@ -327,6 +327,31 @@ function PlanningConfigSection() {
 
 // ── Main scheduling page ─────────────────────────────────
 export default function Scheduling() {
+  const [showReplanModal, setShowReplanModal] = useState(false)
+  const [replanning, setReplanning] = useState(false)
+  const [replanResult, setReplanResult] = useState<any>(null)
+
+  const handleReplan = useCallback(async () => {
+    setReplanning(true)
+    setReplanResult(null)
+    try {
+      const result = await api.fullReplan()
+      setReplanResult(result)
+      if (result?.skipped) {
+        // Cooldown: don't close modal, show the reason
+      } else {
+        // Success: refresh data after a short delay
+        setTimeout(() => {
+          window.location.reload()
+        }, 1500)
+      }
+    } catch (e: any) {
+      setReplanResult({ ok: false, reason: e?.message || 'Error desconocido' })
+    } finally {
+      setReplanning(false)
+    }
+  }, [])
+
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
       {/* Header */}
@@ -335,7 +360,134 @@ export default function Scheduling() {
           <Calendar size={24} className="text-neon-gold" />
           Programacion
         </h2>
+        <button
+          onClick={() => { setShowReplanModal(true); setReplanResult(null) }}
+          disabled={replanning}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {replanning ? (
+            <Loader2 size={14} className="animate-spin" />
+          ) : (
+            <RotateCcw size={14} />
+          )}
+          {replanning ? 'Reprogramando...' : 'Reprogramar Ahora'}
+        </button>
       </div>
+
+      {/* ── Replan confirmation modal ── */}
+      {showReplanModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-800 border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            {replanning ? (
+              /* ── Loading state ── */
+              <div className="flex flex-col items-center gap-4 py-6">
+                <Loader2 size={32} className="animate-spin text-amber-400" />
+                <p className="text-white text-sm font-medium">Reprogramando toda la planificacion...</p>
+                <p className="text-gray-400 text-xs text-center">
+                  Borrando slots pendientes, recalculando cupos y resolviendo colisiones.
+                </p>
+              </div>
+            ) : replanResult ? (
+              /* ── Result state ── */
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  {replanResult.ok ? (
+                    <CheckCircle2 size={20} className="text-green-400" />
+                  ) : (
+                    <AlertTriangle size={20} className="text-amber-400" />
+                  )}
+                  <h3 className="text-white font-semibold text-base">
+                    {replanResult.ok ? 'Replan completado' : 'Replan no ejecutado'}
+                  </h3>
+                </div>
+
+                {replanResult.summary && (
+                  <p className="text-gray-300 text-sm leading-relaxed">{replanResult.summary}</p>
+                )}
+
+                {replanResult.reason && (
+                  <p className="text-amber-300 text-sm bg-amber-500/10 rounded-lg p-3">{replanResult.reason}</p>
+                )}
+
+                {replanResult.videos && replanResult.ok && (
+                  <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs">
+                    <p className="text-gray-400">
+                      <span className="text-red-400">-{replanResult.videos.deleted}</span> videos borrados,{' '}
+                      <span className="text-green-400">+{replanResult.videos.created}</span> creados
+                    </p>
+                    <p className="text-gray-400">
+                      <span className="text-red-400">-{replanResult.shorts?.deleted}</span> shorts borrados,{' '}
+                      <span className="text-green-400">+{replanResult.shorts?.created}</span> creados
+                    </p>
+                    {replanResult.jobs_cancelled > 0 && (
+                      <p className="text-gray-500">{replanResult.jobs_cancelled} jobs huefanos cancelados</p>
+                    )}
+                    {replanResult.catchup_slots > 0 && (
+                      <p className="text-amber-400">{replanResult.catchup_slots} slots catchup (se lanzaran ya)</p>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  {replanResult.ok && (
+                    <p className="text-gray-500 text-xs flex-1 self-center">Recargando pagina...</p>
+                  )}
+                  <button
+                    onClick={() => setShowReplanModal(false)}
+                    className="px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors ml-auto"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* ── Confirmation state ── */
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <RotateCcw size={20} className="text-amber-400" />
+                  <h3 className="text-white font-semibold text-base">Reprogramar toda la planificacion</h3>
+                </div>
+
+                <div className="text-sm text-gray-300 space-y-2">
+                  <p>Esta accion va a:</p>
+                  <ul className="list-disc list-inside text-gray-400 space-y-1 text-xs ml-2">
+                    <li>Borrar <strong className="text-white">todos</strong> los slots pendientes de videos y shorts</li>
+                    <li>Cancelar jobs en cola que se queden sin slot</li>
+                    <li>Recalcular desde cero respetando:</li>
+                  </ul>
+                  <ul className="list-disc list-inside text-gray-500 space-y-0.5 text-xs ml-6">
+                    <li>Cupo diario por canal (videos + shorts)</li>
+                    <li>Franjas horarias de upload y publicacion</li>
+                    <li>Colisiones entre canales y mismo canal</li>
+                    <li>Videos/shorts ya en vuelo (generando, pendiente subida, calentando)</li>
+                  </ul>
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 mt-3">
+                    <p className="text-amber-300 text-xs flex items-start gap-2">
+                      <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                      <span>Los slots en <strong>generacion activa</strong> (running) no se tocaran. Los slots catchup (atrasados) se reprograman para lanzarse inmediatamente.</span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => setShowReplanModal(false)}
+                    className="flex-1 px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleReplan}
+                    className="flex-1 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors"
+                  >
+                    Confirmar Replan
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Section 1: Pipeline Visual (3-columnas) ── */}
       <section className="glass rounded-xl p-5 space-y-3">

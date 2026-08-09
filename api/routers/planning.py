@@ -525,3 +525,26 @@ async def recalculate_optimal_slots_all():
     from database.db_extended import ExtendedDatabase
     result = calculate_and_replan_all(ExtendedDatabase())
     return {"ok": True, **result}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Full Replan — "Reprogramar Ahora"
+# ═══════════════════════════════════════════════════════════════
+
+@router.post("/full-replan")
+def full_replan():
+    """Force a complete planning reset: delete ALL pending slots (videos + shorts)
+    and recreate from scratch across the 7-day horizon.
+
+    Accounts for:
+    - Already-in-flight items (running, awaiting_upload, warming, published today)
+    - Per-channel daily limits (residual quota for today)
+    - Upload windows and publish timeframes
+    - Cross-channel collision avoidance
+    - Past-due catchup: slots scheduled before now are dispatched immediately
+
+    Returns detailed summary for frontend notification.
+    """
+    from api.services.planning_service import full_replan as do_full_replan
+    result = do_full_replan()
+    return result
