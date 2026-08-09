@@ -340,8 +340,13 @@ def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, of
     videos = db.get_videos(channel_id=channel_id, status=status, limit=limit,
                             offset=offset, playlist_id=playlist_id,
                             source_mode=source_mode)
+    _TIMESTAMP_COLS = (
+        "created_at", "uploaded_at", "published_at", "published_verified_at",
+        "published_retry_at", "target_public_at", "scheduled_upload_at",
+        "generation_started_at", "generation_finished_at",
+    )
     for v in videos:
-        for k in ("created_at", "uploaded_at"):
+        for k in _TIMESTAMP_COLS:
             if v.get(k):
                 v[k] = str(v[k])
         if v.get("timing_data") and isinstance(v["timing_data"], str):

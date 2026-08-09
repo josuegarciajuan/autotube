@@ -1647,23 +1647,62 @@ export default function ChannelDetail() {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-white leading-tight line-clamp-2 group-hover:text-neon-red transition-colors">{v.titulo_final || 'Video sin título'}</p>
-                  {/* ── Status + date pill (published / uploaded / created) ── */}
-                  <div className="mt-0.5">
+                  {/* ── Timeline compacta (estado + todos los horarios) ── */}
+                  <div className="mt-1.5 space-y-0.5">
+                    {/* Row 0 — status */}
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border bg-gray-500/10 text-gray-400 border-gray-500/30">
+                      {displayStatus === 'published' ? <CheckCircle size={10} className="text-emerald-400" /> :
+                       displayStatus === 'uploaded' || displayStatus === 'uploaded_private' ? <Upload size={10} className="text-blue-400" /> :
+                       displayStatus === 'scheduled' || displayStatus === 'warming' ? <Clock size={10} className="text-neon-gold" /> :
+                       displayStatus === 'generating' || displayStatus === 'reassembling' ? <Loader2 size={10} className="animate-spin text-neon-red" /> :
+                       displayStatus === 'error' ? <AlertCircle size={10} className="text-red-400" /> :
+                       <Clock size={10} />}
+                      <span>{statusLabel(displayStatus)}</span>
+                    </span>
+                    {/* Row 1 — inicio generación */}
+                    {v.generation_started_at && (
+                      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 pl-1">
+                        <Play size={10} className="text-gray-600 shrink-0" />
+                        <span className="text-gray-600">Inicio:</span>
+                        <span className="tabular-nums">{formatDateTime(v.generation_started_at)}</span>
+                      </div>
+                    )}
+                    {/* Row 2 — fin generación */}
+                    {v.generation_finished_at && (
+                      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 pl-1">
+                        <CheckCircle size={10} className="text-gray-600 shrink-0" />
+                        <span className="text-gray-600">Fin:</span>
+                        <span className="tabular-nums">{formatDateTime(v.generation_finished_at)}</span>
+                      </div>
+                    )}
+                    {/* Row 3 — subida (real o programada) */}
                     {(() => {
-                      const publishedDate = v.published_verified_at || v.published_at;
-                      const isPublished = !!(publishedDate) || v.status === 'published';
-                      const isUploaded = !isPublished && (!!(v.yt_video_id) || !!(v.uploaded_at));
-                      const displayDate = publishedDate || v.uploaded_at || v.generation_started_at || v.created_at;
-                      const dateLabel = isPublished ? 'Publicado' : isUploaded ? 'Subido' : 'Creado';
-                      const DateIcon = isPublished ? CheckCircle : isUploaded ? Upload : Clock;
-                      const dateColor = isPublished ? 'text-emerald-400 border-emerald-400/30' : isUploaded ? 'text-blue-400 border-blue-400/30' : 'text-gray-400 border-gray-500/30';
-                      const dateBg = isPublished ? 'bg-emerald-400/10' : isUploaded ? 'bg-blue-400/10' : 'bg-gray-500/10';
+                      const uploaded = v.uploaded_at;
+                      const scheduledUpload = v.scheduled_upload_at;
+                      const hasReal = !!uploaded;
+                      const date = hasReal ? uploaded : scheduledUpload;
+                      if (!date) return null;
                       return (
-                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${dateBg} ${dateColor}`}>
-                          <DateIcon size={10} className="shrink-0" />
-                          <span>{dateLabel}</span>
-                          <span className="opacity-70">{formatDateTime(displayDate)}</span>
-                        </span>
+                        <div className="flex items-center gap-1.5 text-[10px] text-blue-400/80 pl-1">
+                          <Upload size={10} className="shrink-0" />
+                          <span>{hasReal ? 'Subida:' : 'Subida prog.:'}</span>
+                          <span className="tabular-nums">{formatDateTime(date)}</span>
+                        </div>
+                      );
+                    })()}
+                    {/* Row 4 — publicación (real o prevista) */}
+                    {(() => {
+                      const published = v.published_verified_at || v.published_at;
+                      const target = v.target_public_at;
+                      const hasReal = !!published;
+                      const date = hasReal ? published : target;
+                      if (!date) return null;
+                      return (
+                        <div className="flex items-center gap-1.5 text-[10px] text-emerald-400/80 pl-1">
+                          <CheckCircle size={10} className="shrink-0" />
+                          <span>{hasReal ? 'Publicación:' : 'Pub. prevista:'}</span>
+                          <span className="tabular-nums">{formatDateTime(date)}</span>
+                        </div>
                       );
                     })()}
                   </div>

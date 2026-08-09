@@ -28,11 +28,15 @@ def list_videos(channel_id: int = None, status: str = None, limit: int = 50, off
     db = get_db()
     videos = db.get_videos(channel_id=channel_id, status=status, limit=limit,
                             offset=offset, playlist_id=playlist_id)
+    _TIMESTAMP_COLS = (
+        "created_at", "uploaded_at", "published_at", "published_verified_at",
+        "published_retry_at", "target_public_at", "scheduled_upload_at",
+        "generation_started_at", "generation_finished_at",
+    )
     for v in videos:
-        for k in ("created_at", "uploaded_at"):
+        for k in _TIMESTAMP_COLS:
             if v.get(k):
                 v[k] = str(v[k])
-        # Drop heavy internal columns not needed for list rendering
         for col in _LIST_EXCLUDE_COLUMNS:
             v.pop(col, None)
     return videos
