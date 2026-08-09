@@ -874,21 +874,21 @@ export default function ChannelDetail() {
               <span className="hidden sm:inline text-gray-600">·</span>
               <span className="hidden sm:inline text-gray-500">{channel.slug}</span>
             </div>
-            {/* All channel & video stats — single compact row */}
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
+            {/* All channel & video stats — ultra-compact single row */}
+            <div className="flex flex-wrap items-center gap-1 mt-2">
             {channelYtStats && (
               <>
-                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan border border-neon-cyan/10">
-                  <Eye size={11} />
+                <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-cyan border border-neon-cyan/10">
+                  <Eye size={10} />
                   <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.viewCount || '0')}</span> vistas
                 </span>
-                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink border border-neon-pink/10">
-                  <Users size={11} />
+                <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-pink border border-neon-pink/10">
+                  <Users size={10} />
                   <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.subscriberCount || '0')}</span> subs
                 </span>
                 {channelYtStats.estimatedHoursWatched > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-gold border border-neon-gold/10">
-                    <Clock size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-gold border border-neon-gold/10">
+                    <Clock size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas
                   </span>
                 )}
@@ -896,19 +896,19 @@ export default function ChannelDetail() {
             )}
             {channelShortsStats && channelShortsStats.total > 0 && (
               <>
-                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-purple border border-neon-purple/10">
-                  <Zap size={11} />
+                <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-purple border border-neon-purple/10">
+                  <Zap size={10} />
                   <span className="font-mono font-semibold tabular-nums">{channelShortsStats.published || 0}</span> shorts
                 </span>
                 {channelShortsStats.total_views > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70 border border-neon-cyan/10">
-                    <Eye size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-cyan/70 border border-neon-cyan/10">
+                    <Eye size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelShortsStats.total_views)}</span> vistas shorts
                   </span>
                 )}
                 {channelShortsStats.total_likes > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink/70 border border-neon-pink/10">
-                    <Heart size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-pink/70 border border-neon-pink/10">
+                    <Heart size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelShortsStats.total_likes)}</span> likes shorts
                   </span>
                 )}
@@ -916,19 +916,19 @@ export default function ChannelDetail() {
             )}
             {channelVideosAggregate && (channelVideosAggregate.video_count > 0 || channelVideosAggregate.total_views > 0) && (
               <>
-                <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-gold/80 border border-neon-gold/10">
-                  <Video size={11} />
+                <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-gold/80 border border-neon-gold/10">
+                  <Video size={10} />
                   <span className="font-mono font-semibold tabular-nums">{channelVideosAggregate.video_count || 0}</span> vídeos largos
                 </span>
                 {channelVideosAggregate.total_views > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70 border border-neon-cyan/10">
-                    <Eye size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-cyan/70 border border-neon-cyan/10">
+                    <Eye size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelVideosAggregate.total_views)}</span> vistas
                   </span>
                 )}
                 {channelVideosAggregate.total_likes > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-pink/70 border border-neon-pink/10">
-                    <Heart size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-pink/70 border border-neon-pink/10">
+                    <Heart size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelVideosAggregate.total_likes)}</span> likes
                   </span>
                 )}
@@ -936,8 +936,8 @@ export default function ChannelDetail() {
             )}
             {/* Combined total — inline as last pill */}
             {(channelVideosAggregate?.total_views > 0 || channelShortsStats?.total_views > 0) && (
-              <span className="inline-flex items-center gap-1.5 bg-neon-red/10 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-red font-semibold border border-neon-red/20">
-                <Eye size={11} />
+              <span className="inline-flex items-center gap-1 bg-neon-red/10 rounded px-1.5 py-0.5 text-[10px] text-neon-red font-semibold border border-neon-red/20">
+                <Eye size={10} />
                 <span className="font-mono tabular-nums">
                   {formatShortNumber((channelVideosAggregate?.total_views || 0) + (channelShortsStats?.total_views || 0))}
                 </span>
@@ -947,25 +947,25 @@ export default function ChannelDetail() {
             </div>
             {/* ── Marathon analytics ── */}
             {marathonAnalytics && marathonAnalytics.total_marathons > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                <span className="inline-flex items-center gap-1 bg-neon-amber/10 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-amber/80 border border-neon-amber/15">
-                  <Film size={11} />
+              <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                <span className="inline-flex items-center gap-0.5 bg-neon-amber/10 rounded px-1.5 py-0.5 text-[10px] text-neon-amber/80 border border-neon-amber/15">
+                  <Film size={10} />
                   <span className="font-mono font-semibold tabular-nums">{marathonAnalytics.total_marathons}</span> maratones
                 </span>
                 {marathonAnalytics.total_watch_hours > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-gray-400">
-                    <Clock size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-gray-400">
+                    <Clock size={10} />
                     <span className="font-mono font-semibold tabular-nums">{marathonAnalytics.total_watch_hours.toLocaleString()}</span> horas
                   </span>
                 )}
                 {marathonAnalytics.avg_views > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-neon-cyan/70">
-                    <Eye size={11} />
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-cyan/70">
+                    <Eye size={10} />
                     <span className="font-mono font-semibold tabular-nums">{formatShortNumber(marathonAnalytics.avg_views)}</span> avg views
                   </span>
                 )}
                 {marathonAnalytics.comparison && marathonAnalytics.comparison.avg_marathon_views > 0 && marathonAnalytics.comparison.avg_normal_views > 0 && (
-                  <span className="inline-flex items-center gap-1 bg-dark-700/70 rounded-md px-2 py-1 text-[11px] sm:text-xs text-gray-400">
+                  <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-gray-400">
                     vs normal: {marathonAnalytics.comparison.avg_marathon_views > marathonAnalytics.comparison.avg_normal_views ? '↑' : '↓'}
                     <span className="font-mono tabular-nums">
                       {marathonAnalytics.comparison.avg_marathon_views > marathonAnalytics.comparison.avg_normal_views
