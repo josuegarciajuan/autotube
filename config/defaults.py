@@ -311,6 +311,10 @@ MARATHON_LLM_MAX_BATCHES = 150
 MARATHON_LLM_MAX_EMPTY_STRIKES = 20
 MARATHON_PUBLISH_MODE = "scheduled"
 
+# Mín backlog por canal (awaiting_upload + uploaded_private) para disparar marathon.
+# Umbral total = MARATHON_BACKLOG_PER_CHANNEL × canales_activos.
+MARATHON_BACKLOG_PER_CHANNEL = 4
+
 # ── MARATHON TITLE STRATEGY ──
 
 # Fórmulas de título para maratones. {topic} se reemplaza con el tema.

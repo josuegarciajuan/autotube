@@ -1,10 +1,15 @@
 """
-Marathon mode: long-form ~1-hour video generation for a randomly selected channel.
+Marathon mode: long-form ~1-hour video generation for a round-robin selected channel.
 
-Triggered when the backlog of pending slots across all channels exceeds a threshold.
-Selects an eligible channel (no cooldown — always available if MARATHON_ENABLED=True),
-creates a queued generation_jobs record, and lets the normal _queue_consumer dispatch
-it when the worker is available.
+Triggered when the accumulated pipeline queue across all channels exceeds the threshold:
+    backlog = awaiting_upload + uploaded_private (across ALL active channels)
+    threshold = MARATHON_BACKLOG_PER_CHANNEL × número de canales activos
+
+No cooldown — if the condition holds after a marathon completes, the next eligible
+channel in the rotation fires immediately (round-robin, oldest-first).
+
+Selects an eligible channel (MARATHON_ENABLED=True), creates a queued generation_jobs
+record, and lets the normal _queue_consumer dispatch it when the worker is available.
 
 The marathon is a long-form video just like any other: it respects the single-worker
 serialization invariant. Once generated, it uploads directly (generate_and_upload).
@@ -24,16 +29,16 @@ logger = logging.getLogger("autotube.marathon")
 # ── Public API ─────────────────────────────────────────────────
 
 def calculate_backlog(db) -> int:
-    """Calculate total backlog across all channels.
+    """Calculate total backlog: awaiting_upload + uploaded_private across all channels.
 
-    Includes past-due planned_slots + awaiting_upload videos + warming
-    (uploaded_private) videos to reflect what the dashboard shows.
+    These are videos that have been generated (scripts + TTS + media done) but
+    haven't been published yet — they're sitting in the pipeline queue waiting
+    for upload windows or warmup completion.
+
+    past_due planned_slots are NOT included — they measure scheduling delay, not
+    pipeline accumulation. A video that finishes generating on time but waits for
+    its upload window shows as awaiting_upload, not past_due.
     """
-    try:
-        past_due = db.count_past_due_slots()
-    except Exception:
-        past_due = 0
-
     try:
         awaiting = db.count_all_awaiting_upload()
     except Exception:
@@ -44,7 +49,7 @@ def calculate_backlog(db) -> int:
     except Exception:
         warming = 0
 
-    return past_due + awaiting + warming
+    return awaiting + warming
 
 
 def select_marathon_channel(db) -> tuple[str, int, dict] | None:
@@ -123,28 +128,53 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     return selected
 
 
-def check_and_dispatch_marathon(db, min_backlog: int = 12) -> dict | None:
+def check_and_dispatch_marathon(db) -> dict | None:
     """Main entry point: check backlog and enqueue a marathon if conditions are met.
 
-    Called by the schedule checker loop every ~30 minutes.
+    Condition: (awaiting_upload + uploaded_private) across ALL channels
+               >= MARATHON_BACKLOG_PER_CHANNEL × número de canales activos.
+
+    Called by the schedule checker loop every ~60 minutes.
     Does NOT create planned_slots or fire subprocesses directly.
     Creates a queued generation_jobs record → the normal _queue_consumer
     picks it up when the single long-form worker is free.
 
-    Args:
-        db: ExtendedDatabase instance.
-        min_backlog: Minimum past-due + awaiting_upload + warming to trigger marathon.
-
     Returns:
         dict with dispatch info if a marathon was enqueued, or None.
     """
-    # 1. Check backlog
-    backlog = calculate_backlog(db)
+    from config.defaults import MARATHON_BACKLOG_PER_CHANNEL
+
+    # 1. Check backlog (awaiting + warming only — pipeline accumulation signal)
+    awaiting = 0
+    warming = 0
+    try:
+        awaiting = db.count_all_awaiting_upload()
+    except Exception:
+        pass
+    try:
+        warming = db.count_all_warming()
+    except Exception:
+        pass
+    backlog = awaiting + warming
+
+    # 2. Dynamic threshold: per-channel value × active channels
+    active_channels = db.get_channels(active_only=True)
+    active_count = len(active_channels) if active_channels else 1
+    min_backlog = MARATHON_BACKLOG_PER_CHANNEL * active_count
+
     if backlog < min_backlog:
-        logger.debug("Marathon: backlog=%d < min=%d, skipping", backlog, min_backlog)
+        logger.debug(
+            "Marathon: awaiting=%d + warming=%d = %d < %d (per_ch=%d × ch=%d), skipping",
+            awaiting, warming, backlog, min_backlog,
+            MARATHON_BACKLOG_PER_CHANNEL, active_count,
+        )
         return None
 
-    logger.info("Marathon: backlog=%d >= min=%d — evaluating candidates", backlog, min_backlog)
+    logger.info(
+        "Marathon: awaiting=%d + warming=%d = %d >= %d (per_ch=%d × ch=%d) — evaluating candidates",
+        awaiting, warming, backlog, min_backlog,
+        MARATHON_BACKLOG_PER_CHANNEL, active_count,
+    )
 
     # 2. Guard: don't enqueue if there's already a queued or running marathon job
     #    (prevents duplicate marathon jobs piling up)
