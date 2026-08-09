@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
 import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, RefreshCw } from 'lucide-react'
-import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
+import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -111,7 +111,7 @@ function ContentTypeBadge({ type }: { type: 'video' | 'native' | 'clip' }) {
 
 // ── Card: Planned slot (3-phase) ─────────────────────────────
 function PlannedCard({ slot }: { slot: PlannedSlot }) {
-  const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
   const hasUpload = slot.target_upload_at && slot.target_upload_at !== slot.target_public_at
   return (
     <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} animate-fade-in`}>
@@ -119,7 +119,7 @@ function PlannedCard({ slot }: { slot: PlannedSlot }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name} #{slot.slot_position}
+          {getChannelShort({ channel_slug: slot.channel_slug })} #{slot.slot_position}
         </span>
         <ContentTypeBadge type="video" />
         <span className="text-[10px] text-gray-500 font-mono ml-auto">
@@ -166,7 +166,7 @@ function PlannedCard({ slot }: { slot: PlannedSlot }) {
 
 // ── Card: Generating ─────────────────────────────────────────
 function GeneratingCard({ video }: { video: GeneratingVideo }) {
-  const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
   const pct = video.progress || video.job_progress || 0
   const phase = video.progress_phase || video.job_phase || 'inicio'
 
@@ -176,7 +176,7 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot} animate-pulse`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
+          {getChannelShort({ channel_slug: video.channel_slug })} #{video.video_id}
         </span>
         {video.is_marathon && (
           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
@@ -231,7 +231,7 @@ function GeneratingCard({ video }: { video: GeneratingVideo }) {
 
 // ── Card: Awaiting Upload (F1 done, waiting for F2 upload window) ──
 function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo; onUploadNow: (videoId: number) => void }) {
-  const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
   const countdown = video.target_upload_at ? formatCountdown(video.target_upload_at) : (video.target_public_at ? formatCountdown(video.target_public_at) : '?')
 
   return (
@@ -240,7 +240,7 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
+          {getChannelShort({ channel_slug: video.channel_slug })} #{video.video_id}
         </span>
         {video.is_marathon && (
           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
@@ -315,7 +315,7 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
 
 // ── Card: Warming (uploaded unlisted) ────────────────────────
 function WarmingCard({ video }: { video: WarmingVideo }) {
-  const colors = CHANNEL_STYLES[video.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
 
   // Calculate warmup progress
   const warmupPct = (() => {
@@ -337,7 +337,7 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[video.channel_slug] || video.channel_name} #{video.video_id}
+          {getChannelShort({ channel_slug: video.channel_slug })} #{video.video_id}
         </span>
         <ContentTypeBadge type="video" />
         <span className="text-[10px] text-amber-400 font-mono ml-auto flex items-center gap-1">
@@ -387,7 +387,7 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
 
 // ── Card: Shorts planned (pending slot) ─────────────────────
 function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
-  const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
   const isNative = slot.short_type === 'native'
   const typeBorder = isNative ? 'border-emerald-400/30' : 'border-orange-400/30'
   const countdown = formatCountdown(slot.scheduled_at)
@@ -398,7 +398,7 @@ function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
+          {getChannelShort({ channel_slug: slot.channel_slug })}
         </span>
         <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
       </div>
@@ -430,7 +430,7 @@ function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
 
 // ── Card: Shorts generating (running slot with progress) ────
 function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
-  const colors = CHANNEL_STYLES[slot.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
   const isNative = slot.short_type === 'native'
   const pct = slot.job_progress || 0
   const phase = slot.job_phase || 'inicio'
@@ -441,7 +441,7 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot} animate-pulse`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[slot.channel_slug] || slot.channel_name}
+          {getChannelShort({ channel_slug: slot.channel_slug })}
         </span>
         <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
         <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
@@ -479,7 +479,7 @@ function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
 
 // ── Card: Shorts ready to upload (pre-rendered clip, v25) ───
 function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
-  const colors = CHANNEL_STYLES[short.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: short.channel_id, channel_slug: short.channel_slug })
   const countdown = formatCountdown(short.target_upload_at || short.scheduled_at)
 
   return (
@@ -488,7 +488,7 @@ function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[short.channel_slug] || short.channel_name}
+          {getChannelShort({ channel_slug: short.channel_slug })}
         </span>
         <ContentTypeBadge type="clip" />
         <span className="text-[10px] text-green-400 font-mono ml-auto flex items-center gap-1">
@@ -523,7 +523,7 @@ function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
 
 // ── Card: Published in last 24h ──────────────────────────────
 function PublishedCard({ item }: { item: PublishedItem }) {
-  const colors = CHANNEL_STYLES[item.channel_slug] || DEFAULT_STYLE
+  const colors = getChannelStyles({ channel_id: item.channel_id, channel_slug: item.channel_slug })
   const ytUrl = item.youtube_id ? `https://youtube.com/watch?v=${item.youtube_id}` : null
 
   return (
@@ -532,7 +532,7 @@ function PublishedCard({ item }: { item: PublishedItem }) {
       <div className="flex items-center gap-2 mb-2">
         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
         <span className={`text-xs font-semibold ${colors.text}`}>
-          {CHANNEL_SHORT[item.channel_slug] || item.channel_name}
+          {getChannelShort({ channel_slug: item.channel_slug })}
         </span>
         <ContentTypeBadge type={item.content_type} />
         {ytUrl && (

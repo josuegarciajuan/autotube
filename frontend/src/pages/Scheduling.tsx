@@ -4,7 +4,7 @@ import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlannin
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
-import { CHANNEL_SHORT, CHANNEL_STYLES, DEFAULT_STYLE } from '../lib/channelConfig'
+import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
 interface ChannelSummary {
   channel_id: number
@@ -156,7 +156,7 @@ function TodayStatus() {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       {channels.map((ch) => {
-        const colors = CHANNEL_STYLES[ch.channel_slug] || DEFAULT_STYLE
+        const colors = getChannelStyles({ channel_id: ch.channel_id, channel_slug: ch.channel_slug })
         const allDone = ch.videos.pending === 0 && ch.videos.running === 0 && ch.shorts.pending === 0 && ch.shorts.running === 0
         const hasRunning = ch.videos.running > 0 || ch.shorts.running > 0
         const hasPending = ch.videos.pending > 0 || ch.shorts.pending > 0
@@ -168,7 +168,7 @@ function TodayStatus() {
             <div className="flex items-center gap-2 mb-3">
               <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
               <span className="text-sm font-semibold text-white">{ch.channel_name}</span>
-              <span className="text-[10px] text-gray-600 font-mono">({CHANNEL_SHORT[ch.channel_slug] || ch.channel_slug})</span>
+              <span className="text-[10px] text-gray-600 font-mono">({getChannelShort({ channel_slug: ch.channel_slug })})</span>
               {hasRunning && <Loader2 size={12} className="text-neon-cyan animate-spin ml-auto" />}
               {allDone && !hasCancelled && <CheckCircle2 size={12} className="text-green-400 ml-auto" />}
               {!hasRunning && !allDone && !hasPending && hasCancelled && <XCircle size={12} className="text-red-400 ml-auto" />}
