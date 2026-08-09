@@ -55,7 +55,9 @@ export function getChannelShort(ch: ChannelLike): string {
   if (initials && typeof initials === 'string' && initials.length >= 2) return initials.substring(0, 3).toUpperCase();
   const slug = _slug(ch);
   if (!slug) return '???';
-  // Auto-derive: take first 3 alphanumeric chars
+  // Check the pre-populated map (set by GenerationContext.initAllChannelMaps with canal_initials from API)
+  if (CHANNEL_SHORT[slug]) return CHANNEL_SHORT[slug];
+  // Auto-derive: take first 3 alphanumeric chars (fallback for channels not in the map)
   const clean = slug.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   return clean.substring(0, 3) || 'CHN';
 }
@@ -65,7 +67,15 @@ export const CHANNEL_SHORT: Record<string, string> = {};
 
 export function initChannelShort(channels: ChannelLike[]) {
   for (const ch of channels) {
-    CHANNEL_SHORT[_slug(ch)] = (ch as any).canal_initials || _slug(ch).substring(0, 3).toUpperCase();
+    const slug = _slug(ch);
+    const initials = (ch as any).canal_initials;
+    if (initials && typeof initials === 'string' && initials.length >= 2) {
+      CHANNEL_SHORT[slug] = initials.substring(0, 3).toUpperCase();
+    } else {
+      // Fallback: if no initials, use the slug as-is (e.g. 'my-channel' stays 'my-channel')
+      // rather than deriving from first 3 chars which gives collisions for 'canal2','canal3','canal4'
+      CHANNEL_SHORT[slug] = slug.substring(0, 3).toUpperCase() || slug;
+    }
   }
 }
 

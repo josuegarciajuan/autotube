@@ -152,6 +152,60 @@ def _detect_text_language(text: str) -> str:
         return 'en'
     return 'unknown'
 
+
+def _dedup_blocks(bloques: list[dict]) -> list[dict]:
+    """Remove near-duplicate narrative blocks using character-level similarity.
+
+    Uses difflib.SequenceMatcher (gestalt pattern matching) to detect
+    semantically identical or near-identical blocks across a sliding
+    window. Threshold tuned for Spanish narrative text (75% match).
+    Critical for marathon-scale generation (90+ blocks, 150+ batches)
+    where the LLM may inadvertently rephrase previously covered content.
+
+    Args:
+        bloques: List of block dicts with 'texto' field.
+
+    Returns:
+        Deduplicated list preserving original order.
+    """
+    if len(bloques) < 3:
+        return bloques
+
+    kept = [bloques[0]]
+    # Larger window for marathons, smaller for normal videos
+    window_size = min(20, len(bloques))
+
+    for blk in bloques[1:]:
+        txt = blk.get("texto", "").strip().lower()
+        if not txt or len(txt) < 30:
+            # Skip very short blocks (transitions, one-liners)
+            kept.append(blk)
+            continue
+
+        is_dup = False
+        # Check against nearby blocks (sliding window)
+        for prev in kept[-window_size:]:
+            prev_txt = prev.get("texto", "").strip().lower()
+            if not prev_txt or len(prev_txt) < 30:
+                continue
+            # Length ratio guard: skip if lengths differ by >3x
+            if max(len(txt), len(prev_txt)) / min(len(txt), len(prev_txt)) > 3.0:
+                continue
+            sim = SequenceMatcher(None, txt, prev_txt).ratio()
+            if sim > 0.75:
+                is_dup = True
+                logger.debug(
+                    "_dedup_blocks: removed near-duplicate block "
+                    "(similarity=%.2f): \"%s...\"",
+                    sim, txt[:80],
+                )
+                break
+        if not is_dup:
+            kept.append(blk)
+
+    return kept
+
+
 class ScriptGenerator:
     """Generate YouTube narration scripts from raw content using AI (DeepSeek/OpenAI)."""
 
@@ -2145,10 +2199,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         # Step 3: Sequential block generation
         all_bloques: list[dict] = []
         empty_strikes = 0
+        total_chars = len(content_text)
         # ── Marathon overrides: allow longer generation ──
         max_empty_strikes = marathon_overrides.get("max_empty_strikes", 10) if marathon_overrides else 10
         max_batches = marathon_overrides.get("max_batches", 50) if marathon_overrides else 50
-        source_text = content_text[:3000]
 
         for batch_num in range(max_batches):
             # Cooperative stop check
@@ -2164,6 +2218,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     batch_num + 1, total_words, int(palabras_objetivo * 0.98),
                 )
                 break
+
+            # ── Rotating source text window (v24: anti-repetition) ──
+            # Slides the source material window proportionally with
+            # narrative progress so the LLM always sees fresh content.
+            # This prevents the LLM from re-reading the same 3000 chars
+            # across 150+ batch calls in marathon mode.
+            window_size = 3000
+            if total_chars > window_size:
+                progress = min(0.95, total_words / max(1, palabras_objetivo))
+                start = max(0, int(progress * (total_chars - window_size)))
+                source_text = content_text[start:start + window_size]
+            else:
+                source_text = content_text[:window_size]
 
             # Calculate word guidance for this batch
             remaining = max(100, palabras_objetivo - total_words)
@@ -2225,9 +2292,23 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             return None
 
         total_words = sum(len(b.get("texto", "").split()) for b in all_bloques)
+        initial_blocks = len(all_bloques)
+
+        # ── Dedup pass (v24: anti-repetition) ──
+        # Detect and remove near-duplicate blocks before enrichment.
+        # Critical for marathons where 150+ batch calls can produce
+        # semantically overlapping content across distant blocks.
+        all_bloques = _dedup_blocks(all_bloques)
+        if len(all_bloques) < initial_blocks:
+            removed = initial_blocks - len(all_bloques)
+            logger.warning(
+                "generate_v2: dedup removed %d/%d near-duplicate blocks",
+                removed, initial_blocks,
+            )
+
         logger.info(
             "generate_v2: content done — %d blocks, %d words",
-            len(all_bloques), total_words,
+            len(all_bloques), sum(len(b.get("texto", "").split()) for b in all_bloques),
         )
 
         # Safety net: if the LLM massively overshoots the word target

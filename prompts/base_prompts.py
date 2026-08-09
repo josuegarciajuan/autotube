@@ -194,12 +194,46 @@ def build_content_only_prompt(config, previous_blocks: list = None,
     style = getattr(config, "CANAL_NARRATIVE_STYLE", "documental")
     audience = getattr(config, "TARGET_AUDIENCE", "publico LATAM adulto curioso")
 
+    # ── Detect marathon mode early (used by both outline + continuity) ──
+    is_marathon = previous_blocks and len(previous_blocks) > 40
+    n_last = 12 if is_marathon else 6
+    n_first = 6 if is_marathon else 3
+
     # Outline context injection
     outline_context = ""
     if outline and outline.get("chapters"):
         chapters = outline["chapters"]
         completed_blocks = len(previous_blocks) if previous_blocks else 0
-        chapter_idx = min(len(chapters) - 1, max(0, completed_blocks // 3))
+
+        # ── Smart chapter advancement (v24: anti-repetition) ──
+        # Marathon: more blocks per chapter (5 vs 3) + fact-coverage check.
+        # The LLM only advances to the next chapter when it has actually
+        # used the current chapter's key facts in its recent blocks.
+        blocks_per_chapter = 5 if is_marathon else 3
+        chapter_idx = min(len(chapters) - 1, max(0, completed_blocks // blocks_per_chapter))
+
+        # Fact-coverage check: if recent blocks don't contain keywords from
+        # the current chapter's facts, stay on the current chapter.
+        if is_marathon and completed_blocks > 0 and chapter_idx < len(chapters) - 1:
+            current_facts = chapters[chapter_idx].get("hechos_concretos", [])
+            if current_facts:
+                # Extract significant words (4+ chars) from facts
+                fact_keywords = set()
+                for f in current_facts:
+                    for w in f.lower().split():
+                        if len(w) >= 4:
+                            fact_keywords.add(w)
+                # Check recent blocks for these keywords
+                recent_text = " ".join(
+                    b.get("texto", "") for b in previous_blocks[-n_last:]
+                    if isinstance(b, dict)
+                ).lower()
+                matches = sum(1 for kw in fact_keywords if kw in recent_text)
+                # Need at least 2 keyword matches to consider chapter "covered"
+                if matches < 2:
+                    # Stay on current chapter (don't advance)
+                    chapter_idx = max(0, chapter_idx - 1)
+
         current_chapter = chapters[chapter_idx]
 
         facts_text = "\n".join(f"  - {f}" for f in current_chapter.get("hechos_concretos", [])[:3])
@@ -222,18 +256,43 @@ REGLAS DE CONTENIDO (OBLIGATORIO):
 
     context_text = ""
     if previous_blocks:
+        last_tail_chars = 1200 if is_marathon else 400
+        first_head_chars = 500 if is_marathon else 200
+
         last_texts = []
-        for b in previous_blocks[-6:]:
+        for b in previous_blocks[-n_last:]:
             if isinstance(b, dict):
                 last_texts.append(b.get("texto", ""))
         all_text = " ".join(last_texts)
-        first_blocks = previous_blocks[:3] if len(previous_blocks) >= 3 else previous_blocks
-        first_words = " ".join(b.get("texto", "") for b in first_blocks if isinstance(b, dict))[:200]
+        first_blocks = previous_blocks[:n_first] if len(previous_blocks) >= n_first else previous_blocks
+        first_words = " ".join(b.get("texto", "") for b in first_blocks if isinstance(b, dict))[:first_head_chars]
+
+        # Marathon: extract already-covered topics to prevent repetition
+        covered_topics = ""
+        if is_marathon:
+            # Sample key phrases from blocks spread across the narrative
+            sample_idx = [0, len(previous_blocks) // 4, len(previous_blocks) // 2,
+                          3 * len(previous_blocks) // 4, len(previous_blocks) - 1]
+            sampled = set()
+            for idx in sample_idx:
+                if 0 <= idx < len(previous_blocks):
+                    b = previous_blocks[idx]
+                    if isinstance(b, dict):
+                        txt = b.get("texto", "")[:120]
+                        if txt:
+                            sampled.add(txt)
+            if sampled:
+                topics = "\n  - ".join(sampled)
+                covered_topics = (
+                    f"\n⛔ TEMAS YA CUBIERTOS (NO repetir):\n"
+                    f"  - {topics}\n"
+                )
 
         context_text = (
             f"\n\n--- CONTINUIDAD NARRATIVA ---\n"
             f"La historia empezo asi: \"{first_words}...\"\n"
-            f"Lo ULTIMO que narraste: \"{all_text[-400:]}\"\n\n"
+            f"Lo ULTIMO que narraste: \"{all_text[-last_tail_chars:]}\"\n"
+            f"{covered_topics}"
             f"INSTRUCCIONES DE CONTINUIDAD:\n"
             f"- Continua la narracion desde donde quedo, de forma NATURAL.\n"
             f"- AVANZA la historia: cada bloque debe aportar contenido GENUINAMENTE NUEVO.\n"
