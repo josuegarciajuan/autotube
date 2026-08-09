@@ -27,7 +27,10 @@ from pathlib import Path
 logger = logging.getLogger("autotube.upload_scheduler")
 
 MAX_CONCURRENT_UPLOADS = 1  # One upload at a time (avoids YouTube rate limits)
-MAX_UPLOAD_RETRY_PER_VIDEO = 3  # Max upload attempts before marking video as error
+MAX_UPLOAD_RETRY_PER_VIDEO = 10  # Max upload attempts before marking video as error
+# ^ Increased from 3 → 10 (2026-08-09): Long backoff allows surviving multi-hour
+#   outages (quota exhaustion, server restarts, YouTube processing delays).
+#   Glass Box auto-recovery provides a final safety net if all 10 fail.
 
 # Round-robin state: {(channel_id, date_str): last_window_index}
 # Resets naturally when the date changes.
@@ -375,11 +378,12 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                   AND (v.scheduled_upload_at IS NULL
                        OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now', 'localtime'))
                   -- v24: exclude videos that exceeded upload retry limit
-                  AND (SELECT COUNT(*) FROM generation_jobs gj2
-                       WHERE gj2.video_id = v.id AND gj2.action = 'upload_only'
-                         AND gj2.status = 'failed') < 3
+                   AND (SELECT COUNT(*) FROM generation_jobs gj2
+                        WHERE gj2.video_id = v.id AND gj2.action = 'upload_only'
+                          AND gj2.status = 'failed') < ?
                 ORDER BY v.scheduled_upload_at ASC, v.created_at ASC
-               LIMIT 20"""
+               LIMIT 20""",
+            (MAX_UPLOAD_RETRY_PER_VIDEO,),
         ).fetchall()
 
     if not rows:
@@ -413,8 +417,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             except Exception:
                 pass
             if retry_count > 0:
-                # Exponential backoff: 10min * 2^(retry-1), max ~80min at 3 retries
-                backoff_min = 10 * (2 ** (retry_count - 1))
+                # Exponential backoff: 10min * 2^(retry-1), capped at 12h (720 min)
+                backoff_min = min(10 * (2 ** (retry_count - 1)), 720)
                 sched_time = now + timedelta(minutes=backoff_min)
                 logger.info(
                     "Video %d: retry #%d — applying %dmin backoff (next: %s)",

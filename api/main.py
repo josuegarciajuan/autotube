@@ -2122,6 +2122,22 @@ def _detect_and_clean_orphans_sync():
         except Exception as e:
             logger.warning("Draft cleanup skipped: %s", e)
 
+        # ── Glass Box: recover orphaned videos with complete .mp4 ──
+        # Final safety net — rescues videos that were fully generated but
+        # abandoned due to retry exhaustion, server restarts, or transient failures.
+        # Runs as part of the orphan cleanup cycle to avoid adding more overhead.
+        try:
+            from api.services.glass_box import glass_box_recover_orphaned_videos
+            result = glass_box_recover_orphaned_videos(db=db)
+            if result.get("recovered", 0) > 0:
+                logger.info(
+                    "Glass Box: %d videos rescued from error → awaiting_upload "
+                    "(skipped=%d, errors=%d)",
+                    result["recovered"], result.get("skipped", 0), result.get("errors", 0),
+                )
+        except Exception as gb_exc:
+            logger.debug("Glass Box recovery skipped: %s", gb_exc)
+
         # ── Alert generation on accumulated failures ─────────
         # If multiple errors accumulated across phases, raise a
         # pipeline alert so operators can investigate.
