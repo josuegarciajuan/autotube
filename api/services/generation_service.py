@@ -2128,7 +2128,9 @@ async def start_upload_job(job_id: int, video_id: int):
         from orchestrator import PipelineOrchestrator
         orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
         
-        if not orch.uploader.authenticate():
+        # ── Run auth in thread pool to avoid blocking event loop ──
+        auth_ok, _ = await _run_in_executor(lambda: orch.uploader.authenticate(), timeout=60)
+        if not auth_ok:
             await _broadcast_progress(job_id, 20, "upload",
                 "Error: Fallo autenticacion YouTube", "failed", video_id,
                 detail="No se pudo autenticar. Verifica las credenciales del canal.")
@@ -2293,7 +2295,9 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         from orchestrator import PipelineOrchestrator
         orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
 
-        if not orch.uploader.authenticate():
+        # ── Run auth in thread pool to avoid blocking event loop ──
+        auth_ok, _ = await _run_in_executor(lambda: orch.uploader.authenticate(), timeout=60)
+        if not auth_ok:
             db.update_job(job_id, status="failed", error_msg="YouTube auth failed")
             db.update_video(video_id, status="error", progress_phase="upload")
             return
@@ -2355,15 +2359,26 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         # Import lifecycle manager for post-upload scheduling
         from pipeline.video_lifecycle import VideoLifecycleManager
 
-        # ── Upload as private (scheduled mode) ──
-        yt_video_id = orch.phase_upload(
-            script=None,
-            video_data=video_data,
-            metadata=metadata,
-            job_id=job_id,
-            planned_public_at=target_public_at,
-            skip_lifecycle_scheduling=True,
+        # ── Upload as private (scheduled mode) via thread pool ──
+        # orch.phase_upload is a blocking synchronous call that reads the MP4
+        # and uploads chunk-by-chunk over TLS. Running it in _run_in_executor
+        # (ThreadPoolExecutor) keeps the asyncio event loop free to process HTTP
+        # requests and WebSocket messages during the upload (30-90 min).
+        exec_ok, yt_video_id = await _run_in_executor(
+            lambda: orch.phase_upload(
+                script=None,
+                video_data=video_data,
+                metadata=metadata,
+                job_id=job_id,
+                planned_public_at=target_public_at,
+                skip_lifecycle_scheduling=True,
+            ),
+            timeout=PHASE_TIMEOUTS["upload"],
         )
+        if not exec_ok:
+            # _run_in_executor already logged the error; yt_video_id is the error message
+            logger.error("[%s] F2 upload failed for video %d: %s", canal, video_id, yt_video_id)
+            yt_video_id = None
 
         if yt_video_id:
             yt_url = f"https://youtube.com/watch?v={yt_video_id}"
