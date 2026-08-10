@@ -69,13 +69,14 @@ async def lifespan(app: FastAPI):
     # pings so systemd knows the process is alive. Without this,
     # WatchdogSec would kill the service after 90s even if healthy.
     _watchdog_task = None
+    _sd = None  # exposed at lifespan scope for inline pings during sync startup
     try:
         from systemd import daemon as _sd
         import asyncio as _asyncio_wd
         if _sd.booted():
             _sd.notify("READY=1")
             _wlogger = logging.getLogger("autotube.watchdog")
-            _wlogger.info("systemd watchdog initialized (interval=30s)")
+            _wlogger.info("systemd watchdog initialized (interval=30s, WatchdogSec=600s)")
             
             async def _watchdog_ping():
                 while True:
@@ -88,6 +89,17 @@ async def lifespan(app: FastAPI):
             _watchdog_task = _asyncio_wd.create_task(_watchdog_ping())
     except ImportError:
         pass  # not running under systemd or python3-systemd not installed
+    
+    # ── Inline watchdog helper ─────────────────────────────────
+    # Allows sending WATCHDOG pings from synchronous startup blocks
+    # (init_db, migrate_v2, config sync, orphan cleanup) so systemd
+    # doesn't kill the process if these blocks exceed the ping interval.
+    def _ping_watchdog_now():
+        if _sd is not None:
+            try:
+                _sd.notify("WATCHDOG=1")
+            except Exception:
+                pass
     
     # ── Port pre-flight guard ─────────────────────────────────
     # If port 8000 is already bound (a previous instance still holds it),
@@ -156,6 +168,7 @@ async def lifespan(app: FastAPI):
     # Startup
     init_db()
     migrate_v2()
+    _ping_watchdog_now()  # keep systemd watchdog alive during sync startup
 
     # Restore stats collection state from DB (survives server restarts)
     _unpin_stats_state("stats_collection_state")
@@ -180,6 +193,7 @@ async def lifespan(app: FastAPI):
             logger.warning("Config validation skipped: %s", val_exc)
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
+    _ping_watchdog_now()  # config sync can be slow on first run
     
     # ── Clean up orphaned ffmpeg/edge-tts/yt-dlp processes from prior runs ──
     try:
@@ -218,38 +232,33 @@ async def lifespan(app: FastAPI):
         pass
 
     if not _scheduler_paused:
-        # Auto-recover failed/interrupted videos from previous run
-        try:
-            from api.services.generation_service import auto_recover_on_startup
-            await auto_recover_on_startup()
-            logging.getLogger("autotube.startup").info("Auto-recovery completed")
-        except Exception as exc:
-            logging.getLogger("autotube.startup").warning(
-                "Auto-recovery skipped: %s", exc
-            )
-
-    # Reconnect to running worker subprocesses that survived an API restart
-    try:
-        from api.services.generation_service import reconnect_active_workers
-        await reconnect_active_workers()
-    except Exception as exc:
-        logging.getLogger("autotube.startup").warning(
-            "Worker reconnection skipped: %s", exc
-        )
-    
-    if not _scheduler_paused:
-        # ── Defer heavy startup work to background threads ──
-        # Planning and shorts generation do synchronous I/O (DB, ffmpeg,
-        # Kokoro TTS, DeepSeek API) which blocks the asyncio event loop.
-        # Running them in the lifespan prevents uvicorn from accepting HTTP
-        # connections for minutes.  Defer to run_in_executor so the API
-        # starts responding immediately while startup work proceeds in parallel.
+        # ── Defer all heavy startup work to background ──
+        # auto_recover_on_startup, reconnect_active_workers, planning, and
+        # shorts generation all do synchronous I/O or async operations that
+        # block the lifespan. Running them in the background allows uvicorn
+        # to start accepting connections within seconds instead of minutes.
         import asyncio as _asyncio
         
         async def _startup_heavy_tasks():
-            await _asyncio.sleep(5)  # Brief pause to let API stabilize first
+            await _asyncio.sleep(3)  # Brief pause to let API stabilize first
             _loop = _asyncio.get_running_loop()
             _logger = logging.getLogger("autotube.startup")
+            
+            # ── Auto-recover failed/interrupted videos from previous run ──
+            try:
+                from api.services.generation_service import auto_recover_on_startup
+                await auto_recover_on_startup()
+                _logger.info("Auto-recovery completed")
+            except Exception as exc:
+                _logger.warning("Auto-recovery skipped: %s", exc)
+
+            # ── Reconnect to running worker subprocesses ──
+            try:
+                from api.services.generation_service import reconnect_active_workers
+                await reconnect_active_workers()
+                _logger.info("Worker reconnection completed")
+            except Exception as exc:
+                _logger.warning("Worker reconnection skipped: %s", exc)
             
             # Planning engine
             try:
@@ -289,7 +298,7 @@ async def lifespan(app: FastAPI):
         
         _startup_tasks = _asyncio.create_task(_startup_heavy_tasks())
         logging.getLogger("autotube.startup").info(
-            "Deferred startup tasks: planning + shorts will run in background"
+            "Deferred startup tasks: auto-recover + worker reconnect + planning + shorts will run in background"
         )
     else:
         logging.getLogger("autotube.startup").warning(
