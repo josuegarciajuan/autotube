@@ -3099,7 +3099,23 @@ if STATIC_DIR.exists():
                 await send(message)
             await super().__call__(scope, receive, send_wrapper)
     
-    app.mount("/assets", SmartCacheStaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+    # ── Mount static assets at /assets and /autotube/assets (vite base path) ──
+    static_assets = SmartCacheStaticFiles(directory=STATIC_DIR / "assets")
+    app.mount("/assets", static_assets, name="assets")
+    app.mount("/autotube/assets", static_assets, name="autotube_assets")
+    
+    # ── Also serve root-level files under /autotube/ path ──
+    @app.get("/autotube/{path:path}")
+    async def autotube_spa_fallback(path: str):
+        """Serve SPA under /autotube/ base path — matches vite's base config."""
+        if path.startswith("api/"):
+            raise HTTPException(404, "API endpoint not found")
+        if path.startswith("assets/"):
+            raise HTTPException(404, "Not found")
+        full_path = STATIC_DIR / path
+        if full_path.exists() and full_path.is_file():
+            return FileResponse(full_path, headers=NO_CACHE)
+        return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
     
     @app.get("/{path:path}")
     async def spa_fallback(path: str):
