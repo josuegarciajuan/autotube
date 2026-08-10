@@ -819,6 +819,15 @@ async def _schedule_checker_loop():
                 
                 await _queue_consumer()
 
+                # ── Thumbnail verification (v24) ──
+                # Checks recently uploaded videos for missing YT thumbnails
+                # and retries the upload if needed. Lightweight (~5 quota units/cycle).
+                try:
+                    from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
+                    await run_thumbnail_verification_cycle(db=_sched_db)
+                except Exception as _tv_exc:
+                    logger.debug("Thumbnail verification cycle: %s", _tv_exc)
+
                 # ── Marathon check: when awaiting_upload + uploaded_private
                 #     accumulates across channels (≥ BACKLOG_PER_CHANNEL × active_channels),
                 #     dispatch a 1-hour marathon video (every 60 min).
@@ -2141,6 +2150,27 @@ def _detect_and_clean_orphans_sync():
                 logger.info("Draft cleanup: %d stale drafts deleted", draft_deleted)
         except Exception as e:
             logger.warning("Draft cleanup skipped: %s", e)
+
+        # ── Awaiting-script zombie cleanup (v24) ──────────
+        # Videos stuck in 'awaiting_script' have been abandoned by the
+        # planning system — no script was ever generated for them.
+        # These accumulate when replans create slots that never dispatch.
+        # Clean up any older than 48h to prevent DB bloat.
+        try:
+            with db._connect() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM videos WHERE status = 'awaiting_script' "
+                    "AND created_at < datetime('now', '-48 hours')"
+                )
+                deleted_zombies = cursor.rowcount
+                conn.commit()
+            if deleted_zombies:
+                logger.info(
+                    "Awaiting-script cleanup: %d zombie videos deleted (stuck >48h)",
+                    deleted_zombies,
+                )
+        except Exception as e:
+            logger.debug("Awaiting-script cleanup skipped: %s", e)
 
         # ── Glass Box: recover orphaned videos with complete .mp4 ──
         # Final safety net — rescues videos that were fully generated but

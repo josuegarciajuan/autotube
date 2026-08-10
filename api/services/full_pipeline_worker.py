@@ -1445,8 +1445,24 @@ def run_job(
                 # Determine correct upload status based on publish mode
                 pub_mode = video_record.get("publish_mode", "immediate") if video_record else "immediate"
                 worker_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
-                db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
-                db.update_video(video_id, progress=100, status=worker_status)
+
+                # ── v24 (Aug 2026): Persist yt_video_id IMMEDIATELY ──
+                # The DB update must succeed before any post-upload operations
+                # (cross-platform, lifecycle, etc.) that could crash and cause
+                # the yt_video_id to be lost, triggering a duplicate re-upload.
+                logger.info("[%s] Persisting yt_video_id=%s for video #%d (status=%s)",
+                             canal, yt_video_id, video_id, worker_status)
+                try:
+                    db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
+                    db.update_video(video_id, progress=100, status=worker_status)
+                    logger.info("[%s] yt_video_id persisted successfully for video #%d", canal, video_id)
+                except Exception as persist_err:
+                    logger.critical(
+                        "[%s] CRITICAL: Failed to persist yt_video_id for video #%d: %s. "
+                        "Re-raising to prevent silent duplicate upload.",
+                        canal, video_id, persist_err,
+                    )
+                    raise  # Fatal — better to crash than lose the YouTube ID
 
                 # ── A/B Testing: create initial test record ──────────
                 if ab_test_variant_paths:

@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 # and preserves YouTube API quota.
 _PUBLISH_VERIFY_LOCK = threading.Lock()
 _PUBLISH_VERIFY_INFLIGHT: set = set()   # video ids being verified right now
-_PUBLISH_MAX_RETRIES = 3                # max verification attempts
-_PUBLISH_RETRY_BASE_MINUTES = 10        # base retry delay
-_PUBLISH_RETRY_MAX_MINUTES = 60         # cap retry delay
+_PUBLISH_MAX_RETRIES = 3                # max attempts before forcing go_public (processing must be done)
+_PUBLISH_MAX_TOTAL_RETRIES = 8          # v24: total attempts before giving up entirely (~24-48h)
+_PUBLISH_RETRY_BASE_MINUTES = 30        # v24: increased from 10 → better patience for YT processing
+_PUBLISH_RETRY_MAX_MINUTES = 720        # v24: increased from 60 → max 12h between retries
 _PUBLISH_YOUTUBE_API_QUOTA_COST = 1     # videos.list(part="status") costs 1 unit
 _CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
 _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
@@ -37,10 +38,14 @@ _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verificati
 
 def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: str):
     """Background verification: check if YouTube has auto-published the video.
-    
+
     Called from get_pipeline_status() when target_public_at has passed.
     Runs in a daemon thread. Updates the DB with the result.
-    
+
+    v24 (Aug 2026): Now checks processingStatus to avoid calling go_public
+    while YT is still encoding (which fails and creates an infinite retry
+    loop). Videos stuck in processing >48h are marked as stuck_processing.
+
     Quota: 1 unit per verification (videos.list with part="status").
     """
     import time as _time
@@ -64,7 +69,13 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
             uploader = YouTubeUploader(channel_slug)
             if not uploader.authenticate():
                 retry_count = _get_retry_count(video_id)
-                if retry_count >= _PUBLISH_MAX_RETRIES:
+                if retry_count >= _PUBLISH_MAX_TOTAL_RETRIES:
+                    vlog.error(
+                        "[%s] ❌ Auth stuck for #%d after %d retries — marking stuck_processing",
+                        channel_slug, video_id, retry_count,
+                    )
+                    _mark_video_stuck_processing(video_id, channel_slug)
+                elif retry_count >= _PUBLISH_MAX_RETRIES:
                     vlog.error(
                         "[%s] ❌ Auth stuck for #%d after %d retries — needs manual re-auth",
                         channel_slug, video_id, retry_count,
@@ -72,7 +83,7 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
                     _mark_video_auth_stuck(video_id)
                 else:
                     vlog.warning("[%s] Auth failed for publish verification of #%d (retry %d/%d)",
-                                 channel_slug, video_id, retry_count + 1, _PUBLISH_MAX_RETRIES)
+                                 channel_slug, video_id, retry_count + 1, _PUBLISH_MAX_TOTAL_RETRIES)
                     _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
                 return
             
@@ -89,8 +100,14 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
                 _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
                 return
             
-            privacy_status = items[0].get("status", {}).get("privacyStatus", "")
-            vlog.info("[%s] Video %s privacyStatus = %s", channel_slug, yt_video_id, privacy_status)
+            status_obj = items[0].get("status", {})
+            privacy_status = status_obj.get("privacyStatus", "")
+            processing_status = status_obj.get("processingStatus", "")
+            upload_status = status_obj.get("uploadStatus", "")
+            
+            vlog.info("[%s] Video %s: privacy=%s processing=%s upload=%s",
+                      channel_slug, yt_video_id, privacy_status,
+                      processing_status, upload_status)
             
         except Exception as api_exc:
             vlog.warning("[%s] YouTube API error: %s",
@@ -101,25 +118,59 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
         # ── Update DB based on result ──
         if privacy_status == "public":
             _mark_video_published(video_id, channel_slug, yt_video_id)
-        else:
-            retry_count = _get_retry_count(video_id)
-            if retry_count >= _PUBLISH_MAX_RETRIES:
+            return
+
+        # ── v24: Detect processing stuck BEFORE trying go_public ──
+        total_retries = _get_retry_count(video_id)
+
+        if processing_status == "processing" or (processing_status == "" and upload_status not in ("processed",)):
+            # YouTube is still encoding — go_public WILL fail.
+            # Wait with exponential backoff instead.
+            if total_retries >= _PUBLISH_MAX_TOTAL_RETRIES:
                 vlog.warning(
-                    "[%s] Video #%d still %s after %d retries — forcing go_public",
-                    channel_slug, video_id, privacy_status, retry_count,
+                    "[%s] ❌ Video #%d stuck in processing for %d retries (~%dh) — "
+                    "marking stuck_processing for manual intervention",
+                    channel_slug, video_id, total_retries,
+                    total_retries * _PUBLISH_RETRY_BASE_MINUTES // 60,
                 )
-                _force_go_public(video_id, channel_slug, yt_video_id)
-            else:
-                delay = min(
-                    _PUBLISH_RETRY_BASE_MINUTES * (2 ** retry_count),
-                    _PUBLISH_RETRY_MAX_MINUTES,
-                )
-                vlog.info(
-                    "[%s] Video #%d still %s (retry %d/%d) — next in %dmin",
-                    channel_slug, video_id, privacy_status,
-                    retry_count + 1, _PUBLISH_MAX_RETRIES, delay,
-                )
-                _schedule_publish_retry(video_id, delay)
+                _mark_video_stuck_processing(video_id, channel_slug)
+                return
+            delay = min(
+                _PUBLISH_RETRY_BASE_MINUTES * (2 ** min(total_retries, 5)),
+                _PUBLISH_RETRY_MAX_MINUTES,
+            )
+            vlog.info(
+                "[%s] Video #%d still processing (processingStatus=%s) — "
+                "retry %d/%d in %dmin",
+                channel_slug, video_id, processing_status,
+                total_retries + 1, _PUBLISH_MAX_TOTAL_RETRIES, delay,
+            )
+            _schedule_publish_retry(video_id, delay)
+            return
+
+        # ── Processing is done, but video isn't public yet ──
+        # This is the normal case: YouTube finished encoding, publishAt fired,
+        # but the privacy transition didn't happen (rare YT bug).
+        # Safe to force go_public.
+        if total_retries >= _PUBLISH_MAX_RETRIES:
+            vlog.warning(
+                "[%s] Video #%d still %s after %d retries — "
+                "processing done (status=%s), forcing go_public",
+                channel_slug, video_id, privacy_status, total_retries,
+                processing_status,
+            )
+            _force_go_public(video_id, channel_slug, yt_video_id)
+        else:
+            delay = min(
+                _PUBLISH_RETRY_BASE_MINUTES * (2 ** total_retries),
+                _PUBLISH_RETRY_MAX_MINUTES,
+            )
+            vlog.info(
+                "[%s] Video #%d still %s (retry %d/%d) — next in %dmin",
+                channel_slug, video_id, privacy_status,
+                total_retries + 1, _PUBLISH_MAX_RETRIES, delay,
+            )
+            _schedule_publish_retry(video_id, delay)
     
     finally:
         with _PUBLISH_VERIFY_LOCK:
@@ -233,6 +284,37 @@ def _mark_video_auth_stuck(video_id: int):
             conn.commit()
     except Exception as e:
         logger.error("Failed to mark video #%d as auth_stuck: %s", video_id, e)
+
+
+def _mark_video_stuck_processing(video_id: int, channel_slug: str):
+    """v24: Mark a video as permanently stuck in YouTube processing.
+
+    Called when _verify_published_status_bg exhausts all retries while
+    YouTube's processingStatus remains 'processing'. The video cannot
+    be published or privacy-changed until YT finishes encoding — which
+    in rare cases can take >48h or get permanently stuck.
+
+    The operator must manually check YouTube Studio to decide whether
+    to wait, delete and re-upload, or contact YouTube support.
+    """
+    db = ExtendedDatabase()
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE videos SET status = 'stuck_processing', "
+                "progress_phase = 'yt_processing_stuck', "
+                "published_retry_at = NULL, "
+                "error_message = 'YouTube processing stuck >48h — check YT Studio manually' "
+                "WHERE id = ?",
+                (video_id,),
+            )
+            conn.commit()
+        logger.warning(
+            "[%s] Video #%d marked as stuck_processing — requires manual intervention",
+            channel_slug, video_id,
+        )
+    except Exception as e:
+        logger.error("Failed to mark video #%d as stuck_processing: %s", video_id, e)
 
 
 def _maybe_trigger_publish_verification(video: dict):
@@ -1066,6 +1148,9 @@ def migrate_v2(db_path: str = None):
     
     # ── v33: Cleanup zero-valued channel_stats_history rows (false valleys) ──
     _migrate_v33(conn, logger)
+    
+    # ── v34: Thumbnail verification column ──
+    _migrate_v34(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2194,6 +2279,23 @@ def _migrate_v33(conn, logger):
             "Migration v33: no zero-valued channel_stats_history rows to clean up"
         )
 
+    conn.commit()
+
+
+def _migrate_v34(conn, logger):
+    """Idempotent v34 migration: add thumbnail_verified column to videos.
+
+    Tracks whether the custom thumbnail has been verified post-upload.
+    0 = not verified yet (may or may not have been uploaded)
+    1 = verified successfully present on YT
+    """
+    try:
+        conn.execute(
+            "ALTER TABLE videos ADD COLUMN thumbnail_verified INTEGER DEFAULT 0"
+        )
+        logger.info("Migration v34: added thumbnail_verified column to videos")
+    except sqlite3.OperationalError:
+        pass  # column already exists — idempotent
     conn.commit()
 
 

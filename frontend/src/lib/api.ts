@@ -108,6 +108,7 @@ export const api = {
     request<any>('/videos/generate', { method: 'POST', body: JSON.stringify(data) }),
   uploadVideo: (id: number) => request<any>(`/videos/${id}/upload`, { method: 'POST' }),
   regenerateThumbnail: (id: number) => request<any>(`/videos/${id}/regenerate-thumbnail`, { method: 'POST' }),
+  retryThumbnail: (id: number) => request<any>(`/videos/${id}/retry-thumbnail-upload`, { method: 'POST' }),
 
   // Scenes
   getScenes: (videoId: number) => request<any[]>(`/scenes/video/${videoId}`),
@@ -656,6 +657,11 @@ export function statusBadge(status: string): string {
     warming: 'badge-warming',
     scheduled: 'badge-scheduled',
     published: 'badge-published',
+    stuck_processing: 'badge-stuck',
+    awaiting_script: 'badge-draft',
+    cancelled: 'badge-error',
+    unlisted: 'badge-uploaded_private',
+    private_quality_issue: 'badge-error',
   };
   return map[status] || 'badge-draft';
 }
@@ -671,10 +677,15 @@ export function statusLabel(status: string): string {
     uploading: 'Subiendo...',
     uploaded: 'Subido',
     error: 'Error',
-    uploaded_private: 'Subido (no listado)',
+    uploaded_private: 'Subido (privado)',
     warming: 'Calentando',
     scheduled: 'Programado',
     published: 'Publicado',
+    stuck_processing: 'Processing stuck (YT)',
+    awaiting_script: 'Esperando script',
+    cancelled: 'Cancelado',
+    unlisted: 'No listado',
+    private_quality_issue: 'Error calidad',
   };
   return map[status] || status;
 }

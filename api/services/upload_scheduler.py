@@ -158,9 +158,10 @@ def _recover_stuck_uploading_videos(db) -> int:
     4. Upload job failed during dispatch and video reverted to 'ready'
        instead of 'awaiting_upload' (ghost worker, manual cleanup, etc).
 
-    Strategy: find videos in 'uploading' or 'ready' status whose latest
-    upload_only job is 'failed' (dead worker), and revert them to
-    'awaiting_upload' so the dispatcher retries them on the next cycle.
+    **v24 (Aug 2026): Guards against duplicate re-upload.**
+    - Videos with yt_video_id already set are NEVER reverted to awaiting_upload.
+      The upload succeeded — only the job tracking failed. Mark them as uploaded.
+    - Both Scenario A and B now filter `AND v.yt_video_id IS NULL`.
 
     Returns count of recovered videos.
     """
@@ -168,6 +169,7 @@ def _recover_stuck_uploading_videos(db) -> int:
     try:
         with db._connect() as conn:
             # ── Scenario A: videos stuck in 'uploading' with failed upload job ──
+            # ONLY recover videos that have NO yt_video_id (upload didn't actually complete).
             stuck = conn.execute(
                 """SELECT v.id, v.channel_id
                    FROM videos v
@@ -180,6 +182,7 @@ def _recover_stuck_uploading_videos(db) -> int:
                    JOIN generation_jobs j ON j.id = j_latest.max_job_id
                    WHERE v.status = 'uploading'
                      AND j.status = 'failed'
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
                 """
             ).fetchall()
 
@@ -188,7 +191,7 @@ def _recover_stuck_uploading_videos(db) -> int:
                 conn.execute(
                     "UPDATE videos SET status='awaiting_upload', "
                     "progress_phase='upload', scheduled_upload_at=NULL "
-                    "WHERE id=? AND status='uploading'",
+                    "WHERE id=? AND status='uploading' AND (yt_video_id IS NULL OR yt_video_id = '')",
                     (video_id,)
                 )
                 if conn.total_changes > 0:
@@ -197,6 +200,44 @@ def _recover_stuck_uploading_videos(db) -> int:
                         "🔁 Recovery: video #%d (ch=%d) stuck in 'uploading' with dead "
                         "upload job → reverted to 'awaiting_upload' for retry",
                         video_id, row["channel_id"],
+                    )
+
+            # ── Scenario A2: videos in 'uploading' that DO have yt_video_id ──
+            # The upload actually succeeded but the job tracking died.
+            # Mark them as uploaded — DO NOT re-upload.
+            stuck_with_yt = conn.execute(
+                """SELECT v.id, v.channel_id, v.yt_video_id, v.publish_mode
+                   FROM videos v
+                   JOIN (
+                       SELECT video_id, MAX(id) as max_job_id
+                       FROM generation_jobs
+                       WHERE action = 'upload_only'
+                       GROUP BY video_id
+                   ) j_latest ON j_latest.video_id = v.id
+                   JOIN generation_jobs j ON j.id = j_latest.max_job_id
+                   WHERE v.status = 'uploading'
+                     AND j.status = 'failed'
+                     AND v.yt_video_id IS NOT NULL
+                     AND v.yt_video_id != ''
+                """
+            ).fetchall()
+
+            for row in stuck_with_yt:
+                video_id = row["id"]
+                target_status = "uploaded_private" if row["publish_mode"] == "scheduled" else "uploaded"
+                yt_url = f"https://youtube.com/watch?v={row['yt_video_id']}"
+                conn.execute(
+                    "UPDATE videos SET status=?, progress=100, "
+                    "progress_phase='upload', yt_url=? "
+                    "WHERE id=? AND status='uploading'",
+                    (target_status, yt_url, video_id),
+                )
+                if conn.total_changes > 0:
+                    recovered += 1
+                    logger.warning(
+                        "🔁 Recovery: video #%d (ch=%d) stuck in 'uploading' BUT already "
+                        "uploaded (yt=%s) → marked as '%s' (NOT re-uploaded)",
+                        video_id, row["channel_id"], row["yt_video_id"], target_status,
                     )
 
             # ── Scenario B: videos stuck in 'ready' with a failed upload job ──
@@ -215,6 +256,7 @@ def _recover_stuck_uploading_videos(db) -> int:
                    JOIN generation_jobs j ON j.id = j_latest.max_job_id
                    WHERE v.status = 'ready'
                      AND j.status = 'failed'
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
                 """
             ).fetchall()
 
@@ -224,7 +266,7 @@ def _recover_stuck_uploading_videos(db) -> int:
                     "UPDATE videos SET status='awaiting_upload', "
                     "progress=100, progress_phase='upload', "
                     "scheduled_upload_at=NULL, error_message=NULL "
-                    "WHERE id=? AND status='ready'",
+                    "WHERE id=? AND status='ready' AND (yt_video_id IS NULL OR yt_video_id = '')",
                     (video_id,)
                 )
                 if conn.total_changes > 0:
@@ -573,6 +615,21 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     video_id = video["id"]
     channel_id = video["channel_id"]
     slug = video.get("channel_slug", video.get("canal", "unknown"))
+
+    # ── v24 (Aug 2026): Pre-dispatch yt_video_id guard ──
+    # If the video already has a YouTube ID, the upload already succeeded.
+    # Fix the status rather than re-uploading.
+    existing_yt = video.get("yt_video_id") if isinstance(video, dict) else None
+    if existing_yt and str(existing_yt).strip():
+        logger.warning(
+            "📤 Upload skip for video #%d (%s): already uploaded (yt=%s) — correcting status",
+            video_id, slug, existing_yt,
+        )
+        pub_mode = video.get("publish_mode", "immediate")
+        corrected_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+        db.update_video(video_id, status=corrected_status, progress=100,
+                        progress_phase="upload")
+        return None
 
     # Per-channel guard: skip if this channel already has an upload running
     active_for_channel = db.get_active_upload_job_for_channel(channel_id)

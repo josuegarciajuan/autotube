@@ -2279,6 +2279,30 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         db.update_job(job_id, status="failed", error_msg="Video not found")
         return
 
+    # ── v24 (Aug 2026): Guard against duplicate upload ──
+    # If the video already has a yt_video_id, the upload already succeeded.
+    # This catches race conditions where the scheduler dispatches the same
+    # video twice, or a post-timeout recovery before the DB was updated.
+    existing_yt_id = v.get("yt_video_id")
+    if existing_yt_id and str(existing_yt_id).strip():
+        logger.warning(
+            "[%s] Video #%d already uploaded to YouTube (yt_video_id=%s) — aborting F2 upload",
+            v.get("canal", "?"), video_id, existing_yt_id,
+        )
+        db.update_job(job_id, status="completed", progress=100,
+                      error_msg=f"Already uploaded: {existing_yt_id}")
+        # Ensure video status reflects reality
+        current_status = v.get("status", "")
+        if current_status in ("awaiting_upload", "uploading", "ready"):
+            pub_mode = v.get("publish_mode", "immediate")
+            corrected_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+            db.update_video(video_id, status=corrected_status, progress=100,
+                            progress_phase="upload")
+        await _broadcast_progress(job_id, 100, "upload",
+                                   f"Already uploaded: {existing_yt_id}",
+                                   "completed", video_id)
+        return
+
     db.update_job(job_id, status="running")
     ch = db.get_channel(channel_id)
     canal = ch["slug"] if ch else v.get("canal")
@@ -2377,8 +2401,20 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         )
         if not exec_ok:
             # _run_in_executor already logged the error; yt_video_id is the error message
-            logger.error("[%s] F2 upload failed for video %d: %s", canal, video_id, yt_video_id)
-            yt_video_id = None
+            # ── v24 (Aug 2026): Timeout recovery — check if upload completed despite timeout ──
+            # The YouTube API may have accepted the upload but _run_in_executor timed out
+            # waiting for the response. Re-read video record to detect successful upload.
+            v_check = db.get_video(video_id)
+            if v_check and v_check.get("yt_video_id"):
+                logger.info(
+                    "[%s] F2 upload detected as completed despite timeout "
+                    "(yt_video_id=%s) for video %d",
+                    canal, v_check["yt_video_id"], video_id,
+                )
+                yt_video_id = v_check["yt_video_id"]
+            else:
+                logger.error("[%s] F2 upload failed for video %d: %s", canal, video_id, yt_video_id)
+                yt_video_id = None
 
         if yt_video_id:
             yt_url = f"https://youtube.com/watch?v={yt_video_id}"

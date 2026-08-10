@@ -565,6 +565,50 @@ def regenerate_thumbnail(video_id: int, background_tasks: BackgroundTasks):
     return {"message": "Thumbnail regeneration started"}
 
 
+@router.post("/{video_id}/retry-thumbnail-upload")
+def retry_thumbnail_upload(video_id: int):
+    """Re-upload existing local thumbnail to YouTube without regenerating.
+
+    v24 (Aug 2026): Uses the thumbnail file already stored in thumbnail_path.
+    No Pollo AI credits consumed. Only works if the local file still exists.
+    """
+    db = get_db()
+    v = db.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+
+    tp = v.get("thumbnail_path")
+    if not tp:
+        raise HTTPException(400, "No thumbnail_path in database — regenerate first")
+
+    if not Path(tp).exists():
+        raise HTTPException(400, f"Thumbnail file not found: {tp}")
+
+    yt_id = v.get("yt_video_id")
+    if not yt_id or not str(yt_id).strip():
+        raise HTTPException(400, "Video not uploaded to YouTube yet")
+
+    canal = v.get("canal", "")
+    if not canal:
+        raise HTTPException(400, "Channel not resolved")
+
+    try:
+        from pipeline.youtube_uploader import YouTubeUploader
+        uploader = YouTubeUploader(canal)
+        if not uploader.authenticate():
+            raise HTTPException(500, "YouTube authentication failed")
+
+        service = uploader._get_service()
+        success = uploader._set_thumbnail(service, yt_id, Path(tp))
+        if success:
+            db.update_video(video_id, thumbnail_verified=1)
+            return {"message": "Thumbnail uploaded and verified successfully"}
+        else:
+            raise HTTPException(500, "Thumbnail upload failed — check server logs")
+    except Exception as e:
+        raise HTTPException(500, f"Thumbnail upload error: {e}")
+
+
 # ── Script routes ────────────────────────────────────────────
 
 @router.post("/scripts/generate")

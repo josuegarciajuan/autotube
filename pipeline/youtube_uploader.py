@@ -538,7 +538,14 @@ class YouTubeUploader:
                 "ready": False,
             })
             if thumbnail_path and Path(thumbnail_path).exists():
-                self._set_thumbnail(service, video_id, Path(thumbnail_path))
+                if not self._set_thumbnail(service, video_id, Path(thumbnail_path)):
+                    warnings.append({
+                        "type": "thumbnail",
+                        "field": "thumbnail",
+                        "reason": "Thumbnail upload failed or could not be verified",
+                        "ready": False,
+                        "retry_needed": True,
+                    })
 
             if self.db is not None:
                 self._log_to_db(video_path, title, video_id, youtube_url)
@@ -656,7 +663,13 @@ class YouTubeUploader:
 
     def _set_thumbnail(
         self, service: Any, video_id: str, thumbnail_path: Path
-    ) -> None:
+    ) -> bool:
+        """Set custom thumbnail for a YouTube video. Returns True on success.
+
+        v24 (Aug 2026): Now verifies the thumbnail was actually applied by
+        calling thumbnails().list() after set(). Returns False instead of
+        silently swallowing errors, so callers can retry or log properly.
+        """
         try:
             service.thumbnails().set(
                 videoId=video_id,
@@ -665,12 +678,41 @@ class YouTubeUploader:
                     mimetype="image/jpeg",
                 ),
             ).execute()
-            logger.info("Thumbnail set for video %s", video_id)
+            logger.info("Thumbnail uploaded for video %s", video_id)
+
+            # Verify it was actually applied (1 quota unit)
+            try:
+                verify_resp = service.thumbnails().list(
+                    videoId=video_id,
+                ).execute()
+                items = verify_resp.get("items", [])
+                if items:
+                    logger.info("Thumbnail verified for video %s (%d item(s))",
+                                video_id, len(items))
+                    return True
+                else:
+                    logger.warning(
+                        "Thumbnail set() succeeded but list() returned no items for %s",
+                        video_id,
+                    )
+                    return False
+            except HttpError as verify_exc:
+                logger.warning(
+                    "Thumbnail set() succeeded but verification failed for %s: %s",
+                    video_id, verify_exc,
+                )
+                return False  # uncertain — assume failure
+
         except HttpError as exc:
-            logger.warning(
-                "Thumbnail upload skipped — account may need phone verification "
-                "at youtube.com/verify. Error: %s", exc
-            )
+            reason = str(exc)[:200]
+            if "youtube.com/verify" in reason.lower() or "phone" in reason.lower():
+                logger.warning(
+                    "Thumbnail upload skipped for %s — account may need phone "
+                    "verification at youtube.com/verify. Error: %s", video_id, exc,
+                )
+            else:
+                logger.warning("Thumbnail upload failed for %s: %s", video_id, exc)
+            return False
 
     # ── Upload validation ───────────────────────────────────────
 

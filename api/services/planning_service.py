@@ -1210,6 +1210,12 @@ def compute_and_store_slots(
     
     # Compute slots
     slots = compute_daily_slots(date_str, channel_configs)
+
+    # ── v24 (Aug 2026): Topic-level dedup ──
+    # Prevent creating multiple slots for the same topic by checking
+    # recent (7-day) planned_slots and published videos for content overlap.
+    # Uses source_url + primary keyword hash for fast comparison.
+    slots = _deduplicate_slots_by_topic(slots, db)
     
     # ── v10.3: Resolve collisions with already-existing slots/videos ──
     # Check against non-pending planned_slots AND existing videos with 
@@ -1238,6 +1244,90 @@ def compute_and_store_slots(
         "total_slots": stored,
         "slots_by_channel": slots_by_channel,
     }
+
+
+def _deduplicate_slots_by_topic(slots: list[dict], db) -> list[dict]:
+    """Remove slots whose topic already appears in recent slots or published videos.
+
+    v24 (Aug 2026): Prevents planning from creating multiple slots for the
+    same content topic — a common source of duplicate video uploads when
+    replans or horizon extensions generate slots from the same sources.
+
+    Detection uses a lightweight content hash combining:
+      - source_url (URL of the original content source)
+      - primary keyword / search query
+      - channel_id
+
+    A slot is skipped if a matching hash exists in:
+      - planned_slots from the last 7 days (any status)
+      - videos with yt_video_id from the last 7 days
+
+    Returns filtered slot list.
+    """
+    import hashlib
+
+    def _slot_hash(slot: dict) -> str:
+        """Create a stable content hash for a slot."""
+        source = slot.get("source_url", "")
+        keyword = slot.get("primary_keyword", slot.get("search_query", ""))
+        channel = str(slot.get("channel_id", ""))
+        raw = f"{source}|{keyword}|{channel}"
+        return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    # Collect existing topic hashes from recent slots and videos
+    existing_hashes: set[str] = set()
+    try:
+        with db._connect() as conn:
+            # Recent planned_slots (any status, last 7 days)
+            recent_slots = conn.execute(
+                """SELECT source_url, channel_id
+                   FROM planned_slots
+                   WHERE scheduled_at >= datetime('now', '-7 days')
+                     AND source_url IS NOT NULL AND source_url != ''"""
+            ).fetchall()
+            for rs in recent_slots:
+                raw = f"{rs['source_url'] or ''}||{rs['channel_id']}"
+                h = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+                existing_hashes.add(h)
+
+            # Recent published videos (last 7 days, with yt_video_id)
+            recent_vids = conn.execute(
+                """SELECT source_url, channel_id
+                   FROM videos
+                   WHERE yt_video_id IS NOT NULL AND yt_video_id != ''
+                     AND created_at >= datetime('now', '-7 days')
+                     AND source_url IS NOT NULL AND source_url != ''"""
+            ).fetchall()
+            for rv in recent_vids:
+                raw = f"{rv['source_url'] or ''}||{rv['channel_id']}"
+                h = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+                existing_hashes.add(h)
+    except Exception as e:
+        logger.debug("Topic dedup: could not load existing hashes: %s", e)
+        return slots  # Fail open — don't block planning
+
+    filtered: list[dict] = []
+    skipped = 0
+    for slot in slots:
+        h = _slot_hash(slot)
+        if h in existing_hashes:
+            skipped += 1
+            logger.debug(
+                "Topic dedup: skipping slot for ch=%s src=%s (hash=%s — already exists)",
+                slot.get("channel_id", "?"),
+                (slot.get("source_url") or "?")[:50],
+                h,
+            )
+            continue
+        filtered.append(slot)
+        existing_hashes.add(h)  # Prevent duplicates within the same batch
+
+    if skipped:
+        logger.info(
+            "Topic dedup: skipped %d/%d slots that would duplicate recent content",
+            skipped, skipped + len(filtered),
+        )
+    return filtered
 
 
 def _augment_channel_configs(db, channel_configs: list[dict]) -> list[dict]:
