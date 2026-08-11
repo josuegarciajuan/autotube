@@ -301,9 +301,34 @@ async def lifespan(app: FastAPI):
             "Deferred startup tasks: auto-recover + worker reconnect + planning + shorts will run in background"
         )
     else:
-        logging.getLogger("autotube.startup").warning(
-            "SCHEDULER PAUSED — auto-recovery, planning, and shorts scheduling skipped"
-        )
+        # Check if paused due to quota exhaustion and quota has already reset.
+        # When the API restarts after a deployment/SIGKILL, the recovery loop
+        # may not have had a chance to auto-resume. We catch that here.
+        _is_quota_pause = False
+        _quota_reset_passed = False
+        try:
+            _is_quota_pause = _paused_db.get_system_state("quota_exhausted_at") not in (None, "")
+            if _is_quota_pause:
+                _reset_info = _paused_db.get_quota_reset_time()
+                if _reset_info.get("exhausted") and _reset_info.get("reset_at_utc"):
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    _reset_at = _dt.fromisoformat(_reset_info["reset_at_utc"])
+                    if _reset_at.tzinfo is None:
+                        _reset_at = _reset_at.replace(tzinfo=_tz.utc)
+                    _now = _dt.now(_tz.utc)
+                    _quota_reset_passed = _now >= _reset_at + _td(minutes=15)
+        except Exception:
+            pass
+
+        if _quota_reset_passed:
+            _paused_db.clear_quota_exhausted()
+            logging.getLogger("autotube.startup").warning(
+                "Quota reset already passed — scheduler auto-resumed at startup"
+            )
+        else:
+            logging.getLogger("autotube.startup").warning(
+                "SCHEDULER PAUSED — auto-recovery, planning, and shorts scheduling skipped"
+            )
     
     # Launch schedule checker in background
     import asyncio
@@ -419,27 +444,36 @@ async def _queue_consumer():
         except ImportError:
             pass  # ram_governor not available — proceed
         
+        action = next_job.get("action", "generate_and_upload")
+
         logger.info(
             "Queue consumer: dispatching job #%d (channel_id=%d, action=%s)",
-            next_job["id"], next_job["channel_id"], next_job.get("action", "?"),
+            next_job["id"], next_job["channel_id"], action,
         )
-        
-        from api.services.generation_service import start_generation_job, start_generation_job_subprocess, USE_SUBPROCESS_WORKER
-        
-        if USE_SUBPROCESS_WORKER:
-            asyncio.create_task(start_generation_job_subprocess(
+
+        if action == "reassemble":
+            from api.services.generation_service import _run_reassembly_job
+            asyncio.create_task(_run_reassembly_job(
                 job_id=next_job["id"],
-                channel_id=next_job["channel_id"],
                 video_id=next_job["video_id"],
-                action=next_job.get("action", "generate_and_upload"),
             ))
         else:
-            asyncio.create_task(start_generation_job(
-                job_id=next_job["id"],
-                channel_id=next_job["channel_id"],
-                video_id=next_job["video_id"],
-                action=next_job.get("action", "generate_and_upload"),
-            ))
+            from api.services.generation_service import start_generation_job, start_generation_job_subprocess, USE_SUBPROCESS_WORKER
+
+            if USE_SUBPROCESS_WORKER:
+                asyncio.create_task(start_generation_job_subprocess(
+                    job_id=next_job["id"],
+                    channel_id=next_job["channel_id"],
+                    video_id=next_job["video_id"],
+                    action=action,
+                ))
+            else:
+                asyncio.create_task(start_generation_job(
+                    job_id=next_job["id"],
+                    channel_id=next_job["channel_id"],
+                    video_id=next_job["video_id"],
+                    action=action,
+                ))
         
     except Exception as e:
         logger.error("Queue consumer error: %s", e)
@@ -612,42 +646,45 @@ async def _quota_recovery_loop():
                         await _asyncio.sleep(1800)  # 30 min
                         continue
 
-                    _db.clear_quota_exhausted()
-
-                    # Resolve quota alerts
                     try:
-                        with _db._connect() as _conn:
-                            _conn.execute(
-                                """UPDATE pipeline_alerts 
-                                   SET resolved = 1, resolved_at = datetime('now')
-                                   WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
-                            )
-                            _conn.commit()
-                    except Exception:
-                        pass
+                        _db.clear_quota_exhausted()
 
-                    # Log lifecycle event
-                    try:
-                        from api.services.lifecycle_monitor import log_event as _le
-                        _le(_db, entity_type='system', entity_id=0, channel_id=None,
-                            event='quota_recovered', status='info',
-                            message='Scheduler auto-resumed (midnight PT reached)')
-                    except Exception:
-                        pass
+                        # Resolve quota alerts
+                        try:
+                            with _db._connect() as _conn:
+                                _conn.execute(
+                                    """UPDATE pipeline_alerts 
+                                       SET resolved = 1, resolved_at = datetime('now')
+                                       WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
+                                )
+                                _conn.commit()
+                        except Exception:
+                            pass
 
-                    # Broadcast update to WebSocket clients
-                    try:
-                        from api.routers.monitor import broadcast_monitor_update
-                        await broadcast_monitor_update({
-                            "type": "quota_recovered",
-                            "message": "Scheduler auto-resumed after midnight PT quota reset",
-                        })
-                    except Exception:
-                        pass
+                        # Log lifecycle event
+                        try:
+                            from api.services.lifecycle_monitor import log_event as _le
+                            _le(_db, entity_type='system', entity_id=0, channel_id=None,
+                                event='quota_recovered', status='info',
+                                message='Scheduler auto-resumed (midnight PT reached)')
+                        except Exception:
+                            pass
 
-                    _logger.info("Quota recovery complete — scheduler resumed")
+                        # Broadcast update to WebSocket clients
+                        try:
+                            from api.routers.monitor import broadcast_monitor_update
+                            await broadcast_monitor_update({
+                                "type": "quota_recovered",
+                                "message": "Scheduler auto-resumed after midnight PT quota reset",
+                            })
+                        except Exception:
+                            pass
+
+                        _logger.info("Quota recovery complete — scheduler resumed")
+                    except Exception as _resume_exc:
+                        _logger.warning("Quota recovery resume failed: %s", _resume_exc, exc_info=True)
         except Exception as _exc:
-            _logger.debug("Quota recovery loop error: %s", _exc)
+            _logger.warning("Quota recovery loop error: %s", _exc, exc_info=True)
         
         await _asyncio.sleep(1800)  # Check every 30 minutes
 

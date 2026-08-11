@@ -2670,6 +2670,9 @@ async def _run_reassembly_job(job_id: int, video_id: int):
                             error_msg=f"Global concurrency guard: {active_count} active job(s)")
         return
 
+    # ── Mark job as running so guards count it and queue consumer skips it ──
+    db_guard.update_job(job_id, status="running")
+
     # ── Pre-flight: kill lingering ffmpegs from prior failed attempts ──
     _kill_orphaned_ffmpeg()
     
