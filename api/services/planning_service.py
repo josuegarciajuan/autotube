@@ -3084,7 +3084,7 @@ def full_replan(db=None) -> dict:
     #   via round-robin so no channel starves.
 
     # 3a. Get per-channel pipeline duration (from history or heuristic)
-    from api.services.schedule_engine import get_avg_creation_minutes
+    from api.services.schedule_engine import get_avg_creation_minutes, estimate_remaining_minutes
 
     channel_pipeline = {}  # channel_id → pipeline_minutes
     channel_upload_windows = {}  # channel_id → [(start, end), ...]
@@ -3203,7 +3203,39 @@ def full_replan(db=None) -> dict:
         round_idx += 1
 
     # 3c. Chain slots from NOW (pipeline continua)
-    pipeline_cursor = now  # current time in the pipeline chain
+    # ── Offset start for active generations on ANY channel ──
+    # If a channel is already generating a video, push the pipeline cursor
+    # past its estimated completion so the first planned slot doesn't start
+    # before the current job has finished.
+    max_active_remaining_min = 0.0
+    for ch in channels:
+        ch_id = ch["id"]
+        if ch.get("slug") == "test":
+            continue
+        try:
+            remaining = estimate_remaining_minutes(ch_id)
+            if remaining > 0:
+                logger.info(
+                    "Full replan: channel %s has active generation, "
+                    "estimated %.1f min remaining",
+                    ch.get("slug"), remaining,
+                )
+                max_active_remaining_min = max(max_active_remaining_min, remaining)
+        except Exception as exc:
+            logger.warning(
+                "Full replan: error estimating remaining for channel %s: %s",
+                ch.get("slug"), exc,
+            )
+
+    if max_active_remaining_min > 0:
+        pipeline_cursor = now + _td(minutes=max_active_remaining_min + GLOBAL_GAP_MINUTES)
+        logger.info(
+            "Full replan: pipeline delayed by %.1f min (active gen remaining %.1f + %d min gap)",
+            max_active_remaining_min + GLOBAL_GAP_MINUTES,
+            max_active_remaining_min, GLOBAL_GAP_MINUTES,
+        )
+    else:
+        pipeline_cursor = now  # current time in the pipeline chain
     last_channel_target = {}  # channel_id → last target_upload_at (for same-channel gap)
     resolved_videos = []
     channel_day_count = {}  # (channel_id, date_key) → count (for slot_position within day)

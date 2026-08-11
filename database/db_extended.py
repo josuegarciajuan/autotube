@@ -7244,9 +7244,8 @@ class ExtendedDatabase(Database):
                     WHERE sps.date_key >= date('now', 'localtime')
                       AND sps.date_key <= date('now', 'localtime', '+1 day')
                       AND sps.status = 'pending'
-                      AND sps.short_id IS NULL
-                      AND sps.short_type = 'native'
-                    ORDER BY sps.scheduled_at ASC""",
+                       AND sps.short_id IS NULL
+                     ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
             result["shorts"]["pending"] = [dict(r) for r in shorts_pending]
 

@@ -79,7 +79,7 @@ def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
 
     rows = conn.execute(
         """SELECT timing_data FROM videos 
-           WHERE channel_id = ? AND status = 'uploaded' 
+           WHERE channel_id = ? AND status IN ('uploaded', 'published', 'uploaded_private')
            AND timing_data IS NOT NULL AND timing_data != '{}' AND timing_data != ''
            ORDER BY id DESC LIMIT ?""",
         (channel_id, n),
@@ -109,6 +109,224 @@ def get_avg_creation_minutes(channel_id: int, n: int = 3) -> float:
     avg_min = (total_ms / count) / 60000.0
     logger.info("channel_id=%d: avg creation = %.1f min (from %d videos)", channel_id, avg_min, count)
     return avg_min
+
+
+# ── Phase-based remaining time estimation ─────────────────────
+
+# Pipeline phase order (from full_pipeline_worker._PHASE_ORDER)
+_PHASE_ORDER = ["scrape", "script", "pre_validate", "tts", "media",
+                "video", "metadata", "post_validate", "upload"]
+
+# Maps worker progress_phase → orchestrator timing_data phase key.
+# Phases set to None have no timing_data (use DEFAULT_SHORT_PHASE_SEC).
+# Phases set to empty string exist as concept but are rarely tracked
+# in timing_data (also use DEFAULT_SHORT_PHASE_SEC).
+_PHASE_TO_TIMING_KEY = {
+    "scrape":        "scrape",
+    "script":        "script",
+    "pre_validate":  None,
+    "tts":           "tts",
+    "media":         "media",
+    "video":         "video_assembly",
+    "metadata":      "metadata",
+    "post_validate": None,
+    "upload":        "upload",
+}
+
+# Estimated duration (seconds) for phases that don't have timing_data
+# or whose timing key is not found in historical data.
+_DEFAULT_SHORT_PHASE_SEC = 60  # pre_validate, post_validate are fast checks
+_DEFAULT_UPLOAD_PHASE_SEC = 180  # upload normally takes 2-5 min
+
+# Progress % range per phase: (start_pct, end_pct).  Approximate —
+# used to estimate how far a running job is within its current phase.
+_PHASE_PROGRESS_RANGE = {
+    "scrape":        (5,  12),
+    "script":        (12, 25),
+    "pre_validate":  (25, 27),
+    "tts":           (27, 40),
+    "media":         (40, 55),
+    "video":         (55, 75),
+    "metadata":      (75, 87),
+    "post_validate": (87, 90),
+    "upload":        (90, 100),
+}
+
+# Minimum floor for remaining estimate (minutes) — avoids scheduling
+# a new job while the current one is clearly still running.
+_MIN_REMAINING_MINUTES_FLOOR = 5
+
+
+def _get_per_phase_avg_ms(channel_id: int, n: int = 5) -> dict | None:
+    """Build a per-phase average duration (ms) map from last N uploaded videos.
+
+    Returns a dict like {"scrape": 120000, "script": 300000, ...} or None if
+    no valid timing_data is available.
+    """
+    import sqlite3
+    from config.settings import DATABASE_PATH
+
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT timing_data FROM videos
+           WHERE channel_id = ? AND status IN ('uploaded', 'published', 'uploaded_private')
+             AND timing_data IS NOT NULL AND timing_data != '' AND timing_data != '{}'
+           ORDER BY id DESC LIMIT ?""",
+        (channel_id, n),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return None
+
+    # Accumulate per-phase durations across videos
+    phase_totals: dict[str, float] = {}
+    phase_counts: dict[str, int] = {}
+
+    for row in rows:
+        try:
+            td = json.loads(row["timing_data"])
+            phases = td.get("phases", {})
+            if not isinstance(phases, dict):
+                continue
+            for key, ms in phases.items():
+                if not isinstance(ms, (int, float)) or ms <= 0:
+                    continue
+                phase_totals[key] = phase_totals.get(key, 0.0) + ms
+                phase_counts[key] = phase_counts.get(key, 0) + 1
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if not phase_totals:
+        return None
+
+    return {k: phase_totals[k] / phase_counts[k] for k in phase_totals}
+
+
+def _get_active_generation(channel_id: int) -> dict | None:
+    """Return the active generating video for a channel, or None.
+
+    Returns dict with keys: video_id, progress, progress_phase, generation_started_at.
+    """
+    import sqlite3
+    from config.settings import DATABASE_PATH
+
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT v.id, v.progress, v.progress_phase, v.generation_started_at
+           FROM videos v
+           WHERE v.channel_id = ? AND v.status = 'generating'
+             AND v.progress IS NOT NULL
+           ORDER BY v.id DESC LIMIT 1""",
+        (channel_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+    d = dict(row)
+    if not d.get("progress_phase") or not d.get("progress"):
+        return None
+    return d
+
+
+def estimate_remaining_minutes(channel_id: int) -> float:
+    """Estimate how many minutes remain for the currently running generation.
+
+    Uses per-phase historical timing data to compute a phase-aware estimate:
+    - Builds a per-phase average duration model from the last N uploaded videos.
+    - For the running job, sums the historical averages of all remaining phases.
+    - Uses the current ``progress`` % to interpolate within the current phase.
+
+    Falls back to ``avg_total * (1 - progress/100)`` if per-phase data is
+    unavailable.  Returns 0.0 if no generation is active for this channel.
+    """
+    active = _get_active_generation(channel_id)
+    if not active:
+        return 0.0
+
+    progress = int(active["progress"])
+    phase = active["progress_phase"].strip().lower()
+
+    # Normalise: progress_phase might be "video" but timing uses "video_assembly"
+    if phase not in _PHASE_ORDER:
+        logger.warning(
+            "estimate_remaining: unknown phase '%s' for channel %d, "
+            "using progress-based fallback",
+            phase, channel_id,
+        )
+        return _estimate_by_total_progress(channel_id, progress)
+
+    # ── 1. Per-phase historical averages ──
+    phase_avg_ms = _get_per_phase_avg_ms(channel_id, n=5)
+
+    # ── 2. Fallback: total-duration based ──
+    if not phase_avg_ms or len(phase_avg_ms) < 2:
+        logger.info(
+            "estimate_remaining: insufficient phase data for channel %d, "
+            "using total-progress fallback",
+            channel_id,
+        )
+        return _estimate_by_total_progress(channel_id, progress)
+
+    # ── 3. Sum remaining phases ──
+    stage_idx = _PHASE_ORDER.index(phase) if phase in _PHASE_ORDER else -1
+    remaining_ms = 0
+
+    for i in range(stage_idx, len(_PHASE_ORDER)):
+        p = _PHASE_ORDER[i]
+        timing_key = _PHASE_TO_TIMING_KEY.get(p)
+
+        if timing_key is None:
+            # Phase intentionally not tracked → use short default
+            phase_duration_ms = _DEFAULT_SHORT_PHASE_SEC * 1000
+        elif timing_key not in phase_avg_ms:
+            # Phase key exists but no historical data for it
+            if p == "upload":
+                phase_duration_ms = _DEFAULT_UPLOAD_PHASE_SEC * 1000
+            else:
+                phase_duration_ms = _DEFAULT_SHORT_PHASE_SEC * 1000
+        else:
+            phase_duration_ms = phase_avg_ms[timing_key]
+
+        if i == stage_idx:
+            # ── Current phase: interpolate how much is left ──
+            pr = _PHASE_PROGRESS_RANGE.get(p, (0, 100))
+            range_start, range_end = pr
+            range_span = max(range_end - range_start, 1)
+            # Clamp progress within the phase range
+            progress_in_range = max(0, min(progress, range_end) - range_start)
+            fraction_done = progress_in_range / range_span
+            current_remaining = phase_duration_ms * max(0, 1.0 - fraction_done)
+            remaining_ms += current_remaining
+        else:
+            # ── Future phase: full duration ──
+            remaining_ms += phase_duration_ms
+
+    remaining_min = (remaining_ms / 60000.0)
+
+    # ── Floor ──
+    remaining_min = max(remaining_min, _MIN_REMAINING_MINUTES_FLOOR)
+
+    logger.info(
+        "estimate_remaining: channel=%d phase=%s progress=%d%% → %.1f min",
+        channel_id, phase, progress, remaining_min,
+    )
+    return remaining_min
+
+
+def _estimate_by_total_progress(channel_id: int, progress: int) -> float:
+    """Simple fallback: remaining = avg_total * (1 - progress/100)."""
+    avg_total_min = get_avg_creation_minutes(channel_id, n=5)
+    remaining = avg_total_min * (1.0 - progress / 100.0)
+    remaining = max(remaining, _MIN_REMAINING_MINUTES_FLOOR)
+    logger.info(
+        "estimate_remaining (total-fallback): channel=%d progress=%d%% → %.1f min",
+        channel_id, progress, remaining,
+    )
+    return remaining
 
 
 def _day_seed(date_str: str, channel_slug: str, slot_idx: int) -> int:
