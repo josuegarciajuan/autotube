@@ -1,6 +1,6 @@
 /** API client for Autotube backend.
- *  Uses relative URLs so it works whether served at / or /autotube/ */
-const API_BASE = 'api';
+ *  Uses absolute /api prefix — works with Vite proxy (dev) and direct (prod). */
+const API_BASE = '/api';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
