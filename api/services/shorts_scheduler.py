@@ -1199,7 +1199,22 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
                 continue
 
             slots = compute_daily_shorts_slots(day_str, db)
-            count = persist_daily_shorts_slots(day_str, slots, db)
+
+            # ── Today: discard past-due slots so they don't fire immediately ──
+            if day_offset == 0 and slots:
+                now_local = datetime.now(DEFAULT_TIMEZONE)
+                now_utc_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
+                future = [s for s in slots if s.get("scheduled_at", "") >= now_utc_str]
+                dropped = len(slots) - len(future)
+                if dropped > 0:
+                    logger.info(
+                        "Dropped %d past-due shorts slots for %s "
+                        "(already behind current time %s)",
+                        dropped, day_str, now_utc_str[:16],
+                    )
+                slots = future
+
+            count = persist_daily_shorts_slots(day_str, slots, db) if slots else 0
             results[day_str] = f"{count} slots"
         except Exception as e:
             logger.error("Failed to generate shorts schedule for %s: %s", day_str, e)
