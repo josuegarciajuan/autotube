@@ -633,13 +633,11 @@ export function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + '...' : text;
 }
 
-/** Format big numbers: 1000 → 1K, 1500000 → 1.5M */
+/** Format big numbers with locale separators (e.g. 1547 → 1.547, 1500000 → 1.500.000) */
 export function formatShortNumber(num: string | number): string {
   const n = typeof num === 'string' ? parseInt(num, 10) : num;
   if (isNaN(n)) return '0';
-  if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(1).replace('.0', '') + 'K';
-  return parseFloat(n.toFixed(2)).toString();
+  return n.toLocaleString('es-ES');
 }
 
 /** Get status badge class */

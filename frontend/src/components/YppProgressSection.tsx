@@ -19,7 +19,6 @@ const YPP_TARGET_SUBS = 1000
 const YPP_TARGET_HOURS = 4000
 
 function hoursToText(h: number): string {
-  if (h >= 1000) return `${(h / 1000).toFixed(1)}K`
   return Math.round(h).toLocaleString('es-ES')
 }
 

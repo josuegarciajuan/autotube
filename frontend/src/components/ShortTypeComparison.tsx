@@ -49,9 +49,7 @@ const DAY_OPTIONS = [7, 14, 30, 60, 90]
 
 function fmtNum(n: number | null | undefined): string {
   if (n == null || n === 0) return '0'
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
-  return Math.round(n).toString()
+  return Math.round(n).toLocaleString('es-ES')
 }
 
 function fmtSec(sec: number): string {

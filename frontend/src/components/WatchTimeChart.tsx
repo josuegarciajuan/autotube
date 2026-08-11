@@ -106,7 +106,7 @@ export default function WatchTimeChart({
                 x={pad.left - 4} y={t.y + 3}
                 textAnchor="end" fill="#6b7280" fontSize={8}
               >
-                {t.val >= 1000 ? `${(t.val/1000).toFixed(0)}K` : t.val}h
+                {t.val.toLocaleString('es-ES')}h
               </text>
             </g>
           ))}
