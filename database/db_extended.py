@@ -7509,6 +7509,12 @@ class ExtendedDatabase(Database):
         This method auto-detects via a DST heuristic. It adds a 15-minute
         safety buffer to avoid calling the API just before reset.
 
+        CRITICAL: The reset time is calculated relative to the EXHAUSTION
+        timestamp, not relative to `now`. If exhaustion happened on Aug 10
+        at 22:00 UTC, the relevant reset is Aug 11 07:00 UTC (PDT midnight).
+        Using `now` as the reference would push it to Aug 12 after the reset
+        has already passed, causing the recovery loop to never trigger.
+
         Returns:
             {
                 "exhausted": bool,
@@ -7537,18 +7543,29 @@ class ExtendedDatabase(Database):
 
         now = datetime.now(timezone.utc)
 
+        # Parse exhausted_at timestamp
+        try:
+            exhausted_at = datetime.fromisoformat(exhausted_at_str)
+            if exhausted_at.tzinfo is None:
+                exhausted_at = exhausted_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            exhausted_at = now
+
         # Detect DST: mid-Jul is PDT (UTC-7), mid-Jan is PST (UTC-8).
         # YouTube reset is always midnight Pacific Time.
-        # Simple heuristic: PDT if month is Mar-Nov, PST if Dec-Feb.
-        month = now.month
-        pt_offset = -7 if 3 <= month <= 11 else -8  # PDT or PST
+        # Use the month of EXHAUSTION so that if exhaustion crosses
+        # a DST boundary, we still pick the right offset.
+        exhaust_month = exhausted_at.month
+        pt_offset = -7 if 3 <= exhaust_month <= 11 else -8  # PDT or PST
         reset_hour_utc = abs(pt_offset)  # 7 or 8
 
-        # Build midnight PT in UTC
-        midnight_pt = now.replace(
+        # Build midnight PT on the day of exhaustion
+        midnight_pt = exhausted_at.replace(
             hour=reset_hour_utc, minute=0, second=0, microsecond=0,
         )
-        if now >= midnight_pt:
+        # If exhaustion was AFTER midnight PT, the next reset is the
+        # following day's midnight PT
+        if exhausted_at >= midnight_pt:
             midnight_pt += timedelta(days=1)
 
         remaining_seconds = max(0, (midnight_pt - now).total_seconds())
