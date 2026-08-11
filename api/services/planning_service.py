@@ -27,6 +27,14 @@ from api.services.generation_service import _DISPATCH_LOCK
 _last_horizon_replan_ts: Optional[datetime] = None
 _HORIZON_REPLAN_COOLDOWN_MIN = 5  # minimum minutes between replans
 
+# ── Post-full_replan quiet window ──────────────────────────
+# After a manual full_replan(), block ALL automatic compute_and_store_horizon()
+# calls for this many minutes — even force_replan=True cannot bypass.
+# This prevents the user's manual replan from being overwritten by smart_replan,
+# midnight check, never-dry, or startup replans.
+_POST_FULL_REPLAN_QUIET_MIN = 120
+_post_full_replan_block_until: Optional[datetime] = None
+
 # ── Dynamic VPD adjuster ───────────────────────────────────
 class DynamicSlotAdjuster:
     """
@@ -997,6 +1005,13 @@ def compute_horizon_slots(
             # Start as EARLY as possible within the window (clear the queue quickly)
             scheduled_dt = earliest_start
         
+        # ── Floor: never schedule in the past ──
+        # Without this, slots generated with lead_hours > time-to-public
+        # get scheduled_at in the past. Only affects horizon-slot generation;
+        # full_replan() has its own floor in its rebuild phase.
+        if scheduled_dt < now + _td(minutes=1):
+            scheduled_dt = now + _td(minutes=2)
+        
         s["scheduled_at"] = scheduled_dt.strftime("%Y-%m-%d %H:%M:%S")
         next_scheduled_at = scheduled_dt
     
@@ -1364,9 +1379,29 @@ def compute_and_store_horizon(
     """
     from datetime import date as _date
     
+    # ── Post-full_replan quiet-window guard (NOT bypassable by force_replan) ──
+    global _post_full_replan_block_until
+    now = datetime.now()
+    if _post_full_replan_block_until is not None:
+        if now < _post_full_replan_block_until:
+            remaining = int((_post_full_replan_block_until - now).total_seconds() / 60)
+            logger.info(
+                "compute_and_store_horizon: blocked — post-full_replan quiet window, "
+                "%d min remaining",
+                remaining,
+            )
+            return {
+                "total_slots": 0,
+                "days_planned": 0,
+                "slots_by_channel": {},
+                "skipped": True,
+                "reason": f"post-full_replan quiet ({remaining} min remaining)",
+            }
+        else:
+            _post_full_replan_block_until = None  # clear expired
+    
     # ── Cooldown guard ──────────────────────────────────
     global _last_horizon_replan_ts
-    now = datetime.now()
     if _last_horizon_replan_ts is not None and not force_replan:
         elapsed = (now - _last_horizon_replan_ts).total_seconds() / 60
         if elapsed < _HORIZON_REPLAN_COOLDOWN_MIN:
@@ -1870,7 +1905,7 @@ def smart_replan(db=None) -> dict:
                 """UPDATE planned_slots SET status='cancelled'
                    WHERE channel_id=? AND status='pending'
                      AND date_key <= date('now', 'localtime')
-                     AND scheduled_at <= datetime('now', 'localtime', '-6 hours')""",
+                     AND scheduled_at <= datetime('now', 'localtime', '-2 hours')""",
                 (ch_id,),
             ).rowcount
             conn.commit()
@@ -2525,7 +2560,7 @@ def _cancel_stale_slots(db):
     (the upload window for that day has come and gone). These slots can never be
     generated+uploaded in time.
 
-    Also cancels slots whose scheduled_at is >6h in the past (server crash/restart
+    Also cancels slots whose scheduled_at is >2h in the past (server crash/restart
     scenarios where the dispatcher never picked them up).
 
     Viral protection: stale viral slots are preserved if the channel has NOT yet
@@ -2568,7 +2603,7 @@ def _cancel_stale_slots(db):
                  AND target_upload_at <= datetime('now', 'localtime', '-30 minutes')"""
         ).rowcount
 
-        # Also cancel very old pending slots (>6h past scheduled_at).
+        # Also cancel very old pending slots (>2h past scheduled_at).
         # Only for today/past dates — future-date slots with old scheduled_at
         # are pre-generated buffer slots and should NOT be cancelled.
         c2 = conn.execute(
@@ -2579,7 +2614,7 @@ def _cancel_stale_slots(db):
                      source_mode != 'viral'
                      OR channel_id IN ({channels_with_viral_today})
                  )
-                 AND scheduled_at <= datetime('now', 'localtime', '-6 hours')"""
+                 AND scheduled_at <= datetime('now', 'localtime', '-2 hours')"""
         ).rowcount
 
         conn.commit()
@@ -3446,6 +3481,14 @@ def full_replan(db=None) -> dict:
         if slug not in videos_by_channel:
             videos_by_channel[slug] = 0
         videos_by_channel[slug] += 1
+
+    # ── Set post-full_replan quiet window to prevent automatic overwrites ──
+    global _post_full_replan_block_until
+    _post_full_replan_block_until = _dt.now() + _td(minutes=_POST_FULL_REPLAN_QUIET_MIN)
+    logger.info(
+        "full_replan: quiet window activated — auto-replans blocked for %d min",
+        _POST_FULL_REPLAN_QUIET_MIN,
+    )
 
     return {
         "ok": True,
