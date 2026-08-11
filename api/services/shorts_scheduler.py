@@ -1183,19 +1183,21 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
     for day_offset in range(days):
         day_str = (today + timedelta(days=day_offset)).isoformat()
         try:
-            # Skip if date already has any slots (pending, running, completed, etc.)
-            # This prevents server restarts from wiping and recreating today's slots,
-            # which would cause all past-due slots to fire back-to-back.
-            existing = db.get_shorts_planned_slots(date_key=day_str)
-            if existing and len(existing) > 0:
+            # Skip if date already has ACTIVE slots (pending or running).
+            # Regenerate if only cancelled/completed/failed slots remain —
+            # those don't represent future work and shouldn't block scheduling.
+            existing_pending = db.get_shorts_planned_slots(date_key=day_str, status="pending")
+            existing_running = db.get_shorts_planned_slots(date_key=day_str, status="running")
+            active = (existing_pending or []) + (existing_running or [])
+            if active and len(active) > 0:
                 # ── v25: One-day native compensation (2026-07-31 only) ──
                 # All clip shorts for today were cancelled (pre-render switch).
                 # Inject 2 extra native short slots per channel for today,
                 # distributed across remaining future windows.
                 if day_str == '2026-07-31':
                     _inject_compensation_native_slots(day_str, db)
-                results[day_str] = f"{len(existing)} slots (existing, skipped)"
-                logger.debug("Shorts slots for %s: %d existing — skipping regeneration", day_str, len(existing))
+                results[day_str] = f"{len(active)} slots (active, skipped)"
+                logger.debug("Shorts slots for %s: %d active — skipping regeneration", day_str, len(active))
                 continue
 
             slots = compute_daily_shorts_slots(day_str, db)

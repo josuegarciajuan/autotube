@@ -3059,7 +3059,7 @@ def full_replan(db=None) -> dict:
             "DELETE FROM planned_slots WHERE status = 'pending'"
         ).rowcount
         deleted_shorts = conn.execute(
-            "DELETE FROM shorts_planned_slots WHERE status = 'pending'"
+            "DELETE FROM shorts_planned_slots WHERE status IN ('pending', 'cancelled')"
         ).rowcount
         orphaned = conn.execute(
             "UPDATE generation_jobs SET status = 'cancelled', "
