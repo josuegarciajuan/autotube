@@ -25,6 +25,9 @@ from googleapiclient.errors import HttpError
 from config.settings import LLM_MODEL, TOKENS_DIR
 from pipeline.youtube_playlists import _load_credentials
 
+# ── Quota tracking (passive diagnostic — no behavioral change) ──
+from api.services.quota_tracker import track_quota
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -157,6 +160,10 @@ class YouTubeCommentManager:
             body=body,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.slug, "commentThreads.insert", 50,
+                    yt_id=yt_video_id, caller="post_comment")
+
         comment_id = resp["id"]
         logger.info("[%s] Posted comment on %s: %s...", self.slug, yt_video_id, text[:60])
         return {"yt_comment_id": comment_id, "text": text}
@@ -182,6 +189,10 @@ class YouTubeCommentManager:
             body=body,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.slug, "comments.insert", 50,
+                    yt_id=parent_comment_id, caller="reply_to_comment")
+
         comment_id = resp["id"]
         return {"yt_comment_id": comment_id, "text": text}
 
@@ -201,6 +212,10 @@ class YouTubeCommentManager:
                 maxResults=min(max_results, 100),
                 order="time",
             ).execute()
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.slug, "commentThreads.list", 1,
+                        yt_id=yt_video_id, caller="list_comments")
         except HttpError as exc:
             if exc.resp.status == 403:
                 # Comments may be disabled

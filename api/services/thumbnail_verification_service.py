@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
+from api.services.quota_tracker import track_quota
+
 logger = logging.getLogger("autotube.thumbnail_verify")
 
 THUMBNAIL_VERIFY_BATCH = 5  # max videos per cycle
@@ -83,6 +85,11 @@ async def run_thumbnail_verification_cycle(db=None):
             # Check if thumbnail exists on YT (1 quota unit)
             try:
                 resp = service.thumbnails().list(videoId=yt_video_id).execute()
+
+                # ── Track quota (diagnostic) ──────────────────────────
+                track_quota(canal, "thumbnails.list", 1,
+                            yt_id=yt_video_id, caller="thumbnail_verify.check")
+
                 items = resp.get("items", [])
                 if items:
                     # Thumbnail already present — mark as verified

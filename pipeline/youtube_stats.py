@@ -16,6 +16,9 @@ from googleapiclient.errors import HttpError
 
 from config.settings import TOKENS_DIR
 
+# ── Quota tracking (passive diagnostic — no behavioral change) ──
+from api.services.quota_tracker import track_quota
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +105,11 @@ class YouTubeStatsFetcher:
                 .list(part="statistics,snippet,contentDetails,status", id=yt_video_id)
                 .execute()
             )
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.slug, "videos.list", 1,
+                        yt_id=yt_video_id, caller="get_video_stats")
+
             items = resp.get("items", [])
             if not items:
                 result = self._mock_stats(yt_video_id)
@@ -167,6 +175,11 @@ class YouTubeStatsFetcher:
                     )
                     .execute()
                 )
+
+                # ── Track quota (diagnostic) — 1 unit per batch of 50 IDs ──
+                track_quota(self.slug, "videos.list", 1,
+                            yt_id=f"batch:{len(batch)}", caller="get_video_stats_batch")
+
                 items = resp.get("items", [])
                 returned_ids = set()
                 for item in items:
@@ -626,6 +639,11 @@ class YouTubeStatsFetcher:
                 .list(part="statistics,snippet", mine=True)
                 .execute()
             )
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.slug, "channels.list", 1,
+                        caller="get_channel_stats")
+
             items = resp.get("items", [])
             if not items:
                 return {}

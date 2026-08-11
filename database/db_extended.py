@@ -92,7 +92,12 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
                 part="status",
                 id=yt_video_id,
             ).execute()
-            
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            from api.services.quota_tracker import track_quota
+            track_quota(channel_slug, "videos.list", _PUBLISH_YOUTUBE_API_QUOTA_COST,
+                        yt_id=yt_video_id, caller="_verify_published_status_bg")
+
             items = resp.get("items", [])
             if not items:
                 vlog.warning("[%s] Video %s not found via API — skipping",
@@ -1151,6 +1156,9 @@ def migrate_v2(db_path: str = None):
     
     # ── v34: Thumbnail verification column ──
     _migrate_v34(conn, logger)
+    
+    # ── v35: YouTube API quota tracking log ──
+    _migrate_v35(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2299,6 +2307,43 @@ def _migrate_v34(conn, logger):
     conn.commit()
 
 
+def _migrate_v35(conn, logger):
+    """Idempotent v35 migration: yt_quota_log table for YouTube API quota tracking.
+
+    Passive accounting — no behavioral changes. Records every YT Data API call
+    with its quota cost, channel, operation, and success/error status.
+
+    Used by api/services/quota_tracker.py for real-time quota monitoring.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS yt_quota_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            channel_slug    TEXT NOT NULL DEFAULT 'unknown',
+            operation       TEXT NOT NULL,
+            units           INTEGER NOT NULL DEFAULT 0,
+            yt_id           TEXT DEFAULT '',
+            success         INTEGER NOT NULL DEFAULT 1,
+            error           TEXT DEFAULT '',
+            caller          TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ytquota_channel_date
+        ON yt_quota_log(channel_slug, timestamp)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ytquota_date
+        ON yt_quota_log(timestamp)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ytquota_operation
+        ON yt_quota_log(operation, timestamp)
+    """)
+    conn.commit()
+    logger.info("Migration v35: yt_quota_log table ensured")
+
+    
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 

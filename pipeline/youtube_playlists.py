@@ -25,6 +25,9 @@ from googleapiclient.errors import HttpError
 
 from config.settings import TOKENS_DIR
 
+# ── Quota tracking (passive diagnostic — no behavioral change) ──
+from api.services.quota_tracker import track_quota
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -229,6 +232,10 @@ class YouTubePlaylistManager:
                 pageToken=page_token,
             ).execute()
 
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.slug, "playlists.list", 1,
+                        caller="list_playlists")
+
             for item in resp.get("items", []):
                 playlists.append({
                     "yt_playlist_id": item["id"],
@@ -280,6 +287,10 @@ class YouTubePlaylistManager:
             body=body,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.slug, "playlists.insert", 50,
+                    yt_id=resp.get("id", ""), caller="create_playlist")
+
         yt_id = resp["id"]
         logger.info("[%s] Created playlist: %s (%s)", self.slug, title, yt_id)
         return {
@@ -320,6 +331,11 @@ class YouTubePlaylistManager:
                 part="snippet",
                 body=body,
             ).execute()
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.slug, "playlistItems.insert", 50,
+                        yt_id=yt_video_id, caller="add_video_to_playlist")
+
             item_id = resp["id"]
             logger.info("[%s] Added video %s to playlist %s (item: %s)",
                          self.slug, yt_video_id, yt_playlist_id, item_id)

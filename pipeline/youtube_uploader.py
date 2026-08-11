@@ -28,6 +28,9 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from config.settings import GOOGLE_CLIENT_SECRET_PATH, TOKENS_DIR
+
+# ── Quota tracking (passive diagnostic — no behavioral change) ──
+from api.services.quota_tracker import track_quota
 from config.settings import PROXY_ENABLED, PROXY_TYPE, PROXY_HOST, PROXY_PORT, PROXY_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -519,6 +522,10 @@ class YouTubeUploader:
             self._validate_upload_response(response)
 
             video_id: str = response["id"]
+
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.channel_slug, "videos.insert", 1600,
+                        yt_id=video_id, caller="YouTubeUploader.upload")
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
             logger.info("Upload complete: %s", youtube_url)
 
@@ -606,6 +613,10 @@ class YouTubeUploader:
             id=video_id,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.channel_slug, "videos.list", 1,
+                    yt_id=video_id, caller="update_description.fetch_title")
+
         items = list_response.get("items", [])
         if not items:
             raise ValueError(f"Video {video_id} not found or not accessible "
@@ -627,6 +638,10 @@ class YouTubeUploader:
             part="snippet",
             body=body,
         ).execute()
+
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.channel_slug, "videos.update", 50,
+                    yt_id=video_id, caller="update_description")
 
         logger.info("[%s] Description updated for video %s", self.channel_slug, video_id)
         return {"updated": True, "yt_video_id": video_id}
@@ -656,6 +671,10 @@ class YouTubeUploader:
             body=body,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.channel_slug, "videos.update", 50,
+                    yt_id=video_id, caller="set_privacy")
+
         logger.info("[%s] Privacy set to %s for video %s", self.channel_slug, privacy, video_id)
         return {"updated": True, "yt_video_id": video_id, "privacy": privacy}
 
@@ -680,11 +699,17 @@ class YouTubeUploader:
             ).execute()
             logger.info("Thumbnail uploaded for video %s", video_id)
 
+            # ── Track quota (diagnostic) ──────────────────────────
+            track_quota(self.channel_slug, "thumbnails.set", 50,
+                        yt_id=video_id, caller="_set_thumbnail")
+
             # Verify it was actually applied (1 quota unit)
             try:
                 verify_resp = service.thumbnails().list(
                     videoId=video_id,
                 ).execute()
+                track_quota(self.channel_slug, "thumbnails.list", 1,
+                            yt_id=video_id, caller="_set_thumbnail.verify")
                 items = verify_resp.get("items", [])
                 if items:
                     logger.info("Thumbnail verified for video %s (%d item(s))",
@@ -772,6 +797,11 @@ class YouTubeUploader:
                 resp = service.videos().list(
                     part="status,snippet", id=video_id
                 ).execute()
+
+                # ── Track quota (diagnostic) ──────────────────────────
+                track_quota(self.channel_slug, "videos.list", 1,
+                            yt_id=video_id, caller="_verify_upload_exists")
+
                 items = resp.get("items", [])
                 
                 if not items:

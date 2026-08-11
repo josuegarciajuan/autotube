@@ -23,6 +23,7 @@ import DeepDivePanel from '../components/DeepDivePanel'
 import UpcomingPublications from '../components/UpcomingPublications'
 import ViewGapPanel from '../components/monitor/ViewGapPanel'
 import type { StabilizeResult } from '../components/StabilizeProgress'
+import QuotaWidget from '../components/QuotaWidget'
 
 // Collapsible section wrapper
 function CollapsibleSection({ title, icon, defaultOpen, children }: {
@@ -558,7 +559,12 @@ export default function Dashboard() {
         channelNames={channelNames}
         channelColors={channelColors}
       />
-     
+
+      {/* ═══════ YouTube API Quota Widget ═══════ */}
+      <div className="mb-6">
+        <QuotaWidget />
+      </div>
+      
       {/* ═══════ NIVEL 1: SEO Overview (CTR + Score) ═══════ */}
       <CollapsibleSection title="SEO Overview" icon="🔎" defaultOpen={false}>
         {seoLoading ? (
