@@ -109,16 +109,6 @@ def _dynamic_volume(clip, factor):
         keep_duration=True,
     )
 
-
-# ── FFmpeg decoder semaphore (global, system-wide) ──────────────────
-# Limits concurrent ffmpeg decoder processes to prevent RAM exhaustion
-# when multiple renders run simultaneously. Each decoder consumes
-# 50-300 MB RSS (up to 1.2 GB for 4K sources). With this cap, even
-# 2-3 parallel renders stay within safe memory bounds.
-_MAX_FFMPEG_DECODERS = 4
-_ffmpeg_decoder_semaphore = threading.Semaphore(_MAX_FFMPEG_DECODERS)
-
-
 def _kill_orphaned_ffmpeg_videoeditor():
     """Kill orphaned ffmpeg processes from previous crashed renders.
 
@@ -3509,19 +3499,21 @@ class VideoEditor:
         if not segment_paths:
             raise RuntimeError("No segments to concatenate")
 
-        # For very large segment counts, the O(N²) xfade filter_complex
-        # can exhaust ffmpeg filter buffers and fail with rc=-9. Split
-        # into batches of ~50 segments, xfade each batch separately, then
-        # concat the batch outputs (stream copy, near-zero CPU).
+        # For high segment counts, the O(N²) xfade filter_complex can
+        # exhaust ffmpeg filter buffers (rc=-9) and devour RAM (7+ GB for
+        # 70 scenes). Split into configurable batches, xfade each batch
+        # separately, then concat batch outputs (stream copy, near-zero
+        # CPU). Threshold defaults to 50 segments — keeps peak RAM per
+        # ffmpeg invocation ~3 GB on 1080p sources.
+        batch_size = self.canal.get("XFADE_BATCH_SIZE", 50)
         n = len(segment_paths)
-        BATCH_SIZE = 60
-        if n > 150:
+        if n > batch_size:
             self.logger.info(
                 "xfade batching: %d segments → %d batches of ~%d for safer concat",
-                n, (n + BATCH_SIZE - 1) // BATCH_SIZE, BATCH_SIZE,
+                n, (n + batch_size - 1) // batch_size, batch_size,
             )
             return self._xfade_concat_batched(
-                segment_paths, block_ranges, output_path, BATCH_SIZE,
+                segment_paths, block_ranges, output_path, batch_size,
             )
 
         crossfade_duration = random.uniform(
@@ -3567,14 +3559,16 @@ class VideoEditor:
                     "%d of %d segments failed ffprobe validation: %s...",
                     len(bad_segments), n, ", ".join(bad_segments[:3]),
                 )
-                # Remove bad segments from the list so xfade can proceed
+                # Remove bad segments with synchronized index filtering
+                # so block_ranges and segment_paths stay 1:1 aligned.
                 bad_paths = {bs.split(" (")[0] for bs in bad_segments}
-                segment_paths = [s for s in segment_paths if os.path.abspath(s) not in bad_paths and str(s) not in bad_paths]
+                keep = [i for i, s in enumerate(segment_paths)
+                         if os.path.abspath(s) not in bad_paths and str(s) not in bad_paths]
+                segment_paths = [segment_paths[i] for i in keep]
+                block_ranges = [block_ranges[i] for i in keep]
                 n = len(segment_paths)
                 if n == 0:
                     raise RuntimeError(f"All {len(bad_segments)} segments failed validation — nothing to concat")
-                # Recompute block_ranges to match remaining segments
-                block_ranges = block_ranges[:n]
 
         ff_args = ["ffmpeg", "-y", "-v", "error"]
 
@@ -3682,15 +3676,18 @@ class VideoEditor:
     ) -> str:
         """Split large segment lists into batches, xfade each batch, then concat.
 
-        Avoids the O(N²) filter_complex explosion that crashes ffmpeg with
-        rc=-9 when N > 150. Each batch produces a standalone body MP4;
-        the batch outputs are then concatenated with the ffmpeg concat
-        demuxer (stream copy — near-zero CPU, no re-encoding).
+        Avoids the O(N²) filter_complex explosion and RAM exhaustion that
+        occurs when too many segments are xfaded in a single ffmpeg command.
+        Each batch produces a standalone body MP4; the batch outputs are
+        then concatenated with the ffmpeg concat demuxer (stream copy —
+        near-zero CPU, no re-encoding).
         """
         import tempfile
+        import time as _time
         import uuid
 
         n = len(segment_paths)
+        total_batches = (n + batch_size - 1) // batch_size
         batches: list[str] = []  # paths to batch output files
 
         tmpdir = Path(tempfile.gettempdir()) / f"autotube_xfade_{uuid.uuid4().hex[:8]}"
@@ -3698,22 +3695,28 @@ class VideoEditor:
 
         try:
             for batch_idx in range(0, n, batch_size):
+                batch_num = batch_idx // batch_size + 1
                 batch_end = min(batch_idx + batch_size, n)
                 batch_segs = segment_paths[batch_idx:batch_end]
                 batch_ranges = block_ranges[batch_idx:batch_end]
                 batch_output = str(tmpdir / f"batch_{batch_idx:04d}.mp4")
 
                 self.logger.info(
-                    "Batch %d/%d: xfading %d segments (%d–%d)",
-                    batch_idx // batch_size + 1,
-                    (n + batch_size - 1) // batch_size,
+                    "Batch %d/%d: xfading %d segments (%d–%d)…",
+                    batch_num, total_batches,
                     len(batch_segs), batch_idx, batch_end - 1,
                 )
+                t0 = _time.monotonic()
                 # Recursive call: xfade this batch normally
                 result = self._concat_body_with_crossfades(
                     batch_segs, batch_ranges, batch_output,
                 )
+                elapsed = _time.monotonic() - t0
                 batches.append(result)
+                self.logger.info(
+                    "Batch %d/%d: completed in %.1fs (%d remaining)",
+                    batch_num, total_batches, elapsed, total_batches - batch_num,
+                )
 
             # Concat all batch outputs via concat demuxer (no re-encoding)
             concat_list = tmpdir / "concat_list.txt"

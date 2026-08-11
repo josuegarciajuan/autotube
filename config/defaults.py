@@ -178,6 +178,7 @@ MEDIA_STRATEGY = {
     "video_fallback_queries": DEFAULT_VIDEO_FALLBACK_QUERIES,
     "crossfade_min": 0.3,
     "crossfade_max": 0.7,
+    "xfade_batch_size": 50,           # max segments per ffmpeg xfade invocation (RAM safety)
     "ai_image_fallback": True,
     "ai_max_per_video": 5,
 }
