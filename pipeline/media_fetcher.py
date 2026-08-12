@@ -767,8 +767,8 @@ class MediaFetcher:
                     continue
                 if results[i].get("type") != "image":
                     continue
-                # Original intent was video (from video_assigned)
-                if i not in video_assigned:
+                # Original intent was video (from video_scenes classification)
+                if i not in video_scenes:
                     continue
 
                 target_dur = scene.get("duration", 5)
