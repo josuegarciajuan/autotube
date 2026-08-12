@@ -2249,11 +2249,10 @@ async def start_upload_job(job_id: int, video_id: int):
 
 
 def _is_quota_exhausted(db) -> bool:
-    """Check if the upload scheduler has been paused due to quota exhaustion."""
+    """Check if YouTube API quota is exhausted."""
     try:
-        paused = db.get_system_state("scheduler_paused") == "true"
         exhausted_at = db.get_system_state("quota_exhausted_at")
-        return paused and bool(exhausted_at)
+        return bool(exhausted_at)
     except Exception:
         return False
 

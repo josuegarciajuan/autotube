@@ -2186,9 +2186,8 @@ class PipelineOrchestrator:
             return video_id
 
         except QuotaExhaustedError:
-            # ── Quota exhaustion: already auto-paused in youtube_uploader ──
-            # Belt-and-suspenders: ensure scheduler is paused + alert exists
-            logger.error(f"[{self.canal}] Quota agotada — scheduler pausado automáticamente")
+            # ── Quota exhaustion: record exhaustion timestamp; generation continues ──
+            logger.error(f"[{self.canal}] Quota agotada — subidas pausadas (generación sigue activa)")
             try:
                 from database.db_extended import ExtendedDatabase
                 _qdb = ExtendedDatabase()
@@ -2204,7 +2203,8 @@ class PipelineOrchestrator:
                              alert_type='quota_exhausted', severity='critical',
                              title='YouTube API quota agotada',
                              message=f'Cuota agotada durante subida del canal {self.canal}. '
-                                     'Scheduler pausado. Se reanudará en 6h o manualmente.',
+                                     'Subidas pausadas. Generación sigue activa. '
+                                     'Recuperación automática al reset de medianoche (PT).',
                              metadata={'channel': self.canal})
             except Exception:
                 pass

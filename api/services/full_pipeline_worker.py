@@ -1628,18 +1628,16 @@ def run_job(
                 logger.error("Upload failed — video saved locally")
                 # ── Quota exhaustion check: keep in awaiting_upload, don't mark as ready ──
                 try:
-                    paused = db.get_system_state("scheduler_paused") == "true"
                     exhausted_at = db.get_system_state("quota_exhausted_at")
-                    if paused and exhausted_at:
+                    if exhausted_at:
                         db.update_video(video_id, progress=0, status="awaiting_upload",
                                         error_message="YouTube API quota exhausted",
                                         progress_phase="upload", scheduled_upload_at=None)
                         logger.info("[%s] Upload failed due to quota exhaustion — keeping awaiting_upload", canal)
+                    else:
+                        db.update_video(video_id, progress=95, status="ready")
                 except Exception:
                     db.update_video(video_id, progress=95, status="ready")
-                else:
-                    if not (paused and exhausted_at):
-                        db.update_video(video_id, progress=95, status="ready")
                 # ── Log lifecycle: upload failed ──
                 try:
                     log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,

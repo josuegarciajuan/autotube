@@ -229,9 +229,17 @@ def check_and_dispatch_marathon(db) -> dict | None:
         video_id = cursor.lastrowid
 
     # 7. Create queued job — _queue_consumer dispatches when worker is free
-    #    Always generate_and_upload: marathon uploads directly after generation,
-    #    does NOT schedule for prime time.
-    job_id = db.create_job(channel_id, "generate_and_upload", video_id)
+    #    If YouTube quota is exhausted, use generate_only so the marathon is
+    #    generated and stored locally, then uploaded when quota recovers.
+    _quota_exhausted = False
+    try:
+        _quota_exhausted = db.is_quota_exhausted()
+    except Exception:
+        pass
+    action = "generate_only" if _quota_exhausted else "generate_and_upload"
+    job_id = db.create_job(channel_id, action, video_id)
+    if _quota_exhausted:
+        logger.info("[MARATHON] Quota exhausted — dispatching as generate_only (no upload)")
     db.update_job(job_id, status="queued")
 
     # 8. Record marathon dispatch

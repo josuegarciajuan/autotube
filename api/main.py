@@ -499,11 +499,11 @@ async def _publish_verify_loop():
     
     while True:
         try:
-            # Pause gate: skip when scheduler is paused
+            # Pause gate: skip when scheduler is paused or quota exhausted
             try:
                 from database.db_extended import ExtendedDatabase
                 _db = ExtendedDatabase()
-                if _db.get_system_state("scheduler_paused") == "true":
+                if _db.get_system_state("scheduler_paused") == "true" or _db.is_quota_exhausted():
                     await asyncio.sleep(60)
                     continue
             except Exception:
@@ -539,6 +539,13 @@ async def _upload_health_checker_loop():
 
     while True:
         try:
+            # ── Quota guard: skip health checks when YouTube API is exhausted ──
+            from database.db_extended import ExtendedDatabase
+            _hdb = ExtendedDatabase()
+            if _hdb.is_quota_exhausted():
+                await asyncio.sleep(300)
+                continue
+
             from api.services.upload_health_checker import process_due_checks, cleanup_old_checks
 
             result = await asyncio.to_thread(process_due_checks)
@@ -619,10 +626,10 @@ async def _quota_recovery_loop():
             from database.db_extended import ExtendedDatabase
             _db = ExtendedDatabase()
 
-            paused = _db.get_system_state("scheduler_paused") == "true"
+            quota_exhausted = _db.is_quota_exhausted()
             exhausted_at_str = _db.get_system_state("quota_exhausted_at")
 
-            if paused and exhausted_at_str:
+            if quota_exhausted:
                 # Calculate actual reset time (midnight PT) instead of blind 6h
                 reset_info = _db.get_quota_reset_time()
                 now_utc = _dt.now(_tz.utc)
@@ -650,6 +657,22 @@ async def _quota_recovery_loop():
                     try:
                         _db.clear_quota_exhausted()
 
+                        # ── Kick off uploads for accumulated backlog ──
+                        # Videos that were generated while quota was exhausted
+                        # are now sitting as awaiting_upload. Trigger immediate
+                        # upload dispatch so they don't wait for the next 5-min tick.
+                        try:
+                            from api.services.upload_scheduler import dispatch_due_uploads
+                            upload_result = await _asyncio.to_thread(dispatch_due_uploads, db=_db)
+                            if upload_result:
+                                _logger.info(
+                                    "Quota recovery: dispatched upload for video=%d channel=%s",
+                                    upload_result.get("video_id", 0),
+                                    upload_result.get("channel_slug", "?"),
+                                )
+                        except Exception as _upload_exc:
+                            _logger.warning("Quota recovery: upload kick-off failed: %s", _upload_exc)
+
                         # Resolve quota alerts
                         try:
                             with _db._connect() as _conn:
@@ -667,7 +690,7 @@ async def _quota_recovery_loop():
                             from api.services.lifecycle_monitor import log_event as _le
                             _le(_db, entity_type='system', entity_id=0, channel_id=None,
                                 event='quota_recovered', status='info',
-                                message='Scheduler auto-resumed (midnight PT reached)')
+                                message='Quota auto-recovered (midnight PT reached)')
                         except Exception:
                             pass
 
@@ -676,12 +699,12 @@ async def _quota_recovery_loop():
                             from api.routers.monitor import broadcast_monitor_update
                             await broadcast_monitor_update({
                                 "type": "quota_recovered",
-                                "message": "Scheduler auto-resumed after midnight PT quota reset",
+                                "message": "Quota auto-recovered after midnight PT reset — uploads re-enabled",
                             })
                         except Exception:
                             pass
 
-                        _logger.info("Quota recovery complete — scheduler resumed")
+                        _logger.info("Quota recovery complete — uploads re-enabled")
                     except Exception as _resume_exc:
                         _logger.warning("Quota recovery resume failed: %s", _resume_exc, exc_info=True)
         except Exception as _exc:
@@ -825,27 +848,36 @@ async def _schedule_checker_loop():
                     sleep_sec = 300  # normal: 5 min
                 await asyncio.sleep(sleep_sec)
 
-            # ── Pause gate: skip ALL scheduling when operator paused ──
-            _paused = False
+            # ── Pause gates ──
+            # scheduler_paused: manual operator pause → blocks EVERYTHING
+            # quota_exhausted_at: YouTube API quota exhausted → blocks uploads + YT API calls only
+            # Generation (planned_slots, marathons, queue_consumer) continues in both modes
+            # to build up backlog while waiting for quota reset.
+            _paused_manual = False
+            _quota_exhausted = False
             try:
-                _paused = _sched_db.get_system_state("scheduler_paused") == "true"
+                _paused_manual = _sched_db.get_system_state("scheduler_paused") == "true"
+                _quota_exhausted = _sched_db.is_quota_exhausted()
             except Exception:
                 pass
 
             now = time.time()
 
-            if not _paused:
+            if not _paused_manual:
                 local_hour = time.localtime().tm_hour
+
+                # ════════════════════════════════════════════════════════════
+                # Phase A: generation + planning (always active, no YT API)
+                # ════════════════════════════════════════════════════════════
                 await _process_due_schedules()
-                await _process_shorts_slots()
-                await _process_upload_slots()
                 long_dispatched = await _process_planned_slots()
-                
+
                 # ── Shorts interleaving: when long-form is blocked (pipelining
                 #     guard or no slots), try an extra shorts dispatch to fill
-                #     the gap. Shorts run independently and don't compete for RAM.
+                #     the gap. Skip if quota exhausted (shorts need upload).
                 if not long_dispatched:
-                    await _process_shorts_slots()
+                    if not _quota_exhausted:
+                        await _process_shorts_slots()
                     # ── Never-dry guard: if still no dispatch and pipeline
                     #     is running empty, force horizon replan.
                     try:
@@ -854,32 +886,13 @@ async def _schedule_checker_loop():
                             logger.info("Never-dry: emergency replan triggered")
                     except Exception as exc:
                         logger.debug("Never-dry check: %s", exc)
-                
+
                 await _queue_consumer()
 
-                # ── Thumbnail verification (v24) ──
-                # Checks recently uploaded videos for missing YT thumbnails
-                # and retries the upload if needed. Lightweight (~5 quota units/cycle).
-                # ═══ Quota guard: skip when global usage >50% to preserve quota ═══
-                try:
-                    from api.services.quota_tracker import should_throttle_global
-                    if not should_throttle_global(0.50):
-                        from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
-                        await run_thumbnail_verification_cycle(db=_sched_db)
-                    else:
-                        _tv_skip_interval = 300  # re-check guard every 5 min
-                        if not hasattr(_schedule_checker_loop, '_last_tv_skip_log') or \
-                           time.time() - _schedule_checker_loop._last_tv_skip_log > 600:
-                            logger.info("⏸️ Thumbnail verify skipped — quota >50%% used")
-                            _schedule_checker_loop._last_tv_skip_log = time.time()
-                except Exception as _tv_exc:
-                    logger.debug("Thumbnail verification cycle: %s", _tv_exc)
-
-                # ── Marathon check: when awaiting_upload + uploaded_private
-                #     accumulates across channels (≥ BACKLOG_PER_CHANNEL × active_channels),
-                #     dispatch a 1-hour marathon video (every 60 min).
-                #     Marathon ties up the single worker for 4-6h, draining the
-                #     pipeline queue naturally while producing a high-value long video.
+                # ════════════════════════════════════════════════════════════
+                # Marathon check: always runs — marathon service dispatches
+                # as generate_only if quota is exhausted, generate_and_upload otherwise.
+                # ════════════════════════════════════════════════════════════
                 if now - last_marathon_check > 3600:  # every 60 min
                     try:
                         from api.services.marathon_service import check_and_dispatch_marathon
@@ -942,26 +955,6 @@ async def _schedule_checker_loop():
                     await _process_recovery_planner()
                     last_recovery_check = now
 
-                # Standalone shorts: auto-dispatch trending topics every 120 min (10:00-23:00)
-                if 10 <= local_hour <= 23 and now - last_standalone_dispatch > 7200:
-                    try:
-                        from api.services.shorts_scheduler import dispatch_standalone_shorts_daily
-                        await asyncio.to_thread(dispatch_standalone_shorts_daily)
-                    except Exception as exc:
-                        logger.debug("Standalone shorts dispatch: %s", exc)
-                    last_standalone_dispatch = now
-
-                # Collaboration engine: daily at 3:00-4:00 UTC (off-peak)
-                # ── Quota guard: skip if exhausted ──
-                if not _quota_exhausted_safe() and 3 <= local_hour <= 4 and now - last_collab_run > 82800:  # ~23h
-                    try:
-                        from pipeline.collaboration_engine import run_all_channels_collab
-                        await asyncio.to_thread(run_all_channels_collab)
-                        logger.debug("Collaboration round completed")
-                    except Exception as exc:
-                        logger.debug("Collaboration run: %s", exc)
-                    last_collab_run = now
-
                 # Smart replan: every 30 min during active hours (10:00-23:00)
                 if 10 <= local_hour <= 23 and now - last_smart_replan > 1800:
                     try:
@@ -980,10 +973,10 @@ async def _schedule_checker_loop():
                     last_smart_replan = now
 
                 # ── A/B Testing: sequential title/thumbnail optimization (v31) ──
-                # Runs every 60 minutes. Scans for videos needing first-check
-                # (48h after upload) or second-check (48h after change).
-                # Quota-aware: reads local DB, only hits YT API if data is stale.
-                if now - last_ab_test_check > 3600:  # every hour
+                # Runs every 60 minutes. Quota-aware: reads local DB, only hits
+                # YT API if data is stale. Still skip if quota is fully exhausted
+                # to avoid wasting the first YT API call on a doomed check.
+                if not _quota_exhausted and now - last_ab_test_check > 3600:
                     try:
                         from config.settings import ENABLE_AB_TESTING
                         if ENABLE_AB_TESTING:
@@ -995,22 +988,9 @@ async def _schedule_checker_loop():
                     last_ab_test_check = now
 
                 # Shorts auto-recovery: rebalance shorts every 120 minutes (v14: reduced from 60min)
-                # to prevent runaway recovery slot creation during normal operation
                 if now - last_shorts_recovery_check > 7200:
                     await _process_shorts_recovery_planner()
                     last_shorts_recovery_check = now
-
-                # ── Optimal publish slots: calculate once per day ──
-                # ── Quota guard: skip if exhausted; persist timestamp to avoid retry storm ──
-                if not _quota_exhausted_safe():
-                    try:
-                        _sched_db.set_system_state("last_slot_calculation", str(int(now)))
-                    except Exception:
-                        pass
-                    last_slot_calculation = now
-                elif now - last_slot_calculation > 86400:
-                    await _calculate_optimal_slots()
-                    last_slot_calculation = now
 
                 # Regenerate the schedule forecast at midnight (daily)
                 if now - last_midnight_check > 3600:
@@ -1028,6 +1008,96 @@ async def _schedule_checker_loop():
                         last_midnight_check = now
                     except Exception as exc:
                         logger.debug("Midnight schedule refresh: %s", exc)
+
+                # ════════════════════════════════════════════════════════════
+                # Phase B: YT API-dependent operations (gated by quota)
+                # ════════════════════════════════════════════════════════════
+                if not _quota_exhausted:
+                    # Primary shorts + upload dispatch
+                    await _process_shorts_slots()
+                    await _process_upload_slots()
+
+                    # ── Thumbnail verification (v24) ──
+                    try:
+                        from api.services.quota_tracker import should_throttle_global
+                        if not should_throttle_global(0.50):
+                            from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
+                            await run_thumbnail_verification_cycle(db=_sched_db)
+                        else:
+                            if not hasattr(_schedule_checker_loop, '_last_tv_skip_log') or \
+                               time.time() - _schedule_checker_loop._last_tv_skip_log > 600:
+                                logger.info("⏸️ Thumbnail verify skipped — quota >50%% used")
+                                _schedule_checker_loop._last_tv_skip_log = time.time()
+                    except Exception as _tv_exc:
+                        logger.debug("Thumbnail verification cycle: %s", _tv_exc)
+
+                    # Standalone shorts: auto-dispatch trending topics every 120 min (10:00-23:00)
+                    if 10 <= local_hour <= 23 and now - last_standalone_dispatch > 7200:
+                        try:
+                            from api.services.shorts_scheduler import dispatch_standalone_shorts_daily
+                            await asyncio.to_thread(dispatch_standalone_shorts_daily)
+                        except Exception as exc:
+                            logger.debug("Standalone shorts dispatch: %s", exc)
+                        last_standalone_dispatch = now
+
+                    # Collaboration engine: daily at 3:00-4:00 UTC (off-peak)
+                    if 3 <= local_hour <= 4 and now - last_collab_run > 82800:  # ~23h
+                        try:
+                            from pipeline.collaboration_engine import run_all_channels_collab
+                            await asyncio.to_thread(run_all_channels_collab)
+                            logger.debug("Collaboration round completed")
+                        except Exception as exc:
+                            logger.debug("Collaboration run: %s", exc)
+                        last_collab_run = now
+
+                    # ── Optimal publish slots: calculate once per day ──
+                    if now - last_slot_calculation > 86400:
+                        await _calculate_optimal_slots()
+                        last_slot_calculation = now
+
+                    # ── Daily view gap monitor ──
+                    if STATS_ENABLED and now - last_view_gap_check > 86400:
+                        try:
+                            from api.services.view_gap_monitor import ViewGapMonitor
+                            logger.info("Starting daily view gap check...")
+                            monitor = ViewGapMonitor()
+                            db = get_db()
+                            results = await asyncio.to_thread(monitor.check_all_channels, db)
+                            last_view_gap_check = now
+                            try:
+                                _sched_db.set_system_state("last_view_gap_check", str(int(now)))
+                            except Exception:
+                                pass
+                            if results:
+                                checked = results.get("channels_checked", 0)
+                                gaps = results.get("gaps_detected", 0)
+                                registered = results.get("videos_registered", 0)
+                                logger.info(
+                                    "View gap check: %d channels, %d gaps detected, %d videos auto-registered",
+                                    checked, gaps, registered,
+                                )
+                                if gaps > 0:
+                                    try:
+                                        from api.routers.monitor import broadcast_monitor_update
+                                        await broadcast_monitor_update({
+                                            "type": "view_gap_alert",
+                                            "gaps_detected": gaps,
+                                            "channels_checked": checked,
+                                            "videos_registered": registered,
+                                        })
+                                    except Exception:
+                                        pass
+                        except Exception as e:
+                            logger.warning("Daily view gap check failed: %s", e)
+                else:
+                    # ── Quota exhausted: log periodically (once per hour) ──
+                    if not hasattr(_schedule_checker_loop, '_last_qex_log') or \
+                       now - _schedule_checker_loop._last_qex_log > 3600:
+                        logger.info(
+                            "⏸️ Quota API YouTube agotada — generación activa, subidas pausadas. "
+                            "Recuperación automática al reset de medianoche (PT)."
+                        )
+                        _schedule_checker_loop._last_qex_log = now
 
             await _detect_and_clean_orphans()
             
@@ -1072,52 +1142,6 @@ async def _schedule_checker_loop():
                         logger.info("Weekly power word analysis: no channels processed")
                 except Exception as e:
                     logger.warning("Weekly power word analysis failed: %s", e)
-
-            # ── Daily view gap monitor ──────────────────────────
-            # Compares YouTube total channel views vs DB-tracked
-            # views and alerts when untracked views grow beyond
-            # the VIEW_GAP_THRESHOLD in a 24h period.
-            # ── Quota guard: skip if exhausted; persist timestamp to avoid retry storm ──
-            if not _quota_exhausted_safe():
-                try:
-                    _sched_db.set_system_state("last_view_gap_check", str(int(now)))
-                except Exception:
-                    pass
-                last_view_gap_check = now
-            elif STATS_ENABLED and now - last_view_gap_check > 86400:  # 24 hours
-                try:
-                    from api.services.view_gap_monitor import ViewGapMonitor
-                    logger.info("Starting daily view gap check...")
-                    monitor = ViewGapMonitor()
-                    db = get_db()
-                    results = await asyncio.to_thread(monitor.check_all_channels, db)
-                    last_view_gap_check = now
-                    try:
-                        _sched_db.set_system_state("last_view_gap_check", str(int(now)))
-                    except Exception:
-                        pass
-                    if results:
-                        checked = results.get("channels_checked", 0)
-                        gaps = results.get("gaps_detected", 0)
-                        registered = results.get("videos_registered", 0)
-                        logger.info(
-                            "View gap check: %d channels, %d gaps detected, %d videos auto-registered",
-                            checked, gaps, registered,
-                        )
-                        # Broadcast to monitor WebSocket if gaps found
-                        if gaps > 0:
-                            try:
-                                from api.routers.monitor import broadcast_monitor_update
-                                await broadcast_monitor_update({
-                                    "type": "view_gap_alert",
-                                    "gaps_detected": gaps,
-                                    "channels_checked": checked,
-                                    "videos_registered": registered,
-                                })
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.warning("Daily view gap check failed: %s", e)
                 
         except asyncio.CancelledError:
             raise

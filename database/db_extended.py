@@ -7525,22 +7525,23 @@ class ExtendedDatabase(Database):
     # ── Quota exhaustion helpers ────────────────────────────────
 
     def set_quota_exhausted(self, channel_slug: str = "") -> None:
-        """Auto-pause scheduler and record quota exhaustion timestamp."""
-        self.set_system_state("scheduler_paused", "true")
+        """Record quota exhaustion timestamp (does NOT pause scheduler).
+
+        Generation continues; only uploads and YouTube API calls are blocked.
+        Use is_quota_exhausted() to check, not scheduler_paused.
+        """
         self.set_system_state("quota_exhausted_at",
                               datetime.now(_dt_timezone.utc).isoformat())
         if channel_slug:
             self.set_system_state("quota_exhausted_channel", channel_slug)
 
     def is_quota_exhausted(self) -> bool:
-        """Check if scheduler is paused due to quota exhaustion."""
-        paused = self.get_system_state("scheduler_paused") == "true"
+        """Check if YouTube API quota is exhausted (independent of scheduler_paused)."""
         exhausted_at = self.get_system_state("quota_exhausted_at")
-        return paused and exhausted_at is not None
+        return bool(exhausted_at)
 
     def clear_quota_exhausted(self) -> None:
-        """Resume scheduler and clear quota exhaustion markers."""
-        self.set_system_state("scheduler_paused", "false")
+        """Clear quota exhaustion markers (does NOT touch scheduler_paused)."""
         self.set_system_state("quota_exhausted_at", "")
         self.set_system_state("quota_exhausted_channel", "")
 
@@ -7573,10 +7574,9 @@ class ExtendedDatabase(Database):
         """
         from datetime import datetime, timezone, timedelta
 
-        paused = self.get_system_state("scheduler_paused") == "true"
         exhausted_at_str = self.get_system_state("quota_exhausted_at")
 
-        if not (paused and exhausted_at_str):
+        if not exhausted_at_str:
             return {
                 "exhausted": False,
                 "exhausted_at": None,

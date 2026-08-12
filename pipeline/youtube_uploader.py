@@ -980,7 +980,7 @@ class YouTubeUploader:
                             "La cuenta de YouTube requiere registro adicional (youtube.com/create_channel)."
                         ) from exc
                     if error_reason == "quotaExceeded":
-                        # ── Auto-pause scheduler + create monitoring alert ──
+                        # ── Record quota exhaustion; generation continues, uploads paused ──
                         try:
                             from database.db_extended import ExtendedDatabase
                             _qdb = ExtendedDatabase()
@@ -996,14 +996,13 @@ class YouTubeUploader:
                                          alert_type='quota_exhausted', severity='critical',
                                          title='YouTube API quota agotada',
                                          message='Cuota diaria de YouTube API agotada (10,000 unidades). '
-                                                 'El scheduler se ha pausado automáticamente. '
-                                                 'Se reanudará en 6 horas. Puedes reanudar manualmente '
-                                                 'desde el panel de monitorización.',
+                                                 'Subidas pausadas, generación sigue activa. '
+                                                 'Recuperación automática al reset de medianoche (PT).',
                                          metadata={'channel': getattr(self, 'canal', 'unknown')})
                         except Exception:
                             pass
                         raise QuotaExhaustedError(
-                            "Cuota diaria de YouTube API agotada (10,000 unidades). Reintentar mañana."
+                            "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar mañana."
                         ) from exc
                     logger.error("Auth/permission error (%s): %s", error_reason or "unknown", exc)
                     raise

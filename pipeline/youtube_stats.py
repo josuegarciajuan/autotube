@@ -23,11 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 def _set_quota_exhausted_global(channel_slug: str = "stats_collector"):
-    """Set global quota exhausted flag so all YT API callers know to pause.
+    """Set global quota exhausted flag so all YT API callers know to pause uploads.
     
     Called from within stats collection when a 403 quotaExceeded is detected.
-    This ensures the scheduler and UI both become aware immediately,
+    This ensures all YT API consumers become aware immediately,
     not just when the uploader eventually hits the same error.
+    Generation continues while uploads are paused.
     """
     try:
         from database.db_extended import ExtendedDatabase

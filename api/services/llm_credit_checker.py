@@ -274,10 +274,9 @@ def get_youtube_quota_status(db) -> dict:
         }
     """
     try:
-        paused = db.get_system_state("scheduler_paused") == "true"
         exhausted_at_str = db.get_system_state("quota_exhausted_at")
 
-        if not (paused and exhausted_at_str):
+        if not exhausted_at_str:
             return {
                 "exhausted": False,
                 "exhausted_at": None,
