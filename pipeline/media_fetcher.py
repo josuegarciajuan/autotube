@@ -178,6 +178,9 @@ class MediaFetcher:
         self._bad_image_urls: set[str] = set()
         self._bad_image_urls_ts: float = 0.0
 
+        # ── Video quality scoring (Phase 2) ────────────────────────
+        self._video_quality_scores: list[float] = []
+
         # ── Pollo AI scene generator (lazy, avoids ~7 min per image unless absolutely needed) ─
         self._pollo_scene_gen = None
         self._ai_fallback_enabled = self._media_strategy.get("ai_image_fallback", False)
@@ -524,116 +527,64 @@ class MediaFetcher:
         scenes = scene_ranges
         n_scenes = len(scenes)
 
-        # ── Phase 0: compute video target ─────────────────────
-        target_video_pct = self._media_strategy.get("target_video_pct", 50)
-        max_video_pct = self._media_strategy.get("max_video_blocks_pct", 50)
-        max_placeholder_pct = self._media_strategy.get("max_placeholder_pct", 0)
-        target_video_count = max(1, round(target_video_pct / 100.0 * n_scenes))
-        target_video_count = min(target_video_count, round(max_video_pct / 100.0 * n_scenes))
-        target_video_count = min(target_video_count, n_scenes)
-        # ── Hard cap: never exceed 50 video assets to prevent RAM exhaustion ──
-        # Each downloaded video clip is ~10-50 MB. 50 videos ≈ 1-2 GB in-memory
-        # before rendering. Beyond this, ffmpeg decoders risk OOM kills.
-        MAX_ABSOLUTE_VIDEOS = 50
+        # ── Phase 2: Classify scenes (video_priority vs ai_image) ──
+        video_scenes, scene_types = self._classify_scenes(scenes)
 
-        # ── RAM-aware cap: further reduce video limit when free RAM is low ──
+        # ── RAM governor: hard-cap video assets to prevent OOM ──
+        MAX_ABSOLUTE_VIDEOS = 50
         try:
             from pipeline.ram_governor import available_mb
             free_ram_mb = available_mb()
             if free_ram_mb > 0 and free_ram_mb < 3000:
-                # <3 GB free → cap at 15 videos (prevent OOM like worker#1655)
                 MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, 15)
-                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
                 logger.warning(
-                    "RAM governor: only %.1f GB free → capping videos at %d (was %d)",
-                    free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS, 50,
+                    "RAM governor: only %.1f GB free → capping videos at %d",
+                    free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
                 )
             elif free_ram_mb > 0 and free_ram_mb < 5000:
-                # 3-5 GB free → moderate cap
                 MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, 25)
-                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
                 logger.warning(
                     "RAM governor: only %.1f GB free → capping videos at %d",
                     free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
                 )
             elif free_ram_mb > 12000:
-                # 12+ GB free → high-RAM mode: raise cap to 70 for 80% video ratio
                 MAX_ABSOLUTE_VIDEOS = 70
-                target_video_count = min(target_video_count, MAX_ABSOLUTE_VIDEOS)
                 logger.info(
                     "RAM governor: %.1f GB free → high-RAM mode: video cap raised to %d",
                     free_ram_mb / 1024, MAX_ABSOLUTE_VIDEOS,
                 )
         except Exception:
-            pass  # ram_governor unavailable (non-critical)
-        video_ok = 0  # declared early for hard-cap check in the fetch loop
+            pass
+
+        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
+        MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
         logger.info(
-            "Ratio governor: %d scenes, target %d video (%.0f%%), "
-            "max placeholder %.0f%%, hard cap %d videos",
-            n_scenes, target_video_count, target_video_pct,
-            max_placeholder_pct, MAX_ABSOLUTE_VIDEOS,
+            "Fase 2 classification: %d video-priority / %d ai-image (%d scenes), "
+            "hard cap %d videos, dynamic range %.0f-%.0f%%",
+            len(video_scenes), n_scenes - len(video_scenes), n_scenes,
+            MAX_ABSOLUTE_VIDEOS,
+            self._media_strategy.get("video_scene_pct_min", 20),
+            self._media_strategy.get("video_scene_pct_max", 30),
         )
 
-        # ── Phase 1: build priority list for video assignment ─
-        # Priority:
-        #   1) LLM tagged "video"
-        #   2) hook/climax types (forced video for high-impact scenes)
-        #   3) 1 in 3 desarrollo scenes (to ensure video variety, not all images)
-        #   4) longest scenes benefit most from video
-        scene_indices = list(range(n_scenes))
-        
-        # Force-assign video to ALL hook and climax scenes (structural guarantee)
-        forced_video: set[int] = set()
-        for idx in scene_indices:
-            s = scenes[idx]
-            if s.get("tipo") in ("hook", "climax") and not s.get("is_transition"):
-                forced_video.add(idx)
-            # Also force 1 in 3 desarrollo scenes
-            elif s.get("tipo") == "desarrollo" and idx in scene_indices:
-                # Force video for every 3rd desarrollo (positions 2, 5, 8... among desarrollo)
-                des_idx = sum(1 for j in scene_indices if j <= idx and scenes[j].get("tipo") == "desarrollo")
-                if des_idx % 3 == 0:
-                    forced_video.add(idx)
-        
-        remaining_slots = max(0, target_video_count - len(forced_video))
-        
-        def _video_priority(idx: int) -> tuple[int, int, float]:
-            s = scenes[idx]
-            llm_video = 1 if s.get("media_tipo") == "video" else 0
-            high_impact = 1 if s.get("tipo") in ("hook", "climax") else 0
-            duration = s.get("duration", 5)
-            return (-llm_video, -high_impact, -duration)
-
-        # Fill remaining slots from priority queue (excluding already forced)
-        remaining_queue = sorted(
-            [idx for idx in scene_indices if idx not in forced_video],
-            key=_video_priority,
-        )
-        additional_video = set(remaining_queue[:remaining_slots])
-        video_assigned: set[int] = forced_video | additional_video
-        
-        logger.info(
-            "Video slots assigned: forced=%d (+additional=%d) = %d total / %d scenes (LLM-video: %d, hook/climax forced: %d)",
-            len(forced_video), len(additional_video), len(video_assigned),
-            n_scenes,
-            sum(1 for i in video_assigned if scenes[i].get("media_tipo") == "video"),
-            sum(1 for i in forced_video if scenes[i].get("tipo") in ("hook", "climax")),
-        )
-
-        # ── Phase 2: fetch per scene ──────────────────────────
+        # ── Phase 2: fetch per scene (tier-based) ──────────────
         results: list[dict] = [{} for _ in range(n_scenes)]
-        # video_ok declared earlier (Phase 0) for hard-cap check
+        video_ok = 0
         image_ok = 0
         placeholder = 0
 
-        # Pollo AI counter (capped at ai_max_per_video)
+        # Video quality scoring for 20-30% dynamic control
+        self._video_quality_scores: list[float] = []
+        _video_queries_tried: dict[int, int] = {}  # scene_idx → queries exhausted
+
+        # Pollo AI counter
         ai_max = self._media_strategy.get("ai_max_per_video", 2)
         ai_used = 0
         ai_enabled = self._media_strategy.get("ai_image_fallback", False)
 
         # ── Phase timeout guard ───────────────────────────────────
         _cb_phase_start = time.time()
-        _cb_phase_timeout = max(1800, n_scenes * 30)  # Scale timeout by scene count (floor 30min, ~30s/scene — raised from 15s for Pixabay HTTP 502/timeout resilience)
+        _cb_phase_timeout = max(1800, n_scenes * 30)
 
         # ── Reset video provider circuit breaker for this job ──
         self._vp_hard_fail.clear()
@@ -641,102 +592,97 @@ class MediaFetcher:
         self._vp_disabled.clear()
         self._scene_tried_providers.clear()
 
-        # Track sub-scene sequence per asset_idx (preserved for backward compat)
-        subscene_seq: dict[int, int] = {}
-
-        # ── v10: reset enhanced dedup tracking ─────────────────
+        # ── Reset enhanced dedup tracking ─────────────────────
         self._used_filenames.clear()
         self._used_img_ids.clear()
         self._used_content_hashes.clear()
 
-        # ── Hard abort counter: consecutive black/placeholder scenes ──
+        # ── Hard abort counter: consecutive placeholder scenes ──
         _consecutive_black = 0
         _MAX_CONSECUTIVE_BLACK = 3
 
         for i, scene in enumerate(scenes):
-            want_video = i in video_assigned
-            target_dur = scene.get("duration", 5)
             scene_tipo = scene.get("tipo", "desarrollo")
+            target_dur = scene.get("duration", 5)
+            is_video_priority = i in video_scenes
 
-            # ── Transition scenes always use image (Ken Burns) ─
-            if scene.get("is_transition"):
-                want_video = False
-
-            # ── RAM safety: hard-cap video assets to prevent OOM ──
-            # When we hit the absolute video limit, force remaining scenes
-            # to use only images (no video fallback in interleaved providers).
+            # ── RAM safety: hard-cap video assets ────────────────
             _force_images = False
             if video_ok >= MAX_ABSOLUTE_VIDEOS:
-                want_video = False
+                is_video_priority = False
                 _force_images = True
-                if video_ok == MAX_ABSOLUTE_VIDEOS:  # log once
+                if video_ok == MAX_ABSOLUTE_VIDEOS:
                     logger.warning(
                         "RAM safety cap reached (%d videos) — "
                         "forcing remaining %d scenes to image-only",
                         MAX_ABSOLUTE_VIDEOS, n_scenes - i,
                     )
 
+            # ── Dynamic video stop: quality threshold not met ─────
+            if is_video_priority and not self._should_continue_video_search(
+                video_ok, n_scenes
+            ):
+                logger.info(
+                    "Dynamic video stop at scene %d: %d videos found, "
+                    "avg quality %.2f — reclassifying remaining as ai_image",
+                    i + 1, video_ok,
+                    sum(self._video_quality_scores) / max(len(self._video_quality_scores), 1),
+                )
+                is_video_priority = False
+
             logger.info(
-                "Scene %d/%d [%s]: want_video=%s dur=%.1fs",
-                i + 1, n_scenes, scene_tipo, want_video, target_dur,
+                "Scene %d/%d [%s]: %s dur=%.1fs",
+                i + 1, n_scenes, scene_tipo,
+                "video_priority" if is_video_priority else "ai_image",
+                target_dur,
             )
 
-            asset = None
+            # ── Fetch via tier chain ──────────────────────────────
+            asset, ai_used, quality_info = self._fetch_with_ai_tiers(
+                scene=scene,
+                scene_idx=i,
+                total_scenes=n_scenes,
+                is_video_priority=is_video_priority,
+                target_dur=target_dur,
+                ctx=ctx,
+                ai_used=ai_used,
+                ai_max=ai_max,
+                ai_enabled=ai_enabled,
+                force_images=_force_images,
+            )
 
-            # ── Phase 1: AI Image Primary ──────────────────────
-            # For scenes that do NOT want video, try AI generation
-            # FIRST (coherence before stock). Video-priority scenes
-            # go through the regular stock chain as before.
-            if asset is None and not want_video and self._ai_image_primary:
+            # ── Score video quality for dynamic control ───────────
+            if asset and asset.get("type") == "video":
+                provider = asset.get("source", "unknown")
+                resolution = asset.get("resolution", "unknown")
+                actual_dur = asset.get("duration")
+                score = self._score_video_quality(
+                    provider_name=provider,
+                    resolution=resolution,
+                    target_dur=target_dur,
+                    actual_dur=actual_dur,
+                    queries_tried=_video_queries_tried.get(i, 1),
+                )
+                self._video_quality_scores.append(score)
                 logger.info(
-                    "Scene %d/%d [%s]: AI image primary (phase 1)",
-                    i + 1, n_scenes, scene_tipo,
+                    "Video quality score: %.2f (provider=%s, res=%s)",
+                    score, provider, resolution,
                 )
-                asset = self._try_ai_image_chain(scene, i, n_scenes)
-                if asset:
-                    logger.info(
-                        "Scene %d/%d: AI image generated via %s",
-                        i + 1, n_scenes, asset.get("source", "?"),
-                    )
-
-            # ── v10: Exhaustive search with cross-rotation + pagination ─
-            # Hook scenes go through the normal provider chain (video → Pixabay
-            # → Unsplash → simplified retry) like any other scene. Pollo AI is
-            # only invoked as rescue (below) when ALL stock providers fail.
-            if asset is None:
-                query_pool = self._build_query_pool(scene, ctx)
-                logger.info(
-                    "Scene %d [%s]: %d query variations → exhaustive search",
-                    i + 1, scene_tipo, len(query_pool),
-                )
-                asset = self._fetch_asset_exhaustive(
-                    scene, query_pool, want_video, target_dur, ctx,
-                    force_images=_force_images,
-                )
-
-            # ── Pollo AI: rescate si el stock falló y hay cupo ─
-            if asset is None and ai_enabled and ai_used < ai_max:
-                rescue_query = scene.get("search_query_en", "") or scene_tipo
-                logger.info("Scene %d [%s]: stock exhausted — Pollo AI rescue (%d/%d)",
-                            i + 1, scene_tipo, ai_used + 1, ai_max)
-                asset = self._try_pollo_scene(rescue_query, scene_tipo, ctx)
-                if asset:
-                    ai_used += 1
 
             # ── Placeholder (absolutely nothing found) ────────
             if asset is None:
                 _consecutive_black += 1
                 logger.warning(
-                    "Scene %d [%s]: ALL providers + all pages + all queries exhausted — "
+                    "Scene %d [%s]: ALL tiers exhausted — "
                     "placeholder (%d/%d consecutive)",
-                    i, scene_tipo, _consecutive_black, _MAX_CONSECUTIVE_BLACK,
+                    i + 1, scene_tipo, _consecutive_black, _MAX_CONSECUTIVE_BLACK,
                 )
 
-                # ── HARD ABORT: if 3+ consecutive black scenes, the video is invalid ──
+                # ── HARD ABORT: 3+ consecutive black scenes ──
                 if _consecutive_black >= _MAX_CONSECUTIVE_BLACK:
                     error_msg = (
                         f"CRITICAL: {_consecutive_black} consecutive scenes with NO media. "
-                        f"All providers, all pages, and all query variations exhausted "
+                        f"All tiers, all providers, and all queries exhausted "
                         f"at scene {i+1}/{n_scenes}. Aborting to prevent black/blank video."
                     )
                     logger.error(error_msg)
@@ -749,8 +695,7 @@ class MediaFetcher:
                     "source": "placeholder",
                 }
             else:
-                _consecutive_black = 0  # reset counter on success
-                # Record for cross-video dedup
+                _consecutive_black = 0
                 self._record_asset_for_history(asset)
 
             # ── Count for stats ───────────────────────────────
@@ -1152,6 +1097,303 @@ class MediaFetcher:
                 seed = hash(master + str(video_id)) % (2**31)
 
         return prompt, seed
+
+    # ── Phase 2: Scene Classification & Tier System ───────────────
+
+    def _classify_scenes(self, scenes: list[dict]) -> tuple[set[int], dict[int, str]]:
+        """Classify every scene as ``video_priority`` or ``ai_image``.
+
+        **Video-priority criteria** (any one is sufficient):
+          1. Scene type is ``hook`` or ``climax`` (always forced).
+          2. Scene duration ≥ ``video_min_scene_duration`` AND position
+             is within the first ``video_first_half_pct``% of runtime.
+
+        Capped at ``video_scene_pct_max``% of total scenes.  Scenes
+        beyond the cap are reclassified as ``ai_image`` even if they
+        meet the criteria.
+
+        Returns
+        -------
+        video_scenes : set[int]
+            Indices of scenes that should try stock video first.
+        scene_types : dict[int, str]
+            ``"video_priority"`` or ``"ai_image"`` for every scene index.
+        """
+        n_scenes = len(scenes)
+        if n_scenes == 0:
+            return set(), {}
+
+        total_duration = sum(s.get("duration", 5) for s in scenes) or 1.0
+        min_dur = self._media_strategy.get("video_min_scene_duration", 10)
+        first_half_pct = self._media_strategy.get("video_first_half_pct", 40) / 100.0
+        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
+        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
+        max_video = min(round(max_pct * n_scenes), hard_cap)
+
+        # Build candidate list sorted by priority
+        candidates: list[tuple[int, int]] = []  # (priority, idx) — higher = better
+        cumulative = 0.0
+        for idx, s in enumerate(scenes):
+            dur = s.get("duration", 5)
+            cumulative += dur
+            pos_in_runtime = cumulative / total_duration
+            tipo = s.get("tipo", "desarrollo")
+            is_transition = s.get("is_transition", False)
+
+            if is_transition:
+                continue  # transitions never get video
+
+            priority = 0
+
+            # Hook / climax always candidates with top priority
+            if tipo in ("hook", "climax"):
+                priority = 100
+            # Long scene in first half of runtime
+            elif dur >= min_dur and pos_in_runtime <= first_half_pct:
+                # Priority decays as we get further into the video
+                pos_factor = 1.0 - (pos_in_runtime / first_half_pct)
+                dur_factor = min(1.0, dur / max(min_dur * 2, 20))
+                priority = int(50 * (pos_factor * 0.6 + dur_factor * 0.4))
+                if tipo == "desarrollo":
+                    priority += 5  # slight boost for desarrollo over otros
+
+            if priority > 0:
+                candidates.append((priority, idx))
+
+        # Sort by priority descending, take top up to max_video
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        video_scenes: set[int] = {idx for _, idx in candidates[:max_video]}
+
+        # Build type map
+        scene_types: dict[int, str] = {}
+        for idx in range(n_scenes):
+            scene_types[idx] = "video_priority" if idx in video_scenes else "ai_image"
+
+        logger.info(
+            "Scene classification: %d video-priority / %d ai-image (%d scenes total, "
+            "hook/climax: %d, max cap: %d)",
+            len(video_scenes), n_scenes - len(video_scenes), n_scenes,
+            sum(1 for i in video_scenes if scenes[i].get("tipo") in ("hook", "climax")),
+            max_video,
+        )
+        return video_scenes, scene_types
+
+    def _fetch_with_ai_tiers(
+        self,
+        scene: dict,
+        scene_idx: int,
+        total_scenes: int,
+        is_video_priority: bool,
+        target_dur: float,
+        ctx,
+        ai_used: int,
+        ai_max: int,
+        ai_enabled: bool,
+        force_images: bool = False,
+    ) -> tuple[dict | None, int, dict]:
+        """Fetch a media asset for *scene* using the 5-tier chain.
+
+        **Video-priority chain:**
+          TIER 1 → Stock Video (exhaustive)
+          TIER 2 → AI Image (Pollinations → Local SD)
+          TIER 3 → Stock Image (Pixabay → Unsplash)
+          TIER 4 → Pollo AI (credits, last resort)
+          TIER 5 → Placeholder
+
+        **AI-image chain:**
+          TIER 1 → AI Image (Pollinations → Local SD)  ← coherence first
+          TIER 2 → Stock Image (Pixabay → Unsplash)
+          TIER 3 → Stock Video (exhaustive)
+          TIER 4 → Pollo AI (credits, last resort)
+          TIER 5 → Placeholder
+
+        Returns (asset, ai_used_updated, quality_info).
+
+        *quality_info* is a dict with ``score``, ``provider``, ``resolution``,
+        and ``query_attempt`` for ``_score_video_quality()``.  Empty dict
+        if the asset is not a stock video.
+        """
+        quality_info: dict = {}
+        query_pool = self._build_query_pool(scene, ctx)
+        query_attempt = 0
+
+        # ── Choose tiers based on scene type ─────────────────
+        if is_video_priority and not force_images:
+            tiers = ["stock_video", "ai_image", "stock_image", "pollo_ai", "placeholder"]
+        else:
+            tiers = ["ai_image", "stock_image", "stock_video", "pollo_ai", "placeholder"]
+
+        for tier in tiers:
+            if tier == "stock_video":
+                # Exhaustive search across all video providers
+                asset = self._try_stock_video_tier(scene, query_pool, target_dur, ctx)
+                if asset:
+                    # Capture quality metadata for scoring
+                    quality_info = {
+                        "score": None,  # computed later by caller
+                        "provider": asset.get("source", "unknown"),
+                        "resolution": asset.get("resolution", "unknown"),
+                        "query_attempt": 1,  # _try_stock_video_tier tracks internally
+                    }
+                    return asset, ai_used, quality_info
+
+            elif tier == "ai_image" and self._ai_image_primary:
+                asset = self._try_ai_image_chain(scene, scene_idx, total_scenes)
+                if asset:
+                    return asset, ai_used, quality_info
+
+            elif tier == "stock_image":
+                # Fall back to image-only providers (no video fallback)
+                query_pool = self._build_query_pool(scene, ctx)
+                asset = self._fetch_asset_exhaustive(
+                    scene, query_pool, want_video=False,
+                    target_dur=target_dur, ctx=ctx, force_images=True,
+                )
+                if asset:
+                    return asset, ai_used, quality_info
+
+            elif tier == "pollo_ai":
+                if ai_enabled and ai_used < ai_max:
+                    rescue_query = scene.get("search_query_en", "") or scene.get("tipo", "desarrollo")
+                    logger.info(
+                        "Scene %d/%d: tier 4 — Pollo AI rescue (%d/%d)",
+                        scene_idx + 1, total_scenes, ai_used + 1, ai_max,
+                    )
+                    pollo_asset = self._try_pollo_scene(rescue_query, scene.get("tipo", "desarrollo"), ctx)
+                    if pollo_asset:
+                        ai_used += 1
+                        return pollo_asset, ai_used, quality_info
+
+            elif tier == "placeholder":
+                return None, ai_used, quality_info
+
+        return None, ai_used, quality_info
+
+    def _try_stock_video_tier(
+        self,
+        scene: dict,
+        query_pool: list[str],
+        target_dur: float,
+        ctx,
+    ) -> dict | None:
+        """Exhaustive stock video search across all providers and queries.
+
+        Uses the same `_fetch_asset_exhaustive` with video priority,
+        but also captures resolution metadata for quality scoring.
+        """
+        return self._fetch_asset_exhaustive(
+            scene, query_pool, want_video=True,
+            target_dur=target_dur, ctx=ctx, force_images=False,
+        )
+
+    def _score_video_quality(
+        self,
+        provider_name: str,
+        resolution: str,
+        target_dur: float,
+        actual_dur: float | None,
+        queries_tried: int,
+    ) -> float:
+        """Score a video asset's quality from 0.0 to 1.0 using proxy signals.
+
+        Components (weight):
+          - **Provider tier** (0.30): pexels=0.30, pixabay=0.25, mixkit=0.20,
+            coverr=0.15, youtube_cc=0.10.
+          - **Resolution** (0.20): 2160p=0.20, 1080p=0.18, 720p=0.12, <720p=0.06.
+          - **Duration match** (0.25): ratio in [0.8, 1.5]=0.25, [0.5, 2.0]=0.15, else=0.05.
+          - **Query efficiency** (0.25): found in 1st query=0.25, 2nd-3rd=0.18, 4th+=0.10,
+            fallback=0.05.
+
+        Parameters
+        ----------
+        provider_name:
+            Source string, e.g. ``"pexels"``, ``"pixabay"``, ``"youtube_cc"``.
+        resolution:
+            Resolution string like ``"1080p"``, ``"720p"``, ``"2160p"``.
+        target_dur:
+            Ideal duration in seconds (the scene's target).
+        actual_dur:
+            Actual duration of the downloaded clip, or ``None`` if unknown.
+        queries_tried:
+            How many query variations were exhausted before finding this asset
+            (1 = first query worked, 2 = second query, etc.).
+        """
+        score = 0.0
+
+        # ── Provider tier ─────────────────────────────────────
+        provider_scores = {
+            "pexels": 0.30, "pixabay": 0.25, "mixkit": 0.20,
+            "coverr": 0.15, "youtube_cc": 0.10,
+        }
+        score += provider_scores.get(provider_name, 0.10)
+
+        # ── Resolution ────────────────────────────────────────
+        res = resolution.lower()
+        if "2160" in res or "4k" in res:
+            score += 0.20
+        elif "1080" in res:
+            score += 0.18
+        elif "720" in res:
+            score += 0.12
+        elif "480" in res:
+            score += 0.06
+        else:
+            score += 0.10  # unknown — be neutral
+
+        # ── Duration match ────────────────────────────────────
+        if actual_dur and target_dur > 0:
+            ratio = actual_dur / target_dur
+            if 0.8 <= ratio <= 1.5:
+                score += 0.25
+            elif 0.5 <= ratio <= 2.0:
+                score += 0.15
+            else:
+                score += 0.05
+        else:
+            score += 0.10  # unknown duration
+
+        # ── Query efficiency ──────────────────────────────────
+        if queries_tried <= 1:
+            score += 0.25
+        elif queries_tried <= 3:
+            score += 0.18
+        elif queries_tried <= 6:
+            score += 0.10
+        else:
+            score += 0.05
+
+        return min(score, 1.0)
+
+    def _should_continue_video_search(
+        self, videos_found: int, n_scenes: int
+    ) -> bool:
+        """Decide whether to keep searching for stock videos.
+
+        Rules:
+          - videos_found < 20% minimum → always continue.
+          - videos_found ≥ 30% maximum → always stop.
+          - Between 20% and 30% → continue only if average quality ≥ threshold.
+        """
+        min_pct = self._media_strategy.get("video_scene_pct_min", 20) / 100.0
+        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
+        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
+        threshold = self._media_strategy.get("video_quality_threshold", 0.5)
+
+        min_videos = max(1, round(min_pct * n_scenes))
+        max_videos = min(round(max_pct * n_scenes), hard_cap)
+
+        if videos_found < min_videos:
+            return True   # haven't reached 20% minimum yet
+
+        if videos_found >= max_videos:
+            return False  # already at 30% / hard cap
+
+        # Between 20% and 30% — check average quality
+        if self._video_quality_scores:
+            avg = sum(self._video_quality_scores) / len(self._video_quality_scores)
+            return avg >= threshold
+
+        return True  # no quality data yet → continue
 
     # ── Internal: multi-provider video chain ──────────────────────
 
