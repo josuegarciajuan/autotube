@@ -164,7 +164,21 @@ class PollinationsProvider:
         except requests.Timeout:
             logger.error("Pollinations request timed out after %ds", REQUEST_TIMEOUT)
         except requests.HTTPError as exc:
-            logger.error("Pollinations HTTP error %d: %s", exc.response.status_code if exc.response else 0, exc)
+            status = exc.response.status_code if exc.response else 0
+            if status == 429:
+                logger.warning("Pollinations rate-limited (429) — sleeping 30s and retrying once")
+                time.sleep(30)
+                try:
+                    resp = requests.get(self._build_url(prompt, w, h, seed), timeout=REQUEST_TIMEOUT)
+                    resp.raise_for_status()
+                    output_path.write_bytes(resp.content)
+                    self._save_cache(prompt, output_path)
+                    logger.info("Pollinations retry succeeded after rate-limit cooldown")
+                    return output_path
+                except Exception:
+                    logger.error("Pollinations retry also failed after rate-limit")
+            else:
+                logger.error("Pollinations HTTP error %d: %s", status, exc)
         except requests.RequestException as exc:
             logger.error("Pollinations request failed: %s", exc)
         except Exception as exc:
