@@ -199,6 +199,27 @@ def run_post_publish_promotion(
 
     Returns a dict with action results.
     """
+    # ── Quota-aware gating: 3 tiers ─────────────────────────────
+    # Tier CRITICAL (>85%): skip EVERYTHING — just upload the short.
+    # Tier TIGHT (>70%): skip comments + per-video playlists (expensive).
+    # Below 70%: full cross-promotion.
+    from api.services.quota_tracker import (
+        should_skip_all_cross_promote,
+        should_skip_short_comments,
+        should_skip_per_video_playlist,
+    )
+    if should_skip_all_cross_promote(channel_slug):
+        return {
+            "skipped": True,
+            "reason": "quota_critical",
+            "playlist_added": False,
+            "per_video_playlist_added": False,
+            "source_in_shorts_playlist": False,
+            "comment_posted": False,
+            "errors": [],
+        }
+    quota_tight = should_skip_short_comments(channel_slug)  # >70%
+
     playlist_name = playlist_name or DEFAULT_SHORTS_PLAYLIST
     per_video_pl = (
         getattr(channel_config, "SHORTS_PER_VIDEO_PLAYLIST", True)
@@ -260,7 +281,8 @@ def run_post_publish_promotion(
 
     # ── 3. Per-video playlist: "{Title} | Shorts" ─────────────────
     #    Only for clip shorts that have an explicit source_video_id.
-    if per_video_pl and source_yt_id and source_video_id:
+    #    Skip when quota is tight (>70%) to save 101+ units per short.
+    if not quota_tight and per_video_pl and source_yt_id and source_video_id:
         try:
             source_info = get_source_video_info(source_video_id)
             if source_info and source_info.get("title"):
@@ -282,7 +304,8 @@ def run_post_publish_promotion(
             logger.warning("[%s] %s", channel_slug, msg)
 
     # ── 4. First comment with long-form link ────────────────────
-    if source_yt_id or first_comment_text:
+    #    Skip when quota is tight (>70%) to save 50 units per short.
+    if not quota_tight and (source_yt_id or first_comment_text):
         try:
             from pipeline.youtube_comments import YouTubeCommentManager
 

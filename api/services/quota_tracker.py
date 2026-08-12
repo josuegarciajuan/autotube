@@ -263,6 +263,54 @@ def should_throttle(channel_slug: str, threshold_pct: float = 0.85) -> bool:
         return False
 
 
+# ── Guard helpers for callers ────────────────────────────────────
+
+# Thresholds for different operation tiers
+QUOTA_CRITICAL = 0.85   # >85%: stop ALL non-essential operations
+QUOTA_TIGHT = 0.70      # >70%: skip expensive extras (comments, per-video playlists)
+QUOTA_CAUTION = 0.50    # >50%: skip purely cosmetic operations (thumbnail verify)
+
+
+def should_skip_thumbnail_verify(channel_slug: str) -> bool:
+    """True if quota is too low for thumbnail verification (cosmetic)."""
+    return should_throttle(channel_slug, QUOTA_CAUTION)
+
+
+def should_skip_short_comments(channel_slug: str) -> bool:
+    """True if quota is too tight for first comments on shorts."""
+    return should_throttle(channel_slug, QUOTA_TIGHT)
+
+
+def should_skip_per_video_playlist(channel_slug: str) -> bool:
+    """True if quota is too tight for per-video playlist creation."""
+    return should_throttle(channel_slug, QUOTA_TIGHT)
+
+
+def should_skip_all_cross_promote(channel_slug: str) -> bool:
+    """True if quota is critical — skip ALL cross-promotion (playlists + comments)."""
+    return should_throttle(channel_slug, QUOTA_CRITICAL)
+
+
+def should_preserve_quota(channel_slug: str, threshold_pct: float = QUOTA_CAUTION) -> bool:
+    """Convenience: True when quota is above threshold and non-essential ops should be paused."""
+    return should_throttle(channel_slug, threshold_pct)
+
+
+def should_throttle_global(threshold_pct: float = 0.85) -> bool:
+    """Check global quota usage across ALL channels (shared GCP project).
+
+    Since all channels share the same YouTube Data API quota pool
+    (common Google Cloud project), we must monitor total consumption,
+    not per-channel.
+    """
+    try:
+        usage = get_daily_usage()  # no channel filter = all channels
+        used_pct = usage["total_units"] / max(usage["quota_limit"], 1)
+        return used_pct >= threshold_pct
+    except Exception:
+        return False
+
+
 # ── Decorator ────────────────────────────────────────────────────
 
 def tracked(operation: str, units: int):

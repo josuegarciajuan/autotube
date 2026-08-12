@@ -860,9 +860,18 @@ async def _schedule_checker_loop():
                 # ── Thumbnail verification (v24) ──
                 # Checks recently uploaded videos for missing YT thumbnails
                 # and retries the upload if needed. Lightweight (~5 quota units/cycle).
+                # ═══ Quota guard: skip when global usage >50% to preserve quota ═══
                 try:
-                    from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
-                    await run_thumbnail_verification_cycle(db=_sched_db)
+                    from api.services.quota_tracker import should_throttle_global
+                    if not should_throttle_global(0.50):
+                        from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
+                        await run_thumbnail_verification_cycle(db=_sched_db)
+                    else:
+                        _tv_skip_interval = 300  # re-check guard every 5 min
+                        if not hasattr(_schedule_checker_loop, '_last_tv_skip_log') or \
+                           time.time() - _schedule_checker_loop._last_tv_skip_log > 600:
+                            logger.info("⏸️ Thumbnail verify skipped — quota >50%% used")
+                            _schedule_checker_loop._last_tv_skip_log = time.time()
                 except Exception as _tv_exc:
                     logger.debug("Thumbnail verification cycle: %s", _tv_exc)
 

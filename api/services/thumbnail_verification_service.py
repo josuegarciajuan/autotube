@@ -19,6 +19,30 @@ logger = logging.getLogger("autotube.thumbnail_verify")
 THUMBNAIL_VERIFY_BATCH = 5  # max videos per cycle
 THUMBNAIL_VERIFY_MAX_AGE_DAYS = 3  # only check recent uploads
 
+# ── Quota guard cache: avoid re-querying DB for every video ──
+_skipped_channels: dict[str, float] = {}  # channel_slug → last_skip_timestamp
+_SKIP_CACHE_TTL = 300  # re-check quota every 5 min per channel
+
+
+def track_quota_exceeded_for_cycle(channel_slug: str) -> bool:
+    """Check if quota is too low for thumbnail verification on this channel.
+
+    Caches result for _SKIP_CACHE_TTL seconds to avoid hammering the DB
+    for every video in the batch.
+    """
+    import time as _time
+    now = _time.monotonic()
+    if channel_slug in _skipped_channels:
+        if now - _skipped_channels[channel_slug] < _SKIP_CACHE_TTL:
+            return True  # still skipping this channel
+        del _skipped_channels[channel_slug]  # cache expired, re-check
+
+    from api.services.quota_tracker import should_skip_thumbnail_verify
+    if should_skip_thumbnail_verify(channel_slug):
+        _skipped_channels[channel_slug] = now
+        return True
+    return False
+
 
 async def run_thumbnail_verification_cycle(db=None):
     """Check recent uploaded videos for missing YT thumbnails and retry.
@@ -59,6 +83,14 @@ async def run_thumbnail_verification_cycle(db=None):
     recovered = 0
     for row in rows:
         video_id, channel_id, canal, yt_video_id, thumbnail_path, publish_mode = row
+
+        # ── Quota guard: skip if channel >50% consumed ──────────────
+        if track_quota_exceeded_for_cycle(canal):
+            logger.debug(
+                "Thumbnail verify: skipping video #%d (%s) — quota >50%% for %s",
+                video_id, yt_video_id, canal,
+            )
+            continue
 
         # Verify local file exists
         if not thumbnail_path or not Path(thumbnail_path).exists():
