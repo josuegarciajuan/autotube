@@ -144,9 +144,21 @@ class VisualBibleGenerator:
 
         try:
             logger.info("Generating visual bible for %d scenes...", num_scenes)
+            # Determine which model to use
+            model = model_name
+            if not model:
+                # Fall back to the script generator's first pool model
+                try:
+                    for entry in self._script_gen.model_pool.iter_models():
+                        model = entry.model_id
+                        break
+                except Exception:
+                    model = "gpt-4o-mini"  # absolute fallback
+
             result = self._script_gen._llm_json_call(
                 thinking=True,
-                model_name=model_name,
+                model=model,
+                model_name=model or "visual-bible",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

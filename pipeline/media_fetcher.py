@@ -1084,6 +1084,12 @@ class MediaFetcher:
             }
             concept = type_hints.get(scene.get("tipo", ""), "cinematic atmospheric scene")
 
+        # Ensure uniqueness: append scene index when using generic concepts
+        # so that same-tipo scenes don't produce identical prompts → cached dupes.
+        if not self._visual_bible:
+            concepto_base = concept
+            concept = f"{concept}, scene variation {scene_idx + 1}/{total_scenes}"
+
         # ── Layer 4: Technical suffix ────────────────────────
         # Density may have been overridden by the visual bible above
         if "density" not in dir() or density is None:
