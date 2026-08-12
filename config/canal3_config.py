@@ -216,19 +216,20 @@ VIRALITY_TRIGGERS = [
 # ═══════════════════════════════════════════════════════════════════
 TTS_STRATEGY = {
     "voice_primary": "es-ES-AlvaroNeural", "voice_secondary": "es-MX-DaliaNeural",
-    "rate_base": "-12%", "pitch_base": "-2Hz",
-    "rate_hook": "-8%", "pitch_hook": "+0Hz",
-    "rate_desarrollo": "-10%", "pitch_desarrollo": "-2Hz",
-    "rate_climax": "-18%", "pitch_climax": "-4Hz",
-    "rate_reflexion": "-12%", "pitch_reflexion": "-2Hz",
-    "rate_cierre": "-8%", "pitch_cierre": "+0Hz",
+    "rate_base": 0.80, "pitch_base": "-2Hz",
+    "rate_hook": "-15%", "pitch_hook": "+0Hz",
+    "rate_desarrollo": "-22%", "pitch_desarrollo": "-2Hz",
+    "rate_climax": "-30%", "pitch_climax": "-4Hz",
+    "rate_reflexion": "-25%", "pitch_reflexion": "-2Hz",
+    "rate_cierre": "-18%", "pitch_cierre": "+0Hz",
 }
-VOICE_RATE = "-12%"
+VOICE_RATE = 0.80
 VOICE_PITCH = "-2Hz"
 TTS_ENGINE = "kokoro"
 KOKORO_VOICE = "em_santa"
-KOKORO_BLOCK_SPEEDS = {"hook": 1.04, "desarrollo": 0.92, "climax": 0.84, "reflexion": 0.90, "cierre": 0.96}
-KOKORO_PAUSE_BETWEEN_BLOCKS = 0.8
+# KOKORO_BLOCK_SPEEDS ya no se define aquí — el voice resolver calcula
+# las velocidades Kokoro automáticamente desde TTS_STRATEGY.rate_*
+KOKORO_PAUSE_BETWEEN_BLOCKS = 1.3
 
 # ═══════════════════════════════════════════════════════════════════
 # CONTENT SOURCES
