@@ -165,6 +165,7 @@ PIXABAY_API_TIMEOUT = 30
 # ═══════════════════════════════════════════════════════════════════
 
 MEDIA_STRATEGY = {
+    # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,
     "prefer_video": True,
     "max_video_blocks_pct": 80,
@@ -181,6 +182,59 @@ MEDIA_STRATEGY = {
     "xfade_batch_size": 50,           # max segments per ffmpeg xfade invocation (RAM safety)
     "ai_image_fallback": True,
     "ai_max_per_video": 5,
+
+    # ── AI Image Primary (Phase 1) ─────────────────────────────
+    # When True, scenes classified as 'ai_image' use AI generation
+    # as their primary tier (before falling back to stock images).
+    "ai_image_primary": True,
+    # Ordered list of free AI providers to try: pollinations first
+    # (fast, ~8s), then local_sd (slow, ~180s) as fallback.
+    "ai_image_providers": ["pollinations", "local_sd"],
+    # Optional global style prefix injected into every AI prompt.
+    # None → auto-derived from channel COLOR_PALETTE + IMAGE_STYLE_MODIFIERS
+    #   by the VisualCoherenceEngine.
+    "ai_style_prefix": None,
+    # Cache directory for AI-generated images (per-channel via output dir).
+    "ai_cache_enabled": True,
+    # Model override for Pollinations (None = use Pollinations default: flux).
+    "ai_pollinations_model": None,
+    # Local SD generation steps (fewer = faster, lower quality).
+    "ai_local_sd_steps": 20,
+
+    # ── Video Scene Control (Phase 2) ──────────────────────────
+    # Minimum % of scenes that should try stock video.
+    "video_scene_pct_min": 20,
+    # Maximum % of scenes that may try stock video (if quality is high).
+    "video_scene_pct_max": 30,
+    # Absolute hard cap on number of video assets regardless of scene count.
+    "video_scene_hard_cap": 12,
+    # Only assign video to scenes within the first X% of total runtime.
+    "video_first_half_pct": 40,
+    # Minimum scene duration (seconds) to be eligible for video.
+    "video_min_scene_duration": 10,
+    # Avg quality threshold (0-1). Above this → keep searching up to 30%.
+    "video_quality_threshold": 0.5,
+
+    # ── Pollo AI (credits, kept as absolute last resort) ───────
+    "pollo_ai_enabled": True,
+
+    # ── Visual Bible (Phase 3, NUEVO) ──────────────────────────
+    # When True, a second LLM call generates a visual bible JSON
+    # (protagonist, recurring elements, scene visual concepts).
+    "visual_bible_enabled": False,     # Phase 3; disabled in Phase 1
+    # LLM model for visual bible. None = same model as script LLM.
+    "visual_bible_model": None,
+    # If visual bible LLM fails, fallback to the script's LLM.
+    "visual_bible_fallback": True,
+
+    # ── Shot Type Rotation (Phase 3) ───────────────────────────
+    "shot_type_distribution": {
+        "establishing": 0.15,
+        "detail": 0.25,
+        "mood": 0.30,
+        "action": 0.20,
+        "symbolic": 0.10,
+    },
 }
 
 # ═══════════════════════════════════════════════════════════════════

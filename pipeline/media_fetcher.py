@@ -27,6 +27,9 @@ from pipeline.providers.mixkit import MixkitVideoProvider
 from pipeline.providers.coverr import CoverrVideoProvider
 from pipeline.providers.youtube_cc import YouTubeCCProvider
 from pipeline.providers.base import VideoAsset
+from pipeline.providers.pollinations_provider import PollinationsProvider
+from pipeline.providers.local_sd_provider import LocalSDProvider
+from pipeline.visual_coherence import VisualCoherenceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,23 @@ class MediaFetcher:
             from config.config_bridge import get_channel_config
             config = get_channel_config(settings.ACTIVE_CHANNELS[0])
         self._config = config
-        self._media_strategy = getattr(self._config, "MEDIA_STRATEGY", {})
+
+        # ── MEDIA_STRATEGY: deep-merge channel overrides onto defaults ──
+        # Channel configs may define their own MEDIA_STRATEGY dict, which
+        # replaces the entire defaults dict (shallow overwrite).  We deep-merge
+        # so that new keys added to defaults auto-propagate to all channels
+        # without requiring per-channel config updates.
+        _channel_strategy = getattr(self._config, "MEDIA_STRATEGY", {}) or {}
+        try:
+            from config import defaults as _def
+            _default_strategy = getattr(_def, "MEDIA_STRATEGY", {}) or {}
+        except Exception:
+            _default_strategy = {}
+        if _default_strategy:
+            self._media_strategy = dict(_default_strategy)
+            self._media_strategy.update(_channel_strategy)  # channel wins per-key
+        else:
+            self._media_strategy = dict(_channel_strategy)
 
         # P3: Theme context for enriched search queries
         self._theme_context = None
@@ -162,6 +181,60 @@ class MediaFetcher:
         # ── Pollo AI scene generator (lazy, avoids ~7 min per image unless absolutely needed) ─
         self._pollo_scene_gen = None
         self._ai_fallback_enabled = self._media_strategy.get("ai_image_fallback", False)
+
+        # ── AI image providers (Phase 1: Pollinations + Local SD) ──────
+        self._ai_image_primary = self._media_strategy.get("ai_image_primary", False)
+        self._pollinations: PollinationsProvider | None = None
+        self._local_sd: LocalSDProvider | None = None
+        self._coherence_engine: VisualCoherenceEngine | None = None
+        self._visual_bible: dict | None = None
+
+        # Build AI provider chain from config (always available — no auth needed)
+        ai_cache_dir = str(settings.OUTPUT_DIR / "ai_cache" / "pollinations")
+        try:
+            self._pollinations = PollinationsProvider(
+                model=self._media_strategy.get("ai_pollinations_model") or "flux",
+                width=1920,
+                height=1080,
+                cache_dir=ai_cache_dir,
+            )
+            logger.info("AI image provider registered: pollinations (free, no-auth)")
+        except Exception as exc:
+            logger.warning("Pollinations provider init failed: %s", exc)
+
+        try:
+            sd_steps = self._media_strategy.get("ai_local_sd_steps", 20)
+            self._local_sd = LocalSDProvider(num_inference_steps=sd_steps)
+            logger.info("AI image provider registered: local_sd (free, CPU, ~3 min)")
+        except Exception as exc:
+            logger.warning("Local SD provider init failed: %s", exc)
+
+    def set_visual_context(
+        self,
+        visual_bible: dict | None = None,
+        coherence_engine: VisualCoherenceEngine | None = None,
+    ) -> None:
+        """Inject visual context into the media fetcher.
+
+        Called by the orchestrator **before** ``fetch_for_script()`` so
+        that all AI image generations within a single video share the
+        same style prefix, colour arc, and visual bible.
+
+        Parameters
+        ----------
+        visual_bible:
+            Optional ``VisualBible`` dict (Phase 3). Not used in Phase 1.
+        coherence_engine:
+            ``VisualCoherenceEngine`` instance that provides the style
+            prefix and colour-temperature arc. If not provided, one is
+            auto-created from the channel config.
+        """
+        self._visual_bible = visual_bible
+
+        if coherence_engine is not None:
+            self._coherence_engine = coherence_engine
+        elif self._coherence_engine is None:
+            self._coherence_engine = VisualCoherenceEngine(self._config, visual_bible)
 
     def _load_cross_video_filenames(self) -> None:
         """Refresh the cross-video dedup set from the DB history table.
@@ -610,6 +683,22 @@ class MediaFetcher:
 
             asset = None
 
+            # ── Phase 1: AI Image Primary ──────────────────────
+            # For scenes that do NOT want video, try AI generation
+            # FIRST (coherence before stock). Video-priority scenes
+            # go through the regular stock chain as before.
+            if asset is None and not want_video and self._ai_image_primary:
+                logger.info(
+                    "Scene %d/%d [%s]: AI image primary (phase 1)",
+                    i + 1, n_scenes, scene_tipo,
+                )
+                asset = self._try_ai_image_chain(scene, i, n_scenes)
+                if asset:
+                    logger.info(
+                        "Scene %d/%d: AI image generated via %s",
+                        i + 1, n_scenes, asset.get("source", "?"),
+                    )
+
             # ── v10: Exhaustive search with cross-rotation + pagination ─
             # Hook scenes go through the normal provider chain (video → Pixabay
             # → Unsplash → simplified retry) like any other scene. Pollo AI is
@@ -878,6 +967,190 @@ class MediaFetcher:
             logger.warning("Pollo AI generation failed: %s", exc)
 
         return None
+
+    # ── AI Image Chain (Phase 1) ─────────────────────────────────
+
+    def _try_ai_image_chain(
+        self,
+        scene: dict,
+        scene_idx: int,
+        total_scenes: int,
+    ) -> dict | None:
+        """Try to generate an AI image for *scene* using the free providers.
+
+        Provider order (from config ``ai_image_providers``):
+          1. Pollinations.ai (fast, ~8 s, quality 7/10)
+          2. Local SD 1.5   (slow, ~180 s, quality 6.5/10 — only if #1 fails)
+
+        Each generation uses a coherent 4-layer prompt assembled by
+        ``build_ai_prompt()``.  In Phase 1 only 3 layers are active
+        (visual bible is ``None``).
+
+        Returns an asset dict on success, or ``None`` if all providers
+        (including Local SD) failed.
+        """
+        ai_providers_cfg = self._media_strategy.get("ai_image_providers", ["pollinations", "local_sd"])
+
+        # Build shared prompt once per scene (it doesn't change per provider).
+        prompt, seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
+        negative = VisualCoherenceEngine.build_negative_prompt()
+        output_dir = Path(settings.OUTPUT_DIR) / "ai_images" / scene.get("tipo", "escena")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"scene_{scene_idx:03d}_{hashlib.md5(prompt.encode()).hexdigest()[:10]}.jpg"
+
+        for provider_key in ai_providers_cfg:
+            provider = None
+            provider_label = ""
+
+            if provider_key == "pollinations" and self._pollinations is not None:
+                provider = self._pollinations
+                provider_label = "pollinations"
+
+            elif provider_key == "local_sd" and self._local_sd is not None:
+                provider = self._local_sd
+                provider_label = "local_sd"
+
+            if provider is None:
+                continue
+
+            try:
+                logger.info(
+                    "Scene %d/%d [%s]: AI image via %s — prompt: %s...",
+                    scene_idx + 1, total_scenes,
+                    scene.get("tipo", "?"),
+                    provider_label,
+                    prompt[:100],
+                )
+                result_path = provider.generate(
+                    prompt=prompt,
+                    output_path=output_path,
+                    seed=seed,
+                    negative_prompt=negative,
+                )
+                if result_path and result_path.exists():
+                    # Validate minimum quality
+                    if not self._is_valid_image(result_path):
+                        logger.warning(
+                            "AI image from %s failed quality validation, trying next provider",
+                            provider_label,
+                        )
+                        continue
+
+                    self._record_asset_used({"url": str(result_path)})
+                    self._record_asset_for_history({
+                        "path": str(result_path),
+                        "source": f"ai_{provider_label}",
+                    })
+                    return {
+                        "path": result_path,
+                        "type": "image",
+                        "duration": None,
+                        "source": f"ai_{provider_label}",
+                    }
+
+            except Exception as exc:
+                logger.warning(
+                    "AI provider %s failed for scene %d: %s",
+                    provider_label, scene_idx + 1, exc,
+                )
+                continue  # next provider
+
+        logger.warning(
+            "Scene %d/%d: all AI providers exhausted — no image generated",
+            scene_idx + 1, total_scenes,
+        )
+        return None
+
+    def _build_ai_prompt(
+        self,
+        scene: dict,
+        scene_idx: int,
+        total_scenes: int,
+    ) -> tuple[str, int | None]:
+        """Assemble the AI image prompt for a scene.
+
+        Returns (prompt, seed).
+
+        Layers (Phase 1 — visual bible is ``None``):
+          1. **Style prefix** — from ``VisualCoherenceEngine``, modulated
+             by the scene's position in the colour-temperature arc.
+          2. **Visual context** — (Phase 3 only; empty in Phase 1).
+          3. **Scene concept** — query or description from the scene dict.
+          4. **Technical suffix** — aspect ratio, quality, density hints.
+
+        The prompt is truncated to ~500 characters to avoid overwhelming
+        the model with verbosity while preserving style consistency.
+        """
+        # ── Ensure coherence engine ──────────────────────────
+        if self._coherence_engine is None:
+            self._coherence_engine = VisualCoherenceEngine(self._config, self._visual_bible)
+
+        # ── Layer 1: Style (channel + colour arc) ────────────
+        style = self._coherence_engine.get_scene_style(scene_idx, total_scenes)
+
+        # ── Layer 2: Visual context (Phase 3; placeholder) ───
+        context_parts: list[str] = []
+        if self._visual_bible:
+            vu = self._visual_bible.get("visual_universe", "")
+            if vu:
+                context_parts.append(vu)
+            entity = self._visual_bible.get("central_entity", {})
+            if entity.get("type") != "none" and scene_idx in entity.get("appears_in_scenes", []):
+                context_parts.append(entity.get("master_description", ""))
+                variation = entity.get("variation_by_scene", {}).get(str(scene_idx), "")
+                if variation:
+                    context_parts.append(variation)
+            for elem in self._visual_bible.get("recurring_elements", [])[:3]:
+                if elem:
+                    context_parts.append(elem)
+        context = ", ".join(p for p in context_parts if p)
+
+        # ── Layer 3: Scene concept (query or description) ────
+        concept = scene.get("search_query_en", "") or scene.get("texto", "") or ""
+        if not concept:
+            type_hints = {
+                "hook": "dramatic cinematic opening scene",
+                "desarrollo": "atmospheric documentary b-roll",
+                "climax": "intense dramatic peak moment",
+                "reflexion": "contemplative peaceful scene",
+                "cierre": "hopeful closing scene resolution",
+            }
+            concept = type_hints.get(scene.get("tipo", ""), "cinematic atmospheric scene")
+
+        # ── Layer 4: Technical suffix ────────────────────────
+        palabras = len(scene.get("texto", "").split())
+        duracion = scene.get("duration", 5) or 1
+        pps = palabras / duracion  # words per second
+        density = VisualCoherenceEngine.get_visual_density(pps)
+        tech = VisualCoherenceEngine.build_tech_suffix(density)
+
+        # ── Assemble ─────────────────────────────────────────
+        parts = [style]
+        if context:
+            parts.append(context)
+        parts.append(concept)
+        parts.append(tech)
+        prompt = ", ".join(p for p in parts if p)
+
+        # Truncate to ~500 chars
+        if len(prompt) > 500:
+            # Keep style + tech, trim context+concept proportionally
+            head = f"{style}, {concept[:200]}"
+            tail = tech
+            prompt = f"{head}, {tail}"
+            if len(prompt) > 500:
+                prompt = prompt[:497] + "..."
+
+        # ── Seed (protagonist consistency — Phase 3) ─────────
+        seed = None
+        if self._visual_bible:
+            entity = self._visual_bible.get("central_entity", {})
+            if entity.get("type") != "none" and scene_idx in entity.get("appears_in_scenes", []):
+                master = entity.get("master_description", "")
+                video_id = getattr(self, "_video_id", 0)
+                seed = hash(master + str(video_id)) % (2**31)
+
+        return prompt, seed
 
     # ── Internal: multi-provider video chain ──────────────────────
 
