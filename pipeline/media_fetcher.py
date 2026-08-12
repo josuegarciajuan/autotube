@@ -1028,10 +1028,11 @@ class MediaFetcher:
                     negative_prompt=negative,
                 )
                 if result_path and result_path.exists():
-                    # Validate minimum quality
-                    if not self._is_valid_image(result_path):
+                    # Validate minimum quality (lenient for AI — they may be smaller
+                    # than stock photos due to efficient encoding).
+                    if not self._is_valid_ai_image(result_path):
                         logger.warning(
-                            "AI image from %s failed quality validation, trying next provider",
+                            "AI image from %s failed validation, trying next provider",
                             provider_label,
                         )
                         continue
@@ -2488,6 +2489,26 @@ class MediaFetcher:
                 return False
             size = filepath.stat().st_size
             if size < 50000:
+                return False
+            header = filepath.read_bytes()[:4]
+            return header[:3] == b'\xff\xd8\xff'
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_valid_ai_image(filepath: Path) -> bool:
+        """Lenient validation for AI-generated images.
+
+        AI images (especially from free providers) may be smaller than
+        stock photos due to simpler scenes or efficient encoding.  We
+        only require a valid JPEG header and a minimum of 5 KB to
+        filter out completely broken/garbage responses.
+        """
+        try:
+            if not filepath.exists():
+                return False
+            size = filepath.stat().st_size
+            if size < 5000:   # 5 KB minimum — anything smaller is likely broken
                 return False
             header = filepath.read_bytes()[:4]
             return header[:3] == b'\xff\xd8\xff'
