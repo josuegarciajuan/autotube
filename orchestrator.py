@@ -165,6 +165,78 @@ class PipelineOrchestrator:
         return self._media_fetcher
 
     @property
+    def _media_strategy(self) -> dict:
+        """Channel MEDIA_STRATEGY with defaults deep-merged (cached)."""
+        if not hasattr(self, "_cached_media_strategy"):
+            from config import defaults as _def
+            channel_strategy = getattr(self.config, "MEDIA_STRATEGY", {}) or {}
+            default_strategy = getattr(_def, "MEDIA_STRATEGY", {}) or {}
+            merged = dict(default_strategy)
+            merged.update(channel_strategy)
+            self._cached_media_strategy = merged
+        return self._cached_media_strategy
+
+    def _generate_and_inject_visual_bible(
+        self, bloques: list[dict], scene_ranges: list[dict] | None
+    ) -> None:
+        """Generate a visual bible via LLM and inject into the media fetcher.
+
+        Called during ``phase_images`` before media fetching begins.
+        On failure the method degrades gracefully — the media fetcher
+        falls back to its 3-layer prompt (style + concept + tech).
+        """
+        from pipeline.visual_bible import VisualBibleGenerator
+        from pipeline.visual_coherence import VisualCoherenceEngine
+
+        try:
+            n_scenes = len(scene_ranges) if scene_ranges else len(bloques)
+            # Build script text from all blocks
+            script_text = "\n\n".join(
+                b.get("texto", "") for b in bloques if b.get("texto")
+            )
+            if not script_text or n_scenes == 0:
+                logger.warning("[%s] Visual bible: empty script — skipping", self.canal)
+                return
+
+            self._emit_progress(43, "images",
+                "Generando biblia visual con IA...")
+
+            bible_gen = VisualBibleGenerator(
+                script_generator=self.script_gen,
+                channel_cfg=self.config,
+            )
+            bible_model = self._media_strategy.get("visual_bible_model")
+            visual_bible = bible_gen.generate(
+                script_text=script_text,
+                num_scenes=n_scenes,
+                model_name=bible_model or None,
+            )
+
+            # Build coherence engine enriched with the bible
+            coherence = VisualCoherenceEngine(self.config, visual_bible.to_dict())
+
+            # Inject into media fetcher
+            self.media_fetcher.set_visual_context(
+                visual_bible=visual_bible.to_dict(),
+                coherence_engine=coherence,
+            )
+            logger.info(
+                "[%s] Visual bible injected: universe=%s..., %d scenes, "
+                "entity=%s",
+                self.canal,
+                visual_bible.visual_universe[:50],
+                len(visual_bible.scene_visual_map),
+                visual_bible.central_entity.get("type", "none"),
+            )
+            self._emit_progress(44, "images",
+                "Biblia visual generada. Buscando media...")
+        except Exception as exc:
+            logger.warning(
+                "[%s] Visual bible generation failed: %s — proceeding without bible",
+                self.canal, exc,
+            )
+
+    @property
     def image_fetcher(self):
         """Legacy image fetcher — kept for backward compatibility."""
         if self._image_fetcher is None:
@@ -1056,6 +1128,10 @@ class PipelineOrchestrator:
 
             # ── Save scene_ranges for phase_video (ensures 1:1 alignment) ──
             self._last_scene_ranges = scene_ranges
+
+            # ── Phase 3: Visual Bible (LLM-generated visual direction) ──
+            if self._media_strategy.get("visual_bible_enabled", False):
+                self._generate_and_inject_visual_bible(bloques, scene_ranges)
 
             logger.info("[%s] Fetching media for %d scenes", self.canal,
                         len(scene_ranges) if scene_ranges else len(bloques))

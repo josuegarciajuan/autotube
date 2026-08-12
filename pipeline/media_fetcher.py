@@ -1051,8 +1051,29 @@ class MediaFetcher:
                     context_parts.append(elem)
         context = ", ".join(p for p in context_parts if p)
 
-        # ── Layer 3: Scene concept (query or description) ────
-        concept = scene.get("search_query_en", "") or scene.get("texto", "") or ""
+        # ── Layer 3: Scene concept ────────────────────────────
+        # When visual bible is available, use the per-scene visual_concept
+        # (a metaphoric visual description, NOT a literal illustration).
+        # Fall back to search_query_en or generic type hints otherwise.
+        concept = ""
+        if self._visual_bible:
+            scene_map = self._visual_bible.get("scene_visual_map", [])
+            if scene_idx < len(scene_map):
+                vb_scene = scene_map[scene_idx]
+                concept = vb_scene.get("visual_concept", "")
+                # Add visual bridge from the previous scene
+                if scene_idx > 0:
+                    bridge = vb_scene.get("bridge_from_prev", "")
+                    if bridge:
+                        concept = f"{concept}, visual bridge: {bridge}"
+
+                # Override density from visual bible if available
+                vb_density = vb_scene.get("visual_density", "")
+                if vb_density in ("simple", "balanced", "rich"):
+                    density = vb_density
+
+        if not concept:
+            concept = scene.get("search_query_en", "") or scene.get("texto", "") or ""
         if not concept:
             type_hints = {
                 "hook": "dramatic cinematic opening scene",
@@ -1064,10 +1085,12 @@ class MediaFetcher:
             concept = type_hints.get(scene.get("tipo", ""), "cinematic atmospheric scene")
 
         # ── Layer 4: Technical suffix ────────────────────────
-        palabras = len(scene.get("texto", "").split())
-        duracion = scene.get("duration", 5) or 1
-        pps = palabras / duracion  # words per second
-        density = VisualCoherenceEngine.get_visual_density(pps)
+        # Density may have been overridden by the visual bible above
+        if "density" not in dir() or density is None:
+            palabras = len(scene.get("texto", "").split())
+            duracion = scene.get("duration", 5) or 1
+            pps = palabras / duracion
+            density = VisualCoherenceEngine.get_visual_density(pps)
         tech = VisualCoherenceEngine.build_tech_suffix(density)
 
         # ── Assemble ─────────────────────────────────────────

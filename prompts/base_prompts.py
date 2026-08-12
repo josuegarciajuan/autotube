@@ -569,3 +569,128 @@ CRITICO: Solo hechos verificables. Solo datos. Solo historias reales. NADA de me
 
 # Legacy for backwards compatibility — not used in new code but avoids import errors
 SYSTEM_PROMPT = None  # Set at runtime per channel via build_system_prompt
+
+
+# ═══════════════════════════════════════════════════════════════════
+# VISUAL BIBLE PROMPT (Phase 3)
+# ═══════════════════════════════════════════════════════════════════
+
+def build_visual_bible_prompt(config, num_scenes: int = 0) -> str:
+    """Build the system prompt that asks the LLM to generate a visual bible.
+
+    The visual bible is a JSON blueprint that drives AI image generation
+    for every scene, ensuring visual coherence across the entire video.
+
+    Parameters
+    ----------
+    config:
+        Channel config object (used to derive narrative style, tone, etc.).
+    num_scenes:
+        Approximate number of scenes.  Used to hint the expected array
+        size (the LLM will output exactly one entry per scene in the
+        script it receives).
+    """
+    style = str(getattr(config, "CANAL_NARRATIVE_STYLE", "documental"))
+    tone = str(getattr(config, "CANAL_TONE", "documental riguroso"))
+    style_desc = str(getattr(config, "CANAL_STYLE_DESCRIPTION", ""))
+
+    shot_dist = getattr(config, "MEDIA_STRATEGY", {}).get("shot_type_distribution", {})
+    establishing_pct = int(shot_dist.get("establishing", 0.15) * 100)
+    detail_pct = int(shot_dist.get("detail", 0.25) * 100)
+    mood_pct = int(shot_dist.get("mood", 0.30) * 100)
+    action_pct = int(shot_dist.get("action", 0.20) * 100)
+    symbolic_pct = int(shot_dist.get("symbolic", 0.10) * 100)
+
+    scene_hint = ""
+    if num_scenes > 0:
+        scene_hint = f" El guion tiene aproximadamente {num_scenes} escenas. Genera EXACTAMENTE ese numero de entradas en scene_visual_map."
+
+    return f"""Eres un director de fotografia y diseno visual experto en documentales de estilo {style}.
+
+TONO DEL CANAL: {tone}
+{f'ESTILO: {style_desc}' if style_desc else ''}
+
+Tu tarea: analizar el guion completo de un video de YouTube y generar una
+"biblia visual" en JSON que guiara la generacion de imagenes IA para cada
+escena. La biblia visual asegura que todas las escenas compartan el mismo
+universo visual, paleta de colores y atmosfera.
+
+REGLAS:
+
+1. METAFORA VISUAL, NO LITERAL. NO describas lo que dice la escena al pie
+   de la letra. Crea una IMAGEN que transmita la misma emocion e idea sin
+   palabras. Ejemplo: si la escena habla de "la caida del imperio", muestra
+   "estatua de emperador derrumbandose en camara lenta, monedas de oro
+   esparcidas en el barro". JAMAS muestres texto en la imagen.
+
+2. ENTIDAD CENTRAL. Si el guion tiene un protagonista humano o una entidad
+   central recurrente (persona, criatura, lugar emblematico, objeto magico),
+   describela en central_entity con precision quirurgica:
+   - type: "person", "place", "object", o "none"
+   - master_description: descripcion ultra-detallada (edad, rasgos faciales,
+     vestimenta, cicatrices, iluminacion tipica, angulo de camara habitual).
+     Esta descripcion se inyectara en CADA escena donde aparezca.
+   - appears_in_scenes: lista de indices de escena donde aparece.
+   - variation_by_scene: para cada escena, variacion de encuadre
+     (ej. "medium shot walking", "close-up hands", "silhouette against fire").
+   Si NO hay entidad central clara, usa type="none".
+
+3. ELEMENTOS RECURRENTES. Hasta 5 elementos visuales que aparecen en
+   multiples escenas como hilo conductor (ej. "columnas de marmol agrietadas",
+   "humo de incienso", "pergaminos antiguos").
+
+4. PUENTES VISUALES. Cada escena (excepto la primera) debe tener un
+   bridge_from_prev: un elemento visual compartido con la escena anterior
+   (misma luz, mismo objeto, misma textura, mismo color dominante).
+
+5. TIPOS DE TOMA. Distribuye los shot_type aproximadamente asi:
+   establishing={establishing_pct}%, detail={detail_pct}%, mood={mood_pct}%,
+   action={action_pct}%, symbolic={symbolic_pct}%.
+   - establishing: gran angular, situa al espectador.
+   - detail: primer plano, intimidad, textura.
+   - mood: atmosfera pura, luz, sombras, emocion sin accion.
+   - action: movimiento, tension, dinamismo.
+   - symbolic: concepto abstracto, metafora visual pura.
+
+6. DENSIDAD VISUAL. Ajusta visual_density segun la cantidad de narracion:
+   - Mucha narracion (>3 palabras/seg) -> "simple" (fondos desenfocados,
+     composicion limpia, pocos elementos).
+   - Narracion media (2-3 palabras/seg) -> "balanced".
+   - Poca narracion (<2 palabras/seg) -> "rich" (paisajes detallados,
+     texturas ricas, profundidad de campo amplia).
+
+7. ARCO EMOCIONAL. Define visual_tone_arc como una secuencia de estados
+   emocionales separados por flechas (ej. "majestuoso->intimo->tenso->
+   tragico->esperanzador").
+
+8. FORMATO. Responde EXCLUSIVAMENTE con un JSON valido, sin markdown,
+   sin explicaciones fuera del JSON. Usa este esquema:{scene_hint}
+
+{{
+  "visual_universe": "descripcion del universo visual completo (epoca, locacion, atmosfera, paleta dominante, texturas)",
+  "visual_tone_arc": "emocion1->emocion2->emocion3->...",
+  "central_entity": {{
+    "type": "person|place|object|none",
+    "master_description": "descripcion ultra-detallada del protagonista/entidad",
+    "appears_in_scenes": [0, 3, 7],
+    "variation_by_scene": {{
+      "0": "medium shot, walking through colonnade, backlit",
+      "3": "close-up hands writing, candlelight"
+    }}
+  }},
+  "recurring_elements": ["elemento1", "elemento2", "..."],
+  "scene_visual_map": [
+    {{
+      "scene": 0,
+      "shot_type": "establishing|detail|mood|action|symbolic",
+      "visual_concept": "descripcion visual de QUE mostrar (metafora, no literal)",
+      "mood": "emocion que transmite la imagen",
+      "has_protagonist": true|false,
+      "bridge_from_prev": null,
+      "visual_density": "simple|balanced|rich"
+    }}
+  ]
+}}
+
+IMPORTANTE: visual_concept debe estar en INGLES (se usara como prompt para
+generacion de imagenes IA). El resto del JSON puede estar en espanol."""
