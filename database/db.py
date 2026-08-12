@@ -83,12 +83,23 @@ class Database:
             init_db(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
+        """Return a SQLite connection with performance PRAGMAs.
+
+        Uses WAL mode for concurrent reads, aggressive caching, and memory-mapped
+        I/O to reduce filesystem overhead on read-heavy dashboard workloads.
+        """
         conn = sqlite3.connect(self.db_path, timeout=60)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")  # Better concurrent read/write
+        conn.execute("PRAGMA journal_mode=WAL")  # concurrent read/write
         conn.execute("PRAGMA busy_timeout=45000")  # 45s wait on lock
-        conn.execute("PRAGMA wal_autocheckpoint=100")  # Keep WAL file small
+        conn.execute("PRAGMA wal_autocheckpoint=100")  # keep WAL small
+        # ── Performance PRAGMAs (v1.0 — connection reuse optimization) ──
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB page cache (negative = KB)
+        conn.execute("PRAGMA mmap_size=134217728")  # 128MB memory-mapped I/O
+        conn.execute("PRAGMA synchronous=NORMAL")  # faster writes, WAL-safe
+        conn.execute("PRAGMA temp_store=MEMORY")  # temp tables in RAM
+        conn.execute("PRAGMA optimize")  # run ANALYZE hints on close
         return conn
 
     @_with_db_lock_retry

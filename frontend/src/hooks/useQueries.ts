@@ -8,16 +8,18 @@ export function useDashboard(channelId?: number) {
     queryFn: () => api.getDashboard(channelId),
     staleTime: 60_000,
     refetchInterval: 120_000, // auto-refresh every 2 minutes
+    refetchOnWindowFocus: false,  // don't refetch on tab switch
   })
 }
 
-// ── Status Bar (always visible, poll every 10s) ──
+// ── Status Bar (always visible, poll every 30s — was 10s) ──
 export function useStatusBar() {
   return useQuery({
     queryKey: ['status-bar'],
     queryFn: () => api.getStatusBar(),
-    refetchInterval: 10_000,
-    staleTime: 5_000,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -36,8 +38,9 @@ export function useMonitorDashboard() {
   return useQuery({
     queryKey: ['monitor-dashboard'],
     queryFn: () => api.getMonitorDashboard(),
-    refetchInterval: 30_000,
-    staleTime: 10_000,
+    refetchInterval: 60_000,  // was 30s
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -54,8 +57,9 @@ export function useSystemMetrics() {
   return useQuery({
     queryKey: ['system-metrics'],
     queryFn: () => api.getSystemMetrics(),
-    refetchInterval: 5_000,
-    staleTime: 2_000,
+    refetchInterval: 15_000,  // was 5s
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -63,8 +67,9 @@ export function useActiveWorkers() {
   return useQuery({
     queryKey: ['active-workers'],
     queryFn: () => api.getActiveWorkers(),
-    refetchInterval: 5_000,
-    staleTime: 2_000,
+    refetchInterval: 15_000,  // was 5s
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -157,8 +162,9 @@ export function useActiveJobs() {
   return useQuery({
     queryKey: ['active-jobs'],
     queryFn: () => api.getActiveJobs(),
-    refetchInterval: 15_000,
-    staleTime: 10_000,
+    refetchInterval: 30_000,  // was 15s
+    staleTime: 15_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -166,9 +172,10 @@ export function useJob(jobId: number) {
   return useQuery({
     queryKey: ['job', jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: 3_000,
+    refetchInterval: 5_000,  // was 3s — still fast for job progress
     staleTime: 1_000,
     enabled: !!jobId,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -177,8 +184,9 @@ export function usePlannedSlots() {
   return useQuery({
     queryKey: ['planned-slots'],
     queryFn: () => api.getPlannedSlots(),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
+    refetchInterval: 60_000,  // was 30s
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -215,8 +223,9 @@ export function useVideo(videoId?: number) {
   return useQuery({
     queryKey: ['video', videoId ?? 0],
     queryFn: () => api.getVideo(videoId!),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
+    refetchInterval: 60_000,  // was 30s
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
     enabled: !!videoId && videoId > 0,
   })
 }

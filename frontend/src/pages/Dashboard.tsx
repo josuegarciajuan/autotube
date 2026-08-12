@@ -100,45 +100,13 @@ export default function Dashboard() {
   const [recalcSlotsResult, setRecalcSlotsResult] = useState<any>(null)
   const [recalcSlotsError, setRecalcSlotsError] = useState<string | null>(null)
 
-  // SEO scores for channels
-  const [seoScores, setSeoScores] = useState<Record<number, any>>({})
-  const [seoLoading, setSeoLoading] = useState(false)
-  const fetchSEOScores = useCallback(async (chans: any[]) => {
-    if (!chans.length) return
-    setSeoLoading(true)
-    const scores: Record<number, any> = {}
-    // Fetch SEO score + CTR for each channel in parallel
-    const results = await Promise.allSettled(
-      chans.map(async (ch: any) => {
-        const [seoRes, ctrRes] = await Promise.allSettled([
-          api.getChannelSEOScore(ch.id),
-          api.getChannelCTR(ch.id),
-        ])
-        return {
-          channelId: ch.id,
-          seo: seoRes.status === 'fulfilled' ? seoRes.value : null,
-          ctr: ctrRes.status === 'fulfilled' ? ctrRes.value : null,
-        }
-      })
-    )
-    for (const r of results) {
-      if (r.status === 'fulfilled') {
-        scores[r.value.channelId] = r.value
-      }
-    }
-    setSeoScores(scores)
-    setSeoLoading(false)
-  }, [])
+  // SEO scores — now included in the dashboard response (seo_summary)
+  // Eliminates N×2 per-channel HTTP requests (was: api.getChannelSEOScore + api.getChannelCTR)
+  const seoScores = data?.seo_summary || {}
+  const seoLoading = false  // already included in dashboard data
 
   // Console events (via React Query)
   const { data: consoleEvents = [] } = useRecentEvents(20, selectedChannelId ?? undefined)
-
-  // Fetch SEO scores when channels are loaded
-  useEffect(() => {
-    if (data?.channels?.length > 0) {
-      fetchSEOScores(data.channels)
-    }
-  }, [data?.channels, fetchSEOScores])
 
   function summarize(s: any): string {
     const chans = s.channels || []
@@ -576,8 +544,10 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {channels.map((ch: any) => {
               const seoData = seoScores[ch.id]
-              const seo = seoData?.seo
-              const ctr = seoData?.ctr
+              const ctr = seoData?.avg_ctr_30d
+              const retention = seoData?.avg_retention_30d
+              const impressions = seoData?.total_impressions_30d
+              const ctrCount = seoData?.ctr_video_count
               return (
                 <div
                   key={ch.id}
@@ -590,61 +560,49 @@ export default function Dashboard() {
                     >
                       {ch.name}
                     </span>
-                    {seo && (
+                    {ctr != null && (
                       <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                        seo.score >= 8 ? 'bg-green-500/20 text-green-400' :
-                        seo.score >= 5 ? 'bg-amber-500/20 text-amber-400' :
+                        ctr >= 5 ? 'bg-green-500/20 text-green-400' :
+                        ctr >= 2 ? 'bg-amber-500/20 text-amber-400' :
                         'bg-red-500/20 text-red-400'
                       }`}>
-                        SEO {seo.score}/{seo.score_max}
+                        CTR {ctr}%
                       </span>
                     )}
                   </div>
                   <div className="space-y-1.5 text-xs text-gray-400">
-                    {ctr?.avg_ctr_30d != null && (
+                    {ctr != null && (
                       <div className="flex justify-between">
                         <span>CTR 30d</span>
-                        <span className={ctr.avg_ctr_30d >= 5 ? 'text-green-400' : ctr.avg_ctr_30d >= 2 ? 'text-amber-400' : 'text-red-400'}>
-                          {ctr.avg_ctr_30d}%
+                        <span className={ctr >= 5 ? 'text-green-400' : ctr >= 2 ? 'text-amber-400' : 'text-red-400'}>
+                          {ctr}%
                         </span>
                       </div>
                     )}
-                    {ctr?.avg_retention_30d != null && (
+                    {retention != null && (
                       <div className="flex justify-between">
-                        <span>Retención</span>
-                        <span className={ctr.avg_retention_30d >= 40 ? 'text-green-400' : ctr.avg_retention_30d >= 25 ? 'text-amber-400' : 'text-red-400'}>
-                          {ctr.avg_retention_30d}%
+                        <span>Retencion</span>
+                        <span className={retention >= 40 ? 'text-green-400' : retention >= 25 ? 'text-amber-400' : 'text-red-400'}>
+                          {retention}%
                         </span>
                       </div>
                     )}
-                    {seo?.videos_analyzed != null && (
+                    {impressions != null && impressions > 0 && (
                       <div className="flex justify-between">
-                        <span>Videos anal.</span>
-                        <span className="text-gray-500">{seo.videos_analyzed}</span>
+                        <span>Impresiones 30d</span>
+                        <span className="text-gray-500">{impressions.toLocaleString()}</span>
                       </div>
                     )}
-                    {seo?.breakdown && (
-                      <div className="flex gap-1 mt-1.5 pt-1.5 border-t border-dark-500">
-                        {Object.entries(seo.breakdown as Record<string, any>).map(([k, v]: [string, any]) => (
-                          <div key={k} className="flex-1" title={v.detail}>
-                            <div className="h-1 rounded-full bg-dark-600 mb-0.5">
-                              <div
-                                className="h-1 rounded-full bg-neon-red"
-                                style={{ width: `${Math.round((v.score / v.max) * 100)}%` }}
-                              />
-                            </div>
-                            <span className="text-[9px] text-gray-500 block text-center">
-                              {k === 'title_length' ? 'Tit' : 
-                               k === 'power_words' ? 'PW' : 
-                               k === 'description_length' ? 'Desc' : 
-                               k === 'timestamps' ? 'Cap' : 'Tags'}
-                            </span>
-                          </div>
-                        ))}
+                    {ctrCount != null && ctrCount > 0 && (
+                      <div className="flex justify-between">
+                        <span>Videos con datos</span>
+                        <span className="text-gray-500">{ctrCount}</span>
                       </div>
                     )}
-                    {!seo && !ctr && (
-                      <div className="text-[10px] text-gray-600 italic py-1">Sin datos SEO</div>
+                    {!ctr && !retention && (
+                      <div className="text-center text-gray-600 py-2">
+                        Sin datos de analytics
+                      </div>
                     )}
                   </div>
                 </div>

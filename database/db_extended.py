@@ -1160,6 +1160,9 @@ def migrate_v2(db_path: str = None):
     # ── v35: YouTube API quota tracking log ──
     _migrate_v35(conn, logger)
     
+    # ── v36: Performance indexes for dashboard/pipeline speed ──
+    _migrate_v36(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -2343,7 +2346,73 @@ def _migrate_v35(conn, logger):
     conn.commit()
     logger.info("Migration v35: yt_quota_log table ensured")
 
-    
+
+def _migrate_v36(conn, logger):
+    """Idempotent v36: performance indexes for dashboard and pipeline speed.
+
+    Targets:
+      - video_stats_history: partial indexes for views>0 / likes>0 filter patterns
+        that cause full table scans in get_dashboard_data() channels query.
+      - generation_jobs: composite index on (action, status) for
+        count_active_longform_jobs / count_running_longform_jobs.
+      - videos: composite index on (status, video_path) for pipeline_status.
+      - shorts: index on (status, published_at) for engagement queries.
+      - channel_stats_history: partial index for subscribers>0 on delta lookups.
+    """
+    indexes = [
+        # P0: video_stats_history partial indexes for channels subquery patterns
+        # Each channel row runs MAX(id) WHERE views > 0 — without this it's a full table scan
+        ("idx_vsh_video_views_partial",
+         "video_stats_history", "(video_id, views) WHERE views > 0"),
+        ("idx_vsh_video_likes_partial",
+         "video_stats_history", "(video_id, likes) WHERE likes > 0"),
+        ("idx_vsh_video_comments_partial",
+         "video_stats_history", "(video_id, comments) WHERE comments > 0"),
+
+        # P0: generation_jobs action+status composite — used per tick in dispatch loop
+        ("idx_jobs_action_status",
+         "generation_jobs", "(action, status)"),
+
+        # P1: videos status+video_path for pipeline_status query
+        ("idx_videos_status_path",
+         "videos", "(status, video_path) WHERE video_path IS NOT NULL AND video_path != ''"),
+
+        # P1: shorts status+published_at for engagement / dashboard queries
+        ("idx_shorts_status_published",
+         "shorts", "(status, published_at) WHERE status = 'published'"),
+
+        # P2: channel_stats_history partial for delta lookups with non-zero values
+        ("idx_csh_subs_partial",
+         "channel_stats_history",
+         "(channel_id, fetched_at) WHERE subscribers > 0"),
+
+        # P2: short_stats partial for views / likes — mirrors v25 video_stats_history pattern
+        ("idx_ss_short_views_partial",
+         "short_stats", "(short_id, views) WHERE views > 0"),
+        ("idx_ss_short_likes_partial",
+         "short_stats", "(short_id, likes) WHERE likes > 0"),
+    ]
+
+    created = 0
+    for idx_name, table, columns in indexes:
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name = ?",
+            (idx_name,)
+        ).fetchone()
+        if existing:
+            continue
+        try:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}{columns}")
+            created += 1
+        except Exception as exc:
+            logger.warning("Migration v36: failed to create %s: %s", idx_name, exc)
+
+    if created:
+        logger.info("Migration v36: created %d performance indexes", created)
+    else:
+        logger.info("Migration v36: all indexes already exist")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -4423,15 +4492,72 @@ class ExtendedDatabase(Database):
             "retention_video_count": ret_row["cnt"] or 0,
             "videos": [
                 {
-                    "id": row["id"],
-                    "title": row["titulo_final"] or "Sin título",
-                    "ctr": round(row["ctr"] or 0, 2),
-                    "retention": round(row["retention"] or 0, 2),
-                    "impressions": int(row["impressions"] or 0),
+                    "id": vr["id"],
+                    "title": vr["titulo_final"],
+                    "ctr": round(vr["ctr"] or 0, 2),
+                    "retention": round(vr["retention"] or 0, 2),
+                    "impressions": int(vr["impressions"] or 0),
                 }
-                for row in video_rows
-            ],
+                for vr in video_rows
+            ] if video_rows else [],
         }
+
+    def get_all_channels_ctr_summary(self) -> dict:
+        """Batch CTR+retention summary for ALL channels in a single query.
+        
+        Avoids N+1 per-channel queries when the dashboard loads.
+        Returns dict mapping channel_id → { avg_ctr_30d, avg_retention_30d, total_impressions_30d }.
+        """
+        with self._connect() as conn:
+            # Batch CTR per channel
+            ctr_rows = conn.execute(
+                """SELECT v.channel_id,
+                          AVG(vad.metric_value) as avg_ctr, COUNT(*) as cnt
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE vad.report_type = 'ctr' AND vad.metric_value > 0
+                   GROUP BY v.channel_id"""
+            ).fetchall()
+
+            # Batch retention per channel
+            ret_rows = conn.execute(
+                """SELECT v.channel_id,
+                          AVG(vad.metric_value) as avg_ret, COUNT(*) as cnt
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE vad.report_type = 'retention_pct' AND vad.metric_value > 0
+                   GROUP BY v.channel_id"""
+            ).fetchall()
+
+            # Batch impressions per channel
+            imp_rows = conn.execute(
+                """SELECT v.channel_id,
+                          COALESCE(SUM(vad.metric_value), 0) as total
+                   FROM video_analytics_detailed vad
+                   JOIN videos v ON v.id = vad.video_id
+                   WHERE vad.report_type = 'impressions'
+                   GROUP BY v.channel_id"""
+            ).fetchall()
+
+        result = {}
+        ctr_map = {r["channel_id"]: r for r in ctr_rows}
+        ret_map = {r["channel_id"]: r for r in ret_rows}
+        imp_map = {r["channel_id"]: r for r in imp_rows}
+
+        # Collect all channel_ids
+        all_ids = set(ctr_map.keys()) | set(ret_map.keys()) | set(imp_map.keys())
+        for ch_id in all_ids:
+            ctr_r = ctr_map.get(ch_id)
+            ret_r = ret_map.get(ch_id)
+            imp_r = imp_map.get(ch_id)
+            result[ch_id] = {
+                "avg_ctr_30d": round(ctr_r["avg_ctr"] or 0, 2) if ctr_r else 0,
+                "avg_retention_30d": round(ret_r["avg_ret"] or 0, 2) if ret_r else 0,
+                "total_impressions_30d": int(imp_r["total"] or 0) if imp_r else 0,
+                "ctr_video_count": ctr_r["cnt"] if ctr_r else 0,
+                "retention_video_count": ret_r["cnt"] if ret_r else 0,
+            }
+        return result
 
     def get_channel_traffic_summary(self, channel_id: int) -> list[dict]:
         """Get aggregated traffic source breakdown for a channel.
@@ -4630,6 +4756,60 @@ class ExtendedDatabase(Database):
             views_prev = 0
             engagement_prev = 0
 
+            # ── Batch: previous channel stats (~7 days ago) — single query for ALL channels ──
+            # Eliminates N+1 query pattern (was 3 queries per channel in Python loop)
+            prev_channel_stats = conn.execute(
+                """SELECT csh.channel_id, csh.subscribers, csh.total_views,
+                          csh.estimated_minutes_watched
+                   FROM channel_stats_history csh
+                   INNER JOIN (
+                       SELECT channel_id, MAX(id) as max_id
+                       FROM channel_stats_history
+                       WHERE fetched_at <= datetime('now', '-7 days')
+                         AND subscribers > 0
+                       GROUP BY channel_id
+                   ) latest ON csh.id = latest.max_id"""
+            ).fetchall()
+            prev_stats_map = {}
+            for row in prev_channel_stats:
+                prev_stats_map[row["channel_id"]] = {
+                    "subscribers": row["subscribers"] or 0,
+                    "total_views": row["total_views"] or 0,
+                    "watch_minutes": row["estimated_minutes_watched"] or 0,
+                }
+
+            # ── Batch: previous longform engagement (~7 days ago) — single query ──
+            prev_eng_rows = conn.execute(
+                """SELECT v.channel_id,
+                          COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id
+                         AND (vsh2.likes > 0 OR vsh2.comments > 0)
+                         AND vsh2.fetched_at <= datetime('now', '-7 days')
+                   )
+                   WHERE v.yt_video_id IS NOT NULL
+                   GROUP BY v.channel_id"""
+            ).fetchall()
+            prev_eng_map = {r["channel_id"]: (r["engagement"] or 0) for r in prev_eng_rows}
+
+            # ── Batch: previous shorts engagement (~7 days ago) — single query ──
+            prev_shorts_eng_rows = conn.execute(
+                """SELECT s.channel_id,
+                          COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
+                   FROM shorts s
+                   JOIN short_stats ss ON ss.id = (
+                       SELECT MAX(ss2.id) FROM short_stats ss2
+                       WHERE ss2.short_id = s.id
+                         AND (ss2.likes > 0 OR ss2.comments > 0)
+                         AND ss2.fetched_at <= datetime('now', '-7 days')
+                   )
+                   WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
+                   GROUP BY s.channel_id"""
+            ).fetchall()
+            prev_shorts_eng_map = {r["channel_id"]: (r["engagement"] or 0) for r in prev_shorts_eng_rows}
+
             for ch in channels:
                 ch_dict = dict(ch)
                 ch_dict["engagement"] = engagement_map.get(ch_dict["id"], 0)
@@ -4654,51 +4834,20 @@ class ExtendedDatabase(Database):
                 ch_dict["watch_hours"] = watch_hours
                 total_watch_hours += watch_hours
 
-                # Get previous snapshot (~7 days ago) for delta
-                prev = conn.execute(
-                    """SELECT subscribers, total_views, estimated_minutes_watched
-                       FROM channel_stats_history
-                       WHERE channel_id = ? AND fetched_at <= datetime('now', '-7 days')
-                       ORDER BY fetched_at DESC LIMIT 1""",
-                    (ch_dict["id"],),
-                ).fetchone()
+                # Look up previous snapshot from batch results (no DB query)
+                prev = prev_stats_map.get(ch_dict["id"])
                 if prev:
-                    subscribers_prev += (prev["subscribers"] or 0)
-                    views_prev += (prev["total_views"] or 0)
-                    total_watch_hours_prev += round((prev["estimated_minutes_watched"] or 0) / 60.0, 1)
+                    subscribers_prev += prev["subscribers"]
+                    views_prev += prev["total_views"]
+                    total_watch_hours_prev += round(prev["watch_minutes"] / 60.0, 1)
 
-                # Engagement at ~7 days ago
-                eng_prev = conn.execute(
-                    """SELECT COALESCE(SUM(vsh.likes + vsh.comments), 0) as engagement
-                       FROM videos v
-                       JOIN video_stats_history vsh ON vsh.id = (
-                           SELECT MAX(vsh2.id) FROM video_stats_history vsh2
-                           WHERE vsh2.video_id = v.id
-                             AND (vsh2.likes > 0 OR vsh2.comments > 0)
-                             AND vsh2.fetched_at <= datetime('now', '-7 days')
-                       )
-                       WHERE v.yt_video_id IS NOT NULL AND v.channel_id = ?""",
-                    (ch_dict["id"],),
-                ).fetchone()
-                if eng_prev:
-                    engagement_prev += (eng_prev["engagement"] or 0)
+                # Look up previous engagement from batch results
+                ch_eng_prev = prev_eng_map.get(ch_dict["id"], 0)
+                engagement_prev += ch_eng_prev
 
-                # Shorts engagement at ~7 days ago
-                shorts_eng_prev = conn.execute(
-                    """SELECT COALESCE(SUM(ss.likes + ss.comments), 0) as engagement
-                       FROM shorts s
-                       JOIN short_stats ss ON ss.id = (
-                           SELECT MAX(ss2.id) FROM short_stats ss2
-                           WHERE ss2.short_id = s.id
-                             AND (ss2.likes > 0 OR ss2.comments > 0)
-                             AND ss2.fetched_at <= datetime('now', '-7 days')
-                       )
-                       WHERE s.status = 'published' AND s.youtube_id IS NOT NULL
-                         AND s.channel_id = ?""",
-                    (ch_dict["id"],),
-                ).fetchone()
-                if shorts_eng_prev:
-                    engagement_prev += (shorts_eng_prev["engagement"] or 0)
+                # Look up previous shorts engagement from batch results
+                ch_shorts_prev = prev_shorts_eng_map.get(ch_dict["id"], 0)
+                engagement_prev += ch_shorts_prev
 
             def _delta_pct(current, previous):
                 if previous and previous > 0 and current is not None and current > 0:
@@ -5076,6 +5225,8 @@ class ExtendedDatabase(Database):
             "streaks": streaks,
             "badges": badges,
             "today_actions": self._get_today_actions(conn, channel_id, ch_params),
+            # ── SEO / CTR summary (batched — avoids N×2 client requests) ──
+            "seo_summary": self._build_seo_summary(conn, channels_data),
         }
 
     def _get_today_actions(self, conn, channel_id=None, ch_params=()):
@@ -5166,6 +5317,77 @@ class ExtendedDatabase(Database):
         """
         rows = conn.execute(sql, ch_params * 5).fetchall()
         return [dict(r) for r in rows]
+
+    def _build_seo_summary(self, conn, channels_data: list[dict]) -> dict:
+        """Build a lightweight SEO+CTR summary for all channels in the dashboard.
+
+        Uses batch queries (not per-channel) to avoid N×2 client HTTP requests.
+        Returns dict mapping channel_id → { seo_score, ctr, impressions, ... }.
+        """
+        if not channels_data:
+            return {}
+
+        channel_ids = [ch["id"] for ch in channels_data]
+
+        # ── Batch CTR + retention ──
+        ctr_rows = conn.execute(
+            f"""SELECT v.channel_id,
+                       ROUND(AVG(vad.metric_value), 2) as avg_ctr,
+                       COUNT(*) as cnt
+                FROM video_analytics_detailed vad
+                JOIN videos v ON v.id = vad.video_id
+                WHERE vad.report_type = 'ctr' AND vad.metric_value > 0
+                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
+                GROUP BY v.channel_id""",
+            channel_ids,
+        ).fetchall()
+        ctr_map = {r["channel_id"]: r for r in ctr_rows}
+
+        ret_rows = conn.execute(
+            f"""SELECT v.channel_id,
+                       ROUND(AVG(vad.metric_value), 2) as avg_ret,
+                       COUNT(*) as cnt
+                FROM video_analytics_detailed vad
+                JOIN videos v ON v.id = vad.video_id
+                WHERE vad.report_type = 'retention_pct' AND vad.metric_value > 0
+                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
+                GROUP BY v.channel_id""",
+            channel_ids,
+        ).fetchall()
+        ret_map = {r["channel_id"]: r for r in ret_rows}
+
+        # ── Batch impressions ──
+        imp_rows = conn.execute(
+            f"""SELECT v.channel_id,
+                       COALESCE(SUM(vad.metric_value), 0) as total_imp
+                FROM video_analytics_detailed vad
+                JOIN videos v ON v.id = vad.video_id
+                WHERE vad.report_type = 'impressions'
+                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
+                GROUP BY v.channel_id""",
+            channel_ids,
+        ).fetchall()
+        imp_map = {r["channel_id"]: r for r in imp_rows}
+
+        # ── Build summary per channel ──
+        result = {}
+        for ch in channels_data:
+            ch_id = ch["id"]
+            ctr_r = ctr_map.get(ch_id)
+            ret_r = ret_map.get(ch_id)
+            imp_r = imp_map.get(ch_id)
+
+            result[ch_id] = {
+                "channel_id": ch_id,
+                "channel_name": ch.get("name", ""),
+                "channel_slug": ch.get("slug", ""),
+                "avg_ctr_30d": ctr_r["avg_ctr"] if ctr_r else 0,
+                "avg_retention_30d": ret_r["avg_ret"] if ret_r else 0,
+                "total_impressions_30d": int(imp_r["total_imp"] or 0) if imp_r else 0,
+                "ctr_video_count": ctr_r["cnt"] if ctr_r else 0,
+                "retention_video_count": ret_r["cnt"] if ret_r else 0,
+            }
+        return result
 
     # ── Channel Templates ─────────────────────────────────────
 
@@ -7229,13 +7451,9 @@ class ExtendedDatabase(Database):
             ).fetchall()
             result["warming"] = [dict(r) for r in warming]
 
-            # ── Trigger verification for videos whose publishAt time has passed ──
-            # Only spawn verification threads from within get_pipeline_status() 
-            # (called every 60s by frontend polling). This ensures surgical, 
-            # on-demand verification without a persistent background loop.
-            for row in warming:
-                _maybe_trigger_publish_verification(dict(row))
-
+            # ── Verification disabled in get_pipeline_status() ──
+            # _publish_verify_loop() in api/main.py handles this as a background task
+            # every 5 minutes, avoiding per-60s-poll YT API thread spawning.
             # ── 4b. Orphaned 'uploaded' videos (no target_public_at, no published_at) ──
             # Videos uploaded in 'immediate' mode (marathon, viral, or legacy code paths)
             # that were never transitioned to 'published'. Verify directly via YouTube API.
@@ -7259,14 +7477,7 @@ class ExtendedDatabase(Database):
                    ORDER BY v.uploaded_at DESC""",
             ).fetchall()
             result["orphaned"] = [dict(r) for r in orphaned]
-            for row in orphaned:
-                d = dict(row)
-                vid = d.get("video_id")
-                ch_slug = d.get("channel_slug", "")
-                yt_id = d.get("yt_video_id", "")
-                if vid and yt_id and ch_slug:
-                    _maybe_trigger_orphaned_verification(vid, ch_slug, yt_id)
-
+            # Orphaned verification disabled — handled by background _publish_verify_loop()
             # ── 5. Shorts pending (slots for today, not dispatched yet) ──
             # v26: Exclude slots that already have a short_id linked (pre-rendered
             # clip shorts). Those appear in ready_to_upload section (Pendiente subida).
