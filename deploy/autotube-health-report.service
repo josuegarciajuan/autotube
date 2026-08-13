@@ -1,0 +1,17 @@
+[Unit]
+Description=Autotube — informe diario de salud y alertas
+After=autotube-panel.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/autotube
+ExecStart=/usr/bin/python3 /root/autotube/scripts/daily_health_report.py
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Límite real de cuota por proyecto GCP (los canales consumen 30-55k/día;
+# ajustar al valor real de GCP Console si se conoce).
+Environment=YT_DAILY_QUOTA_LIMIT=100000
+
+[Install]
+WantedBy=multi-user.target

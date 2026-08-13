@@ -1,0 +1,11 @@
+[Unit]
+Description=Ejecuta el informe de salud de Autotube cada mañana (08:30)
+Requires=autotube-health-report.service
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
