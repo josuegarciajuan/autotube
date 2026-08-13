@@ -163,7 +163,7 @@ def _mark_deleted_in_db(db: ExtendedDatabase, video: dict, slug: str):
 
 def process_channel(slug: str, duplicates: list, yt_service,
                     db: ExtendedDatabase, dry_run: bool,
-                    max_delete: int) -> dict:
+                    max_delete: int, auto_yes: bool = False) -> dict:
     """Process all duplicate groups for one channel. Returns stats dict."""
     stats = {"groups": 0, "deleted": 0, "failed": 0, "skipped": 0, "quota": 0}
 
@@ -171,7 +171,7 @@ def process_channel(slug: str, duplicates: list, yt_service,
         logger.info("[%s] No duplicate groups to process", slug)
         return stats
 
-    # Safety: confirm with user
+    # Safety: confirm with user (unless --yes for unattended runs)
     total_to_delete = sum(max(0, len(group) - 1) for group in duplicates)
     print(f"\n{'='*60}")
     print(f"  Canal: {slug}")
@@ -184,12 +184,14 @@ def process_channel(slug: str, duplicates: list, yt_service,
     if total_to_delete == 0:
         return stats
 
-    if not dry_run:
+    if not dry_run and not auto_yes:
         confirm = input(f"\n¿Borrar {total_to_delete} vídeos duplicados de {slug}? (yes/no): ")
         if confirm.lower() not in ("yes", "y", "si", "sí"):
             logger.info("[%s] Cancelado por el usuario", slug)
             stats["skipped"] = total_to_delete
             return stats
+    elif not dry_run and auto_yes:
+        logger.info("[%s] Auto-confirmado (--yes) — procediendo", slug)
 
     remaining_deletes = max_delete if max_delete else 99999
 
@@ -233,7 +235,8 @@ def process_channel(slug: str, duplicates: list, yt_service,
 
 
 def run_cleanup(report_path: Path = None, channel_filter: str = None,
-                dry_run: bool = True, max_delete: int = None) -> dict:
+                dry_run: bool = True, max_delete: int = None,
+                auto_yes: bool = False) -> dict:
     """Run full cleanup of duplicates across all (or one) channels."""
     if report_path is None:
         report_path = _find_latest_report()
@@ -270,7 +273,7 @@ def run_cleanup(report_path: Path = None, channel_filter: str = None,
             logger.error("[%s] Auth failed — skipping", slug)
             continue
 
-        stats = process_channel(slug, duplicates, yt_service, db, dry_run, max_delete)
+        stats = process_channel(slug, duplicates, yt_service, db, dry_run, max_delete, auto_yes)
         all_stats["total_deleted"] += stats["deleted"]
         all_stats["total_failed"] += stats["failed"]
         all_stats["total_skipped"] += stats["skipped"]
@@ -314,6 +317,8 @@ if __name__ == "__main__":
                         help="Max videos to delete per channel (safety cap)")
     parser.add_argument("--report", type=str, default=None,
                         help="Path to specific diagnose report JSON")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip interactive confirmation (for unattended runs)")
     args = parser.parse_args()
 
     dry_run = not args.execute
@@ -325,6 +330,7 @@ if __name__ == "__main__":
         channel_filter=args.channel,
         dry_run=dry_run,
         max_delete=args.max_delete,
+        auto_yes=args.yes,
     )
 
     if "error" in stats:
