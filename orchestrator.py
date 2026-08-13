@@ -104,6 +104,9 @@ class PipelineOrchestrator:
 
         # Inter-phase state (computed once, used in subsequent phases)
         self._last_scene_ranges: list[dict] | None = None
+        # Final media assets (1:1 with scene_ranges) — kept for the
+        # verification report (scripts/test_visual_coherence.py).
+        self._last_media_assets: list[dict] | None = None
 
         # Theme extraction (lazy-loaded, shared across phases)
         self._theme_extractor = None
@@ -1128,6 +1131,7 @@ class PipelineOrchestrator:
 
             # ── Save scene_ranges for phase_video (ensures 1:1 alignment) ──
             self._last_scene_ranges = scene_ranges
+            self._last_media_assets = None
 
             # ── Phase 3: Visual Bible (LLM-generated visual direction) ──
             if self._media_strategy.get("visual_bible_enabled", False):
@@ -1148,6 +1152,7 @@ class PipelineOrchestrator:
                 scene_ranges=scene_ranges,
                 progress_cb=_media_progress,
             )
+            self._last_media_assets = media_assets
 
             # Post-process images only (videos are used as-is)
             skip_processing = getattr(self.config, "IMAGE_PROCESSING_DISABLED", False)
