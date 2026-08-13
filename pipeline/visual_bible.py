@@ -144,27 +144,41 @@ class VisualBibleGenerator:
 
         try:
             logger.info("Generating visual bible for %d scenes...", num_scenes)
-            # Determine which model to use
-            model = model_name
-            if not model:
-                # Fall back to the script generator's first pool model
+            result = None
+            last_error = None
+            # Reuse the script generator's model pool with proper failover.
+            # ``iter_models()`` yields ``(ModelEntry, OpenAI client)`` tuples;
+            # pass the client explicitly so we never fall back to the legacy
+            # client, and pass the actual model id so the call resolves
+            # against the client's own provider.
+            for entry, client in self._script_gen.model_pool.iter_models():
+                # If a specific model was requested, skip non-matching entries.
+                if model_name and model_name not in (entry.model_id, entry.display_name):
+                    continue
                 try:
-                    for entry in self._script_gen.model_pool.iter_models():
-                        model = entry.model_id
-                        break
-                except Exception:
-                    model = "gpt-4o-mini"  # absolute fallback
+                    result = self._script_gen._llm_json_call(
+                        thinking=True,
+                        client=client,
+                        model=entry.model_id,
+                        model_name=entry.display_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.7,
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Visual bible: model %s failed: %s",
+                        entry.display_name, exc,
+                    )
 
-            result = self._script_gen._llm_json_call(
-                thinking=True,
-                model=model,
-                model_name=model or "visual-bible",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.7,
-            )
+            if result is None:
+                raise last_error if last_error else RuntimeError(
+                    "No model available in pool for visual bible"
+                )
             bible = VisualBible.from_dict(result, num_scenes)
             logger.info(
                 "Visual bible generated: universe=%s..., entity=%s, %d scenes",
