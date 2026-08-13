@@ -43,7 +43,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 # ── Lifecycle monitoring (import AFTER sys.path fix) ──
-from api.services.lifecycle_monitor import log_event as log_lifecycle
+from api.services.lifecycle_monitor import (
+    log_event as log_lifecycle,
+    log_phase_start,
+    log_phase_end,
+    log_phase_error,
+)
 from api.utils import db_now
 
 
@@ -818,9 +823,11 @@ def run_job(
                 db.update_video(video_id, progress=12, progress_phase="scrape")
                 _save_checkpoint(video_id, "scrape", {"items_added": 0}, db)
         else:
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='scrape', channel_id=channel_id)
             orch.phase_scrape()
             db.update_video(video_id, progress=12, progress_phase="scrape")
             _save_checkpoint(video_id, "scrape", {"items_added": 0}, db)
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='scrape', channel_id=channel_id)
 
         # ═══════════════════════════════════════════════════════
         # Phase 1: Script
@@ -832,7 +839,8 @@ def run_job(
         else:
             db.update_video(video_id, progress=15, progress_phase="script")
             logger.info("Phase 1/6: Generating script...")
-            
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='script', channel_id=channel_id)
+
             script = orch.phase_generate_script()
             if not script:
                 logger.warning("Script generation failed — retrying after re-scrape...")
@@ -844,6 +852,8 @@ def run_job(
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="script")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='script',
+                                error=error_msg, channel_id=channel_id)
                 return False
             
             db.update_video(video_id, progress=25, progress_phase="script",
@@ -857,6 +867,7 @@ def run_job(
                 "escenas_json": script.get("escenas_json", []),
                 "titulo_options": _titulo_opts,
             }, db)
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='script', channel_id=channel_id)
         
         titulo = (
             script.get("titulo_selected")
@@ -875,15 +886,19 @@ def run_job(
         else:
             db.update_video(video_id, progress=27, progress_phase="pre_validate")
             logger.info("Phase 1.5/7: Pre-validating script quality...")
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='pre_validate', channel_id=channel_id)
             try:
                 orch.phase_pre_validate(script)
                 db.update_video(video_id, progress=27, progress_phase="pre_validate")
                 _save_checkpoint(video_id, "pre_validate", {"passed": True}, db)
+                log_phase_end(db, entity_type='video', entity_id=video_id, phase='pre_validate', channel_id=channel_id)
             except RuntimeError as ve:
                 error_msg = str(ve)
                 logger.error("Pre-validation FAILED: %s", error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="pre_validate")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='pre_validate',
+                                error=error_msg, channel_id=channel_id)
                 return False
 
         # ═══════════════════════════════════════════════════════
@@ -901,6 +916,7 @@ def run_job(
 
             db.update_video(video_id, progress=30, progress_phase="tts")
             logger.info("Phase 2/6: Generating TTS audio...")
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='tts', channel_id=channel_id)
 
             audio_data = orch.phase_tts(script, job_id=job_id)
             if not audio_data:
@@ -908,6 +924,8 @@ def run_job(
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="tts")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='tts',
+                                error=error_msg, channel_id=channel_id)
                 return False
             
             db.update_video(video_id, progress=40, progress_phase="tts")
@@ -916,6 +934,7 @@ def run_job(
                 "timestamps_path": audio_data.get("timestamps_path", ""),
                 "cta_audio_path": audio_data.get("cta_audio_path", ""),
             }, db)
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='tts', channel_id=channel_id)
         
         audio_dur = 0
         if audio_data and isinstance(audio_data, dict) and audio_data.get("timestamps"):
@@ -940,7 +959,8 @@ def run_job(
         else:
             db.update_video(video_id, progress=45, progress_phase="media")
             logger.info("Phase 3/6: Fetching media assets...")
-            
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='media', channel_id=channel_id)
+
             media_assets = orch.phase_media(script, audio_data, job_id=job_id)
             if not media_assets:
                 if media_assets is None:
@@ -953,6 +973,8 @@ def run_job(
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="media",
                                 error_message=error_msg)
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='media',
+                                error=error_msg, channel_id=channel_id)
                 return False
             
             db.update_video(video_id, progress=55, progress_phase="media")
@@ -961,6 +983,7 @@ def run_job(
                             "source": a.get("source", "?")}
                            for a in (media_assets if isinstance(media_assets, list) else [])],
             }, db)
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='media', channel_id=channel_id)
         
         n_video = sum(1 for a in (media_assets or []) if isinstance(a, dict) and a.get("type") == "video")
         n_image = sum(1 for a in (media_assets or []) if isinstance(a, dict) and a.get("type") == "image")
@@ -986,7 +1009,8 @@ def run_job(
             
             db.update_video(video_id, progress=60, progress_phase="video")
             logger.info("Phase 4/7: Assembling video...")
-            
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='video', channel_id=channel_id)
+
             # ── Memory guard: wait if system is critically low on RAM ──
             # ffmpeg xfade concat of 200+ segments with crossfades consumes
             # GBs of memory. If we're already near OOM, the concat will crash
@@ -996,6 +1020,8 @@ def run_job(
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg, phase="video")
                 db.update_video(video_id, status="error", progress_phase="video")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='video',
+                                error=error_msg, channel_id=channel_id)
                 return False
             
             # ── CRITICAL SECTION: block SIGTERM during video assembly ──
@@ -1037,6 +1063,8 @@ def run_job(
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="video")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='video',
+                                error=error_msg, channel_id=channel_id)
                 return False
             
             db.update_video(video_id, progress=75, progress_phase="video", status="ready")
@@ -1046,6 +1074,7 @@ def run_job(
                 "thumbnail_path": str(video_data.get("thumbnail_path", "")),
                 "titulo": str(video_data.get("titulo", "")),
             }, db)
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='video', channel_id=channel_id)
         
         logger.info("Video: %s", video_data.get("video_path", "?") if video_data else "?")
 
@@ -1057,7 +1086,8 @@ def run_job(
         else:
             db.update_video(video_id, progress=78, progress_phase="metadata")
             logger.info("Phase 5/7: Generating SEO metadata...")
-            
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='metadata', channel_id=channel_id)
+
             try:
                 metadata = orch.phase_metadata(script, video_data)
             except Exception as meta_exc:
@@ -1180,6 +1210,8 @@ def run_job(
                     status="ready",
                 )
 
+            log_phase_end(db, entity_type='video', entity_id=video_id, phase='metadata', channel_id=channel_id)
+
         # Save scenes (from media checkpoint or freshly generated)
         if media_assets and video_data:
             try:
@@ -1221,6 +1253,7 @@ def run_job(
         else:
             db.update_video(video_id, progress=87, progress_phase="post_validate")
             logger.info("Phase 5.5/7: Post-validating video & metadata quality...")
+            log_phase_start(db, entity_type='video', entity_id=video_id, phase='post_validate', channel_id=channel_id)
             try:
                 val_result = orch.phase_post_validate(video_data, metadata, script)
                 # Auto-fixes may have updated metadata — sync to DB
@@ -1245,11 +1278,14 @@ def run_job(
                     )
                 db.update_video(video_id, progress=87, progress_phase="post_validate")
                 _save_checkpoint(video_id, "post_validate", {"passed": True}, db)
+                log_phase_end(db, entity_type='video', entity_id=video_id, phase='post_validate', channel_id=channel_id)
             except RuntimeError as ve:
                 error_msg = str(ve)
                 logger.error("Post-validation FAILED: %s", error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="validation_failed", progress_phase="post_validate")
+                log_phase_error(db, entity_type='video', entity_id=video_id, phase='post_validate',
+                                error=error_msg, channel_id=channel_id)
                 return False
 
         # ═══════════════════════════════════════════════════════
@@ -1401,7 +1437,7 @@ def run_job(
             # ── Log lifecycle: upload started ──
             try:
                 log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
-                              event='upload_started', status='started',
+                              event='upload_started', phase='upload', status='started',
                               message='Uploading to YouTube',
                               metadata={'publish_mode': video_record.get('publish_mode') if video_record else 'immediate'})
             except Exception:
@@ -1641,7 +1677,7 @@ def run_job(
                 # ── Log lifecycle: upload failed ──
                 try:
                     log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
-                                  event='upload_failed', status='failed',
+                                  event='upload_failed', phase='upload', status='failed',
                                   message='Upload to YouTube failed — video saved locally')
                 except Exception:
                     pass
@@ -1658,7 +1694,7 @@ def run_job(
             pub_mode = video_record.get('publish_mode', 'immediate') if video_record else 'immediate'
             event_msg = f'Uploaded to YouTube (yt_id={yt_video_id})' if upload_completed and yt_video_id else 'Generation completed (no upload)'
             log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,
-                          event=event_type, status='completed',
+                          event=event_type, phase='upload', status='completed',
                           message=event_msg,
                           metadata={'duration_ms': pipeline_duration * 1000,
                                     'yt_video_id': yt_video_id,
