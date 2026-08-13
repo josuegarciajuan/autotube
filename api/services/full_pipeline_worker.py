@@ -808,7 +808,11 @@ def run_job(
                     # Inject playlist keywords into orchestrator for viral mode
                     config_json = ch.get("config_json", "{}")
                     if isinstance(config_json, str):
-                        import json; config_json = json.loads(config_json)
+                        # 'json' ya está importado a nivel de módulo (línea 25).
+                        # El 'import json' local aquí sombreaba el global y causaba
+                        # "local variable 'json' referenced before assignment" cuando
+                        # el bloque scrape se saltaba (upload_only / resume).
+                        config_json = json.loads(config_json)
                     generated = config_json.get("PLAYLISTS_GENERATED", [])
                     for pl_cfg in generated:
                         if pl_cfg.get("slug") == target_pl["slug"]:
