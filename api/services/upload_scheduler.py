@@ -370,6 +370,136 @@ def _check_for_overlapping_targets(db, channel_id: int, slug: str,
     return effective_target
 
 
+# ── Threshold (hours) beyond which a scheduled_upload_at is considered
+# far-future and reset. Upload windows are daily (e.g. 10-13, 20-22), so a
+# video should never wait >12h for the next window. Values beyond this mean
+# the seed came from a stale/deferred planned slot.
+FAR_FUTURE_UPLOAD_HOURS = 12
+
+
+def _recover_inconsistent_upload_times(db) -> int:
+    """Self-heal: fix awaiting_upload videos whose upload/public times are inconsistent.
+
+    Fixes two symptoms observed in production:
+      1. target_public_at stale (in the past, or within warmup) relative to now —
+         the video would upload with a publishAt already passed → "publish before upload".
+      2. scheduled_upload_at far in the future (>FAR_FUTURE_UPLOAD_HOURS) — seeded
+         from a deferred planned slot, making a ready video wait days → "upload too far".
+
+    For (1): recalculates target_public_at to the next peak slot.
+    For (2): resets scheduled_upload_at to NULL so dispatch_due_uploads computes a
+             fresh time in the next available upload window.
+
+    Returns the number of videos fixed.
+    """
+    fixed = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, v.scheduled_upload_at, v.target_public_at,
+                          c.slug, c.config_json
+                   FROM videos v
+                   JOIN channels c ON c.id = v.channel_id
+                   WHERE v.status = 'awaiting_upload'
+                     AND v.video_path IS NOT NULL AND v.video_path != ''
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
+                """
+            ).fetchall()
+    except Exception as exc:
+        logger.debug("Consistency scan skipped: %s", exc)
+        return 0
+
+    from pipeline.publish_scheduler import (
+        _target_is_stale, ensure_future_target_public_at,
+    )
+
+    now = datetime.now()
+    for row in rows:
+        video_id = row["id"]
+        channel_id = row["channel_id"]
+        slug = row["slug"]
+        sched_val = row["scheduled_upload_at"]
+        tpa = row["target_public_at"]
+
+        cfg = {}
+        try:
+            cfg = json.loads(row["config_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+        warmup = int(cfg.get("PUBLISH_WARMUP_MIN", 120)) or 120
+
+        changed = False
+
+        # ── (1) stale target_public_at → recalc ──
+        tpa_stale = _target_is_stale(tpa, timezone_str=tz_str, warmup_min=warmup)
+
+        # ── (2) far-future scheduled_upload_at → reset ──
+        sched_far_future = False
+        if sched_val:
+            try:
+                sched_dt = datetime.strptime(str(sched_val)[:19], "%Y-%m-%d %H:%M:%S")
+                if sched_dt > now + timedelta(hours=FAR_FUTURE_UPLOAD_HOURS):
+                    sched_far_future = True
+            except (ValueError, TypeError):
+                pass
+
+        if not tpa_stale and not sched_far_future:
+            continue
+
+        # ── Recalc target_public_at whenever either condition holds ──
+        # If scheduled_upload_at is being reset to NULL, the video will upload
+        # ASAP in the next window, so its publish time must be recomputed to a
+        # future peak (>= upload + warmup). Recalculating here keeps both fields
+        # consistent in a single pass.
+        new_tpa = None
+        try:
+            new_tpa = ensure_future_target_public_at(
+                tpa, slug=slug, timezone_str=tz_str,
+                db=db, channel_id=channel_id,
+                warmup_min=warmup, jitter_min=0,
+            )
+            db.update_video(video_id, target_public_at=new_tpa)
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE planned_slots SET target_public_at = ? WHERE video_id = ?",
+                    (new_tpa, video_id),
+                )
+                conn.execute(
+                    "UPDATE video_lifecycle_actions SET scheduled_for = ? "
+                    "WHERE video_id = ? AND action_type = 'go_public'",
+                    (new_tpa, video_id),
+                )
+                conn.commit()
+            logger.warning(
+                "🔁 Consistency: video #%d (%s) target_public_at %s → %s",
+                video_id, slug, str(tpa)[:19] if tpa else "None", new_tpa[:19],
+            )
+            changed = True
+        except Exception as exc:
+            logger.debug("[%s] target_public_at recalc failed: %s", slug, exc)
+
+        # ── Reset far-future scheduled_upload_at so upload happens ASAP ──
+        # NOTE: db.update_video() ignores None values, so we write NULL via raw SQL.
+        if sched_far_future:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE videos SET scheduled_upload_at = NULL WHERE id = ?",
+                    (video_id,),
+                )
+                conn.commit()
+            logger.warning(
+                "🔁 Consistency: video #%d (%s) scheduled_upload_at %s is >%dh ahead → reset",
+                video_id, slug, str(sched_val)[:19], FAR_FUTURE_UPLOAD_HOURS,
+            )
+            changed = True
+
+        if changed:
+            fixed += 1
+
+    return fixed
+
+
 def _spawn_upload_worker(job_id: int, channel_id: int, video_id: int) -> bool:
     """Fase 1.3: lanza la subida como subproceso independiente (sobrevive reinicios).
 
@@ -444,6 +574,10 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # This catches videos that got stuck due to server restart / worker crash
     # where the startup recovery didn't revert them (e.g. race condition, missed tick).
     _recover_stuck_uploading_videos(db)
+
+    # ── 0b. Consistency scan: fix stale target_public_at / far-future scheduled_upload_at ──
+    # Self-heals the "publish before upload" and "upload too far" inconsistencies.
+    _recover_inconsistent_upload_times(db)
 
     # ── 1. Count active upload jobs ──
     active_uploads = db.count_active_upload_jobs()

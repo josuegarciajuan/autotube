@@ -51,6 +51,53 @@ from api.services.lifecycle_monitor import (
 )
 from api.utils import db_now
 
+# ── Maximum hours ahead we allow when seeding scheduled_upload_at from a
+# planned slot's target_upload_at. Beyond this, the slot's upload target is
+# treated as a far-future buffer slot and the upload scheduler computes a
+# fresh time instead (avoiding videos sitting in awaiting_upload for days).
+MAX_SEED_UPLOAD_AT_AHEAD_HOURS = 12
+
+
+def _clamp_seed_upload_at(raw_seed: str, canal: str):
+    """Clamp a planned slot's target_upload_at into a sane seed value.
+
+    Returns the raw string if it is within [now, now+12h], else None.
+    None means "don't seed" — the upload scheduler will compute a fresh time
+    in the next available upload window.
+    """
+    if not raw_seed:
+        return None
+    _log = logging.getLogger("autotube.worker")
+    try:
+        from datetime import datetime as _dt
+        raw = str(raw_seed).strip()
+        # Accept both naive "YYYY-MM-DD HH:MM:SS" and ISO/T-separated forms.
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                seed_dt = _dt.strptime(raw[:19], fmt)
+                break
+            except ValueError:
+                seed_dt = None
+        if seed_dt is None:
+            return None
+        if seed_dt.tzinfo is None:
+            seed_dt = seed_dt.replace(tzinfo=timezone.utc)
+        from datetime import timedelta as _td
+        now = _dt.now(timezone.utc)
+        if seed_dt < now:
+            _log.info("[%s] Slot upload target %s is in the past — not seeding", canal, raw)
+            return None
+        if seed_dt > now + _td(hours=MAX_SEED_UPLOAD_AT_AHEAD_HOURS):
+            _log.info(
+                "[%s] Slot upload target %s is >%dh ahead — not seeding (upload scheduler will reschedule)",
+                canal, raw, MAX_SEED_UPLOAD_AT_AHEAD_HOURS,
+            )
+            return None
+        return raw
+    except Exception as exc:
+        _log.debug("[%s] Could not parse seed upload_at '%s': %s", canal, raw_seed, exc)
+        return None
+
 
 # ── Logging setup ──────────────────────────────────────────────────
 
@@ -1380,9 +1427,15 @@ def run_job(
                 try:
                     slot = db.get_planned_slot_for_video(video_id)
                     if slot and slot.get("target_upload_at"):
-                        seed_upload_at = str(slot["target_upload_at"])
-                        logger.info("[%s] Seeded scheduled_upload_at=%s from planned slot #%s",
-                                     canal, seed_upload_at, slot.get("id"))
+                        raw_seed = str(slot["target_upload_at"])
+                        # ── v (Aug 2026): clamp far-future / past seed ──
+                        # The "pipeline continua" replan can set target_upload_at days
+                        # ahead while generation finishes now. Seeding that far-future
+                        # value makes the video sit in awaiting_upload for days. If the
+                        # slot's upload target is >12h away (or in the past), leave
+                        # scheduled_upload_at NULL so the upload scheduler computes a
+                        # fresh time in the next upload window.
+                        seed_upload_at = _clamp_seed_upload_at(raw_seed, canal)
                     # Check if target_public_at is stale using proper timezone-aware comparison
                     vr = db.get_video(video_id)
                     tpa = vr.get("target_public_at") if vr else None

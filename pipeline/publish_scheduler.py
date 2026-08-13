@@ -1017,8 +1017,13 @@ def _target_is_stale(target_public_at: Optional[str],
                      warmup_min: int = 120) -> bool:
     """Check if a target_public_at is already in the past (stale).
 
-    Returns True if the target is before now_utc.
-    Returns False if the target is in the future or None.
+    Returns True if the target is before now_utc (+ warmup buffer).
+    Returns False if the target is sufficiently in the future, or None.
+
+    v (Aug 2026): warmup_min is now honored. Previously it was accepted but
+    ignored, so a target only minutes away was treated as "not stale" and the
+    video uploaded with a publishAt with no YouTube processing margin. Now a
+    target within warmup_min of now triggers recalculation.
     """
     if not target_public_at:
         return True  # No target at all → needs recalculation
@@ -1028,6 +1033,8 @@ def _target_is_stale(target_public_at: Optional[str],
         return True  # Can't parse → treat as stale
 
     now_utc = datetime.now(timezone.utc)
+    if warmup_min and warmup_min > 0:
+        return parsed < now_utc + timedelta(minutes=warmup_min)
     return parsed < now_utc
 
 

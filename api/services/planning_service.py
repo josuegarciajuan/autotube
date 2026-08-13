@@ -701,7 +701,22 @@ def compute_daily_slots(
                 new_total = prev_h * 60 + prev_m + min_gap
                 nh = min(new_total // 60, 23)
                 nm = new_total % 60
+                push_delta = new_total - (curr_h * 60 + curr_m)
                 curr["target_upload_at"] = f"{curr['date_key']} {nh:02d}:{nm:02d}:00"
+                # ── v (Aug 2026): keep target_public_at >= target_upload_at ──
+                # Pushing the upload forward without touching the publish time
+                # could leave target_upload_at > target_public_at (publish before
+                # upload). Push target_public_at by the same delta so ordering holds.
+                tpa = curr.get("target_public_at")
+                if tpa:
+                    try:
+                        from datetime import datetime as _dtp, timedelta as _tdp
+                        _tpa_dt = _dtp.strptime(str(tpa)[:19], "%Y-%m-%d %H:%M:%S")
+                        _tpa_dt = _tpa_dt + _tdp(minutes=push_delta)
+                        curr["target_public_at"] = _tpa_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except (ValueError, TypeError):
+                        # target_public_at may already be ISO/UTC — leave as-is
+                        pass
                 logger.info(
                     "compute_daily_slots: [%s] pushed slot #%d target from %02d:%02d → %02d:%02d "
                     "(gap was %d min < %d min)",
@@ -3543,9 +3558,22 @@ def _resolve_cross_day_collisions(slots: list[dict]) -> None:
                 new_total = prev_h * 60 + prev_m + min_gap
                 nh = min(new_total // 60, 23)
                 nm = new_total % 60
+                push_delta = new_total - (curr_h * 60 + curr_m)
                 curr["target_upload_at"] = (
                     f"{curr['date_key']} {nh:02d}:{nm:02d}:00"
                 )
+                # ── v (Aug 2026): keep target_public_at >= target_upload_at ──
+                # Only applies to scheduled slots where target_public_at is a
+                # naive local string (ISO/UTC strings are left untouched).
+                if curr.get("publish_mode") == "scheduled":
+                    tpa = curr.get("target_public_at")
+                    if tpa and " " in str(tpa):
+                        try:
+                            _tpa_dt = _dt.strptime(str(tpa)[:19], "%Y-%m-%d %H:%M:%S")
+                            _tpa_dt = _tpa_dt + _td(minutes=push_delta)
+                            curr["target_public_at"] = _tpa_dt.strftime("%Y-%m-%d %H:%M:%S")
+                        except (ValueError, TypeError):
+                            pass
 
     # Recalculate target_upload_at for non-scheduled
     for s in slots:
