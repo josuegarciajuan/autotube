@@ -370,6 +370,43 @@ def _check_for_overlapping_targets(db, channel_id: int, slug: str,
     return effective_target
 
 
+def _spawn_upload_worker(job_id: int, channel_id: int, video_id: int) -> bool:
+    """Fase 1.3: lanza la subida como subproceso independiente (sobrevive reinicios).
+
+    Antes la subida corría in-process (ThreadPoolExecutor en start_upload_job_from_scheduler)
+    y moría en cada reinicio del API → 77 fallos 'Server restarted' en 4 días.
+    Ahora usa full_pipeline_worker.py --action upload_only como proceso con
+    start_new_session=True, igual que las generaciones.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    from config import settings
+
+    worker = Path(__file__).parent / "full_pipeline_worker.py"
+    log_path = settings.LOGS_DIR / f"worker_{job_id}.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable, str(worker),
+            "--job-id", str(job_id),
+            "--channel-id", str(channel_id),
+            "--video-id", str(video_id),
+            "--action", "upload_only",
+        ]
+        subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdout=open(log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+        logger.info("📤 Upload worker spawned: job=%d video=%d (subprocess)", job_id, video_id)
+        return True
+    except Exception as e:
+        logger.error("Failed to spawn upload worker for job %d: %s", job_id, e)
+        return False
+
+
 def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     """Check for awaiting_upload videos and dispatch upload jobs.
 
@@ -733,10 +770,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                          progress=0)
         return None
 
-    # ── 5. Create upload job and dispatch ──
-    import asyncio
-    from api.services.generation_service import start_upload_job_from_scheduler
-
+    # ── 5. Create upload job and dispatch (Fase 1.3: subproceso independiente) ──
     job_id = db.create_job(channel_id, "upload_only", video_id)
     db.update_job(job_id, status="running")
 
@@ -762,24 +796,14 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     except Exception:
         pass
 
-    try:
-        if loop is None:
-            loop = asyncio.get_running_loop()
-        asyncio.run_coroutine_threadsafe(
-            start_upload_job_from_scheduler(
-                job_id=job_id,
-                video_id=video_id,
-                channel_id=channel_id,
-            ),
-            loop,
-        )
-    except Exception as e:
+    # ── Fase 1.3: spawn subproceso independiente (sobrevive reinicios) ──
+    if not _spawn_upload_worker(job_id, channel_id, video_id):
         logger.error(
-            "Failed to schedule upload task for job %d (video %d): %s — cleaning up",
-            job_id, video_id, e,
+            "Failed to spawn upload worker for job %d (video %d) — cleaning up",
+            job_id, video_id,
         )
         db.update_job(job_id, status="failed",
-                       error_msg=f"Upload scheduling failed: {e}"[:500])
+                       error_msg="Failed to spawn upload worker")
         db.update_video(video_id, status="awaiting_upload",
                          progress_phase="upload",
                          scheduled_upload_at=None)

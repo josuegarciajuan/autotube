@@ -583,8 +583,16 @@ def run_job(
     
     # ── 3. Load checkpoint (resume support) ───────────────────
     checkpoint, last_phase, last_idx = _load_checkpoint(video_id, db)
-    
-    if last_idx >= 0:
+
+    # ── Fase 1.3 (ago 2026): upload_only salta TODA la generación ──
+    # El vídeo ya está generado (F1) — solo subir, sin re-scrapear/re-renderizar.
+    # script/video_data/metadata se cargan del checkpoint (claves 'script',
+    # 'video', 'metadata' guardadas por generate_only).
+    if action == "upload_only":
+        start_idx = _PHASE_INDEX["upload"]
+        start_phase = "upload"
+        logger.info("upload_only: saltando generación, inicio directo en '%s'", start_phase)
+    elif last_idx >= 0:
         start_idx = last_idx + 1
         start_phase = _PHASE_ORDER[start_idx] if start_idx < len(_PHASE_ORDER) else "done"
         logger.info("Checkpoint found: last_phase=%s (idx=%d) → resuming from %s",
@@ -613,7 +621,9 @@ def run_job(
     # ── 5. Update job and video status ────────────────────────
     db.update_job(job_id, status="running", started_at=db_now(),
                   worker_pid=os.getpid(), pipeline_phase="prep")
-    db.update_video(video_id, status="generating", progress=1 if start_idx == 0 else 2, 
+    # Fase 1.3: upload_only marca 'uploading' (no 'generating' — el vídeo ya existe)
+    _start_status = "uploading" if action == "upload_only" else "generating"
+    db.update_video(video_id, status=_start_status, progress=1 if start_idx == 0 else 2,
                     progress_phase="inicio" if start_idx == 0 else f"resume_{start_phase}",
                     generation_started_at=db_now())
 
