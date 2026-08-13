@@ -1308,8 +1308,11 @@ def run_job(
             ENABLE_AB_TESTING = False
         
         skip_upload = not upload or test_mode or action == "generate_only"
-        
-        if ENABLE_AB_TESTING and not skip_upload and action != "generate_only":
+
+        # Fase 1.3: upload_only NO genera variantes A/B (la miniatura ya existe en F1).
+        # Antes el upload in-process (start_upload_job_from_scheduler) tampoco lo hacía —
+        # evitamos consumir créditos Pollo/LLM en cada subida F2.
+        if ENABLE_AB_TESTING and not skip_upload and action not in ("generate_only", "upload_only"):
             db.update_video(video_id, progress=88, progress_phase="ab_test_thumbnails")
             logger.info("Phase 5.8/7: Generating A/B thumbnail variants...")
             
