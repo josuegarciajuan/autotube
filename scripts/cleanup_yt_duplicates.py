@@ -88,9 +88,27 @@ def _authenticate(slug: str):
 
 
 def _select_canonical(group: list[dict]) -> dict:
-    """Select the canonical video to keep (most views, then earliest published)."""
+    """Select the canonical video to keep (most views, then earliest published).
+
+    v24.1 fix: dedupe by yt_video_id FIRST. The diagnose report can contain
+    the same video ID twice (pagination overlap), which previously caused the
+    canonical video to also appear in `duplicates` and get DELETED. Deduping
+    guarantees the kept video is never in the delete list.
+    """
     if not group:
         raise ValueError("Empty duplicate group")
+
+    # Dedupe by yt_video_id, keeping the first occurrence
+    seen_ids = set()
+    deduped = []
+    for v in group:
+        yt_id = v.get("yt_video_id")
+        if yt_id and yt_id in seen_ids:
+            continue
+        if yt_id:
+            seen_ids.add(yt_id)
+        deduped.append(v)
+    group = deduped
 
     # Sort by views desc, then by published_at asc
     def _sort_key(v):

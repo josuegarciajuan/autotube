@@ -95,24 +95,30 @@ def _authenticate(slug: str) -> Any:
 
 
 def _slugify_title(title: str) -> str:
-    """Normalize title for duplicate detection."""
+    """Normalize title for duplicate detection (conservative).
+
+    Only removes case, spaced separators (" — ", " | "), trailing
+    parenthetical/bracket decorations ((REAL), [LIMITADO], etc.), and
+    punctuation. Does NOT remove content words — over-grouping distinct
+    videos (e.g. "dormir" vs "morir", "Göbekli Tepe" vs "Karahan Tepe")
+    is far more dangerous than missing a duplicate.
+    """
     import re
     t = title.lower().strip()
-    # Remove common suffixes that differ between dupes
-    t = re.sub(r'\s*[—–-]\s*.*$', '', t)  # remove "— El Secreto X" suffixes
-    t = re.sub(r'\s*\|.*$', '', t)         # remove "| Something" suffixes
-    t = re.sub(r'[^\w\s]', '', t)          # remove punctuation
+    # Remove series suffix after a SPACED separator only (so "K-141" is not
+    # truncated to "K"). Handles "Título — El Secreto X" and "Título | Serie".
+    t = re.split(r'\s+[—–|]\s+', t, maxsplit=1)[0]
+    # Strip trailing bracketed/parenthetical decorations repeatedly:
+    # (REAL), (Documental), [LIMITADO], [CLASIFICADO], (DOCUMENTAL), etc.
+    while True:
+        t2 = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]\s*$', '', t).strip()
+        if t2 == t:
+            break
+        t = t2
+    # Remove remaining punctuation and collapse whitespace
+    t = re.sub(r'[^\w\s]', ' ', t)
     t = re.sub(r'\s+', ' ', t).strip()
-    # Normalize common word variations
-    for word in ['documental', 'real', 'caso real', 'casos reales',
-                 'misterio', 'historia', 'revelación', 'revelado',
-                 'inesperado', 'fascinante', 'desconocido', 'oculto',
-                 'secreto', 'increíble', 'imposible', 'verdad',
-                 'explicación', 'sin explicación', 'confirmado']:
-        t = t.replace(f' {word} ', ' ').replace(f' ({word})', '').replace(f' [{word}]', '')
-        if t.endswith(f' {word}'):
-            t = t[:-(len(word)+1)]
-    return t.strip()
+    return t
 
 
 def _compute_title_similarity(a: str, b: str) -> float:
@@ -127,26 +133,22 @@ def _compute_title_similarity(a: str, b: str) -> float:
 
 
 def _find_duplicates_by_title(yt_videos: list[dict]) -> list[dict]:
-    """Group YT videos by normalized title similarity > 0.7."""
-    groups = []
-    used = set()
+    """Group YT videos by EXACT normalized title (dict keyed by slug).
 
-    for i, va in enumerate(yt_videos):
-        if i in used:
+    v24.1 fix: replaced fuzzy Jaccard similarity (>0.70) with exact-title
+    grouping. The fuzzy matching grouped DISTINCT videos that differed by a
+    single content word (e.g. 'dormir' vs 'morir' vs 'soñar', 'dolor' vs
+    'hambre', 'Göbekli Tepe' vs 'Karahan Tepe'), causing cleanup to DELETE
+    legitimate distinct videos with thousands of views. Exact matching only
+    groups true re-uploads (identical titles after normalization).
+    """
+    buckets: dict[str, list[dict]] = {}
+    for v in yt_videos:
+        key = _slugify_title(v["snippet"]["title"])
+        if not key:
             continue
-        group = [va]
-        for j, vb in enumerate(yt_videos):
-            if j <= i or j in used:
-                continue
-            sim = _compute_title_similarity(va["snippet"]["title"], vb["snippet"]["title"])
-            if sim > 0.70:
-                group.append(vb)
-                used.add(j)
-        if len(group) >= 2:
-            used.add(i)
-            groups.append(group)
-
-    return groups
+        buckets.setdefault(key, []).append(v)
+    return [grp for grp in buckets.values() if len(grp) >= 2]
 
 
 def _check_thumbnail_custom(thumbnails: dict) -> bool:
@@ -232,6 +234,22 @@ def diagnose_channel(slug: str, yt_service, db: ExtendedDatabase) -> dict:
         except HttpError as exc:
             logger.error("[%s] Error listando playlist (página %d): %s", slug, page_count, exc)
             break
+
+    # ── v24.1 fix: dedupe video IDs ─────────────────────────────
+    # YouTube's uploads playlist occasionally returns the same videoId
+    # across page boundaries (pagination overlap). Duplicate IDs here
+    # propagate into `all_yt_videos`, making `_find_duplicates_by_title`
+    # group a video WITH ITSELF (title similarity 1.0). That in turn made
+    # cleanup_yt_duplicates.py delete the canonical video (same ID listed
+    # as both KEEP and DEL). Dedupe here, preserving order.
+    _raw_count = len(yt_video_ids)
+    _seen: set[str] = set()
+    yt_video_ids = [v for v in yt_video_ids if not (v in _seen or _seen.add(v))]
+    if len(yt_video_ids) != _raw_count:
+        logger.warning(
+            "[%s] Deduplicados %d video IDs repetidos (paginación) — %d únicos",
+            slug, _raw_count - len(yt_video_ids), len(yt_video_ids),
+        )
 
     result["stats"]["yt_videos"] = len(yt_video_ids)
     logger.info("[%s] Total videos en YT: %d (en %d páginas)", slug, len(yt_video_ids), page_count)
