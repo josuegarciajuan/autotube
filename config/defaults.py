@@ -221,7 +221,7 @@ MEDIA_STRATEGY = {
     # ── Visual Bible (Phase 3, NUEVO) ──────────────────────────
     # When True, a second LLM call generates a visual bible JSON
     # (protagonist, recurring elements, scene visual concepts).
-    "visual_bible_enabled": False,     # Phase 3; disabled in Phase 1
+    "visual_bible_enabled": True,      # Phase 3; enabled in production
     # LLM model for visual bible. None = same model as script LLM.
     "visual_bible_model": None,
     # If visual bible LLM fails, fallback to the script's LLM.
