@@ -2814,10 +2814,17 @@ class ExtendedDatabase(Database):
         return True
     
     def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
-        """Mark a video as uploaded to YouTube. Supports scheduled mode statuses."""
+        """Mark a video as uploaded to YouTube. Supports scheduled mode statuses.
+
+        Fase 1.5 (ago 2026): marca thumbnail_verified=1 — la miniatura se aplica
+        durante la subida (youtube_uploader._set_thumbnail). Antes quedaba en 0
+        para siempre, disparando re-subidas manuales de miniaturas. El
+        thumbnail_verification_service sigue como red de seguridad.
+        """
         with self._connect() as conn:
             conn.execute(
-                "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, status=? WHERE id=?",
+                "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, "
+                "status=?, thumbnail_verified=1 WHERE id=?",
                 (yt_video_id, yt_url, status, video_id),
             )
             conn.commit()
