@@ -1605,24 +1605,33 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             continue
 
                     if short_type_f == "clip":
-                        # Skip clips for channels known to lack completed long videos today.
+                        # Fase 0.2/1.6: clips sin source se CANCELAN (no se saltan en bucle).
+                        # Antes quedaban 'pending' para siempre → livelock + spam de logs.
                         if channel_id in _channels_without_source:
                             logger.info(
                                 "Force dispatch: clip slot #%d (%s) — channel has "
-                                "no completed long videos today, skipping",
+                                "no completed long videos today, CANCELLING",
                                 slot_id, slug,
                             )
                             _failed_force_ids.add(slot_id)
+                            db.update_shorts_slot_status(
+                                slot_id, "cancelled",
+                                error_message="no source: no completed long video today",
+                            )
                             continue  # don't consume retry
                         source_video_id_f = _resolve_clip_source(channel_id,
                             force_slot.get("long_slot_position"))
                         if source_video_id_f is None:
                             logger.info(
-                                "Force dispatch: clip slot #%d (%s) has no source — skipping",
+                                "Force dispatch: clip slot #%d (%s) has no source — CANCELLING",
                                 slot_id, slug,
                             )
                             _failed_force_ids.add(slot_id)
-                            continue  # don't consume retry — may resolve later
+                            db.update_shorts_slot_status(
+                                slot_id, "cancelled",
+                                error_message="no source: clip source video unavailable",
+                            )
+                            continue  # don't consume retry
 
                     _force_retry += 1  # only consume retry when we actually dispatch
 
@@ -1814,14 +1823,19 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             # If source_video_id is still None (no pre-render or pre-render check
             # failed), do the normal source resolution.
             if source_video_id is None:
-                # Pre-filter: skip clip slots for channels with no completed long videos today.
+                # Pre-filter: CANCEL clip slots for channels with no completed long
+                # videos today (Fase 0.2/1.6) — antes quedaban 'pending' en bucle.
                 if channel_id in _channels_without_source:
                     logger.info(
-                        "Shorts slot #%d (%s) skipped: clip type but channel has "
-                        "no completed long videos today — trying next channel",
+                        "Shorts slot #%d (%s): clip type but channel has "
+                        "no completed long videos today — CANCELLING",
                         slot_id, slug,
                     )
                     _skipped_slot_ids.add(slot_id)
+                    db.update_shorts_slot_status(
+                        slot_id, "cancelled",
+                        error_message="no source: no completed long video today",
+                    )
                     continue
 
                 long_pos = next_slot.get("long_slot_position")
