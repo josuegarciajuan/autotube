@@ -191,6 +191,9 @@ class MediaFetcher:
         self._local_sd: LocalSDProvider | None = None
         self._coherence_engine: VisualCoherenceEngine | None = None
         self._visual_bible: dict | None = None
+        # Per-scene AI prompt log (scene_idx → full prompt) for the
+        # verification report (scripts/test_visual_coherence.py).
+        self._ai_prompt_log: dict[int, str] = {}
 
         # Build AI provider chain from config (always available — no auth needed)
         ai_cache_dir = str(settings.OUTPUT_DIR / "ai_cache" / "pollinations")
@@ -942,6 +945,8 @@ class MediaFetcher:
 
         # Build shared prompt once per scene (it doesn't change per provider).
         prompt, seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
+        # Record the full prompt for the verification report.
+        self._ai_prompt_log[scene_idx] = prompt
         negative = VisualCoherenceEngine.build_negative_prompt()
         output_dir = Path(settings.OUTPUT_DIR) / "ai_images" / scene.get("tipo", "escena")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -964,11 +969,11 @@ class MediaFetcher:
 
             try:
                 logger.info(
-                    "Scene %d/%d [%s]: AI image via %s — prompt: %s...",
+                    "Scene %d/%d [%s]: AI image via %s — prompt: %s",
                     scene_idx + 1, total_scenes,
                     scene.get("tipo", "?"),
                     provider_label,
-                    prompt[:100],
+                    prompt,
                 )
                 result_path = provider.generate(
                     prompt=prompt,
@@ -1104,19 +1109,31 @@ class MediaFetcher:
         tech = VisualCoherenceEngine.build_tech_suffix(density)
 
         # ── Assemble ─────────────────────────────────────────
-        parts = [style]
+        # Concept-first: the scene's subject leads the prompt so the
+        # generated image tracks the narration. Style and visual context
+        # are supporting layers appended AFTER the subject.
+        parts = [concept]
         if context:
             parts.append(context)
-        parts.append(concept)
+        parts.append(style)
         parts.append(tech)
         prompt = ", ".join(p for p in parts if p)
 
-        # Truncate to ~500 chars
+        # Truncate to ~500 chars while ALWAYS preserving the concept and
+        # the visual context (which carries the protagonist description).
+        # The style prefix (longest, least scene-specific) is trimmed first.
         if len(prompt) > 500:
-            # Keep style + tech, trim context+concept proportionally
-            head = f"{style}, {concept[:200]}"
-            tail = tech
-            prompt = f"{head}, {tail}"
+            concept_lead = concept[:220]
+            context_lead = context[:150] if context else ""
+            reserved = len(concept_lead) + len(context_lead) + len(tech)
+            overhead = reserved + (6 if context_lead else 4)  # ", " separators
+            style_trim = style[: max(0, 497 - overhead)]
+            trim_parts = [concept_lead]
+            if context_lead:
+                trim_parts.append(context_lead)
+            trim_parts.append(style_trim)
+            trim_parts.append(tech)
+            prompt = ", ".join(p for p in trim_parts if p)
             if len(prompt) > 500:
                 prompt = prompt[:497] + "..."
 
@@ -1127,7 +1144,13 @@ class MediaFetcher:
             if entity.get("type") != "none" and scene_idx in entity.get("appears_in_scenes", []):
                 master = entity.get("master_description", "")
                 video_id = getattr(self, "_video_id", 0)
-                seed = hash(master + str(video_id)) % (2**31)
+                # Deterministic seed (hashlib, not Python's process-random
+                # ``hash()``) so the same protagonist renders identically
+                # across every scene where they appear.
+                digest = hashlib.md5(
+                    f"{master}|{video_id}".encode("utf-8")
+                ).hexdigest()[:8]
+                seed = int(digest, 16) % (2**31)
 
         return prompt, seed
 
@@ -2148,22 +2171,31 @@ class MediaFetcher:
         if simple and simple != base and simple.strip():
             pool.append(simple)
 
+        # 4b. Ultra-simplified: 2 core nouns. Drops overly-specific proper
+        #     nouns (site names, etc.) that stock providers can't match, so
+        #     the general subject still has a chance before generic fallbacks.
+        ultra_simple = self._simplify_query(base, max_keywords=2) if base else ""
+        if ultra_simple and ultra_simple not in pool and ultra_simple.strip():
+            pool.append(ultra_simple)
+
         # 5. Without theme keywords — anti-poisoning fallback
         if ctx and ctx.theme_keywords_en and base:
             clean = _strip_theme_keywords(base, ctx.theme_keywords_en)
             if clean and clean != base and clean.strip():
                 pool.append(clean)
 
-        # 6. Type-specific fallback queries (generic, moved later in pool)
-        type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
-        if type_fb and type_fb not in pool:
-            pool.append(type_fb)
-
-        # 7. Themed fallback queries: built dynamically from ThemeContext
+        # 6. Themed fallback queries: built dynamically from ThemeContext.
+        #    Topic-aware and moved BEFORE the generic type fallback so the
+        #    video stays anchored to its actual subject.
         if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
             themed_fb = self._build_themed_fallback(scene_tipo, ctx)
             if themed_fb and themed_fb not in pool:
                 pool.append(themed_fb)
+
+        # 7. Type-specific fallback queries (generic, near the end)
+        type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
+        if type_fb and type_fb not in pool:
+            pool.append(type_fb)
 
         # 8. Channel-configured fallback queries (absolute last resort)
         fallbacks = self._media_strategy.get("fallback_queries", [
@@ -2848,13 +2880,20 @@ class MediaFetcher:
         # Gather available thematic anchors
         anchors: list[str] = []
 
-        # Primary subject (best anchor when available)
+        # Primary subject (best anchor when available — English)
         if ctx.primary_subject:
             ps_words = ctx.primary_subject.split()[:4]
             anchors.extend(ps_words)
 
-        # Key motifs (the visual icons of this video's world)
-        if ctx.key_motifs:
+        # English theme keywords (built for stock search) — prefer these
+        # over the Spanish key_motifs below.
+        if ctx.theme_keywords_en:
+            for kw in ctx.theme_keywords_en[:4]:
+                anchors.extend(kw.split()[:2])
+
+        # Key motifs (Spanish visual icons) — only used if no English
+        # anchors were found above, since stock providers need English.
+        if not anchors and ctx.key_motifs:
             for motif in ctx.key_motifs[:3]:
                 motif_words = motif.split()[:2]
                 anchors.extend(motif_words)
@@ -2906,8 +2945,14 @@ class MediaFetcher:
     # ── Internal: query simplification ────────────────────────────
 
     @staticmethod
-    def _simplify_query(query: str) -> str:
-        """Take first 3-4 keywords from a query (skip style modifiers)."""
+    def _simplify_query(query: str, max_keywords: int = 4) -> str:
+        """Take first N keywords from a query (skip style modifiers).
+
+        ``max_keywords=4`` returns a 3-4 word query; ``max_keywords=2``
+        returns an ultra-simplified query that drops overly-specific
+        proper nouns (e.g. site names) so stock providers have a chance
+        of matching the general subject.
+        """
         words = query.split()
         # Skip known style words
         style_words = {
@@ -2917,7 +2962,7 @@ class MediaFetcher:
             "overhead", "style", "film", "video", "stock",
         }
         keywords = [w for w in words if w.lower() not in style_words]
-        return " ".join(keywords[:4])
+        return " ".join(keywords[:max_keywords])
 
     # ── Internal: smart query builder ────────────────────────────
     _STYLE_WORDS: set[str] = {
