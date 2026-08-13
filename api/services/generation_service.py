@@ -2534,9 +2534,11 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                 db.update_job(job_id, status="failed",
                                error_msg="Max upload retries exceeded")
             else:
-                backoff_sec = 600 * (2 ** retry_count) if retry_count > 0 else 0  # 10min * 2^retry
+                # Fase 0: backoff mínimo 10 min (antes el primer fallo ponía 0s
+                # → re-subida inmediata cada 5 min). Cap 12h.
+                backoff_sec = min(600 * (2 ** retry_count), 43200)
                 sched_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_sec)
-                            ).strftime('%Y-%m-%d %H:%M:%S') if backoff_sec > 0 else None
+                            ).strftime('%Y-%m-%d %H:%M:%S')
                 db.update_video(video_id, status="awaiting_upload",
                                  progress_phase="upload",
                                  scheduled_upload_at=sched_at,
@@ -2577,9 +2579,10 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             db.update_job(job_id, status="failed",
                            error_msg=f"Max upload retries exceeded: {e}"[:500])
         else:
-            backoff_sec = 600 * (2 ** retry_count) if retry_count > 0 else 0
+            # Fase 0: backoff mínimo 10 min, cap 12h (ver rama no-exception)
+            backoff_sec = min(600 * (2 ** retry_count), 43200)
             sched_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_sec)
-                        ).strftime('%Y-%m-%d %H:%M:%S') if backoff_sec > 0 else None
+                        ).strftime('%Y-%m-%d %H:%M:%S')
             db.update_job(job_id, status="failed", error_msg=str(e)[:500])
             db.update_video(video_id, status="awaiting_upload",
                              progress_phase="upload",
