@@ -733,13 +733,14 @@ def migrate_v2(db_path: str = None):
             )
     conn.commit()
     
-    # ── v12 one-time: bump all active channels to 3 native + 3 clips_per_long ──
-    # Only updates if the old value was different (safe for first run after v12 deploy)
+    # ── v12 one-time: bump channels to a minimum of 2 native + 2 clips_per_long ──
+    # Fase 0 (ago 2026): el floor se bajó de 3 a 2 para respetar el objetivo
+    # 50/50 (2 nativos + 2 clips) sin que el restart lo revierta a 3.
     conn.execute("""
         UPDATE shorts_planning_config
-        SET shorts_native_per_day = 3,
-            shorts_clips_per_long = COALESCE(shorts_clips_per_long, 3)
-        WHERE shorts_native_per_day < 3
+        SET shorts_native_per_day = 2,
+            shorts_clips_per_long = COALESCE(shorts_clips_per_long, 2)
+        WHERE shorts_native_per_day < 2
            OR shorts_clips_per_long IS NULL
     """)
     conn.commit()
