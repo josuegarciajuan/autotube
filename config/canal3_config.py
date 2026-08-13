@@ -275,9 +275,7 @@ GOOGLE_NEWS_QUERIES = [
 # VISUAL STYLE
 # ═══════════════════════════════════════════════════════════════════
 IMAGE_STYLE_MODIFIERS = (
-    "ancient ruins, archaeological sites, historical artifacts, "
-    "cinematic 16:9, warm golden hour photography, stone textures, "
-    "desert landscapes, temple interiors, atmospheric lighting, "
+    "cinematic 16:9, warm golden hour photography, atmospheric lighting, "
     "professional documentary photography, mysterious and solemn mood, "
     "earthy tones, dust particles in light rays"
 )

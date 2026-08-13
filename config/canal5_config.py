@@ -215,8 +215,7 @@ GOOGLE_NEWS_QUERIES = [
 IMAGE_STYLE_MODIFIERS = (
     "medical documentary cinematography, clinical lighting, 16:9 aspect ratio, "
     "professional scientific photography, clean sterile aesthetic, "
-    "cool teal and blue tones, medical equipment, hospital environment, "
-    "anatomical precision, cellular imagery, laboratory setting"
+    "cool teal and blue tones"
 )
 COLOR_PALETTE = {
     "primary": (0, 95, 115), "secondary": (8, 20, 38), "accent": (220, 130, 40),
