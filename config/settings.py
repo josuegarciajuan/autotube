@@ -173,11 +173,12 @@ SHORTS_NATIVE_SCHEDULE = [
 ]
 SHORTS_NATIVE_MAX_DAILY = 4
 
-# ── Shorts frequency targets (v2: 8-10/day per channel) ──────
+# ── Shorts frequency targets ──────
 # Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots).
-# v2 (Aug 2026): Raised from 4/6 to 8/10 to support 65/35 clip/native split.
-MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "8"))
-MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "10"))
+# Fase 0 (ago 2026): reducido de 8/10 a 3/4 para evitar "mass-produced content"
+# (riesgo de ban/desmonetización) y el consumo de cuota (~75% era shorts).
+MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "3"))
+MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "4"))
 
 # Conservative QUOTA cap: YouTube API default 10,000 units/day.
 # v2: aligned with updated per-channel target (4 native + ~6 clips = ~10/day).

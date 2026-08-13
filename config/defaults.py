@@ -302,14 +302,14 @@ SHORTS_PER_VIDEO_PLAYLIST = True
 SHORTS_PLAYLIST_NAME = "Shorts"
 
 # ── v2: New distribution system (Aug 2026) ──────────────────────
-SHORTS_NATIVE_RATIO = 0.35            # 35% native, 65% clip (aspirational)
+SHORTS_NATIVE_RATIO = 0.50            # 50% native, 50% clip (equilibrado — Fase 0)
 SHORTS_ADAPTIVE_DISTRIBUTION = True   # Auto-adjust based on 14-day performance
 SHORTS_ADAPTIVE_CHECK_DAYS = 14       # Re-evaluation window
 SHORTS_ADAPTIVE_RATIO_MIN = 0.20      # Floor (never below 20% native)
 SHORTS_ADAPTIVE_RATIO_MAX = 0.60      # Ceiling (never above 60% native)
 SHORTS_ADAPTIVE_STEP = 0.10           # ±10% adjustment per evaluation
 SHORTS_MIN_NATIVE_PER_DAY = 2         # Minimum native shorts per day
-SHORTS_CLIPS_PER_LONG = 3             # Fixed: 3 clip shorts per long video
+SHORTS_CLIPS_PER_LONG = 2             # Fixed: 2 clip shorts per long video (Fase 0)
 SHORTS_HOOK_OVERLAY_FONT_SIZE = 48    # Hook text overlay (3s)
 SHORTS_HOOK_OVERLAY_DURATION_SEC = 3.0
 SHORTS_HOOK_OVERLAY_FADE_SEC = 0.3
@@ -355,7 +355,9 @@ KOKORO_PAUSE_BETWEEN_BLOCKS = 0.8
 # DYNAMIC VIDEOS PER DAY (auto-adjust by recovery planner)
 # ═══════════════════════════════════════════════════════════════════
 # Master switch — set False to disable auto-adjust entirely
-DYNAMIC_VPD_ENABLED = True
+# Fase 0 estabilización (ago 2026): desactivado para evitar el feedback
+# negativo (bugs → baja success_rate → Dynamic VPD baja videos_per_day).
+DYNAMIC_VPD_ENABLED = False
 # Starting point for all channels (overridable per-channel)
 VIDEOS_PER_DAY_BASE = 2
 # Floor and ceiling — dynamic algorithm will never go outside [MIN, MAX]
@@ -382,7 +384,7 @@ DYNAMIC_VPD_SHARED_ACCOUNT_MAX = 6
 # MARATHON DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 
-MARATHON_ENABLED = True
+MARATHON_ENABLED = False
 MARATHON_VIDEO_DURATION_TARGET = 60
 MARATHON_NUM_SECTIONS = 12
 MARATHON_SCRIPT_WORDS_MIN = 8000
