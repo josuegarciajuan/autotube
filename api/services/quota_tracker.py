@@ -19,6 +19,7 @@ Throughput: ~0.1ms per insert (in-memory DB lock, no fsync).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time as _time
 from datetime import datetime, timezone
@@ -34,8 +35,10 @@ _batch_buffer: list[tuple] = []
 _batch_lock = threading.Lock()
 _last_flush = 0.0
 
-# Default daily quota per channel (YouTube Data API v3 free tier)
-DEFAULT_DAILY_QUOTA = 10_000
+# Default daily quota per project (YouTube Data API v3).
+# Fase 2 (ago 2026): era 10_000 (free tier), pero los canales consumen 30-55k ud/día
+# sin bloqueos → tienen ampliación. Configurable vía YT_DAILY_QUOTA_LIMIT.
+DEFAULT_DAILY_QUOTA = int(os.getenv("YT_DAILY_QUOTA_LIMIT", "100000"))
 
 
 # ── Fase 1.4 (ago 2026): mapping canal → proyecto GCP ──
