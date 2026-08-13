@@ -181,13 +181,12 @@ def run_standalone_short(
         )
 
         # ── Upload ─────────────────────────────────────────
-        title = topic.get("title", "Untitled")[:100]
+        # _phase_upload_short(script, video_path) — el título sale del script,
+        # no se pasan kwargs extra (bug previo: 'short_content'/'render_path'/
+        # 'target_upload_at' no existían en la firma → TypeError).
         result = pipeline._phase_upload_short(
-            short_content=short_content,
             script=script,
-            render_path=str(render_path),
-            title=title,
-            target_upload_at=target_upload_at,
+            video_path=render_path,
         )
 
         # ── Cleanup temp files ─────────────────────────────
