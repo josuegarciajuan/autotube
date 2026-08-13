@@ -55,6 +55,25 @@ SHORT_STUCK_THRESHOLD_MIN = 60
 # for this many hours. After cooldown expires, stale alerts will reappear.
 ALERT_RESOLVE_COOLDOWN_HOURS = 24
 
+# Failed-video error messages that are transient/intentional and should NOT
+# generate a critical alert (case-insensitive substring match against
+# generation_jobs.error_msg). E.g. "Aborted by re-test" (A/B re-run) and
+# "Server restarted — old process no longer exists" (video gets re-queued).
+TRANSIENT_SKIP_PATTERNS = (
+    "re-test",
+    "server restarted",
+    "old process no longer exists",
+)
+
+# Failed-video error messages that indicate an environment/resource problem
+# (OOM, memory guard) rather than a content pipeline failure. These are still
+# actionable but demoted from critical to warning to avoid alert fatigue.
+ENV_DEMOTE_PATTERNS = (
+    "ram insuficiente",
+    "oom",
+    "memory guard",
+)
+
 
 # ═══════════════════════════════════════════════════════════════
 # Public API
@@ -393,11 +412,19 @@ def _check_video_failed_unalerted(db) -> int:
     created = 0
     try:
         with db._connect() as conn:
+            # Join the LATEST failed generation_jobs row per video. A video can
+            # accumulate many failed job rows (retries, restarts); a plain LEFT
+            # JOIN picks an arbitrary row and produces misleading alert messages
+            # (e.g. "Unknown error" when the real cause was an OOM abort).
             rows = conn.execute(
                 """SELECT v.id, v.channel_id, v.canal, v.progress_phase,
                           g.error_msg, g.id as job_id
                    FROM videos v
-                   LEFT JOIN generation_jobs g ON g.video_id = v.id
+                   JOIN generation_jobs g ON g.video_id = v.id
+                     AND g.id = (
+                         SELECT MAX(g2.id) FROM generation_jobs g2
+                         WHERE g2.video_id = v.id AND g2.status = 'failed'
+                     )
                    WHERE v.status = 'error'
                      AND v.id NOT IN (
                          SELECT entity_id FROM pipeline_alerts
@@ -410,11 +437,22 @@ def _check_video_failed_unalerted(db) -> int:
 
             for row in rows:
                 error_msg = row["error_msg"] or "Unknown error"
+                error_lower = error_msg.lower()
+
+                # Skip transient/intentional failures (no alert).
+                if any(p in error_lower for p in TRANSIENT_SKIP_PATTERNS):
+                    continue
+
+                # Demote environment/resource failures to warning.
+                severity = "critical"
+                if any(p in error_lower for p in ENV_DEMOTE_PATTERNS):
+                    severity = "warning"
+
                 first_line = error_msg.split('\n')[0].strip()
                 short_msg = first_line[:100] + "..." if len(first_line) > 100 else first_line
                 created += _maybe_create_alert(
                     db, conn, "video", row["id"], row["channel_id"],
-                    "failed", "critical",
+                    "failed", severity,
                     f"Video #{row['id']} failed: {short_msg}",
                     error_msg,
                     {"phase": row["progress_phase"], "job_id": row["job_id"]},
@@ -590,6 +628,30 @@ def _auto_resolve_completed(db) -> int:
                     """UPDATE pipeline_alerts
                        SET resolved = 1, resolved_at = datetime('now'),
                            message = message || ' [Auto-resolved: short published]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            # Resolve publish_delayed alerts for videos that are now public.
+            # These alerts were created while the video was stuck in
+            # uploaded_private, but the video later published (natively via
+            # YouTube scheduledPublishTime or a manual resume). Without this,
+            # they linger unresolved forever.
+            alerts = conn.execute(
+                """SELECT pa.id, pa.entity_id, pa.alert_type
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                   WHERE pa.resolved = 0
+                     AND v.status IN ('published', 'uploaded', 'ready')
+                     AND pa.alert_type = 'publish_delayed'"""
+            ).fetchall()
+
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           message = message || ' [Auto-resolved: video published]'
                        WHERE id = ?""",
                     (alert["id"],),
                 )
