@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { Clock, Play, Smartphone, AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react'
-import { CHANNEL_SHORT, CHANNEL_TABLE_ROW, DEFAULT_TABLE_ROW } from '../lib/channelConfig'
+import { CHANNEL_TABLE_ROW, DEFAULT_TABLE_ROW, getChannelShort } from '../lib/channelConfig'
 
 interface ChannelSummary {
   channel_id: number
@@ -235,7 +235,7 @@ export default function ChannelScheduleTable() {
                       <div className="flex items-center gap-2">
                         <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
                         <span className="text-white font-medium text-xs">{ch.channel_name}</span>
-                        <span className="text-[10px] text-gray-600 font-mono">({CHANNEL_SHORT[ch.channel_slug] || ch.channel_slug})</span>
+                        <span className="text-[10px] text-gray-600 font-mono">({getChannelShort({ channel_id: ch.channel_id, channel_slug: ch.channel_slug, channel_name: ch.channel_name })})</span>
                       </div>
                     </td>
                     <td className="px-3 py-3 text-center">

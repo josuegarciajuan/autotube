@@ -23,6 +23,8 @@ interface ChannelLike {
   channel_id?: number;
   channel_slug?: string;
   canal_initials?: string;
+  channel_name?: string;
+  name?: string;
 }
 
 function _slug(ch: ChannelLike): string {
@@ -50,16 +52,29 @@ function _hashSlug(slug: string): number {
 }
 
 // ── 3-letter abbreviation ────────────────────────────────────────────
+function _initialsFromName(name: unknown): string | null {
+  if (!name || typeof name !== 'string') return null;
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  if (words.length === 1) {
+    const w = words[0].replace(/[^a-zA-Z0-9]/g, '');
+    return w.slice(0, 3).toUpperCase() || null;
+  }
+  const letters = words.slice(0, 3).map(w => (w[0] || '').toUpperCase()).join('');
+  return letters || null;
+}
+
 export function getChannelShort(ch: ChannelLike): string {
   const initials = (ch as any).canal_initials;
   if (initials && typeof initials === 'string' && initials.length >= 2) return initials.substring(0, 3).toUpperCase();
   const slug = _slug(ch);
-  if (!slug) return '???';
   // Check the pre-populated map (set by GenerationContext.initAllChannelMaps with canal_initials from API)
-  if (CHANNEL_SHORT[slug]) return CHANNEL_SHORT[slug];
-  // Auto-derive: take first 3 alphanumeric chars (fallback for channels not in the map)
-  const clean = slug.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-  return clean.substring(0, 3) || 'CHN';
+  if (slug && CHANNEL_SHORT[slug]) return CHANNEL_SHORT[slug];
+  // Derive from the channel name (never the slug, which yields 'CAN' for every canalX)
+  const fromName = _initialsFromName((ch as any).channel_name || (ch as any).name);
+  if (fromName) return fromName;
+  if (!slug) return '???';
+  return slug.toUpperCase() || 'CHN';
 }
 
 // Backward-compat map (derived from channel list at runtime)
@@ -72,9 +87,12 @@ export function initChannelShort(channels: ChannelLike[]) {
     if (initials && typeof initials === 'string' && initials.length >= 2) {
       CHANNEL_SHORT[slug] = initials.substring(0, 3).toUpperCase();
     } else {
-      // Fallback: if no initials, use the slug as-is (e.g. 'my-channel' stays 'my-channel')
-      // rather than deriving from first 3 chars which gives collisions for 'canal2','canal3','canal4'
-      CHANNEL_SHORT[slug] = slug.substring(0, 3).toUpperCase() || slug;
+      // Fallback: derive from the display name (e.g. 'Sincronías' → 'SIN'),
+      // never from the slug (which collides as 'CAN' for every canalX channel).
+      CHANNEL_SHORT[slug] =
+        _initialsFromName((ch as any).channel_name || (ch as any).name) ||
+        slug.toUpperCase() ||
+        slug;
     }
   }
 }

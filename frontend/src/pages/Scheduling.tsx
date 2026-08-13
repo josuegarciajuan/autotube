@@ -168,7 +168,7 @@ function TodayStatus() {
             <div className="flex items-center gap-2 mb-3">
               <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
               <span className="text-sm font-semibold text-white">{ch.channel_name}</span>
-              <span className="text-[10px] text-gray-600 font-mono">({getChannelShort({ channel_slug: ch.channel_slug })})</span>
+              <span className="text-[10px] text-gray-600 font-mono">({getChannelShort({ channel_id: ch.channel_id, channel_slug: ch.channel_slug, channel_name: ch.channel_name })})</span>
               {hasRunning && <Loader2 size={12} className="text-neon-cyan animate-spin ml-auto" />}
               {allDone && !hasCancelled && <CheckCircle2 size={12} className="text-green-400 ml-auto" />}
               {!hasRunning && !allDone && !hasPending && hasCancelled && <XCircle size={12} className="text-red-400 ml-auto" />}

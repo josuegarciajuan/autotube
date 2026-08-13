@@ -110,6 +110,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
     if (channels) {
       initAllChannelMaps(channels.map((ch: any) => ({
         id: ch.id, slug: ch.slug,
+        channel_name: ch.name,
         canal_initials: ch.config_json?.CANAL_INITIALS || ch.canal_initials,
       })))
       for (const ch of channels) {
