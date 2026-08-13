@@ -38,6 +38,43 @@ _last_flush = 0.0
 DEFAULT_DAILY_QUOTA = 10_000
 
 
+# ── Fase 1.4 (ago 2026): mapping canal → proyecto GCP ──
+# La cuota de YouTube Data API es POR PROYECTO Google Cloud, no un pool global.
+# Hay 2 proyectos (verificado en client_secret_*.json):
+#   - youtube-uploads-automation → canal2 + canal3 (google_account tracatrack)
+#   - autotube-expediciones     → canal4 + canal5 (google_account burrianacasa2026)
+CHANNEL_PROJECT_MAP = {
+    "canal2": "youtube-uploads-automation",
+    "canal3": "youtube-uploads-automation",
+    "canal4": "autotube-expediciones",
+    "canal5": "autotube-expediciones",
+}
+
+_project_cache: dict[str, str] = {}
+
+
+def get_channel_project(channel_slug: str) -> str:
+    """Resolve the GCP project for a channel (authoritative from client_secret)."""
+    if channel_slug in _project_cache:
+        return _project_cache[channel_slug]
+    proj = CHANNEL_PROJECT_MAP.get(channel_slug, "unknown")
+    try:
+        import json as _json
+        from config.settings import PROJECT_ROOT
+        for cand in (f"client_secret_{channel_slug}.json", "client_secret.json"):
+            p = PROJECT_ROOT / "config" / cand
+            if p.exists():
+                d = _json.loads(p.read_text())
+                found = (d.get("installed") or d.get("web") or {}).get("project_id")
+                if found:
+                    proj = found
+                    break
+    except Exception:
+        pass
+    _project_cache[channel_slug] = proj
+    return proj
+
+
 def track_quota(
     channel_slug: str,
     operation: str,
@@ -297,16 +334,26 @@ def should_preserve_quota(channel_slug: str, threshold_pct: float = QUOTA_CAUTIO
 
 
 def should_throttle_global(threshold_pct: float = 0.85) -> bool:
-    """Check global quota usage across ALL channels (shared GCP project).
+    """Check if ANY GCP project exceeded its quota threshold.
 
-    Since all channels share the same YouTube Data API quota pool
-    (common Google Cloud project), we must monitor total consumption,
-    not per-channel.
+    Fase 1.4 (ago 2026): la cuota es POR PROYECTO, no un pool global compartido.
+    Hay 2 proyectos (youtube-uploads-automation y autotube-expediciones), cada uno
+    con su propio límite de 10.000 ud/día. Se devuelve True si CUALQUIERA de los
+    proyectos supera el umbral (antes se sumaba todo y la medición era incorrecta).
     """
     try:
         usage = get_daily_usage()  # no channel filter = all channels
-        used_pct = usage["total_units"] / max(usage["quota_limit"], 1)
-        return used_pct >= threshold_pct
+        by_channel = usage.get("by_channel", {})
+        project_units: dict[str, int] = {}
+        for slug, units in by_channel.items():
+            proj = get_channel_project(slug)
+            project_units[proj] = project_units.get(proj, 0) + units
+        for proj, units in project_units.items():
+            used_pct = units / max(usage["quota_limit"], 1)
+            if used_pct >= threshold_pct:
+                logger.debug("Quota throttle: project '%s' at %.0f%%", proj, used_pct * 100)
+                return True
+        return False
     except Exception:
         return False
 
