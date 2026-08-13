@@ -301,6 +301,27 @@ def diagnose_channel(slug: str, yt_service, db: ExtendedDatabase) -> dict:
         if yt_id:
             db_index[yt_id] = v
 
+    # ── 5b. Also index SHORTS (tracked in the `shorts` table) ──
+    # v24.1 fix: shorts live in a separate table but still appear in the
+    # uploads playlist. Without this, every short was misreported as an
+    # 'orphaned_on_yt' (932 → 764 were actually shorts). Mark them matched
+    # so they don't pollute the orphan list.
+    try:
+        with db._connect() as _conn:
+            _shorts_rows = _conn.execute(
+                """SELECT s.youtube_id, c.slug
+                   FROM shorts s JOIN channels c ON c.id = s.channel_id
+                   WHERE c.slug = ? AND s.youtube_id IS NOT NULL AND s.youtube_id != ''
+                """,
+                (slug,),
+            ).fetchall()
+        for _sr in _shorts_rows:
+            _sid = str(_sr["youtube_id"]).strip()
+            if _sid and _sid not in db_index:
+                db_index[_sid] = {"id": None, "yt_video_id": _sid, "is_short": True}
+    except Exception as _e:
+        logger.debug("[%s] Shorts indexing skipped: %s", slug, _e)
+
     # ── 6. Cross-reference ──────────────────────────────────
     matched = 0
 
@@ -319,6 +340,8 @@ def diagnose_channel(slug: str, yt_service, db: ExtendedDatabase) -> dict:
 
     # 6b. Videos en DB que NO están en YT → deleted_manually
     for yt_id, db_v in db_index.items():
+        if db_v.get("is_short"):
+            continue  # skip shorts — they're not in the videos table
         if yt_id not in yt_index:
             result["deleted_manually"].append({
                 "db_video_id": db_v["id"],
