@@ -6201,6 +6201,27 @@ class ExtendedDatabase(Database):
                 "AND action = 'upload_only'"
             ).fetchone()
         return row["cnt"] if row else 0
+
+    def count_today_uploads(self) -> int:
+        """Count uploads to YouTube today: long-form + shorts.
+
+        Fase 0.2 (ago 2026): red de seguridad global. Cuenta
+        - long-form: videos con yt_video_id subidos hoy
+        - shorts:    shorts con youtube_id publicados hoy
+        Ambos usan videos.insert (1600 unidades de cuota) — se contabilizan juntos.
+        """
+        with self._connect() as conn:
+            long_n = conn.execute(
+                "SELECT COUNT(*) FROM videos "
+                "WHERE yt_video_id IS NOT NULL AND yt_video_id != '' "
+                "AND date(uploaded_at) = date('now', 'localtime')"
+            ).fetchone()[0]
+            short_n = conn.execute(
+                "SELECT COUNT(*) FROM shorts "
+                "WHERE youtube_id IS NOT NULL AND youtube_id != '' "
+                "AND date(published_at) = date('now', 'localtime')"
+            ).fetchone()[0]
+        return (long_n or 0) + (short_n or 0)
     
     def count_past_due_slots(self) -> int:
         """Count pending planned_slots whose scheduled_at is in the past.

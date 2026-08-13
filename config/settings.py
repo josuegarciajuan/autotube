@@ -186,6 +186,12 @@ MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
     "MAX_DAILY_SHORTS_QUOTA_SAFE", "10"
 ))  # Safe with default 10,000 unit quota
 
+# ── Fase 0.2 (ago 2026): tope global de subidas/día (long-form + shorts) ──
+# Red de seguridad: cada subida (video largo o short) consume 1.600 ud de cuota.
+# 24/día ≈ 38.400 ud — dentro del régimen histórico (16-20/día) con margen,
+# y frena los picos de crisis (30-50/día) que agotaban la cuota.
+GLOBAL_DAILY_UPLOAD_CAP = int(os.getenv("GLOBAL_DAILY_UPLOAD_CAP", "24"))
+
 # ── Shorts video/image mix strategy ──────────────────────────
 SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
 SHORTS_MIN_VIDEO_PCT = float(os.getenv("SHORTS_MIN_VIDEO_PCT", "0.30"))  # minimum acceptable video ratio

@@ -1405,6 +1405,20 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
+    # 0a. Fase 0.2: tope global de subidas (long-form + shorts)
+    # Red de seguridad compartida con upload_scheduler (cada subida = 1.600 ud).
+    try:
+        from config.settings import GLOBAL_DAILY_UPLOAD_CAP
+        today_uploads = db.count_today_uploads()
+        if today_uploads >= GLOBAL_DAILY_UPLOAD_CAP:
+            logger.info(
+                "Shorts dispatch: global daily cap reached (%d/%d) — no more uploads today",
+                today_uploads, GLOBAL_DAILY_UPLOAD_CAP,
+            )
+            return None
+    except Exception:
+        pass  # guard no crítico
+
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
 

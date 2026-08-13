@@ -388,6 +388,21 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
         db = ExtendedDatabase()
 
+    # ── 0a. Fase 0.2: tope global de subidas (long-form + shorts) ──
+    # Red de seguridad: cada subida = 1.600 ud de cuota. Frena picos >24/día
+    # que agotaban la cuota. No bloquea el régimen normal (16-20/día).
+    try:
+        from config.settings import GLOBAL_DAILY_UPLOAD_CAP
+        today_uploads = db.count_today_uploads()
+        if today_uploads >= GLOBAL_DAILY_UPLOAD_CAP:
+            logger.info(
+                "📤 Upload scheduler: global daily cap reached (%d/%d) — no more uploads today",
+                today_uploads, GLOBAL_DAILY_UPLOAD_CAP,
+            )
+            return None
+    except Exception:
+        pass  # guard no crítico: nunca bloquear subidas por un error de conteo
+
     # ── 0. Recovery scan: revert stuck 'uploading' videos whose job died ──
     # This catches videos that got stuck due to server restart / worker crash
     # where the startup recovery didn't revert them (e.g. race condition, missed tick).
