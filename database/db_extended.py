@@ -1163,6 +1163,9 @@ def migrate_v2(db_path: str = None):
     # ── v36: Performance indexes for dashboard/pipeline speed ──
     _migrate_v36(conn, logger)
     
+    # ── v37: Cleanup stale/noisy pipeline_alerts (publish_delayed + re-test) ──
+    _migrate_v37(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -2411,6 +2414,60 @@ def _migrate_v36(conn, logger):
         logger.info("Migration v36: created %d performance indexes", created)
     else:
         logger.info("Migration v36: all indexes already exist")
+
+
+def _migrate_v37(conn, logger):
+    """Idempotent v37 migration: clean up stale/noisy pipeline_alerts.
+
+    Resolves two classes of alerts that were left active incorrectly:
+
+    1. publish_delayed alerts for videos that have since published. The
+       lifecycle_monitor's _auto_resolve_completed() now handles these going
+       forward, but historical rows need a one-time backfill.
+
+    2. failed alerts caused by intentional A/B re-tests ("Aborted by re-test"),
+       which are not real failures and should never have raised a critical alert.
+    """
+    # ── 1. publish_delayed for already-published videos ──
+    result = conn.execute("""
+        UPDATE pipeline_alerts
+        SET resolved = 1,
+            resolved_at = datetime('now'),
+            acknowledged = 1,
+            message = message || ' [v37: video ya publicado]'
+        WHERE resolved = 0
+          AND alert_type = 'publish_delayed'
+          AND entity_type = 'video'
+          AND entity_id IN (
+              SELECT id FROM videos
+              WHERE status IN ('published', 'uploaded', 'ready')
+          )
+    """)
+    published_cleaned = conn.rowcount if hasattr(conn, 'rowcount') else result.rowcount
+
+    # ── 2. failed alerts from intentional A/B re-tests ──
+    result = conn.execute("""
+        UPDATE pipeline_alerts
+        SET resolved = 1,
+            resolved_at = datetime('now'),
+            acknowledged = 1,
+            message = message || ' [v37: abort intencional re-test]'
+        WHERE resolved = 0
+          AND alert_type = 'failed'
+          AND (title LIKE '%re-test%' OR message LIKE '%re-test%')
+    """)
+    retest_cleaned = conn.rowcount if hasattr(conn, 'rowcount') else result.rowcount
+
+    conn.commit()
+
+    total = published_cleaned + retest_cleaned
+    if total:
+        logger.info(
+            "Migration v37: resolved %d stale alerts (%d publish_delayed, %d re-test)",
+            total, published_cleaned, retest_cleaned,
+        )
+    else:
+        logger.debug("Migration v37: no stale alerts to clean up")
 
 
 def _migrate_v10(conn, logger):
