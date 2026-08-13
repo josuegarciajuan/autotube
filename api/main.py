@@ -483,9 +483,10 @@ async def _queue_consumer():
 async def _publish_verify_loop():
     """Background loop: check if warming videos have been auto-published by YouTube.
     
-    Runs every 5 minutes independently of frontend polling. Each invocation calls
-    get_pipeline_status() which triggers _maybe_trigger_publish_verification() for
-    any video whose target_public_at has passed.
+    Runs every 5 minutes independently of frontend polling. For every warming
+    (uploaded_private) video whose target_public_at has passed, and for orphaned
+    'uploaded' videos, it triggers a YouTube API verification thread that
+    transitions them to 'published' (or forces go_public if needed).
     
     This ensures videos transition from 'warming' → 'published' even when nobody
     has the PipelineView open in the frontend.
@@ -514,6 +515,33 @@ async def _publish_verify_loop():
             # calls that can block the event loop during lock contention.
             data = await asyncio.to_thread(db.get_pipeline_status)
             warming = data.get("warming", [])
+            orphaned = data.get("orphaned", [])
+            
+            # ── Trigger publish verification ─────────────────────────────
+            # v24 regression fix: the perf commit 912a6c6 removed these triggers
+            # from get_pipeline_status() (to avoid spawning threads on every 60s
+            # frontend poll), claiming this loop already handled them — but the
+            # loop never actually called them. This left uploaded_private videos
+            # stuck in 'warming' forever. Restore the triggers here, in the
+            # 5-minute background loop, so verification still runs without
+            # hammering the API from frontend polling.
+            try:
+                from database.db_extended import (
+                    _maybe_trigger_publish_verification,
+                    _maybe_trigger_orphaned_verification,
+                )
+                for row in warming:
+                    _maybe_trigger_publish_verification(dict(row))
+                for row in orphaned:
+                    d = dict(row)
+                    vid = d.get("video_id")
+                    ch_slug = d.get("channel_slug", "")
+                    yt_id = d.get("yt_video_id", "")
+                    if vid and yt_id and ch_slug:
+                        _maybe_trigger_orphaned_verification(vid, ch_slug, yt_id)
+            except Exception as trig_exc:
+                logger.warning("Publish verify trigger error: %s", trig_exc)
+            
             if warming:
                 logger.debug("Publish verify ping: %d warming video(s)", len(warming))
         except Exception as exc:

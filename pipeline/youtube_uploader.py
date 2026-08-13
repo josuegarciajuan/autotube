@@ -685,9 +685,13 @@ class YouTubeUploader:
     ) -> bool:
         """Set custom thumbnail for a YouTube video. Returns True on success.
 
-        v24 (Aug 2026): Now verifies the thumbnail was actually applied by
-        calling thumbnails().list() after set(). Returns False instead of
-        silently swallowing errors, so callers can retry or log properly.
+        Note: YouTube Data API v3 has NO `thumbnails().list()` method — only
+        `thumbnails().set()`. A previous revision tried to call the non-existent
+        `list()`, which raised `AttributeError: 'Resource' object has no
+        attribute 'list'` AFTER the upload succeeded, aborting the whole upload
+        and causing endless re-upload loops (duplicate videos). `set()` returns
+        204 No Content on success and raises HttpError on real failures, so no
+        extra verification is needed.
         """
         try:
             service.thumbnails().set(
@@ -703,30 +707,8 @@ class YouTubeUploader:
             track_quota(self.channel_slug, "thumbnails.set", 50,
                         yt_id=video_id, caller="_set_thumbnail")
 
-            # Verify it was actually applied (1 quota unit)
-            try:
-                verify_resp = service.thumbnails().list(
-                    videoId=video_id,
-                ).execute()
-                track_quota(self.channel_slug, "thumbnails.list", 1,
-                            yt_id=video_id, caller="_set_thumbnail.verify")
-                items = verify_resp.get("items", [])
-                if items:
-                    logger.info("Thumbnail verified for video %s (%d item(s))",
-                                video_id, len(items))
-                    return True
-                else:
-                    logger.warning(
-                        "Thumbnail set() succeeded but list() returned no items for %s",
-                        video_id,
-                    )
-                    return False
-            except HttpError as verify_exc:
-                logger.warning(
-                    "Thumbnail set() succeeded but verification failed for %s: %s",
-                    video_id, verify_exc,
-                )
-                return False  # uncertain — assume failure
+            # set() succeeded without raising — thumbnail is applied.
+            return True
 
         except HttpError as exc:
             reason = str(exc)[:200]
