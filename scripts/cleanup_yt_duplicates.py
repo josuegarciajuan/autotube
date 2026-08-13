@@ -110,11 +110,16 @@ def _select_canonical(group: list[dict]) -> dict:
         deduped.append(v)
     group = deduped
 
-    # Sort by views desc, then by published_at asc
+    # Sort: prefer videos already tracked in DB (has db_video_id), then by
+    # views desc, then earliest published_at. This ensures the cleanup NEVER
+    # deletes the DB-tracked video in favor of an orphan copy — critical when
+    # a re-upload just completed and has 0 views while older orphan copies
+    # exist.
     def _sort_key(v):
+        in_db = 0 if v.get("db_video_id") else 1  # DB-tracked first
         views = v.get("views", 0)
         pub = v.get("published_at", "9999")
-        return (-views, pub)
+        return (in_db, -views, pub)
 
     sorted_group = sorted(group, key=_sort_key)
     canonical = sorted_group[0]
