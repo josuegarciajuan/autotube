@@ -98,3 +98,29 @@ class TestSceneDurations:
         for s in result:
             assert 4.5 <= s["duration"] <= 21.0, \
                 f"Duration {s['duration']} outside [5,20]"
+
+    def test_media_specific_caps_preserve_contiguous_ranges_and_unique_requests(self):
+        """Image ranges cap at 7s, video ranges at 10s without timeline gaps."""
+        editor = self._make_editor()
+        editor.canal = {
+            "IMAGE_SCENE_DURATION_MIN": 4.0,
+            "IMAGE_SCENE_DURATION_MAX": 7.0,
+            "VIDEO_SCENE_DURATION_MIN": 6.0,
+            "VIDEO_SCENE_DURATION_MAX": 10.0,
+        }
+        image = self._make_scene(0, 16, asset_idx=3)
+        image["media_tipo"] = "imagen"
+        video = self._make_scene(16, 39, asset_idx=4)
+        video["media_tipo"] = "video"
+
+        result = editor._enforce_scene_durations([image, video])
+
+        assert result[0]["start"] == pytest.approx(0.0)
+        assert result[-1]["end"] == pytest.approx(39.0)
+        assert all(
+            left["end"] == pytest.approx(right["start"])
+            for left, right in zip(result, result[1:])
+        )
+        assert all(scene["duration"] <= 7.0 for scene in result if scene["media_tipo"] == "imagen")
+        assert all(scene["duration"] <= 10.0 for scene in result if scene["media_tipo"] == "video")
+        assert len({scene["media_request_id"] for scene in result}) == len(result)

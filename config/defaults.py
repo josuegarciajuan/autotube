@@ -547,3 +547,10 @@ SEO_SCORE_WEIGHTS = {
     "timestamps": 2,
     "tag_count": 1,
 }
+# Media-specific limits are used by the production timeline.  The legacy
+# SCENE_DURATION_* values remain supported for older direct VideoEditor callers.
+IMAGE_SCENE_DURATION_MIN = 4.0
+IMAGE_SCENE_DURATION_MAX = 7.0
+VIDEO_SCENE_DURATION_MIN = 6.0
+VIDEO_SCENE_DURATION_MAX = 10.0
+SCENE_SYNC_TOLERANCE_SEC = 0.15

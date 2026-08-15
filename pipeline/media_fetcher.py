@@ -810,7 +810,108 @@ class MediaFetcher:
                 rescued, video_ok, (video_ok / max(n_scenes, 1)) * 100,
             )
 
+        # A video-priority scene can ultimately receive an image.  Reconcile
+        # after every rescue attempt so actual image ranges never exceed the
+        # image cap.  New subscenes get separate, deduplicated fetch requests;
+        # a failed/duplicate request becomes a placeholder rather than reusing
+        # the first image or shifting any following timestamp.
+        scenes, results = self._reconcile_actual_image_fallbacks(
+            scenes, results, self._fetch_distinct_image_for_expanded_scene,
+        )
         return results
+
+    def _reconcile_actual_image_fallbacks(
+        self,
+        scenes: list[dict],
+        assets: list[dict],
+        fetch_distinct_image: callable,
+    ) -> tuple[list[dict], list[dict]]:
+        """Split overlong *actual* image scenes and obtain unique assets.
+
+        The function mutates ``scenes`` in place because callers retain that
+        list as the renderer's timing contract.  It only partitions a scene's
+        own [start, end] range, therefore subsequent timestamps are unchanged.
+        """
+        config = self._config
+        if isinstance(config, dict):
+            image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 7.0))
+        else:
+            image_max = float(getattr(config, "IMAGE_SCENE_DURATION_MAX", 7.0))
+
+        expanded_scenes: list[dict] = []
+        expanded_assets: list[dict] = []
+        for scene, asset in zip(scenes, assets):
+            actual_type = asset.get("type") if asset else None
+            duration = float(scene.get("duration", 0))
+            if actual_type != "image" or duration <= image_max:
+                expanded_scenes.append(scene)
+                expanded_assets.append(asset)
+                continue
+
+            count = max(2, int((duration + image_max - 1e-9) / image_max))
+            sub_duration = duration / count
+            parent_request = str(scene.get("media_request_id", "scene"))
+            seen_identity_tokens = self._asset_identity_tokens(asset)
+            for index in range(count):
+                subscene = dict(scene)
+                subscene["start"] = float(scene["start"]) + index * sub_duration
+                subscene["end"] = float(scene["start"]) + (index + 1) * sub_duration
+                subscene["duration"] = subscene["end"] - subscene["start"]
+                subscene["media_tipo"] = "image"
+                subscene["is_subscene"] = True
+                subscene["media_request_id"] = f"{parent_request}:image:{index}"
+                if index == 0:
+                    subasset = asset
+                else:
+                    subasset = fetch_distinct_image(subscene)
+                    identity_tokens = self._asset_identity_tokens(subasset)
+                    if not subasset or subasset.get("type") != "image" or (
+                        identity_tokens & seen_identity_tokens
+                    ):
+                        subasset = {
+                            "path": None,
+                            "type": "placeholder",
+                            "duration": None,
+                            "source": "placeholder",
+                        }
+                    else:
+                        seen_identity_tokens.update(identity_tokens)
+                expanded_scenes.append(subscene)
+                expanded_assets.append(subasset)
+
+        if len(expanded_scenes) != len(scenes):
+            scenes[:] = expanded_scenes
+            logger.info(
+                "Expanded %d fetched scene(s) into %d actual-media ranges to enforce image timing",
+                len(assets), len(expanded_assets),
+            )
+        return scenes, expanded_assets
+
+    @staticmethod
+    def _asset_identity_tokens(asset: dict | None) -> set[str]:
+        """Return all stable identity tokens used to reject repeated images."""
+        asset = asset or {}
+        tokens: set[str] = set()
+        for prefix, value in (
+            ("path", asset.get("path")),
+            ("url", asset.get("url") or asset.get("download_url")),
+            ("content", asset.get("content_hash") or asset.get("id")),
+        ):
+            if value:
+                tokens.add(f"{prefix}:{value}")
+        return tokens
+
+    def _fetch_distinct_image_for_expanded_scene(self, scene: dict) -> dict | None:
+        """Fetch one additional image through normal per-video dedup tracking."""
+        query_pool = self._build_query_pool(scene, self._theme_context)
+        asset = self._fetch_asset_exhaustive(
+            scene, query_pool, want_video=False,
+            target_dur=scene["duration"], ctx=self._theme_context, force_images=True,
+        )
+        if asset and asset.get("type") == "image":
+            self._record_asset_for_history(asset)
+            return asset
+        return None
 
     def fetch_single_image_urgent(self, query: str) -> dict | None:
         """Fetch ONE image urgently from any available provider.

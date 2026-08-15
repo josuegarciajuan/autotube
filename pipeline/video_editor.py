@@ -259,9 +259,6 @@ class VideoEditor:
         self._image_reuse_count: dict[str, int] = {}  # path → how many times reused
         # On-demand image fetcher callback (set by orchestrator before build_video)
         self._on_demand_fetcher: Optional[callable] = None
-        # Pending fill tracking: when a video is too short, signal fill needed
-        self._pending_fill_dur: float = 0.0
-        self._pending_fill_usable: float = 0.0
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -341,8 +338,6 @@ class VideoEditor:
         self._image_last_clip_idx.clear()
         self._current_clip_idx = 0
         self._image_reuse_count.clear()
-        self._pending_fill_dur = 0.0
-        self._pending_fill_usable = 0.0
 
         # ── Compute block time ranges ──────────────────────────
         if scene_ranges:
@@ -355,6 +350,14 @@ class VideoEditor:
             if not block_ranges:
                 raise RuntimeError("No block ranges computed — cannot build video.")
             self.logger.info("Step 1/6: %d blocks with time ranges computed", len(block_ranges))
+
+        # Timestamps can differ slightly from the encoded audio duration.  Keep
+        # the planned timeline intact except for its final endpoint, which must
+        # cover the real narration rather than leave an unplanned tail.
+        if audio_path and block_ranges:
+            actual_audio_duration = self._get_voice_duration(Path(audio_path))
+            if actual_audio_duration > 0:
+                self._align_last_scene_to_audio(block_ranges, actual_audio_duration)
 
         # ── Heartbeat emitter (covers Steps 2-6: segment rendering through final mux) ──
         # Starts BEFORE the heavy segment rendering to prevent orphan detection
@@ -393,7 +396,12 @@ class VideoEditor:
         # render each scene as a standalone MP4 segment (1 decoder at a time),
         # then concatenate with ffmpeg xfade. Peak RAM = ~400 MB, constant.
         self.logger.info("Step 2/6: Rendering %d scene segments (RAM bounded)…", len(block_ranges))
-        tts_duration = timestamps[-1].get("end", 0) if timestamps else 0
+        # Use the decoded narration duration as the audio cursor limit.  Word
+        # timestamps are an allocation guide, not the authoritative stream
+        # duration (encoder padding can otherwise create a body mismatch).
+        tts_duration = self._get_voice_duration(Path(audio_path)) if audio_path else 0
+        if tts_duration <= 0:
+            tts_duration = timestamps[-1].get("end", 0) if timestamps else 0
 
         # Collect fallback image pool (images only, videos would crash PIL)
         _real_image_paths: list[Path] = []
@@ -511,6 +519,19 @@ class VideoEditor:
                 fallback_pool=_real_image_paths,
             )
 
+            if result_path and not self._segment_matches_planned_duration(result_path, br["duration"]):
+                self.logger.warning(
+                    "  Scene %d duration differs from its %.3fs plan — retrying once",
+                    i, br["duration"],
+                )
+                Path(result_path).unlink(missing_ok=True)
+                result_path = self._render_scene_segment(
+                    br, asset, str(seg_path), clip_idx=i, fallback_pool=_real_image_paths,
+                )
+                if result_path and not self._segment_matches_planned_duration(result_path, br["duration"]):
+                    Path(result_path).unlink(missing_ok=True)
+                    result_path = None
+
             if result_path is None:
                 # Scene failed or returned None (no media) — retry with fallback image
                 self.logger.warning(
@@ -586,17 +607,12 @@ class VideoEditor:
                     except Exception:
                         pass
 
-        # Remove empty entries AND corresponding block_ranges to keep 1:1 alignment
-        _valid = []
-        _valid_ranges = []
-        for _j, (_sp, _br) in enumerate(zip(segment_paths, block_ranges)):
-            if _sp and Path(_sp).exists():
-                _valid.append(_sp)
-                _valid_ranges.append(_br)
-        segment_paths, block_ranges = _valid, _valid_ranges
-
-        if not segment_paths:
-            raise RuntimeError("No segments rendered — cannot build video.")
+        # A missing segment must fail the render: filtering it out would shift
+        # every following scene earlier than its planned narration timestamp.
+        if len(segment_paths) != len(block_ranges) or any(
+            not path or not Path(path).exists() for path in segment_paths
+        ):
+            raise RuntimeError("One or more planned scene segments failed — refusing to alter the timeline.")
 
         self.logger.info(
             "  %d segments rendered (%d fallback, %d image/%d video ratio)",
@@ -648,75 +664,10 @@ class VideoEditor:
                 f"Aborting to prevent publishing bad video."
             )
 
-        # ── v6: merge consecutive gradient placeholders ──────────
-        # When many consecutive scenes fail to get media (e.g. due to
-        # off-niche theme poisoning), the concat gets overloaded with
-        # placeholder segments that add no visual value but consume
-        # ffmpeg xfade processing. Merging them reduces segment count
-        # dramatically and prevents xfade concat timeouts.
-        segment_paths, block_ranges = _merge_consecutive_placeholders(
-            segment_paths, block_ranges, seg_dir, self.logger,
-        )
-
-        # ── v11: Dynamic gap fill — ensure body video covers full narration ──
-        # After all planned scenes are rendered (including checkpoints), measure
-        # the total rendered body duration vs the narration audio duration.
-        # If there's a gap, render additional fill scenes on-demand using images
-        # fetched in real-time (related to the narration topic at that timestamp).
-        # This prevents the "black screen from halfway" bug.
-        if audio_path:
-            try:
-                _body_vid_dur = self._probe_video_duration(segment_paths)
-                _body_aud_dur = self._get_voice_duration(Path(audio_path))
-                _gap = _body_aud_dur - _body_vid_dur
-                if _gap > 3.0:
-                    self.logger.warning(
-                        "⚠ Body gap detected: video=%.1fs audio=%.1fs gap=%.1fs. "
-                        "Filling dynamically…",
-                        _body_vid_dur, _body_aud_dur, _gap,
-                    )
-                    _fill_idx = len(segment_paths)
-                    _cumulative = _body_vid_dur
-                    while _gap > 2.0 and _fill_idx < len(segment_paths) + 30:
-                        _fill_dur = min(_gap, 10.0)
-                        _fill_query = self._find_nearest_scene_query(
-                            _cumulative, block_ranges, bloques
-                        )
-                        _fill_seg = self._render_fill_scene_on_demand(
-                            query=_fill_query or "documentary background atmospheric",
-                            duration=_fill_dur,
-                            seg_dir=seg_dir,
-                            scene_idx=_fill_idx,
-                        )
-                        if _fill_seg and Path(_fill_seg).exists():
-                            segment_paths.append(_fill_seg)
-                            block_ranges.append({
-                                "start": _cumulative,
-                                "end": _cumulative + _fill_dur,
-                                "duration": _fill_dur,
-                                "tipo": "fill",
-                                "texto": "",
-                            })
-                            _cumulative += _fill_dur
-                            _gap -= _fill_dur
-                            _fill_idx += 1
-                            self.logger.info(
-                                "  Fill scene %d: %.1fs (gap remaining: %.1fs)",
-                                _fill_idx, _fill_dur, _gap,
-                            )
-                        else:
-                            self.logger.warning(
-                                "  Could not fetch fill image — "
-                                "%.1fs gap will remain", _gap,
-                            )
-                            break
-            except Exception as _gf_err:
-                self.logger.warning("Dynamic gap fill skipped (non-fatal): %s", _gf_err)
-
-        # ── Concat segments with crossfades (+ grain + vignette) ──
+        # ── Concat planned segments without temporal overlap ──────
         if progress_cb is not None:
-            progress_cb(68, "video", "Concatenando segmentos con transiciones xfade...")
-        self.logger.info("Step 3/6: Concatenating %d segments with xfade…", len(segment_paths))
+            progress_cb(68, "video", "Concatenando segmentos con transiciones exactas...")
+        self.logger.info("Step 3/6: Concatenating %d scene segments exactly…", len(segment_paths))
         body_path = seg_dir / "body.mp4"
         body_segment_path = self._concat_body_with_crossfades(
             segment_paths, block_ranges, str(body_path),
@@ -724,6 +675,10 @@ class VideoEditor:
 
         # Load body as VideoClip for final assembly (cheap — single file)
         body_video = VideoFileClip(body_segment_path)
+        if audio_path:
+            self._assert_body_timeline_sync(
+                self._dur(body_video), self._get_voice_duration(Path(audio_path)),
+            )
 
         # ── v5: progress after body concat ──
         if progress_cb is not None:
@@ -1136,16 +1091,12 @@ class VideoEditor:
             "Timeline: intro=%.1fs | body_video=%.1fs body_audio=%.1fs (match=%s) | "
             "cta=%.1fs (voice=%s) | outro=%.1fs | TOTAL=%.1fs",
             intro_dur, body_vid_dur, body_aud_dur,
-            "OK" if abs(body_vid_dur - body_aud_dur) < 0.5 else "MISMATCH!",
+            "OK" if abs(body_vid_dur - body_aud_dur) < float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15)) else "MISMATCH!",
             cta_dur, "yes" if cta_has_voice else "no",
             outro_dur,
             intro_dur + body_vid_dur + cta_dur + outro_dur,
         )
-        if abs(body_vid_dur - body_aud_dur) >= 0.5:
-            self.logger.warning(
-                "⚠ Body video/audio mismatch: video=%.1fs audio=%.1fs gap=%.1fs",
-                body_vid_dur, body_aud_dur, abs(body_vid_dur - body_aud_dur),
-            )
+        self._assert_body_timeline_sync(body_vid_dur, body_aud_dur)
 
         render_ok = output_path.exists() and output_path.stat().st_size > 0
         try:
@@ -1399,7 +1350,7 @@ class VideoEditor:
     # ── Scene duration enforcement ──────────────────────────────
 
     def _enforce_scene_durations(self, block_ranges: list[dict]) -> list[dict]:
-        """Enforce SCENE_DURATION_MIN / SCENE_DURATION_MAX on block ranges.
+        """Enforce media-specific scene pacing while preserving coverage.
 
         - Scenes shorter than SCENE_DURATION_MIN are merged with the next scene.
         - Scenes longer than SCENE_DURATION_MAX are split into sub-scenes.
@@ -1407,9 +1358,6 @@ class VideoEditor:
           scene's asset is skipped (its media will not be used in this build).
         - Split sub-scenes inherit the parent's asset_idx and tipo.
         """
-        min_dur = self.canal.get("SCENE_DURATION_MIN", self.SCENE_DURATION_MIN)
-        max_dur = self.canal.get("SCENE_DURATION_MAX", self.SCENE_DURATION_MAX)
-
         # ---- Phase 1: Merge short scenes (repeat until stable) ----
         # Repeatedly scan the list and merge any scene whose duration
         # falls below min_dur with the next scene. The outer loop runs
@@ -1427,6 +1375,7 @@ class VideoEditor:
             i = 0
             while i < len(merged):
                 br = dict(merged[i])
+                min_dur, _ = self._scene_duration_limits(br)
                 if br["duration"] < min_dur and i + 1 < len(merged):
                     # Merge this short scene with the next one
                     nxt = merged[i + 1]
@@ -1447,8 +1396,7 @@ class VideoEditor:
         if safety >= max_safety:
             self.logger.warning(
                 "Scene merge safety limit reached (%d iterations) — "
-                "some short scenes may remain. min_dur=%.1f",
-                safety, min_dur,
+                "some short scenes may remain.", safety,
             )
 
         # ---- Phase 1b: Backward-merge last scene ------------------
@@ -1458,7 +1406,7 @@ class VideoEditor:
         # backward into the previous one when it still falls below the
         # minimum duration.
         if (len(merged) >= 2
-                and merged[-1]["duration"] < min_dur
+                and merged[-1]["duration"] < self._scene_duration_limits(merged[-1])[0]
                 and not any(r.get("is_subscene") for r in merged[-2:])):
             prev = merged[-2]
             last = merged.pop()
@@ -1473,6 +1421,7 @@ class VideoEditor:
         # ---- Phase 2: Split long scenes ----
         new_ranges: list[dict] = []
         for br in merged:
+            _, max_dur = self._scene_duration_limits(br)
             if br["duration"] > max_dur:
                 num_subscenes = int(br["duration"] / max_dur) + 1
                 sub_dur = br["duration"] / num_subscenes
@@ -1487,14 +1436,60 @@ class VideoEditor:
                     sub["duration"] = sub["end"] - sub["start"]
                     sub["is_subscene"] = True
                     sub["parent_tipo"] = br["tipo"]
-                    # Preserve parent asset_idx so sub-scenes reuse the same asset
+                    # MediaFetcher receives one request per subscene.  Keep the
+                    # parent index only as metadata; request identity is unique.
+                    sub["media_request_id"] = f"{br.get('asset_idx', 'scene')}:{j}"
                     new_ranges.append(sub)
             else:
                 br = dict(br)
                 br["is_subscene"] = False
+                br["media_request_id"] = f"{br.get('asset_idx', 'scene')}:0"
                 new_ranges.append(br)
 
         return new_ranges
+
+    def _scene_duration_limits(self, scene: dict) -> tuple[float, float]:
+        """Return limits for a scene, retaining legacy config fallback."""
+        media_type = str(scene.get("media_tipo", "imagen")).lower()
+        is_video = media_type == "video"
+        prefix = "VIDEO" if is_video else "IMAGE"
+        legacy_min = self.canal.get("SCENE_DURATION_MIN", self.SCENE_DURATION_MIN)
+        legacy_max = self.canal.get("SCENE_DURATION_MAX", self.SCENE_DURATION_MAX)
+        minimum = float(self.canal.get(f"{prefix}_SCENE_DURATION_MIN", legacy_min))
+        maximum = float(self.canal.get(f"{prefix}_SCENE_DURATION_MAX", legacy_max))
+        return minimum, maximum
+
+    def _align_last_scene_to_audio(self, block_ranges: list[dict], audio_duration: float) -> None:
+        """Set only the final planned endpoint to the decoded narration end."""
+        last = block_ranges[-1]
+        planned_end = float(last["end"])
+        tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
+        if abs(audio_duration - planned_end) < tolerance:
+            return
+        if audio_duration <= float(last["start"]):
+            raise RuntimeError(
+                "Narration duration ends before the final planned scene starts; refusing invalid timeline."
+            )
+        last["end"] = audio_duration
+        last["duration"] = audio_duration - float(last["start"])
+        self.logger.info("Adjusted final scene endpoint %.3fs → %.3fs to match narration", planned_end, audio_duration)
+
+    def _segment_matches_planned_duration(self, path: str, planned_duration: float) -> bool:
+        """Verify one encoded segment is within the configured timing tolerance."""
+        duration = self._probe_video_duration([path])
+        tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
+        return duration > 0 and abs(duration - planned_duration) < tolerance
+
+    def _assert_body_timeline_sync(self, video_duration: float, audio_duration: float) -> None:
+        """Fail rather than publish a body whose visual and narration clocks diverge."""
+        tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
+        mismatch = abs(video_duration - audio_duration)
+        if mismatch >= tolerance:
+            raise RuntimeError(
+                "Body video/audio mismatch: "
+                f"video={video_duration:.3f}s audio={audio_duration:.3f}s gap={mismatch:.3f}s "
+                f"(tolerance={tolerance:.3f}s)"
+            )
 
     def _create_block_clip(self, block_range: dict, asset: dict,
                            clip_idx: int = 0,
@@ -3421,87 +3416,25 @@ class VideoEditor:
                     pass
         return total
 
-    def _find_nearest_scene_query(
-        self, timestamp: float, block_ranges: list[dict], bloques: list[dict],
-    ) -> str | None:
-        """Find the search query of the scene nearest to a given timestamp."""
-        for br in block_ranges:
-            if br.get("start", 0) <= timestamp <= br.get("end", 0):
-                return br.get("search_query_en", "")
-        # Fallback: use the last block's query
-        if block_ranges:
-            return block_ranges[-1].get("search_query_en", "")
-        if bloques:
-            return bloques[-1].get("search_query_en", "")
-        return None
-
-    def _render_fill_scene_on_demand(
-        self, query: str, duration: float, seg_dir: Path, scene_idx: int,
-    ) -> str | None:
-        """Fetch one image on-demand and render it as a Ken Burns segment.
-
-        Uses the orchestrator's _on_demand_fetcher callback to search and
-        download a real image related to the narration topic at this point.
-        Falls back to gradient placeholder if no image is available.
-        """
-        seg_path = seg_dir / f"fill_{scene_idx:04d}.mp4"
-        if seg_path.exists():
-            import uuid
-            seg_path = seg_path.with_stem(f"{seg_path.stem}_{uuid.uuid4().hex[:4]}")
-
-        img_path = None
-        if self._on_demand_fetcher is not None:
-            try:
-                img_path = self._on_demand_fetcher(query, duration)
-            except Exception as e:
-                self.logger.warning("On-demand fetch error: %s", e)
-
-        if img_path is None or not Path(str(img_path)).exists():
-            # Ultimate fallback: gradient placeholder (not black)
-            return self._render_placeholder_segment(
-                {"duration": duration}, seg_path,
-            )
-
-        try:
-            clip = self._single_ken_burns_clip(
-                Path(str(img_path)), duration,
-                zoom_percent=random.uniform(3, 6),
-            )
-            clip.write_videofile(
-                str(seg_path), fps=self.fps, codec=VIDEO_CODEC,
-                preset=self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
-                bitrate=VIDEO_BITRATE,
-                ffmpeg_params=["-pix_fmt", "yuv420p", "-an"],
-                logger=None,
-            )
-            clip.close()
-            self.logger.info("  Fill scene rendered: %s (%.1fs, query=%s)",
-                             seg_path.name, duration, query[:60])
-            return str(seg_path)
-        except Exception as exc:
-            self.logger.warning("Fill scene render failed: %s", exc)
-            return self._render_placeholder_segment(
-                {"duration": duration}, seg_path,
-            )
-
     def _concat_body_with_crossfades(
         self, segment_paths: list[str], block_ranges: list[dict],
         output_path: str,
     ) -> str:
-        """Concatenate pre-rendered scene segments with xfade transitions.
+        """Concatenate pre-rendered scene segments at their exact boundaries.
 
-        Uses ffmpeg's xfade filter to chain segments with the same crossfade
-        duration and overlap formula as the original CompositeVideoClip path.
-        Grain and vignette are folded into the same filter_complex as overlays.
+        The legacy name remains for call-site compatibility.  The implementation
+        intentionally uses ffmpeg's concat filter, not xfade: an xfade overlaps
+        the next visual before its planned scene timestamp and shortens the body.
+        Grain and vignette are applied after the duration-preserving concat.
 
         Returns the output path of the concatenated body video (video-only, no audio).
         """
         if not segment_paths:
             raise RuntimeError("No segments to concatenate")
 
-        # For high segment counts, the O(N²) xfade filter_complex can
+        # For high segment counts, splitting the concat limits filter graph size.
         # exhaust ffmpeg filter buffers (rc=-9) and devour RAM (7+ GB for
-        # 70 scenes). Split into configurable batches, xfade each batch
+        # 70 scenes). Split into configurable batches, concatenate each batch
         # separately, then concat batch outputs (stream copy, near-zero
         # CPU). Threshold defaults to 50 segments — keeps peak RAM per
         # ffmpeg invocation ~3 GB on 1080p sources.
@@ -3509,20 +3442,12 @@ class VideoEditor:
         n = len(segment_paths)
         if n > batch_size:
             self.logger.info(
-                "xfade batching: %d segments → %d batches of ~%d for safer concat",
+                "exact concat batching: %d segments → %d batches of ~%d",
                 n, (n + batch_size - 1) // batch_size, batch_size,
             )
-            return self._xfade_concat_batched(
+            return self._concat_body_batched(
                 segment_paths, block_ranges, output_path, batch_size,
             )
-
-        crossfade_duration = random.uniform(
-            self.canal.get("CROSSFADE_MIN", 0.3),
-            self.canal.get("CROSSFADE_MAX", 0.7),
-        )
-
-        # Compute total expected duration (same formula as _composite_scenes)
-        total_scenes_dur = sum(br["duration"] for br in block_ranges)
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3530,8 +3455,8 @@ class VideoEditor:
             import uuid
             output_path = output_path.with_stem(f"{output_path.stem}_{uuid.uuid4().hex[:6]}")
 
-        # Build ffmpeg filter_complex for xfade chain
-        # Each segment is an input, chained with xfade
+        # Build a duration-preserving concat graph.  Scene i starts exactly at
+        # sum(duration[0:i]); no temporal overlap or end padding is introduced.
         n = len(segment_paths)
 
         # Pre-validate all segments exist and have valid video streams.
@@ -3575,61 +3500,11 @@ class VideoEditor:
         for sp in segment_paths:
             ff_args += ["-i", str(sp)]
 
-        filter_parts: list[str] = []
-        stream_labels: list[str] = []
-
-        # Build xfade chain: xfade=transition=fade:duration=X:offset=Y
-        # First segment passes through. Then each new segment gets xfade with the running result.
-        current_label = "[0:v]"
-        cumulative_offset = 0.0
-        stream_labels.append(current_label)
-
-        for i in range(1, n):
-            seg_dur = block_ranges[i-1]["duration"] if i-1 < len(block_ranges) else 5.0
-            offset = cumulative_offset + seg_dur - crossfade_duration
-            offset = max(0.0, offset)
-
-            next_stream = f"[{i}:v]"
-            output_label = f"[xfade{i}]"
-            filter_parts.append(
-                f"{current_label}{next_stream}xfade=transition=fade:duration={crossfade_duration:.3f}:offset={offset:.3f}{output_label}"
-            )
-            current_label = output_label
-            stream_labels.append(current_label)
-            cumulative_offset = offset
-
-        # After xfade chain, compute padding to match total narration length
-        composite_end = cumulative_offset + block_ranges[-1]["duration"] if block_ranges else 0
-        if composite_end < total_scenes_dur:
-            pad_dur = total_scenes_dur - composite_end
-            pad_label = f"[padded]"
-            filter_parts.append(
-                f"{current_label}tpad=stop_mode=clone:stop_duration={pad_dur:.3f}{pad_label}"
-            )
-            current_label = pad_label
-
-        # Grain + vignette overlays (if enabled)
         film_grain_opacity = self.canal.get("FILM_GRAIN_OPACITY", 0)
         vignette_intensity = self.canal.get("VIGNETTE_INTENSITY", 0)
-        has_overlays = film_grain_opacity > 0 or vignette_intensity > 0
-
-        if has_overlays:
-            # Generate grain + vignette as temporary image clips, then overlay
-            # For now: apply vignette via ffmpeg vignette filter (simpler, no temp files)
-            overlay_parts = []
-            if vignette_intensity > 0:
-                vig_val = vignette_intensity / 100.0
-                overlay_parts.append(f"vignette=PI/4:aspect=16/9")
-            if film_grain_opacity > 0:
-                # ffmpeg noise + blend
-                grain_val = film_grain_opacity / 100.0
-                overlay_parts.append(f"noise=alls={grain_val*20:.0f}:allf=t+u")
-            if overlay_parts:
-                vig_label = f"[final]"
-                filter_parts.append(f"{current_label}{','.join(overlay_parts)}{vig_label}")
-                current_label = vig_label
-
-        filter_complex = ";".join(filter_parts)
+        filter_complex, current_label = self._build_duration_preserving_concat_filter(
+            n, film_grain_opacity=film_grain_opacity, vignette_intensity=vignette_intensity,
+        )
 
         ff_args += [
             "-filter_complex", filter_complex,
@@ -3644,40 +3519,61 @@ class VideoEditor:
         ]
 
         self.logger.info(
-            "Concat %d segments + xfade(%.1fs) + overlays → %s",
-            n, crossfade_duration, output_path.name,
+            "Exact concat %d segments + overlays → %s", n, output_path.name,
         )
 
         try:
-            # v6: timeout scales with segment count (each xfade is expensive)
+            # Timeout scales with segment count and output size.
             scaled_timeout = max(900, n * 15)
             self.logger.info(
-                "Concat %d segments + xfade(%.1fs) + overlays → %s (timeout=%ds)",
-                n, crossfade_duration, output_path.name, scaled_timeout,
+                "Exact concat %d segments + overlays → %s (timeout=%ds)",
+                n, output_path.name, scaled_timeout,
             )
             result = subprocess.run(ff_args, capture_output=True, text=True, timeout=scaled_timeout)
             if result.returncode != 0:
                 stderr_tail = result.stderr.strip()[-500:] if result.stderr else ""
                 raise RuntimeError(
-                    f"ffmpeg xfade concat failed (rc={result.returncode}): {stderr_tail}"
+                    f"ffmpeg exact concat failed (rc={result.returncode}): {stderr_tail}"
                 )
             if not output_path.exists() or output_path.stat().st_size == 0:
-                raise RuntimeError("ffmpeg xfade concat produced empty output")
+                raise RuntimeError("ffmpeg exact concat produced empty output")
         except subprocess.TimeoutExpired:
             raise RuntimeError(
-                f"ffmpeg xfade concat timed out after {scaled_timeout}s ({n} segments)"
+                f"ffmpeg exact concat timed out after {scaled_timeout}s ({n} segments)"
             )
 
         return str(output_path)
 
-    def _xfade_concat_batched(
+    @staticmethod
+    def _build_duration_preserving_concat_filter(
+        segment_count: int, *, film_grain_opacity: float, vignette_intensity: float,
+    ) -> tuple[str, str]:
+        """Return an ffmpeg graph that keeps every input duration unchanged."""
+        if segment_count < 1:
+            raise ValueError("segment_count must be positive")
+        if segment_count == 1:
+            parts = ["[0:v]null[concat]"]
+        else:
+            inputs = "".join(f"[{index}:v]" for index in range(segment_count))
+            parts = [f"{inputs}concat=n={segment_count}:v=1:a=0[concat]"]
+        label = "[concat]"
+        overlays: list[str] = []
+        if vignette_intensity > 0:
+            overlays.append("vignette=PI/4:aspect=16/9")
+        if film_grain_opacity > 0:
+            overlays.append(f"noise=alls={film_grain_opacity / 100.0 * 20:.0f}:allf=t+u")
+        if overlays:
+            parts.append(f"{label}{','.join(overlays)}[final]")
+            label = "[final]"
+        return ";".join(parts), label
+
+    def _concat_body_batched(
         self, segment_paths: list[str], block_ranges: list[dict],
         output_path: str, batch_size: int = 60,
     ) -> str:
-        """Split large segment lists into batches, xfade each batch, then concat.
+        """Split large segment lists into exact-concat batches, then concat.
 
-        Avoids the O(N²) filter_complex explosion and RAM exhaustion that
-        occurs when too many segments are xfaded in a single ffmpeg command.
+        Avoids oversized filter graphs and RAM exhaustion.
         Each batch produces a standalone body MP4; the batch outputs are
         then concatenated with the ffmpeg concat demuxer (stream copy —
         near-zero CPU, no re-encoding).
@@ -3690,7 +3586,7 @@ class VideoEditor:
         total_batches = (n + batch_size - 1) // batch_size
         batches: list[str] = []  # paths to batch output files
 
-        tmpdir = Path(tempfile.gettempdir()) / f"autotube_xfade_{uuid.uuid4().hex[:8]}"
+        tmpdir = Path(tempfile.gettempdir()) / f"autotube_concat_{uuid.uuid4().hex[:8]}"
         tmpdir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -3702,12 +3598,12 @@ class VideoEditor:
                 batch_output = str(tmpdir / f"batch_{batch_idx:04d}.mp4")
 
                 self.logger.info(
-                    "Batch %d/%d: xfading %d segments (%d–%d)…",
+                    "Batch %d/%d: concatenating %d segments (%d–%d)…",
                     batch_num, total_batches,
                     len(batch_segs), batch_idx, batch_end - 1,
                 )
                 t0 = _time.monotonic()
-                # Recursive call: xfade this batch normally
+                # Recursive call: exact-concat this batch normally.
                 result = self._concat_body_with_crossfades(
                     batch_segs, batch_ranges, batch_output,
                 )
@@ -3738,7 +3634,7 @@ class VideoEditor:
                     f"Batch concat failed (rc={result.returncode}): {result.stderr[-300:]}"
                 )
 
-            self.logger.info("Batched xfade complete: %d batches → %s", len(batches), output_path)
+            self.logger.info("Batched exact concat complete: %d batches → %s", len(batches), output_path)
             return str(output_path)
         finally:
             # Clean up temp batch files
@@ -3747,130 +3643,6 @@ class VideoEditor:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             except Exception:
                 pass
-
-
-def _merge_consecutive_placeholders(
-    segment_paths: list[str],
-    block_ranges: list[dict],
-    seg_dir: Path,
-    logger,
-) -> tuple[list[str], list[dict]]:
-    """Merge consecutive placeholder segments into fewer, longer clips.
-
-    When many consecutive scenes fail to get media assets (e.g. due to
-    off-niche theme poisoning or provider circuit breakers), the concat
-    gets overloaded with placeholder segments that add no visual
-    value but consume ffmpeg xfade processing time per segment.
-
-    This function identifies runs of consecutive ``_placeholder.mp4`` segments,
-    concatenates them into a single longer placeholder using ffmpeg
-    stream concat (fast, no re-encode), and merges their block ranges.
-
-    Returns:
-        (merged_paths, merged_ranges) — reduced lists with placeholder
-        runs collapsed into single entries.
-    """
-    if not segment_paths:
-        return segment_paths, block_ranges
-
-    merged_paths: list[str] = []
-    merged_ranges: list[dict] = []
-    run_indices: list[int] = []
-
-    for i, sp in enumerate(segment_paths):
-        is_placeholder = "_black" in Path(sp).stem or "_placeholder" in Path(sp).stem
-
-        if is_placeholder:
-            run_indices.append(i)
-        else:
-            # Flush any pending black run
-            if run_indices:
-                _flush_black_run(
-                    run_indices, segment_paths, block_ranges,
-                    seg_dir, merged_paths, merged_ranges, logger,
-                )
-                run_indices = []
-            merged_paths.append(sp)
-            merged_ranges.append(block_ranges[i])
-
-    # Flush trailing black run
-    if run_indices:
-        _flush_black_run(
-            run_indices, segment_paths, block_ranges,
-            seg_dir, merged_paths, merged_ranges, logger,
-        )
-
-    if len(merged_paths) < len(segment_paths):
-        logger.info(
-            "Merged %d consecutive placeholder runs → reduced %d segments to %d",
-            len(segment_paths) - len(merged_paths),
-            len(segment_paths), len(merged_paths),
-        )
-
-    return merged_paths, merged_ranges
-
-
-def _flush_black_run(
-    indices: list[int],
-    segment_paths: list[str],
-    block_ranges: list[dict],
-    seg_dir: Path,
-    merged_paths: list[str],
-    merged_ranges: list[dict],
-    logger,
-) -> None:
-    """Concatenate a run of consecutive placeholders into one segment."""
-    if len(indices) == 1:
-        # Single black segment — no merge needed
-        merged_paths.append(segment_paths[indices[0]])
-        merged_ranges.append(block_ranges[indices[0]])
-        return
-
-    first, last = indices[0], indices[-1]
-
-    # Build merged block range with combined duration
-    merged_range = dict(block_ranges[first])
-    merged_range["duration"] = sum(
-        block_ranges[j]["duration"] for j in indices
-    )
-
-    # Use ffmpeg concat demuxer (fast, no re-encode) to merge black clips
-    merged_path = seg_dir / f"scene_{first:04d}_merged_placeholder_{len(indices)}.mp4"
-    if not merged_path.exists():
-        concat_list = seg_dir / f"_blist_{first}.txt"
-        with open(concat_list, "w") as f:
-            for j in indices:
-                f.write(f"file '{Path(segment_paths[j]).resolve()}'\n")
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-v", "error",
-                    "-f", "concat", "-safe", "0",
-                    "-i", str(concat_list),
-                    "-c", "copy",
-                    str(merged_path),
-                ],
-                capture_output=True, timeout=60,
-                check=True,
-            )
-            logger.debug(
-                "Merged %d placeholders (indices %d..%d) → %s",
-                len(indices), first, last, merged_path.name,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Could not merge %d placeholders: %s — using first one",
-                len(indices), exc,
-            )
-            merged_paths.append(segment_paths[first])
-            merged_ranges.append(block_ranges[first])
-            return
-        finally:
-            concat_list.unlink(missing_ok=True)
-
-    merged_paths.append(str(merged_path.resolve()))
-    merged_ranges.append(merged_range)
-
 
 # ── Module-level helpers ────────────────────────────────────────
 
