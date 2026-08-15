@@ -53,6 +53,10 @@ async def run_thumbnail_verification_cycle(db=None):
     Quota: 2 units per video (thumbnails().list() + set()).
     Max daily: 5 × 12 × 24 = 1,440 units (safe with 10,000 daily quota).
     """
+    from config.settings import YT_REMEDIATION_MODE
+    if YT_REMEDIATION_MODE:
+        return
+
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -114,17 +118,31 @@ async def run_thumbnail_verification_cycle(db=None):
 
             service = uploader._get_service()
 
-            # Check if thumbnail exists on YT (1 quota unit)
+            # Check if a custom thumbnail exists on YT (1 quota unit).
+            # NOTE: YouTube Data API v3 has NO `thumbnails().list()` endpoint —
+            # only `thumbnails().set()`. A previous revision called the non-existent
+            # `list()`, raising `AttributeError: 'Resource' object has no attribute
+            # 'list'` every cycle and always falling through to a 50-unit re-upload.
+            # Verify via videos().list(part="snippet") and detect a custom
+            # thumbnail through the maxres key instead.
             try:
-                resp = service.thumbnails().list(videoId=yt_video_id).execute()
+                resp = service.videos().list(
+                    part="snippet",
+                    id=yt_video_id,
+                    fields="items/snippet/thumbnails",
+                ).execute()
 
                 # ── Track quota (diagnostic) ──────────────────────────
-                track_quota(canal, "thumbnails.list", 1,
+                track_quota(canal, "videos.list", 1,
                             yt_id=yt_video_id, caller="thumbnail_verify.check")
 
                 items = resp.get("items", [])
-                if items:
-                    # Thumbnail already present — mark as verified
+                thumbnails = (
+                    items[0].get("snippet", {}).get("thumbnails", {})
+                    if items else {}
+                )
+                if thumbnails.get("maxres"):
+                    # Custom thumbnail already present — mark as verified
                     db.update_video(video_id, thumbnail_verified=1)
                     logger.info(
                         "[%s] ✅ Thumbnail verified for video #%d (%s)",

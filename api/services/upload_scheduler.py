@@ -555,20 +555,22 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
         db = ExtendedDatabase()
 
-    # ── 0a. Fase 0.2: tope global de subidas (long-form + shorts) ──
-    # Red de seguridad: cada subida = 1.600 ud de cuota. Frena picos >24/día
-    # que agotaban la cuota. No bloquea el régimen normal (16-20/día).
+    from config.settings import YT_REMEDIATION_MODE
+    if YT_REMEDIATION_MODE:
+        logger.warning("📤 Upload scheduler: remediation mode active — uploads require preflight approval")
+        return None
+
+    # ── 0. YouTube quota circuit breaker ─────────────────────
+    # Project-level reservation admission in YouTubeUploadDispatcher is the
+    # quota source of truth.  This global breaker is only for a confirmed
+    # YouTube quotaExceeded response; do not add heuristic thresholds here.
     try:
-        from config.settings import GLOBAL_DAILY_UPLOAD_CAP
-        today_uploads = db.count_today_uploads()
-        if today_uploads >= GLOBAL_DAILY_UPLOAD_CAP:
-            logger.info(
-                "📤 Upload scheduler: global daily cap reached (%d/%d) — no more uploads today",
-                today_uploads, GLOBAL_DAILY_UPLOAD_CAP,
-            )
+        if db.is_quota_exhausted():
+            logger.info("📤 Upload scheduler: YouTube quota exhausted — uploads paused")
             return None
-    except Exception:
-        pass  # guard no crítico: nunca bloquear subidas por un error de conteo
+    except Exception as exc:
+        logger.warning("Upload quota breaker check failed; blocking dispatch fail-closed: %s", exc)
+        return None
 
     # ── 0. Recovery scan: revert stuck 'uploading' videos whose job died ──
     # This catches videos that got stuck due to server restart / worker crash
@@ -758,7 +760,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                     """SELECT COUNT(*) as cnt FROM videos
                        WHERE channel_id = ?
                          AND date(uploaded_at) = date('now', 'localtime')
-                         AND status = 'published'
+                         AND status IN ('published', 'uploaded_private', 'uploaded')
                          AND yt_video_id IS NOT NULL""",
                     (ch_id,),
                 ).fetchone()
@@ -801,6 +803,15 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     video_id = video["id"]
     channel_id = video["channel_id"]
     slug = video.get("channel_slug", video.get("canal", "unknown"))
+
+    # Late gate: quota can be consumed between candidate selection and dispatch.
+    try:
+        if db.is_quota_exhausted():
+            logger.info("📤 Upload scheduler: quota exhausted before job creation — skipping %s", slug)
+            return None
+    except Exception as exc:
+        logger.warning("Upload quota breaker recheck failed; blocking dispatch fail-closed: %s", exc)
+        return None
 
     # ── v24 (Aug 2026): Pre-dispatch yt_video_id guard ──
     # If the video already has a YouTube ID, the upload already succeeded.
