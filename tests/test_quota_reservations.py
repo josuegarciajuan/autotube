@@ -91,10 +91,30 @@ def test_consumed_reservation_cannot_admit_a_second_upload(tmp_path):
 
 
 def test_remediation_mode_defaults_to_safe():
-    from config import settings
+    """El DEFAULT en código de YT_REMEDIATION_MODE debe ser safe-on ("true").
 
-    assert settings.YT_REMEDIATION_MODE is True
-    assert settings.SHORTS_CHAIN_DISPATCH_ENABLED is False
+    El .env de producción puede desactivarlo explícitamente tras validar el
+    preflight (load_dotenv override=True), así que verificamos el default del
+    código fuente, no el valor efectivo del entorno.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path("config/settings.py").read_text()
+
+    m = re.search(
+        r'YT_REMEDIATION_MODE = os\.getenv\("YT_REMEDIATION_MODE", "([^"]+)"\)',
+        src,
+    )
+    assert m, "YT_REMEDIATION_MODE definition not found"
+    assert m.group(1).lower() == "true"
+
+    m2 = re.search(
+        r'SHORTS_CHAIN_DISPATCH_ENABLED = os\.getenv\("SHORTS_CHAIN_DISPATCH_ENABLED", "([^"]+)"\)',
+        src,
+    )
+    assert m2, "SHORTS_CHAIN_DISPATCH_ENABLED definition not found"
+    assert m2.group(1).lower() == "false"
 
 
 def test_preflight_prioritizes_oldest_long_backlog(tmp_path):
