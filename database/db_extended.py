@@ -2874,10 +2874,10 @@ class ExtendedDatabase(Database):
                 q += " AND v.status = ?"
                 params.append(status)
             else:
-                # Exclude videos deleted from YouTube (soft-delete) and
-                # failed/error videos by default to keep listings clean.
-                # Pass status='error' explicitly to see failures.
-                q += " AND v.status NOT IN ('deleted_on_yt', 'error')"
+                # Exclude videos deleted from YouTube (soft-delete),
+                # failed/error videos, and cancelled videos by default to
+                # keep listings clean. Pass the status explicitly to see them.
+                q += " AND v.status NOT IN ('deleted_on_yt', 'error', 'cancelled')"
             q += " ORDER BY v.created_at DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             rows = conn.execute(q, params).fetchall()
