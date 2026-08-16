@@ -116,16 +116,21 @@ export default function Dashboard() {
     const totalShorts = ok.reduce((n: number, c: any) => n + (c.shorts_updated || 0), 0)
     const totalAnalytics = ok.reduce((n: number, c: any) => n + (c.analytics_updated || 0), 0)
     const totalFallback = ok.reduce((n: number, c: any) => n + (c.analytics_fallback_videos || 0), 0)
+    const totalScraped = ok.reduce((n: number, c: any) => n + (c.scrape_fallback_videos || 0) + (c.scrape_fallback_shorts || 0), 0)
     const quotaExhausted = ok.some((c: any) => c.quota_exhausted)
+    const scrapeMode = s.scrape_mode || ok.some((c: any) => c.scrape_mode)
     let msg = `${ok.length} canal(es)`
-    if (quotaExhausted) {
+    if (scrapeMode) {
+      msg += ` · 🕸️ modo scraping`
+    } else if (quotaExhausted) {
       msg += ` · ⚠️ Cuota Data API agotada`
     }
     if (totalVideos > 0) msg += ` · ${totalVideos} videos`
-    else if (quotaExhausted) msg += ` · 0 videos (sin quota)`
+    else if (quotaExhausted && totalScraped === 0) msg += ` · 0 videos (sin quota)`
     if (totalShorts > 0) msg += ` · ${totalShorts} shorts`
     if (totalAnalytics > 0) msg += ` · ${totalAnalytics} analytics`
     if (totalFallback > 0) msg += ` · ${totalFallback} via analytics`
+    if (totalScraped > 0) msg += ` · ${totalScraped} via scraping`
     if (failed.length) msg += ` · ${failed.length} con error`
     return msg
   }
@@ -133,7 +138,9 @@ export default function Dashboard() {
   function hasQuotaWarning(s: any): boolean {
     const chans = s.channels || []
     const ok = chans.filter((c: any) => c.ok)
-    return ok.some((c: any) => c.quota_exhausted)
+    // Warn only on a GENUINE quota failure: quota exhausted AND scraping did
+    // not recover the data. A successful scrape-mode collection is a success.
+    return ok.some((c: any) => c.quota_exhausted && (c.scrape_fallback_videos || 0) + (c.scrape_fallback_shorts || 0) === 0)
   }
 
   function applyStatsStatus(s: any, showBanner = true) {
@@ -397,10 +404,10 @@ export default function Dashboard() {
         </button>
         <button
           onClick={handleCollectStats}
-          disabled={collectingStats || quotaExhausted}
+          disabled={collectingStats}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           title={quotaExhausted 
-            ? `Cuota agotada — recarga en ~${quotaStatus?.remaining_hours?.toFixed(1) ?? '?'}h` 
+            ? 'Recolectar stats en modo scraping (0 cuota Data API)' 
             : 'Recolectar estadisticas de YouTube bajo demanda'}
         >
           {collectingStats ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
