@@ -21,7 +21,7 @@ Called every 5 min by the checker loop in api/main.py.
 import json
 import logging
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger("autotube.upload_scheduler")
@@ -537,6 +537,55 @@ def _spawn_upload_worker(job_id: int, channel_id: int, video_id: int) -> bool:
         return False
 
 
+def _minutes_since_last_upload(db, channel_id: int) -> float | None:
+    """Minutes since the channel's last upload, or None if never uploaded.
+
+    Computed in SQLite (julianday, UTC) to avoid local/UTC ambiguity: both
+    uploaded_at (CURRENT_TIMESTAMP) and 'now' are UTC inside SQLite.
+    """
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT (julianday('now') - julianday(MAX(uploaded_at))) * 1440.0 AS mins_ago "
+                "FROM videos WHERE channel_id = ? "
+                "AND yt_video_id IS NOT NULL AND yt_video_id != '' "
+                "AND uploaded_at IS NOT NULL",
+                (channel_id,),
+            ).fetchone()
+        if row and row["mins_ago"] is not None:
+            return float(row["mins_ago"])
+    except Exception:
+        pass
+    return None
+
+
+def _apply_same_channel_gap(db, ch_cfg: dict, channel_id: int,
+                            candidate: datetime, now: datetime) -> datetime:
+    """Push a candidate upload time forward to respect the same-channel minimum gap.
+
+    Reads MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS from channel config (default 3h).
+    The gap is a duration, so it is timezone-agnostic: the earliest allowed time
+    is now + (gap - minutes_since_last_upload). Returns candidate unchanged if
+    no gap applies or it is already beyond the earliest allowed time.
+    """
+    try:
+        gap_hours = int(ch_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
+    except (TypeError, ValueError):
+        gap_hours = 3
+    if gap_hours <= 0:
+        return candidate
+    mins_ago = _minutes_since_last_upload(db, channel_id)
+    if mins_ago is None:
+        return candidate
+    remaining_min = gap_hours * 60 - mins_ago
+    if remaining_min <= 0:
+        return candidate
+    earliest = now + timedelta(minutes=remaining_min)
+    if candidate >= earliest:
+        return candidate
+    return earliest
+
+
 def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     """Check for awaiting_upload videos and dispatch upload jobs.
 
@@ -604,8 +653,6 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
     # ── 2. Find videos awaiting upload (due now or needing scheduling) ──
     now = datetime.now()
-    now_utc = datetime.now(timezone.utc)  # UTC-aware for past-due comparisons
-    now_utc_naive = now_utc.replace(tzinfo=None)  # naive UTC for legacy fallback comparisons
 
     with db._connect() as conn:
         rows = conn.execute(
@@ -651,11 +698,12 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             # ── v24: exponential backoff for retries ──
             retry_count = 0
             try:
-                retry_count = conn.execute(
-                    "SELECT COUNT(*) FROM generation_jobs "
-                    "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
-                    (video_id,),
-                ).fetchone()[0]
+                with db._connect() as _conn:
+                    retry_count = _conn.execute(
+                        "SELECT COUNT(*) FROM generation_jobs "
+                        "WHERE video_id = ? AND action = 'upload_only' AND status = 'failed'",
+                        (video_id,),
+                    ).fetchone()[0]
             except Exception:
                 pass
             if retry_count > 0:
@@ -685,66 +733,42 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 continue
             # sched_time <= now — ready to dispatch now
 
-        # Past-due check (target_public_at already passed → catch-up)
-        past_due = False
-        target_public = row["target_public_at"]
-        if target_public:
-            try:
-                from pipeline.publish_scheduler import _parse_target_public_at
-                # Parse with timezone awareness (handles both naive local and ISO8601 UTC)
-                pub_dt = _parse_target_public_at(str(target_public))
-                # Compare aware-vs-aware: pub_dt is UTC-aware, now_utc is also UTC-aware
-                if pub_dt is not None and pub_dt < now_utc:
-                    past_due = True
-                    logger.info(
-                        "Video %d: public time already passed — uploading ASAP", video_id
-                    )
-            except (ValueError, TypeError):
-                # Fallback: try legacy naive parsing
-                # target_public format: "2026-07-24T23:00:00+00:00" — strip tz offset for naive parse
-                try:
-                    pub_dt = datetime.strptime(str(target_public)[:19], "%Y-%m-%dT%H:%M:%S")
-                    if pub_dt < now_utc_naive:
-                        past_due = True
-                        logger.info(
-                            "Video %d: public time already passed — uploading ASAP",
-                            video_id,
-                        )
-                except (ValueError, TypeError):
-                    try:
-                        pub_dt = datetime.fromisoformat(
-                            str(target_public).replace("Z", "+00:00")
-                        )
-                        if pub_dt < now_utc:
-                            past_due = True
-                            logger.info(
-                                "Video %d: public time already passed — uploading ASAP",
-                                video_id,
-                            )
-                    except (ValueError, TypeError):
-                        pass
-
-        # v12.1: — scheduled_upload_at past-due check ─
-        # A video whose scheduled_upload_at has passed is overdue for upload
-        # regardless of whether target_public_at has arrived yet.
-        if not past_due and sched_at_val is not None:
-            try:
-                sched_dt = datetime.strptime(
-                    str(sched_at_val)[:19], "%Y-%m-%d %H:%M:%S"
-                )
-                if sched_dt < now:
-                    past_due = True
-                    logger.info(
-                        "Video %d: scheduled_upload_at already passed — uploading ASAP",
-                        video_id,
-                    )
-            except (ValueError, TypeError):
-                pass
-
-        # Window gate (unless past-due)
         current_hour = now.hour
-        if past_due or _is_in_any_window(current_hour, windows):
-            eligible.append({"row": dict(row), "past_due": past_due})
+        in_window = _is_in_any_window(current_hour, windows)
+
+        # ── v25 (Aug 2026): reprogram overdue scheduled_upload_at instead of ASAP ──
+        # A backlog of past-due videos must drain through future upload windows,
+        # NOT be dumped back-to-back. If scheduled_upload_at is overdue AND we are
+        # outside a window, recompute a future window time (respecting the
+        # same-channel gap) and wait. target_public_at staleness is handled
+        # separately by _recover_inconsistent_upload_times + the pre-dispatch recalc.
+        if sched_at_val is not None and not in_window:
+            try:
+                sched_dt = datetime.strptime(str(sched_at_val)[:19], "%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                sched_dt = None
+            if sched_dt is not None and sched_dt < now:
+                new_time = _compute_random_upload_time(windows, now, channel_id)
+                if new_time is None:
+                    logger.debug("Video %d: overdue but no window available — skipping", video_id)
+                    continue
+                new_time = _apply_same_channel_gap(db, ch_cfg, channel_id, new_time, now)
+                try:
+                    db.update_video(
+                        video_id,
+                        scheduled_upload_at=new_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    "🔁 Video %d: overdue (%s) outside window → reprogrammed to %s",
+                    video_id, str(sched_at_val)[:19], new_time.strftime('%Y-%m-%d %H:%M'),
+                )
+                continue
+
+        # Window gate
+        if in_window:
+            eligible.append({"row": dict(row), "past_due": False})
 
     if not eligible:
         # ── Heartbeat: log only once every ~15 min when idle ──
@@ -803,11 +827,34 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 slug, uploaded_today, max_allowed,
             )
             continue
+
+        # ── v25: same-channel upload gap (default 3h) ──
+        # Prevents a backlog from uploading back-to-back for the same channel.
+        sel_cfg = {}
+        try:
+            sel_cfg = json.loads(entry["row"].get("config_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        try:
+            gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
+        except (TypeError, ValueError):
+            gap_hours = 3
+        if gap_hours > 0:
+            mins_ago = _minutes_since_last_upload(db, ch_id)
+            if mins_ago is not None and mins_ago < gap_hours * 60:
+                slug = entry["row"].get("channel_slug", "?")
+                logger.info(
+                    "📤 Upload skipped for %s: same-channel gap (%dh) not elapsed "
+                    "(%.0f min since last upload)",
+                    slug, gap_hours, mins_ago,
+                )
+                continue
+
         selected = entry
         break
 
     if not selected:
-        logger.debug("📤 Upload scheduler: all eligible channels at daily quota")
+        logger.debug("📤 Upload scheduler: no eligible video (daily quota or same-channel gap)")
         return None
 
     entry = selected
@@ -863,9 +910,16 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     effective_target = video.get("target_public_at")
     try:
         from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
-        ch_cfg_raw = ch_cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
-        ch_cfg_spread = ch_cfg.get("PUBLISH_WINDOW_SPREAD_MIN", 90)
-        if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=60):
+        # Use the SELECTED video's config (not the last loop iteration's config).
+        sel_cfg2 = {}
+        try:
+            sel_cfg2 = json.loads(video.get("config_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        ch_cfg_raw = sel_cfg2.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+        ch_cfg_spread = sel_cfg2.get("PUBLISH_WINDOW_SPREAD_MIN", 90)
+        ch_cfg_warmup = int(sel_cfg2.get("PUBLISH_WARMUP_MIN", 60) or 60)
+        if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=ch_cfg_warmup):
             logger.warning(
                 "[%s] Video #%d: target_public_at is stale (%s). Recalculating...",
                 slug, video_id, str(effective_target)[:19] if effective_target else "None"
@@ -876,7 +930,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 timezone_str=ch_cfg_raw,
                 db=db,
                 channel_id=channel_id,
-                warmup_min=60,
+                warmup_min=ch_cfg_warmup,
                 publish_window_spread_min=ch_cfg_spread,
             )
             # Persist to both tables
