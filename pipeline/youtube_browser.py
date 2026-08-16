@@ -1268,7 +1268,8 @@ def _parse_subs_text(renderer_text: str) -> int | None:
     """
     import re
     m = re.search(
-        r"([\d.,]+)\s*(mil|K|M)?\s*suscriptores", renderer_text, re.IGNORECASE
+        r"([\d.,]+)\s*(mil|K|M)?\s*(?:de\s*)?suscriptores",
+        renderer_text, re.IGNORECASE,
     )
     if not m:
         return None
