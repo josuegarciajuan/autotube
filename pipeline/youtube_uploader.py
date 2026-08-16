@@ -158,17 +158,40 @@ class YouTubeUploader:
             from api.services.lifecycle_monitor import create_alert
             from database.db_extended import ExtendedDatabase as _E2
             _adb = _E2()
+
+            # Resolve the shared GCP project + affected channels so the alert
+            # is a PER-TOKEN notice (sincronías+civilizaciones share a project,
+            # expediciones+anomalías share another).
+            project_id = "unknown"
+            shared_channels: list = []
+            try:
+                from api.services.quota_tracker import get_channel_project
+                project_id = get_channel_project(channel)
+                for ch in (_adb.get_channels(active_only=False) or []):
+                    s = ch.get("slug")
+                    if s and get_channel_project(s) == project_id:
+                        shared_channels.append(s)
+            except Exception:
+                pass
+
+            channels_label = ", ".join(shared_channels) or channel
             create_alert(
                 _adb,
                 entity_type="system", entity_id=None, channel_id=None,
                 alert_type="quota_exhausted", severity="critical",
-                title="YouTube API quota agotada",
+                title=f"YouTube API quota agotada — {project_id}",
                 message=(
-                    "Cuota diaria de YouTube API agotada. "
-                    "Subidas y comprobaciones YT pausadas para el proyecto "
-                    "afectado hasta el reset PT."
+                    f"Cuota diaria agotada para el proyecto GCP '{project_id}' "
+                    f"(token compartido). Canales afectados: {channels_label}. "
+                    "Subidas y comprobaciones YT pausadas para este proyecto "
+                    "hasta el reset PT."
                 ),
-                metadata={"channel": channel, "caller": caller},
+                metadata={
+                    "channel": channel,
+                    "caller": caller,
+                    "project_id": project_id,
+                    "channels": shared_channels,
+                },
             )
         except Exception:
             pass
