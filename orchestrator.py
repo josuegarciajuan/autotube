@@ -1043,14 +1043,6 @@ class PipelineOrchestrator:
                 else:
                     cta_text = None
 
-                # Priority 2: Channel config SCRIPT_END_HOOK (channel-specific teaser)
-                if not cta_text:
-                    cta_text = getattr(self.config, "SCRIPT_END_HOOK", None)
-                    # Clean up any remaining placeholders like {next_story}
-                    if cta_text:
-                        import re as _re
-                        cta_text = _re.sub(r'\{[^}]+\}', 'la proxima historia', cta_text)
-
                 if cta_text:
                     self._emit_progress(39, "tts", "Generando audio de cierre (CTA)...")
                     cta_path, _ = self.tts.generate(cta_text)

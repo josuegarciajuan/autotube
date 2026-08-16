@@ -2,6 +2,29 @@
  *  Uses absolute /api prefix — works with Vite proxy (dev) and direct (prod). */
 const API_BASE = '/api';
 
+export interface FullReplanPreflight {
+  confirmation_token: string;
+  expires_at: string;
+  proposed_slots: FullReplanProposedSlot[];
+  summary: {
+    proposed: number;
+    horizon_days: number;
+  };
+}
+
+export interface FullReplanProposedSlot {
+  channel_id: number;
+  date_key: string;
+  scheduled_at: string;
+}
+
+export interface FullReplanApplyResult {
+  ok: boolean;
+  updated: number;
+  created: number;
+  preserved: number;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
@@ -223,8 +246,12 @@ export const api = {
     request<any>(`/planning/shorts-config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   replanShorts: () => request<any>('/planning/shorts-replan', { method: 'POST' }),
 
-  // Full Replan — reset complete de programacion (videos + shorts)
-  fullReplan: () => request<any>('/planning/full-replan', { method: 'POST' }),
+  // Full Replan — preview first, then apply the short-lived reviewed plan.
+  fullReplanPreflight: () => request<FullReplanPreflight>('/planning/full-replan/preflight', { method: 'POST' }),
+  fullReplanApply: (confirmationToken: string) => request<FullReplanApplyResult>('/planning/full-replan/apply', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation_token: confirmationToken }),
+  }),
 
   // Optimal Publish Slots (v10)
   getOptimalSlots: (channelId: number) =>

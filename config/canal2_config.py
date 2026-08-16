@@ -244,12 +244,6 @@ SCRIPT_STRUCTURE = [
      )},
 ]
 
-SCRIPT_END_HOOK = (
-    "Y si crees que esta historia es increíble, espera a ver {next_story}. "
-    "Porque lo que le ocurrió a {next_protagonist} es todavía más "
-    "inexplicable. Ese es el próximo video. Dale like, suscríbete y activa la campana."
-)
-
 SCRIPT_EMOTIONAL_ARC = {
     "0-10%": "asombro", "10-20%": "curiosidad", "20-30%": "empatía",
     "30-45%": "intriga", "45-55%": "anticipación", "55-65%": "estupefacción",
@@ -416,6 +410,10 @@ IMAGE_STYLE_MODIFIERS = (
     "warm cinematic photography, golden hour lighting, atmospheric, 16:9, "
     "professional photography, hopeful luminous mood, ethereal light rays, "
     "soft focus, inspiring"
+)
+AI_VISUAL_COLOR_GRADING = (
+    "luminous gold-and-indigo colour grade, warm amber highlights, rich navy "
+    "shadows, vivid readable ethereal glow"
 )
 
 COLOR_PALETTE = {

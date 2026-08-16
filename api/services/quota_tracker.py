@@ -38,20 +38,8 @@ _last_flush = 0.0
 # Default daily quota per project (YouTube Data API v3).
 # Fase 2 (ago 2026): era 10_000 (free tier), pero los canales consumen 30-55k ud/día
 # sin bloqueos → tienen ampliación. Configurable vía YT_DAILY_QUOTA_LIMIT.
-DEFAULT_DAILY_QUOTA = int(os.getenv("YT_DAILY_QUOTA_LIMIT", "100000"))
+DEFAULT_DAILY_QUOTA = int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000"))
 
-
-# ── Fase 1.4 (ago 2026): mapping canal → proyecto GCP ──
-# La cuota de YouTube Data API es POR PROYECTO Google Cloud, no un pool global.
-# Hay 2 proyectos (verificado en client_secret_*.json):
-#   - youtube-uploads-automation → canal2 + canal3 (google_account tracatrack)
-#   - autotube-expediciones     → canal4 + canal5 (google_account burrianacasa2026)
-CHANNEL_PROJECT_MAP = {
-    "canal2": "youtube-uploads-automation",
-    "canal3": "youtube-uploads-automation",
-    "canal4": "autotube-expediciones",
-    "canal5": "autotube-expediciones",
-}
 
 _project_cache: dict[str, str] = {}
 
@@ -60,7 +48,7 @@ def get_channel_project(channel_slug: str) -> str:
     """Resolve the GCP project for a channel (authoritative from client_secret)."""
     if channel_slug in _project_cache:
         return _project_cache[channel_slug]
-    proj = CHANNEL_PROJECT_MAP.get(channel_slug, "unknown")
+    proj = "unknown"
     try:
         import json as _json
         from config.settings import PROJECT_ROOT
@@ -76,6 +64,13 @@ def get_channel_project(channel_slug: str) -> str:
         pass
     _project_cache[channel_slug] = proj
     return proj
+
+
+def quota_day_pacific(now: datetime | None = None) -> str:
+    """Return the YouTube quota day, which resets at midnight Pacific Time."""
+    from zoneinfo import ZoneInfo
+    current = now or datetime.now(timezone.utc)
+    return current.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
 
 
 def track_quota(
@@ -184,7 +179,12 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         db = ExtendedDatabase()
 
     if date is None:
-        date = datetime.now().strftime("%Y-%m-%d")
+        # Quota day is Pacific (resets at midnight PT = 07:00 UTC). Grouping by
+        # the server-local date (Europe/Madrid) miscounts usage between local
+        # midnight and the PT reset, tripping the throttle governor on the wrong
+        # day. Timestamps are stored in server-local time (Europe/Madrid, UTC+2),
+        # which is 9h ahead of Pacific (UTC-7), so shift back 9h before grouping.
+        date = quota_day_pacific()
 
     with db._connect() as conn:
         conn.row_factory = None
@@ -193,7 +193,7 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_channel = {}
         rows = conn.execute(
             "SELECT channel_slug, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp) = ? AND success = 1 "
+            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
             "GROUP BY channel_slug",
             (date,),
         ).fetchall()
@@ -204,7 +204,7 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_operation = {}
         rows = conn.execute(
             "SELECT operation, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp) = ? AND success = 1 "
+            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
             "GROUP BY operation",
             (date,),
         ).fetchall()
@@ -215,7 +215,7 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_hour = {}
         rows = conn.execute(
             "SELECT strftime('%H', timestamp) AS h, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp) = ? AND success = 1 "
+            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
             "GROUP BY h ORDER BY h",
             (date,),
         ).fetchall()

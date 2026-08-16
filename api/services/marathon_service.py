@@ -143,6 +143,11 @@ def check_and_dispatch_marathon(db) -> dict | None:
         dict with dispatch info if a marathon was enqueued, or None.
     """
     from config.defaults import MARATHON_BACKLOG_PER_CHANNEL
+    from config.settings import YT_REMEDIATION_MODE
+
+    if YT_REMEDIATION_MODE:
+        logger.info("Marathon: remediation mode active — generation is held until backlog preflight")
+        return None
 
     # 1. Check backlog (awaiting + warming only — pipeline accumulation signal)
     awaiting = 0

@@ -182,12 +182,6 @@ SCRIPT_STRUCTURE = [
     {"step": "EL LEGADO", "time_pct": "85-100%",
      "description": ("Lo que nos dejaron. Por qué importa hoy. Reflexión. End hook + CTA.")},
 ]
-SCRIPT_END_HOOK = (
-    "Y si crees que esta historia es increíble, espera a ver lo que "
-    "descubrieron en {next_place}. Porque lo que los arqueólogos "
-    "encontraron allí es todavía más inexplicable. Ese es el próximo "
-    "video. Dale like, suscríbete y activa la campana."
-)
 SCRIPT_EMOTIONAL_ARC = {
     "0-10%": "asombro", "10-20%": "curiosidad", "20-30%": "fascinación",
     "30-45%": "intriga", "45-55%": "misterio", "55-65%": "revelación",
@@ -278,6 +272,10 @@ IMAGE_STYLE_MODIFIERS = (
     "cinematic 16:9, warm golden hour photography, atmospheric lighting, "
     "professional documentary photography, mysterious and solemn mood, "
     "earthy tones, dust particles in light rays"
+)
+AI_VISUAL_COLOR_GRADING = (
+    "sun-baked archaeological colour grade, vivid sandstone gold, terracotta "
+    "accents, deep umber shadows with readable ancient detail"
 )
 COLOR_PALETTE = {
     "primary": (194, 154, 75), "secondary": (62, 38, 22), "accent": (168, 104, 52),

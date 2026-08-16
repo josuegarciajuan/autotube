@@ -24,13 +24,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Colour-temperature arc (position 0..1 → prompt modifier) ──────
+# ── Colour-treatment arc (position 0..1 → prompt modifier) ────────
 _COLOR_ARC = [
-    (0.00, 0.15, "warm golden hour light, rich amber tones, inviting glow"),
-    (0.15, 0.40, "neutral warm daylight, natural soft light, balanced tones"),
-    (0.40, 0.70, "cool muted shadows, overcast atmosphere, desaturated midtones"),
-    (0.70, 0.85, "desaturated cold light, dramatic contrast, stark shadows"),
-    (0.85, 1.00, "warm hopeful light, soft golden glow, resolution and peace"),
+    (0.00, 0.15, "warm golden-hour light, rich amber tones, vivid readable detail"),
+    (0.15, 0.40, "natural daylight, lively true-to-life colour, readable subject separation"),
+    (0.40, 0.70, "deep cool shadows with saturated accents, vivid readable midtones"),
+    (0.70, 0.85, "bold cinematic contrast, rich colour separation, readable shadow detail"),
+    (0.85, 1.00, "warm hopeful light, luminous colour, vivid readable resolution"),
 ]
 
 # ── Global negative prompt (shared across ALL generations) ────────
@@ -77,12 +77,17 @@ class VisualCoherenceEngine:
             self._base_prefix = self._build_base_prefix()
         return self._base_prefix
 
+    @property
+    def impact_style_prefix(self) -> str:
+        """Return the non-negotiable global impact and channel-grade layers."""
+        return self._build_impact_style_prefix()
+
     def get_scene_style(self, scene_idx: int, total_scenes: int) -> str:
         """Return the full style prefix for a specific scene index.
 
-        The base prefix is augmented with a colour-temperature modifier
-        that shifts along a pre-defined arc as the video progresses
-        (warm → neutral → cool → desaturated → warm resolution).
+        The base prefix is augmented with a colour-treatment modifier
+        that shifts along a pre-defined arc while preserving vivid,
+        readable colour throughout the video.
 
         If *total_scenes* is 0 the base prefix is returned unmodified.
         """
@@ -153,33 +158,65 @@ class VisualCoherenceEngine:
         """Build the fixed style prefix from channel config.
 
         Combines:
+          - ``AI_VISUAL_IMPACT_STYLE`` (global, inheritable AI treatment)
+          - ``AI_VISUAL_COLOR_GRADING`` (channel colour-grade override)
           - ``IMAGE_STYLE_MODIFIERS`` (free-text style modifiers)
           - ``COLOR_PALETTE`` → human-readable colour hints
           - ``CANAL_NARRATIVE_STYLE`` (optional narrative flavour)
         """
         cfg = self._config
 
+        # Global impact treatment is inheritable from defaults and establishes
+        # the common hybrid documentary / YouTube-impact look for all AI
+        # providers. A channel may add a colour-grade without replacing it.
+        impact_style = self.impact_style_prefix
+
         # Core style from channel
-        style_mod: str = getattr(
-            cfg, "IMAGE_STYLE_MODIFIERS",
+        style_mod: str = self._config_string(
+            cfg,
+            "IMAGE_STYLE_MODIFIERS",
             "cinematic documentary photography, 16:9, atmospheric",
         )
         # Normalize — ensure it's a clean comma-separated string.
         if isinstance(style_mod, tuple):
             style_mod = ", ".join(s for s in style_mod if s)
 
+        style_parts = [impact_style, style_mod]
+        style_mod = ", ".join(part for part in style_parts if part)
+
         # Colour palette hints (human-readable terms)
         palette = getattr(cfg, "COLOR_PALETTE", {})
+        if not isinstance(palette, dict):
+            palette = {}
         colour_hint = self._palette_to_hint(palette)
         if colour_hint:
             style_mod = f"{style_mod}, {colour_hint}"
 
         # Narrative style adds flavour
-        narrative: str = getattr(cfg, "CANAL_NARRATIVE_STYLE", "")
+        narrative = self._config_string(cfg, "CANAL_NARRATIVE_STYLE")
         if narrative and narrative.lower() not in style_mod.lower():
             style_mod = f"{narrative} style, {style_mod}"
 
         return style_mod
+
+    def _build_impact_style_prefix(self) -> str:
+        """Build the global impact and per-channel colour-grade layers."""
+        return ", ".join(
+            part for part in (
+                self._config_string(self._config, "AI_VISUAL_IMPACT_STYLE"),
+                self._config_string(self._config, "AI_VISUAL_COLOR_GRADING"),
+            ) if part
+        )
+
+    @staticmethod
+    def _config_string(config: Any, name: str, default: str = "") -> str:
+        """Return a textual config value without leaking mock/non-text values."""
+        value = getattr(config, name, default)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+            return ", ".join(item for item in value if item)
+        return default
 
     @staticmethod
     def _palette_to_hint(palette: dict) -> str:

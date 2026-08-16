@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fix — YouTube quota circuit breaker para schedulers
+- Conectado el governor de cuota (10.000 ud/proyecto) al dispatch de subidas long-form y shorts; si supera el 85% marca `quota_exhausted_at` y deja backlog en espera.
+- `quotaExceeded` ahora dispara el circuit breaker desde uploads, verificación post-upload, thumbnails, cambios de privacidad/descripción y health checks.
+- Reducido ritmo: `videos_per_day=1`, shorts 2/día por canal, `GLOBAL_DAILY_UPLOAD_CAP=12`; `yt-dlp` pineado a `<2026` por compatibilidad con Python 3.10.
+- Limpieza operativa: cancelados clips pendientes inválidos/del día tras el incidente y reforzado cleanup de Playwright para no dejar driver Node huérfano.
+
 ### Fase A — FIX: Duplicación (1 generación = 1 registro) + yt_video_id en registro trackeado
 - **orchestrator.py**: añadido `db_video_id` opcional; `phase_video`/`phase_upload` usan `update_video` en vez de `insert_video` cuando viene de API.
 - **api/services/generation_service.py**: pasa `db_video_id` al orquestador; guarda `yt_video_id`/`yt_url` en el registro trackeado tras subida exitosa.

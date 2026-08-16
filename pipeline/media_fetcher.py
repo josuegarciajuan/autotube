@@ -988,14 +988,25 @@ class MediaFetcher:
 
     # ── Pollo AI last resort ────────────────────────────────────
 
-    def _try_pollo_scene(self, query: str, scene_tipo: str, ctx) -> dict | None:
+    def _try_pollo_scene(
+        self,
+        scene: dict | str,
+        scene_idx: int = 0,
+        total_scenes: int = 1,
+        ctx=None,
+    ) -> dict | None:
         """Invoke Pollo AI image generation as absolute last resort."""
         pollo = self._get_pollo_scene_gen()
         if pollo is None:
             return None
 
-        prompt = query
-        if not prompt:
+        # Accept the legacy query string for direct callers, but normalize it
+        # into a scene so Pollo always uses the same concept/bible/style/seed
+        # prompt assembly as Pollinations and Local SD.
+        if isinstance(scene, str):
+            scene = {"search_query_en": scene, "tipo": "desarrollo"}
+        scene_tipo = scene.get("tipo", "desarrollo")
+        if not scene.get("search_query_en") and not scene.get("texto"):
             # Build a minimal prompt from scene type if query is empty
             type_hints = {
                 "hook": "dramatic cinematic opening scene dark atmosphere",
@@ -1004,7 +1015,13 @@ class MediaFetcher:
                 "reflexion": "contemplative peaceful atmospheric reflection",
                 "cierre": "hopeful closing scene dawn light resolution",
             }
-            prompt = type_hints.get(scene_tipo, "cinematic atmospheric scene 16:9")
+            scene = dict(scene)
+            scene["search_query_en"] = type_hints.get(
+                scene_tipo, "cinematic atmospheric scene 16:9"
+            )
+
+        prompt, _seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
+        self._ai_prompt_log[scene_idx] = prompt
 
         try:
             logger.info("Scene [%s]: invoking Pollo AI for %r", scene_tipo, prompt[:80])
@@ -1220,19 +1237,21 @@ class MediaFetcher:
         parts.append(tech)
         prompt = ", ".join(p for p in parts if p)
 
-        # Truncate to ~500 chars while ALWAYS preserving the concept and
-        # the visual context (which carries the protagonist description).
-        # The style prefix (longest, least scene-specific) is trimmed first.
+        # Truncate to ~500 chars while retaining the global impact treatment
+        # and channel grade. They are the shared visual contract for every AI
+        # provider; concept/context remain present but yield length first.
         if len(prompt) > 500:
-            concept_lead = concept[:220]
-            context_lead = context[:150] if context else ""
-            reserved = len(concept_lead) + len(context_lead) + len(tech)
-            overhead = reserved + (6 if context_lead else 4)  # ", " separators
-            style_trim = style[: max(0, 497 - overhead)]
+            protected_style = self._coherence_engine.impact_style_prefix
+            overhead = 6 if context else 4  # ", " separators
+            remaining = max(0, 497 - len(protected_style) - len(tech) - overhead)
+            concept_budget = int(remaining * 0.7)
+            context_budget = remaining - concept_budget
+            concept_lead = concept[:concept_budget]
+            context_lead = context[:context_budget] if context else ""
             trim_parts = [concept_lead]
             if context_lead:
                 trim_parts.append(context_lead)
-            trim_parts.append(style_trim)
+            trim_parts.append(protected_style)
             trim_parts.append(tech)
             prompt = ", ".join(p for p in trim_parts if p)
             if len(prompt) > 500:
@@ -1411,12 +1430,13 @@ class MediaFetcher:
 
             elif tier == "pollo_ai":
                 if ai_enabled and ai_used < ai_max:
-                    rescue_query = scene.get("search_query_en", "") or scene.get("tipo", "desarrollo")
                     logger.info(
                         "Scene %d/%d: tier 4 — Pollo AI rescue (%d/%d)",
                         scene_idx + 1, total_scenes, ai_used + 1, ai_max,
                     )
-                    pollo_asset = self._try_pollo_scene(rescue_query, scene.get("tipo", "desarrollo"), ctx)
+                    pollo_asset = self._try_pollo_scene(
+                        scene, scene_idx, total_scenes, ctx
+                    )
                     if pollo_asset:
                         ai_used += 1
                         return pollo_asset, ai_used, quality_info

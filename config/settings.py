@@ -177,8 +177,8 @@ SHORTS_NATIVE_MAX_DAILY = 4
 # Floor and ceiling enforced by the scheduler (compute_daily_shorts_slots).
 # Fase 0 (ago 2026): reducido de 8/10 a 3/4 para evitar "mass-produced content"
 # (riesgo de ban/desmonetización) y el consumo de cuota (~75% era shorts).
-MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "3"))
-MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "4"))
+MIN_DAILY_SHORTS = int(os.getenv("MIN_DAILY_SHORTS", "2"))
+MAX_DAILY_SHORTS = int(os.getenv("MAX_DAILY_SHORTS", "2"))
 
 # Conservative QUOTA cap: YouTube API default 10,000 units/day.
 # v2: aligned with updated per-channel target (4 native + ~6 clips = ~10/day).
@@ -191,6 +191,16 @@ MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
 # 24/día ≈ 38.400 ud — dentro del régimen histórico (16-20/día) con margen,
 # y frena los picos de crisis (30-50/día) que agotaban la cuota.
 GLOBAL_DAILY_UPLOAD_CAP = int(os.getenv("GLOBAL_DAILY_UPLOAD_CAP", "24"))
+
+# Emergency remediation gate. While true, no automatic upload path may start a
+# new YouTube operation. It defaults to safe-on after the August 2026 quota
+# incident and is only disabled after the operator validates the preflight.
+YT_REMEDIATION_MODE = os.getenv("YT_REMEDIATION_MODE", "true").lower() == "true"
+# Per-project automatic budget: 8,000 upload units leaves 2,000 for operator
+# stats and essential reconciliation under the standard 10,000-unit quota.
+YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "8000"))
+# Completion chaining caused burst uploads that bypassed the normal scheduler.
+SHORTS_CHAIN_DISPATCH_ENABLED = os.getenv("SHORTS_CHAIN_DISPATCH_ENABLED", "false").lower() == "true"
 
 # ── Shorts video/image mix strategy ──────────────────────────
 SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
@@ -294,13 +304,13 @@ STATS_AUTO_COLLECT = False  # INVARIANTE: hardcodeado, no depende de env
 # Daily check comparing YT channel total views vs DB-tracked views.
 # When the gap grows beyond the threshold in 24h, an alert is raised
 # and (optionally) unregistered video IDs are auto-scanned via YT API.
-ENABLE_DAILY_VIEW_GAP_CHECK = os.getenv("ENABLE_DAILY_VIEW_GAP_CHECK", "true").lower() == "true"
+ENABLE_DAILY_VIEW_GAP_CHECK = os.getenv("ENABLE_DAILY_VIEW_GAP_CHECK", "false").lower() == "true"
 VIEW_GAP_THRESHOLD = int(os.getenv("VIEW_GAP_THRESHOLD", "500"))
 VIEW_GAP_SCAN_UNREGISTERED = os.getenv("VIEW_GAP_SCAN_UNREGISTERED", "true").lower() == "true"
 VIEW_GAP_INTERVAL_HOURS = int(os.getenv("VIEW_GAP_INTERVAL_HOURS", "24"))
 
 # ── Video Lifecycle (post-upload promotion) ────────────────────
-LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "true").lower() == "true"
+LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "false").lower() == "true"
 LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15"))
 
 # ── First comment ──────────────────────────────────────────────
@@ -320,10 +330,10 @@ LIFECYCLE_DEFAULT_TIMELINE = [
 
 # ── Comment reply ──────────────────────────────────────────────
 COMMENT_REPLY_MAX_PER_VIDEO = int(os.getenv("COMMENT_REPLY_MAX_PER_VIDEO", "5"))
-COMMENT_REPLY_ENABLED = os.getenv("COMMENT_REPLY_ENABLED", "true").lower() == "true"
+COMMENT_REPLY_ENABLED = os.getenv("COMMENT_REPLY_ENABLED", "false").lower() == "true"
 
 # ── Metadata reoptimization ────────────────────────────────────
-METADATA_OPTIMIZE_ENABLED = os.getenv("METADATA_OPTIMIZE_ENABLED", "true").lower() == "true"
+METADATA_OPTIMIZE_ENABLED = os.getenv("METADATA_OPTIMIZE_ENABLED", "false").lower() == "true"
 METADATA_OPTIMIZE_CTR_THRESHOLD = float(os.getenv("METADATA_OPTIMIZE_CTR_THRESHOLD", "3.0"))
 
 # ── A/B Testing (sequential title/thumbnail optimization) ───────

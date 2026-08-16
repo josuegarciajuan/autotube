@@ -138,11 +138,6 @@ SCRIPT_STRUCTURE = [
     {"step": "EL LEGADO", "time_pct": "85-100%",
      "description": "Que nos ensena este caso. Lo que la medicina aprendio."},
 ]
-SCRIPT_END_HOOK = (
-    "Y si este caso te parecio increible, espera a ver el de {next_case}. "
-    "Porque lo que le ocurrio a {next_patient} es todavia mas "
-    "inexplicable. Ese es el proximo video. Dale like, suscribete."
-)
 SCRIPT_EMOTIONAL_ARC = {
     "0-10%": "shock", "10-20%": "curiosidad cientifica", "20-30%": "empatia",
     "30-45%": "intriga clinica", "45-55%": "anticipacion", "55-65%": "asombro",
@@ -216,6 +211,10 @@ IMAGE_STYLE_MODIFIERS = (
     "medical documentary cinematography, clinical lighting, 16:9 aspect ratio, "
     "professional scientific photography, clean sterile aesthetic, "
     "cool teal and blue tones"
+)
+AI_VISUAL_COLOR_GRADING = (
+    "clean medical colour grade, vivid clinical teal and cobalt, warm amber "
+    "diagnostic accents, readable whites and shadow detail"
 )
 COLOR_PALETTE = {
     "primary": (0, 95, 115), "secondary": (8, 20, 38), "accent": (220, 130, 40),

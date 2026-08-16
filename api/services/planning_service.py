@@ -14,6 +14,7 @@ Architecture:
 import hashlib
 import json
 import logging
+import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import pytz
@@ -854,6 +855,7 @@ def compute_horizon_slots(
     from datetime import date as _date, datetime as _dt, timedelta as _td
     
     today = _date.today()
+    now = _dt.now()
     all_raw_slots = []
     
     # ── 1. Collect all raw slots across the horizon ──────────────
@@ -2996,6 +2998,350 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
 
 _FULL_REPLAN_COOLDOWN_MIN = 2  # minimum minutes between full replans
 _last_full_replan_ts: Optional[datetime] = None
+
+
+_SAFE_REPLAN_TOKEN_TTL_MINUTES = 10
+
+
+def _safe_replan_snapshot(db) -> str:
+    """Hash the mutable inputs that make a preflight safe to apply."""
+    with db._connect() as conn:
+        slots = [dict(row) for row in conn.execute("""
+            SELECT id, channel_id, date_key, scheduled_at, target_upload_at,
+                   target_public_at, upload_window_start, upload_window_end,
+                   slot_position, source_mode, status, job_id
+            FROM planned_slots
+            WHERE status = 'pending'
+            ORDER BY id
+        """).fetchall()]
+        channels = [dict(row) for row in conn.execute("""
+            SELECT id, config_json FROM channels WHERE active = 1 ORDER BY id
+        """).fetchall()]
+        active_jobs = [dict(row) for row in conn.execute("""
+            SELECT id, channel_id, video_id, status
+            FROM generation_jobs
+            WHERE status IN ('queued', 'running')
+            ORDER BY id
+        """).fetchall()]
+        active_videos = [dict(row) for row in conn.execute("""
+            SELECT id, channel_id, status
+            FROM videos
+            WHERE status IN ('generating', 'running', 'awaiting_upload', 'uploading', 'uploaded_private')
+            ORDER BY id
+        """).fetchall()]
+        shorts_slots = [dict(row) for row in conn.execute("""
+            SELECT id, channel_id, date_key, scheduled_at, target_upload_at,
+                   short_type, long_slot_position, source_video_id, status,
+                   job_id, short_id, slot_position
+            FROM shorts_planned_slots
+            WHERE status IN ('pending', 'running')
+            ORDER BY id
+        """).fetchall()]
+    payload = json.dumps({
+        "slots": slots,
+        "channels": channels,
+        "active_jobs": active_jobs,
+        "active_videos": active_videos,
+        # Pending Shorts are candidates for in-place retiming; running Shorts
+        # are immutable work in progress. Both must make a preflight stale.
+        "shorts_slots": shorts_slots,
+    }, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _safe_replan_proposed_slots(db, horizon_days: int) -> list[dict]:
+    """Build the long-form proposal without writing any planning state."""
+    if horizon_days < 1 or horizon_days > 31:
+        raise ValueError("horizon_days must be between 1 and 31")
+
+    configs = []
+    for channel in db.get_channels(active_only=True):
+        config = db.get_channel_planning_config(channel["id"])
+        if config.get("planning_enabled", True) and config.get("videos_per_day", 0) > 0:
+            configs.append(config)
+
+    proposed = []
+    today = date.today()
+    for offset in range(horizon_days):
+        proposed.extend(compute_daily_slots((today + timedelta(days=offset)).isoformat(), configs))
+    return proposed
+
+
+class _ShortsProposalDatabase:
+    """Read-only DB view that hides existing Shorts from scheduler idempotency.
+
+    The Shorts scheduler suppresses a computed target when a pending slot already
+    exists.  A safe replan needs that target in order to retime the existing row
+    rather than creating a duplicate, so only this lookup is overridden.
+    """
+
+    def __init__(self, db):
+        self._db = db
+
+    def get_shorts_planned_slots(self, *args, **kwargs):
+        return []
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def _safe_replan_proposed_shorts(db, horizon_days: int) -> list[dict]:
+    """Build a Shorts proposal without persisting or deleting existing slots."""
+    from api.services.shorts_scheduler import compute_daily_shorts_slots
+
+    proposal_db = _ShortsProposalDatabase(db)
+    today = date.today()
+    proposed = []
+    for offset in range(horizon_days):
+        proposed.extend(compute_daily_shorts_slots(
+            (today + timedelta(days=offset)).isoformat(), proposal_db,
+        ))
+    return proposed
+
+
+def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = "long_form") -> tuple[list[dict], dict]:
+    """Reconcile generated capacity with all pending slots, without dropping backlog."""
+    existing_by_channel = {}
+    proposed_by_channel = {}
+    for slot in existing:
+        existing_by_channel.setdefault(slot["channel_id"], []).append(slot)
+    for slot in proposed:
+        proposed_by_channel.setdefault(slot["channel_id"], []).append(slot)
+
+    review = []
+    counts = {"retained": 0, "rescheduled": 0, "new": 0}
+    for channel_id in sorted(set(existing_by_channel) | set(proposed_by_channel)):
+        backlog = sorted(existing_by_channel.get(channel_id, []), key=lambda s: (s["scheduled_at"], s["id"]))
+        generated = sorted(proposed_by_channel.get(channel_id, []), key=lambda s: s["scheduled_at"])
+        for index, old in enumerate(backlog):
+            if index >= len(generated):
+                review.append({
+                    "kind": kind,
+                    "action": "retained",
+                    "reason": "backlog_exceeds_horizon",
+                    "slot_id": old["id"],
+                    "channel_id": channel_id,
+                    "before": old,
+                    "after": old,
+                })
+                counts["retained"] += 1
+                continue
+
+            replacement = generated[index]
+            changed = any(old.get(field) != replacement.get(field) for field in (
+                "date_key", "scheduled_at", "target_upload_at", "target_public_at",
+                "upload_window_start", "upload_window_end", "slot_position", "source_mode",
+            ))
+            action = "rescheduled" if changed else "retained"
+            review.append({
+                "kind": kind,
+                "action": action,
+                "reason": "backlog_prioritized",
+                "slot_id": old["id"],
+                "channel_id": channel_id,
+                "before": old,
+                "after": replacement,
+            })
+            counts[action] += 1
+        for replacement in generated[len(backlog):]:
+            review.append({
+                "kind": kind,
+                "action": "new",
+                "reason": "generated_capacity",
+                "slot_id": None,
+                "channel_id": channel_id,
+                "before": None,
+                "after": replacement,
+            })
+            counts["new"] += 1
+    return review, counts
+
+
+def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
+    """Create a non-mutating, expiring confirmation for long-form and Shorts."""
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    snapshot_hash = _safe_replan_snapshot(db)
+    proposed_slots = _safe_replan_proposed_slots(db, horizon_days)
+    proposed_shorts = _safe_replan_proposed_shorts(db, horizon_days)
+    with db._connect() as conn:
+        existing = [dict(row) for row in conn.execute("""
+            SELECT * FROM planned_slots WHERE status = 'pending' ORDER BY scheduled_at, id
+        """).fetchall()]
+        existing_shorts = [dict(row) for row in conn.execute("""
+            SELECT * FROM shorts_planned_slots WHERE status = 'pending' ORDER BY scheduled_at, id
+        """).fetchall()]
+    long_review, long_counts = _safe_replan_review(existing, proposed_slots)
+    shorts_review, shorts_counts = _safe_replan_review(
+        existing_shorts, proposed_shorts, kind="short",
+    )
+    review = long_review + shorts_review
+    # Keep flat long-form counters for compatibility while making per-kind
+    # counts explicit for clients of this expanded contract.
+    counts = {
+        **long_counts,
+        "long_form": long_counts,
+        "shorts": shorts_counts,
+        "total": {
+            action: long_counts[action] + shorts_counts[action]
+            for action in ("retained", "rescheduled", "new")
+        },
+    }
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=_SAFE_REPLAN_TOKEN_TTL_MINUTES)).isoformat()
+
+    with db._connect() as conn:
+        conn.execute("""
+            INSERT INTO safe_replan_confirmations
+                (token_hash, snapshot_hash, plan_json, expires_at)
+            VALUES (?, ?, ?, ?)
+        """, (token_hash, snapshot_hash, json.dumps({"review": review, "counts": counts}), expires_at))
+        conn.commit()
+
+    return {
+        "ok": True,
+        "confirmation_token": token,
+        "expires_at": expires_at,
+        "snapshot_hash": snapshot_hash,
+        "proposed_slots": proposed_slots,
+        "proposed_shorts": proposed_shorts,
+        "review": review,
+        "counts": counts,
+        "covers": "long-form + Shorts",
+        "summary": {
+            "message": "Safe replan covers long-form + Shorts.",
+            "long_form": {"proposed": len(proposed_slots), **long_counts},
+            "shorts": {"proposed": len(proposed_shorts), **shorts_counts},
+            "total_proposed": len(proposed_slots) + len(proposed_shorts),
+            "horizon_days": horizon_days,
+        },
+    }
+
+
+def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
+    """Apply a preflight in place; it never deletes slots or cancels jobs."""
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    if not confirmation_token:
+        raise ValueError("confirmation token is required")
+
+    token_hash = hashlib.sha256(confirmation_token.encode("utf-8")).hexdigest()
+    with db._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        confirmation = conn.execute("""
+            SELECT * FROM safe_replan_confirmations WHERE token_hash = ?
+        """, (token_hash,)).fetchone()
+        if not confirmation:
+            conn.rollback()
+            raise ValueError("confirmation token is invalid")
+        if confirmation["used_at"] is not None:
+            conn.rollback()
+            raise ValueError("confirmation token was already used")
+        if datetime.fromisoformat(confirmation["expires_at"]) <= datetime.now(timezone.utc):
+            conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
+            conn.commit()
+            raise ValueError("confirmation token has expired")
+        if _safe_replan_snapshot(db) != confirmation["snapshot_hash"]:
+            conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
+            conn.commit()
+            raise ValueError("replan confirmation is stale")
+
+        plan = json.loads(confirmation["plan_json"])
+        review = plan["review"]
+        actual_long_counts = {"retained": 0, "rescheduled": 0, "new": 0}
+        actual_shorts_counts = {"retained": 0, "rescheduled": 0, "new": 0}
+        # Apply every existing Short first. This guarantees a pending Shorts
+        # backlog is retained/re-timed before the transaction inserts a new one.
+        ordered_review = [item for item in review if item["action"] != "new"] + [
+            item for item in review if item["action"] == "new"
+        ]
+        for item in ordered_review:
+            action = item["action"]
+            kind = item.get("kind", "long_form")
+            actual_counts = actual_shorts_counts if kind == "short" else actual_long_counts
+            if action == "retained":
+                actual_counts["retained"] += 1
+            elif action == "rescheduled":
+                new = item["after"]
+                # Deliberately excludes id, status, job_id, and video_id.
+                if kind == "short":
+                    # Preserve type, source/long pairing, job, short, and status.
+                    cursor = conn.execute("""
+                        UPDATE shorts_planned_slots
+                        SET date_key = ?, scheduled_at = ?, target_upload_at = ?, slot_position = ?
+                        WHERE id = ? AND status = 'pending'
+                    """, (
+                        new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
+                        new.get("slot_position", 0), item["slot_id"],
+                    ))
+                else:
+                    cursor = conn.execute("""
+                        UPDATE planned_slots
+                        SET date_key = ?, scheduled_at = ?, target_upload_at = ?, target_public_at = ?,
+                            upload_window_start = ?, upload_window_end = ?,
+                            slot_position = ?, source_mode = ?
+                        WHERE id = ? AND status = 'pending'
+                    """, (
+                        new["date_key"], new["scheduled_at"], new.get("target_upload_at"), new.get("target_public_at"),
+                        new.get("upload_window_start", 9), new.get("upload_window_end", 11),
+                        new.get("slot_position", 0), new.get("source_mode", "original"), item["slot_id"],
+                    ))
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    raise ValueError("replan confirmation is stale")
+                actual_counts["rescheduled"] += 1
+            elif action == "new":
+                new = item["after"]
+                if kind == "short":
+                    conn.execute("""
+                        INSERT INTO shorts_planned_slots
+                            (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                             long_slot_position, source_video_id, slot_position, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """, (
+                        new["channel_id"], new["date_key"], new["scheduled_at"],
+                        new.get("target_upload_at"), new.get("short_type", "native"),
+                        new.get("long_slot_position"), new.get("source_video_id"),
+                        new.get("slot_position", 0),
+                    ))
+                else:
+                    conn.execute("""
+                        INSERT INTO planned_slots
+                            (channel_id, date_key, scheduled_at, target_upload_at, target_public_at,
+                             upload_window_start, upload_window_end, slot_position, source_mode, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """, (
+                        new["channel_id"], new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
+                        new.get("target_public_at"), new.get("upload_window_start", 9),
+                        new.get("upload_window_end", 11), new.get("slot_position", 0),
+                        new.get("source_mode", "original"),
+                    ))
+                actual_counts["new"] += 1
+
+        conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
+        conn.commit()
+    return {
+        "ok": True,
+        "counts": {
+            **actual_long_counts,
+            "long_form": actual_long_counts,
+            "shorts": actual_shorts_counts,
+            "total": {
+                action: actual_long_counts[action] + actual_shorts_counts[action]
+                for action in ("retained", "rescheduled", "new")
+            },
+        },
+        "review": review,
+        "covers": "long-form + Shorts",
+        # Compatibility aliases for the initial safe-replan response.
+        "updated": actual_long_counts["rescheduled"],
+        "created": actual_long_counts["new"],
+        "preserved": actual_long_counts["retained"],
+    }
 
 
 def full_replan(db=None) -> dict:

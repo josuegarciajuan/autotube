@@ -121,6 +121,50 @@ class YouTubeUploader:
                 _TOKEN_LOCKS[self.account_name] = lock
             return lock
 
+    def _http_error_reason(self, exc: HttpError) -> str:
+        """Extract the YouTube API error reason from a googleapiclient HttpError."""
+        try:
+            import json as _json
+            content = exc.content if hasattr(exc, "content") else b""
+            data = _json.loads(content) if content else {}
+            return data.get("error", {}).get("errors", [{}])[0].get("reason", "") or ""
+        except Exception:
+            return ""
+
+    def _mark_quota_exhausted(self, caller: str = "") -> None:
+        """Trip the global YouTube quota circuit breaker."""
+        channel = self.channel_slug or self.account_name or "unknown"
+        try:
+            from database.db_extended import ExtendedDatabase
+            _qdb = ExtendedDatabase()
+            _qdb.set_quota_exhausted(channel_slug=channel)
+        except Exception:
+            pass
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            from database.db_extended import ExtendedDatabase as _E2
+            _adb = _E2()
+            create_alert(
+                _adb,
+                entity_type="system", entity_id=None, channel_id=None,
+                alert_type="quota_exhausted", severity="critical",
+                title="YouTube API quota agotada",
+                message=(
+                    "Cuota diaria de YouTube API agotada (10,000 unidades). "
+                    "Subidas y comprobaciones YT pausadas hasta el reset PT."
+                ),
+                metadata={"channel": channel, "caller": caller},
+            )
+        except Exception:
+            pass
+
+    def _raise_if_quota_exceeded(self, exc: HttpError, caller: str = "") -> None:
+        if self._http_error_reason(exc) == "quotaExceeded":
+            self._mark_quota_exhausted(caller=caller)
+            raise QuotaExhaustedError(
+                "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
+            ) from exc
+
     def _safe_unlink(self) -> None:
         """Delete the token file, but only if no other thread just saved fresh credentials.
 
@@ -401,6 +445,7 @@ class YouTubeUploader:
         suggested_video_filename: str = None,
         suggested_thumb_filename: str = None,
         publish_at: str = None,
+        quota_reference_id: str | None = None,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -424,6 +469,14 @@ class YouTubeUploader:
 
         Returns {video_id: str, url: str, warnings: list}
         """
+        # Keep the legacy entry point fail-closed before authentication or any
+        # possible Google request.  The dispatcher repeats this guard at its
+        # own boundary so direct dispatcher consumers receive the same safety.
+        from config.settings import YT_REMEDIATION_MODE
+        if YT_REMEDIATION_MODE:
+            raise QuotaExhaustedError(
+                "Remediation mode active: upload dispatch is blocked fail-closed."
+            )
         video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -515,8 +568,28 @@ class YouTubeUploader:
             )
 
             logger.info("Uploading: %s (privacy=%s)", title, privacy)
-            response = self._resumable_upload(request, heartbeat_callback=heartbeat_callback,
-                                              progress_callback=progress_callback)
+            # The dispatcher reserves exactly 1,600 units atomically.  The
+            # transport marks the boundary immediately before next_chunk(),
+            # where the first billable videos.insert request is issued.
+            from api.services.youtube_upload_dispatcher import (
+                UploadDispatchBlocked,
+                YouTubeUploadDispatcher,
+            )
+            # Callers with a durable database/job ID can supply it explicitly;
+            # legacy callers retain a deterministic canonical-path fallback.
+            reference_id = quota_reference_id or (
+                f"upload:{self.channel_slug or self.account_name}:{video_path.resolve()}"
+            )
+            try:
+                response = YouTubeUploadDispatcher(self.channel_slug or self.account_name).dispatch(
+                    reference_id=reference_id,
+                    content_class="short" if "short" in str(video_path).lower() else "long",
+                    transport=lambda request_started: self._upload_transport(
+                        request, request_started, heartbeat_callback, progress_callback
+                    ),
+                )
+            except UploadDispatchBlocked as exc:
+                raise QuotaExhaustedError(str(exc)) from exc
 
             # ── Validate YouTube response ─────────────────────────
             self._validate_upload_response(response)
@@ -608,10 +681,14 @@ class YouTubeUploader:
 
         # Fetch current title — YouTube API requires `title` on snippet updates
         # and rejects the request with HTTP 400 if title is missing or empty.
-        list_response = service.videos().list(
-            part="snippet",
-            id=video_id,
-        ).execute()
+        try:
+            list_response = service.videos().list(
+                part="snippet",
+                id=video_id,
+            ).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(exc, "update_description.fetch_title")
+            raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
         track_quota(self.channel_slug, "videos.list", 1,
@@ -634,10 +711,14 @@ class YouTubeUploader:
             },
         }
 
-        service.videos().update(
-            part="snippet",
-            body=body,
-        ).execute()
+        try:
+            service.videos().update(
+                part="snippet",
+                body=body,
+            ).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(exc, "update_description")
+            raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
         track_quota(self.channel_slug, "videos.update", 50,
@@ -666,10 +747,14 @@ class YouTubeUploader:
             },
         }
 
-        service.videos().update(
-            part="status",
-            body=body,
-        ).execute()
+        try:
+            service.videos().update(
+                part="status",
+                body=body,
+            ).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(exc, "set_privacy")
+            raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
         track_quota(self.channel_slug, "videos.update", 50,
@@ -711,6 +796,10 @@ class YouTubeUploader:
             return True
 
         except HttpError as exc:
+            try:
+                self._raise_if_quota_exceeded(exc, "_set_thumbnail")
+            except QuotaExhaustedError:
+                raise
             reason = str(exc)[:200]
             if "youtube.com/verify" in reason.lower() or "phone" in reason.lower():
                 logger.warning(
@@ -776,9 +865,13 @@ class YouTubeUploader:
         """
         for attempt in range(1, POST_UPLOAD_VERIFY_RETRIES + 1):
             try:
-                resp = service.videos().list(
-                    part="status,snippet", id=video_id
-                ).execute()
+                try:
+                    resp = service.videos().list(
+                        part="status,snippet", id=video_id
+                    ).execute()
+                except HttpError as exc:
+                    self._raise_if_quota_exceeded(exc, "_verify_upload_exists")
+                    raise
 
                 # ── Track quota (diagnostic) ──────────────────────────
                 track_quota(self.channel_slug, "videos.list", 1,
@@ -907,6 +1000,16 @@ class YouTubeUploader:
 
     # ── Helpers ─────────────────────────────────────────────────
 
+    def _upload_transport(self, request: Any, request_started, heartbeat_callback=None,
+                          progress_callback=None) -> dict:
+        """Explicit dispatcher transport boundary for a resumable upload."""
+        request_started()
+        return self._resumable_upload(
+            request,
+            heartbeat_callback=heartbeat_callback,
+            progress_callback=progress_callback,
+        )
+
     def _resumable_upload(self, request: Any, heartbeat_callback=None,
                            progress_callback=None) -> dict:
         response = None
@@ -940,18 +1043,7 @@ class YouTubeUploader:
                 consecutive_errors += 1
                 if exc.resp.status in (403, 401):
                     # Distinguish between auth issues and YouTube-specific errors
-                    error_content = b""
-                    try:
-                        error_content = exc.content if hasattr(exc, 'content') else b""
-                    except Exception:
-                        pass
-                    error_reason = ""
-                    try:
-                        import json as _json
-                        error_data = _json.loads(error_content) if error_content else {}
-                        error_reason = error_data.get("error", {}).get("errors", [{}])[0].get("reason", "")
-                    except Exception:
-                        pass
+                    error_reason = self._http_error_reason(exc)
                     if error_reason == "uploadLimitExceeded":
                         raise RuntimeError(
                             "YouTube rechazó el vídeo: la cuenta NO está verificada y el vídeo supera 15 minutos. "
@@ -962,29 +1054,9 @@ class YouTubeUploader:
                             "La cuenta de YouTube requiere registro adicional (youtube.com/create_channel)."
                         ) from exc
                     if error_reason == "quotaExceeded":
-                        # ── Record quota exhaustion; generation continues, uploads paused ──
-                        try:
-                            from database.db_extended import ExtendedDatabase
-                            _qdb = ExtendedDatabase()
-                            _qdb.set_quota_exhausted(channel_slug=getattr(self, 'canal', ''))
-                        except Exception:
-                            pass
-                        try:
-                            from api.services.lifecycle_monitor import create_alert
-                            from database.db_extended import ExtendedDatabase as _E2
-                            _adb = _E2()
-                            create_alert(_adb,
-                                         entity_type='system', entity_id=None, channel_id=None,
-                                         alert_type='quota_exhausted', severity='critical',
-                                         title='YouTube API quota agotada',
-                                         message='Cuota diaria de YouTube API agotada (10,000 unidades). '
-                                                 'Subidas pausadas, generación sigue activa. '
-                                                 'Recuperación automática al reset de medianoche (PT).',
-                                         metadata={'channel': getattr(self, 'canal', 'unknown')})
-                        except Exception:
-                            pass
+                        self._mark_quota_exhausted(caller="_resumable_upload")
                         raise QuotaExhaustedError(
-                            "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar mañana."
+                            "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
                         ) from exc
                     logger.error("Auth/permission error (%s): %s", error_reason or "unknown", exc)
                     raise

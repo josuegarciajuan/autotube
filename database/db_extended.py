@@ -1166,6 +1166,12 @@ def migrate_v2(db_path: str = None):
     
     # ── v37: Cleanup stale/noisy pipeline_alerts (publish_delayed + re-test) ──
     _migrate_v37(conn, logger)
+
+    # ── v38: Atomic YouTube quota reservations ──
+    _migrate_v38(conn, logger)
+
+    # ── v39: Safe full-replan single-use confirmations ──
+    _migrate_v39(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2471,6 +2477,57 @@ def _migrate_v37(conn, logger):
         logger.debug("Migration v37: no stale alerts to clean up")
 
 
+def _migrate_v38(conn, logger):
+    """Idempotent v38: atomic project-level YouTube quota reservations."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS yt_quota_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            quota_day_pt TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            content_class TEXT NOT NULL,
+            units INTEGER NOT NULL CHECK(units > 0),
+            status TEXT NOT NULL DEFAULT 'reserved',
+            reference_id TEXT NOT NULL DEFAULT '',
+            expires_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finalized_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_yt_quota_reservation_reference
+        ON yt_quota_reservations(project_id, quota_day_pt, operation, reference_id)
+        WHERE reference_id != ''
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_yt_quota_reservation_budget
+        ON yt_quota_reservations(project_id, quota_day_pt, status)
+    """)
+    conn.commit()
+    logger.info("Migration v38: yt_quota_reservations table ensured")
+
+
+def _migrate_v39(conn, logger):
+    """Idempotent v39: persisted confirmations for safe full replans."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS safe_replan_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            snapshot_hash TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_safe_replan_confirmations_expiry
+        ON safe_replan_confirmations(expires_at, used_at)
+    """)
+    conn.commit()
+    logger.info("Migration v39: safe_replan_confirmations table ensured")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -2542,6 +2599,101 @@ def _migrate_v11(conn, logger):
 
 class ExtendedDatabase(Database):
     """Extended DB with channel, video scene, and job management."""
+
+    # ── YouTube quota reservations ──────────────────────────────
+
+    def reserve_youtube_quota(
+        self,
+        *,
+        project_id: str,
+        quota_day_pt: str,
+        operation: str,
+        content_class: str,
+        units: int,
+        reference_id: str,
+        automatic_budget: int,
+    ) -> dict:
+        """Atomically reserve quota before a YouTube API operation.
+
+        Reservations, rather than completed uploads, are the admission source
+        of truth. This closes the race where several workers all observe spare
+        budget and start 1,600-unit uploads concurrently.
+        """
+        if units <= 0 or automatic_budget <= 0:
+            return {"granted": False, "reason": "invalid_budget"}
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    """SELECT id, status FROM yt_quota_reservations
+                       WHERE project_id=? AND quota_day_pt=? AND operation=?
+                         AND reference_id=?""",
+                    (project_id, quota_day_pt, operation, reference_id),
+                ).fetchone()
+                if existing:
+                    if existing["status"] == "consumed":
+                        conn.commit()
+                        return {"granted": False, "reason": "already_consumed"}
+                    conn.commit()
+                    return {
+                        "granted": existing["status"] == "reserved",
+                        "reservation_id": existing["id"],
+                        "reason": "existing_reservation",
+                    }
+
+                used = conn.execute(
+                    """SELECT COALESCE(SUM(units), 0) AS total
+                       FROM yt_quota_reservations
+                       WHERE project_id=? AND quota_day_pt=?
+                         AND status IN ('reserved', 'consumed')""",
+                    (project_id, quota_day_pt),
+                ).fetchone()["total"]
+                if int(used or 0) + units > automatic_budget:
+                    conn.commit()
+                    return {
+                        "granted": False,
+                        "reason": "automatic_budget_exhausted",
+                        "used_units": int(used or 0),
+                        "budget_units": automatic_budget,
+                    }
+
+                cursor = conn.execute(
+                    """INSERT INTO yt_quota_reservations
+                       (project_id, quota_day_pt, operation, content_class, units,
+                        status, reference_id, expires_at)
+                       VALUES (?, ?, ?, ?, ?, 'reserved', ?, datetime('now', '+2 hours'))""",
+                    (project_id, quota_day_pt, operation, content_class, units, reference_id),
+                )
+                conn.commit()
+                return {"granted": True, "reservation_id": cursor.lastrowid}
+            except Exception:
+                conn.rollback()
+                raise
+
+    def finalize_youtube_quota_reservation(self, reservation_id: int, *, consumed: bool) -> None:
+        """Finalize a reservation after the API attempt; failures may cost quota."""
+        status = "consumed" if consumed else "released"
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE yt_quota_reservations
+                   SET status=?, finalized_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status='reserved'""",
+                (status, reservation_id),
+            )
+            conn.commit()
+
+    def expire_youtube_quota_reservations(self) -> int:
+        """Release stale reservations from workers that never reached YouTube."""
+        with self._connect() as conn:
+            count = conn.execute(
+                """UPDATE yt_quota_reservations
+                   SET status='released', finalized_at=CURRENT_TIMESTAMP
+                   WHERE status='reserved' AND expires_at IS NOT NULL
+                     AND expires_at <= datetime('now')"""
+            ).rowcount
+            conn.commit()
+        return count
     
     # ── Channels ──────────────────────────────────────────────
     

@@ -96,7 +96,10 @@ class Database:
         conn.execute("PRAGMA wal_autocheckpoint=100")  # keep WAL small
         # ── Performance PRAGMAs (v1.0 — connection reuse optimization) ──
         conn.execute("PRAGMA cache_size=-64000")  # 64MB page cache (negative = KB)
-        conn.execute("PRAGMA mmap_size=134217728")  # 128MB memory-mapped I/O
+        # ── mmap_size disabled (0): memory-mapped I/O is unsafe with multi-process
+        # access (API + render subprocess both open the DB in WAL mode). A stale
+        # mmap view in one process corrupts reads → "database disk image is malformed".
+        conn.execute("PRAGMA mmap_size=0")
         conn.execute("PRAGMA synchronous=NORMAL")  # faster writes, WAL-safe
         conn.execute("PRAGMA temp_store=MEMORY")  # temp tables in RAM
         conn.execute("PRAGMA optimize")  # run ANALYZE hints on close

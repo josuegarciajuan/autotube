@@ -34,6 +34,27 @@ _VIDEOS_WITHOUT_SCRIPT_DATE: str = ""
 _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 
+
+def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
+    """Return True when YouTube API quota is exhausted or near budget."""
+    try:
+        from config.settings import YT_REMEDIATION_MODE
+        if YT_REMEDIATION_MODE:
+            return True
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        if db.is_quota_exhausted():
+            return True
+        from api.services.quota_tracker import should_throttle_global
+        if should_throttle_global(0.85):
+            db.set_quota_exhausted(channel_slug=channel_slug or "quota_governor")
+            logger.warning("Shorts dispatch: quota governor tripped (>85%%) — paused")
+            return True
+    except Exception as exc:
+        logger.debug("Shorts quota guard skipped: %s", exc)
+    return False
+
 # ── Auto-mark altered content helper (shorts) ─────────────────
 
 def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_id: int):
@@ -1025,12 +1046,13 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             yesterday_count, long_target_hours, global_pos,
         )
 
-        # ── Filler: guarantee MIN_DAILY_SHORTS floor ──────────────
+        # ── Filler: disabled during quota remediation ──────────────
         # v2: Native shorts count toward the daily floor.
         # Clips are generated ad-hoc after long videos (v26).
         total_planned = native_count
 
-        if total_planned < MIN_DAILY_SHORTS:
+        from config.settings import YT_REMEDIATION_MODE
+        if not YT_REMEDIATION_MODE and total_planned < MIN_DAILY_SHORTS:
             fillers_needed = min(
                 MIN_DAILY_SHORTS - total_planned,
                 MAX_DAILY_SHORTS - total_planned,
@@ -1404,6 +1426,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
+
+    if _youtube_quota_blocked(db):
+        logger.info("Shorts dispatch: YouTube quota exhausted — uploads paused")
+        return None
 
     # 0a. Fase 0.2: tope global de subidas (long-form + shorts)
     # Red de seguridad compartida con upload_scheduler (cada subida = 1.600 ud).
@@ -2099,6 +2125,25 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 conn.commit()
                 conn.close()
                 logger.warning("Shorts slot #%d exhausted retries — cancelled", slot_id)
+    except __import__("pipeline.youtube_uploader", fromlist=["QuotaExhaustedError"]).QuotaExhaustedError as e:
+        logger.warning("Shorts dispatch quota exhausted for slot #%d: %s", slot_id, e)
+        try:
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+            conn.execute(
+                "UPDATE shorts_planned_slots SET status = 'pending', "
+                "error_message = 'YouTube quota exhausted — retry after reset', "
+                "job_id = NULL, scheduled_at = datetime('now', '+12 hours'), "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (slot_id,),
+            )
+            conn.execute(
+                "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                (f"Quota exhausted: {str(e)[:300]}", job_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
     except Exception as e:
         logger.error("Shorts dispatch error for slot #%d: %s", slot_id, e)
         try:
@@ -2171,6 +2216,9 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             pass
 
         try:
+            from config.settings import SHORTS_CHAIN_DISPATCH_ENABLED
+            if not SHORTS_CHAIN_DISPATCH_ENABLED:
+                return
             import asyncio as _asyncio
             _chain_loop = _asyncio.get_running_loop()
             async def _chain_next():
@@ -2715,6 +2763,9 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         channel_url=channel_url,
     )
     _update_short_job_progress(job_id, 90, "upload")
+    if _youtube_quota_blocked(channel_slug=channel_slug):
+        from pipeline.youtube_uploader import QuotaExhaustedError
+        raise QuotaExhaustedError("YouTube quota exhausted before native short upload")
     # ── v10.3: Scheduled publishing ──
     if target_upload_at:
         privacy_mode = "private"
@@ -2873,6 +2924,9 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             else:
                 clip_privacy = "public"
                 clip_publish_at = None
+            if _youtube_quota_blocked(channel_slug=channel_slug):
+                from pipeline.youtube_uploader import QuotaExhaustedError
+                raise QuotaExhaustedError("YouTube quota exhausted before pre-rendered clip upload")
             result = uploader.upload(
                 video_path=output_path,
                 title=title,
@@ -3230,6 +3284,9 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         else:
             clip_privacy2 = "public"
             clip_publish_at2 = None
+        if _youtube_quota_blocked(channel_slug=channel_slug):
+            from pipeline.youtube_uploader import QuotaExhaustedError
+            raise QuotaExhaustedError("YouTube quota exhausted before clip upload")
         result = uploader.upload(
             video_path=output_path,
             title=title,

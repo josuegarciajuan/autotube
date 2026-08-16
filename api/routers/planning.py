@@ -26,6 +26,10 @@ class PreviewOverrides(BaseModel):
     overrides: Optional[dict] = None  # slug → {videos_per_day, planning_enabled}
 
 
+class SafeFullReplanApply(BaseModel):
+    confirmation_token: str
+
+
 # ── Config ────────────────────────────────────────────────────
 
 @router.get("/config")
@@ -531,20 +535,33 @@ async def recalculate_optimal_slots_all():
 #  Full Replan — "Reprogramar Ahora"
 # ═══════════════════════════════════════════════════════════════
 
+@router.post("/full-replan/preflight")
+def safe_full_replan_preflight(horizon_days: int = Query(7, ge=1, le=31)):
+    """Preview a safe long-form + Shorts replan and return a one-time token."""
+    from api.services.planning_service import safe_full_replan_preflight as do_preflight
+    return do_preflight(db=get_db(), horizon_days=horizon_days)
+
+
+@router.post("/full-replan/apply")
+def safe_full_replan_apply(data: SafeFullReplanApply):
+    """Apply a long-form + Shorts preflight without deleting slots or jobs."""
+    from api.services.planning_service import safe_full_replan_apply as do_apply
+    try:
+        return do_apply(data.confirmation_token, db=get_db())
+    except ValueError as exc:
+        message = str(exc)
+        if "expired" in message:
+            code = "SAFE_REPLAN_EXPIRED"
+        elif "already used" in message:
+            code = "SAFE_REPLAN_USED"
+        elif "invalid" in message:
+            code = "SAFE_REPLAN_INVALID"
+        else:
+            code = "SAFE_REPLAN_STALE"
+        raise HTTPException(409, {"code": code, "message": message}) from exc
+
+
 @router.post("/full-replan")
 def full_replan():
-    """Force a complete planning reset: delete ALL pending slots (videos + shorts)
-    and recreate from scratch across the 7-day horizon.
-
-    Accounts for:
-    - Already-in-flight items (running, awaiting_upload, warming, published today)
-    - Per-channel daily limits (residual quota for today)
-    - Upload windows and publish timeframes
-    - Cross-channel collision avoidance
-    - Past-due catchup: slots scheduled before now are dispatched immediately
-
-    Returns detailed summary for frontend notification.
-    """
-    from api.services.planning_service import full_replan as do_full_replan
-    result = do_full_replan()
-    return result
+    """Deprecated dangerous reset; clients must use preflight then apply."""
+    raise HTTPException(410, "Deprecated: use /full-replan/preflight then /full-replan/apply")

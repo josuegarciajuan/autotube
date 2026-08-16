@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from 'react'
-import { api } from '../lib/api'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { api, type FullReplanApplyResult, type FullReplanPreflight } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
@@ -328,29 +329,92 @@ function PlanningConfigSection() {
 // ── Main scheduling page ─────────────────────────────────
 export default function Scheduling() {
   const [showReplanModal, setShowReplanModal] = useState(false)
-  const [replanning, setReplanning] = useState(false)
-  const [replanResult, setReplanResult] = useState<any>(null)
+  const [replanState, setReplanState] = useState<'idle' | 'loading-review' | 'review' | 'applying' | 'result' | 'error'>('idle')
+  const [preflight, setPreflight] = useState<FullReplanPreflight | null>(null)
+  const [replanResult, setReplanResult] = useState<FullReplanApplyResult | null>(null)
+  const [replanError, setReplanError] = useState<string | null>(null)
+  const reviewButtonRef = useRef<HTMLButtonElement>(null)
+  const replanDialogRef = useRef<HTMLDivElement>(null)
+  const replanTriggerRef = useRef<HTMLButtonElement>(null)
+  const queryClient = useQueryClient()
 
-  const handleReplan = useCallback(async () => {
-    setReplanning(true)
+  const isExpiredError = (message: string) => /expir|caduc|stale|invalid|no longer/i.test(message)
+
+  const openReplanReview = useCallback(async () => {
+    setShowReplanModal(true)
+    setReplanState('loading-review')
+    setPreflight(null)
     setReplanResult(null)
+    setReplanError(null)
     try {
-      const result = await api.fullReplan()
-      setReplanResult(result)
-      if (result?.skipped) {
-        // Cooldown: don't close modal, show the reason
-      } else {
-        // Success: refresh data after a short delay
-        setTimeout(() => {
-          window.location.reload()
-        }, 1500)
-      }
+      const result = await api.fullReplanPreflight()
+      setPreflight(result)
+      setReplanState('review')
     } catch (e: any) {
-      setReplanResult({ ok: false, reason: e?.message || 'Error desconocido' })
-    } finally {
-      setReplanning(false)
+      setReplanError(e?.message || 'No se pudo preparar la revisión.')
+      setReplanState('error')
     }
   }, [])
+
+  const closeReplanModal = useCallback(() => {
+    if (replanState !== 'applying') {
+      setShowReplanModal(false)
+      requestAnimationFrame(() => replanTriggerRef.current?.focus())
+    }
+  }, [replanState])
+
+  useEffect(() => {
+    if (!showReplanModal) return
+    const focusable = replanDialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )
+    if (focusable?.length) reviewButtonRef.current?.focus() ?? focusable[0].focus()
+    else replanDialogRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeReplanModal()
+      if (event.key !== 'Tab' || !focusable?.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [showReplanModal, replanState, closeReplanModal])
+
+  const handleReplan = useCallback(async () => {
+    if (!preflight?.confirmation_token) return
+    setReplanState('applying')
+    setReplanResult(null)
+    setReplanError(null)
+    try {
+      const result = await api.fullReplanApply(preflight.confirmation_token)
+      setReplanResult(result)
+      setReplanState('result')
+      if (result.ok) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['today-slots'] }),
+          queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] }),
+          queryClient.invalidateQueries({ queryKey: ['planned-slots'] }),
+          queryClient.invalidateQueries({ queryKey: ['week-slots'] }),
+          queryClient.invalidateQueries({ queryKey: ['planning-config'] }),
+          queryClient.invalidateQueries({ queryKey: ['shorts-planning-config'] }),
+          queryClient.invalidateQueries({ queryKey: ['active-jobs'] }),
+        ])
+      }
+    } catch (e: any) {
+      const message = e?.message || 'No se pudo aplicar la reprogramación.'
+      setReplanError(isExpiredError(message)
+        ? 'La revisión ha caducado o ya no coincide con la planificación actual. Revísala de nuevo antes de confirmar.'
+        : message)
+      setReplanState('error')
+    }
+  }, [preflight, queryClient])
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
@@ -361,33 +425,34 @@ export default function Scheduling() {
           Programacion
         </h2>
         <button
-          onClick={() => { setShowReplanModal(true); setReplanResult(null) }}
-          disabled={replanning}
+          ref={replanTriggerRef}
+          onClick={openReplanReview}
+          disabled={replanState === 'loading-review' || replanState === 'applying'}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {replanning ? (
+          {replanState === 'loading-review' || replanState === 'applying' ? (
             <Loader2 size={14} className="animate-spin" />
           ) : (
             <RotateCcw size={14} />
           )}
-          {replanning ? 'Reprogramando...' : 'Reprogramar Ahora'}
+          {replanState === 'loading-review' || replanState === 'applying' ? 'Reprogramando...' : 'Reprogramar Ahora'}
         </button>
       </div>
 
       {/* ── Replan confirmation modal ── */}
       {showReplanModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-dark-800 border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            {replanning ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onMouseDown={closeReplanModal}>
+          <div ref={replanDialogRef} role="dialog" aria-modal="true" aria-labelledby="replan-dialog-title" tabIndex={-1} className="bg-dark-800 border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+            {replanState === 'loading-review' || replanState === 'applying' ? (
               /* ── Loading state ── */
               <div className="flex flex-col items-center gap-4 py-6">
                 <Loader2 size={32} className="animate-spin text-amber-400" />
-                <p className="text-white text-sm font-medium">Reprogramando toda la planificacion...</p>
+                <p className="text-white text-sm font-medium">{replanState === 'loading-review' ? 'Preparando revisión segura...' : 'Aplicando la planificación revisada...'}</p>
                 <p className="text-gray-400 text-xs text-center">
-                  Borrando slots pendientes, recalculando cupos y resolviendo colisiones.
+                  {replanState === 'loading-review' ? 'Calculando el impacto antes de cambiar ningún slot.' : 'Actualizando slots, cupos y colisiones sin recargar la página.'}
                 </p>
               </div>
-            ) : replanResult ? (
+            ) : replanState === 'result' && replanResult ? (
               /* ── Result state ── */
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
@@ -396,48 +461,41 @@ export default function Scheduling() {
                   ) : (
                     <AlertTriangle size={20} className="text-amber-400" />
                   )}
-                  <h3 className="text-white font-semibold text-base">
-                    {replanResult.ok ? 'Replan completado' : 'Replan no ejecutado'}
+                    <h3 id="replan-dialog-title" className="text-white font-semibold text-base">
+                    {replanResult.ok ? 'Reprogramación aplicada' : 'Reprogramación no aplicada'}
                   </h3>
                 </div>
 
-                {replanResult.summary && (
-                  <p className="text-gray-300 text-sm leading-relaxed">{replanResult.summary}</p>
-                )}
-
-                {replanResult.reason && (
-                  <p className="text-amber-300 text-sm bg-amber-500/10 rounded-lg p-3">{replanResult.reason}</p>
-                )}
-
-                {replanResult.videos && replanResult.ok && (
+                {replanResult.ok && (
                   <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs">
                     <p className="text-gray-400">
-                      <span className="text-red-400">-{replanResult.videos.deleted}</span> videos borrados,{' '}
-                      <span className="text-green-400">+{replanResult.videos.created}</span> creados
+                      <span className="text-neon-cyan">{replanResult.updated}</span> slots reprogramados
                     </p>
-                    <p className="text-gray-400">
-                      <span className="text-red-400">-{replanResult.shorts?.deleted}</span> shorts borrados,{' '}
-                      <span className="text-green-400">+{replanResult.shorts?.created}</span> creados
-                    </p>
-                    {replanResult.jobs_cancelled > 0 && (
-                      <p className="text-gray-500">{replanResult.jobs_cancelled} jobs huefanos cancelados</p>
-                    )}
-                    {replanResult.catchup_slots > 0 && (
-                      <p className="text-amber-400">{replanResult.catchup_slots} slots catchup (se lanzaran ya)</p>
-                    )}
+                    <p className="text-gray-400"><span className="text-green-400">+{replanResult.created}</span> slots nuevos</p>
+                    <p className="text-gray-500"><span className="text-gray-300">{replanResult.preserved}</span> slots preservados</p>
                   </div>
                 )}
 
                 <div className="flex gap-2">
-                  {replanResult.ok && (
-                    <p className="text-gray-500 text-xs flex-1 self-center">Recargando pagina...</p>
-                  )}
                   <button
-                    onClick={() => setShowReplanModal(false)}
+                    ref={reviewButtonRef}
+                    onClick={closeReplanModal}
                     className="px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors ml-auto"
                   >
                     Cerrar
                   </button>
+                </div>
+              </div>
+            ) : replanState === 'error' ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle size={20} className="text-amber-400" />
+                  <h3 id="replan-dialog-title" className="text-white font-semibold text-base">Revisión no disponible</h3>
+                </div>
+                <p className="text-amber-200 text-sm bg-amber-500/10 rounded-lg p-3" role="alert">{replanError}</p>
+                <div className="flex gap-2 pt-1">
+                  <button onClick={closeReplanModal} className="flex-1 px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors">Cerrar</button>
+                  <button ref={reviewButtonRef} onClick={openReplanReview} className="flex-1 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors">Revisar de nuevo</button>
                 </div>
               </div>
             ) : (
@@ -445,15 +503,15 @@ export default function Scheduling() {
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <RotateCcw size={20} className="text-amber-400" />
-                  <h3 className="text-white font-semibold text-base">Reprogramar toda la planificacion</h3>
+                  <h3 id="replan-dialog-title" className="text-white font-semibold text-base">Revisar reprogramación completa</h3>
                 </div>
 
                 <div className="text-sm text-gray-300 space-y-2">
-                  <p>Esta accion va a:</p>
+                  <p>Esta revisión calcula los cambios antes de aplicarlos:</p>
                   <ul className="list-disc list-inside text-gray-400 space-y-1 text-xs ml-2">
-                    <li>Borrar <strong className="text-white">todos</strong> los slots pendientes de videos y shorts</li>
-                    <li>Cancelar jobs en cola que se queden sin slot</li>
-                    <li>Recalcular desde cero respetando:</li>
+                    <li>Preservar slots pendientes que no necesiten cambios</li>
+                    <li>Reprogramar solo los horarios necesarios, sin tocar vídeos ni jobs</li>
+                    <li>Añadir slots nuevos cuando el plan lo requiera, respetando:</li>
                   </ul>
                   <ul className="list-disc list-inside text-gray-500 space-y-0.5 text-xs ml-6">
                     <li>Cupo diario por canal (videos + shorts)</li>
@@ -464,23 +522,32 @@ export default function Scheduling() {
                   <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 mt-3">
                     <p className="text-amber-300 text-xs flex items-start gap-2">
                       <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-                      <span>Los slots en <strong>generacion activa</strong> (running) no se tocaran. Los slots catchup (atrasados) se reprograman para lanzarse inmediatamente.</span>
+                      <span>Los slots en <strong>generacion activa</strong> (running) se preservan. Esta acción solo ajusta horarios pendientes y añade los nuevos necesarios.</span>
                     </p>
                   </div>
+                  {preflight && (
+                    <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs text-gray-400">
+                      <p><span className="text-neon-cyan">{preflight.summary.proposed}</span> slots propuestos para los próximos {preflight.summary.horizon_days} días</p>
+                      <p>{preflight.proposed_slots.length} horarios revisados, conservando slots, vídeos y jobs existentes.</p>
+                      {preflight.expires_at ? <p className="text-gray-500">Esta revisión caduca: {preflight.expires_at}</p> : null}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-2 pt-1">
                   <button
-                    onClick={() => setShowReplanModal(false)}
+                    onClick={closeReplanModal}
                     className="flex-1 px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors"
                   >
                     Cancelar
                   </button>
                   <button
+                    ref={reviewButtonRef}
                     onClick={handleReplan}
+                    disabled={!preflight?.confirmation_token}
                     className="flex-1 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors"
                   >
-                    Confirmar Replan
+                    Confirmar y aplicar
                   </button>
                 </div>
               </div>

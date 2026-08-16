@@ -32,7 +32,7 @@ from api.routers import view_gap as view_gap_router
 from api.routers import quota as quota_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
-from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT
+from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT, YT_REMEDIATION_MODE
 
 logger = logging.getLogger("autotube.main")
 
@@ -504,7 +504,7 @@ async def _publish_verify_loop():
             try:
                 from database.db_extended import ExtendedDatabase
                 _db = ExtendedDatabase()
-                if _db.get_system_state("scheduler_paused") == "true" or _db.is_quota_exhausted():
+                if YT_REMEDIATION_MODE or _db.get_system_state("scheduler_paused") == "true" or _db.is_quota_exhausted():
                     await asyncio.sleep(60)
                     continue
             except Exception:
@@ -570,7 +570,7 @@ async def _upload_health_checker_loop():
             # ── Quota guard: skip health checks when YouTube API is exhausted ──
             from database.db_extended import ExtendedDatabase
             _hdb = ExtendedDatabase()
-            if _hdb.is_quota_exhausted():
+            if YT_REMEDIATION_MODE or _hdb.is_quota_exhausted():
                 await asyncio.sleep(300)
                 continue
 
@@ -628,8 +628,49 @@ async def _health_monitor_loop():
         await asyncio.sleep(90)  # Check every 90 seconds
 
 
+def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> bool:
+    """Recover the quota breaker after reset without bypassing admission control.
+
+    Reservation expiry runs on every pass, including when no breaker is active.
+    A reset only clears the global breaker.  In remediation mode the backlog is
+    deliberately left untouched: the uploader dispatcher remains the sole
+    admission path once an operator disables remediation.
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    expired = db.expire_youtube_quota_reservations()
+    if expired:
+        logger.info("Quota recovery: released %d stale quota reservation(s)", expired)
+
+    if not db.is_quota_exhausted():
+        return False
+
+    reset_info = db.get_quota_reset_time()
+    if not reset_info.get("exhausted") or not reset_info.get("reset_at_utc"):
+        return False
+
+    reset_at = _dt.fromisoformat(reset_info["reset_at_utc"])
+    if reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=_tz.utc)
+    now_utc = now_utc or _dt.now(_tz.utc)
+    if now_utc < reset_at + _td(minutes=15):
+        return False
+
+    db.clear_quota_exhausted()
+    if YT_REMEDIATION_MODE:
+        logger.warning(
+            "Quota recovery cleared the global breaker; remediation mode remains active, "
+            "so no upload was dispatched."
+        )
+        return True
+
+    if dispatch_uploads is not None:
+        dispatch_uploads()
+    return True
+
+
 async def _quota_recovery_loop():
-    """Background loop: auto-resume scheduler 6 hours after quota exhaustion.
+    """Background loop: recover after the PT reset and safety buffer.
     
     When YouTube API quota is exhausted, the uploader auto-pauses the scheduler
     and records the timestamp. After 6 hours (quota resets at midnight PST),
@@ -638,8 +679,8 @@ async def _quota_recovery_loop():
     Can also be resumed manually via POST /api/system/scheduler-resume
     which will preempt this loop (it checks scheduler_paused on each iteration).
     """
-    import asyncio as _asyncio, logging, time as _time
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import asyncio as _asyncio, logging
+    from datetime import datetime as _dt, timezone as _tz
     
     _logger = logging.getLogger("autotube.quota_recovery")
     
@@ -647,59 +688,25 @@ async def _quota_recovery_loop():
     
     _logger.info("Quota recovery loop started (check every 30 min, auto-resume at midnight PT + safety buffer)")
 
-    SAFETY_MINUTES = 15  # extra buffer after reset before resuming
-
     while True:
         try:
             from database.db_extended import ExtendedDatabase
             _db = ExtendedDatabase()
 
-            quota_exhausted = _db.is_quota_exhausted()
-            exhausted_at_str = _db.get_system_state("quota_exhausted_at")
+            def _dispatch_backlog():
+                from api.services.upload_scheduler import dispatch_due_uploads
+                return dispatch_due_uploads(db=_db)
 
-            if quota_exhausted:
-                # Calculate actual reset time (midnight PT) instead of blind 6h
-                reset_info = _db.get_quota_reset_time()
-                now_utc = _dt.now(_tz.utc)
-
-                if reset_info["exhausted"] and reset_info["reset_at_utc"]:
-                    reset_at = _dt.fromisoformat(reset_info["reset_at_utc"])
-                    if reset_at.tzinfo is None:
-                        reset_at = reset_at.replace(tzinfo=_tz.utc)
-                    reset_with_safety = reset_at + _td(minutes=SAFETY_MINUTES)
-
-                    if now_utc >= reset_with_safety:
-                        _logger.info(
-                            "Quota recovery: reset time %s reached (+%dmin buffer) — auto-resuming scheduler",
-                            reset_at.strftime("%Y-%m-%d %H:%M UTC"), SAFETY_MINUTES,
-                        )
-                    else:
-                        remaining = (reset_with_safety - now_utc).total_seconds() / 3600
-                        _logger.debug(
-                            "Quota recovery: %s until reset + safety buffer (%.1fh remaining)",
-                            reset_with_safety.strftime("%Y-%m-%d %H:%M UTC"), remaining,
-                        )
-                        await _asyncio.sleep(1800)  # 30 min
-                        continue
-
-                    try:
-                        _db.clear_quota_exhausted()
-
-                        # ── Kick off uploads for accumulated backlog ──
-                        # Videos that were generated while quota was exhausted
-                        # are now sitting as awaiting_upload. Trigger immediate
-                        # upload dispatch so they don't wait for the next 5-min tick.
-                        try:
-                            from api.services.upload_scheduler import dispatch_due_uploads
-                            upload_result = await _asyncio.to_thread(dispatch_due_uploads, db=_db)
-                            if upload_result:
-                                _logger.info(
-                                    "Quota recovery: dispatched upload for video=%d channel=%s",
-                                    upload_result.get("video_id", 0),
-                                    upload_result.get("channel_slug", "?"),
-                                )
-                        except Exception as _upload_exc:
-                            _logger.warning("Quota recovery: upload kick-off failed: %s", _upload_exc)
+            recovered = await _asyncio.to_thread(
+                _recover_quota_once,
+                _db,
+                now_utc=_dt.now(_tz.utc),
+                dispatch_uploads=_dispatch_backlog,
+            )
+            if recovered:
+                try:
+                    if not YT_REMEDIATION_MODE:
+                        _logger.info("Quota recovery complete — upload scheduler re-enabled")
 
                         # Resolve quota alerts
                         try:
@@ -732,9 +739,8 @@ async def _quota_recovery_loop():
                         except Exception:
                             pass
 
-                        _logger.info("Quota recovery complete — uploads re-enabled")
-                    except Exception as _resume_exc:
-                        _logger.warning("Quota recovery resume failed: %s", _resume_exc, exc_info=True)
+                except Exception as _resume_exc:
+                    _logger.warning("Quota recovery post-reset handling failed: %s", _resume_exc, exc_info=True)
         except Exception as _exc:
             _logger.warning("Quota recovery loop error: %s", _exc, exc_info=True)
         
@@ -1040,7 +1046,7 @@ async def _schedule_checker_loop():
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
                 # ════════════════════════════════════════════════════════════
-                if not _quota_exhausted:
+                if not _quota_exhausted and not YT_REMEDIATION_MODE:
                     # Primary shorts + upload dispatch
                     await _process_shorts_slots()
                     await _process_upload_slots()
@@ -1202,7 +1208,7 @@ async def _process_planned_slots():
     try:
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
-        if _db.get_system_state("scheduler_paused") == "true":
+        if _db.get_system_state("scheduler_paused") == "true" or YT_REMEDIATION_MODE:
             return False  # Operator paused scheduling — skip dispatch
         
         # ── Early RAM gate: skip dispatch if a render is active and RAM is low ──

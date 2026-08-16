@@ -122,6 +122,13 @@ def process_due_checks(loop=None):
     stats = {"processed": 0, "failed_detected": 0, "retried": 0, "errors": 0}
 
     try:
+        if db.is_quota_exhausted():
+            logger.info("[health_check] YouTube quota exhausted — due checks paused")
+            return stats
+    except Exception:
+        pass
+
+    try:
         now_iso = datetime.now(timezone.utc).isoformat()
         with db._connect() as conn:
             rows = conn.execute(
@@ -187,17 +194,30 @@ def _verify_processing(yt_video_id: str, channel_slug: str) -> dict:
     """
     try:
         from pipeline.youtube_uploader import YouTubeUploader
-        uploader = YouTubeUploader(channel_slug)
+        from googleapiclient.errors import HttpError
+
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        if _db.is_quota_exhausted():
+            return {"ok": False, "processing_failed": False,
+                    "processing_status": "quota_exhausted",
+                    "reason": "YouTube quota exhausted"}
+
+        uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
         if not uploader.authenticate():
             return {"ok": False, "processing_failed": False,
                     "processing_status": "unknown",
                     "reason": "Auth failed"}
 
         service = uploader._get_service()
-        resp = service.videos().list(
-            part="status",
-            id=yt_video_id,
-        ).execute()
+        try:
+            resp = service.videos().list(
+                part="status",
+                id=yt_video_id,
+            ).execute()
+        except HttpError as exc:
+            uploader._raise_if_quota_exceeded(exc, "upload_health_checker._verify_processing")
+            raise
 
         items = resp.get("items", [])
         if not items:
@@ -273,6 +293,13 @@ def _auto_retry_upload(video_id: int, yt_video_id: str, channel_slug: str,
     5. Schedule new health checks
     """
     try:
+        try:
+            if db.is_quota_exhausted():
+                logger.info("[health_check] Auto-retry skipped for #%d — YouTube quota exhausted", video_id)
+                return False
+        except Exception:
+            pass
+
         # ── Get video info from DB ──
         video = db.get_video(video_id)
         if not video:

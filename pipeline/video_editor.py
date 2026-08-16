@@ -710,7 +710,7 @@ class VideoEditor:
             self.logger.info("  Added %d onscreen text overlays", len(onscreen_clips))
 
         # ── CTA audio: load first to determine duration ────────
-        # The CTA voice-over can be 10+ seconds (full SCRIPT_END_HOOK),
+        # The CTA voice-over can be 10+ seconds (script-provided CTA),
         # so we measure it before building the visual clip. This prevents:
         #   - CTA visual ending mid-audio (black screen while narrator talks)
         #   - CTA audio bleeding into the OUTRO (outro visuals with CTA voice)

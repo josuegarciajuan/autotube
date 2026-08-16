@@ -20,3 +20,4 @@ playwright-stealth>=2.0.3
 cryptography
 playwright
 playwright-stealth
+yt-dlp<2026

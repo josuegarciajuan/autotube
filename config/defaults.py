@@ -71,6 +71,13 @@ PROD_VIDEO_DURATION_MIN = 10
 PROD_VIDEO_DURATION_MAX = 14
 
 # Scene duration enforcement
+# Media-specific limits are used by the production timeline.  The legacy
+# SCENE_DURATION_* values remain supported for older direct VideoEditor callers.
+IMAGE_SCENE_DURATION_MIN = 4.0
+IMAGE_SCENE_DURATION_MAX = 7.0
+VIDEO_SCENE_DURATION_MIN = 6.0
+VIDEO_SCENE_DURATION_MAX = 10.0
+SCENE_SYNC_TOLERANCE_SEC = 0.15
 SCENE_DURATION_MIN = 8.0
 SCENE_DURATION_MAX = 16.0
 
@@ -123,6 +130,18 @@ GOOGLE_NEWS_QUERIES = []
 # ═══════════════════════════════════════════════════════════════════
 
 IMAGE_STYLE_MODIFIERS = "cinematic documentary photography, 16:9, atmospheric"
+# Shared AI treatment for every channel. Individual channels may override only
+# AI_VISUAL_COLOR_GRADING to preserve this hybrid documentary / YouTube-impact
+# visual language while retaining their own palette.
+AI_VISUAL_IMPACT_STYLE = (
+    "hybrid cinematic documentary photography with high-impact YouTube visual "
+    "storytelling, immediate readable focal subject, vivid natural colour, "
+    "strong subject-background separation, premium editorial detail"
+)
+AI_VISUAL_COLOR_GRADING = (
+    "vivid readable cinematic colour grade, natural skin tones, preserved "
+    "highlight and shadow detail"
+)
 COLOR_PALETTE = {
     "primary": (40, 40, 60),
     "secondary": (15, 20, 35),
@@ -308,7 +327,7 @@ SHORTS_ADAPTIVE_CHECK_DAYS = 14       # Re-evaluation window
 SHORTS_ADAPTIVE_RATIO_MIN = 0.20      # Floor (never below 20% native)
 SHORTS_ADAPTIVE_RATIO_MAX = 0.60      # Ceiling (never above 60% native)
 SHORTS_ADAPTIVE_STEP = 0.10           # ±10% adjustment per evaluation
-SHORTS_MIN_NATIVE_PER_DAY = 2         # Minimum native shorts per day
+SHORTS_MIN_NATIVE_PER_DAY = 1         # Minimum native shorts per day
 SHORTS_CLIPS_PER_LONG = 2             # Fixed: 2 clip shorts per long video (Fase 0)
 SHORTS_HOOK_OVERLAY_FONT_SIZE = 48    # Hook text overlay (3s)
 SHORTS_HOOK_OVERLAY_DURATION_SEC = 3.0
@@ -547,10 +566,3 @@ SEO_SCORE_WEIGHTS = {
     "timestamps": 2,
     "tag_count": 1,
 }
-# Media-specific limits are used by the production timeline.  The legacy
-# SCENE_DURATION_* values remain supported for older direct VideoEditor callers.
-IMAGE_SCENE_DURATION_MIN = 4.0
-IMAGE_SCENE_DURATION_MAX = 7.0
-VIDEO_SCENE_DURATION_MIN = 6.0
-VIDEO_SCENE_DURATION_MAX = 10.0
-SCENE_SYNC_TOLERANCE_SEC = 0.15

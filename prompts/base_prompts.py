@@ -403,7 +403,7 @@ REGLAS ESENCIALES:
 
 5. ESTRUCTURA CLARA. El guion debe tener: introduccion impactante, desarrollo con datos concretos, climax, y cierre reflexivo. Cada bloque debe ser autocontenido y visualizable.
 
-6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre. Incluye una mencion natural al proximo tema que exploraras en el siguiente video (ej. \"en el proximo video\"). PERO NO uses formulas genericas de YouTube como \"suscribete\", \"dale like\", \"activa la campanita\" ni similares.
+6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre y resolver el arco de ESTE video. No anticipes, anuncies ni enlaces al proximo/siguiente video, episodio o entrega. PERO NO uses formulas genericas de YouTube como \"suscribete\", \"dale like\", \"activa la campanita\" ni similares.
 
 7. LONGITUD. Apunta a {duration_target} minutos de video ({words_guide} palabras). Es una guia, no una regla rigida — prioriza calidad sobre cantidad.
 

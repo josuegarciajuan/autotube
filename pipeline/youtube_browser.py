@@ -428,6 +428,13 @@ class YouTubeBrowser:
                 pass
             self._context = None
             self._owning_thread_id = None
+            if self._playwright is not None:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+                _unregister_playwright(self._playwright)
+                self._playwright = None
 
     def mark_altered_content(self, youtube_video_id: str) -> bool:
         with self._lock:

@@ -107,16 +107,10 @@ MAX_GENERATION_ATTEMPTS = 3
 GENERATION_BACKOFF_SECONDS = [2.0, 4.0, 8.0]
 API_CONNECTIVITY_CHECK_TIMEOUT = 5.0
 MIN_NARRATIVE_BLOCKS = 5
-END_HOOK_PATTERNS = [
-    r"pr[oó]ximo\s*(video|episodio|cap[ií]tulo|caso|tema|historia|entrega)",
-    r"siguiente\s*(video|episodio|cap[ií]tulo|caso|tema|historia|entrega)",
-    r"no\s*te\s*(pierdas|olvides)\s*el\s*(pr[oó]ximo|siguiente)",
-    r"pr[oó]xima\s*entrega",
-    r"pr[oó]xima\s*historia",
-    r"pr[oó]ximo\s*caso",
-    r"activa\s*(la\s*)?campana",
-    r"en\s*la\s*siguiente\s*entrega",
-    r"en\s*el\s*siguiente\s*video",
+SERIALIZED_ENDING_PATTERNS = [
+    r"\b(?:el\s+)?pr[oó]xim[oa]\s+(?:video|episodio|cap[ií]tulo|caso|tema|historia|entrega)\b",
+    r"\b(?:el|la)\s+siguiente\s+(?:video|episodio|cap[ií]tulo|caso|tema|historia|entrega)\b",
+    r"\bno\s+te\s+(?:pierdas|olvides)\s+(?:el|la)\s+(?:pr[oó]xim[oa]|siguiente)\b",
 ]
 
 # ── Lightweight language detection (no external deps) ──────────
@@ -411,7 +405,7 @@ class ScriptGenerator:
         Checks:
           1. Hook block contains numeric / quantitative data (NON-BLOCKING).
           2. At least MIN_NARRATIVE_BLOCKS narrative / development blocks.
-          3. End hook references next video or continuation.
+          3. Ending does not serialize the current video into a next-content teaser.
 
         Returns (valid: bool, issues: list[str], warnings: list[str]).
         """
@@ -443,20 +437,19 @@ class ScriptGenerator:
                 f"(need >= {MIN_NARRATIVE_BLOCKS})"
             )
 
-        # 3. End hook must reference next video / continuation
-        last_text = bloques[-1].get('texto', '') if bloques else ''
+        # 3. A reflective closure is sufficient. Reject serialized teasers
+        # so retries can produce an ending that resolves this video's arc.
+        ending_text = ' '.join(
+            block.get('texto', '') for block in bloques[-2:]
+            if isinstance(block, dict)
+        )
         cta_text = ''
         cta = script.get('cta')
         if isinstance(cta, dict):
             cta_text = cta.get('texto', '')
-        combined_end = (last_text + ' ' + cta_text).lower()
-        has_end_hook = any(
-            re.search(p, combined_end) for p in END_HOOK_PATTERNS
-        )
-        if not has_end_hook:
-            issues.append(
-                "end hook missing reference to next video / continuation"
-            )
+        combined_end = (ending_text + ' ' + cta_text).lower()
+        if any(re.search(pattern, combined_end) for pattern in SERIALIZED_ENDING_PATTERNS):
+            issues.append("serialized next-content teaser in ending")
 
         # 4. Language check: the generated script must be in the
         #    channel language. If the LLM outputs English (because the
@@ -477,82 +470,6 @@ class ScriptGenerator:
                 )
 
         return len(issues) == 0, issues, warnings
-
-    def _inject_end_hook(self, script: dict) -> Optional[dict]:
-        """Ask the LLM to generate an end-hook and inject it into the script.
-
-        Called when ``_validate_content_structure`` rejects a script
-        *only* because the end-hook is missing — all other checks passed.
-        Instead of discarding the entire script and retrying from scratch,
-        we ask the LLM to generate just the end-hook paragraph and append
-        it before the CTA block.
-
-        Returns the modified script dict on success, or None if the LLM
-        call fails.
-        """
-        bloques = script.get('bloques', [])
-        if not bloques:
-            return None
-
-        last_blocks_text = '\n'.join(
-            b.get('texto', '') for b in bloques[-3:]
-        )
-
-        prompt = (
-            "Eres un guionista de documentales en español. "
-            "Añade UN párrafo de cierre (end-hook) que anticipe "
-            "el próximo video del canal. Debe conectar con el "
-            "contenido del guion actual.\n\n"
-            f"Últimos bloques del guion:\n{last_blocks_text}\n\n"
-            "End-hook (1 solo párrafo en español, máximo 60 palabras):\n"
-            'Responde con JSON: {"end_hook": "texto aquí"}'
-        )
-
-        try:
-            result = self._call_with_failover(
-                phase="endhook",
-                thinking=False,
-                messages=[
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_tokens=min(200, OPENAI_MAX_TOKENS),
-            )
-        except Exception as exc:
-            logger.warning("End-hook injection LLM call failed: %s", exc)
-            return None
-
-        end_hook = (result or {}).get("end_hook", "").strip()
-        if not end_hook or len(end_hook) < 15:
-            logger.warning(
-                "End-hook injection: LLM returned empty or too-short text"
-            )
-            return None
-
-        # ── Inject the end-hook before the CTA block ──────────
-        # The CTA is typically the last block.  Detect it by checking
-        # if the final block contains common outro / subscribe patterns.
-        cta_last = False
-        if bloques:
-            last_text = bloques[-1].get('texto', '').lower()
-            if any(kw in last_text for kw in (
-                'suscríbete', 'suscribete', 'suscríbanse',
-                'comparte', 'dale like',
-            )):
-                cta_last = True
-
-        if cta_last:
-            cta_block = bloques.pop()
-            bloques.append({"texto": end_hook})
-            bloques.append(cta_block)
-        else:
-            bloques.append({"texto": end_hook})
-
-        logger.info(
-            "End-hook injected: %d chars before %s",
-            len(end_hook), "CTA" if cta_last else "end",
-        )
-        return script
 
     def _record_phase_metric(
         self, phase: str, success: bool,
@@ -808,28 +725,6 @@ class ScriptGenerator:
                 details={"issues": issues, "warnings": warnings},
             )
 
-            # ── Auto-repair: end-hook injection ──────────────
-            # If the ONLY issue is a missing end-hook, repair it
-            # in-place instead of rejecting the entire script.
-            # This saves otherwise-valid scripts when the LLM
-            # consistently omits the end-hook (common with DeepSeek).
-            if not valid and len(issues) == 1 and any(
-                "end hook" in i.lower() for i in issues
-            ):
-                logger.info(
-                    "generate_with_retry: attempting end-hook auto-repair "
-                    "(attempt %d/%d)",
-                    attempt + 1, MAX_GENERATION_ATTEMPTS,
-                )
-                repaired = self._inject_end_hook(script)
-                if repaired:
-                    logger.info(
-                        "generate_with_retry: end-hook auto-repair "
-                        "SUCCESS (attempt %d/%d)",
-                        attempt + 1, MAX_GENERATION_ATTEMPTS,
-                    )
-                    return repaired
-
             if attempt < MAX_GENERATION_ATTEMPTS - 1:
                 time.sleep(GENERATION_BACKOFF_SECONDS[attempt])
 
@@ -1079,8 +974,8 @@ class ScriptGenerator:
             "REQUISITOS OBLIGATORIOS:\n"
             "1. Hook inicial intrigante con un dato numérico concreto.\n"
             "2. Al menos 5 bloques narrativos de desarrollo con hechos.\n"
-            "3. Un end-hook que anticipe el próximo video "
-            "(ej: 'En el próximo video exploramos...').\n"
+            "3. Un cierre reflexivo que resuelva el arco de este video. "
+            "No anuncies ni anticipes el próximo/siguiente video, episodio o entrega.\n"
             "4. Un CTA final invitando a suscribirse al canal.\n"
             "5. IDIOMA: TODO el guion en español latinoamericano neutro. "
             "Nada de vosotros, os, conjugaciones ibéricas.\n"
@@ -1154,7 +1049,7 @@ class ScriptGenerator:
 
         This is the legacy emergency generator preserved as a safety net.
         It builds blocks by splitting the source text into word chunks and
-        wrapping them with hardcoded Spanish scaffolding (hook, end-hook,
+        wrapping them with hardcoded Spanish scaffolding (hook, reflection,
         CTA).
 
         Includes a language gate: if the body blocks are predominantly in
@@ -1242,22 +1137,13 @@ class ScriptGenerator:
 
         bloques.extend(chunks)
 
-        # ── 3. End hook referencing next video ───────────────
-        emergency_end_hook = getattr(
-            self.canal_config, "EMERGENCY_END_HOOK", None,
-        )
-        if emergency_end_hook:
-            end_hook_text = emergency_end_hook
-        else:
-            outro_tagline = getattr(
-                self.canal_config, "CANAL_OUTRO_TAGLINE",
-                "Suscríbete para más historias increíbles.",
-            )
-            end_hook_text = (
-                "En el próximo video exploramos otro caso que "
-                "desafía toda explicación. " + outro_tagline
-            )
-        bloques.append({"texto": end_hook_text})
+        # ── 3. Reflective closure for this video ──────────────
+        bloques.append({
+            "texto": (
+                "Este caso recuerda que incluso los hechos mejor documentados "
+                "pueden dejar preguntas abiertas."
+            ),
+        })
 
         # ── 4. CTA ───────────────────────────────────────────
         outro = getattr(

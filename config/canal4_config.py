@@ -132,11 +132,6 @@ SCRIPT_STRUCTURE = [
     {"step": "EL RESCATE / LEGADO", "time_pct": "85-100%",
      "description": "Como termino. Los que sobrevivieron, los que no."},
 ]
-SCRIPT_END_HOOK = (
-    "Y si crees que esta expedicion fue tragica, espera a ver {next_expedition}. "
-    "Porque lo que le ocurrio a esa tripulacion fue todavia mas increible. "
-    "Ese es el proximo video. Dale like, suscribete y activa la campana."
-)
 SCRIPT_EMOTIONAL_ARC = {
     "0-10%": "impacto", "10-20%": "anticipacion tragica", "20-30%": "empatia",
     "30-45%": "tension creciente", "45-55%": "angustia", "55-65%": "horror",
@@ -210,6 +205,10 @@ GOOGLE_NEWS_QUERIES = [
 IMAGE_STYLE_MODIFIERS = (
     "cinematic documentary photography, natural lighting, wide shot, 16:9, "
     "professional photography, dramatic atmosphere, expedition landscape"
+)
+AI_VISUAL_COLOR_GRADING = (
+    "expedition colour grade, vivid alpine blue and storm teal, safety-orange "
+    "accents, dramatic but readable terrain detail"
 )
 COLOR_PALETTE = {
     "primary": (15, 40, 65), "secondary": (18, 28, 50), "accent": (255, 92, 0),

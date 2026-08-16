@@ -42,3 +42,7 @@ frontend/node_modules/
 # Database
 *.db
 *.sqlite
+# SQLite runtime artifacts (WAL/shm) and recovery backups
+*.db-shm
+*.db-wal
+*.db.corrupt.*
