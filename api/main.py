@@ -2541,12 +2541,15 @@ def _reset_stale_collection_state():
     return False
 
 
-async def _collect_youtube_stats(deep: bool = False):
-    """Collect YouTube stats for all active channels with valid tokens.
+async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
+    """Collect YouTube stats for all active channels.
 
     Args:
         deep: If True, also collects CTR, traffic sources, demographics,
               and retention % per video (extra API quota cost).
+        use_data_api: If False, skips all Data API calls (scrape-only mode):
+              public stats are scraped and Analytics API still fills watch time
+              for channels with a valid token.
     """
     import logging
     logger = logging.getLogger("autotube.stats")
@@ -2557,6 +2560,7 @@ async def _collect_youtube_stats(deep: bool = False):
         "finished_at": None,
         "channels": [],
         "error": None,
+        "scrape_mode": not use_data_api,
     })
     _pin_stats_state("stats_collection_state")
 
@@ -2571,7 +2575,9 @@ async def _collect_youtube_stats(deep: bool = False):
         for ch in channels:
             slug = ch["slug"]
             token_path = TOKENS_DIR / f"{slug}.pickle"
-            if not token_path.exists():
+            # In scrape mode, channels without a token are still collected
+            # (public data needs no auth) — but without Analytics watch time.
+            if use_data_api and not token_path.exists():
                 STATS_COLLECTION_STATE["channels"].append({
                     "slug": slug, "ok": False, "skipped": True,
                     "reason": "no token",
@@ -2580,7 +2586,9 @@ async def _collect_youtube_stats(deep: bool = False):
             
             try:
                 fetcher = YouTubeStatsFetcher(slug)
-                result = fetcher.collect_and_store(db, deep=deep)
+                result = fetcher.collect_and_store(
+                    db, deep=deep, use_data_api=use_data_api
+                )
                 logger.info(
                     "Stats collected for %s: %s videos, %s shorts, %s analytics, channel=%s",
                     slug,
@@ -2598,6 +2606,10 @@ async def _collect_youtube_stats(deep: bool = False):
                     "channel_updated": result.get("channel_updated", False),
                     "quota_exhausted": result.get("quota_exhausted", False),
                     "analytics_fallback_videos": result.get("analytics_fallback_videos", 0),
+                    "scrape_mode": result.get("scrape_mode", False),
+                    "scrape_fallback_videos": result.get("scrape_fallback_videos", 0),
+                    "scrape_fallback_shorts": result.get("scrape_fallback_shorts", 0),
+                    "channel_scraped": result.get("channel_scraped", False),
                     "deep": deep,
                     "impressions_stored": result.get("impressions_stored", 0),
                     "ctr_stored": result.get("ctr_stored", 0),
@@ -2819,29 +2831,21 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
         deep: If true, also collects CTR, traffic sources, demographics, and
               retention % (consumes ~7 extra YouTube Analytics API quota units
               per channel). Default false = basic stats only.
-        force: Override quota exhaustion guard.
+        force: If True, force Data API usage even if quota is exhausted
+               (instead of auto-switching to scrape mode).
 
     Runs _collect_youtube_stats() as a background task and returns immediately.
     Poll GET /api/stats/collect/status to know when it finishes and its result.
     """
-    # ── Quota guard: abort early if quota is exhausted (unless forced) ──
+    # ── Quota guard: if quota is exhausted, auto-switch to scrape mode ──
+    # (skip Data API, use Analytics API + public scraping) instead of failing.
+    use_data_api = True
     if not force:
         try:
             from database.db_extended import ExtendedDatabase
             _qdb = ExtendedDatabase()
             if _qdb.is_quota_exhausted():
-                reset_info = _qdb.get_quota_reset_time()
-                return {
-                    "ok": False,
-                    "message": (
-                        f"YouTube API quota agotada. Recarga en "
-                        f"{reset_info['remaining_hours']:.1f}h "
-                        f"(aprox {reset_info['reset_at_utc']} UTC). "
-                        f"Usa ?force=true para recolectar de todos modos."
-                    ),
-                    "quota_exhausted": True,
-                    "reset_info": reset_info,
-                }
+                use_data_api = False
         except Exception:
             pass  # allow if DB check fails
 
@@ -2852,12 +2856,19 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
             "message": "Ya hay una recoleccion en curso",
             "state": STATS_COLLECTION_STATE,
         }
-    background_tasks.add_task(_collect_youtube_stats, deep=deep)
+    background_tasks.add_task(
+        _collect_youtube_stats, deep=deep, use_data_api=use_data_api
+    )
     return {
         "ok": True,
-        "message": "Recoleccion de stats iniciada para los canales activos",
+        "message": (
+            "Recoleccion de stats iniciada en modo scraping (sin cuota API)"
+            if not use_data_api
+            else "Recoleccion de stats iniciada para los canales activos"
+        ),
         "state": STATS_COLLECTION_STATE,
         "deep": deep,
+        "use_data_api": use_data_api,
     }
 
 
