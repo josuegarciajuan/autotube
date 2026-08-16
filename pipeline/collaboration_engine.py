@@ -1,15 +1,20 @@
 """Collaboration engine — find similar niche channels and leave value comments.
 
-Runs daily, discovers small channels (<5K subs) in the same niche via YouTube
-Search API, and posts genuine, non-spam comments on their recent videos. This
-builds channel authority and attracts curious viewers naturally.
+v2 (ago 2026, Fase cuota): el descubrimiento de canales y vídeos usa el
+NAVEGADOR (web UI de YouTube, 0 unidades de Data API). La versión v1 usaba
+search().list() (100 ud/call × 8 keywords × canal) y agotaba el presupuesto
+del proyecto compartido justo en la ventana crítica de las 3-4 AM.
+
+Los comentarios se publican vía Data API (commentThreads.insert, 50 ud) solo
+si el proyecto GCP del canal tiene >= COLLAB_MIN_FREE_PCT% de cuota libre.
+Flag global: COLLAB_ENABLED (default false).
 
 Strategy:
-  1. Search for channels with niche keywords, filter by subscriber count
-  2. Get each candidate's 3 most recent videos
-  3. LLM generates a genuine comment (question, observation, or data point)
-  4. Post via YouTube Data API commentThreads().insert()
-  5. Max 3-5 comments/channel/day to avoid spam flags
+  1. Search canales del nicho vía navegador, filtrar por suscriptores
+  2. Obtener los vídeos recientes del candidato vía navegador
+  3. LLM genera un comentario genuino (pregunta, observación o dato)
+  4. Publicar vía Data API (50 ud) con gate de presupuesto
+  5. Max 3-5 comentarios/canal/día para evitar flags de spam
 
 The engine NEVER mentions our channel, NEVER asks for subs, and NEVER uses
 spam patterns. Comments are designed to add value to the video's discussion.
@@ -28,7 +33,40 @@ MAX_COMMENTS_PER_CHANNEL_PER_DAY = 3       # Avoid spam flags
 MAX_TARGET_CHANNEL_SUBS = 5000              # Only target small channels
 MIN_RECENT_VIDEOS = 3                       # How many videos to check per candidate
 MAX_SEARCH_CANDIDATES = 10                  # Max channels to discover per run
+MAX_SEARCH_KEYWORDS = 5                     # Keywords per discovery round (v2: reducido)
 COMMENT_MAX_LENGTH = 300                    # Max comment length (chars)
+
+
+def _collab_enabled() -> bool:
+    """Flag global del engine (COLLAB_ENABLED, default false)."""
+    try:
+        from config.settings import COLLAB_ENABLED
+        return bool(COLLAB_ENABLED)
+    except Exception:
+        return False
+
+
+def _project_has_free_capacity(channel_slug: str) -> bool:
+    """True si el proyecto del canal tiene >= COLLAB_MIN_FREE_PCT% libre."""
+    try:
+        from config.settings import COLLAB_MIN_FREE_PCT
+        from api.services.quota_tracker import (
+            get_channel_project, project_has_free_capacity,
+        )
+        return project_has_free_capacity(
+            get_channel_project(channel_slug), COLLAB_MIN_FREE_PCT
+        )
+    except Exception:
+        return False
+
+
+def _get_browser_for_channel(channel_slug: str):
+    """Instancia de navegador para el account del canal (0 cuota API)."""
+    from pipeline.youtube_browser import get_account_for_channel, get_browser
+    account = get_account_for_channel(channel_slug)
+    if not account:
+        return None
+    return get_browser(account)
 
 
 def discover_niche_channels(
@@ -38,13 +76,12 @@ def discover_niche_channels(
 ) -> list[dict]:
     """Discover small YouTube channels in the same niche.
 
-    Uses YouTube Data API search with channel keywords to find channels
-    with similar content and small subscriber counts.
+    v2: usa la web UI de YouTube vía navegador (0 cuota Data API).
+    Los sub-counts se parsean del texto del renderer ("12,3 mil suscriptores").
 
-    Returns list of {"channel_id": str, "title": str, "subs": int, "description": str}
+    Returns list of {"channel_url": str, "title": str, "subs": int|None}
     """
     from config.config_bridge import get_channel_config
-    from pipeline.youtube_uploader import YouTubeUploader
 
     ch_config = get_channel_config(channel_slug)
     keywords = getattr(ch_config, "CHANNEL_KEYWORDS", [])
@@ -52,125 +89,74 @@ def discover_niche_channels(
         logger.warning("[collab] No keywords for %s", channel_slug)
         return []
 
-    uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
-    if not uploader.authenticate():
-        logger.warning("[collab] Auth failed for %s", channel_slug)
+    browser = _get_browser_for_channel(channel_slug)
+    if browser is None:
+        logger.warning("[collab] No browser account for %s", channel_slug)
         return []
 
-    youtube = uploader.get_authenticated_service()
     candidates = []
-    seen_channels = set()
+    seen = set()
 
-    # Search with different keyword combinations to find varied results
     random.shuffle(keywords)
-    for kw in keywords[:8]:  # Try up to 8 keywords
+    for kw in keywords[:MAX_SEARCH_KEYWORDS]:
         if len(candidates) >= max_candidates:
             break
-
         try:
-            search_response = youtube.search().list(
-                part="snippet",
-                q=f"{kw} documental español",
-                type="channel",
-                maxResults=5,
-                order="relevance",
-            ).execute()
-
-            for item in search_response.get("items", []):
-                channel_id = item["snippet"]["channelId"]
-                if channel_id in seen_channels:
+            results = browser.search_channels(
+                f"{kw} documental español", max_results=5
+            )
+            for item in results:
+                url = item.get("url", "")
+                if not url or url in seen:
                     continue
-                seen_channels.add(channel_id)
-
-                title = item["snippet"]["title"]
-
-                # Get subscriber count
-                try:
-                    ch_response = youtube.channels().list(
-                        part="statistics,snippet",
-                        id=channel_id,
-                    ).execute()
-                    if not ch_response.get("items"):
-                        continue
-
-                    ch_info = ch_response["items"][0]
-                    subs = int(ch_info["statistics"].get("subscriberCount", 0))
-
-                    # Skip our own channel (by handle or name)
-                    our_handle = getattr(ch_config, "YOUTUBE_HANDLE", "")
-                    if our_handle and our_handle.lower() in title.lower():
-                        continue
-
-                    # Only target small channels (< max_subs)
-                    if subs > max_subs or subs < 10:
-                        continue
-
-                    candidates.append({
-                        "channel_id": channel_id,
-                        "title": title,
-                        "subs": subs,
-                        "description": ch_info["snippet"].get("description", ""),
-                    })
-
-                    if len(candidates) >= max_candidates:
-                        break
-
-                except Exception:
+                seen.add(url)
+                subs = item.get("subs")
+                # Skip channels que claramente superan el tope
+                if subs is not None and (subs > max_subs or subs < 1):
                     continue
-
+                candidates.append({
+                    "channel_url": url,
+                    "title": item.get("name", url.strip("/@")),
+                    "subs": subs,
+                })
+                if len(candidates) >= max_candidates:
+                    break
         except Exception as e:
-            logger.debug("[collab] Search error for kw='%s': %s", kw, e)
+            logger.debug("[collab] Browser search error for kw='%s': %s", kw, e)
             continue
 
-    logger.info("[collab] %s: found %d candidate channels", channel_slug, len(candidates))
+    logger.info("[collab] %s: found %d candidate channels (browser, 0 quota)",
+                channel_slug, len(candidates))
     return candidates[:max_candidates]
 
 
 def get_candidate_videos(
     channel_slug: str,
-    candidate_channel_id: str,
+    candidate_channel_url: str,
     limit: int = MIN_RECENT_VIDEOS,
 ) -> list[dict]:
-    """Get the most recent videos from a candidate channel."""
-    from pipeline.youtube_uploader import YouTubeUploader
-
-    uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
-    if not uploader.authenticate():
+    """Get the most recent videos from a candidate channel (browser, 0 quota)."""
+    browser = _get_browser_for_channel(channel_slug)
+    if browser is None:
         return []
 
-    youtube = uploader.get_authenticated_service()
-
     try:
-        # Get upload playlist
-        ch_response = youtube.channels().list(
-            part="contentDetails",
-            id=candidate_channel_id,
-        ).execute()
-        if not ch_response.get("items"):
-            return []
-
-        uploads_playlist = ch_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
-
-        # Get recent videos
+        raw = browser.get_channel_videos(candidate_channel_url, limit=limit)
         videos = []
-        playlist_response = youtube.playlistItems().list(
-            part="snippet",
-            playlistId=uploads_playlist,
-            maxResults=limit,
-        ).execute()
-
-        for item in playlist_response.get("items", []):
-            videos.append({
-                "video_id": item["snippet"]["resourceId"]["videoId"],
-                "title": item["snippet"]["title"],
-                "description": item["snippet"].get("description", ""),
-                "channel_title": item["snippet"]["channelTitle"],
-            })
-
+        for item in raw:
+            video_id = (item.get("video_url") or "").replace("/watch?v=", "")
+            video_id = video_id.split("&")[0]
+            if video_id:
+                videos.append({
+                    "video_id": video_id,
+                    "title": item.get("title", ""),
+                    "description": "",
+                    "channel_title": "",
+                })
         return videos
-
     except Exception as e:
-        logger.debug("[collab] Error getting videos for channel %s: %s", candidate_channel_id, e)
+        logger.debug("[collab] Browser error getting videos for %s: %s",
+                     candidate_channel_url, e)
         return []
 
 
@@ -249,30 +235,20 @@ def post_youtube_comment(
     video_id: str,
     comment_text: str,
 ) -> bool:
-    """Post a comment on a YouTube video."""
-    from pipeline.youtube_uploader import YouTubeUploader
+    """Post a comment on a YouTube video via Data API (50 ud, tracked).
 
-    uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
-    if not uploader.authenticate():
+    Gate: solo publica si el proyecto del canal tiene >= COLLAB_MIN_FREE_PCT%
+    de cuota libre. Un comentario jamás debe tumbar el presupuesto de subidas.
+    """
+    if not _project_has_free_capacity(channel_slug):
+        logger.debug("[collab] %s: project quota too tight — comment skipped", channel_slug)
         return False
 
-    youtube = uploader.get_authenticated_service()
-
     try:
-        youtube.commentThreads().insert(
-            part="snippet",
-            body={
-                "snippet": {
-                    "videoId": video_id,
-                    "topLevelComment": {
-                        "snippet": {
-                            "textOriginal": comment_text,
-                        }
-                    },
-                }
-            },
-        ).execute()
-        return True
+        from pipeline.youtube_comments import YouTubeCommentManager
+        mgr = YouTubeCommentManager(channel_slug)
+        result = mgr.post_comment(video_id, comment_text)
+        return bool(result and result.get("yt_comment_id"))
     except Exception as e:
         logger.debug("[collab] Comment post failed: %s", str(e)[:100])
         return False
@@ -289,9 +265,13 @@ def run_collaboration_round(channel_slug: str) -> dict:
     db = ExtendedDatabase()
     ch_config = get_channel_config(channel_slug)
     niche_text = ", ".join(getattr(ch_config, "CHANNEL_KEYWORDS", [])[:5])
-    our_name = getattr(ch_config, "CANAL_DISPLAY_NAME", channel_slug)
 
     result = {"candidates": 0, "videos_checked": 0, "comments_posted": 0, "errors": 0}
+
+    # ── Gate de presupuesto ANTES de gastar nada ──────────────
+    if not _project_has_free_capacity(channel_slug):
+        logger.debug("[collab] %s: project quota too tight — round skipped", channel_slug)
+        return result
 
     # Track today's comments to avoid exceeding limit
     today = time.strftime("%Y-%m-%d")
@@ -312,7 +292,7 @@ def run_collaboration_round(channel_slug: str) -> dict:
 
     remaining = MAX_COMMENTS_PER_CHANNEL_PER_DAY - today_count
 
-    # Discover candidate channels
+    # Discover candidate channels (browser — 0 quota)
     candidates = discover_niche_channels(channel_slug)
     result["candidates"] = len(candidates)
 
@@ -320,7 +300,7 @@ def run_collaboration_round(channel_slug: str) -> dict:
         if result["comments_posted"] >= remaining:
             break
 
-        videos = get_candidate_videos(channel_slug, candidate["channel_id"])
+        videos = get_candidate_videos(channel_slug, candidate.get("channel_url", ""))
         result["videos_checked"] += len(videos)
 
         for video in videos:
@@ -344,7 +324,7 @@ def run_collaboration_round(channel_slug: str) -> dict:
                 result["comments_posted"] += 1
 
                 logger.info("[collab] %s → %s | '%s'",
-                            channel_slug, candidate["title"][:30],
+                            channel_slug, candidate.get("title", "")[:30],
                             comment[:80])
             else:
                 result["errors"] += 1
@@ -355,8 +335,15 @@ def run_collaboration_round(channel_slug: str) -> dict:
 def run_all_channels_collab() -> dict:
     """Run collaboration rounds for all active channels.
 
+    Gate global COLLAB_ENABLED (default false). Con true, cada ronda valida
+    su propio presupuesto de proyecto antes de gastar.
+
     Returns: {"channels_processed": N, "total_comments": N, "total_errors": N}
     """
+    if not _collab_enabled():
+        return {"channels_processed": 0, "total_comments": 0, "total_errors": 0,
+                "disabled": True}
+
     from database.db_extended import ExtendedDatabase
 
     db = ExtendedDatabase()

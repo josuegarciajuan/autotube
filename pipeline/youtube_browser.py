@@ -1240,6 +1240,182 @@ class YouTubeBrowser:
         return True
 
 
+# ── Collaboration engine helpers (Fase cuota ago 2026) ──────────
+# Descubrimiento de canales/videos vía web UI — 0 unidades de Data API.
+# Reemplaza a search().list() (100 ud/call) que agotaba el presupuesto.
+
+def _dismiss_yt_consent(page) -> bool:
+    """Best-effort: aceptar el banner de consentimiento de YouTube si aparece."""
+    try:
+        if "consent.youtube.com" not in page.url:
+            return True
+        for sel in ("button[aria-label*='Aceptar']", "form button[type='submit']",
+                    "button:has-text('Aceptar')", "button:has-text('Accept')"):
+            btn = page.query_selector(sel)
+            if btn:
+                btn.click()
+                human_delay(1.0, 2.0, "consent accepted")
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _parse_subs_text(renderer_text: str) -> int | None:
+    """Parsear '12,3 mil suscriptores' / '1,2 M de suscriptores' → int aprox.
+
+    Devuelve None si no se puede determinar.
+    """
+    import re
+    m = re.search(
+        r"([\d.,]+)\s*(mil|K|M)?\s*suscriptores", renderer_text, re.IGNORECASE
+    )
+    if not m:
+        return None
+    try:
+        num = float(m.group(1).replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+    suffix = (m.group(2) or "").lower()
+    if suffix in ("mil", "k"):
+        num *= 1000
+    elif suffix == "m":
+        num *= 1_000_000
+    return int(num)
+
+
+# ── Browser-search methods (instalados en YouTubeBrowser vía monkey-patch
+#    para no duplicar el manejo de locks/threads) ───────────────────
+
+def _browser_search_channels(self, keyword: str, max_results: int = 5) -> list[dict]:
+    """Buscar canales en YouTube vía web UI (0 cuota Data API).
+
+    Returns [{"url": "/@handle", "name": "...", "subs": int|None}]
+    """
+    with self._lock:
+        try:
+            self._ensure_browser()
+            page = self._context.new_page()
+            return self._do_search_channels(page, keyword, max_results)
+        except Exception as e:
+            logger.error("search_channels failed for '%s': %s", keyword, e)
+            return []
+
+
+def _do_browser_search_channels(self, page, keyword: str, max_results: int) -> list[dict]:
+    try:
+        from urllib.parse import quote
+        # sp=EgIQAg%3D%3D → filtro de resultados: solo canales
+        url = ("https://www.youtube.com/results?search_query="
+               f"{quote(keyword)}&sp=EgIQAg%3D%3D")
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        human_delay(2.0, 4.0, "search load")
+        _dismiss_yt_consent(page)
+        channels: list[dict] = []
+        seen: set[str] = set()
+        for _ in range(8):  # scrolls
+            renderers = page.query_selector_all("ytd-channel-renderer")
+            for r in renderers:
+                try:
+                    anchor = r.query_selector(
+                        "a#main-link, a.yt-simple-endpoint[href^='/@'], "
+                        "a.yt-simple-endpoint[href^='/channel/']"
+                    )
+                    href = (anchor.get_attribute("href") or "").strip() if anchor else ""
+                    text = r.inner_text() or ""
+                    name = ""
+                    try:
+                        name_el = r.query_selector("yt-formatted-string#text")
+                        name = name_el.inner_text().strip() if name_el else href
+                    except Exception:
+                        name = href
+                except Exception:
+                    continue
+                if not href or href in seen:
+                    continue
+                if any(bad in href for bad in ("/results", "/hashtag", "/c/", "/playlist")):
+                    continue
+                seen.add(href)
+                channels.append({"url": href, "name": name,
+                                 "subs": _parse_subs_text(text)})
+                if len(channels) >= max_results:
+                    page.close()
+                    return channels
+            try:
+                page.mouse.wheel(0, 3000)
+                human_delay(0.8, 1.6, "scroll search")
+            except Exception:
+                break
+        page.close()
+        return channels[:max_results]
+    except Exception as e:
+        logger.error("Search scrape error: %s", e)
+        try:
+            page.close()
+        except Exception:
+            pass
+        return []
+
+
+def _browser_channel_videos(self, channel_url: str, limit: int = 3) -> list[dict]:
+    """Videos recientes de un canal vía web UI (0 cuota Data API)."""
+    with self._lock:
+        try:
+            self._ensure_browser()
+            page = self._context.new_page()
+            return self._do_channel_videos(page, channel_url, limit)
+        except Exception as e:
+            logger.error("get_channel_videos failed for %s: %s", channel_url, e)
+            return []
+
+
+def _do_browser_channel_videos(self, page, channel_url: str, limit: int) -> list[dict]:
+    try:
+        target = channel_url.rstrip("/")
+        if not target.endswith("/videos"):
+            target += "/videos"
+        page.goto(target, wait_until="domcontentloaded", timeout=60000)
+        human_delay(2.0, 4.0, "channel load")
+        _dismiss_yt_consent(page)
+        videos: list[dict] = []
+        seen: set[str] = set()
+        for _ in range(8):
+            anchors = page.query_selector_all("a#video-title-link")
+            for a in anchors:
+                try:
+                    href = (a.get_attribute("href") or "").strip()
+                    title = (a.get_attribute("title") or "").strip()
+                except Exception:
+                    continue
+                if href.startswith("/watch?v=") and href not in seen:
+                    seen.add(href)
+                    videos.append({"video_url": href, "title": title})
+                    if len(videos) >= limit:
+                        page.close()
+                        return videos
+            try:
+                page.mouse.wheel(0, 3000)
+                human_delay(0.8, 1.6, "scroll channel")
+            except Exception:
+                break
+        page.close()
+        return videos[:limit]
+    except Exception as e:
+        logger.error("Channel videos scrape error: %s", e)
+        try:
+            page.close()
+        except Exception:
+            pass
+        return []
+
+
+# Instalar métodos en la clase
+YouTubeBrowser.search_channels = _browser_search_channels
+YouTubeBrowser.get_channel_videos = _browser_channel_videos
+YouTubeBrowser._do_search_channels = _do_browser_search_channels
+YouTubeBrowser._do_channel_videos = _do_browser_channel_videos
+
+
 def get_browser(account: str) -> YouTubeBrowser:
     with _browser_lock:
         if account not in _browser_instances:
