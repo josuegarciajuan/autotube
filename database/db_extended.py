@@ -7938,26 +7938,125 @@ class ExtendedDatabase(Database):
 
     # ── Quota exhaustion helpers ────────────────────────────────
 
+    def _channel_project(self, channel_slug: str) -> str:
+        """Resolve the GCP project for a channel (lazy import — evita ciclos)."""
+        if not channel_slug:
+            return "unknown"
+        try:
+            from api.services.quota_tracker import get_channel_project
+            return get_channel_project(channel_slug)
+        except Exception:
+            return "unknown"
+
     def set_quota_exhausted(self, channel_slug: str = "") -> None:
         """Record quota exhaustion timestamp (does NOT pause scheduler).
 
         Generation continues; only uploads and YouTube API calls are blocked.
-        Use is_quota_exhausted() to check, not scheduler_paused.
+        Use is_quota_exhausted() / is_quota_exhausted_for_channel() to check,
+        not scheduler_paused.
+
+        Fase cuota (ago 2026): circuit breaker PER PROJECT. La cuota de YouTube
+        es por proyecto GCP (varios canales pueden compartirlo), así que un 403
+        solo debe pausar los canales de ESE proyecto. Se mantiene el flag global
+        `quota_exhausted_at` como resumen para la UI y se añade
+        `quota_exhausted_{project_id}` con el timestamp del trip de cada proyecto.
         """
-        self.set_system_state("quota_exhausted_at",
-                              datetime.now(_dt_timezone.utc).isoformat())
+        now_iso = datetime.now(_dt_timezone.utc).isoformat()
+        self.set_system_state("quota_exhausted_at", now_iso)
         if channel_slug:
             self.set_system_state("quota_exhausted_channel", channel_slug)
+            project = self._channel_project(channel_slug)
+            if project and project != "unknown":
+                self.set_system_state(f"quota_exhausted_{project}", now_iso)
 
     def is_quota_exhausted(self) -> bool:
-        """Check if YouTube API quota is exhausted (independent of scheduler_paused)."""
+        """Check if ANY project breaker is tripped (global summary)."""
         exhausted_at = self.get_system_state("quota_exhausted_at")
         return bool(exhausted_at)
+
+    def is_project_quota_exhausted(self, project_id: str) -> bool:
+        """True si el breaker del proyecto concreto está activo.
+
+        Si no se conoce el proyecto, falla a la vista global (fail-safe).
+        """
+        if not project_id or project_id == "unknown":
+            return self.is_quota_exhausted()
+        return bool(self.get_system_state(f"quota_exhausted_{project_id}"))
+
+    def is_quota_exhausted_for_channel(self, channel_slug: str) -> bool:
+        """True si el proyecto al que pertenece el canal tiene el breaker activo."""
+        return self.is_project_quota_exhausted(self._channel_project(channel_slug))
+
+    def all_channels_quota_exhausted(self) -> bool:
+        """True si TODOS los canales activos tienen su proyecto agotado.
+
+        Semántica para guards globales (loops): un solo proyecto agotado NO
+        debe paralizar el resto del sistema. Devuelve True solo cuando no
+        queda ningún canal con proyecto sano.
+        """
+        if not self.is_quota_exhausted():
+            return False
+        try:
+            channels = self.get_channels(active_only=True) or []
+        except Exception:
+            channels = []
+        for ch in channels:
+            slug = ch.get("slug") if isinstance(ch, dict) else None
+            if slug and not self.is_quota_exhausted_for_channel(slug):
+                return False
+        return True
+
+    def backfill_project_quota_breakers(self) -> None:
+        """Migración de datos: si existe el breaker global antiguo sin claves
+        por proyecto, rellena la clave del proyecto del canal afectado.
+
+        Se llama al arrancar la API para que los trips previos al despliegue
+        del breaker por proyecto sigan respetándose.
+        """
+        try:
+            exhausted_at = self.get_system_state("quota_exhausted_at")
+            if not exhausted_at:
+                return
+            channel = self.get_system_state("quota_exhausted_channel") or ""
+            if not channel:
+                return
+            project = self._channel_project(channel)
+            if project and project != "unknown":
+                self.set_system_state(f"quota_exhausted_{project}", exhausted_at)
+        except Exception:
+            pass
+
+    def get_exhausted_projects(self) -> list[str]:
+        """Lista de project_ids con breaker activo (para diagnóstico/UI)."""
+        projects = []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT key FROM system_state "
+                    "WHERE key LIKE 'quota_exhausted_%' AND value != ''"
+                ).fetchall()
+            for row in rows:
+                key = row["key"]
+                if key not in ("quota_exhausted_at", "quota_exhausted_channel"):
+                    projects.append(key.removeprefix("quota_exhausted_"))
+        except Exception:
+            pass
+        return projects
 
     def clear_quota_exhausted(self) -> None:
         """Clear quota exhaustion markers (does NOT touch scheduler_paused)."""
         self.set_system_state("quota_exhausted_at", "")
         self.set_system_state("quota_exhausted_channel", "")
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM system_state "
+                    "WHERE key LIKE 'quota_exhausted_%' AND key NOT IN "
+                    "('quota_exhausted_at', 'quota_exhausted_channel')"
+                )
+                conn.commit()
+        except Exception:
+            pass
 
     def get_quota_reset_time(self) -> dict:
         """Calculate next YouTube API quota reset (midnight Pacific Time).

@@ -47,9 +47,11 @@ class YouTubeUploadDispatcher:
 
             quota_day = quota_day_pacific
         if automatic_budget is None or remediation_mode is None:
-            from config.settings import YT_AUTOMATIC_BUDGET_UNITS, YT_REMEDIATION_MODE
+            from config.settings import YT_REMEDIATION_MODE
 
-            automatic_budget = YT_AUTOMATIC_BUDGET_UNITS if automatic_budget is None else automatic_budget
+            # Presupuesto por proyecto (Fase cuota ago 2026): 0 = derivar de
+            # YT_PROJECT_BUDGET_UNITS[project] - YT_PROJECT_RESERVED_UNITS.
+            automatic_budget = 0 if automatic_budget is None else automatic_budget
             remediation_mode = YT_REMEDIATION_MODE if remediation_mode is None else remediation_mode
 
         self.channel_slug = channel_slug
@@ -79,6 +81,12 @@ class YouTubeUploadDispatcher:
         if not project_id or project_id == "unknown":
             raise UploadDispatchBlocked("The channel quota project is unknown; upload blocked fail-closed.")
 
+        # ── Budget: per-project (cuota real - reservados) ──────────
+        budget = self.automatic_budget
+        if not budget or budget <= 0:
+            from config.settings import get_project_automatic_budget_units
+            budget = get_project_automatic_budget_units(project_id)
+
         reservation = self.db.reserve_youtube_quota(
             project_id=project_id,
             quota_day_pt=self.quota_day(),
@@ -86,7 +94,7 @@ class YouTubeUploadDispatcher:
             content_class=content_class,
             units=UPLOAD_UNITS,
             reference_id=reference_id,
-            automatic_budget=self.automatic_budget,
+            automatic_budget=budget,
         )
         if not reservation.get("granted"):
             raise UploadDispatchBlocked(

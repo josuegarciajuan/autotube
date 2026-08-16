@@ -159,8 +159,13 @@ def flush_quota_log() -> None:
 
 
 def get_daily_usage(db=None, channel_slug: Optional[str] = None,
+                    project_id: Optional[str] = None,
                     date: Optional[str] = None) -> dict:
     """Get YouTube API quota usage for today (or a specific date).
+
+    Fase cuota (ago 2026): channel_slug / project_id AHORA filtran de verdad
+    (antes se ignoraban y TODOS los throttles operaban con el total global,
+    lo que hacía que los guards por canal nunca se aplicaran como se esperaba).
 
     Returns:
         {
@@ -186,6 +191,39 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         # which is 9h ahead of Pacific (UTC-7), so shift back 9h before grouping.
         date = quota_day_pacific()
 
+    # ── Build filter (channel or project) ──
+    if channel_slug:
+        slug_filter = "AND channel_slug = ?"
+        slug_params: list = [channel_slug]
+    elif project_id:
+        # usage por proyecto: filtrar por los canales de ese proyecto
+        slugs: list[str] = []
+        try:
+            from database.db_extended import ExtendedDatabase as _EDB
+            _pdb = _EDB()
+            for ch in (_pdb.get_channels(active_only=False) or []):
+                s = ch.get("slug")
+                if s and get_channel_project(s) == project_id:
+                    slugs.append(s)
+        except Exception:
+            pass
+        if not slugs:
+            slugs = ["__none__"]
+        placeholders = ",".join("?" for _ in slugs)
+        slug_filter = f"AND channel_slug IN ({placeholders})"
+        slug_params = slugs
+    else:
+        slug_filter = ""
+        slug_params = []
+
+    quota_limit = DEFAULT_DAILY_QUOTA
+    if project_id:
+        try:
+            from config.settings import get_project_budget_units
+            quota_limit = get_project_budget_units(project_id)
+        except Exception:
+            pass
+
     with db._connect() as conn:
         conn.row_factory = None
 
@@ -193,9 +231,9 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_channel = {}
         rows = conn.execute(
             "SELECT channel_slug, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
+            f"WHERE date(timestamp, '-9 hours') = ? {slug_filter} AND success = 1 "
             "GROUP BY channel_slug",
-            (date,),
+            (date, *slug_params),
         ).fetchall()
         for ch, total in rows:
             by_channel[ch] = total or 0
@@ -204,9 +242,9 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_operation = {}
         rows = conn.execute(
             "SELECT operation, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
+            f"WHERE date(timestamp, '-9 hours') = ? {slug_filter} AND success = 1 "
             "GROUP BY operation",
-            (date,),
+            (date, *slug_params),
         ).fetchall()
         for op, total in rows:
             by_operation[op] = total or 0
@@ -215,9 +253,9 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         by_hour = {}
         rows = conn.execute(
             "SELECT strftime('%H', timestamp) AS h, SUM(units) FROM yt_quota_log "
-            "WHERE date(timestamp, '-9 hours') = ? AND success = 1 "
+            f"WHERE date(timestamp, '-9 hours') = ? {slug_filter} AND success = 1 "
             "GROUP BY h ORDER BY h",
-            (date,),
+            (date, *slug_params),
         ).fetchall()
         for h, total in rows:
             by_hour[h] = total or 0
@@ -231,8 +269,8 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
             hourly_rate = total / max(filled_hours, 1)
 
         exhausted_estimated_at = None
-        if hourly_rate > 0 and total < DEFAULT_DAILY_QUOTA:
-            remaining = DEFAULT_DAILY_QUOTA - total
+        if hourly_rate > 0 and total < quota_limit:
+            remaining = quota_limit - total
             hours_left = remaining / hourly_rate
             # Pacific midnight = 07:00 UTC
             from datetime import timedelta
@@ -253,10 +291,16 @@ def get_daily_usage(db=None, channel_slug: Optional[str] = None,
         "by_channel": by_channel,
         "by_operation": by_operation,
         "by_hour": by_hour,
-        "quota_limit": DEFAULT_DAILY_QUOTA,
-        "remaining": max(DEFAULT_DAILY_QUOTA - total, 0),
+        "quota_limit": quota_limit,
+        "remaining": max(quota_limit - total, 0),
         "exhausted_estimated_at": exhausted_estimated_at,
     }
+
+
+def get_project_usage(db=None, project_id: Optional[str] = None,
+                      date: Optional[str] = None) -> dict:
+    """Consumo del día-PT de un proyecto GCP concreto (o todos si None)."""
+    return get_daily_usage(db=db, project_id=project_id, date=date)
 
 
 def get_recent_quota_log(limit: int = 50, channel_slug: Optional[str] = None) -> list[dict]:
@@ -285,18 +329,23 @@ def get_recent_quota_log(limit: int = 50, channel_slug: Optional[str] = None) ->
 
 
 def is_quota_exhausted_for_channel(channel_slug: str) -> bool:
-    """Check if a channel has exhausted its daily quota."""
+    """Check if a channel's GCP project has exhausted its daily quota."""
     try:
-        usage = get_daily_usage(channel_slug=channel_slug)
+        usage = get_daily_usage(project_id=get_channel_project(channel_slug))
         return usage["remaining"] <= 0
     except Exception:
         return False
 
 
 def should_throttle(channel_slug: str, threshold_pct: float = 0.85) -> bool:
-    """Check if quota usage is above threshold and should throttle non-essential calls."""
+    """Check if the channel's PROJECT usage is above threshold.
+
+    Fase cuota (ago 2026): la cuota es por proyecto; antes se computaba el
+    total global ignorando el filtro, así que los throttles "por canal"
+    saltaban por consumo de OTROS proyectos.
+    """
     try:
-        usage = get_daily_usage(channel_slug=channel_slug)
+        usage = get_daily_usage(project_id=get_channel_project(channel_slug))
         used_pct = usage["total_units"] / max(usage["quota_limit"], 1)
         return used_pct >= threshold_pct
     except Exception:
@@ -339,26 +388,59 @@ def should_preserve_quota(channel_slug: str, threshold_pct: float = QUOTA_CAUTIO
 def should_throttle_global(threshold_pct: float = 0.85) -> bool:
     """Check if ANY GCP project exceeded its quota threshold.
 
-    Fase 1.4 (ago 2026): la cuota es POR PROYECTO, no un pool global compartido.
-    Hay 2 proyectos (youtube-uploads-automation y autotube-expediciones), cada uno
-    con su propio límite de 10.000 ud/día. Se devuelve True si CUALQUIERA de los
-    proyectos supera el umbral (antes se sumaba todo y la medición era incorrecta).
+    Fase cuota (ago 2026): la cuota es POR PROYECTO. Se compara el consumo
+    de cada proyecto contra SU presupuesto real (YT_PROJECT_BUDGET_UNITS,
+    default 10000). Antes todos los proyectos se comparaban contra 10000 fijo
+    ignorando la cuota real configurada.
     """
     try:
-        usage = get_daily_usage()  # no channel filter = all channels
+        from config.settings import get_project_budget_units
+        usage = get_daily_usage()  # no filter = all channels
         by_channel = usage.get("by_channel", {})
         project_units: dict[str, int] = {}
         for slug, units in by_channel.items():
             proj = get_channel_project(slug)
             project_units[proj] = project_units.get(proj, 0) + units
         for proj, units in project_units.items():
-            used_pct = units / max(usage["quota_limit"], 1)
+            budget = get_project_budget_units(proj)
+            used_pct = units / max(budget, 1)
             if used_pct >= threshold_pct:
                 logger.debug("Quota throttle: project '%s' at %.0f%%", proj, used_pct * 100)
                 return True
         return False
     except Exception:
         return False
+
+
+def project_has_free_capacity(project_id: str, min_free_pct: float = 15.0) -> bool:
+    """True si el proyecto tiene al menos min_free_pct% de cuota libre hoy.
+
+    Usado para gatear operaciones no esenciales (collab, comentarios...).
+    """
+    try:
+        usage = get_daily_usage(project_id=project_id)
+        used_pct = usage["total_units"] / max(usage["quota_limit"], 1)
+        return (1.0 - used_pct) * 100 >= min_free_pct
+    except Exception:
+        return False
+
+
+def in_pt_day_end_window(now: Optional[datetime] = None,
+                         minutes_before_reset: int = 30) -> bool:
+    """True si estamos en los últimos N minutos del día de cuota (PT).
+
+    Anti ping-pong (Fase cuota ago 2026): la cuota del día anterior está casi
+    con seguridad agotada en la última media hora antes del reset PT. Intentar
+    subidas en esa ventana provoca un 403 → breaker → clear a las 07:15 UTC →
+    reintento → 403… (el bucle que paralizó el sistema el 15-ago).
+    Los dispatchers RETIENEN subidas en esta ventana sin fijar ningún breaker.
+    """
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt, timezone as _tz
+    now = now or _dt.now(_tz.utc)
+    pt = now.astimezone(ZoneInfo("America/Los_Angeles"))
+    minutes_to_midnight = (24 * 60 - (pt.hour * 60 + pt.minute)) % (24 * 60)
+    return minutes_to_midnight <= minutes_before_reset
 
 
 # ── Decorator ────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ Loads settings from environment variables (.env file) and provides
 type-safe access to all configuration values.
 """
 
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -196,11 +197,60 @@ GLOBAL_DAILY_UPLOAD_CAP = int(os.getenv("GLOBAL_DAILY_UPLOAD_CAP", "24"))
 # new YouTube operation. It defaults to safe-on after the August 2026 quota
 # incident and is only disabled after the operator validates the preflight.
 YT_REMEDIATION_MODE = os.getenv("YT_REMEDIATION_MODE", "true").lower() == "true"
-# Per-project automatic budget: 8,000 upload units leaves 2,000 for operator
-# stats and essential reconciliation under the standard 10,000-unit quota.
-YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "8000"))
+
+# ── Per-project quota budgets (Fase cuota, ago 2026) ──────────────
+# La cuota de YouTube Data API v3 es POR PROYECTO GCP. Varios canales pueden
+# compartir proyecto (canal2+canal3 → youtube-uploads-automation,
+# canal4+canal5 → autotube-expediciones) y por tanto comparten presupuesto.
+# YT_PROJECT_BUDGET_UNITS es un JSON {project_id: units_dia} con la cuota
+# REAL de cada proyecto en GCP Console (default 10000).
+# YT_PROJECT_RESERVED_UNITS reserva unidades para operaciones esenciales
+# (stats, verificación de publicación, reconciliación) fuera del presupuesto
+# automático de subidas.
+try:
+    _raw_budgets = os.getenv("YT_PROJECT_BUDGET_UNITS", "")
+    YT_PROJECT_BUDGET_UNITS = json.loads(_raw_budgets) if _raw_budgets.strip() else {}
+except Exception:
+    YT_PROJECT_BUDGET_UNITS = {}
+YT_PROJECT_DEFAULT_BUDGET = int(os.getenv("YT_PROJECT_DEFAULT_BUDGET", "10000"))
+YT_PROJECT_RESERVED_UNITS = int(os.getenv("YT_PROJECT_RESERVED_UNITS", "2000"))
+# Presupuesto automático (subidas) de un proyecto = cuota real - reservados.
+# Por proyecto, NO un valor global hardcodeado.
+YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "0"))  # 0 = derivar por proyecto
+
 # Completion chaining caused burst uploads that bypassed the normal scheduler.
 SHORTS_CHAIN_DISPATCH_ENABLED = os.getenv("SHORTS_CHAIN_DISPATCH_ENABLED", "false").lower() == "true"
+
+# ── Collaboration engine (comentarios en canales nicho) ───────────
+# v2 (ago 2026): descubrimiento de canales vía navegador (0 cuota API) —
+# los searches de Data API (100 ud/call) estaban agotando el presupuesto.
+# Los comentarios se publican vía Data API (50 ud) solo si el proyecto
+# tiene >COLLAB_MIN_FREE_PCT% de cuota libre.
+COLLAB_ENABLED = os.getenv("COLLAB_ENABLED", "false").lower() == "true"
+COLLAB_MIN_FREE_PCT = float(os.getenv("COLLAB_MIN_FREE_PCT", "15"))  # % de cuota libre mínima
+
+
+def get_project_budget_units(project_id: str) -> int:
+    """Cuota real diaria (ud) de un proyecto GCP.
+
+    Orden: YT_PROJECT_BUDGET_UNITS[project_id] → YT_PROJECT_DEFAULT_BUDGET.
+    """
+    if not project_id or project_id == "unknown":
+        return YT_PROJECT_DEFAULT_BUDGET
+    budget = YT_PROJECT_BUDGET_UNITS.get(project_id)
+    if isinstance(budget, (int, float)) and budget > 0:
+        return int(budget)
+    return YT_PROJECT_DEFAULT_BUDGET
+
+
+def get_project_automatic_budget_units(project_id: str) -> int:
+    """Presupuesto automático (subidas) de un proyecto = cuota - reservados.
+
+    Si YT_AUTOMATIC_BUDGET_UNITS > 0, se usa ese valor global (legacy).
+    """
+    if YT_AUTOMATIC_BUDGET_UNITS > 0:
+        return YT_AUTOMATIC_BUDGET_UNITS
+    return max(get_project_budget_units(project_id) - YT_PROJECT_RESERVED_UNITS, 1600)
 
 # ── Shorts video/image mix strategy ──────────────────────────
 SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
