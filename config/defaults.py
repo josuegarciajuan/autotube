@@ -301,6 +301,12 @@ PUBLISH_JITTER_MIN = 15
 PUBLISH_WARMUP_MIN = 5
 PUBLISH_WINDOW_SPREAD_MIN = 90
 
+# ── Upload spacing (backlog drain) ─────────────────────────────
+# Mínimo de horas entre subidas long-form del MISMO canal. Evita que
+# un backlog de vídeos pasados se despache en ráfagas ("en fila") cuando
+# vuelve la cuota. Se lee vía config_json en upload_scheduler.
+MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS = 3
+
 # ═══════════════════════════════════════════════════════════════════
 # SHORTS DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
@@ -566,3 +572,12 @@ SEO_SCORE_WEIGHTS = {
     "timestamps": 2,
     "tag_count": 1,
 }
+
+# ── Stats collection: public-scraping fallback (zero Data API quota) ──
+# When the YouTube Data API v3 quota is exhausted, the "Recolectar stats"
+# button falls back to scraping public metrics (views/likes/comments/subs)
+# via yt-dlp instead of failing or zeroing likes/comments. Also works for
+# channels without an OAuth token (public data needs no auth).
+STATS_SCRAPE_FALLBACK_ENABLED = True
+# Parallel yt-dlp requests when scraping (1 request per video/short).
+STATS_SCRAPE_MAX_CONCURRENCY = 6
