@@ -35,6 +35,38 @@ _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 
 
+def _safe_publish_at(target_upload_at, channel_slug: str, channel_id: int = None,
+                     db=None) -> str | None:
+    """Return a future publishAt for a short, or None.
+
+    Guards against a stale target_upload_at (in the past) which YouTube would
+    reject. If stale, recalculates to the next peak slot via the publish
+    scheduler. Never returns a past publishAt.
+    """
+    if not target_upload_at:
+        return None
+    try:
+        from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
+        from config.config_bridge import get_channel_config
+        ch_cfg = get_channel_config(channel_slug)
+        tz = getattr(ch_cfg, "PUBLISH_TIMEZONE", "Europe/Madrid")
+        warmup = int(getattr(ch_cfg, "PUBLISH_WARMUP_MIN", 5) or 5)
+        if _target_is_stale(target_upload_at, timezone_str=tz, warmup_min=warmup):
+            logger.info(
+                "[%s] Short publishAt stale (%s) — recalculating to future peak",
+                channel_slug, str(target_upload_at)[:19],
+            )
+            return ensure_future_target_public_at(
+                target_upload_at, slug=channel_slug, timezone_str=tz,
+                db=db, channel_id=channel_id, warmup_min=warmup,
+            )
+        return str(target_upload_at)
+    except Exception as exc:
+        logger.warning("[%s] Short publishAt guard failed; using target as-is: %s",
+                       channel_slug, exc)
+        return str(target_upload_at)
+
+
 def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
     """Return True when the channel's PROJECT quota breaker is active.
 
@@ -2797,8 +2829,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     # ── v10.3: Scheduled publishing ──
     if target_upload_at:
         privacy_mode = "private"
-        publish_at = target_upload_at
-        logger.info("Native short: scheduled publish at %s", publish_at[:19])
+        publish_at = _safe_publish_at(target_upload_at, channel_slug, channel_id=channel_id)
+        logger.info("Native short: scheduled publish at %s", str(publish_at)[:19])
     else:
         privacy_mode = "public"
         publish_at = None
@@ -2948,7 +2980,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
             # ── v10.3: Scheduled publishing ──
             if target_upload_at:
                 clip_privacy = "private"
-                clip_publish_at = target_upload_at
+                clip_publish_at = _safe_publish_at(target_upload_at, channel_slug, channel_id=channel_id)
             else:
                 clip_privacy = "public"
                 clip_publish_at = None
@@ -3308,7 +3340,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
         # ── v10.3: Scheduled publishing ──
         if target_upload_at:
             clip_privacy2 = "private"
-            clip_publish_at2 = target_upload_at
+            clip_publish_at2 = _safe_publish_at(target_upload_at, channel_slug, channel_id=channel_id)
         else:
             clip_privacy2 = "public"
             clip_publish_at2 = None

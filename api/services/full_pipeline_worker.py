@@ -1524,18 +1524,20 @@ def run_job(
                         from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
                         ch_cfg2 = db.get_channel(channel_id)
                         tz_str2 = "Europe/Madrid"
+                        warmup2 = 60
                         if ch_cfg2 and ch_cfg2.get("config_json"):
                             try:
                                 cfg2 = json.loads(ch_cfg2["config_json"])
                                 tz_str2 = cfg2.get("PUBLISH_TIMEZONE", "Europe/Madrid")
+                                warmup2 = int(cfg2.get("PUBLISH_WARMUP_MIN", 60) or 60)
                             except Exception:
                                 pass
-                        if _target_is_stale(planned_public_at, timezone_str=tz_str2, warmup_min=60):
+                        if _target_is_stale(planned_public_at, timezone_str=tz_str2, warmup_min=warmup2):
                             logger.info("[%s] target_public_at is stale before upload — recalculating", canal)
                             planned_public_at = ensure_future_target_public_at(
                                 planned_public_at, slug=canal, timezone_str=tz_str2,
                                 db=db, channel_id=channel_id,
-                                warmup_min=60,
+                                warmup_min=warmup2,
                             )
                             # Persist recalculation immediately
                             db.update_video(video_id, target_public_at=planned_public_at)

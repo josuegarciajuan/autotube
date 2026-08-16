@@ -56,6 +56,17 @@ class QuotaExhaustedError(RuntimeError):
     """
     pass
 
+
+class InvalidPublishAtError(ValueError):
+    """publishAt is in the past (or within the safety buffer).
+
+    Raised fail-closed BEFORE emitting the billable videos.insert request, so a
+    stale scheduled publish time never burns 1600 quota units and never triggers
+    a retry loop. Callers should recompute target_public_at via
+    pipeline.publish_scheduler.ensure_future_target_public_at and retry.
+    """
+    pass
+
 # ── Token file concurrency protection ────────────────────────
 # Two threads sharing the same channel token must not race on
 # read → refresh → write.  A per-account mutex serialises all
@@ -519,6 +530,32 @@ class YouTubeUploader:
         video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
+
+        # ── v25: fail-closed publishAt guard ────────────────────
+        # YouTube rejects a publishAt in the past with a 403 that already bills
+        # the 1600-unit videos.insert. Validate BEFORE issuing the request so a
+        # stale scheduled publish time fails cleanly (InvalidPublishAtError)
+        # instead of burning quota and triggering the retry loop.
+        if publish_at:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _pa = str(publish_at).strip()
+            try:
+                if _pa.endswith(("Z", "z")):
+                    pa_dt = _dt.fromisoformat(_pa.replace("z", "Z").replace("Z", "+00:00"))
+                else:
+                    pa_dt = _dt.fromisoformat(_pa.replace(" ", "T"))
+                if pa_dt.tzinfo is None:
+                    pa_dt = pa_dt.replace(tzinfo=_tz.utc)
+                if pa_dt.astimezone(_tz.utc) < _dt.now(_tz.utc) + _td(minutes=5):
+                    raise InvalidPublishAtError(
+                        f"publishAt is in the past (or within safety buffer): {publish_at}"
+                    )
+            except InvalidPublishAtError:
+                raise
+            except (ValueError, TypeError) as _pe:
+                raise InvalidPublishAtError(
+                    f"Unparseable publishAt: {publish_at!r}"
+                ) from _pe
 
         service = self._get_service()
 
