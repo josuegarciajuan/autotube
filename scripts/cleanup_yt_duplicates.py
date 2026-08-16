@@ -128,10 +128,18 @@ def _select_canonical(group: list[dict]) -> dict:
     return canonical, duplicates
 
 
-def _delete_video(service, yt_video_id: str) -> bool:
+def _delete_video(service, yt_video_id: str, channel_slug: str = "") -> bool:
     """Delete a YouTube video. Returns True on success."""
     try:
         service.videos().delete(id=yt_video_id).execute()
+        # ── Track quota (diagnostic) ──────────────────────────
+        if channel_slug:
+            try:
+                from api.services.quota_tracker import track_quota
+                track_quota(channel_slug, "videos.delete", 50,
+                            yt_id=yt_video_id, caller="dup_cleanup.delete")
+            except Exception:
+                pass
         logger.info("  🗑️  Deleted: %s", yt_video_id)
         return True
     except HttpError as exc:
@@ -215,7 +223,7 @@ def process_channel(slug: str, duplicates: list, yt_service,
             print(f"    🗑️  DEL:   {vid['yt_video_id']} ({vid.get('views', 0):,} views)")
 
             if not dry_run:
-                success = _delete_video(yt_service, vid["yt_video_id"])
+                success = _delete_video(yt_service, vid["yt_video_id"], channel_slug=slug)
                 stats["quota"] += QUOTA_PER_DELETE
 
                 if success:

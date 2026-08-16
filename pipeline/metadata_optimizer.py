@@ -222,6 +222,14 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
             body=body,
         ).execute()
 
+        # ── Track quota (diagnostic) ──────────────────────────
+        try:
+            from api.services.quota_tracker import track_quota
+            track_quota(self.slug, "videos.update", 50,
+                        yt_id=yt_video_id, caller="metadata_optimizer.apply")
+        except Exception:
+            pass
+
         logger.info("[%s] Metadata updated for video %s: %s", self.slug, yt_video_id, new_title[:80])
         return {"updated": True, "yt_video_id": yt_video_id}
 

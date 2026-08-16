@@ -549,6 +549,12 @@ class ABTestWorker:
                         "snippet": {"title": title_v2[:100]},
                     },
                 ).execute()
+                try:
+                    from api.services.quota_tracker import track_quota
+                    track_quota(channel_slug, "videos.update", 50,
+                                yt_id=yt_video_id, caller="ab_test.rotate_title")
+                except Exception:
+                    pass
                 logger.info("[AB] Title changed on YT for %s: '%s' → '%s'", yt_video_id, title_v1[:40], title_v2[:40])
             else:
                 logger.error("[AB] YT auth failed for channel %s — cannot rotate title", channel_slug)
@@ -605,6 +611,12 @@ class ABTestWorker:
                     videoId=yt_video_id,
                     media_body=str(new_path),
                 ).execute()
+                try:
+                    from api.services.quota_tracker import track_quota
+                    track_quota(channel_slug, "thumbnails.set", 50,
+                                yt_id=yt_video_id, caller="ab_test.swap_thumbnail")
+                except Exception:
+                    pass
                 logger.info("[AB] Thumbnail swapped on YT for %s: variant %d", yt_video_id, new_variant)
             else:
                 logger.error("[AB] YT auth failed for channel %s — cannot swap thumbnail", channel_slug)
@@ -651,6 +663,12 @@ class ABTestWorker:
                         "snippet": {"title": title_v1[:100]},
                     },
                 ).execute()
+                try:
+                    from api.services.quota_tracker import track_quota
+                    track_quota(channel_slug, "videos.update", 50,
+                                yt_id=yt_video_id, caller="ab_test.restore_title")
+                except Exception:
+                    pass
                 logger.info("[AB] Title restored on YT for %s: '%s'", yt_video_id, title_v1[:40])
         except Exception as exc:
             logger.error("[AB] YT title restore failed for %s: %s", yt_video_id, exc)
