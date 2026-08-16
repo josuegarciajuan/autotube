@@ -122,8 +122,8 @@ def process_due_checks(loop=None):
     stats = {"processed": 0, "failed_detected": 0, "retried": 0, "errors": 0}
 
     try:
-        if db.is_quota_exhausted():
-            logger.info("[health_check] YouTube quota exhausted — due checks paused")
+        if db.all_channels_quota_exhausted():
+            logger.info("[health_check] all channel projects quota-exhausted — due checks paused")
             return stats
     except Exception:
         pass
@@ -198,10 +198,10 @@ def _verify_processing(yt_video_id: str, channel_slug: str) -> dict:
 
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
-        if _db.is_quota_exhausted():
+        if _db.is_quota_exhausted_for_channel(channel_slug):
             return {"ok": False, "processing_failed": False,
                     "processing_status": "quota_exhausted",
-                    "reason": "YouTube quota exhausted"}
+                    "reason": "YouTube quota exhausted (project breaker)"}
 
         uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
         if not uploader.authenticate():
@@ -216,7 +216,11 @@ def _verify_processing(yt_video_id: str, channel_slug: str) -> dict:
                 id=yt_video_id,
             ).execute()
         except HttpError as exc:
-            uploader._raise_if_quota_exceeded(exc, "upload_health_checker._verify_processing")
+            # readonly=True: un 403 en un videos.list de 1 ud NO debe fijar el
+            # breaker de subidas del proyecto (anti ping-pong).
+            uploader._raise_if_quota_exceeded(
+                exc, "upload_health_checker._verify_processing", readonly=True
+            )
             raise
 
         items = resp.get("items", [])
@@ -294,8 +298,8 @@ def _auto_retry_upload(video_id: int, yt_video_id: str, channel_slug: str,
     """
     try:
         try:
-            if db.is_quota_exhausted():
-                logger.info("[health_check] Auto-retry skipped for #%d — YouTube quota exhausted", video_id)
+            if db.is_quota_exhausted_for_channel(channel_slug):
+                logger.info("[health_check] Auto-retry skipped for #%d — project quota exhausted", video_id)
                 return False
         except Exception:
             pass

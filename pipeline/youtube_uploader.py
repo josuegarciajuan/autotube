@@ -131,9 +131,23 @@ class YouTubeUploader:
         except Exception:
             return ""
 
-    def _mark_quota_exhausted(self, caller: str = "") -> None:
-        """Trip the global YouTube quota circuit breaker."""
+    def _mark_quota_exhausted(self, caller: str = "", readonly: bool = False) -> None:
+        """Trip the YouTube quota circuit breaker for this channel's project.
+
+        Fase cuota (ago 2026):
+        - El breaker es per PROJECT (set_quota_exhausted resuelve el proyecto).
+        - readonly=True (stats, playlists, verificaciones): NO fija el breaker
+          de subidas — solo logea. Un 403 de lectura no debe parar las subidas
+          del proyecto (las llamadas de lectura son 1 ud y reintentables).
+        """
         channel = self.channel_slug or self.account_name or "unknown"
+        if readonly:
+            logger.warning(
+                "[%s] quotaExceeded en operación de solo lectura (%s) — "
+                "no se activa el breaker de subidas",
+                channel, caller or "unknown",
+            )
+            return
         try:
             from database.db_extended import ExtendedDatabase
             _qdb = ExtendedDatabase()
@@ -150,17 +164,19 @@ class YouTubeUploader:
                 alert_type="quota_exhausted", severity="critical",
                 title="YouTube API quota agotada",
                 message=(
-                    "Cuota diaria de YouTube API agotada (10,000 unidades). "
-                    "Subidas y comprobaciones YT pausadas hasta el reset PT."
+                    "Cuota diaria de YouTube API agotada. "
+                    "Subidas y comprobaciones YT pausadas para el proyecto "
+                    "afectado hasta el reset PT."
                 ),
                 metadata={"channel": channel, "caller": caller},
             )
         except Exception:
             pass
 
-    def _raise_if_quota_exceeded(self, exc: HttpError, caller: str = "") -> None:
+    def _raise_if_quota_exceeded(self, exc: HttpError, caller: str = "",
+                                 readonly: bool = False) -> None:
         if self._http_error_reason(exc) == "quotaExceeded":
-            self._mark_quota_exhausted(caller=caller)
+            self._mark_quota_exhausted(caller=caller, readonly=readonly)
             raise QuotaExhaustedError(
                 "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
             ) from exc

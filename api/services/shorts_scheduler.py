@@ -36,21 +36,29 @@ _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 
 
 def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
-    """Return True when YouTube API quota is exhausted or near budget."""
+    """Return True when the channel's PROJECT quota breaker is active.
+
+    Fase cuota (ago 2026): breaker PER PROJECT. Sin channel_slug comprueba si
+    TODOS los canales activos tienen su proyecto agotado (un solo proyecto
+    agotado ya no paraliza los shorts de los demás canales).
+
+    Anti ping-pong: en los últimos 30 min del día-PT se retienen subidas sin
+    fijar breaker (la cuota anterior está agotada con casi total seguridad).
+    """
     try:
         from config.settings import YT_REMEDIATION_MODE
         if YT_REMEDIATION_MODE:
             return True
+        from api.services.quota_tracker import in_pt_day_end_window
+        if in_pt_day_end_window():
+            return True
         if db is None:
             from database.db_extended import ExtendedDatabase
             db = ExtendedDatabase()
-        if db.is_quota_exhausted():
-            return True
-        from api.services.quota_tracker import should_throttle_global
-        if should_throttle_global(0.85):
-            db.set_quota_exhausted(channel_slug=channel_slug or "quota_governor")
-            logger.warning("Shorts dispatch: quota governor tripped (>85%%) — paused")
-            return True
+        if channel_slug:
+            return db.is_quota_exhausted_for_channel(channel_slug)
+        # Sin canal concreto: solo bloquear si TODOS los canales están agotados
+        return db.all_channels_quota_exhausted()
     except Exception as exc:
         logger.debug("Shorts quota guard skipped: %s", exc)
     return False
@@ -90,6 +98,18 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
 
 
 # ── Auto-link long-form video to short helper ──────────────────
+
+def _processing_poll_delay(attempt: int) -> int:
+    """Backoff del poll de procesado: 15s → 30s (4+) → 60s (10+).
+
+    Reduce llamadas videos.list sin penalizar la espera real de encoding.
+    """
+    if attempt < 4:
+        return 15
+    if attempt < 10:
+        return 30
+    return 60
+
 
 def _wait_until_processed(channel_slug: str, yt_id: str, timeout: int = 300) -> bool:
     """Poll YouTube Data API until the video finishes processing.
@@ -134,12 +154,20 @@ def _wait_until_processed(channel_slug: str, yt_id: str, timeout: int = 300) -> 
                 part="processingDetails", id=yt_id
             ).execute()
 
+            # ── Track quota (diagnostic) ──────────────────────────
+            try:
+                from api.services.quota_tracker import track_quota
+                track_quota(channel_slug, "videos.list", 1,
+                            yt_id=yt_id, caller="shorts_wait_processed")
+            except Exception:
+                pass
+
             items = resp.get("items", [])
             if not items:
                 # Video not yet visible in API — still processing
                 logger.debug("[%s] Video %s not yet visible in API (attempt %d, %.0fs elapsed)",
                              channel_slug, yt_id, api_attempts + 1, elapsed)
-                _time.sleep(15)
+                _time.sleep(_processing_poll_delay(api_attempts))
                 api_attempts += 1
                 continue
 
@@ -168,7 +196,7 @@ def _wait_until_processed(channel_slug: str, yt_id: str, timeout: int = 300) -> 
             logger.debug("[%s] Video %s still processing (%s/%s parts, attempt %d, %.0fs elapsed)",
                          channel_slug, yt_id, parts_processed, parts_total,
                          api_attempts + 1, elapsed)
-            _time.sleep(15)
+            _time.sleep(_processing_poll_delay(api_attempts))
             api_attempts += 1
 
         except Exception as api_err:

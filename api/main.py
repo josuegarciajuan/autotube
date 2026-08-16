@@ -171,6 +171,28 @@ async def lifespan(app: FastAPI):
     migrate_v2()
     _ping_watchdog_now()  # keep systemd watchdog alive during sync startup
 
+    # ── Integrity check: PRAGMA quick_check (Fase cuota ago 2026) ──
+    # La noche del 15-ago la DB dio "database disk image is malformed" durante
+    # ~2h y dejó los loops de recuperación caídos. Detectar corrupción al
+    # arranque permite alertar en vez de fallar en silencio.
+    try:
+        import sqlite3 as _sq3
+        from config.settings import DATABASE_PATH
+        _qc = _sq3.connect(str(DATABASE_PATH), timeout=10)
+        _qc_result = _qc.execute("PRAGMA quick_check(1)").fetchone()
+        _qc.close()
+        if _qc_result and _qc_result[0] != "ok":
+            logging.getLogger("autotube.startup").critical(
+                "⚠️ DB integrity check FAILED: %s — repair with "
+                "'sqlite3 autotube.db .recover' if errors persist", _qc_result[0],
+            )
+        else:
+            logging.getLogger("autotube.startup").info("DB integrity check: ok")
+    except Exception as _qc_exc:
+        logging.getLogger("autotube.startup").warning(
+            "DB integrity check skipped: %s", _qc_exc,
+        )
+
     # Restore stats collection state from DB (survives server restarts)
     _unpin_stats_state("stats_collection_state")
 
@@ -308,6 +330,8 @@ async def lifespan(app: FastAPI):
         _is_quota_pause = False
         _quota_reset_passed = False
         try:
+            # Fase cuota: migrar el breaker global antiguo a su clave por proyecto
+            _paused_db.backfill_project_quota_breakers()
             _is_quota_pause = _paused_db.get_system_state("quota_exhausted_at") not in (None, "")
             if _is_quota_pause:
                 _reset_info = _paused_db.get_quota_reset_time()
@@ -388,6 +412,21 @@ async def lifespan(app: FastAPI):
         await quota_recovery_task
     except asyncio.CancelledError:
         pass
+
+    # ── WAL checkpoint at shutdown (Fase cuota ago 2026) ──
+    # Evita WALs gigantes/corrupción al matar el proceso con cambios sin
+    # checkpoint. Best-effort — nunca debe bloquear el apagado.
+    try:
+        import sqlite3 as _sq3
+        from config.settings import DATABASE_PATH
+        _wconn = _sq3.connect(str(DATABASE_PATH), timeout=5)
+        _wconn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _wconn.close()
+        logging.getLogger("autotube.startup").info("WAL checkpoint done at shutdown")
+    except Exception as _wal_exc:
+        logging.getLogger("autotube.startup").warning(
+            "WAL checkpoint failed at shutdown: %s", _wal_exc,
+        )
 
 
 # ── Orphan detection config ─────────────────────────────────
@@ -576,7 +615,7 @@ async def _upload_health_checker_loop():
             # ── Quota guard: skip health checks when YouTube API is exhausted ──
             from database.db_extended import ExtendedDatabase
             _hdb = ExtendedDatabase()
-            if YT_REMEDIATION_MODE or _hdb.is_quota_exhausted():
+            if YT_REMEDIATION_MODE or _hdb.all_channels_quota_exhausted():
                 await asyncio.sleep(300)
                 continue
 
@@ -703,11 +742,28 @@ async def _quota_recovery_loop():
                 from api.services.upload_scheduler import dispatch_due_uploads
                 return dispatch_due_uploads(db=_db)
 
-            recovered = await _asyncio.to_thread(
-                _recover_quota_once,
-                _db,
-                now_utc=_dt.now(_tz.utc),
-                dispatch_uploads=_dispatch_backlog,
+            # ── Log de cada iteración (antes el loop quedaba mudo y era
+            #     imposible diagnosticar por qué no recuperaba) ──
+            try:
+                _ex = _db.is_quota_exhausted()
+                _ex_projects = _db.get_exhausted_projects()
+                _logger.debug(
+                    "Quota recovery tick: exhausted=%s projects=%s",
+                    _ex, _ex_projects,
+                )
+            except Exception:
+                pass
+
+            # Timeout: si una llamada DB se bloquea, el loop no debe quedarse
+            # colgado silenciosamente (incidente 15-ago).
+            recovered = await _asyncio.wait_for(
+                _asyncio.to_thread(
+                    _recover_quota_once,
+                    _db,
+                    now_utc=_dt.now(_tz.utc),
+                    dispatch_uploads=_dispatch_backlog,
+                ),
+                timeout=120,
             )
             if recovered:
                 try:
@@ -890,14 +946,18 @@ async def _schedule_checker_loop():
 
             # ── Pause gates ──
             # scheduler_paused: manual operator pause → blocks EVERYTHING
-            # quota_exhausted_at: YouTube API quota exhausted → blocks uploads + YT API calls only
+            # quota_exhausted_at: YouTube API quota exhausted (per PROJECT).
+            #   _quota_exhausted     = algún proyecto agotado (solo informativo)
+            #   _all_quota_exhausted = TODOS los proyectos agotados → gates globales
             # Generation (planned_slots, marathons, queue_consumer) continues in both modes
             # to build up backlog while waiting for quota reset.
             _paused_manual = False
             _quota_exhausted = False
+            _all_quota_exhausted = False
             try:
                 _paused_manual = _sched_db.get_system_state("scheduler_paused") == "true"
                 _quota_exhausted = _sched_db.is_quota_exhausted()
+                _all_quota_exhausted = _sched_db.all_channels_quota_exhausted()
             except Exception:
                 pass
 
@@ -914,9 +974,9 @@ async def _schedule_checker_loop():
 
                 # ── Shorts interleaving: when long-form is blocked (pipelining
                 #     guard or no slots), try an extra shorts dispatch to fill
-                #     the gap. Skip if quota exhausted (shorts need upload).
+                #     the gap. Per-channel project guards inside decide.
                 if not long_dispatched:
-                    if not _quota_exhausted:
+                    if not _all_quota_exhausted:
                         await _process_shorts_slots()
                     # ── Never-dry guard: if still no dispatch and pipeline
                     #     is running empty, force horizon replan.
@@ -1014,9 +1074,8 @@ async def _schedule_checker_loop():
 
                 # ── A/B Testing: sequential title/thumbnail optimization (v31) ──
                 # Runs every 60 minutes. Quota-aware: reads local DB, only hits
-                # YT API if data is stale. Still skip if quota is fully exhausted
-                # to avoid wasting the first YT API call on a doomed check.
-                if not _quota_exhausted and now - last_ab_test_check > 3600:
+                # YT API if data is stale. Skip only if ALL projects are exhausted.
+                if not _all_quota_exhausted and now - last_ab_test_check > 3600:
                     try:
                         from config.settings import ENABLE_AB_TESTING
                         if ENABLE_AB_TESTING:
@@ -1051,23 +1110,23 @@ async def _schedule_checker_loop():
 
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
+                # Fase cuota (ago 2026): gate solo cuando TODOS los proyectos
+                # están agotados — los guards internos son per-channel/proyecto.
                 # ════════════════════════════════════════════════════════════
-                if not _quota_exhausted and not YT_REMEDIATION_MODE:
+                if not _all_quota_exhausted and not YT_REMEDIATION_MODE:
                     # Primary shorts + upload dispatch
                     await _process_shorts_slots()
                     await _process_upload_slots()
 
                     # ── Thumbnail verification (v24) ──
+                    # Fase cuota: el gate per-channel/proyecto vive DENTRO del
+                    # servicio (should_skip_thumbnail_verify resuelve el proyecto
+                    # del video). El gate global al 50% se eliminó porque
+                    # bloqueaba la verificación de TODOS los canales cuando un
+                    # solo proyecto estaba al 50% (medición global incorrecta).
                     try:
-                        from api.services.quota_tracker import should_throttle_global
-                        if not should_throttle_global(0.50):
-                            from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
-                            await run_thumbnail_verification_cycle(db=_sched_db)
-                        else:
-                            if not hasattr(_schedule_checker_loop, '_last_tv_skip_log') or \
-                               time.time() - _schedule_checker_loop._last_tv_skip_log > 600:
-                                logger.info("⏸️ Thumbnail verify skipped — quota >50%% used")
-                                _schedule_checker_loop._last_tv_skip_log = time.time()
+                        from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
+                        await run_thumbnail_verification_cycle(db=_sched_db)
                     except Exception as _tv_exc:
                         logger.debug("Thumbnail verification cycle: %s", _tv_exc)
 
@@ -1133,9 +1192,15 @@ async def _schedule_checker_loop():
                     # ── Quota exhausted: log periodically (once per hour) ──
                     if not hasattr(_schedule_checker_loop, '_last_qex_log') or \
                        now - _schedule_checker_loop._last_qex_log > 3600:
+                        try:
+                            _ex_projects = _sched_db.get_exhausted_projects()
+                        except Exception:
+                            _ex_projects = []
                         logger.info(
-                            "⏸️ Quota API YouTube agotada — generación activa, subidas pausadas. "
-                            "Recuperación automática al reset de medianoche (PT)."
+                            "⏸️ Quota API YouTube agotada (proyectos: %s) — "
+                            "generación activa, subidas pausadas solo en esos proyectos. "
+                            "Recuperación automática al reset de medianoche (PT).",
+                            ", ".join(_ex_projects) or "?",
                         )
                         _schedule_checker_loop._last_qex_log = now
 

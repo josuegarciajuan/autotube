@@ -23,20 +23,21 @@ logger = logging.getLogger(__name__)
 
 
 def _set_quota_exhausted_global(channel_slug: str = "stats_collector"):
-    """Set global quota exhausted flag so all YT API callers know to pause uploads.
-    
-    Called from within stats collection when a 403 quotaExceeded is detected.
-    This ensures all YT API consumers become aware immediately,
-    not just when the uploader eventually hits the same error.
-    Generation continues while uploads are paused.
+    """NOTA Fase cuota (ago 2026): las llamadas de solo lectura (stats) ya NO
+    fijan el breaker global de subidas — un 403 en un videos.list de 1 ud
+    paralizaba TODO el sistema (bug del 15-ago: pausa global de 24h).
+
+    Solo se logea. El breaker lo fijan únicamente 403s en operaciones de
+    escritura (subidas) vía youtube_uploader.
     """
     try:
-        from database.db_extended import ExtendedDatabase
-        _db = ExtendedDatabase()
-        _db.set_quota_exhausted(channel_slug=channel_slug)
-        logger.warning("YouTube Data API quota exhausted — scheduler paused globally")
+        logger.warning(
+            "quotaExceeded en stats de %s — no se activa el breaker de subidas "
+            "(solo lectura)",
+            channel_slug,
+        )
     except Exception as exc:
-        logger.debug("Could not set global quota flag: %s", exc)
+        logger.debug("Could not log quota flag: %s", exc)
 
 
 class YouTubeStatsFetcher:

@@ -562,15 +562,27 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
     # ── 0. YouTube quota circuit breaker ─────────────────────
     # Project-level reservation admission in YouTubeUploadDispatcher is the
-    # quota source of truth.  This global breaker is only for a confirmed
-    # YouTube quotaExceeded response; do not add heuristic thresholds here.
+    # quota source of truth.  This global breaker only blocks when ALL
+    # channels' projects are exhausted (a single project's 403 no longer
+    # freezes uploads of the other project's channels).
     try:
-        if db.is_quota_exhausted():
-            logger.info("📤 Upload scheduler: YouTube quota exhausted — uploads paused")
+        if db.all_channels_quota_exhausted():
+            logger.info("📤 Upload scheduler: all channel projects quota-exhausted — uploads paused")
             return None
     except Exception as exc:
         logger.warning("Upload quota breaker check failed; blocking dispatch fail-closed: %s", exc)
         return None
+
+    # ── 0a. Anti ping-pong: retener subidas en los últimos 30 min del día-PT ──
+    # La cuota del día anterior está agotada casi con seguridad; intentar subir
+    # ahí provoca 403 → breaker → clear → reintento → 403… Sin fijar breaker.
+    try:
+        from api.services.quota_tracker import in_pt_day_end_window
+        if in_pt_day_end_window():
+            logger.info("📤 Upload scheduler: end-of-PT-day window — uploads held until reset")
+            return None
+    except Exception:
+        pass
 
     # ── 0. Recovery scan: revert stuck 'uploading' videos whose job died ──
     # This catches videos that got stuck due to server restart / worker crash
@@ -805,9 +817,10 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     slug = video.get("channel_slug", video.get("canal", "unknown"))
 
     # Late gate: quota can be consumed between candidate selection and dispatch.
+    # Per-channel: solo bloquea si el PROYECTO de este canal está agotado.
     try:
-        if db.is_quota_exhausted():
-            logger.info("📤 Upload scheduler: quota exhausted before job creation — skipping %s", slug)
+        if db.is_quota_exhausted_for_channel(slug):
+            logger.info("📤 Upload scheduler: project quota exhausted for %s — skipping", slug)
             return None
     except Exception as exc:
         logger.warning("Upload quota breaker recheck failed; blocking dispatch fail-closed: %s", exc)
