@@ -1014,16 +1014,50 @@ class YouTubeStatsFetcher:
 
     # ── Batch collection ───────────────────────────────────────
 
-    def collect_and_store(self, db, deep: bool = False) -> dict:
+    def collect_and_store(
+        self,
+        db,
+        deep: bool = False,
+        use_data_api: bool = True,
+        scrape_fallback: bool = True,
+    ) -> dict:
         """Collect stats for all uploaded videos and the channel, store in DB.
 
-        Uses batch Data API calls (50 IDs per call) and falls back to
-        YouTube Analytics API when Data API quota is exhausted.
+        Primary source: YouTube Data API v3 (batch, 50 IDs/call).
+        Fallbacks when Data API quota is exhausted (or use_data_api=False):
+          - YouTube Analytics API (watch time / retention) — separate quota.
+          - Public scraping via yt-dlp (views / likes / comments / subs) — zero
+            Data API quota, works even without an OAuth token.
 
         Returns summary dict including analytics_updated count and
         quota_exhausted flag for UI feedback.
         """
-        if not self.authenticate():
+        # ── Scrape fallback config ──
+        # Default ON (fail-open): this is a resilience fallback, so a config
+        # load failure should not disable it.
+        scrape_enabled = bool(scrape_fallback)
+        max_concurrency = 6
+        try:
+            from config.config_bridge import get_channel_config
+            cfg = get_channel_config(self.slug)
+            scrape_enabled = bool(
+                getattr(cfg, "STATS_SCRAPE_FALLBACK_ENABLED", True)
+            )
+            max_concurrency = int(
+                getattr(cfg, "STATS_SCRAPE_MAX_CONCURRENCY", 6)
+            )
+        except Exception:
+            pass
+
+        scraper = None
+        if scrape_enabled:
+            from pipeline.youtube_stats_scraper import YouTubeStatsScraper
+            scraper = YouTubeStatsScraper(
+                self.slug, max_concurrency=max_concurrency
+            )
+
+        authenticated = self.authenticate()
+        if not authenticated and use_data_api:
             return {"error": "Authentication failed"}
 
         result = {
@@ -1031,17 +1065,27 @@ class YouTubeStatsFetcher:
             "shorts_updated": 0,
             "channel_updated": False,
             "analytics_updated": 0,
-            "quota_exhausted": False,
+            "quota_exhausted": not use_data_api,
             "analytics_fallback_videos": 0,
             "analytics_fallback_shorts": 0,
+            "scrape_fallback_videos": 0,
+            "scrape_fallback_shorts": 0,
+            "scrape_mode": not use_data_api,
         }
 
-        # ── Channel stats (Data API → Analytics fallback) ──
+        # In scrape-only mode the Data API is intentionally skipped → treat as
+        # quota-unavailable so every fallback path (analytics + scrape) runs.
+        quota_exhausted = not use_data_api
+
+        # ── Channel stats (Data API → scrape fallback) ──
         channel = db.get_channel_by_slug(self.slug)
         channel_stats = None
         if channel:
-            channel_stats = self.get_channel_stats()
-            channel_analytics = self.get_channel_analytics()
+            if use_data_api:
+                channel_stats = self.get_channel_stats()
+            channel_analytics = (
+                self.get_channel_analytics() if authenticated else None
+            )
 
             if channel_stats:
                 # Data API succeeded — merge analytics data
@@ -1056,27 +1100,40 @@ class YouTubeStatsFetcher:
                     channel_stats.get("viewCount"),
                     channel_stats.get("estimatedMinutesWatched"),
                 )
-            elif channel_analytics:
-                # Data API down — Analytics API has watch time
-                # Guard: analytics fallback often returns 0 for subscriberCount/viewCount,
-                # which creates false valleys in dashboard charts → skip insert
-                result["quota_exhausted"] = True
-                sc = int(channel_analytics.get("subscriberCount", 0))
-                vc = int(channel_analytics.get("viewCount", 0))
-                if sc > 0 or vc > 0:
-                    db.insert_channel_stats(channel["id"], channel_analytics)
-                    result["channel_updated"] = True
-                    result["channel_stats"] = channel_analytics
-                    logger.warning(
-                        "Channel stats from Analytics API only (Data API quota exhausted)"
-                    )
-                else:
-                    logger.warning(
-                        "Analytics fallback returned 0 subscribers+views for %s — skipping insert to avoid false valleys",
-                        self.slug,
-                    )
             else:
-                logger.warning("No channel stats at all for %s", self.slug)
+                if use_data_api:
+                    # Data API returned nothing (likely quota) — mark exhausted
+                    # so the scrape fallback path runs below.
+                    quota_exhausted = True
+                    result["quota_exhausted"] = True
+                # Scrape fallback: public subscribers + carry-forward totals
+                if scraper:
+                    scraped_channel = scraper.get_channel_stats(channel)
+                    subs = int(scraped_channel.get("subscriberCount", 0) or 0)
+                    if subs > 0:
+                        carry_views, carry_videos = self._latest_channel_totals(
+                            db, channel["id"]
+                        )
+                        scraped_channel["viewCount"] = str(carry_views)
+                        scraped_channel["videoCount"] = str(carry_videos)
+                        if channel_analytics:
+                            scraped_channel.update(channel_analytics)
+                        db.insert_channel_stats(channel["id"], scraped_channel)
+                        result["channel_updated"] = True
+                        result["channel_stats"] = scraped_channel
+                        result["channel_scraped"] = True
+                        logger.info(
+                            "Channel stats scraped for %s: subs=%s "
+                            "(totals carried forward)",
+                            self.slug, subs,
+                        )
+                    else:
+                        logger.warning(
+                            "No channel stats at all for %s (Data API + scrape empty)",
+                            self.slug,
+                        )
+                else:
+                    logger.warning("No channel stats at all for %s", self.slug)
 
         # ── Gather all video/short IDs ──
         videos = db.get_videos(channel_id=channel["id"] if channel else None, limit=10000)
@@ -1101,9 +1158,8 @@ class YouTubeStatsFetcher:
                 short_yt_ids.append(yt_id)
 
         # ── Video stats — BATCH via Data API (50 IDs per call) ──
-        quota_exhausted = result.get("quota_exhausted", False)
         inserted_video_ids: set[int] = set()  # track which videos got real Data API rows
-        if not quota_exhausted and video_yt_ids:
+        if use_data_api and not quota_exhausted and video_yt_ids:
             batch_result = self.get_video_stats_batch(video_yt_ids)
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
@@ -1124,7 +1180,7 @@ class YouTubeStatsFetcher:
 
         # ── Shorts stats — batch via Data API (skip if quota already gone) ──
         inserted_short_ids: set[int] = set()
-        if not quota_exhausted and short_yt_ids:
+        if use_data_api and not quota_exhausted and short_yt_ids:
             batch_result = self.get_video_stats_batch(short_yt_ids)
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
@@ -1144,6 +1200,28 @@ class YouTubeStatsFetcher:
                         db.insert_short_stats(s["id"], yt_id, stats, short_type=short_type)
                         result["shorts_updated"] += 1
                         inserted_short_ids.add(s["id"])
+
+        # ── Scrape fallback (public data — zero Data API quota) ──
+        # Collect public views/likes/comments for videos/shorts that did NOT get
+        # real Data API rows this run. Runs when quota is exhausted or in
+        # scrape-only mode.
+        scraped_video_stats: dict[str, dict] = {}
+        scraped_short_stats: dict[str, dict] = {}
+        analytics_fallback_video_ids: set[int] = set()
+        analytics_fallback_short_ids: set[int] = set()
+        if scraper and quota_exhausted:
+            remaining_v = [
+                v["yt_video_id"] for v in videos
+                if v.get("yt_video_id") and v["id"] not in inserted_video_ids
+            ]
+            if remaining_v:
+                scraped_video_stats = scraper.get_video_stats_batch(remaining_v)
+            remaining_s = [
+                s["youtube_id"] for s in shorts
+                if s.get("youtube_id") and s["id"] not in inserted_short_ids
+            ]
+            if remaining_s:
+                scraped_short_stats = scraper.get_video_stats_batch(remaining_s)
 
         # ── Bulk video analytics (Analytics API — separate quota, always works) ──
         if video_yt_ids and self._analytics_service:
@@ -1167,12 +1245,18 @@ class YouTubeStatsFetcher:
                             if v["id"] in inserted_video_ids:
                                 continue
                             bdata = bulk_analytics.get(yt_id, {})
-                            if not bdata:
+                            sdata = scraped_video_stats.get(yt_id, {})
+                            if sdata.get("is_mock"):
+                                sdata = {}
+                            if not bdata and not sdata:
                                 continue
                             analytics_stats = {
-                                "viewCount": bdata.get("analyticsViews", "0"),
-                                "likeCount": "0",
-                                "commentCount": "0",
+                                "viewCount": (
+                                    sdata.get("viewCount")
+                                    or bdata.get("analyticsViews", "0")
+                                ),
+                                "likeCount": sdata.get("likeCount", "0"),
+                                "commentCount": sdata.get("commentCount", "0"),
                                 "estimatedMinutesWatched": float(
                                     bdata.get("estimatedMinutesWatched", 0) or 0
                                 ),
@@ -1186,6 +1270,7 @@ class YouTubeStatsFetcher:
                             }
                             db.insert_video_stats(v["id"], yt_id, analytics_stats)
                             fallback_inserted += 1
+                            analytics_fallback_video_ids.add(v["id"])
                         result["analytics_fallback_videos"] = fallback_inserted
                         if fallback_inserted:
                             logger.info(
@@ -1248,12 +1333,18 @@ class YouTubeStatsFetcher:
                                 if s["id"] in inserted_short_ids:
                                     continue
                                 bdata = bulk_analytics.get(yt_id, {})
-                                if not bdata:
+                                sdata = scraped_short_stats.get(yt_id, {})
+                                if sdata.get("is_mock"):
+                                    sdata = {}
+                                if not bdata and not sdata:
                                     continue
                                 analytics_short_stats = {
-                                    "viewCount": bdata.get("analyticsViews", "0"),
-                                    "likeCount": "0",
-                                    "commentCount": "0",
+                                    "viewCount": (
+                                        sdata.get("viewCount")
+                                        or bdata.get("analyticsViews", "0")
+                                    ),
+                                    "likeCount": sdata.get("likeCount", "0"),
+                                    "commentCount": sdata.get("commentCount", "0"),
                                     "estimatedMinutesWatched": float(
                                         bdata.get("estimatedMinutesWatched", 0) or 0
                                     ),
@@ -1270,6 +1361,7 @@ class YouTubeStatsFetcher:
                                     short_type=short_type,
                                 )
                                 fallback_short_inserted += 1
+                                analytics_fallback_short_ids.add(s["id"])
                             result["analytics_fallback_shorts"] = fallback_short_inserted
                             if fallback_short_inserted:
                                 logger.info(
@@ -1278,6 +1370,50 @@ class YouTubeStatsFetcher:
                                 )
             except Exception as exc:
                 logger.error("Bulk analytics update failed for %s: %s", self.slug, exc)
+
+        # ── Pure scrape insert (no Data API row AND no analytics row) ──
+        # Handles videos/shorts that got scraped data but were not inserted by
+        # either the Data API batch or the Analytics fallback (e.g. channels
+        # without an OAuth token have no Analytics service at all).
+        if scraper and quota_exhausted:
+            pure_v = 0
+            for v in videos:
+                yt_id = v.get("yt_video_id")
+                if not yt_id:
+                    continue
+                if v["id"] in inserted_video_ids or v["id"] in analytics_fallback_video_ids:
+                    continue
+                sdata = scraped_video_stats.get(yt_id, {})
+                if sdata.get("is_mock", True):
+                    continue
+                db.insert_video_stats(v["id"], yt_id, sdata)
+                pure_v += 1
+            if pure_v:
+                result["scrape_fallback_videos"] = pure_v
+                logger.info(
+                    "Scrape fallback: inserted %d video rows (no API data) for %s",
+                    pure_v, self.slug,
+                )
+
+            pure_s = 0
+            for s in shorts:
+                yt_id = s.get("youtube_id")
+                if not yt_id:
+                    continue
+                if s["id"] in inserted_short_ids or s["id"] in analytics_fallback_short_ids:
+                    continue
+                sdata = scraped_short_stats.get(yt_id, {})
+                if sdata.get("is_mock", True):
+                    continue
+                short_type = s.get("type", "clip")
+                db.insert_short_stats(s["id"], yt_id, sdata, short_type=short_type)
+                pure_s += 1
+            if pure_s:
+                result["scrape_fallback_shorts"] = pure_s
+                logger.info(
+                    "Scrape fallback: inserted %d short rows (no API data) for %s",
+                    pure_s, self.slug,
+                )
 
         # ── Deep analytics (CTR, traffic, demographics) ──
         if deep and channel and video_yt_ids and self._analytics_service:
@@ -1358,18 +1494,46 @@ class YouTubeStatsFetcher:
             except Exception as exc:
                 logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
 
+        scrape_total = result.get("scrape_fallback_videos", 0) + result.get(
+            "scrape_fallback_shorts", 0
+        )
         logger.info(
-            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s%s%s%s",
+            "Stats collection: %s videos, %s shorts, %s analytics, channel=%s%s%s%s%s%s",
             result["videos_updated"],
             result["shorts_updated"],
             result["analytics_updated"],
             result["channel_updated"],
             " (deep)" if deep else "",
             " (quota_exhausted)" if result.get("quota_exhausted") else "",
-            f" (+{result.get('analytics_fallback_videos', 0)} analytics-fallback)" 
+            " (scrape_mode)" if result.get("scrape_mode") else "",
+            f" (+{result.get('analytics_fallback_videos', 0)} analytics-fallback)"
             if result.get("analytics_fallback_videos", 0) else "",
+            f" (+{scrape_total} scraped)" if scrape_total else "",
         )
         return result
+
+    # ── Channel carry-forward helper ──────────────────────────
+
+    @staticmethod
+    def _latest_channel_totals(db, channel_id: int) -> tuple[int, int]:
+        """Return the most recent (total_views, video_count) for a channel.
+
+        Used to carry forward channel totals when scraping only provides
+        subscribers (yt-dlp cannot read the About tab), avoiding false
+        valleys in the total-views chart.
+        """
+        try:
+            with db._connect() as conn:
+                row = conn.execute(
+                    "SELECT total_views, video_count FROM channel_stats_history "
+                    "WHERE channel_id = ? ORDER BY fetched_at DESC LIMIT 1",
+                    (channel_id,),
+                ).fetchone()
+            if row:
+                return int(row[0] or 0), int(row[1] or 0)
+        except Exception as exc:
+            logger.debug("_latest_channel_totals failed: %s", exc)
+        return 0, 0
 
     # ── Mock (fallback) ────────────────────────────────────────
 
