@@ -482,29 +482,35 @@ async def _queue_consumer():
 
 async def _publish_verify_loop():
     """Background loop: check if warming videos have been auto-published by YouTube.
-    
+
     Runs every 5 minutes independently of frontend polling. For every warming
     (uploaded_private) video whose target_public_at has passed, and for orphaned
-    'uploaded' videos, it triggers a YouTube API verification thread that
-    transitions them to 'published' (or forces go_public if needed).
-    
+    'uploaded' videos, it triggers a quota-FREE wall-scrape verification thread
+    (public RSS feed) that transitions them to 'published' when detected, or
+    raises a system alert after a grace window if still not public.
+
     This ensures videos transition from 'warming' → 'published' even when nobody
-    has the PipelineView open in the frontend.
+    has the PipelineView open in the frontend — and does NOT consume YouTube
+    API quota (so it keeps working while the API quota is exhausted).
     """
     import asyncio, logging
     logger = logging.getLogger("autotube.publish_verify")
     
     await asyncio.sleep(60)  # Let API stabilize first
     
-    logger.info("Publish verify loop started (interval: 5 min)")
+    logger.info("Publish verify loop started (interval: 5 min, quota-free scraping)")
     
     while True:
         try:
-            # Pause gate: skip when scheduler is paused or quota exhausted
+            # Pause gate: skip only when the operator explicitly paused the
+            # scheduler. Scraping consumes NO quota, so we intentionally ignore
+            # quota-exhaustion and remediation mode here (unlike the old
+            # API-based verification, which was gated off by quota and left
+            # warming videos stuck in 'uploaded_private' forever).
             try:
                 from database.db_extended import ExtendedDatabase
                 _db = ExtendedDatabase()
-                if YT_REMEDIATION_MODE or _db.get_system_state("scheduler_paused") == "true" or _db.is_quota_exhausted():
+                if _db.get_system_state("scheduler_paused") == "true":
                     await asyncio.sleep(60)
                     continue
             except Exception:

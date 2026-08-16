@@ -19,235 +19,245 @@ from database.db import Database, init_db as _init_db
 
 logger = logging.getLogger(__name__)
 
-# ── Published status verification (YouTube API check) ────────────
+# ── Published status verification (FREE channel-wall scraping) ────
 # Videos uploaded with scheduledPublishTime (publishAt) are set to
 # 'uploaded_private' with a future target_public_at. When that time
-# passes, a background thread calls YouTube API to confirm the video
-# is now public, then updates the DB. This avoids continuous polling
-# and preserves YouTube API quota.
+# passes, a background thread checks the channel's PUBLIC RSS feed
+# (quota-free, no API). If the video appears there → it is public → mark
+# it. If absent → retry on a fixed interval, and raise a system alert once
+# the video has been missing past a grace window (_PUBLISH_GRACE_MINUTES).
 _PUBLISH_VERIFY_LOCK = threading.Lock()
 _PUBLISH_VERIFY_INFLIGHT: set = set()   # video ids being verified right now
-_PUBLISH_MAX_RETRIES = 3                # max attempts before forcing go_public (processing must be done)
-_PUBLISH_MAX_TOTAL_RETRIES = 8          # v24: total attempts before giving up entirely (~24-48h)
-_PUBLISH_RETRY_BASE_MINUTES = 30        # v24: increased from 10 → better patience for YT processing
-_PUBLISH_RETRY_MAX_MINUTES = 720        # v24: increased from 60 → max 12h between retries
-_PUBLISH_YOUTUBE_API_QUOTA_COST = 1     # videos.list(part="status") costs 1 unit
+_PUBLISH_RETRY_MINUTES = 20             # fixed interval between wall-scrape checks
+_PUBLISH_GRACE_MINUTES = 180            # grace window past reference time before raising alert
 _CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
 _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
 
 
+def _parse_utc_datetime(raw) -> Optional[datetime]:
+    """Parse an ISO/RFC3339 timestamp into an aware UTC datetime, or None."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00").replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt_timezone.utc)
+        return dt.astimezone(_dt_timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_local(dt: datetime, tz_name: str) -> Optional[str]:
+    """Render an aware datetime in the given IANA timezone for human logs."""
+    if dt is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return None
+
+
 def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: str):
-    """Background verification: check if YouTube has auto-published the video.
+    """Background verification via FREE channel-wall scraping (public RSS feed).
 
-    Called from get_pipeline_status() when target_public_at has passed.
-    Runs in a daemon thread. Updates the DB with the result.
+    Replaces the old YouTube Data API check (videos.list part=status, 1 unit)
+    and the "force go_public" fallback (videos.update, 50 units). Zero quota.
 
-    v24 (Aug 2026): Now checks processingStatus to avoid calling go_public
-    while YT is still encoding (which fails and creates an infinite retry
-    loop). Videos stuck in processing >48h are marked as stuck_processing.
+    Logic:
+      - Fetch the channel's public RSS feed (most recent ~15 uploads).
+      - If yt_video_id is present → video is PUBLIC → mark it published.
+      - If absent → schedule a fixed 20-min retry. Once the video has been
+        missing longer than _PUBLISH_GRACE_MINUTES past its reference time
+        (target_public_at, or uploaded_at for orphaned videos), raise a system
+        alert so an operator can investigate the root cause.
 
-    Quota: 1 unit per verification (videos.list with part="status").
+    Rich logging is emitted at every decision point (target vs now in UTC,
+    retry count, feed size, elapsed time) so the alert can point at the log
+    for meaningful debugging info.
     """
-    import time as _time
-    
     vlog = logger.getChild("publish_verify")
-    
+
     # ═══ Dedup guard ══════════════════════════════════════════════════
     with _PUBLISH_VERIFY_LOCK:
         if video_id in _PUBLISH_VERIFY_INFLIGHT:
             vlog.debug("[%s] Verify #%d already in-flight — skipping", channel_slug, video_id)
             return
         _PUBLISH_VERIFY_INFLIGHT.add(video_id)
-    
+
     try:
-        vlog.info("[%s] 📡 Verifying publish status for video #%d (yt=%s)...",
-                  channel_slug, video_id, yt_video_id)
-        
-        # ── Call YouTube API (1 quota unit) ──
+        now_utc = datetime.now(_dt_timezone.utc)
+        db = ExtendedDatabase()
+        video = db.get_video(video_id) or {}
+
+        # ── Resolve the channel timezone for human-readable logs ──
+        tz_name = "UTC"
         try:
-            from pipeline.youtube_uploader import YouTubeUploader
-            uploader = YouTubeUploader(channel_slug)
-            if not uploader.authenticate():
-                retry_count = _get_retry_count(video_id)
-                if retry_count >= _PUBLISH_MAX_TOTAL_RETRIES:
-                    vlog.error(
-                        "[%s] ❌ Auth stuck for #%d after %d retries — marking stuck_processing",
-                        channel_slug, video_id, retry_count,
-                    )
-                    _mark_video_stuck_processing(video_id, channel_slug)
-                elif retry_count >= _PUBLISH_MAX_RETRIES:
-                    vlog.error(
-                        "[%s] ❌ Auth stuck for #%d after %d retries — needs manual re-auth",
-                        channel_slug, video_id, retry_count,
-                    )
-                    _mark_video_auth_stuck(video_id)
-                else:
-                    vlog.warning("[%s] Auth failed for publish verification of #%d (retry %d/%d)",
-                                 channel_slug, video_id, retry_count + 1, _PUBLISH_MAX_TOTAL_RETRIES)
-                    _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
-                return
-            
-            service = uploader._get_service()
-            resp = service.videos().list(
-                part="status",
-                id=yt_video_id,
-            ).execute()
+            from config.config_bridge import get_channel_config
+            cfg = get_channel_config(channel_slug)
+            tz_name = getattr(cfg, "PUBLISH_TIMEZONE", "Europe/Madrid") or "Europe/Madrid"
+        except Exception:
+            tz_name = "Europe/Madrid"
 
-            # ── Track quota (diagnostic) ──────────────────────────
-            from api.services.quota_tracker import track_quota
-            track_quota(channel_slug, "videos.list", _PUBLISH_YOUTUBE_API_QUOTA_COST,
-                        yt_id=yt_video_id, caller="_verify_published_status_bg")
+        vlog.info(
+            "[%s] 🔎 Wall-scrape verify for video #%d (yt=%s) — now=%s UTC (%s)",
+            channel_slug, video_id, yt_video_id, now_utc.isoformat(),
+            _format_local(now_utc, tz_name),
+        )
 
-            items = resp.get("items", [])
-            if not items:
-                vlog.warning("[%s] Video %s not found via API — skipping",
-                             channel_slug, yt_video_id)
-                _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
-                return
-            
-            status_obj = items[0].get("status", {})
-            privacy_status = status_obj.get("privacyStatus", "")
-            processing_status = status_obj.get("processingStatus", "")
-            upload_status = status_obj.get("uploadStatus", "")
-            
-            vlog.info("[%s] Video %s: privacy=%s processing=%s upload=%s",
-                      channel_slug, yt_video_id, privacy_status,
-                      processing_status, upload_status)
-            
-        except Exception as api_exc:
-            vlog.warning("[%s] YouTube API error: %s",
-                         channel_slug, str(api_exc)[:200])
-            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
-            return
-        
-        # ── Update DB based on result ──
-        if privacy_status == "public":
-            _mark_video_published(video_id, channel_slug, yt_video_id)
-            return
+        # ── Resolve the channel_id needed for the RSS feed ──
+        channel_id = None
+        try:
+            ch = db.get_channel_by_slug(channel_slug)
+            channel_id = ch.get("yt_channel_id") if ch else None
+        except Exception as exc:
+            vlog.warning("[%s] Could not resolve channel row for #%d: %s",
+                         channel_slug, video_id, str(exc)[:200])
 
-        # ── v24: Detect processing stuck BEFORE trying go_public ──
-        total_retries = _get_retry_count(video_id)
-
-        if processing_status == "processing" or (processing_status == "" and upload_status not in ("processed",)):
-            # YouTube is still encoding — go_public WILL fail.
-            # Wait with exponential backoff instead.
-            if total_retries >= _PUBLISH_MAX_TOTAL_RETRIES:
-                vlog.warning(
-                    "[%s] ❌ Video #%d stuck in processing for %d retries (~%dh) — "
-                    "marking stuck_processing for manual intervention",
-                    channel_slug, video_id, total_retries,
-                    total_retries * _PUBLISH_RETRY_BASE_MINUTES // 60,
-                )
-                _mark_video_stuck_processing(video_id, channel_slug)
-                return
-            delay = min(
-                _PUBLISH_RETRY_BASE_MINUTES * (2 ** min(total_retries, 5)),
-                _PUBLISH_RETRY_MAX_MINUTES,
-            )
-            vlog.info(
-                "[%s] Video #%d still processing (processingStatus=%s) — "
-                "retry %d/%d in %dmin",
-                channel_slug, video_id, processing_status,
-                total_retries + 1, _PUBLISH_MAX_TOTAL_RETRIES, delay,
-            )
-            _schedule_publish_retry(video_id, delay)
-            return
-
-        # ── Processing is done, but video isn't public yet ──
-        # This is the normal case: YouTube finished encoding, publishAt fired,
-        # but the privacy transition didn't happen (rare YT bug).
-        # Safe to force go_public.
-        if total_retries >= _PUBLISH_MAX_RETRIES:
+        if not channel_id:
             vlog.warning(
-                "[%s] Video #%d still %s after %d retries — "
-                "processing done (status=%s), forcing go_public",
-                channel_slug, video_id, privacy_status, total_retries,
-                processing_status,
+                "[%s] No yt_channel_id for #%d (yt=%s) — cannot scrape wall; retry in %dmin",
+                channel_slug, video_id, yt_video_id, _PUBLISH_RETRY_MINUTES,
             )
-            _force_go_public(video_id, channel_slug, yt_video_id)
-        else:
-            delay = min(
-                _PUBLISH_RETRY_BASE_MINUTES * (2 ** total_retries),
-                _PUBLISH_RETRY_MAX_MINUTES,
+            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MINUTES)
+            return
+
+        # ── Free wall scrape (RSS) ──
+        public_ids = {}
+        try:
+            from pipeline.youtube_wall_scraper import fetch_channel_public_video_ids
+            public_ids = fetch_channel_public_video_ids(channel_id)
+        except Exception as exc:
+            vlog.warning("[%s] Wall-scrape exception for #%d: %s — retry in %dmin",
+                         channel_slug, video_id, str(exc)[:200], _PUBLISH_RETRY_MINUTES)
+            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MINUTES)
+            return
+
+        # ── Found in the feed → public ──
+        if yt_video_id in public_ids:
+            published_at = public_ids.get(yt_video_id)
+            _mark_video_published(video_id, channel_slug, yt_video_id, published_at=published_at)
+            return
+
+        # ── Not public yet — compute elapsed vs reference time ──
+        # Reference: target_public_at for warming videos, uploaded_at for orphaned.
+        ref_str = video.get("target_public_at") or video.get("uploaded_at")
+        ref_dt = _parse_utc_datetime(ref_str)
+        elapsed_min = None
+        if ref_dt is not None:
+            elapsed_min = (now_utc - ref_dt).total_seconds() / 60.0
+
+        retry_count = _get_retry_count(video_id)
+
+        vlog.info(
+            "[%s] Video #%d (yt=%s) NOT yet public — feed=%d entries | "
+            "ref=%s (%s) | now=%s | elapsed=%.1fmin | retries=%d",
+            channel_slug, video_id, yt_video_id, len(public_ids),
+            ref_str, _format_local(ref_dt, tz_name) if ref_dt else "?",
+            now_utc.isoformat(),
+            elapsed_min if elapsed_min is not None else -1.0,
+            retry_count,
+        )
+
+        # ── Raise system alert once grace period is exceeded ──
+        if elapsed_min is not None and elapsed_min >= _PUBLISH_GRACE_MINUTES:
+            _raise_publish_not_detected_alert(
+                video_id, channel_slug, yt_video_id, channel_id,
+                ref_str, elapsed_min, retry_count, len(public_ids),
             )
-            vlog.info(
-                "[%s] Video #%d still %s (retry %d/%d) — next in %dmin",
-                channel_slug, video_id, privacy_status,
-                total_retries + 1, _PUBLISH_MAX_RETRIES, delay,
-            )
-            _schedule_publish_retry(video_id, delay)
-    
+
+        _schedule_publish_retry(video_id, _PUBLISH_RETRY_MINUTES)
+
     finally:
         with _PUBLISH_VERIFY_LOCK:
             _PUBLISH_VERIFY_INFLIGHT.discard(video_id)
 
 
-def _mark_video_published(video_id: int, channel_slug: str, yt_video_id: str):
-    """Update DB: mark video as published after YouTube API confirms it's public."""
+def _mark_video_published(video_id: int, channel_slug: str, yt_video_id: str,
+                          published_at: Optional[str] = None):
+    """Update DB: mark video as published after the wall scrape confirms it's public."""
     vlog = logger.getChild("publish_verify")
-    
+
     db = ExtendedDatabase()
     now_iso = datetime.now(_dt_timezone.utc).isoformat()
-    
+
     try:
         video = db.get_video(video_id)
         target = video.get("target_public_at") if video else None
-        
+
         db.update_video(
             video_id,
             status="published",
             privacy_status="public",
-            published_at=target or now_iso,
+            published_at=published_at or target or now_iso,
             published_verified_at=now_iso,
         )
         vlog.info(
-            "[%s] ✅ Video #%d confirmed public (yt=%s)",
+            "[%s] ✅ Video #%d confirmed public (yt=%s) at %s",
             channel_slug, video_id, yt_video_id,
+            published_at or target or now_iso,
         )
     except Exception as e:
         vlog.error("[%s] Failed to update video #%d: %s",
                    channel_slug, video_id, e)
 
 
-def _force_go_public(video_id: int, channel_slug: str, yt_video_id: str):
-    """Force the video to public after max failed verification retries.
+def _raise_publish_not_detected_alert(video_id: int, channel_slug: str,
+                                      yt_video_id: str, channel_id: str,
+                                      ref_str: str, elapsed_min: float,
+                                      retry_count: int, feed_entries: int):
+    """Raise a system alert: video has not appeared public past the grace window.
 
-    YouTube's publishAt sometimes doesn't fire on time. This function
-    manually sets privacyStatus to 'public' via the YouTube API.
-    Quota cost: 50 units (videos.update).
+    The alert message points the operator at the 'autotube.publish_verify' log
+    for the rich per-check info (target vs now, retries, feed size, elapsed).
     """
     vlog = logger.getChild("publish_verify")
-    vlog.warning(
-        "[%s] 🔧 Forcing go_public for video #%d (yt=%s)...",
-        channel_slug, video_id, yt_video_id,
-    )
     try:
-        from pipeline.youtube_uploader import YouTubeUploader
-        uploader = YouTubeUploader(channel_slug)
-        if not uploader.authenticate():
-            vlog.error("[%s] Auth failed for go_public of #%d", channel_slug, video_id)
-            _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
-            return
-
-        uploader.set_privacy(yt_video_id, "public")
+        from api.services.lifecycle_monitor import create_alert
 
         db = ExtendedDatabase()
-        now_iso = datetime.now(_dt_timezone.utc).isoformat()
-        db.update_video(
-            video_id,
-            status="published",
-            privacy_status="public",
-            published_at=now_iso,
-            published_verified_at=now_iso,
+        video = db.get_video(video_id) or {}
+        channel_db_id = video.get("channel_id")
+        title = (video.get("titulo_final") or f"Video #{video_id}")[:60]
+
+        message = (
+            f"No se detectó público tras {elapsed_min:.0f} min del target ({ref_str}). "
+            f"yt={yt_video_id} | channel_id={channel_id} | retries={retry_count} | "
+            f"feed_entries={feed_entries}. "
+            "Revisar logs 'autotube.publish_verify' para el detalle por chequeo."
         )
-        vlog.info(
-            "[%s] ✅ Video #%d forced to public (yt=%s)",
-            channel_slug, video_id, yt_video_id,
+        metadata = {
+            "video_id": video_id,
+            "yt_video_id": yt_video_id,
+            "channel_slug": channel_slug,
+            "channel_id": channel_id,
+            "reference_at": ref_str,
+            "elapsed_minutes": round(elapsed_min, 1),
+            "retry_count": retry_count,
+            "feed_entries": feed_entries,
+        }
+        alert_id = create_alert(
+            db,
+            entity_type="video",
+            entity_id=video_id,
+            channel_id=channel_db_id,
+            alert_type="publish_not_detected",
+            severity="warning",
+            title=f"Video '{title}' no aparece público en el canal",
+            message=message,
+            metadata=metadata,
         )
+        if alert_id:
+            vlog.warning(
+                "[%s] ⚠️ Alert #%d: video #%d not public after %.0f min (yt=%s)",
+                channel_slug, alert_id, video_id, elapsed_min, yt_video_id,
+            )
+        else:
+            vlog.info("[%s] Alert for #%d already exists (dedup) — not re-created",
+                      channel_slug, video_id)
     except Exception as e:
-        vlog.error("[%s] ❌ Failed to force go_public for #%d: %s",
-                   channel_slug, video_id, e)
-        _schedule_publish_retry(video_id, _PUBLISH_RETRY_MAX_MINUTES)
+        vlog.error("[%s] Failed to raise alert for #%d: %s",
+                   channel_slug, video_id, str(e)[:200])
 
 
 def _schedule_publish_retry(video_id: int, delay_minutes: int):
@@ -273,65 +283,17 @@ def _get_retry_count(video_id: int) -> int:
         return int(row[0]) if row and row[0] else 0
 
 
-def _mark_video_auth_stuck(video_id: int):
-    """Mark a video as stuck due to persistent authentication failure.
-
-    Sets status to 'auth_stuck' so operators can see it in the panel.
-    Resets retry schedule to stop the infinite retry loop.
-    """
-    db = ExtendedDatabase()
-    try:
-        with db._connect() as conn:
-            conn.execute(
-                "UPDATE videos SET status = 'auth_stuck', published_retry_at = NULL WHERE id = ?",
-                (video_id,),
-            )
-            conn.commit()
-    except Exception as e:
-        logger.error("Failed to mark video #%d as auth_stuck: %s", video_id, e)
-
-
-def _mark_video_stuck_processing(video_id: int, channel_slug: str):
-    """v24: Mark a video as permanently stuck in YouTube processing.
-
-    Called when _verify_published_status_bg exhausts all retries while
-    YouTube's processingStatus remains 'processing'. The video cannot
-    be published or privacy-changed until YT finishes encoding — which
-    in rare cases can take >48h or get permanently stuck.
-
-    The operator must manually check YouTube Studio to decide whether
-    to wait, delete and re-upload, or contact YouTube support.
-    """
-    db = ExtendedDatabase()
-    try:
-        with db._connect() as conn:
-            conn.execute(
-                "UPDATE videos SET status = 'stuck_processing', "
-                "progress_phase = 'yt_processing_stuck', "
-                "published_retry_at = NULL, "
-                "error_message = 'YouTube processing stuck >48h — check YT Studio manually' "
-                "WHERE id = ?",
-                (video_id,),
-            )
-            conn.commit()
-        logger.warning(
-            "[%s] Video #%d marked as stuck_processing — requires manual intervention",
-            channel_slug, video_id,
-        )
-    except Exception as e:
-        logger.error("Failed to mark video #%d as stuck_processing: %s", video_id, e)
-
-
 def _maybe_trigger_publish_verification(video: dict):
-    """Check if a warming video should trigger a YouTube API verification.
-    
+    """Check if a warming video should trigger a (quota-free) wall-scrape check.
+
     Conditions:
     - target_public_at is in the past (YouTube should have published by now)
     - Not already being verified (in-flight set)
     - No retry pending (published_retry_at is NULL or in the past)
     - Has a valid yt_video_id
-    
-    If all conditions met, spawns a daemon thread to verify via YouTube API.
+
+    If all conditions met, spawns a daemon thread that scrapes the channel's
+    public RSS feed to detect whether the video is public.
     """
     target_str = video.get("target_public_at")
     yt_video_id = video.get("yt_video_id")
@@ -358,7 +320,7 @@ def _maybe_trigger_publish_verification(video: dict):
         return  # not time yet
     
     # ── Rate-limit: max 1 verification trigger per channel per cycle ──
-    # Prevents N concurrent threads from racing on the same token file
+    # Prevents N concurrent threads from scraping the same channel feed
     # when multiple videos on the same channel are all warming.
     if channel_slug:
         last = _CHANNEL_LAST_VERIFY.get(channel_slug)
@@ -404,11 +366,14 @@ def _maybe_trigger_publish_verification(video: dict):
 
 def _maybe_trigger_orphaned_verification(video_id: int, channel_slug: str, yt_video_id: str):
     """Verify an orphaned 'uploaded' video that has no target_public_at.
-    
+
     These are videos uploaded in 'immediate' mode that were never transitioned
-    to 'published'. Unlike warming videos, we don't check target_public_at —
-    we just verify if uploaded_at is old enough (>1h) to ensure YouTube
-    processing is complete.
+    to 'published' (and may still be unlisted/private on YT). Unlike warming
+    videos, we don't check target_public_at — we verify if uploaded_at is old
+    enough (>1h) to give YouTube time to finish processing, then scrape the
+    channel wall. An unlisted video will never appear in the public feed, so
+    after the grace window it will raise a system alert for investigation
+    (shared root cause with the warming flow).
     """
     now_utc = datetime.now(_dt_timezone.utc)
     
