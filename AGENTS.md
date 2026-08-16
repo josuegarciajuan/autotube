@@ -6,11 +6,23 @@
 - **Servidor:** Uvicorn (`python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000`)
 
 ## Canales (v1 multi-channel)
-| ID | Slug | Nombre | YouTube | Token |
-|----|------|--------|---------|-------|
-| 1 | canal2 | Sincronías | @cleanthelistemaillistclean7103 | tokens/canal2.pickle |
-| 2 | canal3 | Civilizaciones Olvidadas | — | tokens/canal3.pickle |
-| 3 | canal4 | Expediciones sin retorno | — | — |
+| ID | Slug | Nombre | YouTube | Token (OAuth) | Proyecto GCP (cuota compartida) |
+|----|------|--------|---------|---------------|----------------------------------|
+| 1 | canal2 | Sincronías | @cleanthelistemaillistclean7103 | tokens/canal2.pickle | `youtube-uploads-automation` |
+| 2 | canal3 | Civilizaciones Olvidadas | — | tokens/canal3.pickle | `youtube-uploads-automation` |
+| 3 | canal4 | Expediciones sin retorno | — | tokens/canal4.pickle | `autotube-expediciones` |
+| 4 | canal5 | Anomalías Médicas | — | tokens/canal5.pickle | `autotube-expediciones` |
+
+> **Cuota por token compartido:** la cuota del YouTube Data API es por **proyecto GCP**, no por canal.
+> - canal2 + canal3 comparten `youtube-uploads-automation` (cuenta Google `tracatrack`).
+> - canal4 + canal5 comparten `autotube-expediciones` (cuenta Google `burrianacasa2026`).
+> El circuit-breaker de cuota y los avisos (`quota_exhausted`) son **por proyecto**: un 403 de un canal
+> pausa solo los canales de su proyecto, y el alert nombra el proyecto + los canales que lo comparten.
+
+> **Recolección de stats sin cuota (scraping):** cuando la cuota del Data API está agotada, el botón
+> "Recolectar stats" entra automáticamente en **modo scraping** (`use_data_api=False`): usa yt-dlp para
+> leer vistas/likes/comentarios/subs públicos (0 cuota) y el Analytics API para watch-time. Funciona
+> incluso para canales sin token OAuth (datos públicos). Ver `pipeline/youtube_stats_scraper.py`.
 
 ## 🆕 Crear un canal nuevo — metodología plantillable
 
