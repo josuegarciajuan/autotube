@@ -95,8 +95,9 @@ def log_event(db, *,
 
     Args:
         db: ExtendedDatabase instance
-        entity_type: 'video' or 'short'
-        entity_id: videos.id or shorts.id
+        entity_type: 'video', 'short' or 'system' (system-wide audit events
+            such as quota_recovered; requires migration v41+ for the CHECK)
+        entity_id: videos.id or shorts.id (0 for system events)
         channel_id: channels.id (optional)
         event: event name e.g. 'phase_started', 'upload_completed'
         phase: pipeline phase e.g. 'scrape', 'script', 'tts'
@@ -935,7 +936,7 @@ def _check_llm_credits(db) -> int:
                         balance = ds.get("balance_usd", 0)
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0,
+                            entity_type="system", entity_id=0, channel_id=None,
                             alert_type="llm_credit_exhausted",
                             severity="critical",
                             title="DeepSeek sin créditos — generación de scripts detenida",
@@ -958,7 +959,7 @@ def _check_llm_credits(db) -> int:
                         balance = ds.get("balance_usd", 0)
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0,
+                            entity_type="system", entity_id=0, channel_id=None,
                             alert_type="llm_credit_low",
                             severity="warning",
                             title="DeepSeek créditos bajos — recargar pronto",
@@ -988,7 +989,7 @@ def _check_llm_credits(db) -> int:
                         last_err = oa.get("last_error", "")[:300]
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0,
+                            entity_type="system", entity_id=0, channel_id=None,
                             alert_type="llm_credit_exhausted",
                             severity="critical",
                             title="OpenAI sin créditos/quota — fallback de scripts caído",
