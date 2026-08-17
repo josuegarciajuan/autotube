@@ -258,14 +258,17 @@ async def collect_channel_stats(channel_id: int, background_tasks: BackgroundTas
     Útil para refrescar stats de un canal específico sin ejecutar
     la recolección global de todos los canales.
 
-    Ahora asíncrono: lanza la recolección en background y devuelve inmediatamente.
+    Ahora en background (thread pool): lanza la recolección y devuelve inmediatamente.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
 
-    async def _run():
+    def _run():
+        # SYNC on purpose: collect_and_store does blocking I/O (Data API,
+        # Analytics API, yt-dlp). A sync function in BackgroundTasks runs in a
+        # thread pool, so it does NOT block the event loop (unlike async def).
         from pipeline.youtube_stats import YouTubeStatsFetcher
         import logging
         logger = logging.getLogger("autotube.stats")
