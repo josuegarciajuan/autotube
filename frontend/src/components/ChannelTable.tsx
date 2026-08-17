@@ -57,7 +57,7 @@ export default function ChannelTable({ channels }: ChannelTableProps) {
               <th className="pb-3 font-medium hidden md:table-cell">Videos</th>
               <th className="pb-3 font-medium hidden md:table-cell">Shorts</th>
               <th className="pb-3 font-medium hidden lg:table-cell">Revenue est.</th>
-              <th className="pb-3 font-medium hidden lg:table-cell">Watch h</th>
+              <th className="pb-3 font-medium hidden lg:table-cell">Watch h (12m)</th>
             </tr>
           </thead>
           <tbody>

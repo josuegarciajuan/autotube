@@ -889,7 +889,7 @@ export default function ChannelDetail() {
                 {channelYtStats.estimatedHoursWatched > 0 && (
                   <span className="inline-flex items-center gap-0.5 bg-dark-700/70 rounded px-1.5 py-0.5 text-[10px] text-neon-gold border border-neon-gold/10">
                     <Clock size={10} />
-                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas
+                    <span className="font-mono font-semibold tabular-nums">{formatShortNumber(channelYtStats.estimatedHoursWatched)}</span> horas (12 meses)
                   </span>
                 )}
               </>
@@ -1260,7 +1260,7 @@ export default function ChannelDetail() {
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-gray-400">Horas de visualización</span>
+                      <span className="text-xs text-gray-400">Horas de visualización (12 meses)</span>
                       <span className="text-xs font-mono tabular-nums text-gray-300">
                         {formatShortNumber(monetizationData.watch_hours || 0)} / 4,000
                       </span>

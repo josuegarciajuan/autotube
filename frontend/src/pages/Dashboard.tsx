@@ -335,7 +335,7 @@ export default function Dashboard() {
     },
     {
       key: 'sparkline_watch_hours',
-      label: 'Horas',
+      label: 'Horas (12m)',
       value: kpis?.watch_hours?.value ?? 0,
       delta: kpis?.watch_hours?.delta,
       icon: Clock,
