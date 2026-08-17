@@ -765,12 +765,15 @@ async def _quota_recovery_loop():
                 ),
                 timeout=120,
             )
-            if recovered:
+            if recovered or not _db.is_quota_exhausted():
                 try:
                     if not YT_REMEDIATION_MODE:
-                        _logger.info("Quota recovery complete — upload scheduler re-enabled")
+                        if recovered:
+                            _logger.info("Quota recovery complete — upload scheduler re-enabled")
 
-                        # Resolve quota alerts
+                        # Resolve quota alerts (also clears stale quota_warning /
+                        # quota_exhausted left from a previous exhaustion episode
+                        # when the breaker is currently inactive).
                         try:
                             with _db._connect() as _conn:
                                 _conn.execute(
