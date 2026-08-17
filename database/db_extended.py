@@ -4003,6 +4003,7 @@ class ExtendedDatabase(Database):
                 JOIN videos v ON j.video_id = v.id
                 WHERE j.status = 'running'
                   AND v.status = 'error'
+                  AND j.action != 'reassemble'
                   AND (julianday('now') - julianday(j.started_at)) * 1440 > ?
             """, (ZOMBIE_GRACE_MINUTES,)).fetchall()
             
