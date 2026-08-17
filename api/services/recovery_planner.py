@@ -28,7 +28,6 @@ import pytz
 from api.services.planning_service import _resolve_videos_per_day
 
 logger = logging.getLogger("autotube.recovery_planner")
-
 # ── Constants ────────────────────────────────────────────────────
 MIN_GAP_MINUTES = 90               # Minimum gap between same-channel slot starts
 ESTIMATED_PIPELINE_MINUTES = 180   # Typical generation duration (~2-3h) + margin
@@ -152,9 +151,18 @@ def auto_recover_missing_publications(db=None) -> dict:
 
     Called periodically from the background scheduler loop.
 
-    Returns:
-        dict with {recovered_count, channels_affected, details}.
+    v26: wrapped in the shared _REPLAN_LOCK so it cannot race with
+    smart_replan / sync_midday / compute_and_store_horizon when writing
+    planned_slots.
     """
+    # ── v26: shared replan lock (reentrant; safe with nested planning calls) ──
+    from api.services.planning_service import _REPLAN_LOCK
+    with _REPLAN_LOCK:
+        return _auto_recover_missing_publications_impl(db)
+
+
+def _auto_recover_missing_publications_impl(db=None) -> dict:
+    """Implementation of auto_recover_missing_publications (under _REPLAN_LOCK)."""
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -203,6 +211,15 @@ def auto_recover_missing_publications(db=None) -> dict:
     for ch in channels:
         channel_id = ch["id"]
         slug = ch.get("slug", f"channel_{channel_id}")
+
+        # ── v26: skip channels paused by the circuit breaker ──
+        try:
+            from api.services.planning_service import _channel_paused_for_planning
+            if _channel_paused_for_planning(db, channel_id):
+                logger.debug("[%s] Recovery skip: channel paused by circuit breaker", slug)
+                continue
+        except Exception:
+            pass
 
         # ── Read planning config ──
         cfg = db.get_channel_planning_config(channel_id)

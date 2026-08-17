@@ -1149,6 +1149,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v39: Safe full-replan single-use confirmations ──
     _migrate_v39(conn, logger)
+
+    # ── v40: pipeline_alerts CHECK allows 'channel' (circuit breaker) ──
+    _migrate_v40(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2505,6 +2508,87 @@ def _migrate_v39(conn, logger):
     logger.info("Migration v39: safe_replan_confirmations table ensured")
 
 
+def _migrate_v40(conn, logger):
+    """Idempotent v40: extend pipeline_alerts.entity_type CHECK to allow 'channel'.
+
+    The channel circuit breaker (v26) creates per-channel alerts with
+    entity_type='channel', but the original CHECK only allowed
+    ('video', 'short', 'system'). SQLite cannot ALTER a CHECK constraint,
+    so the table is rebuilt in place (data-preserving) with the wider CHECK.
+
+    Uses the 12-step SQLite table-rebuild pattern:
+      create new table → copy rows → drop old → rename → recreate indexes.
+    """
+    try:
+        # Inspect the current CHECK to detect whether the migration already ran
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_alerts'"
+        ).fetchone()
+        cur_sql = sql[0] if sql else ""
+        if "entity_type IN ('video', 'short', 'system', 'channel')" in cur_sql:
+            logger.debug("Migration v40: pipeline_alerts already allows 'channel'")
+            return
+        if "pipeline_alerts" not in cur_sql:
+            logger.debug("Migration v40: pipeline_alerts table missing — nothing to do")
+            return
+
+        logger.info("Migration v40: rebuilding pipeline_alerts to allow entity_type='channel'")
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+
+        conn.execute("""
+            CREATE TABLE pipeline_alerts_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type     TEXT NOT NULL CHECK(entity_type IN ('video', 'short', 'system', 'channel')),
+                entity_id       INTEGER,
+                channel_id      INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+                alert_type      TEXT NOT NULL,
+                severity        TEXT NOT NULL DEFAULT 'warning',
+                title           TEXT NOT NULL,
+                message         TEXT,
+                metadata_json   TEXT,
+                acknowledged    BOOLEAN DEFAULT 0,
+                resolved        BOOLEAN DEFAULT 0,
+                resolved_at     TIMESTAMP,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO pipeline_alerts_new (
+                id, entity_type, entity_id, channel_id, alert_type, severity,
+                title, message, metadata_json, acknowledged, resolved,
+                resolved_at, created_at
+            )
+            SELECT id, entity_type, entity_id, channel_id, alert_type, severity,
+                   title, message, metadata_json, acknowledged, resolved,
+                   resolved_at, created_at
+            FROM pipeline_alerts
+        """)
+        conn.execute("DROP TABLE pipeline_alerts")
+        conn.execute("ALTER TABLE pipeline_alerts_new RENAME TO pipeline_alerts")
+        # Recreate the original indexes exactly (incl. the partial unique one).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_active ON pipeline_alerts(acknowledged, resolved, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_entity ON pipeline_alerts(entity_type, entity_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON pipeline_alerts(severity, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_channel ON pipeline_alerts(channel_id, created_at)")
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_unique_active
+            ON pipeline_alerts(entity_type, entity_id, alert_type)
+            WHERE resolved = 0
+        """)
+        conn.execute("COMMIT")
+        conn.execute("PRAGMA foreign_keys=ON")
+        logger.info("Migration v40: pipeline_alerts rebuilt — 'channel' entity type enabled")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        logger.warning("Migration v40: failed (%s) — channel alerts will not be available", exc)
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -2912,7 +2996,9 @@ class ExtendedDatabase(Database):
                     "published_verified_at", "published_retry_at",
                     "published_retry_count",
                     # ── Cache-busting for frontend ──
-                    "updated_at"]
+                    "updated_at",
+                    # ── Error diagnostics (v26) ──
+                    "error_message"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -8055,8 +8141,24 @@ class ExtendedDatabase(Database):
             pass
         return projects
 
-    def clear_quota_exhausted(self) -> None:
-        """Clear quota exhaustion markers (does NOT touch scheduler_paused)."""
+    def clear_quota_exhausted(self, project_id: str = "") -> None:
+        """Clear quota exhaustion markers (does NOT touch scheduler_paused).
+
+        Fase cuota (ago 2026): acepta un project_id opcional para recuperar
+        SOLO ese proyecto GCP (p. ej. tras su reset PT) sin desbloquear los
+        demás. Un proyecto recuperado recalcula el resumen global
+        (`quota_exhausted_at`) a partir de los proyectos que sigan agotados.
+
+        - project_id dado: borra la clave `quota_exhausted_{project_id}`.
+        - project_id vacío: comportamiento legacy (limpia TODO).
+        """
+        if project_id:
+            try:
+                self.set_system_state(f"quota_exhausted_{project_id}", "")
+            except Exception:
+                pass
+            self._refresh_quota_exhausted_summary()
+            return
         self.set_system_state("quota_exhausted_at", "")
         self.set_system_state("quota_exhausted_channel", "")
         try:
@@ -8070,7 +8172,31 @@ class ExtendedDatabase(Database):
         except Exception:
             pass
 
-    def get_quota_reset_time(self) -> dict:
+    def _refresh_quota_exhausted_summary(self) -> None:
+        """Recompute the global `quota_exhausted_at` summary from the
+        per-project breaker keys (used after clearing a single project)."""
+        projects = self.get_exhausted_projects()
+        if not projects:
+            self.set_system_state("quota_exhausted_at", "")
+            self.set_system_state("quota_exhausted_channel", "")
+            return
+        latest = ""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT value FROM system_state "
+                    "WHERE key LIKE 'quota_exhausted_%' AND value != '' "
+                    "AND key NOT IN ('quota_exhausted_at', 'quota_exhausted_channel')"
+                ).fetchall()
+            # ISO-8601 UTC timestamps compare lexicographically == chronologically
+            for row in rows:
+                if row["value"] and row["value"] > latest:
+                    latest = row["value"]
+        except Exception:
+            pass
+        self.set_system_state("quota_exhausted_at", latest or "")
+
+    def get_quota_reset_time(self, project_id: str = "") -> dict:
         """Calculate next YouTube API quota reset (midnight Pacific Time).
 
         YouTube Data API v3 quota resets at midnight Pacific Time:
@@ -8079,6 +8205,11 @@ class ExtendedDatabase(Database):
 
         This method auto-detects via a DST heuristic. It adds a 15-minute
         safety buffer to avoid calling the API just before reset.
+
+        Fase cuota (ago 2026): si se pasa `project_id`, calcula el reset a
+        partir del timestamp de ESE proyecto (`quota_exhausted_{project_id}`)
+        — permite recuperar cada cuenta de forma independiente. Sin project_id
+        usa el resumen global (legacy).
 
         CRITICAL: The reset time is calculated relative to the EXHAUSTION
         timestamp, not relative to `now`. If exhaustion happened on Aug 10
@@ -8099,7 +8230,12 @@ class ExtendedDatabase(Database):
         """
         from datetime import datetime, timezone, timedelta
 
-        exhausted_at_str = self.get_system_state("quota_exhausted_at")
+        if project_id:
+            exhausted_at_str = self.get_system_state(
+                f"quota_exhausted_{project_id}"
+            )
+        else:
+            exhausted_at_str = self.get_system_state("quota_exhausted_at")
 
         if not exhausted_at_str:
             return {

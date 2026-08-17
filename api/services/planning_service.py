@@ -15,6 +15,8 @@ import hashlib
 import json
 import logging
 import secrets
+import threading
+import functools
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import pytz
@@ -23,6 +25,22 @@ logger = logging.getLogger("autotube.planning")
 
 # ── Dispatch lock (serializes all generation dispatches) ────────
 from api.services.generation_service import _DISPATCH_LOCK
+
+# ── Replan lock (v26): serializes writers of planned_slots ──────
+# smart_replan, recovery_planner, sync_midday, _ensure_never_dry,
+# compute_and_store_horizon, full_replan and _readjust_pending_slots all
+# create/cancel/retime planned_slots. Without a shared lock they can
+# overwrite each other's plan. RLock (reentrant) so nested calls from the
+# same thread (e.g. smart_replan → compute_and_store_horizon) don't deadlock.
+_REPLAN_LOCK = threading.RLock()
+
+def _replan_locked(func):
+    """Decorator: run the function under the shared _REPLAN_LOCK."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _REPLAN_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 # ── Cooldown guard: prevent rapid successive replans ─────
 _last_horizon_replan_ts: Optional[datetime] = None
@@ -67,8 +85,32 @@ class DynamicSlotAdjuster:
         vpd_min = getattr(cfg, 'VIDEOS_PER_DAY_MIN', 1)
         vpd_max = getattr(cfg, 'VIDEOS_PER_DAY_MAX', 4)
         
+        # ── v26: never raise a channel the circuit breaker paused ──
+        # If the channel was paused (videos_per_day=0 by the breaker or
+        # manually), the dynamic adjuster must NOT raise it back. Raising
+        # is a MANUAL decision once the root cause is fixed.
+        current_vpd = self._get_current_vpd(slug)
+        if current_vpd <= 0:
+            return {'recommended': 0, 'reason': 'vpd_zero_paused'}
+        
         if not getattr(cfg, 'DYNAMIC_VPD_ENABLED', True):
             return {'recommended': base, 'reason': 'dynamic_disabled'}
+        
+        # ── v26: circuit-breaker guard — a broken channel drops to 0 ──
+        try:
+            ch_row = self.db.get_channel_by_slug(slug)
+            ch_id = ch_row["id"] if ch_row else None
+            if ch_id is not None:
+                failures = count_channel_consecutive_failures(self.db, ch_id)
+                if failures >= CHANNEL_CONSECUTIVE_FAILURES:
+                    return {
+                        'recommended': 0,
+                        'success_rate': round(self._compute_success_rate(
+                            slug, getattr(cfg, 'DYNAMIC_VPD_SUCCESS_WINDOW', 10)), 2),
+                        'reason': f'consecutive_failures={failures}',
+                    }
+        except Exception:
+            pass
         
         success_rate = self._compute_success_rate(
             slug, getattr(cfg, 'DYNAMIC_VPD_SUCCESS_WINDOW', 10)
@@ -265,6 +307,18 @@ GLOBAL_GAP_MINUTES = 30            # buffer minutes between consecutive generati
 MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # minimum hours between publish times for same channel (v10.1 collision fix)
 BUFFER_PCT = 0.15                  # safety buffer on per-channel avg creation time
 DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
+
+# ── Channel circuit breaker (v26 Aug 2026) ────────────────────────
+# After N consecutive PERMANENT long-form generation failures within a
+# window, the channel is paused: an alert is created (documenting that
+# videos_per_day must be raised again once the root cause is fixed),
+# videos_per_day is lowered to 0, and its pending slots are cancelled.
+# This prevents a broken channel from monopolizing the single long-form
+# generation slot and starving the healthy channels (death-spiral fix).
+CHANNEL_CONSECUTIVE_FAILURES = 3     # consecutive permanent failures to trip the breaker
+CHANNEL_FAILURE_WINDOW_H = 6         # look-back window for counting failures
+# Long-form generation actions only — shorts failures do NOT trip the breaker
+CHANNEL_BREAKER_ACTIONS = ("generate_only", "generate_and_upload")
 
 
 # ── Alternate pattern resolution ─────────────────────────────────
@@ -1032,6 +1086,40 @@ def compute_horizon_slots(
         s["scheduled_at"] = scheduled_dt.strftime("%Y-%m-%d %H:%M:%S")
         next_scheduled_at = scheduled_dt
     
+    # ── 3b. v26: re-chain floor-clamped (catch-up) slots sequentially ──
+    # The floor above clamps EVERY overdue slot to now+2min, collapsing them
+    # onto the same instant (observed: all of today's slots at 09:32:07).
+    # Re-chain them back-to-back in forward order (earliest upload first) so
+    # the dispatcher works through the backlog sequentially instead of seeing
+    # a pile of identical scheduled_at values.
+    floor_ts = (now + _td(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+    catchup = [s for s in all_raw_slots if s["scheduled_at"] == floor_ts]
+    if len(catchup) > 1:
+        catchup.sort(key=lambda s: s["target_upload_at"])
+        cursor = now + _td(minutes=2)
+        for s in catchup:
+            ch_dur = s["avg_duration_min"]
+            s["scheduled_at"] = cursor.strftime("%Y-%m-%d %H:%M:%S")
+            cursor = cursor + _td(minutes=ch_dur + GLOBAL_GAP_MINUTES)
+        logger.info(
+            "Catch-up re-chain: %d overdue slot(s) chained sequentially from %s "
+            "through %s",
+            len(catchup),
+            (now + _td(minutes=2)).strftime("%m-%d %H:%M"),
+            cursor.strftime("%m-%d %H:%M"),
+        )
+    
+    # ── 3c. Enforce a monotonic generation chain across ALL slots ──
+    # After the catch-up re-chain (and the backward walk), guarantee no slot
+    # starts before the previous one finished: scheduled_i >= prev_finish + GAP.
+    prev_end = now + _td(minutes=2)
+    for s in sorted(all_raw_slots, key=lambda x: x["target_upload_at"]):
+        sched_dt = _dt.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S")
+        if sched_dt < prev_end:
+            s["scheduled_at"] = prev_end.strftime("%Y-%m-%d %H:%M:%S")
+        sched_dt = _dt.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S")
+        prev_end = sched_dt + _td(minutes=s["avg_duration_min"] + GLOBAL_GAP_MINUTES)
+    
     # ── 4. Sort final output by scheduled_at ────────────────────
     all_raw_slots.sort(key=lambda s: s["scheduled_at"])
     
@@ -1197,6 +1285,7 @@ def _resolve_existing_collisions(
                 pass
 
 
+@_replan_locked
 def compute_and_store_slots(
     date_str: Optional[str] = None,
     db=None,
@@ -1224,6 +1313,9 @@ def compute_and_store_slots(
     channels = db.get_channels(active_only=True)
     channel_configs = []
     for ch in channels:
+        # v26: skip channels paused by the circuit breaker (vpd=0 / alert active)
+        if _channel_paused_for_planning(db, ch["id"]):
+            continue
         cfg = db.get_channel_planning_config(ch["id"])
         if cfg.get("planning_enabled", True) and cfg.get("videos_per_day", 0) > 0:
             channel_configs.append(cfg)
@@ -1376,6 +1468,7 @@ def _augment_channel_configs(db, channel_configs: list[dict]) -> list[dict]:
     return channel_configs
 
 
+@_replan_locked
 def compute_and_store_horizon(
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     db=None,
@@ -1444,6 +1537,9 @@ def compute_and_store_horizon(
     channels = db.get_channels(active_only=True)
     channel_configs = []
     for ch in channels:
+        # v26: skip channels paused by the circuit breaker (vpd=0 / alert active)
+        if _channel_paused_for_planning(db, ch["id"]):
+            continue
         cfg = db.get_channel_planning_config(ch["id"])
         if cfg.get("planning_enabled", True) and cfg.get("videos_per_day", 0) > 0:
             channel_configs.append(cfg)
@@ -1535,6 +1631,7 @@ def compute_and_store_horizon(
     }
 
 
+@_replan_locked
 def sync_midday(db=None) -> dict:
     """Mid-day reconciliation: adapt planning if channel configs changed.
     
@@ -1751,6 +1848,7 @@ MIN_PENDING_SLOTS = 3
 EMPTY_DAY_CHECK_DAYS = 3
 
 
+@_replan_locked
 def smart_replan(db=None) -> dict:
     """Periodic intelligent replan: cancel fulfilled quotas, detect config changes,
     cancel stale slots, fill empty days, warn on overcapacity.
@@ -1852,6 +1950,23 @@ def smart_replan(db=None) -> dict:
         
         vpd = _resolve_videos_per_day({**cfg, "channel_id": ch_id}, today)
         planning_enabled = cfg.get("planning_enabled", True)
+        
+        # ── v26: skip channels paused by the circuit breaker ──
+        if _channel_paused_for_planning(db, ch_id):
+            with db._connect() as conn:
+                cnt = conn.execute(
+                    "UPDATE planned_slots SET status='cancelled' WHERE channel_id=? AND status='pending'",
+                    (ch_id,),
+                ).rowcount
+                conn.commit()
+            if cnt > 0:
+                logger.info(
+                    "Smart replan: cancelled %d slots for %s (circuit breaker — channel paused)",
+                    cnt, slug,
+                )
+                cancelled_total += cnt
+                channels_adjusted.append(slug)
+            continue
         
         if not planning_enabled:
             with db._connect() as conn:
@@ -2037,11 +2152,15 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
 
 
 def _get_active_channel_ids(db) -> list[int]:
-    """Get ordered list of active channel IDs for round-robin dispatch."""
+    """Get ordered list of ACTIVE channel IDs for round-robin dispatch.
+
+    v26 fix: previously included inactive/test channels (e.g. the "test"
+    channel), skewing the round-robin rotation.
+    """
     try:
         with db._connect() as conn:
             rows = conn.execute(
-                "SELECT id FROM channels ORDER BY id"
+                "SELECT id FROM channels WHERE active = 1 ORDER BY id"
             ).fetchall()
         return [r["id"] for r in rows]
     except Exception:
@@ -2066,20 +2185,32 @@ def _pick_round_robin(candidates: list[dict], db) -> dict | None:
     if not channel_ids:
         return candidates[0]
 
-    # Determine last dispatched channel
+    # Determine last dispatched channel.
+    # v26 fix: read from system_state (persistent) instead of inferring from
+    # the last running/completed slot — cancelled slots (the common failure
+    # outcome) were excluded from that query, which broke the rotation and
+    # let a failing channel keep winning dispatch turns.
     last_channel = None
     try:
-        with db._connect() as conn:
-            row = conn.execute(
-                """SELECT channel_id FROM planned_slots
-                   WHERE status IN ('running', 'completed')
-                   ORDER BY scheduled_at DESC
-                   LIMIT 1"""
-            ).fetchone()
-        if row:
-            last_channel = row["channel_id"]
+        raw = db.get_system_state("last_dispatched_channel")
+        if raw:
+            last_channel = int(raw)
     except Exception:
         pass
+    if last_channel is None:
+        # Fallback for existing deployments: infer from the most recent slot.
+        try:
+            with db._connect() as conn:
+                row = conn.execute(
+                    """SELECT channel_id FROM planned_slots
+                       WHERE status IN ('running', 'completed')
+                       ORDER BY scheduled_at DESC
+                       LIMIT 1"""
+                ).fetchone()
+            if row:
+                last_channel = row["channel_id"]
+        except Exception:
+            pass
 
     # Find starting index in round-robin
     if last_channel and last_channel in channel_ids:
@@ -2379,7 +2510,13 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         _asyncio_plan.run_coroutine_threadsafe(_gen_coro, loop)
     else:
         _asyncio_plan.create_task(_gen_coro)
-    
+
+    # ── v26: persist the last dispatched channel for fair round-robin ──
+    try:
+        db.set_system_state("last_dispatched_channel", str(channel_id))
+    except Exception:
+        pass
+
     return {
         "slot_id": slot_id,
         "job_id": job_id,
@@ -2400,6 +2537,22 @@ def _ensure_never_dry(db) -> bool:
     if candidates:
         return False  # slots exist, just not dispatchable right now
     
+    # ── v26: do not force a replan if every active channel is paused by the
+    # circuit breaker — the pipeline is intentionally idle, not "dry".
+    try:
+        channels = db.get_channels(active_only=True)
+        if channels and all(
+            _channel_paused_for_planning(db, ch["id"]) for ch in channels
+        ):
+            logger.info(
+                "Never-dry: all %d active channel(s) paused by circuit breaker — "
+                "skipping emergency replan",
+                len(channels),
+            )
+            return False
+    except Exception:
+        pass
+    
     # No slots in the next 3 days — pipeline is empty!
     logger.warning(
         "Pipeline EMPTY: no dispatchable slots in next 72h. "
@@ -2414,6 +2567,194 @@ def _ensure_never_dry(db) -> bool:
         return True
     except Exception as exc:
         logger.error("Emergency replan failed: %s", exc)
+        return False
+
+
+# ── Channel failure detection (circuit breaker) ─────────────────
+
+def _is_transient_failure(error_msg: str) -> bool:
+    """Return True if the job error matches a known transient pattern.
+
+    Transient failures (RAM, timeout, broken pipe, …) are retried with
+    backoff and must NOT count towards the consecutive-failure breaker.
+    """
+    _TRANSIENT = [
+        "timeout", "memory guard", "broken pipe", "brokenpipe",
+        "orphaned: process lost", "memory", "abortado: memoria",
+        "ram too low", "ram insuficiente",
+    ]
+    return any(p in error_msg for p in _TRANSIENT)
+
+
+def count_channel_consecutive_failures(db, channel_id: int) -> int:
+    """Count consecutive PERMANENT long-form generation failures for a channel.
+
+    Walks the most recent failed long-form jobs (newest first) and stops at
+    the first transient failure or non-failed job — so only an unbroken run
+    of permanent failures counts.
+
+    NOTE: ``generation_jobs.created_at`` is stored in UTC (SQLite
+    CURRENT_TIMESTAMP), so the window is computed in UTC to match.
+
+    Args:
+        db: ExtendedDatabase instance.
+        channel_id: Channel id.
+
+    Returns:
+        int: number of consecutive permanent failures (0 if none).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    window_start = (datetime.now(timezone.utc) - timedelta(hours=CHANNEL_FAILURE_WINDOW_H)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT error_msg FROM generation_jobs
+                   WHERE channel_id = ? AND status = 'failed'
+                     AND action IN ('generate_only', 'generate_and_upload')
+                     AND created_at >= ?
+                   ORDER BY id DESC LIMIT 20""",
+                (channel_id, window_start),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("count_channel_consecutive_failures: query failed: %s", exc)
+        return 0
+
+    count = 0
+    for row in rows:
+        err = (row["error_msg"] or "").lower()
+        if _is_transient_failure(err):
+            break  # transient failure resets the streak
+        count += 1
+    return count
+
+
+def _channel_breaker_active(db, channel_id: int) -> bool:
+    """Return True if the channel is currently paused by the circuit breaker."""
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """SELECT id FROM pipeline_alerts
+                   WHERE entity_type = 'channel' AND entity_id = ?
+                     AND alert_type = 'consecutive_failures' AND resolved = 0
+                   LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _apply_channel_failure_breaker(db, channel_id: int, slug: str) -> bool:
+    """Pause a channel after consecutive permanent generation failures.
+
+    Actions (all idempotent):
+      1. Create a critical alert documenting the failure and that
+         ``videos_per_day`` must be raised again once the root cause is fixed.
+      2. Lower ``videos_per_day`` to 0 (persisted in ``channels.config_json``;
+         the startup config sync preserves DB-only planning keys, so this
+         survives restarts).
+      3. Cancel all pending planned_slots for the channel.
+
+    The channel is excluded from automatic replans while ``videos_per_day``
+    is 0 / the alert is unresolved. Reactivation is MANUAL: fix the root
+    cause and raise ``videos_per_day`` in the channel planning panel.
+
+    Returns True if the breaker was tripped (or was already active).
+    """
+    # Idempotency: if already paused with an unresolved alert, nothing to do.
+    if _channel_breaker_active(db, channel_id):
+        logger.debug("Circuit breaker already active for channel_id=%d (%s)", channel_id, slug)
+        return True
+
+    failures = count_channel_consecutive_failures(db, channel_id)
+    if failures < CHANNEL_CONSECUTIVE_FAILURES:
+        return False
+
+    logger.warning(
+        "⚠️  CIRCUIT BREAKER: %s has %d consecutive permanent generation failures "
+        "(threshold %d) — pausing channel",
+        slug, failures, CHANNEL_CONSECUTIVE_FAILURES,
+    )
+
+    # 1. Alert (well documented — instructs the operator how to re-enable).
+    try:
+        from api.services.lifecycle_monitor import create_alert
+        create_alert(
+            db,
+            entity_type="channel",
+            entity_id=channel_id,
+            channel_id=channel_id,
+            alert_type="consecutive_failures",
+            severity="critical",
+            title=(
+                f"Canal {slug}: {failures} fallos consecutivos de generación — "
+                f"videos_per_day bajado a 0"
+            ),
+            message=(
+                f"El canal {slug} ha acumulado {failures} fallos PERMANENTES consecutivos "
+                f"de generación long-form (umbral: {CHANNEL_CONSECUTIVE_FAILURES} en "
+                f"{CHANNEL_FAILURE_WINDOW_H}h). Se ha puesto videos_per_day=0 y se han "
+                f"cancelado sus slots pendientes para no bloquear el pipeline de los demás canales.\n\n"
+                f"⚠️ IMPORTANTE: cuando el fallo de creación de vídeos esté SOLVENTADO, "
+                f"entra en Planificación de {slug} y vuelve a subir videos_per_day "
+                f"(recuerda: 0 = canal pausado)."
+            ),
+            metadata={
+                "failures": failures,
+                "threshold": CHANNEL_CONSECUTIVE_FAILURES,
+                "window_h": CHANNEL_FAILURE_WINDOW_H,
+                "action": "videos_per_day=0 + slots cancelados",
+            },
+        )
+    except Exception as exc:
+        logger.warning("Circuit breaker: alert creation failed for %s: %s", slug, exc)
+
+    # 2. videos_per_day = 0 (persisted in config_json, survives restarts).
+    try:
+        db.update_channel_planning_config(channel_id, videos_per_day=0)
+        logger.warning("Circuit breaker: %s videos_per_day → 0", slug)
+    except Exception as exc:
+        logger.warning("Circuit breaker: failed to set videos_per_day=0 for %s: %s", slug, exc)
+
+    # 3. Cancel pending slots (today + future).
+    try:
+        with db._connect() as conn:
+            cnt = conn.execute(
+                "UPDATE planned_slots SET status = 'cancelled' "
+                "WHERE channel_id = ? AND status = 'pending'",
+                (channel_id,),
+            ).rowcount
+            conn.commit()
+        if cnt:
+            logger.warning("Circuit breaker: %s — %d pending slot(s) cancelled", slug, cnt)
+    except Exception as exc:
+        logger.warning("Circuit breaker: slot cancellation failed for %s: %s", slug, exc)
+
+    # 4. Drop the last-dispatched marker if it points at this channel so the
+    #    round-robin does not keep returning to a paused channel.
+    try:
+        if str(db.get_system_state("last_dispatched_channel")) == str(channel_id):
+            db.set_system_state("last_dispatched_channel", "")
+    except Exception:
+        pass
+
+    return True
+
+
+def _channel_paused_for_planning(db, channel_id: int) -> bool:
+    """Return True if the channel must be excluded from automatic planning.
+
+    A channel is paused when the circuit breaker is active OR its effective
+    videos_per_day is 0. Guards smart_replan, recovery planner, never-dry
+    and horizon planning from creating slots for broken channels.
+    """
+    if _channel_breaker_active(db, channel_id):
+        return True
+    try:
+        cfg = db.get_channel_planning_config(channel_id)
+        return int(cfg.get("videos_per_day", 1) or 0) <= 0
+    except Exception:
         return False
 
 
@@ -2433,6 +2774,7 @@ def _sync_running_slots(db):
     """
     running_slots = db.get_planned_slots(status="running")
     any_completed = False
+    permanent_failed_slots = []  # v26: for the channel circuit breaker
     
     # Transient error patterns (same as generation_service._auto_retry_if_transient)
     TRANSIENT_PATTERNS = [
@@ -2472,12 +2814,33 @@ def _sync_running_slots(db):
                 # Permanent failure → cancel slot
                 db.update_slot_status(s["id"], "cancelled")
                 logger.info("Slot #%d cancelled (job #%d %s)", s["id"], job_id, job["status"])
+                # v26: track for the channel circuit breaker (after the loop)
+                permanent_failed_slots.append(s)
             # NOT any_completed — failed slots should NOT trigger readjustment
     
     if any_completed:
         _readjust_pending_slots(db)
 
+    # ── v26: channel circuit breaker — pause channels with an unbroken run
+    # of permanent failures so they stop monopolizing the generation slot.
+    for s in permanent_failed_slots:
+        try:
+            _apply_channel_failure_breaker(
+                db, s.get("channel_id"), s.get("channel_slug", "?"),
+            )
+        except Exception as exc:
+            logger.debug("Circuit breaker check failed: %s", exc)
 
+    # ── v26: also let the Dynamic VPD adjuster react to permanent failures
+    # (not only completions), so a channel with 0% success drops its quota.
+    if permanent_failed_slots:
+        try:
+            _dynamic_vpd_adjust(db, permanent_failed_slots)
+        except Exception as exc:
+            logger.debug("Dynamic VPD adjust after failures failed: %s", exc)
+
+
+@_replan_locked
 def _readjust_pending_slots(db):
     """Realign remaining pending slots after a job finishes — cross-day aware.
     
@@ -3344,6 +3707,7 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
     }
 
 
+@_replan_locked
 def full_replan(db=None) -> dict:
     """Force a complete planning reset: delete ALL pending planned slots
     (videos + shorts) and recreate from scratch across the 7-day horizon.
