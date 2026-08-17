@@ -425,20 +425,19 @@ python3 main.py stats --canal canal2
 curl localhost:8000/api/channels/1/youtube-stats
 ```
 
-## 🧵 Sesiones paralelas (anti-clobber)
+## 🧵 Cambios en paralelo (worktree + merge a producción)
 
-Varias sesiones de opencode pueden trabajar sobre este MISMO árbol. Para no machacarse:
+El árbol principal (`/root/autotube`) queda **fijo en la rama de producción** (`master`).
+Cada CAMBIO se trabaja en una copia aislada:
 
-1. **Antes de editar** cualquier archivo: `git status` + `git diff`.
-2. Cambios ajenos sin commitear: NO pisarlos; commitearlos primero como `sync: ...` o coordinar.
-3. **Antes de cada commit**: repetir `git status`; si otra sesión commiteó mientras editábamos,
-   `git diff` y reconciliar antes de commitear.
-4. **Commit atómico + frecuente**, mensaje `tipo: descripción`.
-5. Serializar add+commit con flock:
-   ```bash
-   flock -x -w 120 .git/.opencode-session.lock -c 'git add -- . ":(exclude).env" ":(exclude)tokens/" && git commit -m "tipo: descripción"'
-   ```
-6. Usar el comando global `/git-workflow` (start al entrar, finish al cerrar).
-7. **Push**: solo si existe remoto. Sin remoto, commit local + reportar acción manual. Nunca inventar un remoto.
-8. No usar `git worktree` aquí: el aislamiento se hace por disciplina + lock, no por copias separadas.
+1. **`/git-workflow start`** crea la copia: `git worktree add -b work/<id> /root/.opencode-worktrees/autotube/<id>`.
+   Se edita SOLO en la copia, nunca en el árbol principal.
+2. Trabajar con commits atómicos `tipo: descripción` en la copia (el hook bloquea
+   `.env`, `tokens/*.pickle`, `client_secret*.json` y secretos).
+3. **`/git-workflow finish`**: merge `--no-ff` de `work/<id>` → `master` (bajo flock),
+   resolviendo conflictos con marcadores de git si es necesario. Después ejecuta
+   `bash scripts/apply_changes.sh` para publicar el cambio en el servicio en vivo.
+4. **Push**: solo si existe remoto. Sin remoto, el merge ya dejó el código en producción
+   (pendiente de apply_changes); reportar la acción manual exacta para la nube. Nunca inventar un remoto.
+5. Si se pide OTRO cambio en la misma sesión, repetir el ciclo completo (nueva copia).
 ```

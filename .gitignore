@@ -3,6 +3,11 @@
 *.pickle
 tokens/*
 !tokens/.gitkeep
+# Credenciales OAuth por canal (se dejaron de trackear: viven solo en disco)
+config/client_secret*.json
+
+# Backups locales (nunca en git)
+*.bak
 
 # Output
 output/*
