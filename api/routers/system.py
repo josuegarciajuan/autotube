@@ -294,7 +294,7 @@ def scheduler_resume():
         with db._connect() as conn:
             conn.execute(
                 """UPDATE pipeline_alerts SET resolved = 1, resolved_at = datetime('now')
-                   WHERE alert_type = 'quota_exhausted' AND resolved = 0"""
+                   WHERE alert_type IN ('quota_exhausted', 'quota_warning') AND resolved = 0"""
             )
             conn.commit()
     except Exception:

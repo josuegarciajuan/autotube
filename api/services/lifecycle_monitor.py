@@ -598,9 +598,9 @@ def _auto_resolve_completed(db) -> int:
                 """SELECT pa.id, pa.entity_id, pa.alert_type
                    FROM pipeline_alerts pa
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
-                   WHERE pa.resolved = 0
-                     AND v.status IN ('uploaded', 'ready')
-                     AND pa.alert_type IN ('stuck', 'timeout')"""
+                    WHERE pa.resolved = 0
+                      AND v.status IN ('uploaded', 'ready', 'awaiting_upload')
+                      AND pa.alert_type IN ('stuck', 'timeout')"""
             ).fetchall()
 
             for alert in alerts:
@@ -645,6 +645,29 @@ def _auto_resolve_completed(db) -> int:
                    WHERE pa.resolved = 0
                      AND v.status IN ('published', 'uploaded', 'ready')
                      AND pa.alert_type = 'publish_delayed'"""
+            ).fetchall()
+
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           message = message || ' [Auto-resolved: video published]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            # Resolve publish_not_detected alerts for videos that did finally
+            # go public (e.g. a previously-unlisted orphan that was published
+            # manually). These are only resolved once status = 'published';
+            # an 'uploaded'/unlisted video is still genuinely unconfirmed.
+            alerts = conn.execute(
+                """SELECT pa.id, pa.entity_id, pa.alert_type
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                   WHERE pa.resolved = 0
+                     AND v.status = 'published'
+                     AND pa.alert_type = 'publish_not_detected'"""
             ).fetchall()
 
             for alert in alerts:
