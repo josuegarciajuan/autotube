@@ -609,7 +609,13 @@ def get_day_schedule_summary(date_str: str = None, db=None) -> str:
 # ── Smart slot dispatcher ──────────────────────────────────────
 
 def dispatch_next_due_slot(db=None) -> dict | None:
-    """Check for due planned slots and dispatch ONE generation job.
+    """[DEPRECATED] Check for due planned slots and dispatch ONE generation job.
+
+    ⚠️  DEPRECATED (v26): this legacy per-day dispatch path is no longer
+    called by the checker loop — `planning_service.process_planned_slots`
+    (3-phase horizon + priority round-robin) is the active dispatcher.
+    Kept for backward compatibility; do NOT wire it back into api/main.py.
+    Use `planning_service.process_planned_slots` instead.
 
     Called every 5 min by the API checker loop.
     Only dispatches if no job is currently running.
