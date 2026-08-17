@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Reassemble all videos that failed with 'ensamblaje' (old-code regression).
+"""Reassemble all videos that failed at the assembly phase.
 
 Waits for the currently running long-form generation to finish, then
 reassembles failed videos one at a time via POST /api/videos/{id}/reassemble,
 polling each job to completion before starting the next.
 
-The reassembly reuses the already-rendered scene segments on disk, so each
-video only re-concatenates + re-muxes (~10-15 min) instead of a full render.
+The reassembly reuses the video's checkpoint (script + audio + media assets),
+so each video re-renders scenes from existing assets instead of a full
+scrape→script→tts run. Missing media files are dropped at reassembly time and
+substituted with fallback images (see _do_reassembly in generation_service).
 
 Usage: nohup python3 scripts/reassemble_failed_videos.py > logs/reassemble.log 2>&1 &
 """
@@ -23,8 +25,6 @@ API = "http://localhost:8000"
 DB_PATH = "/root/autotube/autotube.db"
 POLL_SEC = 30
 MAX_ATTEMPTS = 40  # per reassembly job (~40 * 30s = 20 min cap)
-
-FAILED_IDS = list(range(2156, 2171))  # 2156..2170 inclusive
 
 
 def db():
@@ -93,18 +93,18 @@ def reassemble(video_id: int) -> bool:
 
 def main():
     wait_for_idle()
-    # After idle, include 2171 if it ended in error (old code would have failed it)
+    # Discover failed videos dynamically (assembly-phase errors, with a
+    # checkpoint so they can actually be reassembled). No hardcoded IDs.
     with db() as c:
         rows = c.execute(
-            """SELECT id, status, progress_phase, error_message FROM videos
-               WHERE id IN ({}) OR id = 2171
-               ORDER BY id""".format(",".join("?" * len(FAILED_IDS))),
-            list(FAILED_IDS),
+            """SELECT v.id
+               FROM videos v
+               WHERE v.status = 'error'
+                 AND v.progress_phase = 'video'
+                 AND v.checkpoint_data IS NOT NULL
+               ORDER BY v.id"""
         ).fetchall()
-    candidates = []
-    for r in rows:
-        if r["status"] == "error":
-            candidates.append(r["id"])
+    candidates = [r["id"] for r in rows]
     print(f"[{time.strftime('%H:%M:%S')}] Videos a reensamblar: {candidates}")
 
     for vid in candidates:

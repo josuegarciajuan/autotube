@@ -474,10 +474,14 @@ def _preflight_cleanup(logger):
     
     Lock-aware: never deletes files owned by another active (running/queued)
     generation_job, preventing race conditions that cause black-screen renders.
+    Also preserves clips referenced by recent error-state videos (pending
+    reassembly), so a failed video keeps its media for the rebuild.
     """
     from database.db_extended import ExtendedDatabase
     _db = ExtendedDatabase()
     locked = _db.get_locked_file_paths()
+    error_paths = _db.get_error_video_media_paths(max_age_hours=48)
+    preserved = locked | error_paths
     
     cleanup_dirs = [
         _PROJECT_ROOT / "output" / "video_clips",
@@ -490,15 +494,15 @@ def _preflight_cleanup(logger):
         for f in d.iterdir():
             if not f.is_file():
                 continue
-            if str(f) in locked:
+            if str(f) in preserved:
                 continue
             try:
                 f.unlink()
                 deleted += 1
             except OSError:
                 pass
-        logger.info("Cleaned %d stale files from %s (%d locked files preserved)",
-                     deleted, d, len(locked))
+        logger.info("Cleaned %d stale files from %s (%d locked+error files preserved)",
+                     deleted, d, len(preserved))
 
 
 # ── Phase order (for checkpoint resume) ──────────────────────────

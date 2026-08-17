@@ -2314,6 +2314,11 @@ class PipelineOrchestrator:
             locked_paths = self.db.get_locked_file_paths()
         except Exception:
             locked_paths = set()
+        try:
+            error_paths = self.db.get_error_video_media_paths(max_age_hours=48)
+        except Exception:
+            error_paths = set()
+        preserved_paths = locked_paths | error_paths
         _cleanup_dirs = [
             Path("output/video_clips"),
             Path("output/temp"),
@@ -2325,16 +2330,17 @@ class PipelineOrchestrator:
                     if not _f.is_file():
                         continue
                     _rel = str(_f)
-                    # Never delete files locked by another running/queued job
-                    if _rel in locked_paths:
+                    # Never delete files locked by another running/queued job,
+                    # nor clips referenced by a recent error-state video awaiting reassembly.
+                    if _rel in preserved_paths:
                         continue
                     try:
                         _f.unlink()
                         _deleted += 1
                     except OSError:
                         pass
-                logger.info("[%s] Cleaned %d stale files from %s (%d locked files preserved)",
-                            self.canal, _deleted, _d, len(locked_paths))
+                logger.info("[%s] Cleaned %d stale files from %s (%d locked+error files preserved)",
+                            self.canal, _deleted, _d, len(preserved_paths))
 
         # ── Playlist selection: pick a random playlist BEFORE scraping ──
         target_playlist = getattr(self, '_target_playlist', None)
