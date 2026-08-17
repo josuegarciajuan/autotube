@@ -1153,6 +1153,9 @@ def migrate_v2(db_path: str = None):
     # ── v40: pipeline_alerts CHECK allows 'channel' (circuit breaker) ──
     _migrate_v40(conn, logger)
     
+    # ── v41: lifecycle_events CHECK allows 'system' (quota audit events) ──
+    _migrate_v41(conn, logger)
+    
     conn.commit()
     conn.close()
     
@@ -2587,6 +2590,75 @@ def _migrate_v40(conn, logger):
         except Exception:
             pass
         logger.warning("Migration v40: failed (%s) — channel alerts will not be available", exc)
+
+
+def _migrate_v41(conn, logger):
+    """Idempotent v41: extend lifecycle_events.entity_type CHECK to allow 'system'.
+
+    System-level audit events (e.g. quota_recovered) are logged via
+    log_event() with entity_type='system' from api/main.py and
+    api/routers/system.py, but the original CHECK only allowed
+    ('video', 'short'). SQLite cannot ALTER a CHECK constraint,
+    so the table is rebuilt in place (data-preserving) with the wider CHECK
+    — same pattern as v40 for pipeline_alerts.
+    """
+    try:
+        # Inspect the current CHECK to detect whether the migration already ran
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='lifecycle_events'"
+        ).fetchone()
+        cur_sql = sql[0] if sql else ""
+        if "entity_type IN ('video', 'short', 'system')" in cur_sql:
+            logger.debug("Migration v41: lifecycle_events already allows 'system'")
+            return
+        if "lifecycle_events" not in cur_sql:
+            logger.debug("Migration v41: lifecycle_events table missing — nothing to do")
+            return
+
+        logger.info("Migration v41: rebuilding lifecycle_events to allow entity_type='system'")
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+
+        conn.execute("""
+            CREATE TABLE lifecycle_events_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type     TEXT NOT NULL CHECK(entity_type IN ('video', 'short', 'system')),
+                entity_id       INTEGER NOT NULL,
+                channel_id      INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+                event           TEXT NOT NULL,
+                phase           TEXT,
+                status          TEXT NOT NULL DEFAULT 'started',
+                message         TEXT,
+                metadata_json   TEXT,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            INSERT INTO lifecycle_events_new (
+                id, entity_type, entity_id, channel_id, event, phase, status,
+                message, metadata_json, created_at
+            )
+            SELECT id, entity_type, entity_id, channel_id, event, phase, status,
+                   message, metadata_json, created_at
+            FROM lifecycle_events
+        """)
+        conn.execute("DROP TABLE lifecycle_events")
+        conn.execute("ALTER TABLE lifecycle_events_new RENAME TO lifecycle_events")
+        # Recreate the original indexes exactly.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_entity ON lifecycle_events(entity_type, entity_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_channel ON lifecycle_events(channel_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_event ON lifecycle_events(event, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_time ON lifecycle_events(created_at)")
+        conn.execute("COMMIT")
+        conn.execute("PRAGMA foreign_keys=ON")
+        logger.info("Migration v41: lifecycle_events rebuilt — 'system' entity type enabled")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        logger.warning("Migration v41: failed (%s) — system lifecycle events will not be available", exc)
 
 
 def _migrate_v10(conn, logger):
