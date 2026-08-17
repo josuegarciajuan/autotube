@@ -286,8 +286,11 @@ def scheduler_resume():
     db = ExtendedDatabase()
     
     db.set_system_state("scheduler_paused", "false")
-    db.set_system_state("quota_exhausted_at", "")
-    db.set_system_state("quota_exhausted_channel", "")
+    # Limpia TODOS los marcadores de quota agotada (global + claves por
+    # proyecto `quota_exhausted_{project_id}`). Antes solo se vaciaban las
+    # claves globales y los breakers por proyecto seguían bloqueando los
+    # canales tras un resume manual.
+    db.clear_quota_exhausted()
     
     # Resolve quota-related alerts
     try:
