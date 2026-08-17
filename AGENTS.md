@@ -424,3 +424,21 @@ python3 main.py stats --canal canal2
 # Stats YouTube reales via API
 curl localhost:8000/api/channels/1/youtube-stats
 ```
+
+## 🧵 Sesiones paralelas (anti-clobber)
+
+Varias sesiones de opencode pueden trabajar sobre este MISMO árbol. Para no machacarse:
+
+1. **Antes de editar** cualquier archivo: `git status` + `git diff`.
+2. Cambios ajenos sin commitear: NO pisarlos; commitearlos primero como `sync: ...` o coordinar.
+3. **Antes de cada commit**: repetir `git status`; si otra sesión commiteó mientras editábamos,
+   `git diff` y reconciliar antes de commitear.
+4. **Commit atómico + frecuente**, mensaje `tipo: descripción`.
+5. Serializar add+commit con flock:
+   ```bash
+   flock -x -w 120 .git/.opencode-session.lock -c 'git add -- . ":(exclude).env" ":(exclude)tokens/" && git commit -m "tipo: descripción"'
+   ```
+6. Usar el comando global `/git-workflow` (start al entrar, finish al cerrar).
+7. **Push**: solo si existe remoto. Sin remoto, commit local + reportar acción manual. Nunca inventar un remoto.
+8. No usar `git worktree` aquí: el aislamiento se hace por disciplina + lock, no por copias separadas.
+```
