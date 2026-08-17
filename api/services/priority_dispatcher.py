@@ -48,6 +48,18 @@ def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
         from database.db_extended import ExtendedDatabase  # noqa: F811
         db = ExtendedDatabase()
 
+    # ── Manual operator pause gate ──────────────────────────────
+    # Mirrors the scheduler checker loop (api/main.py:1002). Without this,
+    # the post-worker immediate dispatch would keep launching long-form
+    # jobs even while scheduler_paused=true, starving maintenance windows
+    # (e.g. a reassembly batch) of a free slot.
+    try:
+        if db.get_system_state("scheduler_paused") == "true":
+            logger.info("Priority dispatch skipped: scheduler_paused=true")
+            return None
+    except Exception:
+        pass
+
     # ── Phase 1: batch ALL overdue shorts ───────────────────────
     dispatched_shorts: list[dict[str, Any]] = []
 
