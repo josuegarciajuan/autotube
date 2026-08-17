@@ -393,6 +393,18 @@ def _maybe_trigger_orphaned_verification(video_id: int, channel_slug: str, yt_vi
     # ── Only verify if uploaded >1h ago (let YouTube finish processing) ──
     db = ExtendedDatabase()
     video = db.get_video(video_id)
+
+    # ── Skip unlisted videos with no scheduled publish ────────────────
+    # An 'unlisted' video never appears in the public wall feed, so the
+    # quota-free wall-scrape verification can never confirm it and would
+    # raise a perpetual false `publish_not_detected` alert. Only verify
+    # videos that were actually meant to go public (scheduled warm-ups).
+    if video and not video.get("target_public_at") and \
+            str(video.get("privacy_status", "")).lower() == "unlisted":
+        with _PUBLISH_VERIFY_LOCK:
+            _PUBLISH_VERIFY_INFLIGHT.discard(video_id)
+        return
+
     uploaded_at = video.get("uploaded_at") if video else None
     if uploaded_at:
         try:
