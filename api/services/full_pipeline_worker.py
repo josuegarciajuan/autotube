@@ -604,7 +604,8 @@ def run_job(
     if not ch:
         logger.error("Channel %d not found in DB", channel_id)
         db.update_job(job_id, status="failed", error_msg="Canal no encontrado")
-        db.update_video(video_id, status="error", progress_phase="error")
+        db.update_video(video_id, status="error", progress_phase="error",
+                        error_message="Canal no encontrado")
         return False
 
     canal = ch["slug"]
@@ -729,7 +730,8 @@ def run_job(
     except Exception as exc:
         logger.error("Failed to load config for %s: %s", canal, exc)
         db.update_job(job_id, status="failed", error_msg=f"Config error: {exc}")
-        db.update_video(video_id, status="error", progress_phase="error")
+        db.update_video(video_id, status="error", progress_phase="error",
+                        error_message=f"Config error: {exc}")
         return False
 
     if test_mode:
@@ -912,7 +914,8 @@ def run_job(
                 error_msg = "No se pudo generar el guion (sin contenido disponible)"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-                db.update_video(video_id, status="error", progress_phase="script")
+                db.update_video(video_id, status="error", progress_phase="script",
+                                error_message=error_msg)
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='script',
                                 error=error_msg, channel_id=channel_id)
                 return False
@@ -957,7 +960,8 @@ def run_job(
                 error_msg = str(ve)
                 logger.error("Pre-validation FAILED: %s", error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-                db.update_video(video_id, status="error", progress_phase="pre_validate")
+                db.update_video(video_id, status="error", progress_phase="pre_validate",
+                                error_message=error_msg)
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='pre_validate',
                                 error=error_msg, channel_id=channel_id)
                 return False
@@ -972,7 +976,8 @@ def run_job(
             # ── RAM gate before TTS (avoid wasting 5-9 min of compute) ──
             if not _check_ram_gate(logger, timeout_sec=300):
                 db.update_job(job_id, status="failed", error_msg="RAM insuficiente (pre-TTS gate)")
-                db.update_video(video_id, status="error", progress_phase="script")
+                db.update_video(video_id, status="error", progress_phase="script",
+                                error_message="RAM insuficiente (pre-TTS gate)")
                 return False
 
             db.update_video(video_id, progress=30, progress_phase="tts")
@@ -984,7 +989,8 @@ def run_job(
                 error_msg = "Fallo la generacion de voz (TTS)"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-                db.update_video(video_id, status="error", progress_phase="tts")
+                db.update_video(video_id, status="error", progress_phase="tts",
+                                error_message=error_msg)
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='tts',
                                 error=error_msg, channel_id=channel_id)
                 return False
@@ -1006,8 +1012,10 @@ def run_job(
 
         # ── RAM gate before heavy phases (media + video assembly) ──
         if not _check_ram_gate(logger):
-            db.update_job(job_id, status="failed", error_msg="RAM insuficiente tras timeout (pre-render gate)")
-            db.update_video(video_id, status="error", progress_phase="tts")
+            error_msg = "RAM insuficiente tras timeout (pre-render gate)"
+            db.update_job(job_id, status="failed", error_msg=error_msg)
+            db.update_video(video_id, status="error", progress_phase="tts",
+                            error_message=error_msg)
             return False
 
         # ═══════════════════════════════════════════════════════
@@ -1063,9 +1071,10 @@ def run_job(
             # Wait until no other job is in the render phase. This allows
             # another worker to do prep phases (scrape→media) while we wait.
             if not _acquire_render_slot(job_id, db, timeout_sec=7200):
-                db.update_job(job_id, status="failed",
-                              error_msg="Render slot timeout — otro render activo >2h")
-                db.update_video(video_id, status="error", progress_phase="video")
+                error_msg = "Render slot timeout — otro render activo >2h"
+                db.update_job(job_id, status="failed", error_msg=error_msg)
+                db.update_video(video_id, status="error", progress_phase="video",
+                                error_message=error_msg)
                 return False
             
             db.update_video(video_id, progress=60, progress_phase="video")
@@ -1080,7 +1089,8 @@ def run_job(
                 error_msg = "RAM insuficiente para ensamblaje de video — se aborta para prevenir OOM kill"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg, phase="video")
-                db.update_video(video_id, status="error", progress_phase="video")
+                db.update_video(video_id, status="error", progress_phase="video",
+                                error_message=error_msg)
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='video',
                                 error=error_msg, channel_id=channel_id)
                 return False
@@ -1123,7 +1133,8 @@ def run_job(
                 )
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-                db.update_video(video_id, status="error", progress_phase="video")
+                db.update_video(video_id, status="error", progress_phase="video",
+                                error_message=error_msg[:500])
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='video',
                                 error=error_msg, channel_id=channel_id)
                 return False
@@ -1800,7 +1811,8 @@ def run_job(
         error_msg = f"{type(exc).__name__}: {exc} (trace: {tb_tail})"
         logger.error("Pipeline crashed: %s\n%s", exc, tb)
         db.update_job(job_id, status="failed", error_msg=error_msg[:500])
-        db.update_video(video_id, status="error", progress_phase="error")
+        db.update_video(video_id, status="error", progress_phase="error",
+                        error_message=error_msg[:500])
         
         # ── Record marathon failure ──
         if is_marathon:

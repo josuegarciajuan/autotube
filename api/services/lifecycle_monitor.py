@@ -165,6 +165,9 @@ def check_all_health(db) -> dict:
     # ── Check 9: LLM credits low/exhausted ──
     created += _check_llm_credits(db)
 
+    # ── Check 10: Channel consecutive generation failures (v26) ──
+    created += _check_channel_failure_streak(db)
+
     logger.info(
         "Health check: %d alerts created, %d resolved",
         created, resolved,
@@ -1046,3 +1049,77 @@ def log_phase_error(db, entity_type: str, entity_id: int, phase: str,
               event=f'{phase}_failed', phase=phase, status='failed',
               message=error,
               metadata=meta)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 10: Channel consecutive generation failures (v26)
+# ═══════════════════════════════════════════════════════════════
+
+def _check_channel_failure_streak(db) -> int:
+    """Alert when a channel accumulates consecutive permanent generation failures.
+
+    Complements the circuit breaker in planning_service: the breaker pauses
+    the channel (videos_per_day=0 + cancel slots); this check guarantees a
+    well-documented alert exists even if the breaker path was not triggered
+    (e.g. after a restart, or when the failure window expired between ticks).
+
+    Returns number of alerts created.
+    """
+    created = 0
+    try:
+        from api.services.planning_service import (
+            count_channel_consecutive_failures,
+            CHANNEL_CONSECUTIVE_FAILURES,
+            CHANNEL_FAILURE_WINDOW_H,
+        )
+    except Exception as exc:
+        logger.debug("Failure-streak check: planning_service import failed: %s", exc)
+        return 0
+
+    try:
+        channels = db.get_channels(active_only=True)
+    except Exception as exc:
+        logger.warning("Failure-streak check: cannot load channels: %s", exc)
+        return 0
+
+    for ch in channels:
+        ch_id = ch["id"]
+        slug = ch["slug"]
+        try:
+            failures = count_channel_consecutive_failures(db, ch_id)
+        except Exception:
+            continue
+        if failures < CHANNEL_CONSECUTIVE_FAILURES:
+            continue
+
+        try:
+            created += 1 if create_alert(
+                db,
+                entity_type="channel",
+                entity_id=ch_id,
+                channel_id=ch_id,
+                alert_type="consecutive_failures",
+                severity="critical",
+                title=(
+                    f"Canal {slug}: {failures} fallos consecutivos de generación — "
+                    f"revisar creación de vídeos"
+                ),
+                message=(
+                    f"El canal {slug} acumula {failures} fallos PERMANENTES consecutivos "
+                    f"de generación long-form (umbral: {CHANNEL_CONSECUTIVE_FAILURES} en "
+                    f"{CHANNEL_FAILURE_WINDOW_H}h).\n\n"
+                    f"🔧 El planificador puede haber bajado videos_per_day a 0 (canal pausado). "
+                    f"Cuando el fallo de creación esté SOLVENTADO, vuelve a subir "
+                    f"videos_per_day en Planificación del canal."
+                ),
+                metadata={
+                    "failures": failures,
+                    "threshold": CHANNEL_CONSECUTIVE_FAILURES,
+                    "window_h": CHANNEL_FAILURE_WINDOW_H,
+                    "source": "health_monitor",
+                },
+            ) else 0
+        except Exception as exc:
+            logger.warning("Failure-streak alert for %s failed: %s", slug, exc)
+
+    return created

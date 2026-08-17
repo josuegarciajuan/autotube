@@ -1398,7 +1398,12 @@ async def _process_shorts_recovery_planner():
 
 
 async def _process_smart_slots():
-    """Dispatch due planned_slots using the per-channel adaptive schedule engine.
+    """[DEPRECATED] Dispatch due planned_slots using the per-channel adaptive schedule engine.
+
+    ⚠️  DEPRECATED (v26): this wrapper calls `schedule_engine.dispatch_next_due_slot`,
+    which is legacy and no longer invoked by the checker loop. The active
+    dispatcher is `_process_planned_slots` → `planning_service.process_planned_slots`.
+    Kept for backward compatibility; do NOT wire this back into the checker loop.
 
     Uses per-channel average creation times, 6-day fair rotation,
     jitter (±15 min), and 15% buffer. Dispatches ONE slot at a time
@@ -1507,6 +1512,11 @@ async def _calculate_optimal_slots():
 
 def _process_due_schedules_sync() -> list[dict]:
     """Synchronous DB work for schedule dispatch. Returns list of dispatch payloads.
+
+    ⚠️  DEPRECATED (v26): the `content_schedules` cron table is empty in
+    production and this legacy scheduler is not used — planning is driven by
+    `planned_slots` (planning_service) + `shorts_planned_slots`. Kept for
+    backward compatibility; do NOT rely on it for scheduling.
 
     Offloaded to thread pool by _process_due_schedules() so that sqlite3.connect()
     (with busy_timeout=30000) and ExtendedDatabase calls do not block the asyncio
@@ -1649,6 +1659,9 @@ def _process_due_schedules_sync() -> list[dict]:
 
 async def _process_due_schedules():
     """Find and execute due schedules (async wrapper).
+
+    ⚠️  DEPRECATED (v26): backed by the empty `content_schedules` cron table;
+    planning is driven by planned_slots. Kept for backward compatibility.
 
     All synchronous DB operations (sqlite3.connect, ExtendedDatabase methods,
     threading.Lock acquisition) are offloaded to a thread pool so that none of
