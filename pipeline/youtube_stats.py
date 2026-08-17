@@ -1083,8 +1083,11 @@ class YouTubeStatsFetcher:
         if channel:
             if use_data_api:
                 channel_stats = self.get_channel_stats()
+            # Watch time acumulado de 12 meses (ventana móvil YPP de 4.000h),
+            # no los últimos 30 días — así "horas de visualización" crece de
+            # forma acumulada y es consistente con el requisito de monetización.
             channel_analytics = (
-                self.get_channel_analytics() if authenticated else None
+                self.get_channel_analytics(days=365) if authenticated else None
             )
 
             if channel_stats:

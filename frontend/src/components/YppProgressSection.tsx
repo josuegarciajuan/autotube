@@ -87,7 +87,7 @@ export default function YppProgressSection({ channels }: Props) {
                 <div className="flex items-center justify-between mb-0.5">
                   <div className="flex items-center gap-1 text-[10px] text-gray-400">
                     <Clock size={10} />
-                    <span>Horas: {hoursToText(hours)}/{formatShortNumber(YPP_TARGET_HOURS)}</span>
+                    <span>Horas (12m): {hoursToText(hours)}/{formatShortNumber(YPP_TARGET_HOURS)}</span>
                     {hoursRemaining > 0 && (
                       <span className="text-green-400/60">(-{formatShortNumber(hoursRemaining)})</span>
                     )}
