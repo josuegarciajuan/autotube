@@ -214,7 +214,7 @@ def _setup_worker_logging(job_id: int):
 
 # ── Memory guard for video assembly ────────────────────────────
 
-def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.5, max_wait_sec: int = 120) -> bool:
+def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0, max_wait_sec: int = 600) -> bool:
     """Wait for free memory before starting memory-intensive video assembly.
     
     ffmpeg xfade concat of many segments can consume several GB of RAM.
