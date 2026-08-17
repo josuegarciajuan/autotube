@@ -599,7 +599,7 @@ def _auto_resolve_completed(db) -> int:
                    FROM pipeline_alerts pa
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                     WHERE pa.resolved = 0
-                      AND v.status IN ('uploaded', 'ready', 'awaiting_upload')
+                      AND v.status NOT IN ('error', 'generating', 'draft')
                       AND pa.alert_type IN ('stuck', 'timeout')"""
             ).fetchall()
 
