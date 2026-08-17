@@ -87,9 +87,15 @@ def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
         from api.services.planning_service import process_planned_slots  # noqa: F811
         result = process_planned_slots(db=db)
         if result:
+            # v26 fix: log the slot that was ACTUALLY dispatched.
+            # process_planned_slots performs its own round-robin priority
+            # selection, so the dispatched slot may differ from the
+            # candidate we probed above (get_next_available_slot).
             logger.info(
-                "Priority dispatch: long-form slot #%d dispatched (channel=%s)",
-                slot_id, slug,
+                "Priority dispatch: long-form slot #%s dispatched (channel=%s, pub=%s)",
+                result.get("slot_id"),
+                result.get("channel_slug", "?"),
+                (str(result.get("target_public_at")) or "?")[:16],
             )
             return result
 
