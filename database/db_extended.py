@@ -5241,14 +5241,18 @@ class ExtendedDatabase(Database):
                 ch_params,
             ).fetchall()
 
-            # ── Top 5 videos by views ──
+            # ── Top 25 videos + 25 shorts by views (ranked together, tagged by kind) ──
+            # Two queries (long-form + shorts) feed the dashboard "Top videos" section so
+            # the frontend can filter by type. Each row carries a `kind` tag ('video'|'short').
             top_where = "AND v.channel_id = ?" if channel_id else ""
+            top_short_where = "AND s.channel_id = ?" if channel_id else ""
             top_videos = conn.execute(
                 f"""SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
                            v.video_path, v.created_at, c.name as channel_name, c.slug as channel_slug,
                            vsh.views, vsh.likes, vsh.comments, vsh.estimated_minutes_watched,
                            vsh.average_view_duration, vsh.estimated_revenue_min,
-                           vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
+                           vsh.estimated_revenue_max, vsh.fetched_at as stats_updated,
+                           'video' as kind
                     FROM videos v
                     JOIN channels c ON v.channel_id = c.id
                     JOIN video_stats_history vsh ON vsh.id = (
@@ -5256,7 +5260,27 @@ class ExtendedDatabase(Database):
                         WHERE vsh2.video_id = v.id AND vsh2.views > 0
                     )
                     WHERE 1=1 {top_where}
-                    ORDER BY vsh.views DESC LIMIT 5""",
+                    ORDER BY vsh.views DESC LIMIT 25""",
+                ch_params,
+            ).fetchall()
+
+            top_shorts = conn.execute(
+                f"""SELECT s.id, s.title as titulo_final, s.youtube_id as yt_video_id,
+                           s.youtube_url as yt_url, CAST(s.duration AS INTEGER) as duracion_seg,
+                           s.file_path as video_path, COALESCE(s.published_at, s.created_at) as created_at,
+                           c.name as channel_name, c.slug as channel_slug,
+                           ss.views, ss.likes, ss.comments, ss.estimated_minutes_watched,
+                           ss.average_view_duration, NULL as estimated_revenue_min,
+                           NULL as estimated_revenue_max, ss.fetched_at as stats_updated,
+                           'short' as kind
+                    FROM shorts s
+                    JOIN channels c ON s.channel_id = c.id
+                    JOIN short_stats ss ON ss.id = (
+                        SELECT MAX(ss2.id) FROM short_stats ss2
+                        WHERE ss2.short_id = s.id AND ss2.views > 0
+                    )
+                    WHERE s.status = 'published' {top_short_where}
+                    ORDER BY ss.views DESC LIMIT 25""",
                 ch_params,
             ).fetchall()
 
@@ -5562,7 +5586,7 @@ class ExtendedDatabase(Database):
             "pipeline": [dict(r) for r in pipeline],
             "shorts_pipeline": shorts_pipeline_data,
             "upcoming": [dict(r) for r in upcoming],
-            "top_videos": [dict(r) for r in top_videos],
+            "top_videos": [dict(r) for r in top_videos] + [dict(r) for r in top_shorts],
             "recent_videos": recent_videos,
             "recent_shorts": [dict(r) for r in recent_shorts],
             "today_videos": today_videos,
