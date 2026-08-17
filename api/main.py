@@ -2598,8 +2598,14 @@ def _reset_stale_collection_state():
     return False
 
 
-async def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
+def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
     """Collect YouTube stats for all active channels.
+
+    SYNC function on purpose: it performs blocking I/O (YouTube Data API,
+    Analytics API, yt-dlp scraping). Starlette's BackgroundTasks runs sync
+    functions in a thread pool, keeping the event loop free so the API keeps
+    responding while stats are being collected. If this were `async def`, the
+    blocking calls would freeze the entire API for the duration of the run.
 
     Args:
         deep: If True, also collects CTR, traffic sources, demographics,
