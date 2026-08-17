@@ -73,6 +73,23 @@ def quota_day_pacific(now: datetime | None = None) -> str:
     return current.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
 
 
+def project_entity_id(project_id: str) -> int:
+    """Stable integer entity_id for a GCP project (per-project alerts).
+
+    pipeline_alerts deduplicates on (entity_type, entity_id, alert_type), so
+    quota_exhausted alerts must use a DISTINCT entity_id per GCP project —
+    otherwise the second account's alert would collapse into the first one.
+
+    Returns a stable positive int derived from the project id (crc32).
+    `unknown` (no client_secret) maps to 0 so legacy/ungrouped channels keep
+    the old single-alert behavior.
+    """
+    if not project_id or project_id == "unknown":
+        return 0
+    import zlib
+    return zlib.crc32(project_id.encode("utf-8")) & 0x7FFFFFFF
+
+
 def track_quota(
     channel_slug: str,
     operation: str,

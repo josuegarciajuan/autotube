@@ -175,20 +175,26 @@ class YouTubeUploader:
             # expediciones+anomalías share another).
             project_id = "unknown"
             shared_channels: list = []
+            alert_entity_id = None
             try:
-                from api.services.quota_tracker import get_channel_project
+                from api.services.quota_tracker import get_channel_project, project_entity_id
                 project_id = get_channel_project(channel)
                 for ch in (_adb.get_channels(active_only=False) or []):
                     s = ch.get("slug")
                     if s and get_channel_project(s) == project_id:
                         shared_channels.append(s)
+                alert_entity_id = project_entity_id(project_id)
             except Exception:
                 pass
 
             channels_label = ", ".join(shared_channels) or channel
+            # entity_id deriva del project_id (crc32 estable) para que CADA
+            # cuenta/proyecto tenga su propia alerta activa de quota_exhausted
+            # (el dedup de create_alert es por entity_type+entity_id+alert_type).
             create_alert(
                 _adb,
-                entity_type="system", entity_id=None, channel_id=None,
+                entity_type="system", entity_id=alert_entity_id,
+                channel_id=None,
                 alert_type="quota_exhausted", severity="critical",
                 title=f"YouTube API quota agotada — {project_id}",
                 message=(
