@@ -673,13 +673,20 @@ async def _health_monitor_loop():
         await asyncio.sleep(90)  # Check every 90 seconds
 
 
-def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> bool:
-    """Recover the quota breaker after reset without bypassing admission control.
+def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> list:
+    """Recover exhausted QUOTA PROJECTS after their own PT reset.
+
+    Fase cuota (ago 2026): recovery POR PROYECTO. Cada proyecto GCP (cuenta)
+    se recupera de forma independiente cuando supera su propio reset PT + 15min
+    de margen. Un proyecto recuperado deja de bloquear SOLO sus canales; los
+    demás siguen pausados hasta su propio reset.
 
     Reservation expiry runs on every pass, including when no breaker is active.
-    A reset only clears the global breaker.  In remediation mode the backlog is
-    deliberately left untouched: the uploader dispatcher remains the sole
-    admission path once an operator disables remediation.
+    In remediation mode the backlog is deliberately left untouched: the
+    uploader dispatcher remains the sole admission path once an operator
+    disables remediation.
+
+    Returns: list of recovered project ids (empty list = nothing recovered).
     """
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
@@ -687,31 +694,44 @@ def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> bool:
     if expired:
         logger.info("Quota recovery: released %d stale quota reservation(s)", expired)
 
-    if not db.is_quota_exhausted():
-        return False
-
-    reset_info = db.get_quota_reset_time()
-    if not reset_info.get("exhausted") or not reset_info.get("reset_at_utc"):
-        return False
-
-    reset_at = _dt.fromisoformat(reset_info["reset_at_utc"])
-    if reset_at.tzinfo is None:
-        reset_at = reset_at.replace(tzinfo=_tz.utc)
     now_utc = now_utc or _dt.now(_tz.utc)
-    if now_utc < reset_at + _td(minutes=15):
-        return False
+    recovered: list = []
+    try:
+        exhausted_projects = db.get_exhausted_projects()
+    except Exception:
+        exhausted_projects = []
+    if not exhausted_projects:
+        return recovered
 
-    db.clear_quota_exhausted()
-    if YT_REMEDIATION_MODE:
-        logger.warning(
-            "Quota recovery cleared the global breaker; remediation mode remains active, "
-            "so no upload was dispatched."
-        )
-        return True
+    for proj in exhausted_projects:
+        try:
+            reset_info = db.get_quota_reset_time(project_id=proj)
+        except Exception:
+            continue
+        if not reset_info.get("exhausted") or not reset_info.get("reset_at_utc"):
+            continue
+        try:
+            reset_at = _dt.fromisoformat(reset_info["reset_at_utc"])
+            if reset_at.tzinfo is None:
+                reset_at = reset_at.replace(tzinfo=_tz.utc)
+        except (ValueError, TypeError):
+            continue
+        if now_utc < reset_at + _td(minutes=15):
+            continue  # this project still within its safety buffer
+        db.clear_quota_exhausted(project_id=proj)
+        recovered.append(proj)
+        logger.info("Quota recovery: project '%s' cleared (reset reached)", proj)
 
-    if dispatch_uploads is not None:
-        dispatch_uploads()
-    return True
+    if recovered:
+        if YT_REMEDIATION_MODE:
+            logger.warning(
+                "Quota recovery cleared %d project breaker(s); remediation mode "
+                "remains active, so no upload was dispatched.",
+                len(recovered),
+            )
+        elif dispatch_uploads is not None:
+            dispatch_uploads()
+    return recovered
 
 
 async def _quota_recovery_loop():
@@ -765,22 +785,43 @@ async def _quota_recovery_loop():
                 ),
                 timeout=120,
             )
+            # `recovered` es ahora la lista de proyectos GCP recuperados.
             if recovered or not _db.is_quota_exhausted():
                 try:
                     if not YT_REMEDIATION_MODE:
                         if recovered:
-                            _logger.info("Quota recovery complete — upload scheduler re-enabled")
+                            _logger.info(
+                                "Quota recovery complete — %d project(s) re-enabled: %s",
+                                len(recovered), ", ".join(recovered),
+                            )
 
-                        # Resolve quota alerts (also clears stale quota_warning /
-                        # quota_exhausted left from a previous exhaustion episode
-                        # when the breaker is currently inactive).
+                        # Resolve quota alerts of the RECOVERED projects only
+                        # (cada cuenta mantiene su propia alerta quota_exhausted;
+                        # un proyecto que sigue agotado conserva la suya).
                         try:
+                            from api.services.quota_tracker import project_entity_id
                             with _db._connect() as _conn:
-                                _conn.execute(
-                                    """UPDATE pipeline_alerts 
-                                       SET resolved = 1, resolved_at = datetime('now')
-                                       WHERE alert_type IN ('quota_exhausted', 'quota_warning') AND resolved = 0"""
-                                )
+                                for _proj in recovered:
+                                    _eid = project_entity_id(_proj)
+                                    if _eid:
+                                        _conn.execute(
+                                            """UPDATE pipeline_alerts
+                                               SET resolved = 1, resolved_at = datetime('now')
+                                               WHERE alert_type = 'quota_exhausted'
+                                                 AND entity_type = 'system'
+                                                 AND entity_id = ? AND resolved = 0""",
+                                            (_eid,),
+                                        )
+                                # Si ya no queda ningún proyecto agotado, limpiar
+                                # también alertas stale (episodios previos /
+                                # entidades legacy con entity_id desconocido).
+                                if not _db.is_quota_exhausted():
+                                    _conn.execute(
+                                        """UPDATE pipeline_alerts
+                                           SET resolved = 1, resolved_at = datetime('now')
+                                           WHERE alert_type IN ('quota_exhausted', 'quota_warning')
+                                             AND resolved = 0"""
+                                    )
                                 _conn.commit()
                         except Exception:
                             pass
@@ -2557,15 +2598,22 @@ def _reset_stale_collection_state():
     return False
 
 
-async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
+async def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
     """Collect YouTube stats for all active channels.
 
     Args:
         deep: If True, also collects CTR, traffic sources, demographics,
               and retention % per video (extra API quota cost).
-        use_data_api: If False, skips all Data API calls (scrape-only mode):
-              public stats are scraped and Analytics API still fills watch time
-              for channels with a valid token.
+        force: If True, force Data API usage even if the channel's project
+               quota is exhausted (instead of auto-switching to scrape mode).
+        use_data_api: Global override. True (default): each channel decides by
+              its OWN project breaker (Fase cuota ago 2026). False: everything
+              runs in scrape-only mode (legacy callers).
+
+    Fase cuota (ago 2026): la decisión de usar Data API es POR CANAL. Cada
+    canal consulta el breaker de su proyecto GCP (is_quota_exhausted_for_channel),
+    así un proyecto agotado (ej. tracatrack) no arrastra a los canales de la
+    otra cuenta (burrianacasa2026) a modo scraping.
     """
     import logging
     logger = logging.getLogger("autotube.stats")
@@ -2576,7 +2624,7 @@ async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
         "finished_at": None,
         "channels": [],
         "error": None,
-        "scrape_mode": not use_data_api,
+        "scrape_mode": False,  # se rellena por canal abajo
     })
     _pin_stats_state("stats_collection_state")
 
@@ -2587,13 +2635,18 @@ async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
         
         db = ExtendedDatabase()
         channels = db.get_channels(active_only=True)
-        
+        any_scrape_mode = False
+
         for ch in channels:
             slug = ch["slug"]
             token_path = TOKENS_DIR / f"{slug}.pickle"
-            # In scrape mode, channels without a token are still collected
-            # (public data needs no auth) — but without Analytics watch time.
-            if use_data_api and not token_path.exists():
+            # ── Per-channel Data API decision ──
+            # Cada canal decide según el breaker de SU proyecto GCP. force=True
+            # salta el breaker (uso manual del Data API a pesar de la alerta).
+            channel_use_data_api = use_data_api and (
+                force or not db.is_quota_exhausted_for_channel(slug)
+            )
+            if channel_use_data_api and not token_path.exists():
                 STATS_COLLECTION_STATE["channels"].append({
                     "slug": slug, "ok": False, "skipped": True,
                     "reason": "no token",
@@ -2603,8 +2656,10 @@ async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
             try:
                 fetcher = YouTubeStatsFetcher(slug)
                 result = fetcher.collect_and_store(
-                    db, deep=deep, use_data_api=use_data_api
+                    db, deep=deep, use_data_api=channel_use_data_api
                 )
+                if result.get("scrape_mode"):
+                    any_scrape_mode = True
                 logger.info(
                     "Stats collected for %s: %s videos, %s shorts, %s analytics, channel=%s",
                     slug,
@@ -2702,6 +2757,7 @@ async def _collect_youtube_stats(deep: bool = False, use_data_api: bool = True):
         STATS_COLLECTION_STATE.update({
             "status": "success",
             "finished_at": _time_module.time(),
+            "scrape_mode": any_scrape_mode,
         })
         _pin_stats_state("stats_collection_state")
         # Force dashboard cache invalidation so the frontend sees fresh data
@@ -2852,19 +2908,11 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
 
     Runs _collect_youtube_stats() as a background task and returns immediately.
     Poll GET /api/stats/collect/status to know when it finishes and its result.
-    """
-    # ── Quota guard: if quota is exhausted, auto-switch to scrape mode ──
-    # (skip Data API, use Analytics API + public scraping) instead of failing.
-    use_data_api = True
-    if not force:
-        try:
-            from database.db_extended import ExtendedDatabase
-            _qdb = ExtendedDatabase()
-            if _qdb.is_quota_exhausted():
-                use_data_api = False
-        except Exception:
-            pass  # allow if DB check fails
 
+    Fase cuota (ago 2026): la decisión de usar Data API es POR CANAL — cada
+    canal consulta el breaker de SU proyecto GCP. Un proyecto agotado ya NO
+    arrastra a los canales de la otra cuenta a modo scraping.
+    """
     _reset_stale_collection_state()  # auto-recover from stuck "running"
     if STATS_COLLECTION_STATE["status"] == "running":
         return {
@@ -2873,18 +2921,16 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
             "state": STATS_COLLECTION_STATE,
         }
     background_tasks.add_task(
-        _collect_youtube_stats, deep=deep, use_data_api=use_data_api
+        _collect_youtube_stats, deep=deep, force=force
     )
     return {
         "ok": True,
         "message": (
-            "Recoleccion de stats iniciada en modo scraping (sin cuota API)"
-            if not use_data_api
-            else "Recoleccion de stats iniciada para los canales activos"
+            "Recoleccion de stats iniciada (cada canal decide según la cuota de su cuenta)"
         ),
         "state": STATS_COLLECTION_STATE,
         "deep": deep,
-        "use_data_api": use_data_api,
+        "force": force,
     }
 
 
