@@ -666,9 +666,14 @@ def get_status_bar():
                 quota_info = db.get_quota_reset_time()
                 result["quota_exhausted"] = quota_info.get("exhausted", False)
                 result["quota_reset_hours"] = quota_info.get("remaining_hours")
+                # Estado POR PROYECTO (la cuota no es global): cada cuenta con
+                # su propio breaker, para que la StatusBar pinte por separado.
+                from api.services.quota_tracker import get_projects_status
+                result["quota_projects"] = get_projects_status(db)
             except Exception:
                 result["quota_exhausted"] = False
                 result["quota_reset_hours"] = None
+                result["quota_projects"] = []
             with lock:
                 _STATUS_BAR_CACHE["status"] = {"data": result, "ts": time_mod.time()}
             return result

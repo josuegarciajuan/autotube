@@ -319,13 +319,23 @@ def scheduler_resume():
 @router.get("/system/quota-status")
 def quota_status():
     """Estado actual de la cuota YouTube Data API v3.
-    
+
     Devuelve si la cuota está agotada y cuándo se recarga (medianoche PT).
     Ligero — solo lee system_state, sin llamadas a YouTube API.
+
+    La cuota es POR PROYECTO GCP: además del resumen global (legacy, para
+    compatibilidad), devuelve `projects` con el estado del breaker de cada
+    proyecto/cuenta, para que la UI pinte cada cuenta por separado.
     """
     from database.db_extended import ExtendedDatabase
     db = ExtendedDatabase()
-    return db.get_quota_reset_time()
+    result = db.get_quota_reset_time()
+    try:
+        from api.services.quota_tracker import get_projects_status
+        result["projects"] = get_projects_status(db)
+    except Exception:
+        result["projects"] = []
+    return result
 
 
 # ── Helpers ──────────────────────────────────────────────────────

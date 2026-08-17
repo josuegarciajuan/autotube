@@ -7,7 +7,17 @@ import StatusBar from './StatusBar'
 import { api } from '../../lib/api'
 import { useQuotaStatus } from '../../hooks/useQueries'
 
-const SHELL_BUILD_ID = 'quota-v2.6'
+interface ProjectQuotaStatus {
+  project_id: string
+  account: string
+  channels: string[]
+  exhausted: boolean
+  exhausted_at: string | null
+  reset_at_utc: string | null
+  remaining_hours: number | null
+}
+
+const SHELL_BUILD_ID = 'quota-v2.7'
 
 export default function Shell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -15,10 +25,25 @@ export default function Shell() {
   const [sessionLoading, setSessionLoading] = useState(true)
   const { data: quotaStatus } = useQuotaStatus()
 
-  const resetTimeDisplay = useMemo(() => {
-    if (!quotaStatus?.exhausted || !quotaStatus?.reset_at_utc) return null
-    const local = new Date(quotaStatus.reset_at_utc)
-    return local.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+  // Proyectos agotados (por cuenta — la cuota no es global)
+  const exhaustedProjects: ProjectQuotaStatus[] = useMemo(() => {
+    const list: ProjectQuotaStatus[] = Array.isArray((quotaStatus as any)?.projects)
+      ? (quotaStatus as any).projects.filter((p: ProjectQuotaStatus) => p.exhausted)
+      : []
+    if (list.length > 0) return list
+    // Fallback legacy: si solo llega el flag global
+    if (quotaStatus?.exhausted) {
+      return [{
+        project_id: '',
+        account: '',
+        channels: [],
+        exhausted: true,
+        exhausted_at: quotaStatus.exhausted_at ?? null,
+        reset_at_utc: quotaStatus.reset_at_utc ?? null,
+        remaining_hours: quotaStatus.remaining_hours ?? null,
+      }]
+    }
+    return []
   }, [quotaStatus])
 
   useEffect(() => {
@@ -80,28 +105,40 @@ export default function Shell() {
           </div>
         )}
 
-        {/* ── YouTube API quota warning banner ── */}
-        {quotaStatus?.exhausted && (
+        {/* ── YouTube API quota warning banner (por proyecto/cuenta) ── */}
+        {exhaustedProjects.length > 0 && (
           <div className="flex-shrink-0 bg-red-500/10 border-b border-red-500/25 px-4 py-2.5">
-            <div className="flex items-center gap-2.5 text-sm">
+            <div className="flex items-center gap-2.5 text-sm flex-wrap">
               <AlertTriangle size={16} className="text-red-400 flex-shrink-0" />
               <span className="text-red-300 font-medium">
                 Cuota YouTube API agotada
               </span>
-              {resetTimeDisplay && (
-                <span className="text-red-200/80 text-xs flex items-center gap-1">
-                  <Clock size={12} />
-                  Recarga a las {resetTimeDisplay}
-                  <span className="hidden">{SHELL_BUILD_ID}</span>
-                </span>
-              )}
-              {quotaStatus.remaining_hours != null && quotaStatus.remaining_hours > 0 && (
-                <span className="text-red-400/70 text-xs">
-                  (en ~{quotaStatus.remaining_hours.toFixed(1)}h)
-                </span>
-              )}
+              {exhaustedProjects.map(p => {
+                const label = p.account || p.project_id || 'cuenta'
+                const pReset = p.reset_at_utc
+                  ? new Date(p.reset_at_utc).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+                  : null
+                return (
+                  <span key={p.project_id || label} className="text-red-200/80 text-xs flex items-center gap-1.5">
+                    <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-red-200">{label}</code>
+                    {p.channels.length > 0 && (
+                      <span className="text-red-400/60">({p.channels.join(', ')})</span>
+                    )}
+                    {pReset && (
+                      <span className="flex items-center gap-1 text-red-300/80">
+                        <Clock size={11} />
+                        Recarga a las {pReset}
+                        <span className="hidden">{SHELL_BUILD_ID}</span>
+                      </span>
+                    )}
+                    {p.remaining_hours != null && p.remaining_hours > 0 && (
+                      <span className="text-red-400/70">(~{p.remaining_hours.toFixed(1)}h)</span>
+                    )}
+                  </span>
+                )
+              })}
               <span className="text-red-300/60 text-xs ml-auto">
-                No se harán publicaciones ni recolecciones hasta entonces
+                {exhaustedProjects.length < 2 ? 'Solo esta cuenta está bloqueada' : 'Solo estas cuentas están bloqueadas'} — el resto sigue operativo
               </span>
             </div>
           </div>

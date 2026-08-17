@@ -320,6 +320,154 @@ def get_project_usage(db=None, project_id: Optional[str] = None,
     return get_daily_usage(db=db, project_id=project_id, date=date)
 
 
+def get_projects_usage(db=None, date: Optional[str] = None) -> dict:
+    """Consumo del día-PT desglosado POR PROYECTO GCP (cuota real).
+
+    La cuota de YouTube Data API v3 es por proyecto GCP, no global. Este
+    helper agrupa el consumo de cada canal por proyecto (`get_channel_project`)
+    y etiqueta la cuenta Google asociada (`channels.google_account`), de modo
+    que el dashboard pueda mostrar barras independientes por cuenta/proyecto
+    en lugar de un único total global comparado contra un límite único.
+
+    Returns:
+        {
+            "date": "2026-08-17",
+            "projects": [
+                {
+                    "project_id": "youtube-uploads-automation",
+                    "account": "tracatrack",
+                    "channels": [{"slug": "canal2", "units": 6564}, ...],
+                    "total_units": 8217,
+                    "quota_limit": 10000,
+                    "remaining": 1783,
+                    "exhausted": False,
+                }, ...
+            ],
+            "grand_total_units": 13328,
+        }
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    if date is None:
+        date = quota_day_pacific()
+
+    from config.settings import get_project_budget_units
+
+    # Uso por canal del día (una sola consulta, ya filtra por día-PT).
+    usage = get_daily_usage(db=db, date=date)
+    by_channel = usage.get("by_channel", {})
+
+    # Proyectos conocidos a partir de los canales ACTIVOS (así un proyecto
+    # con consumo 0 hoy sigue apareciendo en la UI). El canal `test` (sin
+    # client_secret) resuelve a "unknown" y se omite salvo que consuma.
+    projects: dict[str, dict] = {}
+    try:
+        for ch in (db.get_channels(active_only=True) or []):
+            slug = ch.get("slug")
+            if not slug:
+                continue
+            proj = get_channel_project(slug)
+            if proj == "unknown":
+                continue
+            acc = ch.get("google_account") or ""
+            if proj not in projects:
+                budget = get_project_budget_units(proj)
+                projects[proj] = {
+                    "project_id": proj,
+                    "account": acc,
+                    "channels": [],
+                    "total_units": 0,
+                    "quota_limit": budget,
+                    "remaining": budget,
+                    "exhausted": False,
+                }
+            elif acc and not projects[proj]["account"]:
+                projects[proj]["account"] = acc
+    except Exception:
+        pass
+
+    # Sumar el consumo registrado por canal (puede incluir canales inactivos
+    # o sin mapear; el proyecto se crea sobre la marcha si hace falta).
+    for slug, units in by_channel.items():
+        proj = get_channel_project(slug)
+        if proj not in projects:
+            budget = get_project_budget_units(proj)
+            projects[proj] = {
+                "project_id": proj,
+                "account": "",
+                "channels": [],
+                "total_units": 0,
+                "quota_limit": budget,
+                "remaining": budget,
+                "exhausted": False,
+            }
+        p = projects[proj]
+        p["channels"].append({"slug": slug, "units": units})
+        p["total_units"] += units
+        p["remaining"] = max(p["quota_limit"] - p["total_units"], 0)
+
+    ordered = []
+    for proj in projects.values():
+        proj["exhausted"] = proj["remaining"] <= 0
+        proj["channels"].sort(key=lambda c: c["units"], reverse=True)
+        ordered.append(proj)
+    ordered.sort(key=lambda p: (not p["exhausted"], -p["total_units"]))
+
+    return {
+        "date": date,
+        "projects": ordered,
+        "grand_total_units": sum(p["total_units"] for p in ordered),
+        "by_operation": usage.get("by_operation", {}),
+    }
+
+
+def get_projects_status(db=None) -> list[dict]:
+    """Estado del circuit-breaker POR PROYECTO GCP (para UI global).
+
+    Enumerates the projects of all ACTIVE channels and reports the breaker
+    state of each one (quota_exhausted_{project_id}) — un proyecto agotado no
+    debe pintar como agotado el resto de cuentas.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        channels = []
+
+    result: list[dict] = []
+    seen: set[str] = set()
+    for ch in channels:
+        slug = ch.get("slug")
+        if not slug:
+            continue
+        proj = get_channel_project(slug)
+        if proj == "unknown" or proj in seen:
+            continue
+        seen.add(proj)
+        try:
+            info = db.get_quota_reset_time(project_id=proj)
+        except Exception:
+            info = {}
+        result.append({
+            "project_id": proj,
+            "account": ch.get("google_account") or "",
+            "channels": [
+                c.get("slug") for c in channels
+                if c.get("slug") and get_channel_project(c.get("slug")) == proj
+            ],
+            "exhausted": bool(info.get("exhausted", False)),
+            "exhausted_at": info.get("exhausted_at"),
+            "reset_at_utc": info.get("reset_at_utc"),
+            "remaining_hours": info.get("remaining_hours"),
+        })
+    return result
+
+
 def get_recent_quota_log(limit: int = 50, channel_slug: Optional[str] = None) -> list[dict]:
     """Get recent quota log entries for debugging."""
     db = None

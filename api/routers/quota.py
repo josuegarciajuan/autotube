@@ -42,3 +42,18 @@ async def get_channel_quota_summary():
         "by_operation": usage["by_operation"],
         "exhausted_estimated_at": usage["exhausted_estimated_at"],
     }
+
+
+@router.get("/projects")
+async def get_projects_quota(
+    date: str | None = Query(None, description="Date in YYYY-MM-DD format (default: today)"),
+):
+    """Consumo de cuota YouTube del día desglosado POR PROYECTO GCP.
+
+    La cuota de la Data API v3 es por proyecto (varios canales lo comparten),
+    así que este endpoint agrupa el consumo por proyecto/cuenta — NO global.
+    Cada proyecto lleva su propio límite real (get_project_budget_units),
+    canales, total, restante y estado de agotamiento.
+    """
+    from api.services.quota_tracker import get_projects_usage
+    return get_projects_usage(date=date)
