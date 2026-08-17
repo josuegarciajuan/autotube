@@ -23,8 +23,10 @@ sys.path.insert(0, "/root/autotube")
 
 API = "http://localhost:8000"
 DB_PATH = "/root/autotube/autotube.db"
-POLL_SEC = 30
-MAX_ATTEMPTS = 40  # per reassembly job (~40 * 30s = 20 min cap)
+POLL_SEC = 60
+# A reassembly re-renders 100-170 scenes (40-90 min), so the poll cap must
+# be much larger than the old 20 min. 120 * 60s = 2h ceiling per job.
+MAX_ATTEMPTS = 120
 
 
 def db():
