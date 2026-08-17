@@ -8,6 +8,8 @@ config/client_secret*.json
 
 # Backups locales (nunca en git)
 *.bak
+# Backups de la base de datos (se dejaron de trackear)
+autotube.db.backup*
 
 # Output
 output/*
