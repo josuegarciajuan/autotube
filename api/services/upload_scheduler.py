@@ -244,20 +244,22 @@ def _recover_stuck_uploading_videos(db) -> int:
             # These were generated successfully but the upload dispatch failed
             # (ghost worker, manual cleanup, concurrency guard, etc). Without
             # recovery they sit in 'ready' forever with no planned_slot.
+            # v27 (Aug 2026): also match jobs with action='generate_and_upload'
+            # that failed AFTER generation (video generated, upload phase died).
             stuck_ready = conn.execute(
                 """SELECT v.id, v.channel_id
                    FROM videos v
                    JOIN (
                        SELECT video_id, MAX(id) as max_job_id
                        FROM generation_jobs
-                       WHERE action = 'upload_only'
+                       WHERE action IN ('upload_only', 'generate_and_upload')
                        GROUP BY video_id
                    ) j_latest ON j_latest.video_id = v.id
                    JOIN generation_jobs j ON j.id = j_latest.max_job_id
                    WHERE v.status = 'ready'
                      AND j.status = 'failed'
                      AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
-                """
+                 """
             ).fetchall()
 
             for row in stuck_ready:

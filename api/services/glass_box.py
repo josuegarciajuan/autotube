@@ -53,12 +53,21 @@ def glass_box_recover_orphaned_videos(db=None, dry_run: bool = False) -> dict:
 
     with db._connect() as conn:
         # Find all candidate videos
+        # v27 (Aug 2026): also cover awaiting_upload videos whose upload retries are
+        # exhausted (COUNT(failed upload_only) >= MAX_UPLOAD_RETRY_PER_VIDEO=10).
+        # Without this they sit in awaiting_upload forever: the dispatch query
+        # excludes them (retry cap), _recover_stuck_uploading_videos only touches
+        # 'uploading'/'ready', and the old query only scanned 'error'.
         candidates = conn.execute(
             """SELECT v.id, v.channel_id, v.status, v.video_path, v.progress,
                       v.progress_phase, v.generation_finished_at, v.error_message,
                       c.slug, c.name
                FROM videos v JOIN channels c ON c.id = v.channel_id
-               WHERE v.status = 'error'
+               WHERE (v.status = 'error'
+                   OR (v.status = 'awaiting_upload' AND (
+                        SELECT COUNT(*) FROM generation_jobs gj
+                        WHERE gj.video_id = v.id AND gj.action = 'upload_only'
+                          AND gj.status = 'failed') >= 10))
                  AND v.video_path IS NOT NULL AND v.video_path != ''
                ORDER BY v.created_at DESC""",
         ).fetchall()
