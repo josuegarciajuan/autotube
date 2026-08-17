@@ -48,10 +48,13 @@ def test_concat_filter_has_exact_duration_without_overlap_or_padding():
 def test_body_sync_gate_allows_tolerance_and_rejects_larger_mismatch():
     editor = VideoEditor({"SCENE_SYNC_TOLERANCE_SEC": 0.15})
 
+    # Trailing TTS silence (audio slightly longer than video) is benign.
     editor._assert_body_timeline_sync(10.0, 10.14)
+    editor._assert_body_timeline_sync(10.0, 10.5)
 
-    with pytest.raises(RuntimeError, match="Body video/audio mismatch"):
-        editor._assert_body_timeline_sync(10.0, 10.15)
+    # Missing narration (audio ends before the body) is a real bug → fail.
+    with pytest.raises(RuntimeError, match="Body narration is shorter"):
+        editor._assert_body_timeline_sync(10.3, 10.0)
 
 
 def test_actual_image_fallback_is_resplit_and_gets_distinct_media_requests():

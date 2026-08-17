@@ -351,13 +351,12 @@ class VideoEditor:
                 raise RuntimeError("No block ranges computed — cannot build video.")
             self.logger.info("Step 1/6: %d blocks with time ranges computed", len(block_ranges))
 
-        # Timestamps can differ slightly from the encoded audio duration.  Keep
-        # the planned timeline intact except for its final endpoint, which must
-        # cover the real narration rather than leave an unplanned tail.
-        if audio_path and block_ranges:
-            actual_audio_duration = self._get_voice_duration(Path(audio_path))
-            if actual_audio_duration > 0:
-                self._align_last_scene_to_audio(block_ranges, actual_audio_duration)
+        # NOTE: the last scene is intentionally NOT extended to the raw audio
+        # duration. Kokoro leaves trailing silence after the last word, and
+        # stretching the last visual to cover it would freeze the final frame
+        # for 2-5s of dead air. Instead the trailing audio is trimmed to the
+        # rendered body at mux time (see the ``with_duration`` trim before
+        # ``audio_parts.append``), keeping narration aligned with the visuals.
 
         # ── Heartbeat emitter (covers Steps 2-6: segment rendering through final mux) ──
         # Starts BEFORE the heavy segment rendering to prevent orphan detection
@@ -1056,6 +1055,15 @@ class VideoEditor:
         else:
             body_audio = body_narration
 
+        # ── Align narration to the rendered body ──────────────────
+        # Kokoro (and other TTS engines) leave trailing silence after the last
+        # word. Trim the body audio (narration + music) to the body video so
+        # the visual and narration clocks coincide and the CTA/outro voices
+        # stay aligned with their visuals. Missing narration (audio shorter
+        # than video) is caught earlier by _assert_body_timeline_sync.
+        body_vid_dur = self._dur(body_video)
+        body_audio = body_audio.with_duration(body_vid_dur)
+
         audio_parts.append(body_audio)
         # CTA voice (if loaded) or silence matching cta_dur
         if cta_audio_clip is not None:
@@ -1135,6 +1143,7 @@ class VideoEditor:
                         '-c:v', 'copy',
                         '-c:a', 'aac', '-b:a', '192k',
                         '-map', '0:v:0', '-map', '1:a:0',
+                        '-shortest',
                         '-movflags', '+faststart',
                         str(_fix_path),
                     ]
@@ -1481,14 +1490,27 @@ class VideoEditor:
         return duration > 0 and abs(duration - planned_duration) < tolerance
 
     def _assert_body_timeline_sync(self, video_duration: float, audio_duration: float) -> None:
-        """Fail rather than publish a body whose visual and narration clocks diverge."""
+        """Fail only on a genuinely broken body sync.
+
+        Only two divergences are possible:
+
+        * ``audio < video`` — the narration ends before the visual body. This
+          means words are missing (TTS dropped a block) → real bug, fail hard.
+        * ``audio > video`` — the TTS encoder left trailing silence beyond the
+          last word. Benign: the trailing audio is trimmed to the body at mux
+          time (see the ``with_duration`` trim before ``audio_parts.append``).
+        """
         tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
-        mismatch = abs(video_duration - audio_duration)
-        if mismatch >= tolerance:
+        if audio_duration < video_duration - tolerance:
             raise RuntimeError(
-                "Body video/audio mismatch: "
-                f"video={video_duration:.3f}s audio={audio_duration:.3f}s gap={mismatch:.3f}s "
-                f"(tolerance={tolerance:.3f}s)"
+                "Body narration is shorter than the video body: "
+                f"video={video_duration:.3f}s audio={audio_duration:.3f}s "
+                f"gap={video_duration - audio_duration:.3f}s (tolerance={tolerance:.3f}s)"
+            )
+        if audio_duration > video_duration + tolerance:
+            self.logger.warning(
+                "Body narration has %.3fs of trailing audio beyond the video body — will trim at mux",
+                audio_duration - video_duration,
             )
 
     def _create_block_clip(self, block_range: dict, asset: dict,
