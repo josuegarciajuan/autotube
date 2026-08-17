@@ -6685,6 +6685,43 @@ class ExtendedDatabase(Database):
         except Exception:
             return set()
 
+    def get_error_video_media_paths(self, max_age_hours: int = 48) -> set:
+        """Collect media asset paths referenced by recent error-state videos.
+
+        Used by the preflight cleanup to avoid deleting clips (output/video_clips)
+        that a failed video will still need if it is reassembled. Without this,
+        a video that failed assembly has no running/queued job (thus no
+        media_file_locks), so the next worker's preflight deletes its clips and
+        the reassembly aborts on the placeholder-ratio gate.
+        """
+        import json as _json
+        paths: set = set()
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT id, checkpoint_data
+                       FROM videos
+                       WHERE status = 'error'
+                         AND created_at > datetime('now', ?)
+                       ORDER BY id DESC
+                       LIMIT 100""",
+                    (f'-{max_age_hours} hours',),
+                ).fetchall()
+            for row in rows:
+                cp_raw = row["checkpoint_data"] or "{}"
+                try:
+                    cp = _json.loads(cp_raw) if isinstance(cp_raw, str) else (cp_raw or {})
+                except (ValueError, TypeError):
+                    continue
+                media = cp.get("media") or {}
+                for a in media.get("assets", []) or []:
+                    p = a.get("path")
+                    if p:
+                        paths.add(str(p))
+        except Exception:
+            pass
+        return paths
+
     def cleanup_stale_locks(self) -> int:
         """Delete locks for jobs that have finished (completed/failed/cancelled).
         Returns number of locks cleaned."""

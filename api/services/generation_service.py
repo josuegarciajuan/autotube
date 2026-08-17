@@ -2196,15 +2196,33 @@ async def start_upload_job(job_id: int, video_id: int):
 
         monitor_task = asyncio.create_task(_upload_monitor())
 
+        # ── Scheduled publishing target (publishAt support) ──
+        # Fix: reassembly must respect publish_mode. The previous direct
+        # uploader.upload() bypassed scheduled publishing → the video was
+        # uploaded as 'unlisted' with no publishAt and never went public
+        # (caused the permanent publish_not_detected alert #1575).
+        # orch.phase_upload() recalculates a stale target_public_at and forces
+        # private + publishAt for scheduled channels, mirroring the full worker.
+        target_public_at = v.get("target_public_at")
+
         def _do_upload():
-            return orch.uploader.upload(
-                video_path=Path(v["video_path"]),
-                title=v.get("titulo_final", "Video sin titulo"),
-                description=v.get("description", ""),
-                tags=tags,
-                thumbnail_path=Path(v["thumbnail_path"]) if v.get("thumbnail_path") else None,
-                privacy=v.get("privacy_status", "public"),
-                progress_callback=_upload_progress_cb,
+            video_data = {
+                "video_path": v.get("video_path", ""),
+                "titulo": v.get("titulo_final", "Video sin titulo"),
+                "thumbnail_path": v.get("thumbnail_path", ""),
+            }
+            metadata = {
+                "selected_title": v.get("titulo_final", "Video sin titulo"),
+                "description": v.get("description", ""),
+                "tags": tags,
+            }
+            return orch.phase_upload(
+                script=None,
+                video_data=video_data,
+                metadata=metadata,
+                job_id=job_id,
+                planned_public_at=target_public_at,
+                skip_lifecycle_scheduling=True,
             )
         
         ok, result = await _run_in_executor(_do_upload, timeout=PHASE_TIMEOUTS["upload"])
@@ -2219,12 +2237,13 @@ async def start_upload_job(job_id: int, video_id: int):
                                        detail="La subida fallo. Revisa los logs.")
             return
         
-        video_yt_id = result.get("video_id")
+        video_yt_id = result  # phase_upload returns the YouTube video id (str) or None
         if video_yt_id:
-            url = result.get("url", f"https://youtube.com/watch?v={video_yt_id}")
+            url = f"https://youtube.com/watch?v={video_yt_id}"
             pub_mode = get_channel_config(canal).PUBLISH_MODE
             upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
             db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
+            db.update_video(video_id, progress=100)
             # ── Save upload timing ───────────────────────────
             try:
                 _upload_ms = int((time.time() - upload_start) * 1000)
@@ -2756,6 +2775,29 @@ async def _do_reassembly(job_id: int, video_id: int):
         if not assets:
             await _broadcast_progress(job_id, 0, "error",
                                        "No hay assets en el checkpoint", "failed")
+            return
+
+        # ── Drop missing media files ─────────────────────────────
+        # The preflight cleanup (full_pipeline_worker._preflight_cleanup /
+        # orchestrator.run_full_pipeline) may have deleted a video's clips
+        # while it was in 'error' state. Rendering a missing path produces a
+        # placeholder segment, and >30% placeholders aborts the whole video
+        # (video_editor placeholder gate). Re-download is not possible here
+        # (the checkpoint stores path + source, no URL), so we drop missing
+        # assets and let the editor's fallback-image pool cover those scenes.
+        _assets_before = len(assets)
+        assets = [a for a in assets
+                  if a.get("path") and Path(a["path"]).exists()]
+        _assets_missing = _assets_before - len(assets)
+        if _assets_missing:
+            logger.warning(
+                "Reassembly: %d/%d assets missing on disk — dropping them "
+                "(editor will substitute fallback images)",
+                _assets_missing, _assets_before,
+            )
+        if not assets:
+            await _broadcast_progress(job_id, 0, "error",
+                                       "No hay assets válidos en disco", "failed")
             return
 
         # Channel config / slug — resolve from video's channel_id
