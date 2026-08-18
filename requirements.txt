@@ -21,3 +21,4 @@ cryptography
 playwright
 playwright-stealth
 yt-dlp<2026
+opencv-contrib-python-headless==4.13.0.92

@@ -86,6 +86,7 @@ class PollinationsProvider:
         width: int = 1280,
         height: int = 720,
         cache_dir: Optional[str] = None,
+        upscale_min: Optional[tuple[int, int]] = None,
     ) -> None:
         self.model = model
         self.width = width
@@ -93,6 +94,12 @@ class PollinationsProvider:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Resolución mínima objetivo (w, h). Si la imagen devuelta por la API
+        # es menor, se upscalea localmente (ESPCN_x2) antes de cachear.
+        self.upscale_min: Optional[tuple[int, int]] = None
+        if upscale_min and len(upscale_min) == 2:
+            self.upscale_min = (int(upscale_min[0]), int(upscale_min[1]))
+        self._upscaler = None  # lazy singleton
 
     # ── Properties ──────────────────────────────────────────
 
@@ -134,6 +141,9 @@ class PollinationsProvider:
         # Check cache first (by prompt hash)
         cached = self._check_cache(prompt)
         if cached:
+            # Aplica upscale a cache hits antiguos (generados antes de
+            # activarse el upscaling) para que también cumplan el mínimo.
+            self._maybe_upscale(cached)
             logger.info("Pollinations cache hit: %s", prompt[:60])
             return cached
 
@@ -157,6 +167,10 @@ class PollinationsProvider:
                 output_path, file_size_kb, elapsed,
             )
 
+            # Upscale local ANTES de cachear → el caché guarda la versión
+            # de mayor resolución y los futuros hits no repiten trabajo.
+            self._maybe_upscale(output_path)
+
             # Save to cache
             self._save_cache(prompt, output_path)
             return output_path
@@ -172,6 +186,7 @@ class PollinationsProvider:
                     resp = requests.get(self._build_url(prompt, w, h, seed), timeout=REQUEST_TIMEOUT)
                     resp.raise_for_status()
                     output_path.write_bytes(resp.content)
+                    self._maybe_upscale(output_path)
                     self._save_cache(prompt, output_path)
                     logger.info("Pollinations retry succeeded after rate-limit cooldown")
                     return output_path
@@ -213,6 +228,27 @@ class PollinationsProvider:
         if not self.cache_dir:
             return None
         return self.cache_dir / f"pollinations_{self._cache_key(prompt)}.jpg"
+
+    def _maybe_upscale(self, image_path: Path) -> None:
+        """Upscale *image_path* a la resolución mínima configurada (si procede).
+
+        No-op si no hay resolución mínima configurada, si el upscaler no
+        está disponible o si la imagen ya cumple el mínimo. Nunca lanza:
+        degrada silenciosamente al comportamiento original.
+        """
+        if not self.upscale_min or not image_path or not Path(image_path).exists():
+            return
+        try:
+            if self._upscaler is None:
+                from pipeline.ai_upscaler import AIImageUpscaler
+                self._upscaler = AIImageUpscaler.get_instance()
+            self._upscaler.upscale_to_min(
+                Path(image_path),
+                self.upscale_min[0],
+                self.upscale_min[1],
+            )
+        except Exception as exc:
+            logger.debug("Pollinations upscale skipped (%s): %s", image_path, exc)
 
     def _check_cache(self, prompt: str) -> Optional[Path]:
         """Return cached image path if it exists, else None."""
