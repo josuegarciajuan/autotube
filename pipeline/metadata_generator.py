@@ -573,19 +573,13 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 title = self._fallback_titles(script)[0]
             
             # Extract title suffix if present (LLM may or may not include it in title)
-            title_suffix = result.get("title_suffix", "").strip().upper()
-            if title_suffix:
-                # Remove suffix symbols the LLM might wrap it in
-                title_suffix = title_suffix.strip("()（）[]")
-                # If title doesn't already end with the suffix, append it
-                suffix_formatted = f" ({title_suffix})"
-                if not title.rstrip().endswith(suffix_formatted):
-                    title = title.rstrip() + suffix_formatted
+            title = _append_title_suffix(title, result.get("title_suffix", ""))
+            title_suffix_norm = _normalize_title_suffix(result.get("title_suffix", ""))
             
             # Ensure title ≤ 100 chars (trim suffix if needed)
             if len(title) > 100:
                 # Try to fit by trimming suffix first, then title
-                suffix_formatted = f" ({title_suffix})" if title_suffix else ""
+                suffix_formatted = f" ({title_suffix_norm})" if title_suffix_norm else ""
                 max_title_body = 100 - len(suffix_formatted)
                 title = title[:max_title_body].rstrip() + suffix_formatted
                 title = title[:100]  # final safety
@@ -901,3 +895,24 @@ Mantén MISMA longitud. NO uses las mismas power words."""
         if any(w in t for w in ["nadie", "nunca", "jamás", "imposible"]):
             return "curiosity_gap"
         return "statement"
+
+
+def _normalize_title_suffix(raw_suffix: str) -> str:
+    """Normaliza el campo title_suffix del LLM a una palabra limpia en mayúsculas."""
+    return (raw_suffix or "").strip().upper().strip("()（）[]")
+
+
+def _append_title_suffix(title: str, raw_suffix: str) -> str:
+    """Añade el sufijo parentético normalizado al título, sin duplicar.
+
+    La comparación es case-insensitive para que un sufijo ya presente en el
+    título (p.ej. "(Impactante)") no desencadene un segundo paréntesis
+    "(IMPACTANTE)" cuando el LLM rellena también el campo title_suffix.
+    """
+    suffix = _normalize_title_suffix(raw_suffix)
+    if not suffix:
+        return title
+    suffix_formatted = f" ({suffix})"
+    if title.rstrip().lower().endswith(suffix_formatted.lower()):
+        return title
+    return title.rstrip() + suffix_formatted
