@@ -551,6 +551,40 @@ class VideoEditor:
                             fallback_pool=_available,
                         )
                 if result_path is None:
+                    # ── On-demand re-fetch before degrading to placeholder ──
+                    # Covers the dedup exhaustion case (e.g. Pollo AI returned
+                    # identical images for different prompts and every scene
+                    # after the first is rejected): query the live providers
+                    # for a fresh, unused image for THIS scene's search query.
+                    if self._on_demand_fetcher is not None:
+                        scene_query = br.get("search_query_en", "") or br.get("texto", "")[:80]
+                        try:
+                            od_path = self._on_demand_fetcher(scene_query, br["duration"])
+                        except Exception as _od_exc:
+                            od_path = None
+                            self.logger.debug("On-demand re-fetch failed scene %d: %s", i, _od_exc)
+                        if od_path:
+                            od_path_str = str(od_path)
+                            if od_path_str not in self._used_asset_paths:
+                                od_asset = {"type": "image", "path": od_path_str}
+                                od_out = seg_dir / f"scene_{i:04d}_od.mp4"
+                                try:
+                                    result_path = self._render_scene_segment(
+                                        br, od_asset, str(od_out), clip_idx=i,
+                                        fallback_pool=[],
+                                    )
+                                except Exception as _od_render_exc:
+                                    result_path = None
+                                    self.logger.debug(
+                                        "On-demand render failed scene %d: %s", i, _od_render_exc,
+                                    )
+                                if result_path:
+                                    self._used_asset_paths.add(od_path_str)
+                                    self.logger.info(
+                                        "  Scene %d recovered via on-demand re-fetch: %s",
+                                        i, Path(od_path_str).name,
+                                    )
+                if result_path is None:
                     self.logger.warning(
                         "  Scene %d [%s]: ULTIMATE FALLBACK — using gradient placeholder",
                         i + 1, br.get("tipo", "?"),
@@ -949,7 +983,9 @@ class VideoEditor:
                     )
                 seg_dur = min(seg_dur, available)
                 if seg_dur > 0.01:
-                    body_narr_parts.append(tts_audio.subclipped(pos, pos + seg_dur))
+                    body_narr_parts.append(
+                        self._safe_subclip_to_duration(tts_audio, pos, seg_dur, tts_duration)
+                    )
                     pos += seg_dur
 
         # ── Append any remaining TTS audio not covered by block_ranges ──
@@ -959,7 +995,9 @@ class VideoEditor:
                 "TTS audio has %.1fs leftover not covered by block_ranges — appending to body narration",
                 leftover,
             )
-            body_narr_parts.append(tts_audio.subclipped(pos, pos + leftover))
+            body_narr_parts.append(
+                self._safe_subclip_to_duration(tts_audio, pos, leftover, tts_duration)
+            )
             pos += leftover
 
         body_narration = concatenate_audioclips(body_narr_parts)
@@ -2152,6 +2190,42 @@ class VideoEditor:
         """Get clip duration, compatible with MoviePy v1 (property) and v2 (method)."""
         d = clip.duration
         return d() if callable(d) else d
+
+    @staticmethod
+    def _safe_subclip_to_duration(clip, start: float, length: float, clip_duration: float):
+        """Subclip ``clip[start:start+length]`` clamped to the clip's real duration.
+
+        MoviePy v2 raises ``ValueError: end_time (X) should be smaller or equal to the
+        clip's duration (X)`` when ``start + length`` exceeds the clip's real duration
+        by a floating-point epsilon (e.g. ``pos + (tts_duration - pos)`` where the
+        addition rounds up by 1e-6, or the caller's ``clip_duration`` being a hair
+        larger than MoviePy's own duration for the file).  We clamp ``end`` against
+        the clip's ACTUAL duration (preferring MoviePy's own ``clip.duration`` and
+        falling back to the caller-provided ``clip_duration``), and when the end
+        would land exactly on the clip end we let MoviePy take the clip to its
+        natural end (single-arg ``subclipped``) so no epsilon can escape.
+        """
+        try:
+            d = clip.duration
+            real_duration = d() if callable(d) else float(d)
+        except Exception:
+            real_duration = clip_duration
+        if not real_duration or real_duration <= 0:
+            real_duration = clip_duration
+
+        end = start + length
+        if end >= real_duration - 1e-9:
+            # Reaching the tail: subclip to the clip's own end (no explicit end).
+            try:
+                return clip.subclipped(start)
+            except TypeError:
+                # MoviePy v1 API: subclip(t_start, t_end) requires both args.
+                return clip.subclip(start, real_duration)
+        try:
+            return clip.subclipped(start, min(end, real_duration))
+        except TypeError:
+            # MoviePy v1 API: subclip(t_start, t_end) requires both args.
+            return clip.subclip(start, min(end, real_duration))
 
     def _build_audio(
         self,
