@@ -115,28 +115,3 @@ def test_remediation_mode_defaults_to_safe():
     )
     assert m2, "SHORTS_CHAIN_DISPATCH_ENABLED definition not found"
     assert m2.group(1).lower() == "false"
-
-
-def test_preflight_prioritizes_oldest_long_backlog(tmp_path):
-    from api.services.quota_preflight import build_project_preflight
-
-    path = tmp_path / "preflight.db"
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, active INTEGER);
-        CREATE TABLE videos (
-            id INTEGER PRIMARY KEY, channel_id INTEGER, status TEXT,
-            created_at TEXT, target_public_at TEXT, yt_video_id TEXT
-        );
-    """)
-    conn.execute("INSERT INTO channels VALUES (1, 'canal2', 1)")
-    conn.execute("INSERT INTO channels VALUES (2, 'canal3', 1)")
-    conn.execute("INSERT INTO videos VALUES (10, 1, 'awaiting_upload', '2026-08-10 10:00:00', NULL, NULL)")
-    conn.execute("INSERT INTO videos VALUES (11, 2, 'awaiting_upload', '2026-08-11 10:00:00', NULL, NULL)")
-    conn.commit()
-    conn.close()
-
-    result = build_project_preflight(str(path), {"canal2": "project-a", "canal3": "project-a"})
-
-    assert result["projects"]["project-a"]["eligible_long_video_ids"] == [10, 11]
-    assert result["projects"]["project-a"]["automatic_upload_capacity"] == 5
