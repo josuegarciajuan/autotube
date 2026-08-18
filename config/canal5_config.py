@@ -315,7 +315,6 @@ SEO_HASHTAGS = [
     "#MedicinaMisteriosa", "#CienciaMedica",
 ]
 
-SHORTS_PER_DAY = 2
 SHORTS_HASHTAGS = [
     "#AnomaliasMedicas", "#EnfermedadesRaras", "#Shorts", "#SabiasQue",
     "#AprendeEnYouTube", "#Medicina", "#CuerpoHumano", "#Curiosidades",
@@ -504,6 +503,8 @@ MARATHON_HOOK_TYPES = [
     "conocimiento_exclusivo",
 ]
 
+# DEPRECATED: no se lee en runtime (el query builder usa
+# PLAYLISTS_GENERATED/keywords_en). Se conserva como referencia.
 VIRAL_PLAYLIST_KEYWORDS = {
     "casos-completos": ["mysterious medical conditions documentary", "patients who baffled every doctor", "undiagnosed diseases full documentary", "medical mystery diagnosis explained"],
     "lo-mas-increible": ["most bizarre medical cases ever", "unbelievable medical anomalies", "top rarest diseases in the world", "shocking medical mysteries compilation"],

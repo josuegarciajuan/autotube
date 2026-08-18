@@ -563,7 +563,6 @@ SEO_HASHTAGS = [
 # SHORTS — channel-specific
 # ═══════════════════════════════════════════════════════════════════
 
-SHORTS_PER_DAY = 3
 SHORTS_HASHTAGS = [
     "#Sincronías", "#MilagrosReales", "#SabíasQue", "#Shorts",
     "#Curiosidades", "#Destino", "#Misterio", "#Casualidades",
@@ -770,6 +769,8 @@ PLAYLISTS = [
 
 # ═══════════════════════════════════════════════════════════════════
 # VIRAL PLAYLIST KEYWORDS (English mirror)
+# DEPRECATED: no se lee en runtime (el query builder usa
+# PLAYLISTS_GENERATED/keywords_en). Se conserva como referencia.
 # ═══════════════════════════════════════════════════════════════════
 
 VIRAL_PLAYLIST_KEYWORDS = {

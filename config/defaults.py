@@ -312,7 +312,6 @@ MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS = 3
 # ═══════════════════════════════════════════════════════════════════
 
 SHORTS_ENABLED = True
-SHORTS_PER_DAY = 3
 SHORTS_MAX_CLIPS_PER_VIDEO = 5
 SHORTS_CLIP_SCHEDULE = [
     {"offset_days": 1, "count": 1},
@@ -421,6 +420,8 @@ MARATHON_SCRIPT_WORDS_MAX = 12000
 MARATHON_SCRIPT_BLOCKS_MIN = 50
 MARATHON_SCRIPT_BLOCKS_MAX = 90
 MARATHON_OUTLINE_CHAPTERS = 15
+# DEPRECATED: no se lee en runtime (el % de vídeo del marathon se define en
+# full_pipeline_worker). Se conserva para no romper configs serializados.
 MARATHON_MEDIA_VIDEO_PCT = 20
 MARATHON_LLM_MAX_BATCHES = 150
 MARATHON_LLM_MAX_EMPTY_STRIKES = 20
@@ -429,6 +430,11 @@ MARATHON_PUBLISH_MODE = "scheduled"
 # Mín backlog por canal (awaiting_upload + uploaded_private) para disparar marathon.
 # Umbral total = MARATHON_BACKLOG_PER_CHANNEL × canales_activos.
 MARATHON_BACKLOG_PER_CHANNEL = 4
+
+# Cooldown entre marathons del MISMO canal (horas). Un canal recién maratoneado
+# no vuelve a ser elegible hasta que pasen estas horas. Se lee del config_json
+# del canal (MARATHON_COOLDOWN_HOURS) con fallback a este default.
+MARATHON_COOLDOWN_HOURS = 24
 
 # ── MARATHON TITLE STRATEGY ──
 
