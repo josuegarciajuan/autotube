@@ -117,10 +117,21 @@ class DynamicSlotAdjuster:
         )
         awaiting = self._count_awaiting(slug)
         backlog_boost = getattr(cfg, 'DYNAMIC_VPD_BACKLOG_BOOST', 4)
-        account = self._get_google_account(slug)
-        sibling_slugs = self._get_sibling_channels(account)
-        account_total = self._sum_vpd_for_slugs(sibling_slugs)
-        account_max = getattr(cfg, 'DYNAMIC_VPD_SHARED_ACCOUNT_MAX', 6)
+        # ── Quota-aware (ago 2026): el tope compartido se deriva del presupuesto
+        # real del PROYECTO GCP (get_project_max_daily_uploads), no de una
+        # heurística por google_account, y cubre longs + shorts nativos.
+        from api.services.quota_tracker import get_project_max_daily_uploads
+        project = self._get_project(slug)
+        sibling_slugs = self._get_sibling_channels_by_project(project)
+        account_total = self._sum_daily_uploads_for_slugs(sibling_slugs)
+        account_max = get_project_max_daily_uploads(project)
+        if account_max <= 0:
+            # Fallback legacy: heurística por cuenta (solo si no se puede
+            # resolver el proyecto o el presupuesto no está configurado).
+            account = self._get_google_account(slug)
+            sibling_slugs = self._get_sibling_channels(account)
+            account_total = self._sum_vpd_for_slugs(sibling_slugs)
+            account_max = getattr(cfg, 'DYNAMIC_VPD_SHARED_ACCOUNT_MAX', 6)
         published_count = self._count_published(slug)
         new_boost = 1 if published_count < getattr(cfg, 'DYNAMIC_VPD_NEW_CHANNEL_THRESHOLD', 30) else 0
         catchup = self._get_catchup_boost(slug, cfg)
@@ -243,6 +254,44 @@ class DynamicSlotAdjuster:
         except Exception:
             return []
     
+    def _get_project(self, slug: str) -> str:
+        """Proyecto GCP del canal (autoritativo vía client_secret)."""
+        try:
+            from api.services.quota_tracker import get_channel_project
+            return get_channel_project(slug)
+        except Exception:
+            return "unknown"
+    
+    def _get_sibling_channels_by_project(self, project: str) -> list:
+        """Canales activos del mismo proyecto GCP (comparten presupuesto real)."""
+        if not project or project == "unknown":
+            return []
+        try:
+            from api.services.quota_tracker import get_channel_project
+            rows = self.db.get_channels(active_only=True) or []
+            return [
+                ch.get("slug") for ch in rows
+                if ch.get("slug") and get_channel_project(ch.get("slug")) == project
+            ]
+        except Exception:
+            return []
+    
+    def _sum_daily_uploads_for_slugs(self, slugs: list) -> int:
+        """Suma de subidas/día de los canales: vpd (long) + shorts nativos."""
+        total = 0
+        for s in slugs:
+            total += self._get_current_vpd(s)
+            try:
+                ch = self.db.get_channel_by_slug(s)
+                ch_id = ch["id"] if ch else None
+                if ch_id:
+                    sc = self.db.get_shorts_planning_config(channel_id=ch_id)
+                    if sc and sc[0].get("shorts_enabled", True):
+                        total += int(sc[0].get("shorts_native_per_day", 3) or 3)
+            except Exception:
+                pass
+        return total
+    
     def _get_current_vpd(self, slug: str) -> int:
         try:
             with self.db._connect() as conn:
@@ -356,6 +405,226 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     if roll < boost_weight:
         return base + 1
     return base
+
+
+# ── Quota-aware planning (ago 2026) ────────────────────────────
+# Cada subida (long o short) consume UPLOAD_UNITS (1.600 ud) de videos.insert.
+# El presupuesto automático de un proyecto GCP se deriva en runtime de
+# get_project_automatic_budget_units(project) — NUNCA hardcodear subidas/día.
+UPLOAD_UNITS = 1600
+
+
+def _count_running_upload_slots_for_project(db, project_id: str, date_str: str) -> int:
+    """Slots 'running' (long+short) de hoy para un proyecto (aún sin reservar).
+
+    Representan subidas comprometidas en curso; restarlas de la capacidad evita
+    sobre-planificar cuando ya hay trabajo de hoy en marcha.
+    """
+    from api.services.quota_tracker import get_channel_project
+    ch_ids: list[int] = []
+    try:
+        for ch in (db.get_channels(active_only=False) or []):
+            s = ch.get("slug")
+            if s and get_channel_project(s) == project_id and ch.get("id"):
+                ch_ids.append(int(ch["id"]))
+    except Exception:
+        return 0
+    if not ch_ids:
+        return 0
+    count = 0
+    try:
+        ph = ",".join("?" for _ in ch_ids)
+        with db._connect() as conn:
+            row = conn.execute(
+                f"""SELECT COUNT(*) AS total FROM planned_slots
+                    WHERE status = 'running' AND date_key = ?
+                      AND channel_id IN ({ph})""",
+                (date_str, *ch_ids),
+            ).fetchone()
+            count += int(row["total"] or 0) if row else 0
+            row2 = conn.execute(
+                f"""SELECT COUNT(*) AS total FROM shorts_planned_slots
+                    WHERE status = 'running' AND date_key = ?
+                      AND channel_id IN ({ph})""",
+                (date_str, *ch_ids),
+            ).fetchone()
+            count += int(row2["total"] or 0) if row2 else 0
+    except Exception:
+        pass
+    return count
+
+
+def compute_daily_upload_allocation(db, date_str: str) -> dict:
+    """Cupo diario de subidas por canal y proyecto (quota-aware).
+
+    Política (long-form primero):
+      1. Longs de todos los canales del proyecto (round-robin).
+      2. Clips — consecuencia garantizada de los longs (clips_per_long × longs).
+         Se RESERVA presupuesto (no crea slots) para que los clips ad-hoc de
+         runtime no agoten el cupo del proyecto por sorpresa.
+      3. Shorts nativos (round-robin) con el cupo sobrante.
+
+    Para hoy, la capacidad se reduce con las subidas ya reservadas/consumidas
+    (yt_quota_reservations + yt_quota_log vía get_project_remaining_upload_slots)
+    y con los slots 'running' de hoy (subirán sin haber reservado aún).
+
+    Args:
+        db: ExtendedDatabase.
+        date_str: día de publicación (YYYY-MM-DD, hora local Europe/Madrid).
+
+    Returns:
+        {project_id: {"max_uploads": int,
+                      "channels": {slug: {"long": int, "native": int, "clips_est": int}}}}
+    """
+    from api.services.quota_tracker import (
+        get_channel_project,
+        get_project_max_daily_uploads,
+        get_project_remaining_upload_slots,
+        quota_day_pacific,
+    )
+
+    today_local = date.today().isoformat()
+    today_pt = quota_day_pacific()
+
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return {}
+
+    # Config de shorts por canal (misma fuente que compute_daily_shorts_slots)
+    shorts_cfg = {}
+    try:
+        for sc in (db.get_shorts_planning_config() or []):
+            shorts_cfg[sc["channel_id"]] = sc
+    except Exception:
+        pass
+
+    by_project: dict[str, list[dict]] = {}
+    for ch in channels:
+        slug = ch.get("slug")
+        if not slug or slug == "test" or not ch.get("id"):
+            continue
+        ch_id = int(ch["id"])
+        # Canal pausado por el breaker → no consume cupo
+        try:
+            if _channel_paused_for_planning(db, ch_id):
+                continue
+        except Exception:
+            pass
+        proj = get_channel_project(slug)
+        if proj == "unknown":
+            continue
+        cfg = {}
+        try:
+            cfg = db.get_channel_planning_config(ch_id)
+        except Exception:
+            pass
+        desired_long = 0
+        if cfg.get("planning_enabled", True):
+            try:
+                desired_long = _resolve_videos_per_day(cfg, date_str)
+            except Exception:
+                desired_long = 0
+        sc = shorts_cfg.get(ch_id, {})
+        shorts_on = sc.get("shorts_enabled", True)
+        desired_native = int(sc.get("shorts_native_per_day", 3) or 3) if shorts_on else 0
+        clips_per_long = int(sc.get("shorts_clips_per_long", 3) or 3)
+        by_project.setdefault(proj, []).append({
+            "slug": slug,
+            "channel_id": ch_id,
+            "long": max(int(desired_long), 0),
+            "native": max(int(desired_native), 0),
+            "clips_per_long": max(int(clips_per_long), 0),
+        })
+
+    result: dict[str, dict] = {}
+    for proj, chans in by_project.items():
+        # ── Capacidad del día ──
+        if date_str == today_local:
+            capacity = get_project_remaining_upload_slots(proj, date=today_pt, db=db)
+            try:
+                capacity = max(capacity - _count_running_upload_slots_for_project(
+                    db, proj, date_str), 0)
+            except Exception:
+                pass
+        else:
+            capacity = get_project_max_daily_uploads(proj)
+
+        chans_sorted = sorted(chans, key=lambda c: c["channel_id"])
+        for c in chans_sorted:
+            c["long_cap"] = 0
+            c["native_cap"] = 0
+            c["clips_est"] = 0
+
+        remaining = max(int(capacity), 0)
+
+        # ── 1. Longs (round-robin) ──
+        while remaining > 0:
+            progressed = False
+            for c in chans_sorted:
+                if c["long_cap"] < c["long"]:
+                    c["long_cap"] += 1
+                    remaining -= 1
+                    progressed = True
+                    if remaining <= 0:
+                        break
+            if not progressed:
+                break
+
+        # ── 2. Clips: reservar presupuesto (no crea slots) ──
+        for c in chans_sorted:
+            c["clips_est"] = c["clips_per_long"] * c["long_cap"]
+        clip_total = sum(c["clips_est"] for c in chans_sorted)
+        remaining -= min(clip_total, remaining)
+
+        # ── 3. Shorts nativos (round-robin) con el sobrante ──
+        while remaining > 0:
+            progressed = False
+            for c in chans_sorted:
+                if c["native_cap"] < c["native"]:
+                    c["native_cap"] += 1
+                    remaining -= 1
+                    progressed = True
+                    if remaining <= 0:
+                        break
+            if not progressed:
+                break
+
+        result[proj] = {
+            "max_uploads": max(int(capacity), 0),
+            "channels": {
+                c["slug"]: {
+                    "long": c["long_cap"],
+                    "native": c["native_cap"],
+                    "clips_est": c["clips_est"],
+                }
+                for c in chans_sorted
+            },
+        }
+    return result
+
+
+def _resolve_long_cap(alloc: dict, slug: str, default_n: int) -> int:
+    """Cap de longs para un canal según la asignación quota-aware."""
+    try:
+        for proj, data in alloc.items():
+            if slug in data.get("channels", {}):
+                return min(default_n, int(data["channels"][slug].get("long", default_n)))
+    except Exception:
+        pass
+    return default_n
+
+
+def _resolve_native_cap(alloc: dict, slug: str, default_n: int) -> int:
+    """Cap de shorts nativos para un canal según la asignación quota-aware."""
+    try:
+        for proj, data in alloc.items():
+            if slug in data.get("channels", {}):
+                return min(default_n, int(data["channels"][slug].get("native", default_n)))
+    except Exception:
+        pass
+    return default_n
+
 
 # ── Source mode alternation ─────────────────────────────────
 
@@ -625,6 +894,7 @@ def _distribute_slots(
 def compute_daily_slots(
     date_str: str,
     channel_configs: list[dict],
+    db=None,
 ) -> list[dict]:
     """Core planning algorithm: compute upload slots for all channels.
 
@@ -635,22 +905,33 @@ def compute_daily_slots(
     Collision resolution operates on scheduled_at (only one gen at a time).
     After resolving, target_upload_at is recalculated forward.
 
+    Quota-aware (ago 2026): si `db` se provee, el nº de slots por canal se
+    limita al cupo del proyecto GCP (compute_daily_upload_allocation) y los
+    slots scheduled se agrupan en batches de subida por cuenta.
+
     Args:
         date_str: ISO date string (YYYY-MM-DD).
         channel_configs: list of dicts with {channel_id, slug, videos_per_day,
                           planning_enabled, name}.
-
-    Returns:
-        Sorted list of slot dicts with keys: channel_id, date_key, scheduled_at,
-        target_upload_at, slot_position.
+        db: ExtendedDatabase (opcional). Sin db no se aplica cap de cuota.
     """
     day_seed = _day_seed(date_str)
     all_slots = []
+
+    # ── Quota-aware: cupo por proyecto para la fecha ──
+    alloc = {}
+    if db is not None:
+        try:
+            alloc = compute_daily_upload_allocation(db, date_str)
+        except Exception as exc:
+            logger.debug("compute_daily_slots: allocation skipped (%s)", exc)
     
     for ch in channel_configs:
         if not ch.get("planning_enabled", True):
             continue
         n = _resolve_videos_per_day(ch, date_str)
+        if db is not None:
+            n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
         if n <= 0:
             continue
 
@@ -699,6 +980,7 @@ def compute_daily_slots(
                 "source_mode": slot_mode,
                 "publish_mode": ch.get("publish_mode", "immediate"),
                 "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
+                "publish_warmup_min": warmup_min,
                 "upload_window_start": ch.get("upload_window_start", 9),
                 "upload_window_end": ch.get("upload_window_end", 11),
             })
@@ -793,6 +1075,15 @@ def compute_daily_slots(
     for pos, s in enumerate(resolved, 1):
         s["slot_position"] = pos
     
+    # ── Quota-aware: agrupar subidas long-form por cuenta (batches) ──
+    # Antes de convertir target_public_at a UTC (la comparación con las horas
+    # de batch se hace en hora local naive).
+    if db is not None:
+        try:
+            _apply_upload_batching(resolved, db)
+        except Exception as exc:
+            logger.debug("compute_daily_slots: upload batching skipped (%s)", exc)
+    
     # ── Convert target_public_at from naive local → ISO8601 UTC ──
     for s in resolved:
         if s.get("target_public_at") and s.get("publish_mode") == "scheduled":
@@ -802,6 +1093,140 @@ def compute_daily_slots(
             s["target_public_at"] = None
     
     return resolved
+
+
+# ── Upload batching por cuenta (6a, ago 2026) ─────────────────
+# Los videos long-form (fase F2) de los canales que comparten cuenta Google se
+# suben agrupados en UPLOAD_BATCH_TIMES (mañana/tarde) para dar sensación de
+# subida manual. Solo afecta a slots `publish_mode="scheduled"` (los shorts y
+# los inmediatos no se agrupan). Respeta upload + warmup <= publicación; si un
+# video no cabe en ningún batch del día, se sube en el último batch del día
+# anterior (se conserva la fecha de subida en target_upload_at).
+
+def _slot_batch_times(slot: dict, db) -> list[tuple[int, int]]:
+    """Batches configurados para el canal del slot (override por config_json)."""
+    from config.settings import UPLOAD_BATCH_TIMES as _DEFAULT_BATCHES
+    try:
+        ch = db.get_channel(slot.get("channel_id"))
+        if ch:
+            import json as _json
+            cfg = _json.loads(ch.get("config_json") or "{}")
+            raw = cfg.get("UPLOAD_BATCH_TIMES")
+            if raw:
+                from config.settings import _parse_batch_times
+                parsed = _parse_batch_times(",".join(str(x) for x in raw)
+                                            if isinstance(raw, (list, tuple))
+                                            else str(raw))
+                if parsed:
+                    return parsed
+    except Exception:
+        pass
+    return list(_DEFAULT_BATCHES)
+
+
+def _slot_latest_allowed_upload(slot: dict) -> str:
+    """Último instante permitido para subir: publish − warmup (naive local)."""
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        tpa = slot.get("target_public_at") or slot.get("target_upload_at")
+        if not tpa:
+            return None
+        s = str(tpa).replace("T", " ")[:19]
+        dt = _dt.strptime(s, "%Y-%m-%d %H:%M:%S")
+        warmup = int(slot.get("publish_warmup_min", 120) or 120)
+        return (dt - _td(minutes=warmup)).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_upload_batching(slots: list[dict], db) -> None:
+    """Reasigna target_upload_at de slots long-form scheduled a batches por cuenta.
+
+    Modifica `slots` in-place. Determinista: mismo (cuenta, día, slots) → mismo
+    resultado. Los slots se ordenan por target_public_at y cada uno se asigna al
+    ÚLTIMO batch cuya hora cumpla upload + warmup <= publish; si ninguno cabe,
+    se usa el último batch del día anterior. Después se equilibran los batches
+    (si todos cayeron en el mismo, se reparte la mitad al batch más temprano,
+    que siempre es seguro porque subir antes solo aumenta el warmup).
+    """
+    from config.settings import _parse_batch_times
+
+    # Agrupar por (google_account, date_key)
+    groups: dict[tuple, list[dict]] = {}
+    for s in slots:
+        if s.get("publish_mode") != "scheduled":
+            continue
+        acc = ""
+        try:
+            ch = db.get_channel(s.get("channel_id"))
+            if ch:
+                acc = ch.get("google_account") or ""
+        except Exception:
+            pass
+        if not acc:
+            from api.services.quota_tracker import get_channel_project
+            acc = get_channel_project(s.get("channel_slug", "")) or "unknown"
+        key = (acc, s.get("date_key"))
+        groups.setdefault(key, []).append(s)
+
+    for (acc, day_key), group in groups.items():
+        batches = _slot_batch_times(group[0], db)
+        if not batches:
+            continue
+        # Ordenar por publicación para asignar batches de forma estable
+        group.sort(key=lambda s: str(s.get("target_public_at") or s.get("target_upload_at") or ""))
+
+        assigned: list[tuple[dict, str]] = []  # (slot, "YYYY-MM-DD HH:MM:SS" local)
+        for s in group:
+            latest = _slot_latest_allowed_upload(s)
+            chosen = None
+            if latest is not None:
+                # Último batch (hora) del mismo día que cumpla la restricción
+                for (bh, bm) in reversed(batches):
+                    cand = f"{day_key} {bh:02d}:{bm:02d}:00"
+                    if cand <= latest:
+                        chosen = cand
+                        break
+            if chosen is None:
+                # Ningún batch de hoy cabe → último batch del día anterior
+                from datetime import date as _d, timedelta as _td2
+                prev = (_d.fromisoformat(day_key) - _td2(days=1)).isoformat()
+                bh, bm = batches[-1]
+                chosen = f"{prev} {bh:02d}:{bm:02d}:00"
+            assigned.append((s, chosen))
+
+        # Equilibrar: si todos los slots cayeron en el mismo batch y hay >= 2,
+        # mover la mitad al batch más temprano (subir antes siempre es seguro).
+        from collections import Counter
+        batch_minutes = Counter(a[1][11:16] for a in assigned)
+        if len(batch_minutes) == 1 and len(assigned) >= 2 and len(batches) >= 2:
+            early_b = batches[0]
+            early_min = early_b[0] * 60 + early_b[1]
+            target = f"{day_key} {early_b[0]:02d}:{early_b[1]:02d}:00"
+            half = len(assigned) // 2
+            for i in range(half):
+                s, _chosen = assigned[i]
+                # solo si el batch temprano cumple la restricción del slot
+                latest = _slot_latest_allowed_upload(s)
+                if latest is not None and target > latest:
+                    continue
+                assigned[i] = (s, target)
+
+        # Aplicar: hora de batch + jitter humano determinista (2-5 min)
+        for i, (s, batch_ts) in enumerate(assigned):
+            jitter = 2 + (int(hashlib.md5(
+                f"{day_key}|{acc}|{i}|batch".encode()).hexdigest()[:8], 16) % 4)
+            from datetime import datetime as _dtb, timedelta as _tdb
+            try:
+                bdt = _dtb.strptime(batch_ts, "%Y-%m-%d %H:%M:%S") + _tdb(minutes=jitter)
+                s["target_upload_at"] = bdt.strftime("%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                s["target_upload_at"] = batch_ts
+            logger.info(
+                "[%s] %s: subida batch %s → %s (jitter +%d min)",
+                s.get("channel_slug", "?"), day_key,
+                batch_ts[11:16], s["target_upload_at"][11:16], jitter,
+            )
 
 
 # ── 3-Phase Horizon Planning (v9) ──────────────────────────────
@@ -916,11 +1341,21 @@ def compute_horizon_slots(
     for day_offset in range(horizon_days):
         d = today + _td(days=day_offset)
         date_str = d.isoformat()
-        
+
+        # ── Quota-aware (ago 2026): cupo por proyecto para la fecha ──
+        alloc = {}
+        if db is not None:
+            try:
+                alloc = compute_daily_upload_allocation(db, date_str)
+            except Exception as exc:
+                logger.debug("compute_horizon_slots: allocation skipped (%s)", exc)
+
         for ch in channel_configs:
             if not ch.get("planning_enabled", True):
                 continue
             n = _resolve_videos_per_day(ch, date_str)
+            if db is not None:
+                n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
             if n <= 0:
                 continue
             
@@ -995,6 +1430,7 @@ def compute_horizon_slots(
                     "source_mode": mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original",
                     "publish_mode": ch.get("publish_mode", "immediate"),
                     "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
+                    "publish_warmup_min": int(ch.get("publish_warmup_min", 120) or 120),
                     "lead_hours": ch.get("generation_lead_hours", 36),
                     "avg_duration_min": ch.get("avg_duration_min", ESTIMATED_PIPELINE_MINUTES),
                     "upload_window_start": ws_start,
@@ -1003,6 +1439,15 @@ def compute_horizon_slots(
     
     if not all_raw_slots:
         return []
+    
+    # ── 1b. Quota-aware: agrupar subidas long-form por cuenta (batches) ──
+    # Antes de ordenar/encadenar scheduled_at (el chaining depende de la hora
+    # de subida). Las comparaciones de batch se hacen en hora local naive.
+    if db is not None:
+        try:
+            _apply_upload_batching(all_raw_slots, db)
+        except Exception as exc:
+            logger.debug("compute_horizon_slots: upload batching skipped (%s)", exc)
     
     # ── 2. Sort all slots by target_upload_at ───────────────────
     all_raw_slots.sort(key=lambda s: s["target_upload_at"])
@@ -1333,7 +1778,7 @@ def compute_and_store_slots(
         conn.commit()
     
     # Compute slots
-    slots = compute_daily_slots(date_str, channel_configs)
+    slots = compute_daily_slots(date_str, channel_configs, db=db)
 
     # ── v24 (Aug 2026): Topic-level dedup ──
     # Prevent creating multiple slots for the same topic by checking
@@ -1658,11 +2103,20 @@ def sync_midday(db=None) -> dict:
     # Get current channel configs
     channels = db.get_channels(active_only=True)
     result = {"date": today, "added": 0, "cancelled": 0, "replanned_channels": []}
+
+    # ── Quota-aware (ago 2026): cupo por proyecto para hoy ──
+    alloc = {}
+    try:
+        alloc = compute_daily_upload_allocation(db, today)
+    except Exception:
+        pass
     
     for ch in channels:
         cfg = db.get_channel_planning_config(ch["id"])
         ch_id = ch["id"]
         target = _resolve_videos_per_day(cfg, today) if cfg.get("planning_enabled", True) else 0
+        # Cap de cuota: nunca planificar más longs de los que el proyecto admite
+        target = _resolve_long_cap(alloc, ch.get("slug", ""), target)
         
         # Current slots for this channel today
         ch_slots = [s for s in existing if s["channel_id"] == ch_id]
@@ -1727,7 +2181,7 @@ def sync_midday(db=None) -> dict:
                 "seo_primary_keyword": cfg.get("seo_primary_keyword", ""),
                 "seo_secondary_keywords": cfg.get("seo_secondary_keywords", []),
                 "viral_per_day": cfg.get("viral_per_day", 0),
-            }])
+            }], db=db)
             
             # Filter: only take slots NOT already covered by existing non-cancelled slots
             new_slots = []
@@ -1818,7 +2272,7 @@ def preview_week(overrides: dict = None, db=None) -> dict:
     for offset in range(7):
         d = today + timedelta(days=offset)
         date_str = d.isoformat()
-        slots = compute_daily_slots(date_str, channel_configs)
+        slots = compute_daily_slots(date_str, channel_configs, db=db)
         
         days.append({
             "date": date_str,
@@ -1836,6 +2290,102 @@ def preview_week(overrides: dict = None, db=None) -> dict:
         })
     
     return {"days": days, "overrides_applied": bool(overrides)}
+
+
+# ── Smart replanning (v2) ─────────────────────────────────────
+
+def _cancel_excess_pending_by_quota(db) -> int:
+    """Cancelar slots pendientes de HOY que excedan el cupo del proyecto.
+
+    Cuando el cupo se reduce (subidas ya reservadas/consumidas durante el día),
+    los slots pendientes sobrantes nunca podrían subirse sin saltar el breaker.
+    Política de cancelación: shorts nativos primero (prioridad baja), luego
+    longs de los canales con más slots pendientes. Nunca toca running/completed.
+
+    Returns: nº de slots cancelados.
+    """
+    today = date.today().isoformat()
+    try:
+        alloc = compute_daily_upload_allocation(db, today)
+    except Exception:
+        return 0
+    if not alloc:
+        return 0
+
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return 0
+    slug_to_ch = {ch.get("slug"): ch for ch in channels if ch.get("slug")}
+
+    cancelled = 0
+    for proj, data in alloc.items():
+        capacity = int(data.get("max_uploads", 0))
+        ch_ids = []
+        for slug in data.get("channels", {}).keys():
+            ch = slug_to_ch.get(slug)
+            if ch and ch.get("id"):
+                ch_ids.append(int(ch["id"]))
+        if not ch_ids:
+            continue
+        ph = ",".join("?" for _ in ch_ids)
+        try:
+            with db._connect() as conn:
+                long_pending = conn.execute(
+                    f"""SELECT id FROM planned_slots
+                        WHERE status = 'pending' AND date_key = ?
+                          AND channel_id IN ({ph})
+                        ORDER BY scheduled_at ASC""",
+                    (today, *ch_ids),
+                ).fetchall()
+                short_pending = conn.execute(
+                    f"""SELECT id FROM shorts_planned_slots
+                        WHERE status = 'pending' AND date_key = ?
+                          AND channel_id IN ({ph})
+                        ORDER BY scheduled_at ASC""",
+                    (today, *ch_ids),
+                ).fetchall()
+        except Exception:
+            continue
+        total_pending = len(long_pending) + len(short_pending)
+        excess = total_pending - capacity
+        if excess <= 0:
+            continue
+
+        shorts_to_cancel = [r["id"] for r in short_pending[:excess]]
+        longs_to_cancel = []
+        if len(shorts_to_cancel) < excess:
+            longs_to_cancel = [
+                r["id"] for r in long_pending[: excess - len(shorts_to_cancel)]
+            ]
+
+        if shorts_to_cancel:
+            try:
+                with db._connect() as conn:
+                    ph2 = ",".join("?" for _ in shorts_to_cancel)
+                    conn.execute(
+                        f"""UPDATE shorts_planned_slots SET status = 'cancelled'
+                            WHERE id IN ({ph2})""",
+                        shorts_to_cancel,
+                    )
+                    conn.commit()
+                cancelled += len(shorts_to_cancel)
+            except Exception:
+                pass
+        if longs_to_cancel:
+            try:
+                with db._connect() as conn:
+                    ph3 = ",".join("?" for _ in longs_to_cancel)
+                    conn.execute(
+                        f"""UPDATE planned_slots SET status = 'cancelled'
+                            WHERE id IN ({ph3})""",
+                        longs_to_cancel,
+                    )
+                    conn.commit()
+                cancelled += len(longs_to_cancel)
+            except Exception:
+                pass
+    return cancelled
 
 
 # ── Smart replanning (v2) ─────────────────────────────────────
@@ -1881,6 +2431,21 @@ def smart_replan(db=None) -> dict:
             "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
         ).fetchone()
         total_pending = row["cnt"] if row else 0
+    
+    # ── 0a-bis. Quota-aware (ago 2026): cancelar pendientes que excedan el
+    # cupo diario del proyecto (shorts primero, luego longs). Evita que una
+    # reducción del cupo (reservas del día) deje slots que el dispatcher
+    # bloquearía → sin slots huérfanos ni breaker por exceso de planificación.
+    try:
+        quota_cancelled = _cancel_excess_pending_by_quota(db)
+        if quota_cancelled > 0:
+            cancelled_total += quota_cancelled
+            logger.info(
+                "Smart replan: cancelled %d pending slots beyond project quota (today)",
+                quota_cancelled,
+            )
+    except Exception as exc:
+        logger.debug("Smart replan: quota-cap cancellation skipped (%s)", exc)
     
     # ── 0a. Auto-replan if pipeline is running dry ──
     if total_pending < MIN_PENDING_SLOTS:
@@ -2452,11 +3017,17 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
                 logger.debug("[%s] Dispatch collision guard skipped: %s", slug, guard_exc)
         
         with db._connect() as conn:
+            # ── Quota-aware (ago 2026): propagar la hora de subida planificada
+            # (batch por cuenta) → scheduled_upload_at para que upload_scheduler
+            # suba en el batch y no recalcule un momento aleatorio.
+            planned_upload_at = next_slot.get("target_upload_at")
+            if is_scheduled and planned_upload_at:
+                planned_upload_at = str(planned_upload_at).replace("T", " ")[:19]
             cursor = conn.execute(
                 "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
-                "publish_mode, target_public_at, created_at) "
-                "VALUES (?, ?, '', 'generating', 0, ?, ?, CURRENT_TIMESTAMP)",
-                (slug, channel_id, publish_mode, target_public_at),
+                "publish_mode, target_public_at, scheduled_upload_at, created_at) "
+                "VALUES (?, ?, '', 'generating', 0, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (slug, channel_id, publish_mode, target_public_at, planned_upload_at),
             )
             conn.commit()
             video_id = cursor.lastrowid
@@ -3426,7 +3997,8 @@ def _safe_replan_proposed_slots(db, horizon_days: int) -> list[dict]:
     proposed = []
     today = date.today()
     for offset in range(horizon_days):
-        proposed.extend(compute_daily_slots((today + timedelta(days=offset)).isoformat(), configs))
+        proposed.extend(compute_daily_slots(
+            (today + timedelta(days=offset)).isoformat(), configs, db=db))
     return proposed
 
 
