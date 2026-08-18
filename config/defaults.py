@@ -157,6 +157,22 @@ KEN_BURNS_ZOOM_MIN = 4
 KEN_BURNS_ZOOM_MAX = 12
 
 # ═══════════════════════════════════════════════════════════════════
+# AI IMAGE UPSCALING (shared across all channels)
+# ═══════════════════════════════════════════════════════════════════
+
+# Pollinations (flux) devuelve imágenes a su resolución nativa 1024×576
+# aunque se pida 1920×1080. Para evitar el aspecto borroso al escalarlas
+# en el render, se upscalean localmente (ESPCN_x2 de OpenCV dnn_superres)
+# hasta la resolución mínima objetivo.
+AI_UPSCALE_ENABLED = True
+AI_UPSCALE_MIN_WIDTH = 1920
+AI_UPSCALE_MIN_HEIGHT = 1080
+# Fuente del modelo ESPCN_x2 (~86 KB, descargado una sola vez a output/models/)
+AI_UPSCALE_MODEL_URL = (
+    "https://raw.githubusercontent.com/fannymonori/TF-ESPCN/master/export/ESPCN_x2.pb"
+)
+
+# ═══════════════════════════════════════════════════════════════════
 # SUBTITLE STYLE (shared across all channels)
 # ═══════════════════════════════════════════════════════════════════
 

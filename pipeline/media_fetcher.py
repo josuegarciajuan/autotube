@@ -198,11 +198,23 @@ class MediaFetcher:
         # Build AI provider chain from config (always available — no auth needed)
         ai_cache_dir = str(settings.OUTPUT_DIR / "ai_cache" / "pollinations")
         try:
+            # ── Upscale local post-generación (ESPCN_x2) ──────────
+            # Pollinations devuelve 1024×576 aunque se pida 1920×1080; al
+            # escalar en el render se ve borroso. Subimos a la resolución
+            # mínima objetivo del canal (config AI_UPSCALE_*).
+            if getattr(self._config, "AI_UPSCALE_ENABLED", True):
+                upscale_min = (
+                    getattr(self._config, "AI_UPSCALE_MIN_WIDTH", 1920),
+                    getattr(self._config, "AI_UPSCALE_MIN_HEIGHT", 1080),
+                )
+            else:
+                upscale_min = None
             self._pollinations = PollinationsProvider(
                 model=self._media_strategy.get("ai_pollinations_model") or "flux",
                 width=1920,
                 height=1080,
                 cache_dir=ai_cache_dir,
+                upscale_min=upscale_min,
             )
             logger.info("AI image provider registered: pollinations (free, no-auth)")
         except Exception as exc:
