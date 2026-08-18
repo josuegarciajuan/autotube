@@ -271,7 +271,8 @@ def run_video_render(
         try:
             from database.db_extended import ExtendedDatabase
             ExtendedDatabase().update_video(video_id, progress=60,
-                                             progress_phase="video_failed")
+                                             progress_phase="video_failed",
+                                             error_message=str(exc)[:2000])
         except Exception as _db_exc:
             logger.error("Failed to write failure status to DB: %s", _db_exc)
 
@@ -305,5 +306,16 @@ def run_video_render(
                 result_queue.put(json.dumps(result, ensure_ascii=False))
             except Exception as _q_exc:
                 logger.error("Failed to put result on Queue: %s", _q_exc)
+
+    if not result["success"]:
+        # ── Signal failure with a non-zero exit code ──────────────
+        # The parent's success branch (exit_code == 0) assumed exit 0 == render
+        # OK and reported "Subprocess exited 0 but no video_path in DB" while
+        # the REAL error (e.g. "Placeholder ratio 46%...") was only in the
+        # Queue / DB. Exiting non-zero routes the parent to its failure branch,
+        # which now reads the real error from the Queue / video.error_message.
+        # (The result was already put on the Queue in the finally block, so the
+        # parent still receives the structured error.)
+        sys.exit(1)
 
     return json.dumps(result, ensure_ascii=False)
