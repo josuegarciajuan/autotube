@@ -1052,20 +1052,41 @@ async def _run_video_in_subprocess(
 
     # ── 4b. Read Queue result (IPC, more reliable) ──────────────
     _queue_result = None
+    _queue_err = None
     try:
         _queue_result = result_queue.get_nowait()
-    except Exception:
-        pass
-    if _queue_result:
-        try:
+        if _queue_result:
             _qr = _json.loads(_queue_result)
             if _qr.get("success") and _qr.get("video_path"):
                 logger.info("Got video_path from Queue: %s", _qr["video_path"])
-        except Exception:
-            pass
+            elif _qr.get("error"):
+                _queue_err = _qr["error"]
+                logger.warning("Render subprocess reported error via Queue: %s",
+                               _queue_err[:300])
+    except Exception:
+        pass
 
     # ── 5. Collect result ──────────────────────────────────────
     exit_code = p.exitcode if p.exitcode is not None else -1
+
+    def _real_render_error() -> str:
+        """Surface the REAL render error instead of a generic message.
+
+        Priority: worker's Queue error → video.error_message (written by
+        run_video_render on failure) → generic fallback.
+        """
+        if _queue_err:
+            return f"Render falló: {_queue_err}"
+        try:
+            v = db.get_video(video_id)
+            if v:
+                if v.get("error_message"):
+                    return f"Render falló: {v['error_message']}"
+                if v.get("progress_phase") == "video_failed":
+                    return "Render falló (subprocess terminó en estado video_failed)"
+        except Exception:
+            pass
+        return "Subprocess exited OK but no output file found"
 
     if exit_code == 0:
         # Read result from DB as primary source (survives parent restart).
@@ -1093,8 +1114,12 @@ async def _run_video_in_subprocess(
                     "titulo": _titulo,
                 }
             else:
-                logger.error("Subprocess exited 0 but no video_path in DB")
-                return False, "Subprocess exited OK but no output file found"
+                # exit 0 with no output = worker caught an exception but the
+                # parent previously masked it as "no video_path". Report the
+                # real error (Queue / error_message) now.
+                real_err = _real_render_error()
+                logger.error("Render subprocess exited 0 but render actually failed: %s", real_err)
+                return False, real_err
         except Exception as db_exc:
             logger.exception("Failed to read subprocess result from DB: %s", db_exc)
             return False, f"Render subprocess exited OK but DB read failed: {db_exc}"
@@ -1104,7 +1129,7 @@ async def _run_video_in_subprocess(
         try:
             v = db.get_video(video_id)
             if v and v.get("progress_phase") == "video_failed":
-                error_msg = f"Render subprocess failed (exit={exit_code})"
+                error_msg = _real_render_error()
         except Exception:
             pass
 
@@ -2669,13 +2694,25 @@ async def _run_reassembly_job(job_id: int, video_id: int):
     Broadcasts progress via WebSocket so the frontend global progress bar
     stays live.
     """
+    db_guard = _get_db()
+
+    # ── Mark job as running FIRST so the guard counts it ──────────
+    # Idempotent: the API endpoints (videos.py) already set 'running' before
+    # calling; the queue consumer passes a 'queued' job. Marking here first
+    # normalizes both paths.
+    db_guard.update_job(job_id, status="running")
+
     # ── Global concurrency guard: strictly ONE generation at a time ──
     # Prevents reassembly + normal generation from running simultaneously,
     # which causes ffmpeg resource contention and OOM crashes.
-    # Phase pipelining disabled — all jobs run sequentially.
-    # count=1 = only self = ok; count=2 = another job is active = blocked.
-    db_guard = _get_db()
-    active_count = db_guard.count_active_longform_jobs()
+    # Uses count_running_longform_jobs() (RUNNING only, self included):
+    #   count=1 → only self → ok
+    #   count>1 → another job is actually running → blocked
+    # The old count_active_longform_jobs() ALSO counted 'queued' jobs, so a
+    # batch of freshly-created queued recovery jobs blocked each other
+    # (self-blocking: "Global concurrency guard: 8 active job(s)"). Only
+    # RUNNING jobs consume ffmpeg/RAM, so queued jobs must not count.
+    active_count = db_guard.count_running_longform_jobs()
     if active_count > 1:
         logger.warning(
             "Reassembly job %d blocked: %d active job(s) running globally",
@@ -2687,12 +2724,14 @@ async def _run_reassembly_job(job_id: int, video_id: int):
             "failed", video_id,
             detail="Solo se permite una generacion simultanea para evitar conflictos de recursos",
         )
-        db_guard.update_job(job_id, status="failed",
-                            error_msg=f"Global concurrency guard: {active_count} active job(s)")
+        # Requeue (NOT fail): the queue consumer retries once the running
+        # generation finishes. Reset the video to 'error' so the dashboard
+        # doesn't show it as active while nothing processes it — the startup
+        # recovery or a manual reassemble can pick it up again.
+        db_guard.update_job(job_id, status="queued",
+                            error_msg=f"Deferred by concurrency guard: {active_count} job(s) running")
+        db_guard.update_video(video_id, status="error")
         return
-
-    # ── Mark job as running so guards count it and queue consumer skips it ──
-    db_guard.update_job(job_id, status="running")
 
     # ── Pre-flight: kill lingering ffmpegs from prior failed attempts ──
     _kill_orphaned_ffmpeg()
@@ -3280,7 +3319,6 @@ async def auto_recover_on_startup():
     unrecoverable = 0
     marathon_reset = 0  # marathon videos reset to draft (no checkpoint, fresh start)
     processed_ids: set[int] = set()  # guard against re-processing the same video
-    _pending_recoveries: list[tuple[int, int]] = []  # (job_id, video_id) — deferred dispatch
 
     for row in rows:
         video_id = row["id"]
@@ -3405,12 +3443,15 @@ async def auto_recover_on_startup():
             job_id = cursor.lastrowid
             log.info("Video %d: AUTO-RECOVERING → job %d (phase was '%s')",
                      video_id, job_id, progress_phase)
-            # Collect for deferred dispatch — launching reassembly jobs
-            # immediately while startup writes are still happening causes
-            # SQLite lock contention (observed in production: server restart
-            # storm + concurrent startup writes + worker writes = DB locked).
-            # We defer dispatch until after all startup operations settle.
-            _pending_recoveries.append((job_id, video_id))
+            # The job stays 'queued' — the global _queue_consumer picks it up
+            # one-at-a-time (serialized + RAM gate) once startup settles and no
+            # other generation is running. No manual dispatch here: launching
+            # tasks immediately competes with the API's own startup writes for
+            # the SQLite lock, and the old deferred-dispatch guard
+            # (count_active_jobs > 1) counted the freshly-created queued jobs
+            # against themselves → self-blocking ("Deferred by concurrency
+            # guard") with no retry cycle. Relying on _queue_consumer is the
+            # canonical path (it already dispatches action='reassemble').
             recovered += 1
         except Exception as exc:
             log.warning("Video %d: recovery dispatch failed — %s", video_id, exc)
@@ -3418,37 +3459,7 @@ async def auto_recover_on_startup():
 
     log.info("Startup recovery complete: %d bug(s) skipped, %d dispatched, %d unrecoverable, %d marathon(s) reset to draft",
              bugs_skipped, recovered, unrecoverable, marathon_reset)
-
-    # ── Deferred dispatch: launch recovery tasks AFTER all startup writes settle ──
-    # Workers launched immediately during startup recovery cause SQLite lock
-    # contention because they compete with the API server's own startup writes
-    # (slot planning, config sync, orphan cleanup). By sleeping a few seconds
-    # before dispatching, we give the API time to finish its DB-heavy startup.
-    if _pending_recoveries:
-        # Small delay to let startup writes flush
-        await asyncio.sleep(3)
-        for job_id, video_id in _pending_recoveries:
-            try:
-                # ── Global concurrency guard: don't launch recovery if another
-                # generation (e.g. a subprocess worker that survived the restart)
-                # is already running.
-                active_now = db.count_active_jobs()
-                if active_now > 1:
-                    log.warning(
-                        "Recovery job %d deferred: %d active job(s) — will retry next cycle",
-                        job_id, active_now,
-                    )
-                    db.update_job(job_id, status="queued",
-                                  error_msg="Deferred by concurrency guard")
-                    # Reset video to 'error' so dashboard doesn't falsely show
-                    # it as generating when nothing is actually processing it.
-                    db.update_video(video_id, status="error")
-                    continue
-                asyncio.create_task(_run_reassembly_job(job_id, video_id))
-            except Exception as dispatch_exc:
-                log.warning("Deferred recovery dispatch failed for job %d: %s", job_id, dispatch_exc)
-        log.info("Deferred dispatch: %d recovery job(s) launched after startup settle",
-                 len(_pending_recoveries))
+    conn.close()
 
 
 # ── Subprocess-based generation (survives API restarts) ──────────

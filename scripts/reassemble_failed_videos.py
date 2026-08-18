@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Reassemble all videos that failed at the assembly phase.
+"""DEPRECADO — no usar.
 
-Waits for the currently running long-form generation to finish, then
-reassembles failed videos one at a time via POST /api/videos/{id}/reassemble,
-polling each job to completion before starting the next.
+La recuperación de videos fallidos es responsabilidad de
+``api.services.generation_service.auto_recover_on_startup()`` (crea jobs
+``reassemble`` en 'queued' que el ``_queue_consumer`` global procesa de uno en
+uno). Este script standalone compite con ese mecanismo: su ``wait_for_idle()``
+cuenta los jobs encolados como "activos" y se cuelga esperando, y sus jobs
+colisionan con los del auto-recovery en cada reinicio de la API.
 
-The reassembly reuses the video's checkpoint (script + audio + media assets),
-so each video re-renders scenes from existing assets instead of a full
-scrape→script→tts run. Missing media files are dropped at reassembly time and
-substituted with fallback images (see _do_reassembly in generation_service).
+Riesgos de ejecutarlo:
+- Se queda en bucle infinito en ``wait_for_idle()`` mientras existan jobs
+  encolados (contaba 'queued' como activos).
+- Un reinicio de la API mata su job en curso ("Server restarted...") y el
+  auto-recovery crea jobs duplicados para los mismos videos.
 
-Usage: nohup python3 scripts/reassemble_failed_videos.py > logs/reassemble.log 2>&1 &
+Si necesitas reensamblar videos manualmente, usa:
+    POST /api/videos/{id}/reassemble
+y espera a que el job termine antes del siguiente.
 """
 
 import sys
+
+sys.exit(0)  # DEPRECADO — ver docstring. auto_recover_on_startup + queue consumer.
+
+# ── Código legacy (no ejecutado) ──────────────────────────────────
 import time
 import urllib.request
 import json
