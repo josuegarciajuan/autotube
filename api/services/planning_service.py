@@ -17,6 +17,7 @@ import logging
 import secrets
 import threading
 import functools
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import pytz
@@ -46,11 +47,40 @@ def _replan_locked(func):
 _last_horizon_replan_ts: Optional[datetime] = None
 _HORIZON_REPLAN_COOLDOWN_MIN = 5  # minimum minutes between replans
 
+# ── Horizon replan gate (v40, persistido) ──────────────────
+# El horizonte de 7 días se reconstruye como mucho una vez cada 24 h desde el
+# ÚLTIMO replan (manual o automático). El timestamp vive en system_state para
+# que un reinicio de la API no resete el gate. Las emergencias (pipeline seco,
+# día vacío, cambio de config, _ensure_never_dry) siguen disparando de
+# inmediato vía compute_and_store_horizon y resetan el timer.
+HORIZON_REPLAN_INTERVAL_HOURS = 24
+_LAST_REPLAN_KEY = "last_horizon_replan_ts"
+
+
+def get_last_replan_ts(db=None) -> float:
+    """Epoch (float) del último replan de horizonte (manual o automático).
+
+    Fallback: now - 24h para que tras un upgrade el primer check periódico
+    dispare (el gate de 24h se considera cumplido de arranque).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        raw = db.get_system_state(_LAST_REPLAN_KEY)
+        if raw:
+            return float(raw)
+    except Exception:
+        pass
+    return time.time() - HORIZON_REPLAN_INTERVAL_HOURS * 3600
+
 # ── Post-full_replan quiet window ──────────────────────────
 # After a manual full_replan(), block ALL automatic compute_and_store_horizon()
 # calls for this many minutes — even force_replan=True cannot bypass.
 # This prevents the user's manual replan from being overwritten by smart_replan,
 # midnight check, never-dry, or startup replans.
+# v40: se persiste en system_state("post_full_replan_block_until") (epoch string)
+# para que un reinicio de la API no pierda la ventana silenciosa.
 _POST_FULL_REPLAN_QUIET_MIN = 120
 _post_full_replan_block_until: Optional[datetime] = None
 
@@ -1807,7 +1837,16 @@ def compute_and_store_slots(
         date_str, stored, len(slots_by_channel),
         {ch_id: times for ch_id, times in slots_by_channel.items()},
     )
-    
+
+    # ── v40: este "Replan día" manual cuenta como último replan de horizonte:
+    # resetea el gate de 24h (DB + global en memoria para el cooldown de 5 min).
+    global _last_horizon_replan_ts
+    _last_horizon_replan_ts = datetime.now()
+    try:
+        db.set_system_state(_LAST_REPLAN_KEY, str(time.time()))
+    except Exception:
+        pass
+
     return {
         "date": date_str,
         "total_slots": stored,
@@ -1933,10 +1972,27 @@ def compute_and_store_horizon(
         dict with {total_slots, days_planned, slots_by_channel}.
     """
     from datetime import date as _date
-    
-    # ── Post-full_replan quiet-window guard (NOT bypassable by force_replan) ──
-    global _post_full_replan_block_until
+
     now = datetime.now()
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    # ── Post-full_replan quiet-window guard (NOT bypassable by force_replan) ──
+    # v40: la ventana silenciosa se persiste en system_state para que un
+    # reinicio de la API no la pierda.
+    global _post_full_replan_block_until
+    if _post_full_replan_block_until is None:
+        try:
+            _raw_q = db.get_system_state("post_full_replan_block_until")
+            if _raw_q:
+                _parsed_q = float(_raw_q)
+                if _parsed_q > now.timestamp():  # solo hidratar si sigue vigente
+                    _post_full_replan_block_until = datetime.fromtimestamp(_parsed_q)
+        except Exception:
+            pass
+
     if _post_full_replan_block_until is not None:
         if now < _post_full_replan_block_until:
             remaining = int((_post_full_replan_block_until - now).total_seconds() / 60)
@@ -1954,9 +2010,24 @@ def compute_and_store_horizon(
             }
         else:
             _post_full_replan_block_until = None  # clear expired
-    
+            try:
+                db.set_system_state("post_full_replan_block_until", "")
+            except Exception:
+                pass
+
     # ── Cooldown guard ──────────────────────────────────
+    # v40: hidratar el cooldown desde DB si arrancamos con el global vacío,
+    # para que el cooldown de 5 min sobreviva a reinicios de la API.
     global _last_horizon_replan_ts
+    if _last_horizon_replan_ts is None:
+        try:
+            _raw_ts = db.get_system_state(_LAST_REPLAN_KEY)
+            if _raw_ts:
+                _parsed_ts = float(_raw_ts)
+                if _parsed_ts <= now.timestamp():
+                    _last_horizon_replan_ts = datetime.fromtimestamp(_parsed_ts)
+        except Exception:
+            pass
     if _last_horizon_replan_ts is not None and not force_replan:
         elapsed = (now - _last_horizon_replan_ts).total_seconds() / 60
         if elapsed < _HORIZON_REPLAN_COOLDOWN_MIN:
@@ -1972,12 +2043,14 @@ def compute_and_store_horizon(
                 "reason": f"cooldown ({_HORIZON_REPLAN_COOLDOWN_MIN} min)",
             }
     _last_horizon_replan_ts = now
+    # Persistir el replan SOLO cuando realmente ejecuta (después de los guards
+    # de quiet-window y cooldown) — es el timestamp que gobierna el gate de 24h.
+    try:
+        db.set_system_state(_LAST_REPLAN_KEY, str(now.timestamp()))
+    except Exception:
+        pass
     # ────────────────────────────────────────────────────
-    
-    if db is None:
-        from database.db_extended import ExtendedDatabase
-        db = ExtendedDatabase()
-    
+
     # Get all active channels and their planning config
     channels = db.get_channels(active_only=True)
     channel_configs = []
@@ -2400,15 +2473,19 @@ EMPTY_DAY_CHECK_DAYS = 3
 
 @_replan_locked
 def smart_replan(db=None) -> dict:
-    """Periodic intelligent replan: cancel fulfilled quotas, detect config changes,
-    cancel stale slots, fill empty days, warn on overcapacity.
-    
-    Called every ~30 min during active hours (10:00-23:00) by the checker loop.
-    Automatically triggers full horizon replan if:
-      - Pending slots drop below MIN_PENDING_SLOTS
-      - Any of the next EMPTY_DAY_CHECK_DAYS has zero slots
-      - Channel config (videos_per_day) changed
-    
+    """Periodic intelligent replan: cancel stale slots, detect config changes,
+    fill empty days, warn on overcapacity.
+
+    Contrato (#5, v40):
+      - Checks ligeros cada 30 min (10:00-23:00): cancelar stale, detectar
+        cambio de config, fill días vacíos, alerta overcapacity.
+      - El rebuild completo del horizonte vive en el gate periódico de 24h
+        (HORIZON_REPLAN_INTERVAL_HOURS) o en los triggers de emergencia
+        (pipeline seco < MIN_PENDING_SLOTS, día vacío, cambio de config,
+        _ensure_never_dry).
+      - El exceso de cuota se poda una vez por día en medianoche PT
+        (ver _cancel_excess_pending_by_quota), no aquí.
+
     Returns dict with: {cancelled_count, horiz_replan, channels_adjusted, overcapacity_warn}
     """
     import json as _json
@@ -2431,21 +2508,6 @@ def smart_replan(db=None) -> dict:
             "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
         ).fetchone()
         total_pending = row["cnt"] if row else 0
-    
-    # ── 0a-bis. Quota-aware (ago 2026): cancelar pendientes que excedan el
-    # cupo diario del proyecto (shorts primero, luego longs). Evita que una
-    # reducción del cupo (reservas del día) deje slots que el dispatcher
-    # bloquearía → sin slots huérfanos ni breaker por exceso de planificación.
-    try:
-        quota_cancelled = _cancel_excess_pending_by_quota(db)
-        if quota_cancelled > 0:
-            cancelled_total += quota_cancelled
-            logger.info(
-                "Smart replan: cancelled %d pending slots beyond project quota (today)",
-                quota_cancelled,
-            )
-    except Exception as exc:
-        logger.debug("Smart replan: quota-cap cancellation skipped (%s)", exc)
     
     # ── 0a. Auto-replan if pipeline is running dry ──
     if total_pending < MIN_PENDING_SLOTS:
@@ -3483,7 +3545,14 @@ def _readjust_pending_slots(db):
 
 
 def _dynamic_vpd_adjust(db, pending_sorted):
-    """Evaluate and apply Dynamic VPD for channels with recently adjusted slots."""
+    """Evaluate and apply Dynamic VPD for channels with recently adjusted slots.
+
+    ⚠️  Intencionalmente desactivado (#6): DYNAMIC_VPD_ENABLED = False en
+    defaults.py — feedback negativo previo (bugs → baja success_rate → Dynamic
+    VPD baja videos_per_day). Si se reactiva, revisar topes
+    (VIDEOS_PER_DAY_MIN/MAX, DYNAMIC_VPD_SHARED_ACCOUNT_MAX) y validación de
+    impacto.
+    """
     try:
         from config.config_bridge import get_channel_config
     except Exception:
@@ -3602,26 +3671,6 @@ def _detect_manual_completions(db) -> bool:
         )
         return True
     return False
-
-
-def ensure_today_planned(db=None):
-    """Ensure today has planned_slots. Called on API startup.
-    
-    Now uses horizon planning to rebuild the full week if empty.
-    """
-    if db is None:
-        from database.db_extended import ExtendedDatabase
-        db = ExtendedDatabase()
-    
-    today = date.today().isoformat()
-    existing = db.get_planned_slots(date_key=today)
-    
-    if not existing:
-        logger.info("No slots found for today (%s) — computing horizon...", today)
-        compute_and_store_horizon(horizon_days=7, db=db)
-    else:
-        # Quick sync in case config changed while API was down
-        sync_midday(db)
 
 
 def _memory_ok(min_free_gb: float = 4.0) -> bool:
@@ -4259,6 +4308,26 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
 
         conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
         conn.commit()
+
+    # ── v40: este replan manual aplicado cuenta como último replan de
+    # horizonte (resetea el gate de 24h) y activa la ventana silenciosa
+    # post-full_replan. Persistido en system_state para sobrevivir reinicios.
+    global _last_horizon_replan_ts, _post_full_replan_block_until
+    _last_horizon_replan_ts = datetime.now()
+    _post_full_replan_block_until = datetime.now() + timedelta(minutes=_POST_FULL_REPLAN_QUIET_MIN)
+    try:
+        db.set_system_state(_LAST_REPLAN_KEY, str(time.time()))
+        db.set_system_state(
+            "post_full_replan_block_until",
+            str(_post_full_replan_block_until.timestamp()),
+        )
+    except Exception:
+        pass
+    logger.info(
+        "safe_full_replan_apply: quiet window activated — auto-replans blocked for %d min",
+        _POST_FULL_REPLAN_QUIET_MIN,
+    )
+
     return {
         "ok": True,
         "counts": {
@@ -4780,8 +4849,16 @@ def full_replan(db=None) -> dict:
         videos_by_channel[slug] += 1
 
     # ── Set post-full_replan quiet window to prevent automatic overwrites ──
-    global _post_full_replan_block_until
+    # v40: persistido en system_state para que un reinicio de la API no pierda
+    # la ventana silenciosa. Además, el replan manual resetea el gate de 24h.
+    global _post_full_replan_block_until, _last_horizon_replan_ts
     _post_full_replan_block_until = _dt.now() + _td(minutes=_POST_FULL_REPLAN_QUIET_MIN)
+    _last_horizon_replan_ts = _dt.now()
+    try:
+        db.set_system_state("post_full_replan_block_until", str(_post_full_replan_block_until.timestamp()))
+        db.set_system_state(_LAST_REPLAN_KEY, str(time.time()))
+    except Exception:
+        pass
     logger.info(
         "full_replan: quiet window activated — auto-replans blocked for %d min",
         _POST_FULL_REPLAN_QUIET_MIN,

@@ -948,7 +948,6 @@ async def _schedule_checker_loop():
         pass
     
     last_lifecycle_check = time.time()
-    last_midnight_check = time.time()
     last_recovery_check = 0
     last_shorts_recovery_check = 0
     last_smart_replan = 0
@@ -1021,7 +1020,10 @@ async def _schedule_checker_loop():
                 # ════════════════════════════════════════════════════════════
                 # Phase A: generation + planning (always active, no YT API)
                 # ════════════════════════════════════════════════════════════
-                await _process_due_schedules()
+                # v40: _process_due_schedules() retirado del loop — la tabla
+                # content_schedules está vacía en producción y la planificación
+                # la gobiernan planned_slots (planning_service). Las funciones
+                # se conservan (deprecadas) por si algún script legacy las usa.
                 long_dispatched = await _process_planned_slots()
 
                 # ── Shorts interleaving: when long-form is blocked (pipelining
@@ -1102,6 +1104,33 @@ async def _schedule_checker_loop():
                         logger.debug("Overlap verify: %s", exc)
                     last_overlap_verify = now
 
+                # ── Quota excess pruning: once per Pacific day, after PT reset + 15min buffer ──
+                # v40: el exceso de cuota ya NO se poda en smart_replan (30 min);
+                # se poda una vez por día tras el reset de medianoche PT. El guard
+                # por día PT hace el paso idempotente.
+                try:
+                    from datetime import datetime as _dt_prune, timezone as _tz_prune, timedelta as _td_prune
+                    from zoneinfo import ZoneInfo as _ZI
+                    from api.services.planning_service import _cancel_excess_pending_by_quota
+                    _now_utc = _dt_prune.now(_tz_prune.utc)
+                    _pt_now = _now_utc.astimezone(_ZI("America/Los_Angeles"))
+                    _pt_day = _pt_now.date().isoformat()
+                    _last_pruned = _sched_db.get_system_state("last_quota_prune_pt_day")
+                    if _last_pruned != _pt_day:
+                        _pt_midnight = _dt_prune.combine(
+                            _pt_now.date(), _dt_prune.min.time(), tzinfo=_ZI("America/Los_Angeles")
+                        )
+                        if _now_utc >= _pt_midnight.astimezone(_tz_prune.utc) + _td_prune(minutes=15):
+                            _pruned = await asyncio.to_thread(_cancel_excess_pending_by_quota, _sched_db)
+                            _sched_db.set_system_state("last_quota_prune_pt_day", _pt_day)
+                            if _pruned:
+                                logger.info(
+                                    "Quota excess prune (PT midnight): cancelled %d pending slot(s)",
+                                    _pruned,
+                                )
+                except Exception as exc:
+                    logger.debug("Quota excess prune: %s", exc)
+
                 # Auto-recovery: replan missing publications every 60 minutes
                 if now - last_recovery_check > 3600:
                     await _process_recovery_planner()
@@ -1143,22 +1172,38 @@ async def _schedule_checker_loop():
                     await _process_shorts_recovery_planner()
                     last_shorts_recovery_check = now
 
-                # Regenerate the schedule forecast at midnight (daily)
-                if now - last_midnight_check > 3600:
-                    try:
-                        from database.db_extended import ExtendedDatabase
-                        _mid_db = ExtendedDatabase()
-                        from api.services.planning_service import compute_and_store_horizon
+                # ── Horizon replan (v40): at most once every 24h since the LAST
+                # replan (manual o automático). El timestamp vive en system_state
+                # (get_last_replan_ts), así el gate sobrevive a reinicios de la API.
+                # Las emergencias siguen disparando de inmediato vía smart_replan /
+                # _ensure_never_dry (que llaman a compute_and_store_horizon).
+                try:
+                    from api.services.planning_service import (
+                        compute_and_store_horizon, get_last_replan_ts,
+                        HORIZON_REPLAN_INTERVAL_HOURS,
+                    )
+                    if now - get_last_replan_ts(_sched_db) >= HORIZON_REPLAN_INTERVAL_HOURS * 3600:
                         result = await asyncio.to_thread(
-                            compute_and_store_horizon, horizon_days=7, db=_mid_db
+                            compute_and_store_horizon, horizon_days=7, db=_sched_db
                         )
-                        logger.info("Midnight horizon replan: %d slots, %d days",
-                                     result.get("total_slots", 0), result.get("days_planned", 0))
+                        logger.info(
+                            "Horizon replan (24h gate): %d slots, %d days",
+                            result.get("total_slots", 0), result.get("days_planned", 0),
+                        )
+                except Exception as exc:
+                    logger.debug("Horizon replan: %s", exc)
+
+                # ── Daily shorts ensure (v40): independent daily check — once per
+                # local day, persisted in system_state("last_shorts_daily_ensure").
+                try:
+                    _today_local = time.strftime("%Y-%m-%d")
+                    _last_shorts_ensure = _sched_db.get_system_state("last_shorts_daily_ensure")
+                    if _last_shorts_ensure != _today_local:
                         from api.services.shorts_scheduler import ensure_today_shorts_scheduled
                         await asyncio.to_thread(ensure_today_shorts_scheduled)
-                        last_midnight_check = now
-                    except Exception as exc:
-                        logger.debug("Midnight schedule refresh: %s", exc)
+                        _sched_db.set_system_state("last_shorts_daily_ensure", _today_local)
+                except Exception as exc:
+                    logger.debug("Daily shorts ensure: %s", exc)
 
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
@@ -1711,8 +1756,10 @@ def _process_due_schedules_sync() -> list[dict]:
 async def _process_due_schedules():
     """Find and execute due schedules (async wrapper).
 
-    ⚠️  DEPRECATED (v26): backed by the empty `content_schedules` cron table;
-    planning is driven by planned_slots. Kept for backward compatibility.
+    ⚠️  DEPRECATED (v26, v40): backed by the empty `content_schedules` cron table;
+    planning is driven by planned_slots. Kept for backward compatibility —
+    possible legacy scripts may still call it, but the checker loop NO LONGER
+    invokes it (removed in v40).
 
     All synchronous DB operations (sqlite3.connect, ExtendedDatabase methods,
     threading.Lock acquisition) are offloaded to a thread pool so that none of

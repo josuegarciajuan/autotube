@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -148,6 +149,15 @@ class OptimalSlotsCalculator:
             except Exception as exc:
                 logger.error("Optimal slots calculation failed for %s: %s", slug, exc)
                 result["details"][slug] = {"error": str(exc)}
+
+        # ── v40: este replan no pasa por compute_and_store_horizon, así que
+        # resetea el gate de 24h manualmente (persistido en system_state) — el
+        # retiming de target_public_at cuenta como replan de horizonte.
+        if result.get("channels_replanned", 0) > 0:
+            try:
+                self._db.set_system_state("last_horizon_replan_ts", str(time.time()))
+            except Exception:
+                pass
 
         return result
 

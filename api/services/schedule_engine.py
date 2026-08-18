@@ -617,6 +617,12 @@ def dispatch_next_due_slot(db=None) -> dict | None:
     Kept for backward compatibility; do NOT wire it back into api/main.py.
     Use `planning_service.process_planned_slots` instead.
 
+    ⚠️  REPLAN DE HORIZONTE (v40): ya NO se gobierna desde esta función. El
+    horizonte se reconstruye vía `planning_service.compute_and_store_horizon`
+    con un gate de 24h persistido (`HORIZON_REPLAN_INTERVAL_HOURS` /
+    `get_last_replan_ts`), más los triggers de emergencia (pipeline seco,
+    día vacío, cambio de config, _ensure_never_dry).
+
     Called every 5 min by the API checker loop.
     Only dispatches if no job is currently running.
 
