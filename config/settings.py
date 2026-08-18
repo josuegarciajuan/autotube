@@ -204,7 +204,9 @@ YT_REMEDIATION_MODE = os.getenv("YT_REMEDIATION_MODE", "true").lower() == "true"
 # compartir proyecto (canal2+canal3 → youtube-uploads-automation,
 # canal4+canal5 → autotube-expediciones) y por tanto comparten presupuesto.
 # YT_PROJECT_BUDGET_UNITS es un JSON {project_id: units_dia} con la cuota
-# REAL de cada proyecto en GCP Console (default 10000).
+# REAL de cada proyecto en GCP Console (default 100000 — ambos proyectos
+# tienen ampliación 10x sobre el free tier; ver yt_quota_log del 2026-08-12
+# con 82k ud consumidas en un día sin bloqueo).
 # YT_PROJECT_RESERVED_UNITS reserva unidades para operaciones esenciales
 # (stats, verificación de publicación, reconciliación) fuera del presupuesto
 # automático de subidas.
@@ -213,8 +215,8 @@ try:
     YT_PROJECT_BUDGET_UNITS = json.loads(_raw_budgets) if _raw_budgets.strip() else {}
 except Exception:
     YT_PROJECT_BUDGET_UNITS = {}
-YT_PROJECT_DEFAULT_BUDGET = int(os.getenv("YT_PROJECT_DEFAULT_BUDGET", "10000"))
-YT_PROJECT_RESERVED_UNITS = int(os.getenv("YT_PROJECT_RESERVED_UNITS", "2000"))
+YT_PROJECT_DEFAULT_BUDGET = int(os.getenv("YT_PROJECT_DEFAULT_BUDGET", "100000"))
+YT_PROJECT_RESERVED_UNITS = int(os.getenv("YT_PROJECT_RESERVED_UNITS", "100"))
 # Presupuesto automático (subidas) de un proyecto = cuota real - reservados.
 # Por proyecto, NO un valor global hardcodeado.
 YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "0"))  # 0 = derivar por proyecto
