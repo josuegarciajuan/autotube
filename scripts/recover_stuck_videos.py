@@ -6,7 +6,6 @@ Generates thumbnails, populates metadata, and triggers upload to YouTube.
 import json
 import logging
 import sqlite3
-import subprocess
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -29,24 +28,18 @@ def get_script(db, script_id):
 
 
 def generate_thumbnail(video_path, canal, video_id):
-    """Generate a thumbnail from a frame of the video."""
+    """Generate a thumbnail from the brightest (non-black) frame of the video."""
+    from pipeline.frame_thumb import extract_thumbnail_frame
+
     out_dir = PROJECT_ROOT / "output" / "thumbnails" / canal
     out_dir.mkdir(parents=True, exist_ok=True)
     thumb_path = out_dir / f"recover_{video_id}.jpg"
 
     log.info("Generating thumbnail for %s -> %s", video_path, thumb_path)
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path),
-         "-ss", "00:00:15", "-vframes", "1",
-         "-q:v", "2", str(thumb_path)],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        log.error("ffmpeg failed: %s", result.stderr[:200])
-        return None
-    if thumb_path.exists():
-        log.info("Thumbnail generated: %s (%d bytes)", thumb_path, thumb_path.stat().st_size)
-        return str(thumb_path)
+    result = extract_thumbnail_frame(video_path, thumb_path, label=f"recover_{video_id}")
+    if result and result.exists():
+        log.info("Thumbnail generated: %s (%d bytes)", result, result.stat().st_size)
+        return str(result)
     return None
 
 

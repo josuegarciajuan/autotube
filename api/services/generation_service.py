@@ -2916,23 +2916,20 @@ async def _do_reassembly(job_id: int, video_id: int):
     # ── Phase 3: Thumbnail + metadata + upload ───────────────
     # Bug #2 fix: after rebuilding the video, generate a thumbnail,
     # populate metadata from the script, and upload to YouTube.
-    import subprocess as _sp
     from pathlib import Path as _P
 
-    # 3a. Generate thumbnail (ffmpeg frame grab — fast and reliable)
+    # 3a. Generate thumbnail (smart frame grab — picks the brightest, non-black frame)
     thumb_path = None
     try:
+        from pipeline.frame_thumb import extract_thumbnail_frame
         _out_dir = _P(f"output/thumbnails/{canal}")
         _out_dir.mkdir(parents=True, exist_ok=True)
         _thumb_file = _out_dir / f"recover_{video_id}.jpg"
-        _sp.run(
-            ["ffmpeg", "-y", "-i", str(output_path),
-             "-ss", "00:00:15", "-vframes", "1",
-             "-q:v", "2", str(_thumb_file)],
-            capture_output=True, timeout=30,
+        _thumb_path = extract_thumbnail_frame(
+            output_path, _thumb_file, label=f"recover_{video_id}",
         )
-        if _thumb_file.exists():
-            thumb_path = str(_thumb_file)
+        if _thumb_path and _thumb_path.exists():
+            thumb_path = str(_thumb_path)
             logger.info("Reassembly thumbnail generated: %s", thumb_path)
     except Exception as _te:
         logger.warning("Reassembly thumbnail generation failed (non-fatal): %s", _te)
