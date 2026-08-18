@@ -217,6 +217,33 @@ def run_video_render(
         from pipeline.video_editor import VideoEditor
 
         ve = VideoEditor(config)
+
+        # ── On-demand image fetcher (reassembly recovery) ───────
+        # Reassembly renders from checkpoint assets; when Pollo AI returned
+        # identical images for different prompts, the editor's dedup rejects
+        # every duplicate and scenes would degrade to black placeholders
+        # (>30% → whole video aborts).  Wire the live fetcher so scenes get
+        # a fresh, unused image from the providers instead.
+        try:
+            from pipeline.media_fetcher import MediaFetcher
+            from pathlib import Path as _P
+
+            _od_fetcher = MediaFetcher(config=config)
+
+            def _od_fetch(query: str, duration: float):
+                try:
+                    asset = _od_fetcher.fetch_single_image_urgent(query)
+                    if asset and asset.get("path") and _P(asset["path"]).exists():
+                        return _P(asset["path"])
+                except Exception as _e:
+                    logger.debug("On-demand fetch failed: %s", _e)
+                return None
+
+            ve._on_demand_fetcher = _od_fetch
+            logger.info("On-demand image fetcher wired for reassembly recovery")
+        except Exception as _fexc:
+            logger.warning("On-demand fetcher init failed (proceeding without): %s", _fexc)
+
         video_path_out = ve.build_video(
             bloques=bloques,
             media_assets=media_assets,

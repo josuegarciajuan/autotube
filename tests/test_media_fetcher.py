@@ -431,3 +431,82 @@ class TestVideoValidation:
         assert not MediaFetcher._is_valid_video(mp4_file), (
             "Frame decode error at any check should reject the file"
         )
+
+
+class TestOnDemandUrgentFetch:
+    """Regression: scenes that fell to black placeholders during assembly
+    (Pollo AI returned identical images → dedup rejected every duplicate)
+    must be recoverable via ``fetch_single_image_urgent`` — the fetcher
+    returns a fresh, unused image for a scene's query even after the
+    pre-fetched pool was exhausted (videos #2174/#2175/#2176/#2178)."""
+
+    def _make_fetcher(self, candidates):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        provider = MagicMock()
+        provider.available = True
+        provider.name = "test_provider"
+        provider.search.return_value = candidates
+        fetcher._image_providers = [provider]
+        return fetcher
+
+    def test_returns_fresh_image_when_available(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        cand = MagicMock()
+        cand.url = "https://cdn.test/img1.jpg"
+        cand.id = "img1"
+        fetcher = self._make_fetcher([cand])
+
+        with patch.object(
+            MediaFetcher, "_download_image",
+            return_value=Path("/tmp/fill_test.jpg"),
+        ), patch.object(
+            MediaFetcher, "_is_valid_image", return_value=True,
+        ):
+            asset = fetcher.fetch_single_image_urgent("ancient ruins")
+        assert asset is not None
+        assert asset.get("type") == "image"
+        assert asset.get("path") is not None
+
+    def test_skips_urls_already_used_in_this_video(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        cand1 = MagicMock()
+        cand1.url = "https://cdn.test/dup.jpg"
+        cand1.id = "dup1"
+        cand2 = MagicMock()
+        cand2.url = "https://cdn.test/fresh.jpg"
+        cand2.id = "fresh1"
+        fetcher = self._make_fetcher([cand1, cand2])
+        fetcher._used_image_urls.add("https://cdn.test/dup.jpg")  # already in this video
+
+        with patch.object(
+            MediaFetcher, "_download_image",
+            return_value=Path("/tmp/fill_test.jpg"),
+        ), patch.object(
+            MediaFetcher, "_is_valid_image", return_value=True,
+        ):
+            asset = fetcher.fetch_single_image_urgent("ancient ruins")
+        assert asset is not None
+        # Must NOT return the duplicate URL
+        assert "dup.jpg" not in asset.get("path", "")
+
+    def test_returns_none_when_all_providers_exhausted(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        cand = MagicMock()
+        cand.url = "https://cdn.test/img1.jpg"
+        cand.id = "img1"
+        fetcher = self._make_fetcher([cand])
+        fetcher._used_image_urls.add("https://cdn.test/img1.jpg")
+        fetcher._used_asset_urls.add("https://cdn.test/img1.jpg")
+        # _urgent_used_urls is lazily created by fetch_single_image_urgent —
+        # pre-seed it the same way the method does.
+        if not hasattr(fetcher, "_urgent_used_urls"):
+            fetcher._urgent_used_urls = set()
+        fetcher._urgent_used_urls.add("https://cdn.test/img1.jpg")
+
+        asset = fetcher.fetch_single_image_urgent("ancient ruins")
+        assert asset is None, "All dedup sets hold the URL → must return None (caller falls to placeholder)"

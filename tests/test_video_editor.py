@@ -421,3 +421,70 @@ class TestConfigValidator:
         }
         w = validate_channel_config("test", cfg)
         assert len(w) == 0, f"Valid config should produce zero warnings, got: {w}"
+
+
+class TestSafeSubclipToDuration:
+    """Regression: MoviePy v2 raises ``ValueError: end_time (X) should be smaller
+    or equal to the clip's duration (X)`` when ``start + length`` exceeds the
+    clip duration by a floating-point epsilon (e.g. ``pos + (tts_duration - pos)``
+    rounding up). ``_safe_subclip_to_duration`` clamps the end so assembly never
+    aborts on this precision edge (video #2173)."""
+
+    def _make_mock_clip(self, duration: float):
+        clip = MagicMock()
+        clip.duration = duration
+        clip.subclipped.return_value = "subclipped"
+        clip.subclip.return_value = "subclip-v1"
+        return clip
+
+    def test_in_bounds_keeps_explicit_end(self):
+        """Normal case: start+length inside the clip → explicit end is used."""
+        from pipeline.video_editor import VideoEditor
+
+        clip = self._make_mock_clip(duration=100.0)
+        result = VideoEditor._safe_subclip_to_duration(clip, 10.0, 5.0, 100.0)
+        assert result == "subclipped"
+        clip.subclipped.assert_called_once_with(10.0, 15.0)
+
+    def test_epsilon_overflow_clamps_to_duration(self):
+        """Regression: pos + (tts_duration - pos) rounds above the clip's real
+        duration → must not raise (MoviePy end_time validation)."""
+        from pipeline.video_editor import VideoEditor
+
+        # The caller's tts_duration can be a hair LARGER than MoviePy's own
+        # duration for the file: pos + leftover == caller duration, but the
+        # clip's real duration is smaller → naive subclipped would raise.
+        caller_duration = 880.63
+        clip_real_duration = 880.63 - 1e-13
+        pos = 879.2299999999997
+        leftover = caller_duration - pos   # ≈ 1.4000000000003183
+
+        clip = self._make_mock_clip(duration=clip_real_duration)
+        # Tail path: single-arg subclipped(start) → no explicit end to validate.
+        result = VideoEditor._safe_subclip_to_duration(clip, pos, leftover, caller_duration)
+        assert result == "subclipped"
+        clip.subclipped.assert_called_once_with(pos)
+
+    def test_tail_exact_end_uses_single_arg(self):
+        """When end lands exactly on the clip end, MoviePy takes the clip to its
+        natural end (no explicit end arg) — no epsilon can escape."""
+        from pipeline.video_editor import VideoEditor
+
+        clip = self._make_mock_clip(duration=60.0)
+        VideoEditor._safe_subclip_to_duration(clip, 55.0, 5.0, 60.0)
+        clip.subclipped.assert_called_once_with(55.0)
+
+    def test_moviepy_v1_fallback_on_typeerror(self):
+        """MoviePy v1 subclip requires two args → fallback passes clamped duration."""
+        from pipeline.video_editor import VideoEditor
+
+        clip = self._make_mock_clip(duration=60.0)
+
+        def _v1_only_subclipped(*args, **kwargs):
+            raise TypeError("subclipped is v2-only")
+
+        clip.subclipped.side_effect = _v1_only_subclipped
+
+        result = VideoEditor._safe_subclip_to_duration(clip, 55.0, 5.0, 60.0)
+        assert result == "subclip-v1"
+        clip.subclip.assert_called_once_with(55.0, 60.0)
