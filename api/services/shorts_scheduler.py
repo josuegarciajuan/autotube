@@ -2053,6 +2053,26 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
             # v22: skip videos known to have no usable script (avoids retry loops)
             if video["id"] in _VIDEOS_WITHOUT_SCRIPT:
                 continue
+            # v (Aug 2026): skip sources that can't be accessed. A video in
+            # 'uploaded_private' has been uploaded but NOT published yet, and its
+            # local mp4 was deleted after upload → yt-dlp can't download a private
+            # video, producing endless "No short_id returned" retries. Only use
+            # sources that still have a local file OR are already public.
+            _src_status = (video.get("status") or "").strip()
+            _src_path = (video.get("video_path") or "").strip()
+            if _src_status == "uploaded_private":
+                _local_ok = False
+                if _src_path:
+                    for _p in (Path(_src_path), Path("/root/autotube") / _src_path):
+                        if _p.exists():
+                            _local_ok = True
+                            break
+                if not _local_ok:
+                    logger.info(
+                        "_resolve_clip_source: skipping #%d (uploaded_private, no local file)",
+                        video["id"],
+                    )
+                    continue
             found = video
             break
 

@@ -8067,7 +8067,7 @@ class ExtendedDatabase(Database):
         Used by clip shorts dispatch to find source long videos."""
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT id, titulo_final, yt_video_id, created_at
+                """SELECT id, titulo_final, yt_video_id, created_at, status, video_path
                    FROM videos
                    WHERE channel_id = ?
                      AND COALESCE(date(uploaded_at), date(created_at)) = date('now', 'localtime')
@@ -8079,7 +8079,7 @@ class ExtendedDatabase(Database):
             return [dict(r) for r in rows]
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT id, titulo_final, yt_video_id, created_at
+                """SELECT id, titulo_final, yt_video_id, created_at, status, video_path
                    FROM videos
                    WHERE channel_id = ?
                      AND COALESCE(date(uploaded_at), date(created_at)) = date('now', '-1 day', 'localtime')
