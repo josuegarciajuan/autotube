@@ -14,6 +14,7 @@ export interface ActiveJob {
   channelName: string
   action: string
   videoId?: number
+  status?: string // 'running' | 'queued' | ... — from /api/jobs/active
   storedAt?: number // timestamp to detect stale/zombie jobs
 }
 
@@ -137,9 +138,14 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
         const jobId = j.id
         const existing = storedMap.get(jobId)
         if (existing) {
+          // Refresh name + status so queued→running transitions are visible
           const freshName = channelNamesRef.current.get(j.channel_id)
           if (freshName && existing.channelName !== freshName) {
             existing.channelName = freshName
+            changed = true
+          }
+          if (existing.status !== j.status) {
+            existing.status = j.status
             changed = true
           }
           result.push(existing)
@@ -151,6 +157,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
             channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
             action: j.action || 'generate_and_upload',
             videoId: j.video_id,
+            status: j.status,
             storedAt: Date.now(),
           })
           changed = true
