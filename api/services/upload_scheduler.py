@@ -437,8 +437,18 @@ def _recover_inconsistent_upload_times(db) -> int:
         tpa_stale = _target_is_stale(tpa, timezone_str=tz_str, warmup_min=warmup)
 
         # ── (2) far-future scheduled_upload_at → reset ──
+        # Quota-aware (ago 2026): los uploads de batch (publish_mode scheduled
+        # con scheduled_upload_at planificado) son intencionados — el video se
+        # genera con lead de días y se sube en el batch del día de publicación.
+        # No se resetean aunque superen FAR_FUTURE_UPLOAD_HOURS.
+        is_batch_scheduled = False
+        try:
+            pub_mode = (row["publish_mode"] if "publish_mode" in row.keys() else "") or ""
+            is_batch_scheduled = bool(sched_val) and str(pub_mode).lower() == "scheduled"
+        except Exception:
+            pass
         sched_far_future = False
-        if sched_val:
+        if sched_val and not is_batch_scheduled:
             try:
                 sched_dt = datetime.strptime(str(sched_val)[:19], "%Y-%m-%d %H:%M:%S")
                 if sched_dt > now + timedelta(hours=FAR_FUTURE_UPLOAD_HOURS):
@@ -660,7 +670,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         rows = conn.execute(
             """SELECT v.id, v.channel_id, v.canal, v.video_path, v.thumbnail_path,
                        v.titulo_final, v.description, v.tags_json, v.target_public_at,
-                       v.scheduled_upload_at, c.slug as channel_slug, c.config_json
+                       v.scheduled_upload_at, v.publish_mode, c.slug as channel_slug, c.config_json
                FROM videos v
                JOIN channels c ON v.channel_id = c.id
                 WHERE v.status = 'awaiting_upload'
@@ -738,13 +748,27 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         current_hour = now.hour
         in_window = _is_in_any_window(current_hour, windows)
 
+        # ── Quota-aware (ago 2026): subidas de batch planificadas ──
+        # Los videos scheduled con scheduled_upload_at pre-fijado (batch por
+        # cuenta desde la planificación) se suben a esa hora, sin pasar por la
+        # ventana UPLOAD_WINDOWS (la hora de batch es la ventana autoritativa).
+        is_batch_scheduled = False
+        if sched_at_val is not None:
+            try:
+                pub_mode = (row["publish_mode"] if "publish_mode" in row.keys() else "") or ""
+                if str(pub_mode).lower() == "scheduled":
+                    is_batch_scheduled = True
+            except Exception:
+                pass
+
         # ── v25 (Aug 2026): reprogram overdue scheduled_upload_at instead of ASAP ──
         # A backlog of past-due videos must drain through future upload windows,
         # NOT be dumped back-to-back. If scheduled_upload_at is overdue AND we are
         # outside a window, recompute a future window time (respecting the
         # same-channel gap) and wait. target_public_at staleness is handled
         # separately by _recover_inconsistent_upload_times + the pre-dispatch recalc.
-        if sched_at_val is not None and not in_window:
+        # Los uploads de batch NO se reprograman (la hora planificada es sagrada).
+        if sched_at_val is not None and not in_window and not is_batch_scheduled:
             try:
                 sched_dt = datetime.strptime(str(sched_at_val)[:19], "%Y-%m-%d %H:%M:%S")
             except (ValueError, TypeError):
@@ -768,9 +792,14 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 )
                 continue
 
-        # Window gate
-        if in_window:
-            eligible.append({"row": dict(row), "past_due": False})
+        # Window gate: los uploads de batch (planificados) no dependen de la
+        # ventana UPLOAD_WINDOWS — la hora de batch es la ventana autoritativa.
+        if in_window or is_batch_scheduled:
+            eligible.append({
+                "row": dict(row),
+                "past_due": False,
+                "is_batch_scheduled": is_batch_scheduled,
+            })
 
     if not eligible:
         # ── Heartbeat: log only once every ~15 min when idle ──
@@ -832,25 +861,29 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
         # ── v25: same-channel upload gap (default 3h) ──
         # Prevents a backlog from uploading back-to-back for the same channel.
-        sel_cfg = {}
-        try:
-            sel_cfg = json.loads(entry["row"].get("config_json") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            pass
-        try:
-            gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
-        except (TypeError, ValueError):
-            gap_hours = 3
-        if gap_hours > 0:
-            mins_ago = _minutes_since_last_upload(db, ch_id)
-            if mins_ago is not None and mins_ago < gap_hours * 60:
-                slug = entry["row"].get("channel_slug", "?")
-                logger.info(
-                    "📤 Upload skipped for %s: same-channel gap (%dh) not elapsed "
-                    "(%.0f min since last upload)",
-                    slug, gap_hours, mins_ago,
-                )
-                continue
+        # Quota-aware (ago 2026): los uploads de batch planificados se EXCLUYEN
+        # del gap — dentro de un batch un canal puede subir varios videos con
+        # jitter de minutos (sensación manual confirmada).
+        if not entry.get("is_batch_scheduled"):
+            sel_cfg = {}
+            try:
+                sel_cfg = json.loads(entry["row"].get("config_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            try:
+                gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
+            except (TypeError, ValueError):
+                gap_hours = 3
+            if gap_hours > 0:
+                mins_ago = _minutes_since_last_upload(db, ch_id)
+                if mins_ago is not None and mins_ago < gap_hours * 60:
+                    slug = entry["row"].get("channel_slug", "?")
+                    logger.info(
+                        "📤 Upload skipped for %s: same-channel gap (%dh) not elapsed "
+                        "(%.0f min since last upload)",
+                        slug, gap_hours, mins_ago,
+                    )
+                    continue
 
         selected = entry
         break

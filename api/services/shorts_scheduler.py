@@ -1049,6 +1049,22 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     shorts_configs = db.get_shorts_planning_config()
     config_by_chid = {sc["channel_id"]: sc for sc in shorts_configs}
 
+    # ── Quota-aware (ago 2026): cupo de shorts nativos por proyecto GCP ──
+    # El reparto del presupuesto automático (6 subidas/día/proyecto) prioriza
+    # longs y clips; los nativos se recortan si el proyecto no tiene cupo.
+    native_caps: dict[int, int] = {}
+    try:
+        from api.services.planning_service import compute_daily_upload_allocation
+        alloc = compute_daily_upload_allocation(db, date_str)
+        for proj, data in alloc.items():
+            for slug, caps in data.get("channels", {}).items():
+                for ch in channels:
+                    if ch.get("slug") == slug:
+                        native_caps[int(ch["id"])] = int(caps.get("native", 0))
+                        break
+    except Exception as exc:
+        logger.debug("Shorts planning: quota allocation skipped (%s)", exc)
+
     all_slots = []
     global_pos = 0
 
@@ -1070,6 +1086,22 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             # but actual clip slots are generated ad-hoc (v26)
         except Exception as e:
             logger.warning("[%s] Adaptive distribution failed, using static config: %s", slug, e)
+
+        # ── Quota-aware: recortar nativos al cupo del proyecto ──
+        cap = native_caps.get(ch_id)
+        if cap is not None:
+            if cap <= 0:
+                logger.info(
+                    "[%s] %s: 0 shorts nativos (cupo del proyecto agotado por longs+clips)",
+                    slug, date_str,
+                )
+                continue
+            if native_count > cap:
+                logger.info(
+                    "[%s] %s: shorts nativos %d → %d (cupo del proyecto)",
+                    slug, date_str, native_count, cap,
+                )
+                native_count = cap
 
         if native_count == 0 and clips_per_long == 0:
             continue
@@ -1490,20 +1522,6 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     if _youtube_quota_blocked(db):
         logger.info("Shorts dispatch: YouTube quota exhausted — uploads paused")
         return None
-
-    # 0a. Fase 0.2: tope global de subidas (long-form + shorts)
-    # Red de seguridad compartida con upload_scheduler (cada subida = 1.600 ud).
-    try:
-        from config.settings import GLOBAL_DAILY_UPLOAD_CAP
-        today_uploads = db.count_today_uploads()
-        if today_uploads >= GLOBAL_DAILY_UPLOAD_CAP:
-            logger.info(
-                "Shorts dispatch: global daily cap reached (%d/%d) — no more uploads today",
-                today_uploads, GLOBAL_DAILY_UPLOAD_CAP,
-            )
-            return None
-    except Exception:
-        pass  # guard no crítico
 
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
