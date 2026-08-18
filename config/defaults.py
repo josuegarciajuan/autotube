@@ -74,9 +74,9 @@ PROD_VIDEO_DURATION_MAX = 14
 # Media-specific limits are used by the production timeline.  The legacy
 # SCENE_DURATION_* values remain supported for older direct VideoEditor callers.
 IMAGE_SCENE_DURATION_MIN = 4.0
-IMAGE_SCENE_DURATION_MAX = 7.0
-VIDEO_SCENE_DURATION_MIN = 6.0
-VIDEO_SCENE_DURATION_MAX = 10.0
+IMAGE_SCENE_DURATION_MAX = 6.0
+VIDEO_SCENE_DURATION_MIN = 4.0
+VIDEO_SCENE_DURATION_MAX = 7.0
 SCENE_SYNC_TOLERANCE_SEC = 0.15
 SCENE_DURATION_MIN = 8.0
 SCENE_DURATION_MAX = 16.0
@@ -230,7 +230,9 @@ MEDIA_STRATEGY = {
     # Only assign video to scenes within the first X% of total runtime.
     "video_first_half_pct": 40,
     # Minimum scene duration (seconds) to be eligible for video.
-    "video_min_scene_duration": 10,
+    # Matches the new VIDEO_SCENE_DURATION_MAX=7s pacing: scenes ≥6s in the
+    # first half still qualify for stock video.
+    "video_min_scene_duration": 6,
     # Avg quality threshold (0-1). Above this → keep searching up to 30%.
     "video_quality_threshold": 0.5,
 

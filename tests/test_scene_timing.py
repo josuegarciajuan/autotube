@@ -1,10 +1,12 @@
 """Unit tests for exact scene timing and body sync gates."""
 
 import sys
+from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, "/root/autotube")
+# Raíz del repo dinámica (worktree o árbol principal) — igual que conftest.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import defaults
 from config.config_validator import validate_channel_config
@@ -14,9 +16,9 @@ from pipeline.video_editor import VideoEditor
 
 def test_scene_timing_defaults_and_cross_parameter_validation():
     assert defaults.IMAGE_SCENE_DURATION_MIN == 4.0
-    assert defaults.IMAGE_SCENE_DURATION_MAX == 7.0
-    assert defaults.VIDEO_SCENE_DURATION_MIN == 6.0
-    assert defaults.VIDEO_SCENE_DURATION_MAX == 10.0
+    assert defaults.IMAGE_SCENE_DURATION_MAX == 6.0
+    assert defaults.VIDEO_SCENE_DURATION_MIN == 4.0
+    assert defaults.VIDEO_SCENE_DURATION_MAX == 7.0
     assert defaults.SCENE_SYNC_TOLERANCE_SEC == 0.15
     assert not hasattr(defaults, "SCENE_TRANSITION_DURATION_SEC")
 

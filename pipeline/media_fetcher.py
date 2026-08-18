@@ -834,9 +834,9 @@ class MediaFetcher:
         """
         config = self._config
         if isinstance(config, dict):
-            image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 7.0))
+            image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 6.0))
         else:
-            image_max = float(getattr(config, "IMAGE_SCENE_DURATION_MAX", 7.0))
+            image_max = float(getattr(config, "IMAGE_SCENE_DURATION_MAX", 6.0))
 
         expanded_scenes: list[dict] = []
         expanded_assets: list[dict] = []
