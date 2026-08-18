@@ -5,7 +5,10 @@ mock LLM responses and a helper to build the test environment.
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+# Raíz del repo dinámica: permite correr los tests desde un worktree (código
+# de la rama en desarrollo) o desde el árbol principal (producción).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import json
 import pytest
