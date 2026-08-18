@@ -545,7 +545,7 @@ class TestPreview:
                 assert "gen_start" in s
                 assert "upload" in s
                 assert "channel_name" in s
-                # gen_start + 75min = upload
+                # gen_start + ESTIMATED_PIPELINE_MINUTES = upload
                 gh, gm = map(int, s["gen_start"].split(":"))
                 uh, um = map(int, s["upload"].split(":"))
                 gap = (uh * 60 + um) - (gh * 60 + gm)
@@ -751,8 +751,8 @@ class TestEdgeCases:
             assert s["channel_id"] == configs[0]["channel_id"]
 
     def test_pipeline_minutes_constant(self):
-        """ESTIMATED_PIPELINE_MINUTES should be 75."""
-        assert ESTIMATED_PIPELINE_MINUTES == 75, \
+        """ESTIMATED_PIPELINE_MINUTES should be 120."""
+        assert ESTIMATED_PIPELINE_MINUTES == 120, \
             "If you change this, update the tests too"
 
     def test_min_gap_constant(self):
