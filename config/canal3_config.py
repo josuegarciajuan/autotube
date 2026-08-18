@@ -391,7 +391,6 @@ SEO_HASHTAGS = [
 # ═══════════════════════════════════════════════════════════════════
 # SHORTS
 # ═══════════════════════════════════════════════════════════════════
-SHORTS_PER_DAY = 3
 SHORTS_HASHTAGS = [
     "#CivilizacionesOlvidadas", "#Historia", "#SabíasQue", "#Shorts",
     "#Curiosidades", "#Arqueología", "#Misterios", "#CivilizacionesPerdidas",
@@ -620,6 +619,8 @@ NICHE_KEYWORDS_ENG = [
     "ancient civilizations documentary", "prehistoric discoveries",
 ]
 
+# DEPRECATED: no se lee en runtime (el query builder usa
+# PLAYLISTS_GENERATED/keywords_en). Se conserva como referencia.
 VIRAL_PLAYLIST_KEYWORDS = {
     "expediciones-completas": ["lost civilizations full documentary", "ancient cities discovered", "archaeological expedition documentary", "forgotten history documentary"],
     "lo-mas-impactante": ["most amazing archaeological discoveries", "unbelievable ancient technology", "discoveries that changed history", "most mysterious ancient artifacts"],

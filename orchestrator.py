@@ -908,7 +908,6 @@ class PipelineOrchestrator:
             blocks_max=mc.get("script_blocks_max", 90),
             llm_max_batches=mc.get("llm_max_batches", 150),
             llm_max_empty_strikes=mc.get("llm_max_empty_strikes", 20),
-            title_format=mc.get("title_format", ""),
         )
 
         duration_ms = int((time.time() - start) * 1000)

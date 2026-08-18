@@ -5,8 +5,9 @@ Triggered when the accumulated pipeline queue across all channels exceeds the th
     backlog = awaiting_upload + uploaded_private (across ALL active channels)
     threshold = MARATHON_BACKLOG_PER_CHANNEL × número de canales activos
 
-No cooldown — if the condition holds after a marathon completes, the next eligible
-channel in the rotation fires immediately (round-robin, oldest-first).
+Cooldown: un canal que acaba de maratonear (MARATHON_COOLDOWN_HOURS, default 24h)
+no vuelve a ser elegible hasta que pasa ese tiempo — la rotación round-robin
+simplemente lo salta (select_marathon_channel).
 
 Selects an eligible channel (MARATHON_ENABLED=True), creates a queued generation_jobs
 record, and lets the normal _queue_consumer dispatch it when the worker is available.
@@ -27,6 +28,38 @@ logger = logging.getLogger("autotube.marathon")
 
 
 # ── Public API ─────────────────────────────────────────────────
+
+def _marathon_cooldown_hours(cfg: dict) -> float:
+    """Cooldown del canal (MARATHON_COOLDOWN_HOURS) con fallback al default."""
+    try:
+        from config.defaults import MARATHON_COOLDOWN_HOURS as _DEFAULT_COOLDOWN_H
+    except ImportError:
+        _DEFAULT_COOLDOWN_H = 24
+    try:
+        return float(cfg.get("MARATHON_COOLDOWN_HOURS", _DEFAULT_COOLDOWN_H) or _DEFAULT_COOLDOWN_H)
+    except (TypeError, ValueError):
+        return float(_DEFAULT_COOLDOWN_H)
+
+
+def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime | None = None) -> bool:
+    """True si el canal maratoneó hace menos de MARATHON_COOLDOWN_HOURS horas.
+
+    El record de get_last_marathon guarda la fecha como "%Y-%m-%d %H:%M:%S"
+    (sin tz, hora local). Los canales en cooldown NO se eligen: la rotación
+    round-robin simplemente los salta.
+    """
+    try:
+        last = db.get_last_marathon(channel_id)
+        if not last or not last.get("date"):
+            return False
+        last_dt = datetime.strptime(str(last["date"]), "%Y-%m-%d %H:%M:%S")
+        now = now or datetime.now()
+        cooldown_h = _marathon_cooldown_hours(cfg)
+        if (now - last_dt).total_seconds() < cooldown_h * 3600:
+            return True
+    except Exception:
+        pass
+    return False
 
 def calculate_backlog(db) -> int:
     """Calculate total backlog: awaiting_upload + uploaded_private across all channels.
@@ -56,7 +89,9 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     """Select the next channel for a marathon video.
 
     Uses a deterministic rotation that gets shuffled on each new iteration.
-    No cooldown — channels are always eligible if MARATHON_ENABLED=True.
+    Channels are eligible if MARATHON_ENABLED=True. v40: los canales en
+    cooldown (maratoneados hace < MARATHON_COOLDOWN_HOURS) se saltan — la
+    rotación round-robin los omite sin romper el orden.
 
     Returns:
         (slug, channel_id, config_json) or None if no channel eligible.
@@ -84,8 +119,22 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
 
         eligible.append((slug, ch_id, cfg))
 
+    # ── v40: cooldown filter — skip channels that marathoned recently ──
+    all_eligible = eligible
+    eligible = [
+        item for item in all_eligible
+        if not _channel_in_marathon_cooldown(db, item[1], item[2])
+    ]
+    skipped_cooldown = len(all_eligible) - len(eligible)
+    if skipped_cooldown:
+        logger.debug(
+            "Marathon: %d channel(s) skipped (cooldown), %d eligible",
+            skipped_cooldown, len(eligible),
+        )
+
     if not eligible:
-        logger.debug("Marathon: no eligible channels (%d active)", len(channels))
+        logger.debug("Marathon: no eligible channels (%d active, %d in cooldown)",
+                     len(channels), skipped_cooldown)
         return None
 
     # ── Rotation: shuffle order on first run, persist for restarts ──
@@ -97,27 +146,32 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
         db.set_marathon_rotation_order(rotation)
         logger.info("Marathon: new rotation order: %s", " → ".join(rotation))
 
-    # Pop first from rotation
-    selected_slug = rotation.pop(0)
-
-    # Find the matching channel data
+    # Pop the first eligible (non-cooldown) slug from the persisted rotation,
+    # preserving round-robin: cooldown channels are simply skipped.
     selected = None
-    for slug, ch_id, cfg in eligible:
-        if slug == selected_slug:
-            selected = (slug, ch_id, cfg)
+    for i, rotation_slug in enumerate(rotation):
+        match = None
+        for slug, ch_id, cfg in eligible:
+            if slug == rotation_slug:
+                match = (slug, ch_id, cfg)
+                break
+        if match is not None:
+            selected = match
+            rotation.pop(i)
             break
 
     if selected is None:
-        logger.warning("Marathon: selected slug %s no longer eligible, rebuilding rotation", selected_slug)
+        logger.warning(
+            "Marathon: no rotation slug is currently eligible, rebuilding rotation"
+        )
         random.shuffle(eligible)
         rotation = [slug for slug, _, _ in eligible]
         db.set_marathon_rotation_order(rotation)
         if rotation:
-            selected_slug = rotation[0]
+            selected_slug = rotation.pop(0)
             for slug, ch_id, cfg in eligible:
                 if slug == selected_slug:
                     selected = (slug, ch_id, cfg)
-                    rotation.pop(0)
                     break
 
     # Push selected to end of rotation and save
@@ -193,6 +247,12 @@ def check_and_dispatch_marathon(db) -> dict | None:
         return None
 
     slug, channel_id, cfg = selected
+
+    # 3b. v40: cooldown double-check (defensivo — select_marathon_channel ya
+    #     filtra, pero el record puede haberse creado entre medias).
+    if _channel_in_marathon_cooldown(db, channel_id, cfg):
+        logger.debug("Marathon: deferred — channel %s in cooldown", slug)
+        return None
 
     # 4. Build marathon config from channel config
     marathon_cfg = {

@@ -3671,7 +3671,6 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         blocks_max: int = 90,
         llm_max_batches: int = 150,
         llm_max_empty_strikes: int = 20,
-        title_format: str = "",
     ) -> Optional[dict]:
         """Generate a long-form marathon script (~1h video).
 
@@ -3692,7 +3691,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             blocks_min/max: Target block count range.
             llm_max_batches: Max batch iterations.
             llm_max_empty_strikes: Tolerance for empty generations.
-            title_format: Optional title format string.
+
+        Note (v40): el parámetro `title_format` se eliminó — era dead code
+        (siempre vacío; el título lo elige full_pipeline_worker con
+        MARATHON_TITLE_FORMULAS).
 
         Returns:
             Script dict or None on failure.
@@ -3825,11 +3827,5 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 "[MARATHON][%s] Script generated: %d words, %s",
                 self.canal, words, script.get("id"),
             )
-
-            # Override title with marathon format if provided
-            if title_format and script:
-                formatted_title = title_format.replace("{N}", str(num_sections))
-                # The title will be set by the LLM, but we add the marathon tag
-                script["_marathon_title_format"] = formatted_title
 
         return script

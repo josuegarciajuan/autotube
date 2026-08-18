@@ -318,7 +318,6 @@ SEO_HASHTAGS = [
     "#HistoriasReales", "#AprendeEnYouTube", "#Montaña", "#Oceano", "#Desierto", "#Exploradores",
 ]
 
-SHORTS_PER_DAY = 2
 SHORTS_HASHTAGS = [
     "#ExpedicionesSinRetorno", "#Supervivencia", "#Shorts", "#SabiasQue",
     "#AprendeEnYouTube", "#Historia", "#Naufragio", "#Curiosidades", "#Documental", "#Aventura",
@@ -505,6 +504,8 @@ MARATHON_HOOK_TYPES = [
     "misterio_sin_resolver",
 ]
 
+# DEPRECATED: no se lee en runtime (el query builder usa
+# PLAYLISTS_GENERATED/keywords_en). Se conserva como referencia.
 VIRAL_PLAYLIST_KEYWORDS = {
     "tragedias-polares": ["arctic expedition disaster documentary", "antarctic survival stories", "polar exploration tragedies", "franklin expedition documentary"],
     "naufragios-historicos": ["shipwreck survival stories", "famous maritime disasters", "lost ships found documentary", "ocean survival true stories"],
