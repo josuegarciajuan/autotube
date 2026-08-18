@@ -278,6 +278,47 @@ def _recover_stuck_uploading_videos(db) -> int:
                         "upload job → reverted to 'awaiting_upload' for retry",
                         video_id, row["channel_id"],
                     )
+
+            # ── Scenario C: videos stuck in 'ready' whose upload never ran ──
+            # A reassembly completes the build (sets 'ready', progress_phase='upload')
+            # but the subsequent upload step returns without uploading (auth fail,
+            # quota, silent error) — or the reassembly job itself finished without
+            # a failed upload_only/generate_and_upload job (Scenario B won't match).
+            # These sit in 'ready' forever: the upload scheduler only dispatches
+            # 'awaiting_upload'. Revert any 'ready' video with no yt_video_id,
+            # progress_phase='upload', a present file, and NO active (running/queued)
+            # job → awaiting_upload so the scheduler picks it up.
+            stuck_ready_no_job = conn.execute(
+                """SELECT v.id, v.channel_id
+                   FROM videos v
+                   WHERE v.status = 'ready'
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
+                     AND (v.progress_phase = 'upload' OR v.progress_phase = 'upload_retry')
+                     AND v.video_path IS NOT NULL AND v.video_path != ''
+                     AND NOT EXISTS (
+                         SELECT 1 FROM generation_jobs gj
+                         WHERE gj.video_id = v.id
+                           AND gj.status IN ('running', 'queued')
+                     )
+                """
+            ).fetchall()
+
+            for row in stuck_ready_no_job:
+                video_id = row["id"]
+                conn.execute(
+                    "UPDATE videos SET status='awaiting_upload', "
+                    "progress=100, progress_phase='upload', "
+                    "scheduled_upload_at=NULL, error_message=NULL "
+                    "WHERE id=? AND status='ready' AND (yt_video_id IS NULL OR yt_video_id = '')",
+                    (video_id,)
+                )
+                if conn.total_changes > 0:
+                    recovered += 1
+                    logger.warning(
+                        "🔁 Recovery: video #%d (ch=%d) stuck in 'ready' with no active "
+                        "job → reverted to 'awaiting_upload' for upload",
+                        video_id, row["channel_id"],
+                    )
             conn.commit()
     except Exception as e:
         logger.debug("Recovery scan for stuck uploading videos skipped: %s", e)

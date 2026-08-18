@@ -2966,8 +2966,32 @@ async def _do_reassembly(job_id: int, video_id: int):
 
     try:
         await start_upload_job(job_id, video_id)
-        # Mark reassembly job as completed after upload succeeds
-        db.update_job(job_id, status="completed", progress=100, phase="done")
+        # ── v (Aug 2026): start_upload_job() can return without uploading
+        # (auth fail, quota, silent upload error) and without raising. Without
+        # this check the video was left in 'ready' forever — the upload scheduler
+        # only dispatches 'awaiting_upload', so it never got uploaded. ──
+        _vr = db.get_video(video_id)
+        _uploaded_yt_id = (_vr.get("yt_video_id") if _vr else None)
+        if not _uploaded_yt_id:
+            # Upload didn't stick — revert to awaiting_upload so the upload
+            # scheduler retries in the next window instead of orphaning in ready.
+            # update_video() ignores None, so clear NULLable fields via raw SQL.
+            db.update_video(video_id, status="awaiting_upload",
+                            progress=100, progress_phase="upload")
+            with db._connect() as _conn:
+                _conn.execute(
+                    "UPDATE videos SET scheduled_upload_at = NULL, "
+                    "error_message = NULL WHERE id = ?", (video_id,),
+                )
+                _conn.commit()
+            db.update_job(job_id, status="completed", progress=100, phase="upload_failed")
+            logger.warning(
+                "Reassembly done for video %d but upload did not stick — "
+                "left in awaiting_upload for scheduler retry", video_id,
+            )
+        else:
+            # Mark reassembly job as completed after upload succeeds
+            db.update_job(job_id, status="completed", progress=100, phase="done")
         # ── Save reassembly timing ──────────────────────────
         try:
             _reassembly_duration_ms = int((time.time() - reassembly_start) * 1000)
@@ -2980,7 +3004,13 @@ async def _do_reassembly(job_id: int, video_id: int):
         logger.info("Reassembly + upload completed for video %d (job %d) in %d ms", video_id, job_id, _reassembly_duration_ms)
     except Exception as _ue:
         logger.exception("Reassembly upload failed for video %d: %s", video_id, _ue)
-        db.update_video(video_id, status="ready", progress=100, progress_phase="upload_retry")
+        db.update_video(video_id, status="awaiting_upload", progress=100, progress_phase="upload")
+        with db._connect() as _conn:
+            _conn.execute(
+                "UPDATE videos SET scheduled_upload_at = NULL, "
+                "error_message = NULL WHERE id = ?", (video_id,),
+            )
+            _conn.commit()
         db.update_job(job_id, status="completed", progress=100, phase="upload_failed")
         # ── Save timing even on upload failure ──────────────
         try:
