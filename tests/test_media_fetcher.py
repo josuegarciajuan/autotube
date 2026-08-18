@@ -4,10 +4,12 @@ Run:  python3 -m pytest tests/test_media_fetcher.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+# Raíz del repo dinámica (mismo patrón que tests/conftest.py) — permite correr
+# los tests desde un worktree o desde el árbol principal.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -207,6 +209,9 @@ class TestSceneRangesSync:
             video_fallback_queries=[],
         )
         fetcher = MediaFetcher(config=cfg)
+        # Real value (6s max image scene) — un MagicMock flotaría a ~1-2.5
+        # y partiría cada escena de 5s en subescenas placeholder sin media.
+        cfg.IMAGE_SCENE_DURATION_MAX = 6.0
 
         scenes = [
             _make_scene_range(start=0, duration=5, media_tipo="video", asset_idx=0),
@@ -215,9 +220,11 @@ class TestSceneRangesSync:
 
         # Mock _fetch_asset_exhaustive (v2 path) to return image results
         # The v2 path uses _interleaved_providers → _search_provider_page, not
-        # the legacy _try_* methods.
+        # the legacy _try_* methods.  Distinct path per scene, matching the
+        # production "never repeat an image" invariant.
         def mock_fetch_exhaustive(scene, query_pool, want_video, target_dur, ctx, force_images=False):
-            return _make_image_result()
+            idx = scene.get("asset_idx", 0)
+            return _make_image_result(path=f"/tmp/img_{idx}.jpg")
 
         fetcher._fetch_asset_exhaustive = MagicMock(side_effect=mock_fetch_exhaustive)
 
@@ -510,3 +517,111 @@ class TestOnDemandUrgentFetch:
 
         asset = fetcher.fetch_single_image_urgent("ancient ruins")
         assert asset is None, "All dedup sets hold the URL → must return None (caller falls to placeholder)"
+
+
+class TestAIImageDedup:
+    """AI image cache hits must never be assigned twice within a video."""
+
+    @staticmethod
+    def _fake_jpeg(path):
+        path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 6100)
+        return path
+
+    @patch("pipeline.media_fetcher.time.sleep", return_value=None)
+    def test_ai_image_chain_rejects_cache_duplicate(self, mock_sleep):
+        """Same cached file returned for 2 scenes → second is rejected."""
+        import tempfile
+        from pipeline.media_fetcher import MediaFetcher
+
+        cfg = _make_config(ai_image_primary=True)
+        cfg.MEDIA_STRATEGY["ai_image_providers"] = ["pollinations", "local_sd"]
+        fetcher = MediaFetcher(config=cfg)
+
+        fake_path = Path(tempfile.gettempdir()) / "ai_cache_dedup_test.jpg"
+        self._fake_jpeg(fake_path)
+
+        mock_polli = MagicMock()
+        mock_polli.generate.return_value = fake_path
+        mock_sd = MagicMock()
+        mock_sd.generate.return_value = None
+
+        fetcher._pollinations = mock_polli
+        fetcher._local_sd = mock_sd
+
+        scene = {"tipo": "desarrollo", "texto": "narration", "duration": 5,
+                 "search_query_en": "test query"}
+
+        # First scene: cached file is fresh → accepted
+        asset1 = fetcher._try_ai_image_chain(scene, scene_idx=0, total_scenes=3)
+        assert asset1 is not None and str(asset1["path"]) == str(fake_path)
+
+        # Second scene: SAME cached file → must be rejected and try local_sd
+        asset2 = fetcher._try_ai_image_chain(scene, scene_idx=1, total_scenes=3)
+        assert asset2 is None, "cache duplicate must be rejected"
+        assert mock_sd.generate.called, "local_sd should be tried after dup rejection"
+
+        fake_path.unlink(missing_ok=True)
+
+
+class TestFetchUniquenessGate:
+    """Post-fetch gate must abort fast when distinct media is insufficient."""
+
+    @patch("pipeline.media_fetcher.time.sleep", return_value=None)
+    def test_gate_raises_on_duplicate_images(self, mock_sleep):
+        """Every scene assigned the SAME image → RuntimeError before render."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        cfg = _make_config(target_video_pct=0, min_video_pct=0,
+                           video_fallback_queries=[])
+        fetcher = MediaFetcher(config=cfg)
+
+        scenes = [
+            _make_scene_range(start=i * 5, duration=5, media_tipo="imagen", asset_idx=i)
+            for i in range(5)
+        ]
+
+        # Bypass the real fetch chain: ALL scenes get the same image path.
+        dup_asset = {"path": "/tmp/dup.jpg", "type": "image",
+                     "duration": None, "source": "pexels_photo"}
+        fetcher._fetch_with_ai_tiers = MagicMock(return_value=(dup_asset, 0, {}))
+        # Avoid real reconciliation/network: keep results as-is.
+        fetcher._reconcile_actual_image_fallbacks = MagicMock(
+            side_effect=lambda scenes, results, fn: (scenes, results)
+        )
+
+        with pytest.raises(RuntimeError, match="DISTINCT media"):
+            fetcher.fetch_for_script(
+                bloques=[{"tipo": "desarrollo", "texto": "t"} for _ in range(5)],
+                scene_ranges=scenes,
+            )
+
+    @patch("pipeline.media_fetcher.time.sleep", return_value=None)
+    def test_gate_passes_with_distinct_images(self, mock_sleep):
+        """Distinct image per scene → no error."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        cfg = _make_config(target_video_pct=0, min_video_pct=0,
+                           video_fallback_queries=[])
+        fetcher = MediaFetcher(config=cfg)
+
+        scenes = [
+            _make_scene_range(start=i * 5, duration=5, media_tipo="imagen", asset_idx=i)
+            for i in range(5)
+        ]
+
+        def fake_fetch(scene, scene_idx, **kwargs):
+            asset = {"path": f"/tmp/unique_{scene_idx}.jpg", "type": "image",
+                     "duration": None, "source": "pexels_photo"}
+            return asset, 0, {}
+
+        fetcher._fetch_with_ai_tiers = MagicMock(side_effect=fake_fetch)
+        fetcher._reconcile_actual_image_fallbacks = MagicMock(
+            side_effect=lambda scenes, results, fn: (scenes, results)
+        )
+
+        results = fetcher.fetch_for_script(
+            bloques=[{"tipo": "desarrollo", "texto": "t"} for _ in range(5)],
+            scene_ranges=scenes,
+        )
+        assert len(results) == 5
+        assert all(r.get("type") == "image" for r in results)
