@@ -400,6 +400,12 @@ AB_TEST_MIN_IMPRESSIONS = int(os.getenv("AB_TEST_MIN_IMPRESSIONS", "100"))
 AB_TEST_MAX_STALE_DAYS = int(os.getenv("AB_TEST_MAX_STALE_DAYS", "7"))
 AB_TEST_MIN_IMPRESSIONS_POST_CHANGE = int(os.getenv("AB_TEST_MIN_IMPRESSIONS_POST_CHANGE", "50"))
 
+# ── Quota-consuming background services (ago 2026) ─────────────
+# Desactivados por defecto: solo subidas + playlist + stats manual
+# consumen quota de YouTube Data API. Reversibles desde .env.
+THUMBNAIL_VERIFY_ENABLED = os.getenv("THUMBNAIL_VERIFY_ENABLED", "false").lower() == "true"
+UPLOAD_HEALTH_CHECKER_ENABLED = os.getenv("UPLOAD_HEALTH_CHECKER_ENABLED", "false").lower() == "true"
+
 # ── Logging ────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

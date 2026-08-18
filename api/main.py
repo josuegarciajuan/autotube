@@ -32,7 +32,9 @@ from api.routers import view_gap as view_gap_router
 from api.routers import quota as quota_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
-from config.settings import TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT, YT_REMEDIATION_MODE
+from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT,
+                             YT_REMEDIATION_MODE, THUMBNAIL_VERIFY_ENABLED,
+                             UPLOAD_HEALTH_CHECKER_ENABLED)
 
 logger = logging.getLogger("autotube.main")
 
@@ -605,6 +607,12 @@ async def _upload_health_checker_loop():
     import asyncio, logging, time
     logger = logging.getLogger("autotube.health_checker")
 
+    # ── Quota pruning (ago 2026): desactivado por defecto desde .env ──
+    # UPLOAD_HEALTH_CHECKER_ENABLED=false → el task existe pero retorna de
+    # inmediato (el shutdown del lifespan no necesita cambios).
+    if not UPLOAD_HEALTH_CHECKER_ENABLED:
+        return
+
     await asyncio.sleep(120)  # Let API stabilize first
     logger.info("Upload health checker loop started (interval: 5 min)")
 
@@ -1168,11 +1176,13 @@ async def _schedule_checker_loop():
                     # del video). El gate global al 50% se eliminó porque
                     # bloqueaba la verificación de TODOS los canales cuando un
                     # solo proyecto estaba al 50% (medición global incorrecta).
-                    try:
-                        from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
-                        await run_thumbnail_verification_cycle(db=_sched_db)
-                    except Exception as _tv_exc:
-                        logger.debug("Thumbnail verification cycle: %s", _tv_exc)
+                    # Quota pruning (ago 2026): desactivado por defecto (flag env).
+                    if THUMBNAIL_VERIFY_ENABLED:
+                        try:
+                            from api.services.thumbnail_verification_service import run_thumbnail_verification_cycle
+                            await run_thumbnail_verification_cycle(db=_sched_db)
+                        except Exception as _tv_exc:
+                            logger.debug("Thumbnail verification cycle: %s", _tv_exc)
 
                     # Standalone shorts: auto-dispatch trending topics every 120 min (10:00-23:00)
                     if 10 <= local_hour <= 23 and now - last_standalone_dispatch > 7200:
