@@ -24,10 +24,10 @@ _RANGE_RULES: List[Tuple[str, float, float, float, str]] = [
     ("MAX_CLIP_EXTEND_SEC", 10.0,  60.0, 25.0,  "Max clip extend seconds"),
     ("SCENE_DURATION_MIN",   2.0,  10.0,  5.0,  "Minimum scene duration (s)"),
     ("SCENE_DURATION_MAX",   5.0,  30.0, 20.0,  "Maximum scene duration (s)"),
-    ("IMAGE_SCENE_DURATION_MIN", 1.0, 7.0, 4.0, "Image scene minimum duration (s)"),
-    ("IMAGE_SCENE_DURATION_MAX", 4.0, 7.0, 7.0, "Image scene maximum duration (s)"),
-    ("VIDEO_SCENE_DURATION_MIN", 1.0, 10.0, 6.0, "Video scene minimum duration (s)"),
-    ("VIDEO_SCENE_DURATION_MAX", 6.0, 10.0, 10.0, "Video scene maximum duration (s)"),
+    ("IMAGE_SCENE_DURATION_MIN", 1.0, 6.0, 4.0, "Image scene minimum duration (s)"),
+    ("IMAGE_SCENE_DURATION_MAX", 4.0, 6.0, 6.0, "Image scene maximum duration (s)"),
+    ("VIDEO_SCENE_DURATION_MIN", 1.0, 7.0, 4.0, "Video scene minimum duration (s)"),
+    ("VIDEO_SCENE_DURATION_MAX", 4.0, 7.0, 7.0, "Video scene maximum duration (s)"),
     ("SCENE_SYNC_TOLERANCE_SEC", 0.01, 1.0, 0.15, "Scene/audio sync tolerance (s)"),
     ("BACKGROUND_MUSIC_VOLUME", -35.0, -5.0, -18.0, "Background music volume (dB)"),
     ("BACKGROUND_MUSIC_DUCK_VOLUME", -40.0, -10.0, -28.0, "Ducked music volume (dB)"),
@@ -118,8 +118,8 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
         minimum = config.get(min_key)
         maximum = config.get(max_key)
         if minimum is not None and maximum is not None and minimum >= maximum:
-            fallback_max = 7.0 if kind == "IMAGE" else 10.0
-            fallback_min = 4.0 if kind == "IMAGE" else 6.0
+            fallback_max = 6.0 if kind == "IMAGE" else 7.0
+            fallback_min = 4.0
             warnings.append(
                 f"[{slug}] {min_key} ({minimum}) >= {max_key} ({maximum}) — "
                 f"forcing {min_key}={fallback_min}, {max_key}={fallback_max}"

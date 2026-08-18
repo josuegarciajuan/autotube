@@ -1769,7 +1769,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "  * VIDEO: paisajes, naturaleza, ciudades, cielo, agua, movimiento, time-lapses, drones\n"
             "  * IMAGEN: objetos estáticos, documentos, mapas, reliquias, retratos, conceptos abstractos\n"
             "  * En caso de duda: IMAGEN\n"
-            "- media_duracion: duración en segundos (imagen=5-7, video=8-12)"
+            "- media_duracion: duración en segundos (imagen=4-6, video=4-7)"
         )
 
         user_prompt = (
