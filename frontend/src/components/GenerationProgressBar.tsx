@@ -226,18 +226,25 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
 export default function GenerationProgressBar() {
   const { activeJobs, clearAll, removeJob } = useGeneration()
 
-  if (activeJobs.length === 0) {
+  // Show only jobs that are ACTUALLY running. Queued jobs (e.g. reassemble
+  // jobs waiting for the global queue consumer) have no progress yet — they
+  // would render dead bars at 0% that never resolve. Jobs without a status
+  // (optimistically added when the user presses "Generar", before the next
+  // API poll) are kept visible so dispatch feedback stays instant.
+  const visibleJobs = activeJobs.filter(j => j.status !== 'queued')
+
+  if (visibleJobs.length === 0) {
     return null
   }
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-[9999] transition-all duration-300 animate-slide-up">
       {/* Multi-job indicator */}
-      {activeJobs.length > 1 && (
+      {visibleJobs.length > 1 && (
         <div className="flex items-center gap-1.5 px-3 py-1.5 bg-dark-700/90 backdrop-blur border-t border-surface-border/50">
           <Layers size={12} className="text-neon-gold" />
           <span className="text-[10px] text-gray-400 font-medium">
-            {activeJobs.length} generaciones activas
+            {visibleJobs.length} generaciones activas
           </span>
           <button
             onClick={clearAll}
@@ -249,7 +256,7 @@ export default function GenerationProgressBar() {
       )}
 
       {/* Individual job bars */}
-      {activeJobs.map(job => (
+      {visibleJobs.map(job => (
         <JobProgressSlot
           key={job.jobId}
           job={job}
