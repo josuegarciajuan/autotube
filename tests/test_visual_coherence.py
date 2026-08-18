@@ -173,12 +173,18 @@ def test_prompts_unique_when_bible_incomplete():
     prompt_b, _ = fetcher._build_ai_prompt(scene, scene_idx=6, total_scenes=10)
 
     assert prompt_a != prompt_b, "Scenes past the vb map must not share a prompt"
-    assert "scene variation 6/10" in prompt_a
-    assert "scene variation 7/10" in prompt_b
+    assert "scene 6/10" in prompt_a
+    assert "scene 7/10" in prompt_b
 
 
 def test_prompt_keeps_vb_concept_when_present():
-    """A real vb concept must NOT get the generic scene-variation suffix."""
+    """A real vb concept must be preserved AND still get the scene marker.
+
+    The scene marker is now prepended unconditionally: it guarantees prompt
+    uniqueness even when the LLM repeats the same visual_concept across
+    scenes (observed in production), while the vb concept itself remains
+    untouched inside the prompt.
+    """
     bible = {
         "visual_universe": "shared universe",
         "central_entity": {"type": "none"},
@@ -198,6 +204,6 @@ def test_prompt_keeps_vb_concept_when_present():
     )
 
     assert "sunken temple beneath green water" in prompt
-    assert "scene variation" not in prompt, (
-        "Real vb concept keeps coherence — no generic variation suffix"
+    assert "scene 1/10" in prompt, (
+        "Scene marker always present (uniqueness); vb concept preserved"
     )

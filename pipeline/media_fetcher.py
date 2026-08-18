@@ -830,6 +830,53 @@ class MediaFetcher:
         scenes, results = self._reconcile_actual_image_fallbacks(
             scenes, results, self._fetch_distinct_image_for_expanded_scene,
         )
+
+        # ── Uniqueness gate: enough DISTINCT media for the timeline? ──
+        # Mirrors the render-time "placeholder ratio" gate in video_editor:
+        # if duplicate cache hits exhausted the unique image pool, the render
+        # would reject the repeats, fall back to placeholders and abort after
+        # ~1h of work (>30% black segments).  Fail fast HERE instead, while a
+        # re-plan / re-fetch is still cheap and the operator gets a clear error.
+        _unique_image_paths: set[str] = set()
+        _dupe_images = 0
+        _missing_files = 0
+        for _a in results:
+            if not isinstance(_a, dict) or not _a.get("path"):
+                _missing_files += 1
+                continue
+            _sp = str(_a["path"])
+            if _a.get("type") == "image":
+                if _sp in _unique_image_paths:
+                    _dupe_images += 1
+                    logger.warning(
+                        "Uniqueness gate: image %s already assigned to "
+                        "another scene — render would reject it",
+                        Path(_sp).name,
+                    )
+                _unique_image_paths.add(_sp)
+
+        # NOTE: video files are legitimately reused across scenes via
+        # offset-tracking (each scene takes a different segment), so only
+        # IMAGE duplicates count as hard violations.  A scene with no file
+        # at all (placeholder) is tolerated up to the same 30% limit the
+        # render-time gate enforces.
+        _placeholder_pct = _missing_files / max(n_scenes, 1) * 100
+        if _dupe_images > 0 or _placeholder_pct > 30.0:
+            if _dupe_images:
+                _note = f" ({_dupe_images} duplicate image assignments)"
+            else:
+                _note = (
+                    f" ({_missing_files}/{n_scenes} scenes without media "
+                    f"— would exceed the 30%% placeholder limit at render)"
+                )
+            error_msg = (
+                f"CRITICAL: media fetch produced insufficient DISTINCT media "
+                f"for {n_scenes} scenes{_note}. Duplicate cache hits exhausted "
+                f"the unique pool — aborting before render to prevent a "
+                f"black-screen placeholder cascade."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
         return results
 
     def _reconcile_actual_image_fallbacks(
@@ -1039,6 +1086,17 @@ class MediaFetcher:
             logger.info("Scene [%s]: invoking Pollo AI for %r", scene_tipo, prompt[:80])
             path = pollo.generate_scene_image(prompt, theme=ctx)
             if path and path.exists():
+                # Same cache-duplicate guard as the AI image chain: the
+                # scene generator caches by prompt hash and can return the
+                # same file for repeated prompts.
+                if self._is_asset_duplicate({"url": str(path)}):
+                    logger.warning(
+                        "Scene %d/%d: Pollo AI image %s already used in this "
+                        "video (cache duplicate) — skipping",
+                        scene_idx + 1, total_scenes, Path(path).name,
+                    )
+                    return None
+                self._record_asset_used({"url": str(path)})
                 return {
                     "path": path,
                     "type": "image",
@@ -1112,6 +1170,21 @@ class MediaFetcher:
                     negative_prompt=negative,
                 )
                 if result_path and result_path.exists():
+                    # ── Strict intra-video dedup (cache hits!) ──────────
+                    # The provider caches by prompt hash; identical or
+                    # truncated prompts return the SAME cached file. If we
+                    # assign it to a second scene, the render-time "never
+                    # repeat an image" invariant rejects it later → fallback
+                    # chain → placeholder. Reject it HERE so the next
+                    # provider/tier is tried while we still have options.
+                    if self._is_asset_duplicate({"url": str(result_path)}):
+                        logger.warning(
+                            "Scene %d/%d: AI image %s already used in this "
+                            "video (cache duplicate) — trying next provider",
+                            scene_idx + 1, total_scenes,
+                            Path(result_path).name,
+                        )
+                        continue
                     # Validate minimum quality (lenient for AI — they may be smaller
                     # than stock photos due to efficient encoding).
                     if not self._is_valid_ai_image(result_path):
@@ -1195,7 +1268,6 @@ class MediaFetcher:
         # (a metaphoric visual description, NOT a literal illustration).
         # Fall back to search_query_en or generic type hints otherwise.
         concept = ""
-        used_vb_concept = False  # True only when a real, non-empty vb concept was used
         if self._visual_bible:
             scene_map = self._visual_bible.get("scene_visual_map", [])
             if scene_idx < len(scene_map):
@@ -1212,9 +1284,6 @@ class MediaFetcher:
                 if vb_density in ("simple", "balanced", "rich"):
                     density = vb_density
 
-            if concept and concept.strip():
-                used_vb_concept = True
-
         if not concept:
             concept = scene.get("search_query_en", "") or scene.get("texto", "") or ""
         if not concept:
@@ -1227,16 +1296,13 @@ class MediaFetcher:
             }
             concept = type_hints.get(scene.get("tipo", ""), "cinematic atmospheric scene")
 
-        # Ensure uniqueness: append scene index when using generic concepts
-        # so that same-tipo scenes don't produce identical prompts → cached dupes.
-        # Applies whenever the concept did NOT come from a real visual-bible
-        # entry (no bible, short scene_visual_map, or empty visual_concept) —
-        # otherwise scenes past the end of a short map would all share the
-        # same generic concept and Pollinations would return the same cached
-        # image for every one of them.
-        if not used_vb_concept:
-            concepto_base = concept
-            concept = f"{concept}, scene variation {scene_idx + 1}/{total_scenes}"
+        # Ensure uniqueness: EVERY scene prompt carries a stable scene marker.
+        # Even when a visual bible concept exists, two scenes can receive the
+        # same concept (LLM repetition / padded entries / empty search_query),
+        # and identical prompts → identical Pollinations cache key → the SAME
+        # cached image for both scenes. The marker is PREPENDED so it survives
+        # the 500-char truncation below (which cuts `concept` from the END).
+        concept = f"scene {scene_idx + 1}/{total_scenes}: {concept}"
 
         # ── Layer 4: Technical suffix ────────────────────────
         # Density may have been overridden by the visual bible above

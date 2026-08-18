@@ -10,7 +10,10 @@ Run:  python3 -m pytest tests/test_media_fetcher_optimizations.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+# Raíz del repo dinámica (mismo patrón que tests/conftest.py) — permite correr
+# los tests desde un worktree o desde el árbol principal.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 from unittest.mock import MagicMock, patch

@@ -118,6 +118,36 @@ class VisualBible:
             "scene_visual_map": self.scene_visual_map,
         }
 
+    def with_filled_concepts(self, entries: list[dict]) -> "VisualBible":
+        """Return a new bible with freshly generated scene entries merged in.
+
+        Each entry in *entries* is keyed by its ``scene`` index; entries
+        without a valid index (or out of range) are ignored.  The merge
+        preserves the original bible's universe/tone/entity/elements and
+        only replaces the per-scene fields of the recovered scenes.
+        """
+        by_scene: dict[int, dict] = {}
+        for entry in entries:
+            try:
+                sidx = int(entry.get("scene", -1))
+            except (TypeError, ValueError):
+                sidx = -1
+            if sidx >= 0:
+                by_scene[sidx] = entry
+
+        merged = [dict(e) for e in self.scene_visual_map]
+        for sidx, entry in by_scene.items():
+            if 0 <= sidx < len(merged):
+                merged[sidx] = {**merged[sidx], **entry}
+
+        return VisualBible(
+            visual_universe=self.visual_universe,
+            visual_tone_arc=self.visual_tone_arc,
+            central_entity=self.central_entity,
+            recurring_elements=self.recurring_elements,
+            scene_visual_map=merged,
+        )
+
 
 class VisualBibleGenerator:
     """Generate a visual bible by calling the LLM with the completed script.
@@ -211,16 +241,122 @@ class VisualBibleGenerator:
                     "No model available in pool for visual bible"
                 )
             bible = VisualBible.from_dict(result, num_scenes)
-            logger.info(
-                "Visual bible generated: universe=%s..., entity=%s, %d scenes",
-                bible.visual_universe[:60],
-                bible.central_entity.get("type", "none"),
-                len(bible.scene_visual_map),
-            )
-            return bible
-
         except Exception as exc:
             logger.warning(
                 "Visual bible LLM call failed: %s — using fallback", exc,
             )
-            return VisualBible._fallback(num_scenes)
+            bible = VisualBible._fallback(num_scenes)
+
+        # ── Gap fill: regenerate missing/empty scene concepts ──────────
+        # A partial or empty bible leaves scenes without a visual_concept;
+        # those scenes then collapse to generic prompts → Pollinations
+        # returns the same cached image for all of them → render-time
+        # dedup rejects the duplicates → placeholder cascade → assembly
+        # abort.  Try ONE targeted regeneration of the missing concepts
+        # before degrading to empty entries (which the media fetcher pads).
+        missing = [
+            i for i, e in enumerate(bible.scene_visual_map)
+            if not (e.get("visual_concept") or "").strip()
+        ]
+        if missing and len(missing) >= max(3, int(num_scenes * 0.05)):
+            logger.info(
+                "Visual bible: %d/%d scenes lack concepts — regenerating...",
+                len(missing), num_scenes,
+            )
+            filled = self._generate_missing_concepts(
+                script_text, missing, num_scenes, model_name,
+            )
+            if filled:
+                bible = bible.with_filled_concepts(filled)
+                still_missing = [
+                    i for i, e in enumerate(bible.scene_visual_map)
+                    if not (e.get("visual_concept") or "").strip()
+                ]
+                logger.info(
+                    "Visual bible gap fill: recovered %d/%d concepts, "
+                    "%d still empty (will use scene queries)",
+                    len(filled) - len(still_missing),
+                    len(missing), len(still_missing),
+                )
+
+        logger.info(
+            "Visual bible generated: universe=%s..., entity=%s, %d scenes",
+            bible.visual_universe[:60],
+            bible.central_entity.get("type", "none"),
+            len(bible.scene_visual_map),
+        )
+        return bible
+
+    def _generate_missing_concepts(
+        self,
+        script_text: str,
+        missing_indices: list[int],
+        num_scenes: int,
+        model_name: str | None = None,
+    ) -> list[dict]:
+        """Second, targeted LLM call that generates ONLY the missing concepts.
+
+        Reuses the same model pool/failover as the main call.  Returns a
+        list of scene-map entries (dicts) that have a valid ``scene`` index
+        and a non-empty ``visual_concept``; empty list on total failure.
+        """
+        missing_list = ", ".join(str(i) for i in missing_indices)
+        system_prompt = (
+            "Eres un director de fotografia y diseno visual experto en documentales.\n"
+            "Una biblia visual previa omitio los conceptos visuales de algunas escenas.\n"
+            "Tu tarea: generar SOLO los conceptos faltantes, manteniendo coherencia\n"
+            "con el universo visual del guion.\n\n"
+            "REGLA: METAFORA VISUAL, NO LITERAL. No describas la narracion al pie\n"
+            "de la letra; crea una imagen que transmita la misma emocion. visual_concept\n"
+            "debe estar en INGLES. JAMAS muestres texto en la imagen.\n\n"
+            "FORMATO: Responde EXCLUSIVAMENTE con un JSON valido, sin markdown:\n"
+            '{"scene_visual_map": [{"scene": <indice>, "shot_type": "mood|detail|establishing|action|symbolic", '
+            '"visual_concept": "<concepto en ingles>", "mood": "<emocion>", '
+            '"has_protagonist": false, "bridge_from_prev": null, '
+            '"visual_density": "simple|balanced|rich"}]}'
+        )
+        user_prompt = (
+            f"Faltan los conceptos visuales de las escenas con indices: "
+            f"[{missing_list}] (de un total de {num_scenes} escenas).\n"
+            "Genera UNA entrada por escena faltante, cada una con su indice exacto.\n\n"
+            f"GUION:\n---\n{script_text}\n---"
+        )
+
+        result = None
+        for entry, client in self._script_gen.model_pool.iter_models():
+            if model_name and model_name not in (entry.model_id, entry.display_name):
+                continue
+            try:
+                result = self._script_gen._llm_json_call(
+                    thinking=True,
+                    client=client,
+                    model=entry.model_id,
+                    model_name=entry.display_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.7,
+                )
+                break
+            except Exception as exc:
+                logger.warning(
+                    "Visual bible gap fill: model %s failed: %s",
+                    entry.display_name, exc,
+                )
+
+        if isinstance(result, dict):
+            entries = result.get("scene_visual_map") or []
+            if isinstance(entries, list):
+                valid = [
+                    e for e in entries
+                    if isinstance(e, dict)
+                    and (e.get("visual_concept") or "").strip()
+                ]
+                if valid:
+                    return valid
+        logger.warning(
+            "Visual bible gap fill failed — %d scenes stay without concepts",
+            len(missing_indices),
+        )
+        return []
