@@ -48,34 +48,65 @@ class VisualBible:
     scene_visual_map: list[dict] = field(default_factory=list)
 
     @classmethod
+    def _empty_scene_entry(cls, scene_idx: int) -> dict:
+        """Minimal scene-map entry with an EMPTY visual_concept.
+
+        An empty ``visual_concept`` signals the media fetcher to fall back to
+        the scene's own ``search_query_en``/``texto`` (or a generic type hint)
+        and append ``scene variation {i}/{N}`` for prompt uniqueness.  Reusing
+        a non-empty literal here would collapse every scene to the same prompt
+        → Pollinations cache returns the same image for all of them.
+        """
+        return {
+            "scene": scene_idx,
+            "shot_type": "mood",
+            "visual_concept": "",
+            "mood": "neutral",
+            "has_protagonist": False,
+            "bridge_from_prev": None,
+            "visual_density": "balanced",
+        }
+
+    @classmethod
     def from_dict(cls, data: dict, num_scenes: int = 0) -> "VisualBible":
-        """Parse a raw LLM JSON dict into a ``VisualBible``, with fallbacks."""
+        """Parse a raw LLM JSON dict into a ``VisualBible``, with fallbacks.
+
+        If the LLM returned fewer ``scene_visual_map`` entries than
+        ``num_scenes`` (observed: 11-32 entries for 100-146 scene videos),
+        the missing entries are padded with ``_empty_scene_entry`` so the
+        fetcher never runs out of per-scene concepts — the empty entries fall
+        back to the scene query with a unique ``scene variation`` suffix.
+        """
         if not isinstance(data, dict):
             logger.warning("Visual bible LLM returned non-dict; using fallback")
             return cls._fallback(num_scenes)
+
+        scene_map = list(data.get("scene_visual_map") or [])
+        if num_scenes > 0 and len(scene_map) < num_scenes:
+            logger.warning(
+                "Visual bible returned %d/%d scene entries — padding %d with empty concepts",
+                len(scene_map), num_scenes, num_scenes - len(scene_map),
+            )
+            for i in range(len(scene_map), num_scenes):
+                scene_map.append(cls._empty_scene_entry(i))
 
         return cls(
             visual_universe=data.get("visual_universe") or FALLBACK_VISUAL_UNIVERSE,
             visual_tone_arc=data.get("visual_tone_arc") or "neutral→tense→hopeful",
             central_entity=data.get("central_entity") or {"type": "none"},
             recurring_elements=data.get("recurring_elements") or [],
-            scene_visual_map=data.get("scene_visual_map") or [],
+            scene_visual_map=scene_map,
         )
 
     @classmethod
     def _fallback(cls, num_scenes: int) -> "VisualBible":
-        """Return a minimal bible with a generic scene map."""
-        scene_map: list[dict] = []
-        for i in range(num_scenes):
-            scene_map.append({
-                "scene": i,
-                "shot_type": "mood",
-                "visual_concept": "cinematic atmospheric documentary scene",
-                "mood": "neutral",
-                "has_protagonist": False,
-                "bridge_from_prev": None,
-                "visual_density": "balanced",
-            })
+        """Return a minimal bible with an empty-concepts scene map.
+
+        Every entry uses an empty ``visual_concept`` so prompt uniqueness is
+        delegated to the media fetcher's ``scene variation {i}/{N}`` suffix
+        (identical concepts here would all hash to the same cached image).
+        """
+        scene_map: list[dict] = [cls._empty_scene_entry(i) for i in range(num_scenes)]
         return cls(scene_visual_map=scene_map)
 
     def to_dict(self) -> dict:

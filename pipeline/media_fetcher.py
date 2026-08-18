@@ -1183,6 +1183,7 @@ class MediaFetcher:
         # (a metaphoric visual description, NOT a literal illustration).
         # Fall back to search_query_en or generic type hints otherwise.
         concept = ""
+        used_vb_concept = False  # True only when a real, non-empty vb concept was used
         if self._visual_bible:
             scene_map = self._visual_bible.get("scene_visual_map", [])
             if scene_idx < len(scene_map):
@@ -1199,6 +1200,9 @@ class MediaFetcher:
                 if vb_density in ("simple", "balanced", "rich"):
                     density = vb_density
 
+            if concept and concept.strip():
+                used_vb_concept = True
+
         if not concept:
             concept = scene.get("search_query_en", "") or scene.get("texto", "") or ""
         if not concept:
@@ -1213,7 +1217,12 @@ class MediaFetcher:
 
         # Ensure uniqueness: append scene index when using generic concepts
         # so that same-tipo scenes don't produce identical prompts → cached dupes.
-        if not self._visual_bible:
+        # Applies whenever the concept did NOT come from a real visual-bible
+        # entry (no bible, short scene_visual_map, or empty visual_concept) —
+        # otherwise scenes past the end of a short map would all share the
+        # same generic concept and Pollinations would return the same cached
+        # image for every one of them.
+        if not used_vb_concept:
             concepto_base = concept
             concept = f"{concept}, scene variation {scene_idx + 1}/{total_scenes}"
 
