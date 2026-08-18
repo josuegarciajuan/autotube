@@ -143,6 +143,11 @@ _SPANISH_TO_ENGLISH: dict[str, str] = {
 class ImageProvider(ABC):
     """Abstract base for image search providers."""
 
+    # Whether this provider is usable. ``media_fetcher.fetch_single_image_urgent``
+    # consults ``provider.available`` before searching; subclasses may set this
+    # to ``False`` to self-disable (e.g. after a hard API failure).
+    available: bool = True
+
     @abstractmethod
     def search(self, query: str, n: int = 1, style_modifiers: str = "",
                page: int = 1) -> list[dict]:
