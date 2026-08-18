@@ -36,9 +36,10 @@ _batch_lock = threading.Lock()
 _last_flush = 0.0
 
 # Default daily quota per project (YouTube Data API v3).
-# Fase 2 (ago 2026): era 10_000 (free tier), pero los canales consumen 30-55k ud/día
-# sin bloqueos → tienen ampliación. Configurable vía YT_DAILY_QUOTA_LIMIT.
-DEFAULT_DAILY_QUOTA = int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000"))
+# Fase 2 (ago 2026): era 10_000 (free tier), pero ambos proyectos tienen
+# ampliación 10x (100_000 ud/día) — los canales consumen 30-82k ud/día sin
+# bloqueos. Configurable vía YT_DAILY_QUOTA_LIMIT.
+DEFAULT_DAILY_QUOTA = int(os.getenv("YT_DAILY_QUOTA_LIMIT", "100000"))
 
 
 _project_cache: dict[str, str] = {}
