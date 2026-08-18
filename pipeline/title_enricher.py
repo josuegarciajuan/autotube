@@ -161,6 +161,34 @@ def _any_power_word_present(title: str, power_words: list[str]) -> bool:
     return False
 
 
+# ── Trailing parenthetical collapse (belt-and-suspenders) ────────────
+
+_TRAILING_PAREN_RE = re.compile(r"(\s*\([^()]*\))\s*$")
+
+
+def _paren_content(paren: str) -> str:
+    return paren.strip(" ()（）[]").lower()
+
+
+def _collapse_trailing_parentheticals(title: str) -> str:
+    """Collapse repeated identical (case-insensitive) trailing parentheticals.
+
+    E.g. "Título (Impactante) (IMPACTANTE)" → "Título (Impactante)".
+    Leaves a single parenthetical — or two different ones — untouched.
+    """
+    while True:
+        m = _TRAILING_PAREN_RE.search(title)
+        if not m:
+            break
+        rest = title[:m.start()].rstrip()
+        m2 = _TRAILING_PAREN_RE.search(rest)
+        if m2 and _paren_content(m.group(1)) == _paren_content(m2.group(1)):
+            title = rest
+        else:
+            break
+    return title
+
+
 # ── Public API ───────────────────────────────────────────────────────
 
 def enforce_power_words(
@@ -190,7 +218,10 @@ def enforce_power_words(
     if not title or not title.strip():
         logger.warning("title_enricher: empty title, cannot enrich")
         return title
-    
+
+    # Collapse duplicate trailing parentheticals (e.g. "(Impactante) (IMPACTANTE)")
+    title = _collapse_trailing_parentheticals(title)
+
     if not power_words:
         logger.debug("title_enricher: no power_words list, skipping")
         return title[:max_chars]
