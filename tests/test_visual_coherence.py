@@ -116,3 +116,88 @@ def test_long_scene_prompt_retains_global_impact_and_channel_grade():
     assert len(prompt) <= 500
     assert "hybrid documentary YouTube impact" in prompt
     assert "channel-specific vivid amber grade" in prompt
+
+
+# ── Regression: duplicate AI prompts from incomplete visual bibles ──────────
+# Videos #2174/#2175/#2176/#2178 aborted with >30% placeholder ratio because
+# Pollo AI/Pollinations returned identical images for different scenes: the
+# visual bible's scene_visual_map was SHORTER than the scene count (e.g. 11
+# entries for 120 scenes), so every scene past the map fell back to the same
+# generic concept → identical prompt → same cached image → dedup rejected it.
+
+def test_visual_bible_from_dict_pads_missing_scenes():
+    """from_dict must pad a short scene_visual_map up to num_scenes."""
+    from pipeline.visual_bible import VisualBible
+
+    bible = VisualBible.from_dict(
+        {"scene_visual_map": [{"visual_concept": "real concept"}]},
+        num_scenes=10,
+    )
+    assert len(bible.scene_visual_map) == 10
+    # The original entry is preserved.
+    assert bible.scene_visual_map[0]["visual_concept"] == "real concept"
+    # Padded entries have EMPTY concepts (fetcher appends scene variation).
+    assert all(not bible.scene_visual_map[i]["visual_concept"]
+               for i in range(1, 10))
+
+
+def test_visual_bible_fallback_has_empty_concepts():
+    """_fallback must not reuse one literal concept for every scene."""
+    from pipeline.visual_bible import VisualBible
+
+    bible = VisualBible._fallback(5)
+    assert len(bible.scene_visual_map) == 5
+    assert all(not entry["visual_concept"]
+               for entry in bible.scene_visual_map)
+
+
+def test_prompts_unique_when_bible_incomplete():
+    """Scenes past a short scene_visual_map must produce DIFFERENT prompts."""
+    bible = {
+        "visual_universe": "shared universe",
+        "central_entity": {"type": "none"},
+        "recurring_elements": [],
+        "scene_visual_map": [
+            {"visual_concept": "concept for scene zero"},
+            {"visual_concept": "concept for scene one"},
+            {"visual_concept": "concept for scene two"},
+        ],
+    }
+    fetcher = MediaFetcher(config=_config())
+    fetcher.set_visual_context(visual_bible=bible)
+
+    scene = {"tipo": "desarrollo", "texto": "generic narration",
+             "search_query_en": "", "duration": 5}
+
+    prompt_a, _ = fetcher._build_ai_prompt(scene, scene_idx=5, total_scenes=10)
+    prompt_b, _ = fetcher._build_ai_prompt(scene, scene_idx=6, total_scenes=10)
+
+    assert prompt_a != prompt_b, "Scenes past the vb map must not share a prompt"
+    assert "scene variation 6/10" in prompt_a
+    assert "scene variation 7/10" in prompt_b
+
+
+def test_prompt_keeps_vb_concept_when_present():
+    """A real vb concept must NOT get the generic scene-variation suffix."""
+    bible = {
+        "visual_universe": "shared universe",
+        "central_entity": {"type": "none"},
+        "recurring_elements": [],
+        "scene_visual_map": [
+            {"visual_concept": "sunken temple beneath green water",
+             "bridge_from_prev": None, "visual_density": "balanced"},
+        ],
+    }
+    fetcher = MediaFetcher(config=_config())
+    fetcher.set_visual_context(visual_bible=bible)
+
+    prompt, _ = fetcher._build_ai_prompt(
+        {"tipo": "desarrollo", "texto": "narration", "duration": 5},
+        scene_idx=0,
+        total_scenes=10,
+    )
+
+    assert "sunken temple beneath green water" in prompt
+    assert "scene variation" not in prompt, (
+        "Real vb concept keeps coherence — no generic variation suffix"
+    )
