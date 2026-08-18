@@ -320,6 +320,113 @@ def get_project_usage(db=None, project_id: Optional[str] = None,
     return get_daily_usage(db=db, project_id=project_id, date=date)
 
 
+# ── Upload budget helpers (planning quota-aware, ago 2026) ──────────
+# Cada subida (long o short) consume UPLOAD_UNITS (1.600 ud) de videos.insert.
+# El presupuesto automático de un proyecto es
+# get_project_automatic_budget_units(project) (cuota real − reservados).
+# NUNCA hardcodear el número de subidas: se deriva de settings en runtime.
+UPLOAD_UNITS = 1600  # coste de videos.insert (long y short cuestan lo mismo)
+
+# Constante de re-export para evitar importar desde el dispatcher (evita
+# dependencias cruzadas api.services ↔ pipeline).
+VIDEOS_INSERT_OPERATION = "videos.insert"
+
+
+def get_project_max_daily_uploads(project_id: str) -> int:
+    """Máximo de subidas/día que un proyecto puede admitir.
+
+    Deriva del presupuesto automático (settings) — nunca un literal:
+        automatic_budget(project) // UPLOAD_UNITS
+    Con YT_PROJECT_BUDGET_UNITS=10000 y YT_PROJECT_RESERVED_UNITS=400
+    → (10000-400)//1600 = 6 subidas/día/proyecto.
+    """
+    try:
+        from config.settings import get_project_automatic_budget_units
+        budget = get_project_automatic_budget_units(project_id)
+        return max(budget // UPLOAD_UNITS, 0)
+    except Exception:
+        return 0
+
+
+def get_project_used_upload_units(project_id: str, date: Optional[str] = None,
+                                  db=None) -> int:
+    """Unidades de subida ya reservadas/consumidas del día para un proyecto.
+
+    Fuente primaria: yt_quota_reservations (status reserved/consumed) — es la
+    fuente de admisión (cada subida reserva 1.600 antes de emitir la llamada).
+    Fallback: yt_quota_log (videos.insert success) para subidas anteriores al
+    sistema de reservas. max() evita el doble conteo (toda subida posterior a
+    la reserva también se registra en el log).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    if date is None:
+        date = quota_day_pacific()
+
+    # Canales del proyecto (para el fallback del log)
+    slugs: list[str] = []
+    try:
+        for ch in (db.get_channels(active_only=False) or []):
+            s = ch.get("slug")
+            if s and get_channel_project(s) == project_id:
+                slugs.append(s)
+    except Exception:
+        pass
+
+    reserved = 0
+    logged = 0
+    try:
+        with db._connect() as conn:
+            try:
+                row = conn.execute(
+                    """SELECT COALESCE(SUM(units), 0) AS total
+                       FROM yt_quota_reservations
+                       WHERE project_id = ? AND quota_day_pt = ?
+                         AND status IN ('reserved', 'consumed')""",
+                    (project_id, date),
+                ).fetchone()
+                reserved = int(row["total"] or 0) if row else 0
+            except Exception:
+                pass  # tabla no disponible → solo log
+
+            if slugs:
+                try:
+                    placeholders = ",".join("?" for _ in slugs)
+                    row2 = conn.execute(
+                        f"""SELECT COALESCE(SUM(units), 0) AS total
+                            FROM yt_quota_log
+                            WHERE channel_slug IN ({placeholders})
+                              AND operation = ?
+                              AND success = 1
+                              AND date(timestamp, '-9 hours') = ?""",
+                        (*slugs, VIDEOS_INSERT_OPERATION, date),
+                    ).fetchone()
+                    logged = int(row2["total"] or 0) if row2 else 0
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return max(reserved, logged)
+
+
+def get_project_remaining_upload_slots(project_id: str, date: Optional[str] = None,
+                                       db=None) -> int:
+    """Subidas que aún caben en el día (día-PT por defecto) para un proyecto.
+
+    remaining = (presupuesto automático − usado) // UPLOAD_UNITS.
+    Para días futuros (sin reservas) devuelve el máximo diario completo.
+    """
+    try:
+        from config.settings import get_project_automatic_budget_units
+        budget = get_project_automatic_budget_units(project_id)
+    except Exception:
+        return 0
+    used = get_project_used_upload_units(project_id, date=date, db=db)
+    return max(budget - used, 0) // UPLOAD_UNITS
+
+
 def get_projects_usage(db=None, date: Optional[str] = None) -> dict:
     """Consumo del día-PT desglosado POR PROYECTO GCP (cuota real).
 

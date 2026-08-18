@@ -187,11 +187,12 @@ MAX_DAILY_SHORTS_PER_CHANNEL_QUOTA_SAFE = int(os.getenv(
     "MAX_DAILY_SHORTS_QUOTA_SAFE", "10"
 ))  # Safe with default 10,000 unit quota
 
-# ── Fase 0.2 (ago 2026): tope global de subidas/día (long-form + shorts) ──
-# Red de seguridad: cada subida (video largo o short) consume 1.600 ud de cuota.
-# 24/día ≈ 38.400 ud — dentro del régimen histórico (16-20/día) con margen,
-# y frena los picos de crisis (30-50/día) que agotaban la cuota.
-GLOBAL_DAILY_UPLOAD_CAP = int(os.getenv("GLOBAL_DAILY_UPLOAD_CAP", "24"))
+# ── Fase cuota (ago 2026): SIN tope global de subidas ──
+# El único tope es POR PROYECTO GCP: get_project_automatic_budget_units(project)
+# (cuota real − reservados) repartido por la planificación quota-aware
+# (planning_service.compute_daily_upload_allocation). Cada subida (video largo
+# o short) consume 1.600 ud. No existe un cap global: dos proyectos con presupuesto
+# sano suben cada uno su cupo (~6 subidas/día/proyecto).
 
 # Emergency remediation gate. While true, no automatic upload path may start a
 # new YouTube operation. It defaults to safe-on after the August 2026 quota
@@ -251,6 +252,31 @@ def get_project_automatic_budget_units(project_id: str) -> int:
     if YT_AUTOMATIC_BUDGET_UNITS > 0:
         return YT_AUTOMATIC_BUDGET_UNITS
     return max(get_project_budget_units(project_id) - YT_PROJECT_RESERVED_UNITS, 1600)
+
+
+# ── Upload batching por cuenta (planificación quota-aware, ago 2026) ──
+# Los videos long-form (fase F2) de los canales que comparten cuenta Google se
+# suben agrupados en 2 momentos al día (mañana y tarde) para dar sensación de
+# subida manual. Se respeta siempre upload + warmup <= publicación; si un video
+# no cabe en ningún batch del día, se sube en el batch de tarde del día anterior.
+# Formato: "HH:MM,HH:MM" (hora local Europe/Madrid). Override por canal en
+# config_json["UPLOAD_BATCH_TIMES"].
+def _parse_batch_times(raw: str) -> list[tuple[int, int]]:
+    times = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h, m = (int(x) for x in part.split(":"))
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                times.append((h, m))
+        except (ValueError, TypeError):
+            continue
+    return times or [(9, 30), (16, 0)]
+
+
+UPLOAD_BATCH_TIMES = _parse_batch_times(os.getenv("UPLOAD_BATCH_TIMES", "09:30,16:00"))
 
 # ── Shorts video/image mix strategy ──────────────────────────
 SHORTS_VIDEO_PCT = float(os.getenv("SHORTS_VIDEO_PCT", "0.55"))     # target fraction of scenes using video
