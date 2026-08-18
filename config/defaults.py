@@ -320,10 +320,14 @@ SHORTS_CLIP_SCHEDULE = [
     {"offset_days": 5, "count": 1},
 ]
 
-SHORTS_LONGFORM_LINK_ENABLED = True
-SHORTS_PLAYLIST_AUTO = True
-SHORTS_FIRST_COMMENT_LINK = True
-SHORTS_PER_VIDEO_PLAYLIST = True
+# ── Quota pruning (ago 2026): shorts se suben SIN playlist ni cross-promote ──
+# Solo los videos long-form se añaden a playlist tras la subida (orchestrator).
+# SHORTS_LONGFORM_LINK_ENABLED es el master switch: False apaga todo el
+# cross-promote de shorts (run_post_publish_promotion) en las 5 rutas de subida.
+SHORTS_LONGFORM_LINK_ENABLED = False
+SHORTS_PLAYLIST_AUTO = False
+SHORTS_FIRST_COMMENT_LINK = False
+SHORTS_PER_VIDEO_PLAYLIST = False
 SHORTS_PLAYLIST_NAME = "Shorts"
 
 # ── v2: New distribution system (Aug 2026) ──────────────────────

@@ -199,6 +199,22 @@ def run_post_publish_promotion(
 
     Returns a dict with action results.
     """
+    # ── Master switch: apagado por canal (SHORTS_LONGFORM_LINK_ENABLED=False) ──
+    # Quota pruning (ago 2026): los shorts se suben SIN playlist ni comentario.
+    # Esta guard cubre las 5 rutas de llamada (shorts_native, api/routers/shorts.py
+    # ×4, backfill). Sin ella, el paso 1 (playlist "Shorts") seguiría ejecutándose
+    # aunque el link long-form estuviera desactivado.
+    if channel_config is not None and not getattr(channel_config, "SHORTS_LONGFORM_LINK_ENABLED", True):
+        return {
+            "skipped": True,
+            "reason": "cross_promote_disabled",
+            "playlist_added": False,
+            "per_video_playlist_added": False,
+            "source_in_shorts_playlist": False,
+            "comment_posted": False,
+            "errors": [],
+        }
+
     # ── Quota-aware gating: 3 tiers ─────────────────────────────
     # Tier CRITICAL (>85%): skip EVERYTHING — just upload the short.
     # Tier TIGHT (>70%): skip comments + per-video playlists (expensive).
