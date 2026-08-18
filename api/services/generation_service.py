@@ -3132,14 +3132,26 @@ async def auto_recover_on_startup():
     conn = db._connect()
 
     # ── Step 1: Kill stale jobs ───────────────────────────────
-    # queued jobs: never started → always stale → mark failed
+    # queued jobs: never started → always stale → mark failed.
+    # EXCEPT 'reassemble' jobs: they are pending recovery work created by this
+    # same function (or manually) and are processed by the global _queue_consumer.
+    # Killing them on every restart discards pending reassembly — and when the
+    # restart is not idle (a generation is running → Step 3 recovery is skipped)
+    # they are NOT recreated, stranding the videos in 'error' until an idle
+    # restart. Reassembly jobs carry no running process, so they are safe to keep.
     queued_killed = conn.execute(
         "UPDATE generation_jobs SET status='failed', "
         "error_msg='Server restarted — old process no longer exists' "
-        "WHERE status = 'queued'"
+        "WHERE status = 'queued' AND action != 'reassemble'"
     ).rowcount
     if queued_killed:
         log.info("Marked %d queued job(s) as failed (server restart)", queued_killed)
+    preserved_reassemble = conn.execute(
+        "SELECT COUNT(*) FROM generation_jobs "
+        "WHERE status='queued' AND action='reassemble'"
+    ).fetchone()[0]
+    if preserved_reassemble:
+        log.info("Preserved %d queued reassemble job(s) across restart", preserved_reassemble)
 
     # running jobs: only mark as failed if the worker process is DEAD.
     # If the subprocess survived the API restart, leave it running so
@@ -3217,11 +3229,15 @@ async def auto_recover_on_startup():
     # ── Step 2: Reset stuck video states ──────────────────────
     # Only reset videos whose job is NOT currently running (i.e., worker dead).
     # Videos from surviving workers must stay as 'generating'.
+    # 'queued' reassemble jobs are preserved across restart (Step 1), so their
+    # 'reassembling' videos must NOT be reset — they are pending work for the
+    # queue consumer, and an 'error' status would make the orphan detector
+    # (running job + error video) kill them as soon as they start.
     stuck_rows = conn.execute(
         "SELECT v.id, v.canal FROM videos v "
         "JOIN generation_jobs j ON j.video_id = v.id "
         "WHERE v.status IN ('generating','reassembling') "
-        "AND j.status != 'running'"
+        "AND j.status NOT IN ('running', 'queued')"
     ).fetchall()
     stuck = 0
     skipped_alive = 0
