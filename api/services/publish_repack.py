@@ -46,6 +46,7 @@ def apply_publish_repack(
     dry_run: bool = False,
     max_yt_updates: int | None = DEFAULT_MAX_YT_UPDATES,
     quota_gate: bool = True,
+    force_yt: bool = False,
 ) -> dict:
     """Repack y (opcionalmente) aplicar el nuevo horario de publicación.
 
@@ -57,6 +58,10 @@ def apply_publish_repack(
         max_yt_updates: límite de llamadas videos.update (None = todas).
         quota_gate: si True, salta si el proyecto del canal no tiene capacidad
             libre (usado por la autogestión; el endpoint manual lo desactiva).
+        force_yt: si True, reprograma en YouTube TODOS los vídeos ya subidos
+            aunque su target_public_at en DB ya coincida con el plan (resync
+            tras una desincronización DB/YT, p. ej. por límite de updates en
+            pasadas anteriores).
 
     Returns:
         dict con {channel_id, slug, total, rescheduled, no_change, yt_failed,
@@ -126,7 +131,8 @@ def apply_publish_repack(
     uploader_cache = {}
 
     for item in changes:
-        if not item["changed"]:
+        # force_yt: aunque la DB ya coincida, resincronizar YouTube
+        if not item["changed"] and not (force_yt and item["requires_yt_update"]):
             continue
         video_id = item["video_id"]
         new_target = item["new_target"]
@@ -135,9 +141,16 @@ def apply_publish_repack(
         # ── 3a. Reprogramar en YouTube (solo ya subidos) ──
         if item["requires_yt_update"]:
             if max_yt_updates is not None and yt_used >= max_yt_updates:
-                logger.info("[%s] repack: límite de %d updates alcanzado — resto en DB solo",
-                            slug, max_yt_updates)
-                # aplica DB pero no reprograma YT (siguiente pasada lo hará)
+                logger.info(
+                    "[%s] repack: límite de %d updates alcanzado — #%d pospuesto "
+                    "(no se toca DB para no desincronizar con YouTube)",
+                    slug, max_yt_updates, video_id,
+                )
+                # NO actualizar DB: si se dejara el nuevo target sin reprogramar
+                # YouTube, el vídeo publicaría a la hora antigua mientras la DB
+                # mostraría la nueva → desincronización. Se pospone a la
+                # siguiente pasada (el canal sigue en _channels_need_repack).
+                continue
             else:
                 try:
                     from pipeline.youtube_uploader import YouTubeUploader

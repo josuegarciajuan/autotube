@@ -45,6 +45,9 @@ def main():
                         help="Ruta a la base de datos SQLite")
     parser.add_argument("--channel-id", type=int, default=None,
                         help="Reprogramar solo este canal (default: todos los afectados)")
+    parser.add_argument("--force-yt", action="store_true",
+                        help="Resincronizar YouTube aunque la DB ya coincida con el plan "
+                             "(útil tras desincronización por límite de updates)")
     args = parser.parse_args()
 
     if not Path(args.db).exists():
@@ -84,6 +87,7 @@ def main():
             dry_run=args.dry_run,
             max_yt_updates=None,
             quota_gate=False,
+            force_yt=args.force_yt,
         )
         for k in totals:
             totals[k] += res.get(k, 0)
