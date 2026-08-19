@@ -3532,9 +3532,11 @@ class VideoEditor:
         # exhaust ffmpeg filter buffers (rc=-9) and devour RAM (7+ GB for
         # 70 scenes). Split into configurable batches, concatenate each batch
         # separately, then concat batch outputs (stream copy, near-zero
-        # CPU). Threshold defaults to 50 segments — keeps peak RAM per
-        # ffmpeg invocation ~3 GB on 1080p sources.
-        batch_size = self.canal.get("XFADE_BATCH_SIZE", 50)
+        # CPU). Threshold defaults to 25 segments (reduced from 50 on
+        # 2026-08-19 after OOM kills: 50-segment batches peaked ~3 GB and
+        # the kernel killed ffmpeg with rc=-9 on an 18 GB host) — keeps
+        # peak RAM per ffmpeg invocation ~1.5 GB on 1080p sources.
+        batch_size = self.canal.get("XFADE_BATCH_SIZE", 25)
         n = len(segment_paths)
         if n > batch_size:
             self.logger.info(
@@ -3665,7 +3667,7 @@ class VideoEditor:
 
     def _concat_body_batched(
         self, segment_paths: list[str], block_ranges: list[dict],
-        output_path: str, batch_size: int = 60,
+        output_path: str, batch_size: int = 25,
     ) -> str:
         """Split large segment lists into exact-concat batches, then concat.
 
@@ -3678,6 +3680,15 @@ class VideoEditor:
         import time as _time
         import uuid
 
+        # ── Per-batch RAM guard ────────────────────────────────────
+        # Each exact-concat invocation peaks ~1.5 GB (25 segments) or
+        # ~3 GB (50). If free RAM is critically low when a batch is about
+        # to start, wait for it to recover; if it never does, abort with a
+        # clear error instead of letting the kernel OOM-kill ffmpeg
+        # mid-concat (rc=-9) and lose the whole render.
+        MIN_FREE_CONCAT_MB = 2500
+        from pipeline.ram_governor import available_mb, wait_for_ram
+
         n = len(segment_paths)
         total_batches = (n + batch_size - 1) // batch_size
         batches: list[str] = []  # paths to batch output files
@@ -3687,6 +3698,20 @@ class VideoEditor:
 
         try:
             for batch_idx in range(0, n, batch_size):
+                # ── RAM re-check before EACH batch ──
+                avail = available_mb()
+                if avail >= 0 and avail < MIN_FREE_CONCAT_MB:
+                    self.logger.warning(
+                        "RAM guard (concat): %d MB free < %d MB — waiting up to 600s before batch %d/%d",
+                        avail, MIN_FREE_CONCAT_MB,
+                        batch_idx // batch_size + 1, total_batches,
+                    )
+                    if not wait_for_ram(MIN_FREE_CONCAT_MB, timeout_sec=600):
+                        avail_now = available_mb()
+                        raise RuntimeError(
+                            f"RAM insuficiente durante concat (batch {batch_idx // batch_size + 1}/{total_batches}): "
+                            f"{avail_now} MB free < {MIN_FREE_CONCAT_MB} MB tras espera — abortado para prevenir OOM kill"
+                        )
                 batch_num = batch_idx // batch_size + 1
                 batch_end = min(batch_idx + batch_size, n)
                 batch_segs = segment_paths[batch_idx:batch_end]

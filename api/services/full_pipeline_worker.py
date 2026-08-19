@@ -214,24 +214,30 @@ def _setup_worker_logging(job_id: int):
 
 # ── Memory guard for video assembly ────────────────────────────
 
-def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0, max_wait_sec: int = 600) -> bool:
+def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 6.0, max_wait_sec: int = 600) -> bool:
     """Wait for free memory before starting memory-intensive video assembly.
     
     ffmpeg xfade concat of many segments can consume several GB of RAM.
     Running it while the system is near OOM triggers the kernel OOM killer
     or crashes with memory errors — both of which lose the entire render.
     
+    Threshold raised to 6 GB (2026-08-19): a batch of 50 concat segments
+    peaks ~3 GB and Kokoro TTS ~2.8 GB; the previous 2 GB floor allowed
+    OOM kills (rc=-9) mid-concat.
+
     Returns True if memory is sufficient, False if critically low even
     after waiting (caller should fail the job gracefully).
     """
-    try:
-        avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
-    except Exception:
+    # Use MemAvailable via ram_governor (includes reclaimable page cache).
+    # SC_AVPHYS_PAGES underreports available RAM by 5-10 GB on Linux.
+    avail_mb = _get_available_memory_mb()
+    if avail_mb < 0:
         try:
             import psutil
-            avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            avail_mb = psutil.virtual_memory().available / (1024 ** 2)
         except ImportError:
             return True  # can't check — allow proceeding
+    avail_gb = avail_mb / 1024.0
     
     if avail_gb >= min_free_gb:
         logger.info("Memory OK: %.1f GB free (threshold: %.1f GB)", avail_gb, min_free_gb)
@@ -246,14 +252,14 @@ def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.0,
     while avail_gb < min_free_gb and waited < max_wait_sec:
         time.sleep(5)
         waited += 5
-        try:
-            avail_gb = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
-        except Exception:
+        avail_mb = _get_available_memory_mb()
+        if avail_mb < 0:
             try:
                 import psutil
-                avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+                avail_mb = psutil.virtual_memory().available / (1024 ** 2)
             except ImportError:
                 break
+        avail_gb = avail_mb / 1024.0
     if avail_gb >= min_free_gb:
         logger.info("Memory recovered: %.1f GB free after %ds wait", avail_gb, waited)
         return True
@@ -376,12 +382,14 @@ def _get_available_memory_mb() -> float:
             return -1.0
 
 
-def _check_ram_gate(logger, timeout_sec: int = 600) -> bool:
+def _check_ram_gate(logger, timeout_sec: int = 600, threshold: int | None = None) -> bool:
     """Check if there's enough RAM to proceed with generation.
 
     Uses MIN_FREE_FOR_RENDER_MB from config.settings as the threshold
-    (default 3000 MB). Delegates to pipeline.ram_governor.wait_for_ram()
-    which blocks until enough RAM is free or timeout expires.
+    (default 5000 MB), or an explicit ``threshold`` (e.g. the higher
+    MIN_FREE_FOR_TTS_MB for Kokoro/torch). Delegates to
+    pipeline.ram_governor.wait_for_ram() which blocks until enough RAM
+    is free or timeout expires.
 
     This avoids the previous hard abort — the pipeline now waits for
     memory to free up (e.g. from other processes finishing), matching
@@ -392,7 +400,7 @@ def _check_ram_gate(logger, timeout_sec: int = 600) -> bool:
     from config.settings import MIN_FREE_FOR_RENDER_MB
     from pipeline.ram_governor import wait_for_ram, available_mb
 
-    threshold = MIN_FREE_FOR_RENDER_MB
+    threshold = threshold or MIN_FREE_FOR_RENDER_MB
     avail_mb = available_mb()
     if avail_mb >= threshold:
         logger.info("RAM check: %.0f MB free — OK", avail_mb)
@@ -978,7 +986,10 @@ def run_job(
             db.update_video(video_id, progress=40, progress_phase="tts")
         else:
             # ── RAM gate before TTS (avoid wasting 5-9 min of compute) ──
-            if not _check_ram_gate(logger, timeout_sec=300):
+            # Kokoro/torch carga ~3 GB: usar umbral TTS más alto
+            # que el genérico de render.
+            from config.settings import MIN_FREE_FOR_TTS_MB
+            if not _check_ram_gate(logger, timeout_sec=300, threshold=MIN_FREE_FOR_TTS_MB):
                 db.update_job(job_id, status="failed", error_msg="RAM insuficiente (pre-TTS gate)")
                 db.update_video(video_id, status="error", progress_phase="script",
                                 error_message="RAM insuficiente (pre-TTS gate)")
