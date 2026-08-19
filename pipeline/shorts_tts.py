@@ -58,6 +58,48 @@ MIN_WORD_COUNT = 45               # minimum words for a coherent Short (raised f
 MAX_WORD_COUNT = 105              # hard cap for audio safety: 105 words × 0.50 s/word worst-case = 52.5 s < 58 s
 BLOCK_PAUSE_MS = 350              # silence between narrative blocks (human rhythm)
 
+
+def trim_blocks_to_word_budget(
+    bloques: list[dict],
+    max_words: int = 90,
+    min_words_per_block: int = 5,
+) -> list[dict]:
+    """Trim narration blocks to ~``max_words`` total before TTS.
+
+    Audio length is roughly 0.50 s/word worst case, so 90 words ≈ 45 s,
+    safely under ``SHORTS_MAX_DURATION_SEC`` (58 s). Words are removed from
+    the END of later blocks first (desarrollo3 → hook) to keep the hook and
+    climax intact.
+
+    Mutates and returns the same ``bloques`` list.
+
+    Args:
+        bloques: [{"tipo": "hook", "texto": "...", ...}, ...]
+        max_words: target total word count.
+        min_words_per_block: floor per block (a block is never emptied).
+    """
+    total = sum(len(b.get("texto", "").split()) for b in bloques)
+    if total <= max_words:
+        return bloques
+
+    to_remove = total - max_words
+    order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
+    for block_type in order:
+        if to_remove <= 0:
+            break
+        for b in bloques:
+            if b.get("tipo") != block_type:
+                continue
+            words = b.get("texto", "").split()
+            if len(words) > min_words_per_block:
+                remove = min(to_remove, len(words) - min_words_per_block)
+                b["texto"] = " ".join(words[: len(words) - remove])
+                to_remove -= remove
+
+    new_total = sum(len(b.get("texto", "").split()) for b in bloques)
+    logger.info("Trimmed short script: %d → %d words (budget %d)", total, new_total, max_words)
+    return bloques
+
 # Fallback per-block voice settings when channel config has none
 _DEFAULT_RATES: dict[str, str] = {
     "hook":        "-5%",

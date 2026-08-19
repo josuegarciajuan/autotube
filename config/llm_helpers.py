@@ -178,6 +178,104 @@ def llm_json_call(
     raise last_exc  # type: ignore[misc]
 
 
+def llm_json_array_call(
+    client,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+    **call_kwargs,
+) -> list:
+    """Call ``client.chat.completions.create(**call_kwargs)`` and parse a JSON ARRAY.
+
+    Mirrors ``llm_json_call`` but targets responses that are a JSON array
+    (``[...]``). The object-only regex in ``llm_json_call`` (``\\{.*\\}``)
+    silently returned just the FIRST element of an array response, so callers
+    like standalone topic discovery saw ``isinstance(result, list)`` == False
+    and treated a successful LLM call as "no topics found".
+
+    If the model returns a single object instead of an array, it is wrapped
+    into a one-element list.
+
+    Raises the last exception if all retries are exhausted.
+    """
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(**call_kwargs)
+            content = _extract_reasoning_content(response)
+            if content is None or not content.strip():
+                raise ValueError(
+                    "LLM returned empty content "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+
+            text = content.strip()
+
+            # 1. Markdown code fence (json block)
+            m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+            if m:
+                text = m.group(1).strip()
+            else:
+                # 2. First JSON array anywhere in the text
+                m = re.search(r"\[.*\]", text, re.DOTALL)
+                if m:
+                    text = m.group(0)
+                else:
+                    # 3. Fallback: a single object → wrap in a list
+                    m = re.search(r"\{.*\}", text, re.DOTALL)
+                    if m:
+                        obj = json.loads(m.group(0))
+                        return obj if isinstance(obj, list) else [obj]
+                    raise json.JSONDecodeError("No JSON array found", text, 0)
+
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(text)
+            if isinstance(obj, list):
+                return obj
+            return [obj]
+
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "LLM JSON array parse failed (attempt %d/%d): %s — "
+                    "retrying in %.1fs",
+                    attempt + 1, max_retries, exc, delay,
+                )
+                time.sleep(delay)
+                if "temperature" in call_kwargs:
+                    call_kwargs["temperature"] = min(
+                        1.0, call_kwargs["temperature"] + 0.05
+                    )
+
+        except ValueError as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "%s — retrying in %.1fs", exc, delay,
+                )
+                time.sleep(delay)
+                if "temperature" in call_kwargs:
+                    call_kwargs["temperature"] = min(
+                        1.0, call_kwargs["temperature"] + 0.05
+                    )
+
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "LLM call failed (attempt %d/%d): %s — "
+                    "retrying in %.1fs",
+                    attempt + 1, max_retries, exc, delay,
+                )
+                time.sleep(delay)
+
+    raise last_exc  # type: ignore[misc]
+
+
 def llm_json_call_or_fallback(
     client,
     fallback: dict,
