@@ -944,6 +944,39 @@ async def recalculate_slots(channel_id: int, background_tasks: BackgroundTasks):
     }
 
 
+@router.post("/{channel_id}/reprogram-publish")
+async def reprogram_publish(channel_id: int, dry_run: bool = Query(default=False)):
+    """Reprogramar TODAS las publicaciones pendientes del canal con gaps >=3h.
+
+    Recalcula la cola de publicaciones (uploaded_private/warming/scheduled ya
+    subidos + awaiting_upload/ready listos para subir) espaciándolas en el
+    tiempo (>= SAME_CHANNEL_PUBLISH_GAP_HOURS), respetando que la publicación
+    sea después de la subida + warmup. Los ya subidos se reprograman en YouTube
+    vía videos().update (publishAt); los listos para subir solo se actualizan en
+    DB (la subida usará el nuevo target).
+
+    - dry_run=true → solo devuelve el plan sin tocar YouTube ni la DB.
+    - La subida se respeta: publish >= scheduled_upload_at + warmup + buffer.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    from api.services.publish_repack import apply_publish_repack
+
+    result = await run_in_threadpool(
+        apply_publish_repack,
+        db, channel_id, ch["slug"],
+        dry_run=dry_run,
+        max_yt_updates=None,   # endpoint manual: reprogramar todos
+        quota_gate=False,      # acción explícita del usuario
+    )
+    result["ok"] = True
+    result["dry_run"] = dry_run
+    return result
+
+
 # ── Timing Dashboard (v11) ──────────────────────────────────────
 
 @router.get("/{channel_id}/timing-dashboard")

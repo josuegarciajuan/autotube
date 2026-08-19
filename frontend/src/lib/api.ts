@@ -355,6 +355,10 @@ export const api = {
   toggleScheduledMode: (channelId: number) =>
     request<{ ok: boolean; channel_id: number; publish_mode: string; previous_mode: string }>(`/channels/${channelId}/scheduled-mode/toggle`, { method: 'POST' }),
 
+  // Reprogramar publicaciones pendientes del canal con gaps >=3h
+  reprogramChannelPublish: (channelId: number, dryRun: boolean = false) =>
+    request<any>(`/channels/${channelId}/reprogram-publish?dry_run=${dryRun}`, { method: 'POST' }),
+
   getUpcomingPublications: (channelId?: number, days?: number) => {
     const params = new URLSearchParams();
     if (channelId) params.set('channel_id', String(channelId));
