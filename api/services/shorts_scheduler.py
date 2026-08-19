@@ -34,6 +34,22 @@ _VIDEOS_WITHOUT_SCRIPT_DATE: str = ""
 _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 
+# ── Hard spam filter (ago 2026) ─────────────────────────────────
+# YouTube removed shorts of this project as spam (post-upload verification
+# confirmed missing / "Deleted video"). Retrying only feeds more spam
+# signals, so: slot CANCELED, channel shorts BLOCKED for a cooling period.
+# Second strike escalates to a longer block; shorts stay off until manual
+# review of the channel content.
+SHORTS_SPAM_BLOCK_HOURS = 72             # 1st strike: 3 days
+SHORTS_SPAM_BLOCK_HOURS_ESCALATED = 168  # 2nd strike: 7 days
+SHORTS_SPAM_MAX_STRIKES = 2
+# Title similarity guard: reject a native short whose title is too similar
+# to a recent one (token-overlap ≥ threshold). Near-duplicate titles are a
+# classic spam signal.
+TITLE_SIMILARITY_THRESHOLD = 0.6
+TITLE_SIMILARITY_LOOKBACK_DAYS = 30
+TITLE_SIMILARITY_LOOKBACK_LIMIT = 30
+
 
 def _safe_publish_at(target_upload_at, channel_slug: str, channel_id: int = None,
                      db=None) -> str | None:
@@ -94,6 +110,88 @@ def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
     except Exception as exc:
         logger.debug("Shorts quota guard skipped: %s", exc)
     return False
+
+
+# ── Hard spam filter helpers ────────────────────────────────────
+
+def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> int:
+    """Record a YouTube spam removal for a channel and BLOCK its shorts.
+
+    Returns the new strike count. After SHORTS_SPAM_MAX_STRIKES the block
+    escalates. The block key is stored in system_state so it survives
+    API restarts (apply_changes.sh).
+    """
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        strikes_key = f"shorts_spam_strikes_{channel_id}"
+        try:
+            strikes = int(db.get_system_state(strikes_key) or 0) + 1
+        except (TypeError, ValueError):
+            strikes = 1
+        db.set_system_state(strikes_key, str(strikes))
+        hours = SHORTS_SPAM_BLOCK_HOURS_ESCALATED if strikes >= SHORTS_SPAM_MAX_STRIKES \
+            else SHORTS_SPAM_BLOCK_HOURS
+        block_until = time.time() + hours * 3600
+        db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
+        logger.error(
+            "⚠️ SPAM STRIKE #%d para %s — shorts BLOQUEADOS %dh (%s)",
+            strikes, channel_slug, hours,
+            "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
+        )
+        return strikes
+    except Exception as exc:
+        logger.error("Failed to record spam strike for %s: %s", channel_slug, exc)
+        return 0
+
+
+def _channel_shorts_spam_blocked(channel_id: int, db=None) -> bool:
+    """Return True if the channel's shorts are blocked by a spam strike."""
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        raw = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
+        if not raw:
+            return False
+        return time.time() < float(raw)
+    except Exception:
+        return False
+
+
+def _recent_short_titles(channel_id: int,
+                         days: int = TITLE_SIMILARITY_LOOKBACK_DAYS,
+                         limit: int = TITLE_SIMILARITY_LOOKBACK_LIMIT) -> list[tuple[int, str]]:
+    """Return [(short_id, title)] for recent shorts of the channel."""
+    import sqlite3 as _sql_titles
+    from config.settings import DATABASE_PATH as _DBP_T
+    try:
+        with _sql_titles.connect(str(_DBP_T), timeout=10) as _conn_t:
+            rows = _conn_t.execute(
+                """SELECT id, title FROM shorts
+                   WHERE channel_id = ? AND title IS NOT NULL AND title != ''
+                     AND date(created_at) >= date('now', 'localtime', ?)
+                   ORDER BY created_at DESC LIMIT ?""",
+                (channel_id, f"-{days} days", limit),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+    except Exception:
+        return []
+
+
+def _titles_too_similar(title_a: str, title_b: str,
+                        threshold: float = TITLE_SIMILARITY_THRESHOLD) -> bool:
+    """Token-overlap similarity. Near-duplicate titles = spam signal."""
+    if not title_a or not title_b:
+        return False
+    import re as _re_sim
+    a = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_a.lower()))
+    b = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_b.lower()))
+    if not a or not b:
+        return False
+    overlap = len(a & b) / max(len(a), len(b))
+    return overlap >= threshold
 
 # ── Auto-mark altered content helper (shorts) ─────────────────
 
@@ -321,7 +419,7 @@ UTC = timezone.utc
 
 # ── Spacing constants ─────────────────────────────────────────
 MIN_SHORTS_GAP_MINUTES = 20    # Minimum generation gap between any same-channel shorts (was 35)
-SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 45  # native↔native or clip↔clip min publish gap (was 60)
+SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 90  # native↔native or clip↔clip min publish gap (raised 45→90: spam-safe pacing)
 CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 20  # v10.3: native↔clip min publish gap (was 0 — allowed overlap)
 CROSS_TYPE_SHORTS_ALLOW_OVERLAP = False     # v10.3: enforce cross-type publish gap
 CATCH_UP_BYPASS_HOURS = 6      # v10.3: only skip gap if slot is >6h past-due (was: any past-due)
@@ -345,7 +443,7 @@ SHORT_GEN_LEAD_MIN_CLIP = 5       # pre-rendered clip: just upload
 SHORT_GEN_LEAD_MIN_CLIP_ONTHEFLY = 15  # on-the-fly clip: extract + render + upload
 
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
-SHORTS_COOLDOWN_MINUTES = 20  # was 30 — reduced for 10-15/day density
+SHORTS_COOLDOWN_MINUTES = 60  # min gap between same-channel shorts (raised 20→60: spam-safe pacing)
 
 # ── Native fallback windows (used when no optimal slots available) ──
 NATIVE_WINDOWS = [
@@ -1675,6 +1773,19 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         _failed_force_ids.add(slot_id)
                         continue
 
+                    # ── Hard spam filter: channel blocked by a spam strike ──
+                    if _channel_shorts_spam_blocked(channel_id):
+                        logger.warning(
+                            "Force dispatch: slot #%d (%s) — channel spam-blocked, CANCELLING",
+                            slot_id, slug,
+                        )
+                        _failed_force_ids.add(slot_id)
+                        db.update_shorts_slot_status(
+                            slot_id, "cancelled",
+                            error_message="channel spam-blocked (YouTube removal)",
+                        )
+                        continue
+
                     # ── v10.5: Apply same-channel guards even in force dispatch ──
                     # Only bypass these guards as absolute last resort (after
                     # exhausting all channels). This prevents the force dispatch
@@ -1834,6 +1945,22 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 slot_id, slug,
             )
             _skipped_slot_ids.add(slot_id)
+            continue
+
+        # ── Hard spam filter: channel blocked by a spam strike ──
+        # A YouTube removal already flagged this channel. CANCELLING the
+        # pending slots keeps the channel from posting more shorts into an
+        # active spam flag (which would escalate to channel-level strikes).
+        if _channel_shorts_spam_blocked(channel_id):
+            logger.warning(
+                "Shorts slot #%d (%s) skipped: channel spam-blocked — CANCELLING slot",
+                slot_id, slug,
+            )
+            _skipped_slot_ids.add(slot_id)
+            db.update_shorts_slot_status(
+                slot_id, "cancelled",
+                error_message="channel spam-blocked (YouTube removal)",
+            )
             continue
 
         # 4. Per-channel short job guard — skip to next slot instead of failing.
@@ -2230,6 +2357,33 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 conn.commit()
                 conn.close()
                 logger.warning("Shorts slot #%d exhausted retries — cancelled", slot_id)
+    except __import__("pipeline.youtube_uploader", fromlist=["SpamRemovalError"]).SpamRemovalError as e:
+        # ── HARD SPAM FILTER ──
+        # YouTube removed the uploaded short. NEVER retry (each retry is a new
+        # spam signal). Cancel the slot, record a strike, and block the
+        # channel's shorts for a cooling period.
+        logger.error(
+            "Shorts slot #%d: YouTube REMOVED the short (%s) — spam strike, cancelling",
+            slot_id, str(e)[:200],
+        )
+        try:
+            _record_short_spam_strike(channel_id, channel_slug)
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+            conn.execute(
+                "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                "error_message = 'YouTube removed short (spam) — no retry', "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (slot_id,),
+            )
+            conn.execute(
+                "UPDATE generation_jobs SET status = 'failed', "
+                "error_msg = ? WHERE id = ?",
+                (f"SpamRemovalError: {str(e)[:300]}", job_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
     except __import__("pipeline.youtube_uploader", fromlist=["QuotaExhaustedError"]).QuotaExhaustedError as e:
         logger.warning("Shorts dispatch quota exhausted for slot #%d: %s", slot_id, e)
         try:
@@ -2632,6 +2786,20 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
+
+    # ── Hard spam filter: title similarity guard ─────────────────
+    # Near-duplicate titles across shorts are a classic spam signal.
+    # If the generated title overlaps too much with a recent one, REJECT
+    # the script (return None) so the slot retries with different content
+    # instead of uploading a near-copy.
+    for prev_id, prev_title in _recent_short_titles(channel_id):
+        if _titles_too_similar(title, prev_title):
+            logger.warning(
+                "[%s] Title too similar to recent short #%d: '%s' ~ '%s' — "
+                "rejecting script, slot will retry with different content",
+                channel_slug, prev_id, title[:60], prev_title[:60],
+            )
+            return None
 
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False

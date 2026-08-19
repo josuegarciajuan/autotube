@@ -79,6 +79,21 @@ class InvalidPublishAtError(ValueError):
     """
     pass
 
+
+class SpamRemovalError(RuntimeError):
+    """YouTube removed the just-uploaded video (spam / IA / policy detection).
+
+    Raised by ``_verify_upload_exists`` when the video is confirmed missing or
+    reported as "Deleted video" AFTER a successful upload.
+
+    HARD FILTER contract (shorts):
+    - The slot is CANCELED (never retried) — retrying after a removal only
+      feeds more spam signals to YouTube.
+    - The channel's shorts are BLOCKED for a cooling period (circuit breaker)
+      so the channel never keeps posting into an active spam flag.
+    """
+    pass
+
 # ── Token file concurrency protection ────────────────────────
 # Two threads sharing the same channel token must not race on
 # read → refresh → write.  A per-account mutex serialises all
@@ -1037,7 +1052,11 @@ class YouTubeUploader:
                         )
                         time.sleep(POST_UPLOAD_VERIFY_DELAY)
                         continue
-                    raise RuntimeError(
+                    # Hard spam filter: video was removed by YouTube. Raised as
+                    # SpamRemovalError so the shorts dispatcher CANCELS the slot
+                    # (no retry) and blocks the channel — never uploads another
+                    # short into an active spam flag.
+                    raise SpamRemovalError(
                         f"Fallo en verificación post-subida: el vídeo {video_id} no aparece en YouTube. "
                         f"Posiblemente fue eliminado por los sistemas automatizados de YouTube."
                     )
@@ -1054,7 +1073,7 @@ class YouTubeUploader:
                 
                 # Detect silently deleted videos
                 if title == "Deleted video" or (not title and not snippet.get("description")):
-                    raise RuntimeError(
+                    raise SpamRemovalError(
                         f"Vídeo subido pero ELIMINADO por YouTube: {video_id}. "
                         f"YouTube lo marcó como 'Deleted video'. "
                         f"Posibles causas: contenido generado por IA detectado, "

@@ -257,5 +257,22 @@ def run_standalone_short(
         return None
 
     except Exception as e:
+        # ── HARD SPAM FILTER ──
+        # YouTube removed the standalone short. Record a strike and block the
+        # channel's shorts (circuit breaker). No retry here — the standalone
+        # dispatch counts this attempt as consumed.
+        try:
+            from pipeline.youtube_uploader import SpamRemovalError
+            if isinstance(e, SpamRemovalError):
+                from api.services.shorts_scheduler import _record_short_spam_strike
+                _record_short_spam_strike(channel_id, channel_slug)
+                logger.error(
+                    "[standalone] YouTube REMOVED the short for %s — spam strike recorded, "
+                    "channel shorts blocked",
+                    channel_slug,
+                )
+                return None
+        except Exception:
+            pass
         logger.error("[standalone] Pipeline failed for %s: %s", channel_slug, e)
         return None
