@@ -1547,7 +1547,10 @@ def run_job(
                 if planned_public_at:
                     # ── Staleness guard: recalculate before upload if target passed ──
                     try:
-                        from pipeline.publish_scheduler import _target_is_stale, ensure_future_target_public_at
+                        from pipeline.publish_scheduler import (
+                            _target_is_stale, ensure_future_target_public_at,
+                            clamp_max_ahead_target_public_at,
+                        )
                         ch_cfg2 = db.get_channel(channel_id)
                         tz_str2 = "Europe/Madrid"
                         warmup2 = 60
@@ -1566,6 +1569,15 @@ def run_job(
                                 warmup_min=warmup2,
                             )
                             # Persist recalculation immediately
+                            db.update_video(video_id, target_public_at=planned_public_at)
+                        # ── Clamp far-future SIEMPRE: nunca subir con publishAt >24h ──
+                        # (idempotente si ya está dentro del margen; recorta si la
+                        # resolución de colisiones empujó más allá del cap)
+                        planned_public_at = clamp_max_ahead_target_public_at(
+                            planned_public_at, slug=canal, timezone_str=tz_str2,
+                            warmup_min=warmup2, db=db, channel_id=channel_id,
+                        )
+                        if planned_public_at != video_record.get("target_public_at"):
                             db.update_video(video_id, target_public_at=planned_public_at)
                     except Exception as stale_exc:
                         logger.debug("[%s] Pre-upload stale check skipped: %s", canal, stale_exc)

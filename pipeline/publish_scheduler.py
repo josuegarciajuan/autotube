@@ -95,6 +95,16 @@ HISTORY_SHIFT_MAX_HOURS = 2.5  # Máximo desplazamiento respecto a la heurístic
 HISTORY_MIN_DATA_POINTS = 3    # Mínimos puntos de datos para confiar en histórico
 SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # v10.1: Mínimo de horas entre publicaciones del mismo canal
 
+# ── Antelación máxima de publicación (clamp "no tan lejano") ──
+# (ago 2026): los vídeos subidos como private con publishAt heredan el
+# target_public_at del slot planificado, que puede estar a días vista
+# (horizonte de planning 7d + lead boost). Sin clamp, un vídeo subido hoy
+# se queda "calentando" (uploaded_private) hasta su día de publicación.
+# Con este límite, si al SUBIR el target_public_at está más allá de
+# MAX_PUBLISH_AT_AHEAD_HOURS, se recalcula al siguiente pico (o ahora+warmup),
+# de modo que un vídeo nunca espera más de este margen en privado.
+MAX_PUBLISH_AT_AHEAD_HOURS = 24
+
 
 def detect_niche(keywords: list[str]) -> str:
     """Detecta el nicho del canal a partir de sus keywords SEO.
@@ -1169,3 +1179,130 @@ def planned_target_is_off_peak(
         if abs(local_h - opt_h) <= tolerance_hours:
             return False
     return True
+
+
+def clamp_max_ahead_target_public_at(
+    target_public_at: Optional[str],
+    slug: str,
+    timezone_str: str = "Europe/Madrid",
+    warmup_min: int = 60,
+    max_ahead_hours: int = MAX_PUBLISH_AT_AHEAD_HOURS,
+    db=None,
+    channel_id: Optional[int] = None,
+    primary_keyword: str = "",
+    secondary_keywords: list[str] = None,
+    target_hour: Optional[int] = None,
+    publish_window_spread_min: int = 0,
+) -> str:
+    """Clamp a far-future target_public_at to at most max_ahead_hours ahead.
+
+    Espejo del guard de "staleness" (`ensure_future_target_public_at`) pero para
+    el otro extremo: si el target está demasiado lejano (p. ej. un slot del
+    horizonte de planning a días vista), se recalcula al siguiente pico de
+    publicación vía `calculate_target_public_time`, de modo que el vídeo nunca
+    espera más de `max_ahead_hours` en "calentando" (uploaded_private).
+
+    Reglas:
+    - None o inparseable → recalc (seguro).
+    - target <= now + max_ahead_hours → se devuelve tal cual.
+    - target > now + max_ahead_hours → recalc al siguiente pico (respeta warmup
+      y evita colisiones 3h mismo canal / 30min cross-channel).
+
+    Returns:
+        ISO8601 UTC string del target_public_at efectivo (clampado o no).
+    """
+    if not target_public_at:
+        logger.info("[%s] target_public_at is empty — nothing to clamp", slug)
+        return target_public_at
+
+    parsed = _parse_target_public_at(target_public_at, timezone_str)
+    if parsed is None:
+        logger.info("[%s] target_public_at unparseable (%s) — recalculating",
+                    slug, str(target_public_at)[:19])
+        return _recalc_clamped_target(
+            slug=slug, timezone_str=timezone_str, warmup_min=warmup_min,
+            max_ahead_hours=max_ahead_hours, db=db, channel_id=channel_id,
+            primary_keyword=primary_keyword,
+            secondary_keywords=secondary_keywords or [],
+            target_hour=target_hour,
+            publish_window_spread_min=publish_window_spread_min,
+            old_target=str(target_public_at),
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    horizon = now_utc + timedelta(hours=max_ahead_hours)
+
+    if parsed <= horizon:
+        logger.debug(
+            "[%s] target_public_at %s within %dh — no clamp needed",
+            slug, parsed.isoformat(), max_ahead_hours,
+        )
+        return target_public_at
+
+    logger.info(
+        "[%s] target_public_at %s is >%dh ahead — clamping to next peak",
+        slug, parsed.isoformat(), max_ahead_hours,
+    )
+    return _recalc_clamped_target(
+        slug=slug, timezone_str=timezone_str, warmup_min=warmup_min,
+        max_ahead_hours=max_ahead_hours, db=db, channel_id=channel_id,
+        primary_keyword=primary_keyword,
+        secondary_keywords=secondary_keywords or [],
+        target_hour=target_hour,
+        publish_window_spread_min=publish_window_spread_min,
+        old_target=str(target_public_at),
+    )
+
+
+def _recalc_clamped_target(
+    slug: str,
+    timezone_str: str,
+    warmup_min: int,
+    max_ahead_hours: int,
+    db,
+    channel_id: Optional[int],
+    primary_keyword: str,
+    secondary_keywords: list[str],
+    target_hour: Optional[int],
+    publish_window_spread_min: int,
+    old_target: str,
+) -> str:
+    """Recalcula el target al siguiente pico (usado por clamp_max_ahead_...).
+
+    Con CAP duro: si la resolución de colisiones empuja el resultado más allá
+    de now + max_ahead_hours (backlog denso), se recorta a now + max_ahead_hours.
+    Así el clamp CONVERGE siempre: el resultado nunca supera el margen y un
+    vídeo ya clampado no vuelve a entrar en el scan. El posible solapamiento
+    residual en momentos de backlog extremo es el precio de no esperar días;
+    los guards de overlap del sistema lo suavizan cuando el backlog se drena.
+    """
+    result = calculate_target_public_time(
+        slug=slug,
+        primary_keyword=primary_keyword,
+        secondary_keywords=secondary_keywords,
+        timezone_str=timezone_str,
+        target_hour=target_hour,
+        warmup_min=warmup_min,
+        publish_window_spread_min=publish_window_spread_min,
+        db=db,
+        channel_id=channel_id,
+    )
+    new_target = result["target_public_at"]
+    parsed = _parse_target_public_at(new_target, timezone_str)
+    if parsed is not None:
+        now_utc = datetime.now(timezone.utc)
+        cap = now_utc + timedelta(hours=max_ahead_hours)
+        if parsed > cap:
+            capped = cap.isoformat()
+            logger.warning(
+                "[%s] Clamp cap: collision resolution pushed beyond %dh (%s) — "
+                "recortando a %s",
+                slug, max_ahead_hours, new_target[:19], capped[:19],
+            )
+            new_target = capped
+    logger.info(
+        "[%s] Clamp far-future target_public_at: %s → %s (peak=%02d:%02d, src=%s)",
+        slug, old_target[:19], new_target[:19],
+        result["peak_hour_local"], 0, result["peak_source"],
+    )
+    return new_target

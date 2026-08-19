@@ -869,6 +869,50 @@ class YouTubeUploader:
         logger.info("[%s] Privacy set to %s for video %s", self.channel_slug, privacy, video_id)
         return {"updated": True, "yt_video_id": video_id, "privacy": privacy}
 
+    def set_publish_at(self, video_id: str, publish_at: str) -> dict:
+        """Re-programar el publishAt de un vídeo ya subido (private).
+
+        Usado por la remediación de "calentando": si un vídeo se subió como
+        private con un publishAt a días vista, esto acerca la publicación.
+        YouTube solo admite publishAt en vídeos con privacyStatus='private',
+        así que se envía ambas cosas. Quota cost: 50 units.
+
+        Args:
+            video_id: ID de YouTube del vídeo.
+            publish_at: ISO 8601 (UTC) del nuevo instante de publicación.
+
+        Returns:
+            {updated: True, yt_video_id, publish_at} o lanza HttpError.
+        """
+        service = self._get_service()
+
+        body = {
+            "id": video_id,
+            "status": {
+                "privacyStatus": "private",
+                "publishAt": publish_at,
+            },
+        }
+
+        try:
+            service.videos().update(
+                part="status",
+                body=body,
+            ).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(exc, "set_publish_at")
+            raise
+
+        # ── Track quota (diagnostic) ──────────────────────────────
+        track_quota(self.channel_slug, "videos.update", 50,
+                    yt_id=video_id, caller="set_publish_at")
+
+        logger.info(
+            "[%s] publishAt reprogramado para video %s → %s",
+            self.channel_slug, video_id, publish_at,
+        )
+        return {"updated": True, "yt_video_id": video_id, "publish_at": publish_at}
+
     # ── Thumbnail ───────────────────────────────────────────────
 
     def _set_thumbnail(
