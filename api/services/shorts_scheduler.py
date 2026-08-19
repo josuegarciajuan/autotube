@@ -1315,9 +1315,12 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
             slots = compute_daily_shorts_slots(day_str, db)
 
             # ── Today: discard past-due slots so they don't fire immediately ──
+            # scheduled_at is stored in UTC (see _minutes_to_utc_slot), so the
+            # "now" reference MUST be UTC too. Using local time (CEST) here made
+            # every replan drop slots that were actually up to 2h in the future,
+            # orphaning their pre-rendered shorts (status 'ready' without slot).
             if day_offset == 0 and slots:
-                now_local = datetime.now(DEFAULT_TIMEZONE)
-                now_utc_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
+                now_utc_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 future = [s for s in slots if s.get("scheduled_at", "") >= now_utc_str]
                 dropped = len(slots) - len(future)
                 if dropped > 0:
@@ -1555,8 +1558,12 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     #    NOTE: Guard #4 moved INSIDE the retry loop (per-channel check) instead of
     #    globally, so different channels can generate shorts in parallel.
 
-    # 4. Memory gate (shorts use minimal RAM — 1 GB is enough)
-    if not _memory_ok(min_free_gb=1.0):
+    # 4. Memory gate (shorts render = ffmpeg in-process, peak 2-4 GB).
+    #    Threshold raised from 1 GB (2026-08-19): 1 GB allowed dispatching
+    #    shorts with the system already under pressure, and the kernel
+    #    OOM-killed the API (killing in-process shorts with it).
+    from config.settings import MIN_FREE_FOR_SHORTS_DISPATCH_MB
+    if not _memory_ok(min_free_gb=MIN_FREE_FOR_SHORTS_DISPATCH_MB / 1024.0):
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
@@ -4234,7 +4241,10 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
 
     try:
         last_time = datetime.strptime(last_completed, "%Y-%m-%d %H:%M:%S")
-        last_utc = last_time.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
+        # updated_at in shorts_planned_slots is stored in UTC
+        # (CURRENT_TIMESTAMP / datetime('now')). Treating it as local
+        # (DEFAULT_TIMEZONE) shifted it -2h and expired the cooldown early.
+        last_utc = last_time.replace(tzinfo=UTC)
         elapsed = (datetime.now(UTC) - last_utc).total_seconds()
         return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
     except (ValueError, TypeError):
@@ -4272,8 +4282,10 @@ def _same_type_shorts_slot_conflict(
     try:
         target_dt = datetime.fromisoformat(
             target_upload_at.replace("Z", "+00:00").replace(" ", "T"))
+        # target_upload_at is stored in UTC (see _minutes_to_utc_slot).
+        # A naive value must be interpreted as UTC, not local time.
         if target_dt.tzinfo is None:
-            target_dt = target_dt.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
+            target_dt = target_dt.replace(tzinfo=UTC)
     except (ValueError, TypeError):
         return False
 
@@ -4531,12 +4543,37 @@ def _cancel_stale_shorts_slots(db):
     cancelled = 0
     for s in all_pending:
         try:
-            sched = datetime.strptime(s["scheduled_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
+            # scheduled_at is stored in UTC (see _minutes_to_utc_slot /
+            # pre_render_clip_shorts_for_video). Treating it as local
+            # (replace tzinfo=DEFAULT_TIMEZONE) shifted it -2h, so slots were
+            # cancelled ~2h before the intended 24h staleness threshold.
+            sched = datetime.strptime(
+                s["scheduled_at"], "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=UTC)
         except (ValueError, TypeError):
             continue
         if (now_utc - sched).total_seconds() > STALE_HOURS * 3600:
             db.update_shorts_slot_status(s["id"], "cancelled")
             cancelled += 1
+            # Also cancel the linked pre-rendered clip short, if still 'ready'.
+            # Otherwise it becomes an orphaned 'ready' row (no upload trigger)
+            # that stays in the 'Pendiente subida' column forever and blocks
+            # clip-source dedup for its long video.
+            if s.get("short_id"):
+                try:
+                    short_row = db.get_short(s["short_id"])
+                    if short_row and short_row.get("status") == "ready":
+                        import sqlite3 as _sql_cancel
+                        from config.settings import DATABASE_PATH as _DBP_CANCEL
+                        with _sql_cancel.connect(str(_DBP_CANCEL), timeout=30) as _conn_c:
+                            _conn_c.execute(
+                                "UPDATE shorts SET status = 'cancelled', "
+                                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (s["short_id"],),
+                            )
+                            _conn_c.commit()
+                except Exception:
+                    pass
 
     if cancelled:
         logger.info("Cancelled %d stale pending shorts slots (>%dh past scheduled)", cancelled, STALE_HOURS)
