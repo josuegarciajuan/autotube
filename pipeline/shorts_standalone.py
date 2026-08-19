@@ -15,15 +15,40 @@ from typing import Optional
 logger = logging.getLogger("autotube.standalone_shorts")
 
 
+def _fallback_topics_from_niche(ch_config, count: int = 3) -> list[dict]:
+    """Generate valid topic dicts from the channel's niche when the LLM fails.
+
+    Ensures standalone dispatch never silently no-ops on LLM/parsing errors:
+    the short still gets generated (slightly less "trending", but functional).
+    """
+    niche_keywords = getattr(ch_config, "NICHE_KEYWORDS_ENG", []) or []
+    tagline = getattr(ch_config, "CANAL_TAGLINE", "") or "datos y misterios"
+    sample = [k for k in niche_keywords[: count + 2] if k] or [tagline]
+
+    topics = []
+    for i in range(min(count, len(sample))):
+        kw = sample[i]
+        topics.append({
+            "title": f"Dato que no conocías sobre {kw}"[:40],
+            "tema": f"Un dato impactante y poco conocido sobre {kw}, contado en 50 segundos.",
+            "hook": f"Esto que vas a oír sobre {kw} lo cambia todo.",
+        })
+    return topics
+
+
 def discover_standalone_topics(channel_slug: str, count: int = 3) -> list[dict]:
     """Discover trending topics in the channel's niche via YouTube search.
 
     Returns a list of topic dicts: {"title": "...", "tema": "..."}
     suitable for feeding into a standalone short pipeline.
+
+    Falls back to niche-based topics if the LLM call fails or returns
+    an invalid shape (previously the object-only JSON parser made every
+    array response look like "no topics found").
     """
     from config.config_bridge import get_channel_config
     from config.llm_client import create_llm_client
-    from config.llm_helpers import llm_json_call
+    from config.llm_helpers import llm_json_array_call
     from config.settings import LLM_MODEL_CREATIVE
 
     ch_config = get_channel_config(channel_slug)
@@ -57,7 +82,7 @@ Cada idea debe tener:
 Responde SOLO con un JSON array de {count} objetos."""
 
     try:
-        result = llm_json_call(
+        result = llm_json_array_call(
             client,
             max_retries=2,
             retry_delay=1.0,
@@ -77,7 +102,8 @@ Responde SOLO con un JSON array de {count} objetos."""
     except Exception as e:
         logger.warning("[standalone] Topic discovery failed for %s: %s", channel_slug, e)
 
-    return []
+    logger.warning("[standalone] Using fallback niche topics for %s", channel_slug)
+    return _fallback_topics_from_niche(ch_config, count=count)
 
 
 def run_standalone_short(
@@ -123,7 +149,7 @@ def run_standalone_short(
             return None
 
         # ── TTS ───────────────────────────────────────────
-        from pipeline.shorts_tts import synthesize_shorts_blocks
+        from pipeline.shorts_tts import synthesize_shorts_blocks, trim_blocks_to_word_budget
         from pathlib import Path
         import tempfile, os
 
@@ -132,12 +158,36 @@ def run_standalone_short(
         audio_path = output_dir / f"standalone_{os.getpid()}.mp3"
         srt_path = output_dir / f"standalone_{os.getpid()}.srt"
 
-        tts_result = synthesize_shorts_blocks(
-            bloques=script["bloques"],
-            ch_config=pipeline.config,
-            output_audio_path=audio_path,
-            output_srt_path=srt_path,
-        )
+        # ── Enforce the audio duration budget BEFORE TTS ──
+        # The LLM often exceeds ~105 words (audio > 58 s) and
+        # synthesize_shorts_blocks then raises "Short audio too long".
+        # Trim first, and if a slow voice still overflows, retry with a
+        # tighter budget instead of failing the whole standalone short.
+        tts_result = None
+        for _attempt in range(2):
+            trim_blocks_to_word_budget(
+                script["bloques"],
+                max_words=90 if _attempt == 0 else 72,
+            )
+            try:
+                tts_result = synthesize_shorts_blocks(
+                    bloques=script["bloques"],
+                    ch_config=pipeline.config,
+                    output_audio_path=audio_path,
+                    output_srt_path=srt_path,
+                )
+                break
+            except RuntimeError as _tts_err:
+                if "too long" not in str(_tts_err) or _attempt == 1:
+                    raise
+                logger.warning(
+                    "[standalone] Audio still too long after trim (%s) — "
+                    "retrying with tighter budget",
+                    str(_tts_err)[:80],
+                )
+        if tts_result is None:
+            logger.error("[standalone] TTS failed for %s", channel_slug)
+            return None
         audio_duration = tts_result.get("duration_sec", 50)
 
         # ── Media ─────────────────────────────────────────
@@ -158,7 +208,10 @@ def run_standalone_short(
         scene_ranges = None
         try:
             from pipeline.video_editor import VideoEditor
-            editor = VideoEditor(ch_config=pipeline.config)
+            # NOTE: VideoEditor.__init__ takes `canal_config`, not `ch_config`
+            # (passing ch_config raised TypeError → scene_ranges fell back to
+            # uniform durations, degrading scene timing on every standalone short)
+            editor = VideoEditor(canal_config=pipeline.config)
             bloques = script["bloques"]
             ts = tts_result.get("timestamps", [])
             if bloques and ts:
