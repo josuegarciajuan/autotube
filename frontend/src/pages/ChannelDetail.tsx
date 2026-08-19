@@ -229,6 +229,8 @@ export default function ChannelDetail() {
   const [syncing, setSyncing] = useState(false)
   const [refreshingStats, setRefreshingStats] = useState(false)
   const [statsRefreshMsg, setStatsRefreshMsg] = useState<string | null>(null)
+  const [repacking, setRepacking] = useState(false)
+  const [repackResult, setRepackResult] = useState<string | null>(null)
   const [editingConfig, setEditingConfig] = useState(false)
   const [editConfig, setEditConfig] = useState<Record<string, any>>({})
   
@@ -675,6 +677,25 @@ export default function ChannelDetail() {
     }
   }
 
+  async function handleRepackPublish() {
+    if (!confirm('Reprogramar TODAS las publicaciones pendientes del canal con gaps >=3h?\n\nLos vídeos ya subidos se reprogramarán en YouTube (publishAt). Los listos para subir se ajustan en DB (publicación después de subida + warmup).')) return
+    setRepacking(true)
+    setRepackResult(null)
+    try {
+      const result = await api.reprogramChannelPublish(channelId, false)
+      const msg = `Reprogramados: ${result.rescheduled} · sin cambio: ${result.no_change} · rechazados YT: ${result.yt_failed}${result.yt_failed ? ' (publicarán a su hora original)' : ''}`
+      setRepackResult(msg)
+      alert(`Reprogramación completada.\n${msg}`)
+      const vids = await api.getChannelVideos(channelId) // refresh the video list
+      setVideos(vids)
+    } catch (e: any) {
+      setRepackResult(`Error: ${e.message || 'desconocido'}`)
+      alert('Error al reprogramar: ' + (e.message || 'desconocido'))
+    } finally {
+      setRepacking(false)
+    }
+  }
+
   async function handleStartAuth() {
     setAuthLoading(true)
     try {
@@ -1049,6 +1070,17 @@ export default function ChannelDetail() {
           {refreshingStats ? <Loader2 size={14} className="animate-spin" /> : <BarChart3 size={14} />}
           <span className="hidden sm:inline">{refreshingStats ? 'Refrescando...' : 'Refresh Stats'}</span><span className="sm:hidden">Stats</span>
         </button>
+        <button onClick={handleRepackPublish} disabled={repacking}
+          title="Reprogramar publicaciones pendientes: espacia con gaps >=3h y respeta subida+warmup antes de publicar"
+          className="flex items-center gap-1.5 px-3 py-2 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-amber-500/20 transition-colors disabled:opacity-50">
+          {repacking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          <span className="hidden sm:inline">{repacking ? 'Reprogramando...' : 'Reprogramar publicaciones'}</span><span className="sm:hidden">Reprogramar</span>
+        </button>
+        {repackResult && (
+          <span className={`text-xs ${repackResult.startsWith('Error') ? 'text-red-400' : 'text-amber-300'} animate-fade-in`}>
+            {repackResult}
+          </span>
+        )}
         {statsRefreshMsg && (
           <span className={`text-xs ${statsRefreshMsg.startsWith('Error') ? 'text-red-400' : 'text-green-400'} animate-fade-in`}>
             {statsRefreshMsg}

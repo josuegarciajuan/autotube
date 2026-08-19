@@ -105,6 +105,11 @@ SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # v10.1: Mínimo de horas entre publicacione
 # de modo que un vídeo nunca espera más de este margen en privado.
 MAX_PUBLISH_AT_AHEAD_HOURS = 24
 
+# Seguridad anti-patología para el clamp: el resultado NUNCA supera este margen
+# (5 días), aunque la resolución de colisiones haya empujado más allá. No es un
+# objetivo: el espaciado real lo garantiza la resolución de colisiones / repack.
+MAX_PUBLISH_AHEAD_SAFETY_HOURS = 120
+
 
 def detect_niche(keywords: list[str]) -> str:
     """Detecta el nicho del canal a partir de sus keywords SEO.
@@ -1291,13 +1296,19 @@ def _recalc_clamped_target(
     parsed = _parse_target_public_at(new_target, timezone_str)
     if parsed is not None:
         now_utc = datetime.now(timezone.utc)
-        cap = now_utc + timedelta(hours=max_ahead_hours)
-        if parsed > cap:
-            capped = cap.isoformat()
+        # ── Seguridad: cap amplio (5 días) SOLO para evitar resultados patológicos.
+        # (ago 2026) Se eliminó el cap duro de 24h: apilaba muchos vídeos del
+        # mismo canal en el mismo instante cuando el backlog era denso. Ahora la
+        # resolución de colisiones estira la publicación con gaps de 3h, aunque
+        # supere el umbral de 24h (trigger). El repack dedicado
+        # (repack_channel_publish_times) garantiza el espaciado >= gap_hours.
+        safety_cap = now_utc + timedelta(hours=MAX_PUBLISH_AHEAD_SAFETY_HOURS)
+        if parsed > safety_cap:
+            capped = safety_cap.isoformat()
             logger.warning(
-                "[%s] Clamp cap: collision resolution pushed beyond %dh (%s) — "
+                "[%s] Clamp safety cap: collision resolution pushed beyond %dh (%s) — "
                 "recortando a %s",
-                slug, max_ahead_hours, new_target[:19], capped[:19],
+                slug, MAX_PUBLISH_AHEAD_SAFETY_HOURS, new_target[:19], capped[:19],
             )
             new_target = capped
     logger.info(
@@ -1306,3 +1317,140 @@ def _recalc_clamped_target(
         result["peak_hour_local"], 0, result["peak_source"],
     )
     return new_target
+
+
+def repack_channel_publish_times(
+    db,
+    channel_id: int,
+    slug: str,
+    timezone_str: str = "Europe/Madrid",
+    warmup_min: int = 60,
+    gap_hours: int = SAME_CHANNEL_PUBLISH_GAP_HOURS,
+    safety_ahead_hours: int = MAX_PUBLISH_AHEAD_SAFETY_HOURS,
+) -> list[dict]:
+    """Repack ALL pending publish times of a channel with >= gap_hours spacing.
+
+    (ago 2026) Sustituye al enfoque incremental (clamp por vídeo): el clamp con
+    cap duro apilaba muchos vídeos del mismo canal en el mismo instante cuando el
+    backlog era denso (p. ej. 8 vídeos a las 10:48). Este repack recalcula TODAS
+    las publicaciones pendientes del canal en una sola pasada:
+
+    - Candidatos: vídeos con compromiso de publicación:
+      * uploaded_private / warming / scheduled → ya subidos a YouTube (private).
+      * awaiting_upload / ready → generados, listos para subir.
+    - Orden: cronológico por (uploaded_at, scheduled_upload_at, created_at) —
+      los ya subidos/listos primero, "después de los que hay subidos y listos".
+    - Walk: cursor arranca en el siguiente pico (>= now + warmup) y avanza en
+      pasos de gap_hours. Cada vídeo recibe el cursor; para awaiting_upload se
+      garantiza publish >= scheduled_upload_at + warmup + buffer 60min.
+    - NUNCA escribe en DB: devuelve la lista de cambios propuestos.
+
+    Returns:
+        list[dict] con {video_id, status, yt_video_id, old_target, new_target,
+        requires_yt_update, adjusted_upload_at}
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    # ── 1. Candidatos ──
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.status, v.yt_video_id, v.target_public_at,
+                          v.scheduled_upload_at, v.uploaded_at, v.created_at
+                   FROM videos v
+                   WHERE v.channel_id = ?
+                     AND v.status IN ('uploaded_private','warming','scheduled',
+                                      'awaiting_upload','ready')
+                     AND v.publish_mode = 'scheduled'
+                   ORDER BY COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at)
+                """, (channel_id,),
+            ).fetchall()
+    except Exception as exc:
+        logger.debug("[%s] repack scan skipped: %s", slug, exc)
+        return []
+
+    if not rows:
+        logger.info("[%s] repack: no hay publicaciones pendientes", slug)
+        return []
+
+    # ── 2. Config de pico para el primer slot ──
+    try:
+        ch = db.get_channel(channel_id)
+        cfg = {}
+        if ch and ch.get("config_json"):
+            import json as _json
+            cfg = _json.loads(ch["config_json"] or "{}")
+    except Exception:
+        cfg = {}
+    tz_str = cfg.get("PUBLISH_TIMEZONE", timezone_str)
+    warmup = int(cfg.get("PUBLISH_WARMUP_MIN", warmup_min) or warmup_min)
+    target_hour = cfg.get("PUBLISH_TARGET_HOUR")
+
+    peak_info = get_channel_peak_info(
+        {k: v for k, v in cfg.items()} if cfg else {"SEO_PRIMARY_KEYWORD": ""}
+    )
+    peak_hour = int(target_hour) if target_hour is not None else peak_info["peak_hour"]
+
+    # ── 3. Walk ──
+    now_utc = _dt.now(_tz.utc)
+    floor = now_utc + _td(minutes=warmup)
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+    # Primer slot: siguiente pico HH:00 (>= floor)
+    local_floor = floor.astimezone(tz)
+    cursor_local = local_floor.replace(hour=peak_hour, minute=0, second=0, microsecond=0)
+    if cursor_local < local_floor:
+        cursor_local += _td(days=1)
+    cursor_utc = cursor_local.astimezone(_tz.utc)
+
+    safety_limit = now_utc + _td(hours=safety_ahead_hours)
+    plan = []
+    for row in rows:
+        video_id = row["id"]
+        status = row["status"]
+        yt_id = row["yt_video_id"] or ""
+
+        slot = cursor_utc
+        # awaiting_upload/ready: publish despues de upload + warmup + buffer 60min
+        adjusted_upload_at = None
+        up_raw = row["scheduled_upload_at"]
+        if status in ("awaiting_upload", "ready") and up_raw:
+            up_dt = _parse_target_public_at(str(up_raw), tz_str)
+            if up_dt is not None:
+                min_public = up_dt + _td(minutes=warmup + 60)
+                if slot < min_public:
+                    slot = min_public
+            # La subida debe caber: ajustar scheduled_upload_at si se pasa
+            if slot > now_utc + _td(minutes=warmup):
+                candidate_up = slot - _td(minutes=warmup + 60)
+                if candidate_up > now_utc and (up_dt is None or candidate_up < up_dt):
+                    adjusted_upload_at = candidate_up.strftime("%Y-%m-%d %H:%M:%S")
+
+        if slot > safety_limit:
+            logger.warning(
+                "[%s] repack: safety bound %dh alcanzado para #%d — se recorta",
+                slug, safety_ahead_hours, video_id,
+            )
+            slot = safety_limit
+
+        old_target = str(row["target_public_at"]) if row["target_public_at"] else ""
+        requires_yt = status in ("uploaded_private", "warming", "scheduled") and bool(yt_id)
+
+        plan.append({
+            "video_id": video_id,
+            "status": status,
+            "yt_video_id": yt_id,
+            "old_target": old_target,
+            "new_target": slot.isoformat(),
+            "requires_yt_update": requires_yt,
+            "adjusted_upload_at": adjusted_upload_at,
+        })
+        cursor_utc = slot + _td(hours=gap_hours)
+
+    logger.info(
+        "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s)",
+        slug, len(plan), gap_hours, peak_hour, tz_str,
+    )
+    return plan

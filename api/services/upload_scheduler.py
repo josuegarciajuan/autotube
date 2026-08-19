@@ -557,154 +557,123 @@ def _recover_inconsistent_upload_times(db) -> int:
 # Límite de vídeos a reprogramar por pasada para acotar el gasto de cuota
 # (videos.update = 50 units c/u).
 MAX_FAR_FUTURE_FIX_PER_RUN = 4
-FAR_FUTURE_PUBLISH_HOURS = 24  # mismo valor que MAX_PUBLISH_AT_AHEAD_HOURS
-# Tolerancia de deriva: un vídeo ya clampado a ~24h (cap) no debe ser
-# re-pickado en las siguientes pasadas por el avance de 'now'. Sin esto, el
-# scan re-selecciona el mismo vídeo cada minuto (el cap es now+24h y 'now'
-# avanza) → ping-pong sin converger.
+FAR_FUTURE_PUBLISH_HOURS = 24  # trigger: publicaciones a más de 24h vista
+# Tolerancia de deriva: no re-pickear vídeos ya reprogramados en las siguientes
+# pasadas por el avance de 'now' (evita ping-pong sin converger).
 FAR_FUTURE_SCAN_TOLERANCE_MIN = 30
+# Máximo de canales repackeados por pasada (1 canal = 1 auth + N updates).
+MAX_REPACK_CHANNELS_PER_RUN = 2
+
+
+def _channels_need_repack(db, now) -> list[int]:
+    """Canales con horario de publicación pendiente problemático.
+
+    Detecta dos síntomas en vídeos pending (uploaded_private / warming /
+    scheduled / awaiting_upload / ready) del mismo canal:
+      1. publishAt a más de FAR_FUTURE_PUBLISH_HOURS + tolerancia vista.
+      2. Colisión < SAME_CHANNEL_PUBLISH_GAP_HOURS entre publicaciones
+         consecutivas (vídeos que saldrán a la misma hora o muy juntos).
+
+    Returns: lista de channel_id ordenada por gravedad (lejano primero).
+    """
+    from pipeline.publish_scheduler import _parse_target_public_at
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.channel_id, c.slug, v.id, v.status, v.target_public_at,
+                          v.uploaded_at, v.scheduled_upload_at, v.created_at
+                   FROM videos v JOIN channels c ON c.id = v.channel_id
+                   WHERE v.status IN ('uploaded_private','warming','scheduled',
+                                      'awaiting_upload','ready')
+                     AND v.publish_mode = 'scheduled'
+                     AND v.target_public_at IS NOT NULL
+                   ORDER BY v.channel_id, v.target_public_at
+                """
+            ).fetchall()
+    except Exception as exc:
+        logger.debug("repack detection scan skipped: %s", exc)
+        return []
+
+    from pipeline.publish_scheduler import SAME_CHANNEL_PUBLISH_GAP_HOURS
+    gap = timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)
+    threshold = now + timedelta(hours=FAR_FUTURE_PUBLISH_HOURS,
+                                minutes=FAR_FUTURE_SCAN_TOLERANCE_MIN)
+    score: dict[int, int] = {}
+    last: dict[int, object] = {}
+    for row in rows:
+        ch_id = row["channel_id"]
+        parsed = _parse_target_public_at(str(row["target_public_at"]),
+                                         "Europe/Madrid")
+        if parsed is None:
+            continue
+        # Síntoma 1: lejano (>24h + tolerancia) — gravedad alta
+        if parsed > threshold:
+            score[ch_id] = max(score.get(ch_id, 0), 10)
+        # Síntoma 2: colisión < gap con la publicación anterior del canal
+        if ch_id in last:
+            prev_dt = last[ch_id]
+            diff_h = (parsed - prev_dt).total_seconds() / 3600
+            if 0 < diff_h < SAME_CHANNEL_PUBLISH_GAP_HOURS:
+                score[ch_id] = max(score.get(ch_id, 0), 5)
+        last[ch_id] = parsed
+
+    return [ch_id for ch_id, _ in
+            sorted(score.items(), key=lambda kv: kv[1], reverse=True)]
 
 
 def _recover_far_future_published(db) -> int:
-    """Reprogramar publishAt de vídeos uploaded_private/warming a >24h vista.
+    """Reprogramar el horario de publicación de canales con vídeos "calentando".
 
-    Complementa a _recover_inconsistent_upload_times (que solo cubre
-    awaiting_upload): los vídeos ya subidos como private con publishAt a días
-    vista se quedan "calentando" (calentando) hasta su día de publicación.
+    Sustituye al enfoque incremental (clamp por vídeo): cuando un canal tiene
+    vídeos pendientes a días vista o con colisiones <3h, se recalcula TODA la
+    cola de publicaciones del canal (repack_channel_publish_times) con gaps
+    >= SAME_CHANNEL_PUBLISH_GAP_HOURS y se reprograma en YouTube (videos.update,
+    50u) + DB.
 
     Este scan:
-    1. Encuentra vídeos status IN ('uploaded_private','warming','scheduled')
-       con yt_video_id y target_public_at > now + FAR_FUTURE_PUBLISH_HOURS.
-    2. Solo actúa si el proyecto del canal tiene capacidad de cuota libre
-       (evita quemar cuota en mitad de una jornada agotada).
-    3. Recalcula el target al siguiente pico (clamp_max_ahead_target_public_at)
-       y lo reprograma en YouTube vía set_publish_at (videos.update, 50u).
-    4. Actualiza DB (target_public_at, planned_slots, go_public pendientes).
+    1. Detecta canales con publicaciones pendientes >24h vista o con huecos <3h.
+    2. Solo actúa si el proyecto del canal tiene capacidad de cuota libre.
+    3. Repack con máx MAX_FAR_FUTURE_FIX_PER_RUN videos.update por pasada y
+       máx MAX_REPACK_CHANNELS_PER_RUN canales.
 
     Si YouTube rechaza (quota/auth/HTTP) se deja como está: el vídeo publicará
     solo a su hora original. Nunca se fuerza una publicación manual.
 
     Returns el número de vídeos reprogramados con éxito.
     """
-    try:
-        from pipeline.publish_scheduler import clamp_max_ahead_target_public_at
-        from api.services.quota_tracker import project_has_free_capacity, get_channel_project
-    except Exception:
-        return 0
-
-    fixed = 0
     now = datetime.now(timezone.utc)
-    # Umbral de scan con tolerancia de deriva (no re-pickear clampados a ~24h)
-    scan_threshold = now + timedelta(
-        hours=FAR_FUTURE_PUBLISH_HOURS,
-        minutes=FAR_FUTURE_SCAN_TOLERANCE_MIN,
-    )
-    try:
-        with db._connect() as conn:
-            rows = conn.execute(
-                """SELECT v.id, v.channel_id, v.canal, v.yt_video_id, v.target_public_at,
-                          c.slug, c.config_json
-                   FROM videos v JOIN channels c ON c.id = v.channel_id
-                   WHERE v.status IN ('uploaded_private','warming','scheduled')
-                     AND v.yt_video_id IS NOT NULL AND v.yt_video_id != ''
-                     AND v.target_public_at IS NOT NULL
-                     AND v.target_public_at > ?
-                   ORDER BY v.target_public_at
-                   LIMIT ?
-                """, (scan_threshold.isoformat(), MAX_FAR_FUTURE_FIX_PER_RUN),
-            ).fetchall()
-    except Exception as exc:
-        logger.debug("Far-future publish scan skipped: %s", exc)
+    affected = _channels_need_repack(db, now)
+    if not affected:
         return 0
 
-    for row in rows:
-        video_id = row["id"]
-        slug = row["slug"] or row["canal"]
-        yt_id = row["yt_video_id"]
-        old_target = str(row["target_public_at"])
+    from api.services.publish_repack import apply_publish_repack
 
-        # ── Cuota: solo si el proyecto del canal tiene capacidad libre ──
-        project = get_channel_project(slug)
+    total_fixed = 0
+    for ch_id in affected[:MAX_REPACK_CHANNELS_PER_RUN]:
         try:
-            if not project_has_free_capacity(project, min_free_pct=10.0):
-                logger.info(
-                    "[%s] Far-future fix skipped: project %s sin capacidad libre",
-                    slug, project,
-                )
-                continue
+            ch = db.get_channel(ch_id)
+            slug = ch.get("slug") if ch else f"canal{ch_id}"
         except Exception:
-            pass
-
-        # ── Config del canal ──
-        cfg = {}
+            slug = f"canal{ch_id}"
         try:
-            cfg = json.loads(row["config_json"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            pass
-        tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
-        warmup = int(cfg.get("PUBLISH_WARMUP_MIN", 120) or 120)
-        primary_kw = cfg.get("SEO_PRIMARY_KEYWORD", "")
-        secondary_kws = cfg.get("SEO_SECONDARY_KEYWORDS", [])
-
-        # ── Recalcular al siguiente pico ──
-        try:
-            new_target = clamp_max_ahead_target_public_at(
-                old_target, slug=slug, timezone_str=tz_str, warmup_min=warmup,
-                db=db, channel_id=row["channel_id"],
-                primary_keyword=primary_kw,
-                secondary_keywords=secondary_kws,
+            res = apply_publish_repack(
+                db, ch_id, slug,
+                dry_run=False,
+                max_yt_updates=MAX_FAR_FUTURE_FIX_PER_RUN,
+                quota_gate=True,
             )
         except Exception as exc:
-            logger.debug("[%s] Clamp failed for #%d: %s", slug, video_id, exc)
+            logger.debug("[%s] repack failed: %s", slug, exc)
             continue
-        if not new_target or new_target == old_target:
-            continue
-
-        # ── Reprogramar en YouTube ──
-        try:
-            from pipeline.youtube_uploader import YouTubeUploader
-            uploader = YouTubeUploader(slug)
-            if not uploader.authenticate():
-                raise RuntimeError("auth fallida")
-            result = uploader.set_publish_at(yt_id, new_target)
-            if not result.get("updated"):
-                raise RuntimeError(f"respuesta inesperada: {result}")
-        except Exception as exc:
-            logger.warning(
-                "[%s] ⚠️ YouTube rechazó reprogramar #%d (%s) — publicará solo a %s",
-                slug, video_id, exc, old_target[:19],
-            )
-            continue
-
-        # ── Actualizar DB ──
-        try:
-            with db._connect() as conn2:
-                conn2.execute(
-                    "UPDATE videos SET target_public_at = ? WHERE id = ?",
-                    (new_target, video_id),
-                )
-                conn2.execute(
-                    "UPDATE planned_slots SET target_public_at = ? WHERE video_id = ?",
-                    (new_target, video_id),
-                )
-                conn2.execute(
-                    """UPDATE video_lifecycle_actions SET scheduled_for = ?
-                       WHERE video_id = ? AND action_type = 'go_public'
-                         AND status = 'pending'""",
-                    (new_target, video_id),
-                )
-                conn2.commit()
-        except Exception as exc:
-            logger.error("[%s] DB update failed for #%d: %s", slug, video_id, exc)
-            continue
-
+        total_fixed += res.get("rescheduled", 0)
         logger.info(
-            "[%s] 🔁 Reprogramado #%d: publishAt %s → %s (yt=%s)",
-            slug, video_id, old_target[:19], new_target[:19], yt_id,
+            "[%s] repack: %d reprogramados, %d sin cambio, %d rechazados por YT%s",
+            slug, res.get("rescheduled", 0), res.get("no_change", 0),
+            res.get("yt_failed", 0),
+            " (cuota insuficiente)" if res.get("quota_skipped") else "",
         )
-        fixed += 1
 
-    return fixed
+    return total_fixed
 
 
 def _spawn_upload_worker(job_id: int, channel_id: int, video_id: int) -> bool:
