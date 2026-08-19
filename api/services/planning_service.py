@@ -799,16 +799,41 @@ def _pick_time_in_window(
     return hour, minute
 
 
+def _optimal_slot_windows(db, channel_id: int) -> list[tuple]:
+    """Build (start_h, end_h, weight, name) windows from data-driven optimal slots.
+
+    Returns [] if no fresh optimal slots exist (caller falls back to heuristic).
+    """
+    if db is None:
+        return []
+    try:
+        slots = db.get_optimal_slots(channel_id, "long")
+    except Exception as exc:
+        logger.debug("get_optimal_slots failed for ch%d: %s", channel_id, exc)
+        return []
+    if not slots:
+        return []
+    windows = []
+    for i, s in enumerate(slots):
+        h = int(s.get("target_hour", 0) or 0)
+        rank = int(s.get("slot_rank", i + 1) or (i + 1))
+        weight = 3 if rank == 1 else 2
+        windows.append((max(0, h - 1), min(23, h + 1), weight, f"optimal_rank{rank}"))
+    return windows
+
+
 def _distribute_slots(
     videos_per_day: int,
     day_seed: int,
     channel_id: int,
     is_scheduled: bool = False,
     scheduled_cfg: dict = None,
+    db=None,
 ) -> list[tuple]:
     """Distribute N video slots across time windows for one channel.
 
-    For scheduled channels, uses niche-specific peak windows (publish_scheduler).
+    For scheduled channels, prefers data-driven optimal_publish_slots (real
+    audience peak hours); falls back to niche-specific peak windows (publish_scheduler).
     For immediate channels, uses generic SPAIN_UPLOAD_WINDOWS.
 
     Returns list of (hour, minute) tuples — TARGET UPLOAD times (public for scheduled).
@@ -823,16 +848,21 @@ def _distribute_slots(
     fallback = SPAIN_FALLBACK_WINDOW
     ch_seed = _channel_seed(day_seed, channel_id)
 
-    # ── Scheduled mode: use niche-specific peak windows ──
+    # ── Scheduled mode: prefer data-driven optimal slots over niche heuristic ──
     if is_scheduled and scheduled_cfg:
-        try:
-            from pipeline.publish_scheduler import get_peak_windows
-            peak_wins = get_peak_windows(scheduled_cfg, n=max(videos_per_day, 3))
-            if peak_wins:
-                windows = peak_wins
-                fallback = windows[-1] if len(windows) > 2 else windows[0]
-        except Exception as exc:
-            logger.debug("Failed to load peak windows, falling back to generic: %s", exc)
+        optimal_wins = _optimal_slot_windows(db, channel_id)
+        if optimal_wins:
+            windows = optimal_wins
+            fallback = windows[-1] if len(windows) > 2 else windows[0]
+        else:
+            try:
+                from pipeline.publish_scheduler import get_peak_windows
+                peak_wins = get_peak_windows(scheduled_cfg, n=max(videos_per_day, 3))
+                if peak_wins:
+                    windows = peak_wins
+                    fallback = windows[-1] if len(windows) > 2 else windows[0]
+            except Exception as exc:
+                logger.debug("Failed to load peak windows, falling back to generic: %s", exc)
     
     if videos_per_day <= 0:
         return []
@@ -975,7 +1005,8 @@ def compute_daily_slots(
         # _distribute_slots returns (h, m) = TARGET_UPLOAD (public for scheduled)
         raw_slots = _distribute_slots(n, day_seed, ch["channel_id"],
                                        is_scheduled=is_scheduled,
-                                       scheduled_cfg=ch if is_scheduled else None)
+                                       scheduled_cfg=ch if is_scheduled else None,
+                                       db=db)
         
         for pos, (target_h, target_m) in enumerate(raw_slots, 1):
             # target_upload_at: for scheduled = public peak time; for immediate = upload time

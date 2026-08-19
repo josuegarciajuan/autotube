@@ -1817,7 +1817,7 @@ class PipelineOrchestrator:
             publish_schedule_info = None
             
             if publish_mode == "scheduled":
-                from pipeline.publish_scheduler import calculate_target_public_time
+                from pipeline.publish_scheduler import calculate_target_public_time, planned_target_is_off_peak
                 primary_kw = getattr(self.config, "SEO_PRIMARY_KEYWORD", "")
                 secondary_kws = getattr(self.config, "SEO_SECONDARY_KEYWORDS", [])
                 tz = getattr(self.config, "PUBLISH_TIMEZONE", "Europe/Madrid")
@@ -1837,12 +1837,22 @@ class PipelineOrchestrator:
 
                     now_utc_dt = _dt.now(_tz.utc)
 
-                    # Recalculate if planned time has already passed
-                    if target_dt < now_utc_dt + timedelta(minutes=warmup):
-                        logger.info(
-                            "[%s] Planned public time within warmup or past (%s). Recalculating.",
-                            self.canal, target_dt.isoformat(),
-                        )
+                    # Recalculate if planned time has already passed OR lands on an
+                    # off-peak hour (heuristic seed vs data-driven optimal slots).
+                    off_peak = planned_target_is_off_peak(
+                        planned_public_at, channel_id, self.db, tz,
+                    )
+                    if (target_dt < now_utc_dt + timedelta(minutes=warmup)) or off_peak:
+                        if off_peak and target_dt >= now_utc_dt + timedelta(minutes=warmup):
+                            logger.info(
+                                "[%s] Planned public time %s is off-peak — recalculating to optimal slot.",
+                                self.canal, target_dt.isoformat(),
+                            )
+                        else:
+                            logger.info(
+                                "[%s] Planned public time within warmup or past (%s). Recalculating.",
+                                self.canal, target_dt.isoformat(),
+                            )
                         try:
                             fallback_info = calculate_target_public_time(
                                 slug=self.canal,

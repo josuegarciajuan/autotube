@@ -29,7 +29,7 @@ NICHO_PEAK_HOURS = {
             "secreto", "oculto", "enigma", "leyenda", "maldición",
         ],
         "peak_hour": 21,       # 9 PM — consumo nocturno de misterio
-        "secondary_peaks": [0, 14, 17],  # madrugada (insomnes), sobremesa, tarde-noche
+        "secondary_peaks": [14, 17, 20],  # sobremesa, media tarde, pre-prime (sin madrugada)
         "peak_day": "daily",
         "note": "El contenido de misterio tiene pico nocturno (20-23h)."
                " Las notificaciones previas al prime time (21h) maximizan CTR.",
@@ -1125,3 +1125,47 @@ def ensure_future_target_public_at(
         new_target,
     )
     return new_target
+
+
+def planned_target_is_off_peak(
+    target_public_at: str,
+    channel_id: int,
+    db,
+    timezone_str: str = "Europe/Madrid",
+    tolerance_hours: int = 1,
+) -> bool:
+    """Return True if target_public_at's local hour is far from all optimal slots.
+
+    Belt-and-suspenders for the uploader: a planning-provided target seeded by
+    the niche heuristic (before data-driven optimal slots existed, or when they
+    were stale) can land on off-peak hours (e.g. midnight). If optimal slots
+    exist and the target hour is more than ``tolerance_hours`` from every
+    optimal hour, the caller should recalculate via calculate_target_public_time
+    (which prefers optimal slots). Returns False when there is nothing to
+    compare against (no db / no optimal slots / parse ok), so behaviour is
+    unchanged in those cases.
+    """
+    if db is None or channel_id is None:
+        return False
+    try:
+        slots = db.get_optimal_slots(channel_id, "long")
+    except Exception:
+        return False
+    if not slots:
+        return False
+
+    parsed = _parse_target_public_at(target_public_at, timezone_str)
+    if parsed is None:
+        return True  # unparseable → let caller recalculate
+
+    try:
+        tz = pytz.timezone(timezone_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+    local_h = parsed.astimezone(tz).hour
+
+    for s in slots:
+        opt_h = int(s.get("target_hour", 0) or 0)
+        if abs(local_h - opt_h) <= tolerance_hours:
+            return False
+    return True
