@@ -2843,6 +2843,20 @@ async def _do_reassembly(job_id: int, video_id: int):
         channel_id = video.get("channel_id")
         ch = db.get_channel(channel_id) if channel_id else None
         canal = ch["slug"] if ch else video.get("canal")
+
+        # ── Guard: never reassemble videos of inactive channels ──
+        # Channels with active=0 (e.g. "test") are excluded from the whole
+        # reassembly process: the startup auto-recovery already filters them
+        # in its SQL, and this execution chokepoint catches any remaining
+        # path (manual reassemble / force-retry / queued legacy jobs).
+        if ch is not None and not ch.get("active"):
+            await _broadcast_progress(
+                job_id, 0, "skipped",
+                f"Canal '{canal}' inactivo — video descartado del reensamblado",
+                "failed", video_id,
+                detail="Solo los canales activos pueden reensamblarse",
+            )
+            return
     except Exception as e:
         logger.exception("Reassembly data load failed")
         await _broadcast_progress(job_id, 0, "error", f"Error cargando datos: {e}", "failed")
@@ -3351,10 +3365,13 @@ async def auto_recover_on_startup():
         )
         _marathon_skip_recovery_for_non_marathon = True  # only process marathon videos
     rows = conn.execute(
-        "SELECT * FROM videos WHERE status='error' "
-        "AND checkpoint_data IS NOT NULL AND checkpoint_data != '{}' "
-        "AND (progress_phase IS NULL OR progress_phase NOT IN ('bug_crash','manual_review')) "
-        "ORDER BY created_at DESC"
+        "SELECT v.* FROM videos v "
+        "LEFT JOIN channels c ON c.id = v.channel_id "
+        "WHERE v.status='error' "
+        "AND v.checkpoint_data IS NOT NULL AND v.checkpoint_data != '{}' "
+        "AND (v.progress_phase IS NULL OR v.progress_phase NOT IN ('bug_crash','manual_review')) "
+        "AND COALESCE(c.active, 1) = 1 "
+        "ORDER BY v.created_at DESC"
     ).fetchall()
 
     bugs_skipped = 0
