@@ -1762,13 +1762,24 @@ def run_job(
                 logger.error("Upload failed — video saved locally")
                 # ── Quota exhaustion check: keep in awaiting_upload, don't mark as ready ──
                 # Per-project breaker: solo se retiene si el proyecto del CANAL
-                # está agotado (Fase cuota ago 2026).
+                # está agotado (Fase cuota ago 2026). También se retiene (sin
+                # breaker) si el dispatcher local denegó la admisión por una
+                # razón no-quota (colisión de reference, presupuesto, proyecto
+                # desconocido) — reintentable, NO es cuota agotada.
                 try:
+                    admission_denied = bool(
+                        getattr(orch, "_upload_admission_denied", False)
+                    )
                     if db.is_quota_exhausted_for_channel(canal):
                         db.update_video(video_id, progress=0, status="awaiting_upload",
                                         error_message="YouTube API quota exhausted",
                                         progress_phase="upload", scheduled_upload_at=None)
                         logger.info("[%s] Upload failed due to quota exhaustion — keeping awaiting_upload", canal)
+                    elif admission_denied:
+                        db.update_video(video_id, progress=0, status="awaiting_upload",
+                                        error_message="Upload admission denied locally — retry pending",
+                                        progress_phase="upload", scheduled_upload_at=None)
+                        logger.info("[%s] Upload admission denied locally — keeping awaiting_upload (retry)", canal)
                     else:
                         db.update_video(video_id, progress=95, status="ready")
                 except Exception:

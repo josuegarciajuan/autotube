@@ -57,6 +57,18 @@ class QuotaExhaustedError(RuntimeError):
     pass
 
 
+class UploadAdmissionDeniedError(RuntimeError):
+    """The local quota dispatcher denied admission for a NON-quota reason
+    (reference collision, invalid budget, unknown project, remediation mode).
+
+    Unlike QuotaExhaustedError, this does NOT mean the YouTube daily quota is
+    exhausted: raising this must NOT trip the per-project quota circuit breaker
+    nor create a "quota agotada" alert. Callers keep the video retryable
+    (awaiting_upload) without pausing the project.
+    """
+    pass
+
+
 class InvalidPublishAtError(ValueError):
     """publishAt is in the past (or within the safety buffer).
 
@@ -537,6 +549,14 @@ class YouTubeUploader:
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
+        # ── Canonical path for quota reference ────────────────────
+        # Capture BEFORE the SEO rename below: the reference_id used for quota
+        # admission must be stable and unique per video. Using the renamed temp
+        # copy (e.g. "video.mp4" when the title is empty) made two different
+        # videos collide on the same reference and one got denied with
+        # "already_consumed" → false "quota agotada" breaker trip (ago 2026).
+        original_video_path = video_path.resolve()
+
         # ── v25: fail-closed publishAt guard ────────────────────
         # YouTube rejects a publishAt in the past with a 403 that already bills
         # the 1600-unit videos.insert. Validate BEFORE issuing the request so a
@@ -658,9 +678,10 @@ class YouTubeUploader:
                 YouTubeUploadDispatcher,
             )
             # Callers with a durable database/job ID can supply it explicitly;
-            # legacy callers retain a deterministic canonical-path fallback.
+            # legacy callers retain a deterministic canonical-path fallback
+            # (original pre-rename path — unique per generated video).
             reference_id = quota_reference_id or (
-                f"upload:{self.channel_slug or self.account_name}:{video_path.resolve()}"
+                f"upload:{self.channel_slug or self.account_name}:{original_video_path}"
             )
             try:
                 response = YouTubeUploadDispatcher(self.channel_slug or self.account_name).dispatch(
@@ -671,7 +692,10 @@ class YouTubeUploader:
                     ),
                 )
             except UploadDispatchBlocked as exc:
-                raise QuotaExhaustedError(str(exc)) from exc
+                # Local admission denial (reference collision, budget, unknown
+                # project...). NOT a YouTube quota error: must not trip the
+                # per-project breaker nor create a "quota agotada" alert.
+                raise UploadAdmissionDeniedError(str(exc)) from exc
 
             # ── Validate YouTube response ─────────────────────────
             self._validate_upload_response(response)

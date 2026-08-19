@@ -102,6 +102,12 @@ class PipelineOrchestrator:
         self._metadata_gen = None
         self._uploader = None
 
+        # Upload failure classification (read by the worker to decide retry
+        # vs ready). True when the local quota dispatcher denied admission
+        # (UploadAdmissionDeniedError) — retryable, but NOT quota exhaustion:
+        # must NOT trip the per-project quota breaker.
+        self._upload_admission_denied = False
+
         # Inter-phase state (computed once, used in subsequent phases)
         self._last_scene_ranges: list[dict] | None = None
         # Final media assets (1:1 with scene_ranges) — kept for the
@@ -1793,7 +1799,10 @@ class PipelineOrchestrator:
 
         _saved_uploader_db = None  # for finally restore
 
-        from pipeline.youtube_uploader import QuotaExhaustedError
+        from pipeline.youtube_uploader import (
+            QuotaExhaustedError,
+            UploadAdmissionDeniedError,
+        )
 
         try:
             # Authenticate with YouTube
@@ -1960,7 +1969,18 @@ class PipelineOrchestrator:
             else:
                 # Fallback: build from config templates (original behavior)
                 import json as _json
-                title = video_data.get("titulo", "Video sin título")
+                # ── Never upload with an empty title (ago 2026) ──
+                # An empty title made slugify_filename("") → "video", so every
+                # empty-titled video collided on the same quota reference_id
+                # and one of them got a false "quota agotada" breaker trip.
+                # Fall back to the script title / first title option.
+                title = (
+                    video_data.get("titulo")
+                    or (script.get("titulo_selected") if script else None)
+                    or (script.get("titulo") if script else None)
+                    or ((script.get("titulo_options") or [None])[0] if script else None)
+                    or "Video sin título"
+                )
                 
                 kw_raw = script.get("keywords") or script.get("keywords_json", "[]")
                 if isinstance(kw_raw, str):
@@ -2033,6 +2053,14 @@ class PipelineOrchestrator:
                 suggested_video_filename=filename_slug,
                 suggested_thumb_filename=filename_slug,
                 publish_at=upload_publish_at,
+                # ── Stable quota reference (ago 2026) ──
+                # Prefer the DB video id so two videos never share the same
+                # reservation reference even if they map to the same renamed
+                # temp file (empty-title "video.mp4" collision → false quota).
+                quota_reference_id=(
+                    f"upload:{self.canal}:db:{self.db_video_id}"
+                    if self.db_video_id is not None else None
+                ),
             )
 
             video_id = result.get("video_id")
@@ -2280,6 +2308,18 @@ class PipelineOrchestrator:
                              metadata={'channel': self.canal})
             except Exception:
                 pass
+            return None
+
+        except UploadAdmissionDeniedError as exc:
+            # ── Local admission denial (reference collision, budget, unknown
+            # project...). NOT YouTube quota: retryable, but must NOT trip the
+            # per-project quota breaker nor create a "quota agotada" alert. ──
+            self._upload_admission_denied = True
+            logger.warning(
+                "[%s] Upload admission denied locally (retryable, no quota impact): %s",
+                self.canal, exc,
+            )
+            _safe_log_error(self.db, self.canal, "upload", f"admission_denied: {exc}")
             return None
 
         except Exception as e:
