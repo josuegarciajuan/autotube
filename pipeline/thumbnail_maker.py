@@ -307,7 +307,9 @@ class ThumbnailMaker:
             overlay_text: Pre-computed marketing text (from metadata phase).
                 If empty, the brainstorming agent will generate one.
             keywords: SEO keywords for context.
-            scene_images: Unused in v2 (Pollo AI generates fresh images).
+            scene_images: Existing video scene images (paths); one is reused
+                as the inset recuadro image when available. No extra AI
+                image generation is performed for the inset.
             script_text: First ~1500 chars of script for context.
             canal_slug: Channel slug for cache key (e.g. "canal2").
             channel_display_name: Display name for style engine.
@@ -371,6 +373,11 @@ class ThumbnailMaker:
 
         # ── F4: Composition ────────────────────────────────────
         logger.info("[Thumbnail v2] F4: Composing final thumbnail")
+        # Reuse an existing video scene image for the inset recuadro —
+        # avoids painting the secondary_scene prompt as literal text.
+        inset_path = self._pick_inset_image(scene_images, base_image=base_image)
+        if inset_path:
+            logger.info("[Thumbnail v2] F4: inset recuadro image: %s", inset_path)
         thumb_path = self._compose_final(
             base_image=base_image,
             brief=brief,
@@ -384,6 +391,7 @@ class ThumbnailMaker:
             badge_text=badge_text,
             secondary_scene=secondary_scene,
             layout=getattr(brief, 'layout', '') or '',
+            inset_image_path=inset_path,
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
@@ -401,6 +409,7 @@ class ThumbnailMaker:
         video_id: int = 0,
         variant_briefs: list | None = None,
         num_variants: int = 3,
+        scene_images: list | None = None,
     ) -> list[Path]:
         """Generate multiple thumbnail variants for A/B testing.
         
@@ -423,6 +432,8 @@ class ThumbnailMaker:
             variant_briefs: Optional pre-generated list of ThumbnailBrief.
                 If None, brainstorm_variants() is called to generate them.
             num_variants: Number of variants to generate (default 3).
+            scene_images: Existing video scene images (paths); one is reused
+                as the inset recuadro image when available.
 
         Returns:
             List of Path objects, one per generated thumbnail variant.
@@ -473,7 +484,10 @@ class ThumbnailMaker:
         )
         # Store for metadata recompose
         self._last_raw_base = base_image
-        
+
+        # Reuse an existing video scene image for the inset recuadro
+        inset_path = self._pick_inset_image(scene_images, base_image=base_image)
+
         # ── F4: Compose each variant on the same base image ────
         variant_paths: list[Path] = []
         for i, brief in enumerate(variant_briefs):
@@ -498,6 +512,7 @@ class ThumbnailMaker:
                 badge_text=badge,
                 secondary_scene=secondary,
                 layout=layout,
+                inset_image_path=inset_path,
             )
             variant_paths.append(thumb_path)
             logger.info(
@@ -944,7 +959,6 @@ class ThumbnailMaker:
                 draw=draw,
                 accent_rgb=accent_rgb,
                 title=title,
-                secondary_scene=secondary_scene,
                 badge_text=badge_text,
                 inset_count=comp.get("inset_count", 2),
                 inset_image_path=inset_image_path,
@@ -1078,13 +1092,53 @@ class ThumbnailMaker:
 
     # ── Inset recuadros helper ──────────────────────────────
 
+    @staticmethod
+    def _pick_inset_image(
+        scene_images: list | None,
+        base_image: Path | None = None,
+    ) -> Path | None:
+        """Pick one existing video scene image for the inset recuadro.
+
+        Accepts the two shapes produced by callers:
+        - nested: ``[[path_a], [path_b], ...]`` (orchestrator / generation_service)
+        - flat:   ``[path_a, path_b, ...]``
+
+        The base (main) image is excluded so the inset never repeats the
+        primary visual. Returns ``None`` when no usable image is found —
+        the caller then falls back to a short text label.
+
+        Args:
+            scene_images: Scene image paths from the video media assets.
+            base_image: Path of the main thumbnail image to exclude.
+
+        Returns:
+            A Path to a usable scene image, or None.
+        """
+        import random
+
+        candidates: list[Path] = []
+        if scene_images:
+            for item in scene_images:
+                if isinstance(item, (list, tuple)):
+                    candidates.extend(Path(p) for p in item if p)
+                else:
+                    candidates.append(Path(item))
+
+        base_resolved = Path(base_image).resolve() if base_image else None
+        usable = [
+            p for p in candidates
+            if p.exists()
+            and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+            and (base_resolved is None or p.resolve() != base_resolved)
+        ]
+        return random.choice(usable) if usable else None
+
     def _draw_insets(
         self,
         img: Image.Image,
         draw: ImageDraw.ImageDraw,
         accent_rgb: tuple,
         title: str,
-        secondary_scene: str = "",
         badge_text: str = "",
         inset_count: int = 2,
         inset_image_path: Path | None = None,
@@ -1105,11 +1159,9 @@ class ThumbnailMaker:
         inset_y = self.height - inset_h - 15
 
         # ── Inset A : bottom-left ─────────────────────────────
-        label_a = (
-            secondary_scene[:30].upper()
-            if secondary_scene
-            else ("DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA")
-        )
+        # Short label only — never paint a raw image prompt here.
+        # The real visual content comes from inset_image_path when available.
+        label_a = "DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA"
 
         # Determine whether to embed an image or draw text
         use_image_inset = bool(inset_image_path and inset_image_path.exists())

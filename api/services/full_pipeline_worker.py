@@ -1407,7 +1407,13 @@ def run_job(
                 channel_display = getattr(config, "CANAL_DISPLAY_NAME", canal)
                 channel_desc = getattr(config, "CHANNEL_ABOUT_SECTION", "")
                 channel_theme = getattr(config, "CANAL_NARRATIVE_STYLE", "")
-                
+
+                # Reuse video scene images for the inset recuadro of each variant
+                _scene_images = []
+                for a in (media_assets if isinstance(media_assets, list) else []):
+                    if isinstance(a, dict) and a.get("type") == "image" and a.get("path"):
+                        _scene_images.append([a["path"]])
+
                 maker = ThumbnailMaker(config=config)
                 
                 ab_test_variant_paths = maker.make_variant_thumbnails(
@@ -1420,6 +1426,7 @@ def run_job(
                     channel_theme=channel_theme,
                     video_id=video_id,
                     num_variants=3,
+                    scene_images=_scene_images or None,
                 )
                 
                 if ab_test_variant_paths:
