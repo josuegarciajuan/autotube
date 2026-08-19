@@ -142,10 +142,16 @@ VIDEO_MAX_DURATION = int(os.getenv("VIDEO_MAX_DURATION", "840"))   # seconds (14
 FFMPEG_PRESET_DEFAULT = os.getenv("FFMPEG_PRESET_DEFAULT", "fast")
 
 # ── Memory guard thresholds (MB) ───────────────────────────────
-VIDEO_MEMORY_GUARD_MB = int(os.getenv("VIDEO_MEMORY_GUARD_MB", "2000"))
+# Subidos el 2026-08-19 tras OOM kills reales: ffmpeg exact-concat consume
+# ~3 GB por batch de 50 segmentos y Kokoro/torch ~2.8 GB. Umbrales previos
+# (2000/3000/4000 MB) permitían arrancar fases pesadas con RAM justa y el
+# kernel mataba ffmpeg (rc=-9) y python3 (code -9) perdiendo horas de render.
+VIDEO_MEMORY_GUARD_MB = int(os.getenv("VIDEO_MEMORY_GUARD_MB", "5000"))
 LOW_MEMORY_WARN_MB = int(os.getenv("LOW_MEMORY_WARN_MB", "1500"))
-MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "3000"))
-MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "4000"))
+MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "5000"))
+MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "6000"))
+# Kokoro-82M (torch) carga ~3 GB al generar TTS; necesita más margen que el render.
+MIN_FREE_FOR_TTS_MB = int(os.getenv("MIN_FREE_FOR_TTS_MB", "6000"))
 
 # ── Render timeout ─────────────────────────────────────────────
 # Timeout = min(max(video_duration * RENDER_TIMEOUT_MULTIPLIER, RENDER_TIMEOUT_MIN_SEC), RENDER_TIMEOUT_MAX_SEC)
