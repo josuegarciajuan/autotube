@@ -671,6 +671,35 @@ def _get_db():
     return _broadcast_db
 
 
+def _clamp_scheduled_public_at(db, canal: str, channel_id: int, video_id: int,
+                               target_public_at) -> str:
+    """Clamp far-future target_public_at to at most MAX_PUBLISH_AT_AHEAD_HOURS.
+
+    Espejo del clamp del full_pipeline_worker: si el target del slot planificado
+    está a días vista, lo acerca al siguiente pico para que el vídeo no se quede
+    "calentando" (uploaded_private) más de 24h. Devuelve el target efectivo.
+    """
+    if not target_public_at:
+        return target_public_at
+    try:
+        from pipeline.publish_scheduler import clamp_max_ahead_target_public_at
+        tz_str = "Europe/Madrid"
+        warmup = 60
+        try:
+            cfg = get_channel_config(canal)
+            tz_str = getattr(cfg, "PUBLISH_TIMEZONE", "Europe/Madrid")
+            warmup = int(getattr(cfg, "PUBLISH_WARMUP_MIN", 60) or 60)
+        except Exception:
+            pass
+        return clamp_max_ahead_target_public_at(
+            target_public_at, slug=canal, timezone_str=tz_str,
+            warmup_min=warmup, db=db, channel_id=channel_id,
+        )
+    except Exception as exc:
+        logger.debug("[%s] Far-future clamp skipped: %s", canal, exc)
+        return target_public_at
+
+
 _broadcast_db = None  # module-level cached ExtendedDatabase instance
 
 
@@ -2229,6 +2258,16 @@ async def start_upload_job(job_id: int, video_id: int):
         # orch.phase_upload() recalculates a stale target_public_at and forces
         # private + publishAt for scheduled channels, mirroring the full worker.
         target_public_at = v.get("target_public_at")
+        # ── Clamp far-future publish (no quedarse "calentando" >24h) ──
+        target_public_at = _clamp_scheduled_public_at(
+            db, canal, channel_id, video_id, target_public_at,
+        )
+        # Persistir el target clampado para mantener DB/UI coherentes
+        try:
+            if target_public_at and target_public_at != v.get("target_public_at"):
+                db.update_video(video_id, target_public_at=target_public_at)
+        except Exception:
+            pass
 
         def _do_upload():
             video_data = {
@@ -2381,6 +2420,17 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
 
         # ── Scheduled publishing: use target_public_at from the video record ──
         target_public_at = v.get("target_public_at")
+        # ── Clamp far-future publish (no quedarse "calentando" >24h) ──
+        target_public_at = _clamp_scheduled_public_at(
+            db, canal, channel_id, video_id, target_public_at,
+        )
+        # Persistir el target clampado para que el lifecycle posterior use el
+        # valor efectivo (evita agendar go_public con la fecha antigua lejana).
+        try:
+            if target_public_at and target_public_at != v.get("target_public_at"):
+                db.update_video(video_id, target_public_at=target_public_at)
+        except Exception:
+            pass
         if target_public_at:
             logger.info("[%s] Upload scheduler: target_public_at=%s", canal, target_public_at)
         else:
