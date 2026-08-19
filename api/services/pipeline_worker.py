@@ -288,10 +288,17 @@ def run_video_render(
                 if v and v.get("checkpoint_data"):
                     raw = v["checkpoint_data"]
                     existing = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                # ── Merge, do NOT clobber existing metadata (ago 2026) ──
+                # This subprocess only knows the render output path. Overwriting
+                # the whole "video" checkpoint with titulo="" destroyed the real
+                # title after reassembly, so later upload-only resumes uploaded
+                # with an empty title → slugify("")="video" → quota reference
+                # collision → false "quota agotada" breaker trip.
+                prev_video = existing.get("video") or {}
                 existing["video"] = {
                     "video_path": result["video_path"],
-                    "thumbnail_path": "",
-                    "titulo": "",
+                    "thumbnail_path": prev_video.get("thumbnail_path") or "",
+                    "titulo": prev_video.get("titulo") or "",
                 }
                 db2.update_video(
                     video_id, progress=75, progress_phase="video",

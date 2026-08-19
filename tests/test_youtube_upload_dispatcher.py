@@ -112,3 +112,36 @@ def test_unknown_project_and_missing_reference_fail_closed():
         unknown.dispatch("video:123", "long", lambda request_started: None)
     with pytest.raises(UploadDispatchBlocked, match="reference"):
         _dispatcher(db, remediation_mode=False).dispatch("", "long", lambda request_started: None)
+
+
+def test_dispatch_denied_when_reservation_already_consumed_collision():
+    """Regression (ago 2026): a reference collision (two videos sharing the
+    renamed temp path "video.mp4") must deny admission BEFORE any transport
+    request — the caller classifies it as UploadAdmissionDeniedError, NOT
+    QuotaExhaustedError, so the per-project quota breaker never trips."""
+
+    class DeniedDb:
+        def __init__(self):
+            self.reservation = None
+            self.finalized = []
+
+        def reserve_youtube_quota(self, **kwargs):
+            self.reservation = kwargs
+            return {"granted": False, "reason": "already_consumed", "used_units": 1600, "budget_units": 8000}
+
+        def finalize_youtube_quota_reservation(self, reservation_id, *, consumed):
+            self.finalized.append((reservation_id, consumed))
+
+    db = DeniedDb()
+    transport_called = []
+
+    with pytest.raises(UploadDispatchBlocked, match="already_consumed"):
+        _dispatcher(db, remediation_mode=False).dispatch(
+            "upload:canal2:/root/autotube/output/videos/video.mp4",
+            "long",
+            lambda request_started: transport_called.append(request_started) or "ok",
+        )
+
+    # No request may cross the boundary, and no reservation is finalized.
+    assert transport_called == []
+    assert db.finalized == []
