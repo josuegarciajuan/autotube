@@ -3369,22 +3369,29 @@ async def auto_recover_on_startup():
 
     conn.commit()
 
-    # ── Step 2b: Clean up orphaned shorts_planned_slots ───────
-    # When a generation_job is killed by server restart, the
-    # shorts_planned_slots row stays as 'running' indefinitely.
-    # This closes the gap: any slot whose linked job is now failed
-    # gets marked as failed too.
+    # ── Step 2b: Re-queue orphaned shorts_planned_slots ───────
+    # When a generation_job is killed by server restart (e.g. apply_changes.sh
+    # restarts the API), the shorts_planned_slots row stays as 'running'
+    # indefinitely. Previously it was marked 'failed' permanently — every
+    # restart silently killed in-flight shorts and they never got retried
+    # (failed slots are invisible to the dispatcher and the recovery planner).
+    # Shorts run in-process (asyncio.to_thread), so ANY API restart kills them;
+    # the correct behaviour is to re-queue the slot as 'pending' (job_id=NULL)
+    # so the dispatcher retries it on the next tick, exactly like
+    # _sync_running_shorts_slots does for running slots found later.
     orphaned_slots = conn.execute(
         """UPDATE shorts_planned_slots
-           SET status = 'failed',
-               error_message = 'Server restart — linked job failed'
+           SET status = 'pending',
+               job_id = NULL,
+               error_message = 'Server restart — re-queued for retry',
+               updated_at = CURRENT_TIMESTAMP
            WHERE status = 'running'
              AND job_id IS NOT NULL
              AND job_id IN (SELECT id FROM generation_jobs WHERE status = 'failed')"""
     ).rowcount
     if orphaned_slots:
         conn.commit()
-        log.info("Cleaned up %d orphaned shorts slot(s) (job died on restart)", orphaned_slots)
+        log.info("Re-queued %d orphaned shorts slot(s) as pending (job died on restart)", orphaned_slots)
 
     # ── Step 3: Auto-recover recoverable videos ───────────────
     # ── Concurrency guard: skip non-marathon recovery if a long-form
