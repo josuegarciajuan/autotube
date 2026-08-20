@@ -44,8 +44,8 @@ SHORTS_SPAM_BLOCK_HOURS = 72             # 1st strike: 3 days
 SHORTS_SPAM_BLOCK_HOURS_ESCALATED = 168  # 2nd strike: 7 days
 SHORTS_SPAM_MAX_STRIKES = 2
 # Colchón extra de reactivación: el bloque se mantiene (hours + buffer) antes
-# de desbloquear el canal automáticamente. Ej: 72h → se reactiva a las 76h.
-SHORTS_SPAM_BLOCK_BUFFER_HOURS = 4
+# de desbloquear el canal automáticamente. Ej: 72h → se reactiva a las 78h.
+SHORTS_SPAM_BLOCK_BUFFER_HOURS = 6
 # Title similarity guard: reject a native short whose title is too similar
 # to a recent one (token-overlap ≥ threshold). Near-duplicate titles are a
 # classic spam signal.
@@ -148,6 +148,16 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> in
             strikes, channel_slug, total_hours,
             "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
         )
+        # ── Rebaja de frecuencia (canal + hermanos del mismo proyecto) ──
+        # Tras el bloqueo, el canal y sus hermanos publican a menor ritmo para
+        # no reincidir en el flag de spam. Restauración manual vía panel.
+        try:
+            from api.services.spam_mitigation import reduce_publication_frequency_after_strike
+            reduce_publication_frequency_after_strike(channel_id, channel_slug, db=db)
+        except Exception as _freq_exc:
+            logger.error(
+                "Spam frequency reduction failed for %s: %s", channel_slug, _freq_exc,
+            )
         return strikes
     except Exception as exc:
         logger.error("Failed to record spam strike for %s: %s", channel_slug, exc)
