@@ -24,6 +24,10 @@ ExecStart=/usr/bin/python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --
 Restart=always
 RestartSec=10
 
+# Prioridad de CPU: menor que la de los capturadores de reconocimientoFacial
+# (Tier 1, tiempo real). Los ffmpeg/TTS hijos heredan Nice=10.
+Nice=10
+
 # KillMode: process = SIGTERM only to the main process (uvicorn).
 # Child processes (full_pipeline_worker subprocesses with start_new_session)
 # survive the restart, preserving running video generations.
