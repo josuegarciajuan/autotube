@@ -117,12 +117,16 @@ def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
 
 # ── Hard spam filter helpers ────────────────────────────────────
 
-def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> int:
+def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
+                              video_id: str = None, reason: str = None) -> int:
     """Record a YouTube spam removal for a channel and BLOCK its uploads.
 
     Returns the new strike count. After SHORTS_SPAM_MAX_STRIKES the block
     escalates. The block key is stored in system_state so it survives
     API restarts (apply_changes.sh).
+
+    ``video_id`` / ``reason`` se guardan (``shorts_spam_last_removal_{id}``)
+    para el informe de situación del banner (por qué se bloqueó el canal).
 
     NOTA: el registro se hace UNA sola vez por eliminación, desde
     `_verify_upload_exists` (punto único de detección), para cubrir tanto
@@ -143,11 +147,64 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> in
         total_hours = hours + SHORTS_SPAM_BLOCK_BUFFER_HOURS
         block_until = time.time() + total_hours * 3600
         db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
+
+        # ── Contexto del strike (para el informe de situación) ──
+        try:
+            import json as _json
+            _now_iso = __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat()
+            db.set_system_state(
+                f"shorts_spam_last_removal_{channel_id}",
+                _json.dumps({
+                    "video_id": video_id or "",
+                    "reason": reason or "eliminado por los sistemas automatizados de YouTube",
+                    "detected_at": _now_iso,
+                    "strike_count": strikes,
+                }),
+            )
+        except Exception as _ctx_exc:
+            logger.warning("[%s] spam removal context store failed: %s", channel_slug, _ctx_exc)
+
         logger.error(
             "⚠️ SPAM STRIKE #%d para %s — subidas BLOQUEADAS %dh (%s)",
             strikes, channel_slug, total_hours,
             "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
         )
+
+        # ── Alerta formal (StatusBar + AlertsPanel) ──
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(
+                db,
+                entity_type="channel",
+                entity_id=channel_id,
+                channel_id=channel_id,
+                alert_type="spam_strike",
+                severity="critical",
+                title=f"Canal {channel_slug}: strike de spam #{strikes} — subidas bloqueadas",
+                message=(
+                    f"YouTube eliminó una subida de {channel_slug} por spam/IA/política "
+                    f"(strike #{strikes}). Subidas bloqueadas {total_hours}h "
+                    f"(shorts + vídeos long-form).\n\n"
+                    f"Vídeo afectado: {video_id or 'desconocido'}\n"
+                    f"Razón: {reason or 'no especificada'}\n\n"
+                    f"Acciones automáticas: frecuencia de publicación rebajada (canal + "
+                    f"hermanos de proyecto), publicaciones programadas retenidas hasta el "
+                    f"fin del bloqueo. Revisa el contenido en YouTube Studio antes de restaurar."
+                ),
+                metadata={
+                    "strike": strikes,
+                    "block_hours": total_hours,
+                    "blocked_until": block_until,
+                    "video_id": video_id,
+                    "reason": reason,
+                    "action": "bloqueo + rebaja frecuencia + retención publicaciones",
+                },
+            )
+        except Exception as _alert_exc:
+            logger.warning("[%s] spam-strike alert failed: %s", channel_slug, _alert_exc)
+
         # ── Rebaja de frecuencia (canal + hermanos del mismo proyecto) ──
         # Tras el bloqueo, el canal y sus hermanos publican a menor ritmo para
         # no reincidir en el flag de spam. Restauración manual vía panel.

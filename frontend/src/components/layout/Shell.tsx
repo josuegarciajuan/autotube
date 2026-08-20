@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Outlet } from 'react-router-dom'
-import { AlertTriangle, ExternalLink, Clock } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Clock, ShieldAlert, FileText } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import StatusBar from './StatusBar'
+import SpamReportModal from '../SpamReportModal'
 import { api } from '../../lib/api'
 import { useQuotaStatus } from '../../hooks/useQueries'
 
@@ -23,7 +24,26 @@ export default function Shell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [sessionWarnings, setSessionWarnings] = useState<{account: string; channels: string[]}[]>([])
   const [sessionLoading, setSessionLoading] = useState(true)
+  const [spamBlocks, setSpamBlocks] = useState<any[]>([])
+  const [reportChannel, setReportChannel] = useState<any | null>(null)
   const { data: quotaStatus } = useQuotaStatus()
+
+  // Canales bloqueados por spam (banner global, como el de cuota)
+  useEffect(() => {
+    const loadSpamBlocks = async () => {
+      try {
+        const res = await api.getSpamBlocks()
+        if (res?.ok && Array.isArray(res.channels)) {
+          setSpamBlocks(res.channels.filter((c: any) => c.blocked || c.freq_reduced))
+        } else {
+          setSpamBlocks([])
+        }
+      } catch { /* banner opcional, no crítico */ }
+    }
+    loadSpamBlocks()
+    const interval = setInterval(loadSpamBlocks, 5 * 60 * 1000) // cada 5 min
+    return () => clearInterval(interval)
+  }, [])
 
   // Proyectos agotados (por cuenta — la cuota no es global)
   const exhaustedProjects: ProjectQuotaStatus[] = useMemo(() => {
@@ -144,12 +164,48 @@ export default function Shell() {
           </div>
         )}
 
+        {/* ── Spam-block banner (canales bloqueados por YouTube) ── */}
+        {spamBlocks.length > 0 && (
+          <div className="flex-shrink-0 bg-red-500/10 border-b border-red-500/25 px-4 py-2.5">
+            <div className="flex items-center gap-2.5 text-sm flex-wrap">
+              <ShieldAlert size={16} className="text-red-400 flex-shrink-0" />
+              <span className="text-red-300 font-medium">Canales bloqueados por spam de YouTube</span>
+              {spamBlocks.map(sb => (
+                <span key={sb.channel_id} className="text-red-200/80 text-xs flex items-center gap-1.5 flex-wrap">
+                  <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-red-200">{sb.name || sb.slug}</code>
+                  <span className="text-red-400/60">({sb.strikes} strike{sb.strikes !== 1 ? 's' : ''})</span>
+                  {sb.blocked && sb.restan_h > 0 && (
+                    <span className="flex items-center gap-1 text-red-300/80">
+                      <Clock size={11} />
+                      {sb.restan_h.toFixed(1)}h restantes
+                    </span>
+                  )}
+                  {sb.scope === 'todo' && <span className="text-red-400/60">· todo (shorts + vídeos)</span>}
+                  {sb.freq_reduced && <span className="text-amber-400/80">· frecuencia rebajada</span>}
+                  <button
+                    onClick={() => setReportChannel(sb)}
+                    className="ml-1 px-2 py-0.5 text-[10px] bg-red-500/20 text-red-200 border border-red-500/40 rounded hover:bg-red-500 hover:text-white transition-all flex items-center gap-1"
+                  >
+                    <FileText size={10} /> Informe
+                  </button>
+                </span>
+              ))}
+              <span className="text-red-300/60 text-xs ml-auto">Desbloqueo automático al expirar + colchón</span>
+            </div>
+          </div>
+        )}
+
         <Header onMenuToggle={() => setMobileMenuOpen(v => !v)} />
         <StatusBar />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           <Outlet />
         </main>
       </div>
+
+      {/* Informe LLM de bloqueo por spam (modal) */}
+      {reportChannel && (
+        <SpamReportModal channel={reportChannel} onClose={() => setReportChannel(null)} />
+      )}
     </div>
   )
 }

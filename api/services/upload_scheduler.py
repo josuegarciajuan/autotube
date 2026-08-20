@@ -617,6 +617,18 @@ def _channels_need_repack(db, now) -> list[int]:
                 score[ch_id] = max(score.get(ch_id, 0), 5)
         last[ch_id] = parsed
 
+    # Excluir canales bloqueados por spam: sus publicaciones pendientes ya fueron
+    # retenidas (hold) hasta tras el bloqueo; el repack no debe moverlas.
+    try:
+        _spam_blocked_ids = {
+            int(ch["id"]) for ch in db.get_channels(active_only=False)
+            if db.is_channel_spam_blocked(int(ch["id"]))
+        }
+        if _spam_blocked_ids:
+            score = {k: v for k, v in score.items() if k not in _spam_blocked_ids}
+    except Exception:
+        pass
+
     return [ch_id for ch_id, _ in
             sorted(score.items(), key=lambda kv: kv[1], reverse=True)]
 

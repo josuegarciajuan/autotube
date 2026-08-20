@@ -1049,13 +1049,17 @@ class YouTubeUploader:
                 f"El vídeo puede no estar disponible. Revisa YouTube Studio."
             )
     
-    def _record_spam_strike_if_needed(self) -> None:
+    def _record_spam_strike_if_needed(self, video_id: str = None,
+                                      reason: str = None) -> None:
         """Registra un strike de spam para el canal (shorts Y vídeos normales).
 
         Se llama desde _verify_upload_exists cuando YouTube elimina una subida.
         Es el PUNTO ÚNICO de detección/registro: bloquea el canal durante el
         periodo de penalización y cubre tanto shorts como vídeos normales sin
         doble conteo (los catch de SpamRemovalError de shorts ya NO registran).
+
+        ``video_id`` / ``reason`` se guardan para el informe de situación
+        (por qué se bloqueó el canal).
         """
         try:
             if not self.channel_slug:
@@ -1066,7 +1070,10 @@ class YouTubeUploader:
             if not _ch:
                 return
             from api.services.shorts_scheduler import _record_short_spam_strike
-            _record_short_spam_strike(int(_ch["id"]), self.channel_slug, db=_db)
+            _record_short_spam_strike(
+                int(_ch["id"]), self.channel_slug, db=_db,
+                video_id=video_id, reason=reason,
+            )
         except Exception as _e:
             logger.warning("[%s] spam-strike record failed: %s", self.channel_slug, _e)
 
@@ -1111,7 +1118,10 @@ class YouTubeUploader:
                     # SpamRemovalError so the shorts dispatcher CANCELS the slot
                     # (no retry) and blocks the channel — never uploads another
                     # short into an active spam flag.
-                    self._record_spam_strike_if_needed()
+                    self._record_spam_strike_if_needed(
+                        video_id=video_id,
+                        reason="video no aparece en YouTube tras la subida (eliminado por spam/IA)",
+                    )
                     raise SpamRemovalError(
                         f"Fallo en verificación post-subida: el vídeo {video_id} no aparece en YouTube. "
                         f"Posiblemente fue eliminado por los sistemas automatizados de YouTube."
@@ -1129,7 +1139,10 @@ class YouTubeUploader:
                 
                 # Detect silently deleted videos
                 if title == "Deleted video" or (not title and not snippet.get("description")):
-                    self._record_spam_strike_if_needed()
+                    self._record_spam_strike_if_needed(
+                        video_id=video_id,
+                        reason="Deleted video — YouTube marcó la subida como 'Deleted video' (spam/IA/política)",
+                    )
                     raise SpamRemovalError(
                         f"Vídeo subido pero ELIMINADO por YouTube: {video_id}. "
                         f"YouTube lo marcó como 'Deleted video'. "
