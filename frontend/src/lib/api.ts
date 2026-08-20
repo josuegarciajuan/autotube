@@ -456,6 +456,8 @@ export const api = {
     request<any>(`/system/spam-blocks/${channelId}/unblock`, { method: 'POST' }),
   restoreSpamFrequency: (channelId: number) =>
     request<any>(`/system/spam-blocks/${channelId}/restore-frequency`, { method: 'POST' }),
+  getSpamReport: (channelId: number) =>
+    request<any>(`/system/spam-blocks/${channelId}/report`),
   getLLMCredits: () => request<any>('/monitor/llm-credits'),
   triggerLLMCreditCheck: () => request<any>('/monitor/llm-credits/check', { method: 'POST' }),
 

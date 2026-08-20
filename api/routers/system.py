@@ -345,47 +345,52 @@ def spam_blocks():
     """Estado de bloqueos por spam de YouTube por canal (solo lee system_state).
 
     Devuelve por cada canal: id, slug, name, strikes, blocked_until (epoch),
-    restan_h (horas restantes de bloqueo) y blocked (bool).
+    restan_h (horas restantes de bloqueo), blocked (bool), scope (todo/shorts/
+    videos/none), why (razón legible) y pending_publish (vídeos programados con
+    publishAt y si alguno cae dentro del bloqueo).
     """
-    import time as _time
     from database.db_extended import ExtendedDatabase
+    from api.services.spam_mitigation import build_spam_situation
     db = ExtendedDatabase()
     channels = db.get_channels(active_only=False) or []
-    now = _time.time()
     out = []
     for ch in channels:
         cid = int(ch["id"])
-        raw = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
-        strikes_raw = db.get_system_state(f"shorts_spam_strikes_{cid}")
-        strikes = 0
         try:
-            strikes = int(strikes_raw or 0)
-        except (TypeError, ValueError):
-            strikes = 0
-        blocked_until = None
-        restan_h = 0.0
-        blocked = False
-        if raw:
-            try:
-                blocked_until = float(raw)
-                blocked = now < blocked_until
-                restan_h = round((blocked_until - now) / 3600.0, 1) if blocked else 0.0
-            except (TypeError, ValueError):
-                pass
-        # Frecuencia rebajada pendiente de restauración manual (sobrevive al
-        # fin del bloqueo, por eso se expone aparte para que el panel lo muestre).
-        freq_reduced = bool(db.get_system_state(f"spam_freq_restore_{cid}"))
+            sit = build_spam_situation(cid, db) or {}
+        except Exception as exc:
+            logger.warning("spam-blocks: build_spam_situation failed for #%s: %s", cid, exc)
+            sit = {}
         out.append({
             "channel_id": cid,
             "slug": ch.get("slug", ""),
             "name": ch.get("name", ""),
-            "strikes": strikes,
-            "blocked": blocked,
-            "blocked_until": blocked_until,
-            "restan_h": restan_h,
-            "freq_reduced": freq_reduced,
+            "strikes": sit.get("strikes", 0),
+            "blocked": bool(sit.get("blocked", False)),
+            "blocked_until": sit.get("blocked_until"),
+            "restan_h": sit.get("restan_h", 0.0),
+            "freq_reduced": bool(sit.get("freq_reduced", False)),
+            "scope": sit.get("scope", "none"),
+            "why": sit.get("why", ""),
+            "pending_publish": sit.get("pending_publish", {"total": 0, "within_block": []}),
         })
     return {"ok": True, "channels": out}
+
+
+@router.get("/system/spam-blocks/{channel_id}/report")
+def spam_report(channel_id: int, force: bool = False):
+    """Informe LLM de la situación de un canal bloqueado por spam.
+
+    Devuelve explicación, por qué, alcance del bloqueo, estado de las
+    publicaciones programadas, pasos de solución, un prompt reutilizable y un
+    plan de reanudación gradual. Cacheado 12h en system_state (force=true
+    regenera).
+    """
+    from api.services.spam_mitigation import generate_spam_report
+    report = generate_spam_report(channel_id, force=bool(force))
+    if not report or report.get("ok") is False:
+        return report or {"ok": False, "message": "informe no disponible"}
+    return {"ok": True, "report": report}
 
 
 @router.post("/system/spam-blocks/{channel_id}/unblock")

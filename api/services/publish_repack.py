@@ -73,6 +73,20 @@ def apply_publish_repack(
     tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid")
     warmup = int(cfg.get("PUBLISH_WARMUP_MIN", 120) or 120)
 
+    # ── Bloqueo por spam: no reprogramar publicaciones de canales bloqueados ──
+    # Un canal penalizado no debe ver su publishAt movido hacia el bloqueo; las
+    # publicaciones pendientes ya fueron retenidas (hold) hasta tras el bloqueo.
+    try:
+        if db.is_channel_spam_blocked(channel_id):
+            logger.info("[%s] repack skipped: canal bloqueado por spam (no se reprograma)", slug)
+            return {
+                "channel_id": channel_id, "slug": slug,
+                "total": 0, "rescheduled": 0, "no_change": 0,
+                "yt_failed": 0, "quota_skipped": 0, "skipped_spam": 1, "details": [],
+            }
+    except Exception:
+        pass
+
     # ── Cuota (solo cuando quota_gate=True) ──
     if quota_gate:
         try:

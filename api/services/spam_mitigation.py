@@ -415,3 +415,220 @@ def ensure_spam_holds(db=None) -> dict:
             channels_held.append(slug)
 
     return {"buffer_extended": extended, "held": held_total, "channels": channels_held}
+
+
+# ── Situación del canal + informe LLM (banner / modal) ───────────
+
+SPAM_REPORT_TTL_SEC = 12 * 3600  # caché del informe LLM: 12h
+
+_REPORT_KEY = "spam_report_{channel_id}"
+
+
+def _pending_publish_all(channel_id: int, db) -> list[dict]:
+    """Todos los vídeos programados (private) del canal con publishAt futuro."""
+    import sqlite3
+
+    now = time.time()
+    with db._connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT id, yt_video_id, target_public_at FROM videos
+               WHERE channel_id = ? AND published_at IS NULL
+                 AND status IN ('uploaded_private', 'uploaded', 'warming')
+                 AND target_public_at IS NOT NULL
+               ORDER BY target_public_at ASC""",
+            (channel_id,),
+        ).fetchall()
+
+    out = []
+    for r in rows:
+        tp = r["target_public_at"]
+        try:
+            dt = datetime.fromisoformat(str(tp).replace("Z", "+00:00").replace(" ", "T"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if dt.timestamp() > now:
+            out.append({
+                "id": r["id"],
+                "video_id": r["yt_video_id"],
+                "target_public_at": dt.isoformat(),
+            })
+    return out
+
+
+def _why_text(last_removal: dict | None, strikes: int) -> str:
+    """Texto legible del porqué del bloqueo."""
+    if last_removal:
+        vid = last_removal.get("video_id") or "desconocido"
+        reason = last_removal.get("reason") or "no especificada"
+        return f"strike #{strikes}: YouTube eliminó el contenido ({vid}) — {reason}"
+    return f"strike #{strikes} de spam de YouTube (contenido eliminado tras subida)"
+
+
+def build_spam_situation(channel_id: int, db=None) -> dict:
+    """Construye el resumen JSON de la situación de un canal (bloqueado o no)."""
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    ch = db.get_channel(channel_id)
+    if not ch:
+        return {}
+    slug = ch.get("slug", "")
+    now = time.time()
+
+    raw_block = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
+    blocked_until = None
+    blocked = False
+    restan_h = 0.0
+    if raw_block:
+        try:
+            blocked_until = float(raw_block)
+            blocked = now < blocked_until
+            restan_h = round((blocked_until - now) / 3600.0, 1) if blocked else 0.0
+        except (TypeError, ValueError):
+            pass
+
+    strikes = 0
+    try:
+        strikes = int(db.get_system_state(f"shorts_spam_strikes_{channel_id}") or 0)
+    except (TypeError, ValueError):
+        strikes = 0
+
+    last_removal = None
+    try:
+        raw_removal = db.get_system_state(f"shorts_spam_last_removal_{channel_id}")
+        if raw_removal:
+            last_removal = json.loads(raw_removal)
+    except Exception:
+        last_removal = None
+
+    pending_all = _pending_publish_all(channel_id, db)
+    pending_within_block = []
+    if blocked_until:
+        for v in pending_all:
+            try:
+                if datetime.fromisoformat(v["target_public_at"]).timestamp() < blocked_until:
+                    pending_within_block.append(v)
+            except (ValueError, TypeError):
+                continue
+
+    freq_reduced = bool(db.get_system_state(f"spam_freq_restore_{channel_id}"))
+    cfg = db.get_channel_planning_config(channel_id) or {}
+    sc_list = db.get_shorts_planning_config(channel_id=channel_id) or []
+    sc = sc_list[0] if sc_list else {}
+
+    # Alcance: el gate central bloquea shorts + long-form durante la penalización.
+    scope = "todo" if blocked else "none"
+
+    return {
+        "channel_id": channel_id,
+        "slug": slug,
+        "name": ch.get("name", ""),
+        "blocked": blocked,
+        "blocked_until": blocked_until,
+        "restan_h": restan_h,
+        "strikes": strikes,
+        "scope": scope,
+        "why": _why_text(last_removal, strikes),
+        "last_removal": last_removal,
+        "pending_publish": {
+            "total": len(pending_all),
+            "within_block": pending_within_block,
+        },
+        "freq_reduced": freq_reduced,
+        "current_freq": {
+            "videos_per_day": cfg.get("videos_per_day", 2),
+            "shorts_native_per_day": sc.get("shorts_native_per_day", 3),
+            "shorts_clips_per_long": sc.get("shorts_clips_per_long", 3),
+        },
+    }
+
+
+def _llm_spam_report(situation: dict) -> dict:
+    """Llama al LLM para obtener el informe estructurado de la situación."""
+    try:
+        from config.llm_client import create_llm_client
+        from config.llm_helpers import llm_json_call
+        from config.settings import LLM_MODEL
+
+        client = create_llm_client()  # thinking disabled: tarea simple
+        model = LLM_MODEL
+
+        system = (
+            "Eres un asistente de operaciones de canales de YouTube automatizados "
+            "(faceless channels). Recibes un JSON con la situación de un canal "
+            "bloqueado por spam. Responde SOLO con JSON válido con estas claves:\n"
+            "- que_ha_pasado: (string) resumen claro en español.\n"
+            "- por_que: (string) causa raíz probable.\n"
+            "- alcance_del_bloqueo: (string) si el bloqueo afecta a shorts, vídeos "
+            "largos o a todo, explicado para el operador.\n"
+            "- publicaciones_pendientes: (string) si los vídeos ya subidos con "
+            "publishAt asignado se publicarán o fueron reprogramados, y qué implica.\n"
+            "- como_solventar: (array de strings) pasos concretos para resolver.\n"
+            "- prompt_reutilizable: (string) un prompt corto en español, listo para "
+            "pegar en un agente de automatización (opencode), que ajuste la "
+            "configuración del canal para que no vuelva a pasar (bajar frecuencia de "
+            "shorts, pacing, revisar títulos duplicados) Y que planifique la "
+            "reanudación gradual de la publicación.\n"
+            "- reanudacion_gradual: (array de strings) plan por fases para retomar "
+            "la publicación poco a poco.\n"
+            "Sé concreto y accionable. No inventes datos que no estén en la situación."
+        )
+        user = json.dumps(situation, ensure_ascii=False, default=str)
+        return llm_json_call(
+            client, max_retries=2, retry_delay=2.0,
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.4,
+            max_tokens=2500,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        logger.warning("LLM spam report failed: %s", exc)
+        return {}
+
+
+def generate_spam_report(channel_id: int, db=None, force: bool = False) -> dict:
+    """Devuelve el informe LLM de un canal bloqueado (con caché de 12h).
+
+    ``force=True`` regenera ignorando la caché.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    cache_key = _REPORT_KEY.format(channel_id=channel_id)
+    if not force:
+        raw = db.get_system_state(cache_key)
+        if raw:
+            try:
+                cached = json.loads(raw)
+                gen_at = cached.get("generated_at", "")
+                if gen_at:
+                    gen_dt = datetime.fromisoformat(gen_at)
+                    if (datetime.now(timezone.utc) - gen_dt).total_seconds() < SPAM_REPORT_TTL_SEC:
+                        return cached
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+    situation = build_spam_situation(channel_id, db)
+    if not situation:
+        return {"ok": False, "message": "canal no encontrado"}
+
+    report = _llm_spam_report(situation)
+    if not report:
+        return {"ok": False, "message": "LLM no disponible (reintenta más tarde)", "situation": situation}
+
+    report["situation"] = situation
+    report["generated_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        db.set_system_state(cache_key, json.dumps(report))
+    except Exception as exc:
+        logger.warning("Spam report cache write failed: %s", exc)
+    return report
