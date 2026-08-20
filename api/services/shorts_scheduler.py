@@ -43,6 +43,9 @@ _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 SHORTS_SPAM_BLOCK_HOURS = 72             # 1st strike: 3 days
 SHORTS_SPAM_BLOCK_HOURS_ESCALATED = 168  # 2nd strike: 7 days
 SHORTS_SPAM_MAX_STRIKES = 2
+# Colchón extra de reactivación: el bloque se mantiene (hours + buffer) antes
+# de desbloquear el canal automáticamente. Ej: 72h → se reactiva a las 76h.
+SHORTS_SPAM_BLOCK_BUFFER_HOURS = 4
 # Title similarity guard: reject a native short whose title is too similar
 # to a recent one (token-overlap ≥ threshold). Near-duplicate titles are a
 # classic spam signal.
@@ -137,11 +140,12 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> in
         db.set_system_state(strikes_key, str(strikes))
         hours = SHORTS_SPAM_BLOCK_HOURS_ESCALATED if strikes >= SHORTS_SPAM_MAX_STRIKES \
             else SHORTS_SPAM_BLOCK_HOURS
-        block_until = time.time() + hours * 3600
+        total_hours = hours + SHORTS_SPAM_BLOCK_BUFFER_HOURS
+        block_until = time.time() + total_hours * 3600
         db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
         logger.error(
             "⚠️ SPAM STRIKE #%d para %s — subidas BLOQUEADAS %dh (%s)",
-            strikes, channel_slug, hours,
+            strikes, channel_slug, total_hours,
             "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
         )
         return strikes
