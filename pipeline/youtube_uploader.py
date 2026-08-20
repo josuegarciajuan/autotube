@@ -578,21 +578,27 @@ class YouTubeUploader:
         # periodo. Se resuelve el channel_id desde el slug y se consulta el
         # estado. Se lanza ANTES de autenticar/emitir requests para no gastar
         # cuota ni alimentar la señal de spam.
-        if self.channel_slug:
+        # Robustez: se usa channel_slug, con fallback a account_name (la mayoría
+        # de callers pasan `YouTubeUploader(slug)` → account_name=slug), para que
+        # TODAS las rutas de subida queden cubiertas durante el ban.
+        _gate_slug = self.channel_slug or (
+            self.account_name if self.account_name and self.account_name != "default" else None
+        )
+        if _gate_slug:
             try:
                 from database.db_extended import ExtendedDatabase
                 _spam_db = ExtendedDatabase()
-                _ch_row = _spam_db.get_channel_by_slug(self.channel_slug)
+                _ch_row = _spam_db.get_channel_by_slug(_gate_slug)
                 if _ch_row and _spam_db.is_channel_spam_blocked(int(_ch_row["id"])):
                     raise ChannelSpamBlockedError(
-                        f"channel '{self.channel_slug}' is spam-blocked by YouTube — upload held"
+                        f"channel '{_gate_slug}' is spam-blocked by YouTube — upload held"
                     )
             except ChannelSpamBlockedError:
                 raise
             except Exception as _sb_err:
                 logger.warning(
                     "[%s] spam-block gate check failed (fail-open): %s",
-                    self.channel_slug, _sb_err,
+                    _gate_slug, _sb_err,
                 )
         video_path = Path(video_path)
         if not video_path.exists():

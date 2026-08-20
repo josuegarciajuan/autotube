@@ -375,6 +375,12 @@ SHORTS_HOOK_OVERLAY_FADE_SEC = 0.3
 
 SHORTS_MAX_DURATION_SEC = 58.0          # YouTube Shorts max = 60 s; leave 2 s buffer. Per-channel overridable.
 
+# ── Shorts en cola durante bloqueo por spam (ago 2026) ──────────
+# Durante el ban, los shorts nativos se GENERAN y quedan con status 'generated'
+# (sin subir) para despachar la cola al desbloquearse. Tope por canal para no
+# llenar disco/LLM.
+MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL = 30
+
 # ═══════════════════════════════════════════════════════════════════
 # THUMBNAIL DEFAULTS
 # ═══════════════════════════════════════════════════════════════════

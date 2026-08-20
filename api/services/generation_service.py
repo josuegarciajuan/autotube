@@ -1258,6 +1258,26 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
 
 # ── Generation Job (with checkpoint/resume) ──────────────────
 
+def _spam_block_force_generate_only(db, channel_id: int, action: str) -> str:
+    """Fuerza `generate_only` si el canal está bloqueado por spam.
+
+    Gate robusto de subida durante el ban: ningún dispatch de long-form debe
+    intentar subir para un canal bloqueado. El vídeo se genera y queda en
+    `awaiting_upload`; el upload_scheduler lo subirá al expirar bloqueo+colchón.
+    """
+    try:
+        if action == "generate_and_upload" and db.is_channel_spam_blocked(channel_id):
+            logger.warning(
+                "Canal #%d bloqueado por spam — forzando generate_only "
+                "(subida aplazada hasta el fin del bloqueo + colchón)",
+                channel_id,
+            )
+            return "generate_only"
+    except Exception as exc:
+        logger.debug("Spam-block generate_only check skipped: %s", exc)
+    return action
+
+
 async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                                  action: str, content_id: int = None,
                                  resume: bool = False, test_mode: bool = False,
@@ -1327,6 +1347,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
     
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
+    # ── Spam block: forzar generate_only (no subir nada durante el ban) ──
+    action = _spam_block_force_generate_only(db, channel_id, action)
     db.update_job(job_id, status="running", started_at=None)
     db.update_video(video_id, generation_started_at=db_now())
     
@@ -3614,6 +3636,8 @@ async def start_generation_job_subprocess(
 
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
+    # ── Spam block: forzar generate_only (no subir nada durante el ban) ──
+    action = _spam_block_force_generate_only(db, channel_id, action)
 
     # ── Global guard: strictly ONE job at a time ──
     # Prevents ffmpeg resource contention (concurrent renders cause timeouts).

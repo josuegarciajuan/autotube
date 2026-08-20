@@ -1753,6 +1753,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", GLOBAL_SHORTS_PER_DAY_CAP)
         return None
 
+    # ── Cola de shorts nativos generados durante bloqueos: subir gradualmente ──
+    # Solo canales NO bloqueados; respeta cooldown, tope diario y cuota.
+    try:
+        _upload_queued_native_shorts(db, max_per_pass=2)
+    except Exception as exc:
+        logger.warning("Shorts dispatch: queued-native upload pasada falló: %s", exc)
+
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
 
@@ -1903,17 +1910,27 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         continue
 
                     # ── Hard spam filter: channel blocked by a spam strike ──
+                    _spam_gen_only_f = False
                     if _channel_shorts_spam_blocked(channel_id):
-                        logger.warning(
-                            "Force dispatch: slot #%d (%s) — channel spam-blocked, CANCELLING",
-                            slot_id, slug,
-                        )
-                        _failed_force_ids.add(slot_id)
-                        db.update_shorts_slot_status(
-                            slot_id, "cancelled",
-                            error_message="channel spam-blocked (YouTube removal)",
-                        )
-                        continue
+                        if short_type_f == "native":
+                            _spam_gen_only_f = True
+                            logger.info(
+                                "Force dispatch: slot #%d (%s) — canal spam-bloqueado, "
+                                "generando native en cola (generate_only, sin subir)",
+                                slot_id, slug,
+                            )
+                            # No continuar: el dispatch normal generará sin subir.
+                        else:
+                            logger.warning(
+                                "Force dispatch: slot #%d (%s) — channel spam-blocked, CANCELLING",
+                                slot_id, slug,
+                            )
+                            _failed_force_ids.add(slot_id)
+                            db.update_shorts_slot_status(
+                                slot_id, "cancelled",
+                                error_message="channel spam-blocked (YouTube removal)",
+                            )
+                            continue
 
                     # ── v10.5: Apply same-channel guards even in force dispatch ──
                     # Only bypass these guards as absolute last resort (after
@@ -2023,6 +2040,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         source_video_id=source_video_id_f,
                         slot_rank=slot_rank_f,
                         target_upload_at=force_slot.get("target_upload_at"),
+                        generate_only=_spam_gen_only_f,
                     )
                     if loop is not None:
                         import asyncio as _asyncio_f
@@ -2077,20 +2095,48 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             continue
 
         # ── Hard spam filter: channel blocked by a spam strike ──
-        # A YouTube removal already flagged this channel. CANCELLING the
-        # pending slots keeps the channel from posting more shorts into an
-        # active spam flag (which would escalate to channel-level strikes).
+        # Durante el ban NO se sube nada, pero los NATIVOS se GENERAN y quedan
+        # en cola (status='generated') para despacharlos al expirar bloqueo+colchón.
+        # Los CLIPS se cancelan (necesitan long-form publicado reciente).
+        _spam_gen_only = False
         if _channel_shorts_spam_blocked(channel_id):
-            logger.warning(
-                "Shorts slot #%d (%s) skipped: channel spam-blocked — CANCELLING slot",
-                slot_id, slug,
-            )
-            _skipped_slot_ids.add(slot_id)
-            db.update_shorts_slot_status(
-                slot_id, "cancelled",
-                error_message="channel spam-blocked (YouTube removal)",
-            )
-            continue
+            if short_type == "native":
+                # Tope de cola: no acumular sin límite (disco/LLM).
+                try:
+                    from config.defaults import MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL
+                    queued = db.count_queued_native_shorts(channel_id)
+                    if queued >= MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL:
+                        logger.info(
+                            "Shorts slot #%d (%s): canal spam-bloqueado y cola de "
+                            "nativos llena (%d/%d) — cancelando slot",
+                            slot_id, slug, queued, MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL,
+                        )
+                        _skipped_slot_ids.add(slot_id)
+                        db.update_shorts_slot_status(
+                            slot_id, "cancelled",
+                            error_message="cola nativa llena durante bloqueo",
+                        )
+                        continue
+                except Exception:
+                    pass
+                _spam_gen_only = True
+                logger.info(
+                    "Shorts slot #%d (%s): canal spam-bloqueado — generando native "
+                    "en cola (generate_only, sin subir)",
+                    slot_id, slug,
+                )
+                # NO continuar: dejar pasar al dispatch normal (generará sin subir).
+            else:
+                logger.warning(
+                    "Shorts slot #%d (%s) skipped: channel spam-blocked — CANCELLING clip slot",
+                    slot_id, slug,
+                )
+                _skipped_slot_ids.add(slot_id)
+                db.update_shorts_slot_status(
+                    slot_id, "cancelled",
+                    error_message="channel spam-blocked (YouTube removal)",
+                )
+                continue
 
         # 4. Per-channel short job guard — skip to next slot instead of failing.
         #    Different channels can generate shorts in parallel since each has
@@ -2273,6 +2319,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             source_video_id=source_video_id,
             slot_rank=slot_rank,
             target_upload_at=next_slot.get("target_upload_at"),
+            generate_only=_spam_gen_only,
         )
         if loop is not None:
             import asyncio as _asyncio2
@@ -2375,7 +2422,8 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                                  channel_slug: str, short_type: str,
                                  source_video_id: int = None,
                                  slot_rank: int = 0,
-                                 target_upload_at: str = None):
+                                 target_upload_at: str = None,
+                                 generate_only: bool = False):
     """Async wrapper that dispatches the actual short generation and updates DB.
 
     IMPORTANT: _dispatch_native_short() and _dispatch_clip_short() are
@@ -2385,6 +2433,9 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
 
     v10.3: target_upload_at enables scheduled publishing (private + publishAt)
     instead of immediate public.
+
+    vX (spam block): generate_only=True deja el native en cola (status='generated')
+    sin subir, para despacharlo al expirar el bloqueo.
     """
     import asyncio
     import sqlite3
@@ -2398,6 +2449,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 channel_id, channel_slug,
                 slot_rank=slot_rank, job_id=job_id,
                 target_upload_at=target_upload_at,
+                generate_only=generate_only,
             )
         elif short_type == "standalone":
             short_id = await asyncio.to_thread(
@@ -2730,13 +2782,18 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
 
 def _dispatch_native_short(channel_id: int, channel_slug: str,
                             slot_rank: int = 0, job_id: int = None,
-                            target_upload_at: str = None) -> int | None:
+                            target_upload_at: str = None,
+                            generate_only: bool = False) -> int | None:
     """Generate and publish a native Short.
 
     Uses the existing native short generation pipeline (LLM script → TTS → render → upload).
 
     v10.3: If target_upload_at is provided, uploads as private + publishAt
     (scheduled publishing) instead of immediate public.
+
+    vX (spam block): si ``generate_only=True`` se genera y renderiza el short
+    pero NO se sube: queda con status='generated' (en cola) para despacharlo
+    gradualmente cuando expire el bloqueo + colchón.
 
     Returns short_id or None on failure.
     """
@@ -3163,6 +3220,39 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     _update_short_job_progress(job_id, 75, "render")
 
+    # ── vX: generate_only — dejar el short en cola (sin subir) ──
+    # Durante un bloqueo por spam se genera el native y queda status='generated';
+    # la subida la hará _upload_queued_native_shorts al expirar bloqueo+colchón.
+    if generate_only:
+        try:
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+            cursor = conn.execute(
+                """INSERT INTO shorts
+                   (channel_id, type, title, hook_title, hook_text, topic,
+                    status, file_path, has_subscribe_cta)
+                   VALUES (?, 'native', ?, ?, ?, ?, 'generated', ?, ?)""",
+                (channel_id, title, title[:60], hook_text, topic,
+                 str(video_path), int(has_subscribe_cta)),
+            )
+            short_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error("[%s] Failed to register generated native short: %s", channel_slug, e)
+            return None
+        # Record assets in short_asset_history for cross-short dedup
+        if asset_items:
+            try:
+                flush_short_asset_history(short_id, channel_id, asset_items)
+            except Exception as e:
+                logger.warning("[%s] Failed to flush short asset history: %s", channel_slug, e)
+        _update_short_job_progress(job_id, 100, "generated")
+        logger.info(
+            "[%s] Native Short GENERADO y en cola (status=generated): %s",
+            channel_slug, title[:40],
+        )
+        return short_id
+
     # 5. Upload
     from pipeline.youtube_uploader import YouTubeUploader
     uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
@@ -3263,6 +3353,182 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     logger.info("Scheduled native Short published: %s → %s", title[:40], result.get("url", ""))
     return short_id
+
+
+# ── Cola de shorts nativos generados (bloqueo por spam) ──────────
+
+def _upload_queued_native_short(short_record: dict, db=None) -> bool:
+    """Sube un short nativo en cola (status='generated') y lo marca publicado.
+
+    Solo debe llamarse cuando el canal NO está bloqueado por spam (lo verifica
+    el dispatcher _upload_queued_native_shorts). Devuelve True si se subió.
+    """
+    from pathlib import Path
+    from config.config_bridge import get_channel_config
+    from pipeline.youtube_uploader import YouTubeUploader
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    short_id = int(short_record["id"])
+    channel_id = int(short_record["channel_id"])
+    ch = db.get_channel(channel_id)
+    if not ch:
+        logger.error("Queued short #%d: canal %d no encontrado", short_id, channel_id)
+        return False
+    slug = ch["slug"]
+
+    file_path = short_record.get("file_path", "")
+    if not file_path or not Path(file_path).exists():
+        logger.warning("Queued short #%d: archivo no existe (%s) — marcando error", short_id, file_path)
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE shorts SET status='error', error_message='archivo no encontrado' WHERE id=?",
+                    (short_id,),
+                )
+                conn.commit()
+        except Exception:
+            pass
+        return False
+
+    ch_config = get_channel_config(slug)
+    hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
+
+    # Rebuild description (long-form link opcional)
+    longform_url = None
+    try:
+        from pipeline.shorts_cross_promote import (
+            build_short_description, get_best_longform_link, should_cross_promote,
+        )
+        if should_cross_promote(ch_config):
+            longform_url = get_best_longform_link(channel_id)
+        channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
+        description = build_short_description(
+            hook_text=(short_record.get("hook_text") or "")[:100],
+            hashtags=hashtags,
+            longform_url=longform_url,
+            channel_url=channel_url,
+        )
+    except Exception as exc:
+        logger.warning("Queued short #%d: descripción falló (usa hashtags): %s", short_id, exc)
+        description = "\n\n".join(hashtags)
+
+    # Quota guard (proyecto del canal)
+    if _youtube_quota_blocked(channel_slug=slug):
+        logger.info("[%s] Queued short upload skipped: cuota bloqueada", slug)
+        return False
+
+    uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
+    if not uploader.authenticate():
+        logger.error("[%s] YouTube auth failed (queued short #%d)", slug, short_id)
+        return False
+
+    title = (short_record.get("title") or "Short")[:100]
+    try:
+        result = uploader.upload(
+            video_path=file_path,
+            title=title,
+            description=description[:5000],
+            tags=hashtags[:60],
+            category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+            privacy="public",
+        )
+    except Exception as exc:
+        logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
+        return False
+
+    yt_id = result.get("video_id")
+    if not yt_id:
+        logger.error("Queued short #%d upload failed: no video ID", short_id)
+        return False
+
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                """UPDATE shorts SET status='published', youtube_id=?, youtube_url=?,
+                   published_at=datetime('now','localtime'), error_message=''
+                   WHERE id=?""",
+                (yt_id, result.get("url", ""), short_id),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Queued short #%d: DB update failed: %s", short_id, exc)
+
+    # Auto-mark altered content (IA) vía browser (best-effort, en segundo plano)
+    try:
+        if getattr(ch_config, "AUTO_MARK_ALTERED_CONTENT", False):
+            from pipeline.youtube_browser import get_account_for_channel
+            account = get_account_for_channel(slug)
+            if account:
+                import threading
+                threading.Thread(
+                    target=_auto_mark_ia_for_short,
+                    args=(yt_id, slug, account, short_id),
+                    daemon=True,
+                ).start()
+    except Exception:
+        pass
+
+    logger.info("[%s] Queued native short publicado: %s → %s", slug, title[:40], result.get("url", ""))
+    return True
+
+
+def _upload_queued_native_shorts(db=None, max_per_pass: int = 3) -> int:
+    """Sube shorts nativos en cola (status='generated') de forma gradual.
+
+    Gate robusto: SOLO canales NO bloqueados por spam (bloqueo + colchón).
+    Respeta el cooldown entre shorts del mismo canal, el tope diario de
+    nativos publicados y la cuota del proyecto. Devuelve nº de shorts subidos.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    if _shorts_paused(db):
+        return 0
+
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return 0
+
+    uploaded = 0
+    for ch in channels:
+        if uploaded >= max_per_pass:
+            break
+        cid = int(ch.get("id", 0) or 0)
+        slug = ch.get("slug", "")
+        if not cid:
+            continue
+        # ── Gate robusto: no subir NADA durante el ban (bloqueo + colchón) ──
+        if _channel_shorts_spam_blocked(cid, db):
+            continue
+        # Cooldown entre shorts del mismo canal
+        if not _channel_shorts_cooldown_ok(cid, db):
+            continue
+        # Tope diario de nativos publicados
+        try:
+            published_today = db.count_native_shorts_published_today(cid)
+            native_daily_max = db.get_native_shorts_per_day(cid)
+            if published_today >= native_daily_max:
+                continue
+        except Exception:
+            pass
+        # Siguiente short en cola (FIFO)
+        queued = db.get_queued_native_shorts(cid, limit=1)
+        if not queued:
+            continue
+        try:
+            if _upload_queued_native_short(queued[0], db=db):
+                uploaded += 1
+        except Exception as exc:
+            logger.warning("[%s] Queued short upload error: %s", slug, exc)
+
+    if uploaded:
+        logger.info("Cola de shorts nativos: %d subido(s) esta pasada", uploaded)
+    return uploaded
 
 
 # ── Clip short generation ──────────────────────────────────────
