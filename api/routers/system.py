@@ -338,6 +338,72 @@ def quota_status():
     return result
 
 
+# ── Spam-block per channel (visibilidad + desbloqueo manual) ──────
+
+@router.get("/system/spam-blocks")
+def spam_blocks():
+    """Estado de bloqueos por spam de YouTube por canal (solo lee system_state).
+
+    Devuelve por cada canal: id, slug, name, strikes, blocked_until (epoch),
+    restan_h (horas restantes de bloqueo) y blocked (bool).
+    """
+    import time as _time
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    channels = db.get_channels(active_only=False) or []
+    now = _time.time()
+    out = []
+    for ch in channels:
+        cid = int(ch["id"])
+        raw = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
+        strikes_raw = db.get_system_state(f"shorts_spam_strikes_{cid}")
+        strikes = 0
+        try:
+            strikes = int(strikes_raw or 0)
+        except (TypeError, ValueError):
+            strikes = 0
+        blocked_until = None
+        restan_h = 0.0
+        blocked = False
+        if raw:
+            try:
+                blocked_until = float(raw)
+                blocked = now < blocked_until
+                restan_h = round((blocked_until - now) / 3600.0, 1) if blocked else 0.0
+            except (TypeError, ValueError):
+                pass
+        out.append({
+            "channel_id": cid,
+            "slug": ch.get("slug", ""),
+            "name": ch.get("name", ""),
+            "strikes": strikes,
+            "blocked": blocked,
+            "blocked_until": blocked_until,
+            "restan_h": restan_h,
+        })
+    return {"ok": True, "channels": out}
+
+
+@router.post("/system/spam-blocks/{channel_id}/unblock")
+def spam_unblock(channel_id: int):
+    """Desbloqueo manual de un canal penalizado por spam.
+
+    Solo para cuando un humano verifica en YouTube Studio que la penalización
+    ya no está activa (o fue un falso positivo). Limpia el bloque, reinicia
+    el contador de strikes y deja traza de auditoría en system_state.
+    """
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", "")
+    db.set_system_state(f"shorts_spam_strikes_{channel_id}", "0")
+    db.set_system_state(
+        f"spam_unblocked_at_{channel_id}",
+        __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    logger.warning("Spam block lifted manually for channel #%s (verificado en YouTube Studio)", channel_id)
+    return {"ok": True, "message": f"Bloqueo de spam levantado para el canal #{channel_id}"}
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 def _purge_dir(dir_path: Path) -> int:
