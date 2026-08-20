@@ -372,6 +372,9 @@ def spam_blocks():
                 restan_h = round((blocked_until - now) / 3600.0, 1) if blocked else 0.0
             except (TypeError, ValueError):
                 pass
+        # Frecuencia rebajada pendiente de restauración manual (sobrevive al
+        # fin del bloqueo, por eso se expone aparte para que el panel lo muestre).
+        freq_reduced = bool(db.get_system_state(f"spam_freq_restore_{cid}"))
         out.append({
             "channel_id": cid,
             "slug": ch.get("slug", ""),
@@ -380,6 +383,7 @@ def spam_blocks():
             "blocked": blocked,
             "blocked_until": blocked_until,
             "restan_h": restan_h,
+            "freq_reduced": freq_reduced,
         })
     return {"ok": True, "channels": out}
 
@@ -402,6 +406,26 @@ def spam_unblock(channel_id: int):
     )
     logger.warning("Spam block lifted manually for channel #%s (verificado en YouTube Studio)", channel_id)
     return {"ok": True, "message": f"Bloqueo de spam levantado para el canal #{channel_id}"}
+
+
+@router.post("/system/spam-blocks/{channel_id}/restore-frequency")
+def spam_restore_frequency(channel_id: int):
+    """Restaura la frecuencia de publicación original tras una rebaja por spam.
+
+    Solo para cuando un humano verifica en YouTube Studio que la penalización ha
+    cesado. Devuelve ok=False si no había valores guardados (nada que restaurar).
+    """
+    from api.services.spam_mitigation import restore_publication_frequency
+    restored = restore_publication_frequency(channel_id)
+    if not restored:
+        return {
+            "ok": False,
+            "message": f"No hay frecuencia rebajada guardada para el canal #{channel_id}",
+        }
+    return {
+        "ok": True,
+        "message": f"Frecuencia de publicación restaurada para el canal #{channel_id}",
+    }
 
 
 # ── Helpers ──────────────────────────────────────────────────────

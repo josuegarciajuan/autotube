@@ -19,7 +19,9 @@ export default function Channels() {
     try {
       const res = await api.getSpamBlocks()
       if (res?.ok && Array.isArray(res.channels)) {
-        setSpamBlocks(res.channels.filter((c: any) => c.blocked))
+        // Mostrar canales bloqueados Y los que aún tienen la frecuencia rebajada
+        // pendiente de restauración manual (la rebaja sobrevive al fin del bloqueo).
+        setSpamBlocks(res.channels.filter((c: any) => c.blocked || c.freq_reduced))
       } else {
         setSpamBlocks([])
       }
@@ -33,6 +35,16 @@ export default function Channels() {
       await loadSpamBlocks()
     } catch (e: any) {
       setError(e.message || 'Error al desbloquear')
+    }
+  }
+
+  async function restoreFrequency(cid: number) {
+    if (!window.confirm('¿Restaurar la frecuencia de publicación original? Hazlo solo si la penalización de spam ha cesado.')) return
+    try {
+      await api.restoreSpamFrequency(cid)
+      await loadSpamBlocks()
+    } catch (e: any) {
+      setError(e.message || 'Error al restaurar frecuencia')
     }
   }
 
@@ -143,22 +155,38 @@ export default function Channels() {
           </div>
           <p className="text-xs text-gray-400">
             Las subidas (shorts y vídeos) de estos canales están bloqueadas automáticamente hasta que expire la
-            penalización. El desbloqueo es automático al cumplirse el tiempo.
+            penalización. Tras el bloqueo, la frecuencia de publicación queda rebajada hasta que la restaures
+            manualmente.
           </p>
           {spamBlocks.map((sb: any) => (
             <div key={sb.channel_id} className="flex items-center justify-between gap-3 flex-wrap bg-dark-700/50 rounded-lg px-3 py-2">
               <div className="flex items-center gap-2 text-sm">
                 <span className="text-neon-red font-semibold">{sb.name || sb.slug}</span>
                 <span className="text-gray-400 text-xs">
-                  ({sb.strikes} strike{sb.strikes !== 1 ? 's' : ''}) · bloqueado hasta +{sb.restan_h}h restantes
+                  {sb.blocked
+                    ? `(${sb.strikes} strike${sb.strikes !== 1 ? 's' : ''}) · bloqueado hasta +${sb.restan_h}h restantes`
+                    : 'bloqueo expirado'}
+                  {sb.freq_reduced ? ' · frecuencia rebajada' : ''}
                 </span>
               </div>
-              <button
-                onClick={() => unblockChannel(sb.channel_id)}
-                className="px-3 py-1 text-xs bg-neon-red/20 text-neon-red border border-neon-red/40 rounded-lg hover:bg-neon-red hover:text-white transition-all"
-              >
-                Desbloquear
-              </button>
+              <div className="flex items-center gap-2">
+                {sb.freq_reduced && (
+                  <button
+                    onClick={() => restoreFrequency(sb.channel_id)}
+                    className="px-3 py-1 text-xs bg-amber-500/10 text-amber-400 border border-amber-500/40 rounded-lg hover:bg-amber-500 hover:text-white transition-all"
+                  >
+                    Restaurar frecuencia
+                  </button>
+                )}
+                {sb.blocked && (
+                  <button
+                    onClick={() => unblockChannel(sb.channel_id)}
+                    className="px-3 py-1 text-xs bg-neon-red/20 text-neon-red border border-neon-red/40 rounded-lg hover:bg-neon-red hover:text-white transition-all"
+                  >
+                    Desbloquear
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
