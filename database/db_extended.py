@@ -6480,7 +6480,8 @@ class ExtendedDatabase(Database):
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM generation_jobs WHERE status IN ('running','queued') "
-                "AND action IN ('generate_native_short', 'generate_clip_short') LIMIT 1"
+                "AND action IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short') LIMIT 1"
             ).fetchone()
         return dict(row) if row else None
     
@@ -6496,7 +6497,8 @@ class ExtendedDatabase(Database):
                 "SELECT gj.* FROM generation_jobs gj "
                 "JOIN shorts_planned_slots sps ON sps.job_id = gj.id "
                 "WHERE gj.status IN ('running','queued') "
-                "AND gj.action IN ('generate_native_short', 'generate_clip_short') "
+                "AND gj.action IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short') "
                 "AND sps.channel_id = ? LIMIT 1",
                 (channel_id,),
             ).fetchone()
@@ -8255,6 +8257,26 @@ class ExtendedDatabase(Database):
                 (key, value),
             )
             conn.commit()
+
+    def is_channel_spam_blocked(self, channel_id: int) -> bool:
+        """Return True if the channel's uploads are blocked by a YouTube spam strike.
+
+        Reads `shorts_spam_blocked_until_<id>` (epoch timestamp). El desbloqueo es
+        automático al expirar. Se usa como gate central en upload() para BLOQUEAR
+        tanto shorts como vídeos normales durante la penalización.
+        """
+        if not channel_id:
+            return False
+        try:
+            import time as _time
+            raw = self.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
+            if not raw:
+                return False
+            return _time.time() < float(raw)
+        except (TypeError, ValueError):
+            return False
+        except Exception:
+            return False  # fail-open ante error transitorio de DB (mismo criterio que el resto)
 
     # ── Quota exhaustion helpers ────────────────────────────────
 
