@@ -115,11 +115,15 @@ def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
 # ── Hard spam filter helpers ────────────────────────────────────
 
 def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> int:
-    """Record a YouTube spam removal for a channel and BLOCK its shorts.
+    """Record a YouTube spam removal for a channel and BLOCK its uploads.
 
     Returns the new strike count. After SHORTS_SPAM_MAX_STRIKES the block
     escalates. The block key is stored in system_state so it survives
     API restarts (apply_changes.sh).
+
+    NOTA: el registro se hace UNA sola vez por eliminación, desde
+    `_verify_upload_exists` (punto único de detección), para cubrir tanto
+    shorts como vídeos normales sin doble conteo.
     """
     try:
         if db is None:
@@ -136,7 +140,7 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> in
         block_until = time.time() + hours * 3600
         db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
         logger.error(
-            "⚠️ SPAM STRIKE #%d para %s — shorts BLOQUEADOS %dh (%s)",
+            "⚠️ SPAM STRIKE #%d para %s — subidas BLOQUEADAS %dh (%s)",
             strikes, channel_slug, hours,
             "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
         )
@@ -156,6 +160,40 @@ def _channel_shorts_spam_blocked(channel_id: int, db=None) -> bool:
         if not raw:
             return False
         return time.time() < float(raw)
+    except Exception:
+        return False
+
+
+def _shorts_paused(db=None) -> bool:
+    """Kill-switch global de shorts (manual). True si `shorts_paused` o
+    `scheduler_paused` están activos en system_state."""
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        return db.get_system_state("shorts_paused") == "true" or \
+            db.get_system_state("scheduler_paused") == "true"
+    except Exception:
+        return False
+
+
+# Tope global duro de shorts/día (todos los canales sumados). Evita el volumen
+# que dispara el spam de YouTube (histórico: 15-40/día → penalización).
+GLOBAL_SHORTS_PER_DAY_CAP = 6
+
+
+def _global_shorts_daily_cap_reached(db=None) -> bool:
+    """True si ya se publicaron >= GLOBAL_SHORTS_PER_DAY_CAP shorts hoy (global)."""
+    try:
+        import sqlite3 as _sql_cap
+        from config.settings import DATABASE_PATH as _DBP_CAP
+        with _sql_cap.connect(str(_DBP_CAP), timeout=10) as _conn_cap:
+            row = _conn_cap.execute(
+                """SELECT COUNT(*) FROM shorts
+                   WHERE status = 'published'
+                     AND date(published_at) = date('now', 'localtime')"""
+            ).fetchone()
+        return (row[0] if row else 0) >= GLOBAL_SHORTS_PER_DAY_CAP
     except Exception:
         return False
 
@@ -419,7 +457,7 @@ UTC = timezone.utc
 
 # ── Spacing constants ─────────────────────────────────────────
 MIN_SHORTS_GAP_MINUTES = 20    # Minimum generation gap between any same-channel shorts (was 35)
-SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 90  # native↔native or clip↔clip min publish gap (raised 45→90: spam-safe pacing)
+SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 240  # native↔native or clip↔clip min publish gap (90→240: anti-spam tras penalización YT)
 CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES = 20  # v10.3: native↔clip min publish gap (was 0 — allowed overlap)
 CROSS_TYPE_SHORTS_ALLOW_OVERLAP = False     # v10.3: enforce cross-type publish gap
 CATCH_UP_BYPASS_HOURS = 6      # v10.3: only skip gap if slot is >6h past-due (was: any past-due)
@@ -443,7 +481,7 @@ SHORT_GEN_LEAD_MIN_CLIP = 5       # pre-rendered clip: just upload
 SHORT_GEN_LEAD_MIN_CLIP_ONTHEFLY = 15  # on-the-fly clip: extract + render + upload
 
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
-SHORTS_COOLDOWN_MINUTES = 60  # min gap between same-channel shorts (raised 20→60: spam-safe pacing)
+SHORTS_COOLDOWN_MINUTES = 180  # min gap between same-channel shorts (60→180: anti-spam tras penalización YT)
 
 # ── Native fallback windows (used when no optimal slots available) ──
 NATIVE_WINDOWS = [
@@ -1624,6 +1662,16 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.info("Shorts dispatch: YouTube quota exhausted — uploads paused")
         return None
 
+    # Kill-switch global de shorts (manual): shorts_paused / scheduler_paused
+    if _shorts_paused(db):
+        logger.info("Shorts dispatch: shorts pausados por kill-switch (shorts_paused)")
+        return None
+
+    # Tope global duro de shorts/día (anti-spam YouTube)
+    if _global_shorts_daily_cap_reached(db):
+        logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", GLOBAL_SHORTS_PER_DAY_CAP)
+        return None
+
     # 1. Sync running slots: mark completed/failed based on short status
     _sync_running_shorts_slots(db)
 
@@ -2079,6 +2127,28 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 long_pos = next_slot.get("long_slot_position")
                 source_video_id = _resolve_clip_source(channel_id, long_pos)
                 if source_video_id is None:
+                    # ── Anti-churn: no reintentar indefinidamente un clip sin fuente.
+                    # Si el slot lleva >2h sin poder resolver fuente, se CANCELA
+                    # (no se reintenta más); antes quedaba 'pending' en bucle.
+                    sched = next_slot.get("scheduled_at")
+                    overdue = False
+                    try:
+                        if sched:
+                            from datetime import datetime as _dt_ns
+                            _sdt = _dt_ns.strptime(str(sched)[:19], "%Y-%m-%d %H:%M:%S")
+                            overdue = (_dt_ns.now() - _sdt).total_seconds() > 7200
+                    except Exception:
+                        overdue = False
+                    if overdue:
+                        logger.info(
+                            "Shorts slot #%d (%s): clip sin fuente >2h — CANCELLING (anti-churn)",
+                            slot_id, slug,
+                        )
+                        db.update_shorts_slot_status(
+                            slot_id, "cancelled",
+                            error_message="no source: clip source video unavailable (overdue)",
+                        )
+                        continue
                     logger.info(
                         "Shorts slot #%d (%s) skipped: clip type but no completed source "
                         "long video available yet (channel=%s, long_slot=%s) — "
@@ -2360,14 +2430,14 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
     except __import__("pipeline.youtube_uploader", fromlist=["SpamRemovalError"]).SpamRemovalError as e:
         # ── HARD SPAM FILTER ──
         # YouTube removed the uploaded short. NEVER retry (each retry is a new
-        # spam signal). Cancel the slot, record a strike, and block the
-        # channel's shorts for a cooling period.
+        # spam signal). Cancel the slot. El strike se registra UNA sola vez en
+        # _verify_upload_exists (punto único de detección), para no doblar el
+        # conteo con la ruta long-form.
         logger.error(
             "Shorts slot #%d: YouTube REMOVED the short (%s) — spam strike, cancelling",
             slot_id, str(e)[:200],
         )
         try:
-            _record_short_spam_strike(channel_id, channel_slug)
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
             conn.execute(
                 "UPDATE shorts_planned_slots SET status = 'cancelled', "
@@ -4758,6 +4828,14 @@ def dispatch_standalone_shorts_daily() -> dict:
     — generated on demand). This function is called periodically from the
     API background loop.
 
+    ANTI-SATURACIÓN / ANTI-SPAM (ago 2026):
+      - Kill-switch global (`shorts_paused`/`scheduler_paused`).
+      - Solo UN standalone a la vez GLOBAL (registra generation_jobs y usa
+        `get_active_shorts_job`, que ahora incluye `generate_standalone_short`).
+      - Gate de RAM (TTS/render pesan 2-4 GB).
+      - Salta canales bloqueados por spam.
+      - Despacha secuencialmente (sin thread por canal) y solo 1 por tick.
+
     Returns: {"dispatched": N, "errors": N}
     """
     import logging
@@ -4768,13 +4846,35 @@ def dispatch_standalone_shorts_daily() -> dict:
     try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
-        channels = db.get_channels(active_only=True)
 
+        # Kill-switch global de shorts
+        if _shorts_paused(db):
+            logger.info("[standalone] shorts paused (kill-switch) — skip daily dispatch")
+            return result
+
+        # Solo UN short global a la vez (incluye standalone tras el fix de
+        # get_active_shorts_job). Evita varios TTS+ffmpeg concurrentes.
+        if db.get_active_shorts_job():
+            logger.info("[standalone] otro short ya activo — skip daily dispatch")
+            return result
+
+        # Gate de RAM: TTS/render necesitan margen.
+        from config.settings import MIN_FREE_FOR_TTS_MB
+        if not _memory_ok(min_free_gb=MIN_FREE_FOR_TTS_MB / 1024.0):
+            logger.warning("[standalone] RAM insuficiente — skip daily dispatch")
+            return result
+
+        channels = db.get_channels(active_only=True)
         for ch in channels:
             channel_id = ch["id"]
             slug = ch["slug"]
 
-            # Check how many standalone shorts were already dispatched today
+            # Canal penalizado por spam de YouTube: no tocar
+            if _channel_shorts_spam_blocked(channel_id, db):
+                logger.info("[standalone] %s spam-blocked — skip", slug)
+                continue
+
+            # Tope diario por canal
             today_dt = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
             conn = __import__("sqlite3").connect(
                 str(__import__("config.settings", fromlist=["DATABASE_PATH"]).DATABASE_PATH), timeout=10
@@ -4788,7 +4888,6 @@ def dispatch_standalone_shorts_daily() -> dict:
             ).fetchone()[0]
             conn.close()
 
-            # Get per-channel config
             conn2 = __import__("sqlite3").connect(
                 str(__import__("config.settings", fromlist=["DATABASE_PATH"]).DATABASE_PATH), timeout=10
             )
@@ -4802,22 +4901,28 @@ def dispatch_standalone_shorts_daily() -> dict:
             if today_count >= max_per_day:
                 continue
 
-            # Dispatch one standalone short
+            # Registra el job para que get_active_shorts_job lo vea como activo
+            # y el resto de la cola no despache otro short en paralelo.
+            job_id = db.create_job(channel_id, "generate_standalone_short")
+            db.update_job(job_id, status="running", progress=0, phase="standalone")
+
+            # Despacha UN standalone (síncrono, secuencial) y sale.
             try:
                 from api.services.shorts_scheduler import _dispatch_standalone_short
-                import asyncio
-                import threading
-
-                def _run():
-                    _dispatch_standalone_short(channel_id, slug)
-
-                t = threading.Thread(target=_run, daemon=True)
-                t.start()
-                result["dispatched"] += 1
-                logger.info("[standalone] Dispatched for %s (%d/%d today)", slug, today_count + 1, max_per_day)
+                short_id = _dispatch_standalone_short(channel_id, slug, job_id=job_id)
+                if short_id:
+                    db.update_job(job_id, status="completed", progress=100)
+                    result["dispatched"] += 1
+                    logger.info("[standalone] %s OK (%d/%d today)", slug, today_count + 1, max_per_day)
+                else:
+                    db.update_job(job_id, status="failed", error_msg="No short_id returned (standalone)")
+                    result["errors"] += 1
+                    logger.warning("[standalone] %s falló (no short_id)", slug)
             except Exception as e:
-                logger.warning("[standalone] Dispatch error for %s: %s", slug, e)
+                db.update_job(job_id, status="failed", error_msg=str(e)[:300])
                 result["errors"] += 1
+                logger.warning("[standalone] Dispatch error for %s: %s", slug, e)
+            break  # solo un standalone por tick (anti-ráfaga)
 
     except Exception as e:
         logger.warning("[standalone] Daily dispatch failed: %s", e)

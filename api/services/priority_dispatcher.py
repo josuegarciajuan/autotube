@@ -27,7 +27,7 @@ logger = logging.getLogger("autotube.priority_dispatch")
 
 
 # ── Interleaving dispatch ───────────────────────────────────────
-_BATCH_MAX_SHORTS = 8  # safety cap: max overdue shorts dispatched per batch
+_BATCH_MAX_SHORTS = 1  # safety cap: 1 short per batch (anti-ráfaga/anti-spam; antes 8)
 
 
 def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:

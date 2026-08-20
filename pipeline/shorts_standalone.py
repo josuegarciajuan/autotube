@@ -151,12 +151,17 @@ def run_standalone_short(
         # ── TTS ───────────────────────────────────────────
         from pipeline.shorts_tts import synthesize_shorts_blocks, trim_blocks_to_word_budget
         from pathlib import Path
-        import tempfile, os
+        import tempfile, uuid
 
-        output_dir = Path(tempfile.gettempdir()) / "autotube_standalone"
-        output_dir.mkdir(exist_ok=True)
-        audio_path = output_dir / f"standalone_{os.getpid()}.mp3"
-        srt_path = output_dir / f"standalone_{os.getpid()}.srt"
+        # Cada short usa un directorio ÚNICO. Antes se nombraba con os.getpid()
+        # y, al correr varios standalone en proceso (mismo PID), colisionaban
+        # el audio/srt/render: varios ffmpeg escribían a la vez el mismo
+        # standalone_render_<pid>.mp4.
+        run_id = f"{job_id or 0}_{uuid.uuid4().hex[:8]}"
+        output_dir = Path(tempfile.gettempdir()) / "autotube_standalone" / run_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = output_dir / "standalone.mp3"
+        srt_path = output_dir / "standalone.srt"
 
         # ── Enforce the audio duration budget BEFORE TTS ──
         # The LLM often exceeds ~105 words (audio > 58 s) and
@@ -223,7 +228,7 @@ def run_standalone_short(
             scene_ranges = None
 
         # ── Render ─────────────────────────────────────────
-        render_path = output_dir / f"standalone_render_{os.getpid()}.mp4"
+        render_path = output_dir / "render.mp4"
         render_short_hybrid(
             asset_items=assets,
             audio_path=audio_path,
@@ -243,11 +248,15 @@ def run_standalone_short(
         )
 
         # ── Cleanup temp files ─────────────────────────────
-        for f in [audio_path, srt_path, render_path]:
-            try:
-                Path(f).unlink(missing_ok=True)
-            except Exception:
-                pass
+        import shutil
+        try:
+            shutil.rmtree(output_dir, ignore_errors=True)
+        except Exception:
+            for f in [audio_path, srt_path, render_path]:
+                try:
+                    Path(f).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         if result and result.get("short_id"):
             logger.info("[standalone] ✅ Short published: %s → %s",
@@ -258,17 +267,14 @@ def run_standalone_short(
 
     except Exception as e:
         # ── HARD SPAM FILTER ──
-        # YouTube removed the standalone short. Record a strike and block the
-        # channel's shorts (circuit breaker). No retry here — the standalone
-        # dispatch counts this attempt as consumed.
+        # YouTube removed the standalone short. El strike ya se registró en
+        # _verify_upload_exists (punto único). Aquí solo se marca el fallo;
+        # no se reintenta (la daily dispatch cuenta este intento como consumido).
         try:
             from pipeline.youtube_uploader import SpamRemovalError
             if isinstance(e, SpamRemovalError):
-                from api.services.shorts_scheduler import _record_short_spam_strike
-                _record_short_spam_strike(channel_id, channel_slug)
                 logger.error(
-                    "[standalone] YouTube REMOVED the short for %s — spam strike recorded, "
-                    "channel shorts blocked",
+                    "[standalone] YouTube REMOVED the short for %s — spam strike (channel blocked)",
                     channel_slug,
                 )
                 return None

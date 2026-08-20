@@ -875,6 +875,18 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         channel_id = row["channel_id"]
         video_id = row["id"]
 
+        # ── Bloque por spam de YouTube: no subir nada del canal durante la
+        # penalización (gate central, cubre vídeos normales y shorts).
+        try:
+            if db.is_channel_spam_blocked(channel_id):
+                logger.info(
+                    "📤 Video %d: canal #%d spam-blocked por YouTube — upload held",
+                    video_id, channel_id,
+                )
+                continue
+        except Exception:
+            pass
+
         # Check if scheduled_upload_at needs to be set (first time seeing this video)
         # sqlite3.Row doesn't have .get() — use dict-style access with fallback
         sched_at_val = row["scheduled_upload_at"] if "scheduled_upload_at" in row.keys() else None
