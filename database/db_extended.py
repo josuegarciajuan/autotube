@@ -7791,6 +7791,36 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return int(row["shorts_native_per_day"]) if row and row["shorts_native_per_day"] else 3
 
+    def count_queued_native_shorts(self, channel_id: int) -> int:
+        """Shorts nativos generados y en cola (status='generated', sin subir)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS cnt FROM shorts
+                   WHERE channel_id = ? AND type = 'native' AND status = 'generated'""",
+                (channel_id,),
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_queued_native_shorts(self, channel_id: int, limit: int = 1) -> list[dict]:
+        """Shorts nativos en cola (status='generated') listos para subir.
+
+        Devuelve los más antiguos primero (FIFO). Solo los que tienen archivo
+        en disco y aún sin youtube_id.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, channel_id, title, hook_title, hook_text, topic,
+                          file_path, status, created_at
+                   FROM shorts
+                   WHERE channel_id = ? AND type = 'native' AND status = 'generated'
+                     AND file_path IS NOT NULL AND file_path != ''
+                     AND (youtube_id IS NULL OR youtube_id = '')
+                   ORDER BY id ASC LIMIT ?""",
+                (channel_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_shorts_slot_status(self, slot_id: int, status: str,
                                    source_video_id: int = None,
                                    short_id: int = None,
