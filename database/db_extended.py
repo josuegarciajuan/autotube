@@ -1155,6 +1155,9 @@ def migrate_v2(db_path: str = None):
     
     # ── v41: lifecycle_events CHECK allows 'system' (quota audit events) ──
     _migrate_v41(conn, logger)
+
+    # ── v42: Cancel doomed UNLINKED pending clip slots (v27 shorts fix) ──
+    _migrate_v42(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2659,6 +2662,91 @@ def _migrate_v41(conn, logger):
         except Exception:
             pass
         logger.warning("Migration v41: failed (%s) — system lifecycle events will not be available", exc)
+
+
+def _migrate_v42(conn, logger):
+    """Idempotent v42: cancel doomed UNLINKED pending clip slots (v27 cleanup).
+
+    Under the v26/v27 model, clip shorts are pre-rendered right after the long
+    video is generated, and pre_render_clip_shorts_for_video() creates a
+    shorts_planned_slots row LINKED to the ready short (short_id NOT NULL).
+    Pending clip slots with short_id IS NULL are therefore anomalous: they were
+    created by the legacy recovery planner referencing scheduled-publish
+    (private) source videos that yt-dlp cannot download once the local MP4 is
+    gone — every dispatch attempt failed and the slot was retried until
+    cancelled, wasting scheduler ticks.
+
+    This migration cancels such doomed slots (idempotent; nothing to do once
+    they are gone). A slot is kept only when its source is genuinely uncovered
+    AND the local MP4 still exists (dispatch can extract from the file).
+    """
+    try:
+        rows = conn.execute(
+            """SELECT id, source_video_id FROM shorts_planned_slots
+               WHERE short_type = 'clip'
+                 AND status = 'pending'
+                 AND short_id IS NULL"""
+        ).fetchall()
+        cancelled = 0
+        for row in rows:
+            slot_id = row["id"]
+            src = row["source_video_id"]
+            doomed = False
+            if src is None:
+                doomed = True  # no source at all → can never dispatch
+            else:
+                # Covered by a ready/published short or another pending/running
+                # slot for the same source → duplicate → cancel.
+                cov = conn.execute(
+                    """SELECT
+                         (SELECT COUNT(*) FROM shorts
+                           WHERE type = 'clip'
+                             AND status IN ('ready', 'published')
+                             AND source_video_id = ?) AS s_cnt,
+                         (SELECT COUNT(*) FROM shorts_planned_slots
+                           WHERE short_type = 'clip'
+                             AND status IN ('pending', 'running')
+                             AND source_video_id = ?
+                             AND id != ?) AS p_cnt""",
+                    (src, src, slot_id),
+                ).fetchone()
+                if cov and (cov["s_cnt"] or cov["p_cnt"]):
+                    doomed = True
+                else:
+                    # Uncovered source: keep only if the local MP4 exists.
+                    vid = conn.execute(
+                        "SELECT video_path FROM videos WHERE id = ?", (src,)
+                    ).fetchone()
+                    local_ok = False
+                    if vid and vid["video_path"]:
+                        try:
+                            local_ok = os.path.exists(vid["video_path"])
+                        except Exception:
+                            local_ok = False
+                    doomed = not local_ok
+            if doomed:
+                conn.execute(
+                    """UPDATE shorts_planned_slots
+                       SET status = 'cancelled',
+                           error_message = 'cancelled: unlinked clip slot without fulfilled source (v42 cleanup)',
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (slot_id,),
+                )
+                cancelled += 1
+        conn.commit()
+        if cancelled:
+            logger.info(
+                "Migration v42: cancelled %d doomed unlinked clip slot(s)", cancelled,
+            )
+        else:
+            logger.debug("Migration v42: no doomed unlinked clip slots to cancel")
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning("Migration v42: failed (%s)", exc)
 
 
 def _migrate_v10(conn, logger):

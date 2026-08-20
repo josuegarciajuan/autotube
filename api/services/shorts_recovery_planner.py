@@ -11,11 +11,22 @@ v14: Capped recovery + use pct_covered (not pct_published).
   - Removed MIN_DAILY_SHORTS floor — uses native_target + clip_target directly
   - Native/clip deficit recovery also capped at 2 slots per run
 
+v27 (Aug 2026): v26-aware clip recovery.
+  - Clip coverage counts pre-rendered 'ready' shorts + pending/running slots
+    (any date) so recovery stops fabricating doomed duplicate clip slots.
+  - Clip recovery slots are only created when the source MP4 is still on disk
+    (otherwise the slot is doomed: scheduled-publish sources are private and
+    yt-dlp cannot download them once the local file is gone).
+  - Slots are stored with UTC timestamps (the dispatcher treats scheduled_at
+    as UTC; Madrid wall-clock fired recovery slots ~2h late).
+  - Channels with shorts spam-blocked are skipped entirely.
+
 Called every 120 minutes by the background checker loop in api/main.py,
 but only between 10:00-23:00 CEST.
 """
 
 import logging
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -107,28 +118,70 @@ def _count_published_by_type(db, channel_id: int) -> tuple[int, int]:
     return native, clip
 
 
-def _count_completed_longs_today(db, channel_id: int) -> int:
-    """Count long-form videos completed/published yesterday + today.
-    
-    Clips are sourced from BOTH yesterday's and today's completed longs
-    (initial schedule uses yesterday's, recovery planner adds today's as
-    they complete). Counting both prevents cancellation of valid clips.
-    
-    Uses actual upload date (uploaded_at), not record creation date (created_at),
-    and correct status values ('uploaded','published','uploaded_private').
+# ── v27: Helpers (timezone, spam-block, v26-aware clip coverage) ──
+
+def _local_hm_to_utc(date_str: str, hour: int, minute: int,
+                     tz_str: str = "Europe/Madrid") -> str:
+    """Convert a local wall-clock (date_str + hour:minute) to a UTC timestamp string.
+
+    The shorts dispatcher interprets scheduled_at / target_upload_at as UTC
+    (datetime('now') in get_next_pending_shorts_slot). Recovery slots were
+    stored with Madrid wall-clock times, which made them fire ~2h late.
     """
+    local = pytz.timezone(tz_str).localize(
+        datetime.strptime(
+            f"{date_str} {int(hour):02d}:{int(minute):02d}:00",
+            "%Y-%m-%d %H:%M:%S",
+        )
+    )
+    return local.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _channel_shorts_spam_blocked(channel_id: int, db) -> bool:
+    """Return True if the channel's shorts are blocked by a spam strike."""
+    try:
+        raw = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
+        if not raw:
+            return False
+        return time.time() < float(raw)
+    except Exception:
+        return False
+
+
+def _count_clip_coverage(db, channel_id: int, long_ids: list[int],
+                         clips_per_long: int) -> int:
+    """Count how many clip shorts are already handled for today's longs.
+
+    v26-aware: a long's clips are covered by pre-rendered 'ready' shorts,
+    published shorts, OR pending/running clip slots (any date — pre-render
+    schedules same-day, recovery may look across days). Per long, the covered
+    count is capped at clips_per_long; MAX (not SUM) avoids double-counting a
+    ready short and its own linked slot.
+    """
+    if not long_ids:
+        return 0
+    total = 0
     try:
         with db._connect() as conn:
-            row = conn.execute(
-                """SELECT COUNT(*) as cnt FROM videos
-                   WHERE channel_id = ?
-                     AND status IN ('uploaded', 'published', 'uploaded_private')
-                     AND DATE(uploaded_at) >= DATE('now', 'localtime', '-1 day')""",
-                (channel_id,),
-            ).fetchone()
-            return row["cnt"] if row else 0
+            for vid in long_ids:
+                row = conn.execute(
+                    """SELECT
+                         (SELECT COUNT(*) FROM shorts
+                           WHERE channel_id = ? AND type = 'clip'
+                             AND source_video_id = ?
+                             AND status IN ('ready', 'published')) AS shorts_cnt,
+                         (SELECT COUNT(*) FROM shorts_planned_slots
+                           WHERE channel_id = ? AND short_type = 'clip'
+                             AND source_video_id = ?
+                             AND status IN ('pending', 'running')) AS slots_cnt""",
+                    (channel_id, vid, channel_id, vid),
+                ).fetchone()
+                if row:
+                    total += min(clips_per_long, max(row["shorts_cnt"] or 0,
+                                                     row["slots_cnt"] or 0))
     except Exception:
         return 0
+    return total
 
 
 def _cancel_excess_slots(db, pending_slots: list[dict], excess: int) -> int:
@@ -175,8 +228,8 @@ def _create_recovery_slots(
         up_h = min(up_min // 60, 23)
         up_m = min(up_min % 60, 59)
 
-        scheduled_str = f"{today} {scheduled_h:02d}:{scheduled_m:02d}:00"
-        upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
+        scheduled_str = _local_hm_to_utc(today, scheduled_h, scheduled_m)
+        upload_str = _local_hm_to_utc(today, up_h, up_m)
 
         try:
             slot_id = db.create_shorts_slot(
@@ -202,20 +255,34 @@ def _create_recovery_slots(
 
 def _create_clip_recovery_slots(
     ch_id: int, slug: str, today: str, missing: int,
-    clips_per_long: int, completed_longs: int,
+    clips_per_long: int, longs_today: list[dict],
     now_minute_of_day: int, active_slots: list[dict], db,
 ) -> list[dict]:
     """Create clip recovery slots, linked to completed long videos.
 
-    Assigns clips to completed longs with the fewest existing clips.
+    v27 (v26-aware): a clip recovery slot is only created when it can actually
+    be fulfilled:
+      - If the source long already has ANY clip artifact (pre-rendered 'ready'
+        short, published short, or pending/running slot on any date) it is
+        covered — no duplicate slot is created.
+      - If the source MP4 still exists on disk (pre-render failed but the file
+        is there), an unlinked slot is created; dispatch extracts from the
+        local file.
+      - Otherwise the slot would be doomed (scheduled-publish source is private,
+        no local file → yt-dlp cannot download it), so it is SKIPPED.
+
+    Slots are stored with UTC timestamps: the dispatcher treats scheduled_at /
+    target_upload_at as UTC, and storing Madrid wall-clock fired them ~2h late.
     """
+    from pathlib import Path
+
     # Build map: long_slot_position → how many clips exist
     clip_counts_by_long = {}
     for s in active_slots:
         pos = s.get("long_slot_position")
         if pos and s.get("short_type") == "clip":
             clip_counts_by_long[pos] = clip_counts_by_long.get(pos, 0) + 1
-    
+
     # Assign each missing clip to the long with fewest clips
     existing_times = []
     for s in active_slots:
@@ -225,19 +292,70 @@ def _create_clip_recovery_slots(
 
     min_ahead = MIN_HOUR_AHEAD * 60
     created_slots = []
+    skipped = 0
 
     for i in range(missing):
         # Pick long with fewest clips
         best_long_pos = None
         best_count = 999
-        for long_pos in range(1, completed_longs + 1):
+        for long_pos in range(1, len(longs_today) + 1):
             count = clip_counts_by_long.get(long_pos, 0)
             if count < clips_per_long and count < best_count:
                 best_count = count
                 best_long_pos = long_pos
-        
+
         if best_long_pos is None:
             break
+
+        source = longs_today[best_long_pos - 1]
+        source_vid = source.get("id")
+
+        # ── Coverage guard: skip longs that already have their clips ──
+        try:
+            with db._connect() as conn:
+                cov_row = conn.execute(
+                    """SELECT
+                         (SELECT COUNT(*) FROM shorts
+                           WHERE channel_id = ? AND type = 'clip'
+                             AND source_video_id = ?
+                             AND status IN ('ready', 'published')) AS s_cnt,
+                         (SELECT COUNT(*) FROM shorts_planned_slots
+                           WHERE channel_id = ? AND short_type = 'clip'
+                             AND source_video_id = ?
+                             AND status IN ('pending', 'running')) AS p_cnt""",
+                    (ch_id, source_vid, ch_id, source_vid),
+                ).fetchone()
+            covered = 0
+            if cov_row:
+                covered = min(clips_per_long, max(cov_row["s_cnt"] or 0,
+                                                  cov_row["p_cnt"] or 0))
+        except Exception:
+            covered = 0
+        if covered >= clips_per_long:
+            clip_counts_by_long[best_long_pos] = clip_counts_by_long.get(best_long_pos, 0) + 1
+            logger.debug(
+                "[shorts:%s] Clip recovery: long=%d (source #%s) already covered "
+                "(%d) — skipping duplicate",
+                slug, best_long_pos, source_vid, covered,
+            )
+            continue
+
+        # ── Doom guard: only create when the slot can actually be fulfilled ──
+        local_ok = False
+        try:
+            local_ok = bool(source.get("video_path")) and Path(source["video_path"]).exists()
+        except Exception:
+            local_ok = False
+        if not local_ok:
+            skipped += 1
+            logger.info(
+                "[shorts:%s] Clip recovery skipped for long=%d (source #%s): "
+                "no ready short and no local MP4 (private scheduled source) — "
+                "slot would be doomed",
+                slug, best_long_pos, source_vid,
+            )
+            clip_counts_by_long[best_long_pos] = clip_counts_by_long.get(best_long_pos, 0) + 1
+            continue
 
         chosen = _find_available_minute(now_minute_of_day, existing_times, min_ahead)
         if chosen is None:
@@ -250,28 +368,23 @@ def _create_clip_recovery_slots(
         up_h = min(up_min // 60, 23)
         up_m = min(up_min % 60, 59)
 
-        scheduled_str = f"{today} {scheduled_h:02d}:{scheduled_m:02d}:00"
-        upload_str = f"{today} {up_h:02d}:{up_m:02d}:00"
+        scheduled_str = _local_hm_to_utc(today, scheduled_h, scheduled_m)
+        upload_str = _local_hm_to_utc(today, up_h, up_m)
 
         try:
-            slot_id = db.create_shorts_slot(
-                channel_id=ch_id, date_key=today,
-                scheduled_at=scheduled_str, target_upload_at=upload_str,
-                short_type="clip", long_slot_position=best_long_pos,
-                slot_position=len(active_slots) + len(created_slots) + 1,
-            )
-            # Also fetch source_video_id from DB and update
-            try:
-                source_vid = db.get_completed_videos_today(ch_id)
-                if source_vid and best_long_pos <= len(source_vid):
-                    with db._connect() as conn:
-                        conn.execute(
-                            "UPDATE shorts_planned_slots SET source_video_id = ? WHERE id = ?",
-                            (source_vid[best_long_pos - 1]["id"], slot_id),
-                        )
-                        conn.commit()
-            except Exception:
-                pass
+            with db._connect() as conn:
+                cur = conn.execute(
+                    """INSERT INTO shorts_planned_slots
+                       (channel_id, date_key, scheduled_at, target_upload_at,
+                        short_type, long_slot_position, source_video_id,
+                        slot_position, status)
+                       VALUES (?, ?, ?, ?, 'clip', ?, ?, ?, 'pending')""",
+                    (ch_id, today, scheduled_str, upload_str,
+                     best_long_pos, source_vid,
+                     len(active_slots) + len(created_slots) + 1),
+                )
+                slot_id = cur.lastrowid
+                conn.commit()
 
             existing_times.append(chosen)
             clip_counts_by_long[best_long_pos] = clip_counts_by_long.get(best_long_pos, 0) + 1
@@ -279,13 +392,22 @@ def _create_clip_recovery_slots(
                 "slot_id": slot_id, "scheduled_at": scheduled_str,
                 "target_upload_at": upload_str, "type": "clip",
                 "long_slot_position": best_long_pos,
+                "source_video_id": source_vid,
             })
             logger.info(
-                "[shorts:%s] Clip recovery slot #%d: gen=%02d:%02d long=%d",
+                "[shorts:%s] Clip recovery slot #%d: gen=%02d:%02d long=%d "
+                "(local MP4 present)",
                 slug, slot_id, scheduled_h, scheduled_m, best_long_pos,
             )
         except Exception as exc:
             logger.error("[shorts:%s] Failed clip recovery slot: %s", slug, exc)
+
+    if skipped:
+        logger.info(
+            "[shorts:%s] Clip recovery: %d candidate(s) skipped "
+            "(no ready short / no local MP4)",
+            slug, skipped,
+        )
 
     return created_slots
 
@@ -343,6 +465,14 @@ def auto_recover_shorts(db=None) -> dict:
         if not cfg.get("shorts_enabled", True):
             continue
 
+        # ── v27: Skip channels whose shorts are spam-blocked (their slots are
+        # cancelled by the dispatcher anyway — creating them is pure churn) ──
+        if _channel_shorts_spam_blocked(ch_id, db):
+            logger.info(
+                "[shorts:%s] channel spam-blocked — skipping recovery", slug,
+            )
+            continue
+
         native_target = cfg.get("shorts_native_per_day", 3)
         clips_per_long = cfg.get("shorts_clips_per_long", 3)
 
@@ -359,12 +489,22 @@ def auto_recover_shorts(db=None) -> dict:
         active_clip = [s for s in active_slots if s.get("short_type") == "clip"]
 
         # ── 3. Dynamic clip target: clips_per_long × completed longs ──
-        completed_longs = _count_completed_longs_today(db, ch_id)
+        longs_today = []
+        try:
+            longs_today = db.get_completed_videos_today(ch_id) or []
+        except Exception:
+            longs_today = []
+        completed_longs = len(longs_today)
+        long_ids = [v.get("id") for v in longs_today if v.get("id")]
         clip_target = clips_per_long * completed_longs
 
         # ── 4. Coverage by type ──
+        # v27: clip coverage includes pre-rendered 'ready' shorts tied to
+        # today's longs (v26 pre-render), so recovery stops fabricating doomed
+        # duplicate clip slots for sources that already have their clips.
         native_covered = published_native + len(active_native)
-        clip_covered = published_clip + len(active_clip)
+        ready_clips = _count_clip_coverage(db, ch_id, long_ids, clips_per_long)
+        clip_covered = published_clip + len(active_clip) + ready_clips
 
         logger.info(
             "[shorts:%s] Recovery check: native=%d/%d clip=%d/%d "
@@ -502,7 +642,7 @@ def auto_recover_shorts(db=None) -> dict:
             # Assign missing clips to completed longs with fewest existing clips
             created = _create_clip_recovery_slots(
                 ch_id, slug, today, missing, clips_per_long,
-                completed_longs, now_minute_of_day, active_slots, db,
+                longs_today, now_minute_of_day, active_slots, db,
             )
             if created:
                 result["recovered_count"] += len(created)
