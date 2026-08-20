@@ -133,7 +133,10 @@ class VisualCoherenceEngine:
             ``"balanced"`` → natural depth.
             ``"rich"`` → deep DoF, detailed textures.
         """
-        base = "16:9 aspect ratio, no text, no watermark, no blur, sharp focus"
+        base = (
+            "16:9 aspect ratio, no text, no watermark, no blur, sharp focus, "
+            "8K, high resolution, intricate detail, ultra sharp"
+        )
 
         extras: dict[str, str] = {
             "simple": (

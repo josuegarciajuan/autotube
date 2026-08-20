@@ -87,6 +87,10 @@ class PollinationsProvider:
         height: int = 720,
         cache_dir: Optional[str] = None,
         upscale_min: Optional[tuple[int, int]] = None,
+        upscale_model: Optional[str] = None,
+        upscale_sharpen: bool = True,
+        upscale_sharpen_amount: float = 0.4,
+        upscale_sharpen_sigma: float = 2.0,
     ) -> None:
         self.model = model
         self.width = width
@@ -95,10 +99,16 @@ class PollinationsProvider:
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Resolución mínima objetivo (w, h). Si la imagen devuelta por la API
-        # es menor, se upscalea localmente (ESPCN_x2) antes de cachear.
+        # es menor, se upscalea localmente (ESPCN_x2 + unsharp mask).
         self.upscale_min: Optional[tuple[int, int]] = None
         if upscale_min and len(upscale_min) == 2:
             self.upscale_min = (int(upscale_min[0]), int(upscale_min[1]))
+        # Modelo de super-resolución ("espcn", "edsr", "lapsrn", "fsrcnn").
+        self.upscale_model: Optional[str] = upscale_model
+        # Unsharp mask post-upscale (nitidez percibida).
+        self.upscale_sharpen: bool = upscale_sharpen
+        self.upscale_sharpen_amount: float = upscale_sharpen_amount
+        self.upscale_sharpen_sigma: float = upscale_sharpen_sigma
         self._upscaler = None  # lazy singleton
 
     # ── Properties ──────────────────────────────────────────
@@ -241,7 +251,12 @@ class PollinationsProvider:
         try:
             if self._upscaler is None:
                 from pipeline.ai_upscaler import AIImageUpscaler
-                self._upscaler = AIImageUpscaler.get_instance()
+                self._upscaler = AIImageUpscaler(
+                    model=self.upscale_model or "espcn",
+                    sharpen_enabled=self.upscale_sharpen,
+                    sharpen_amount=self.upscale_sharpen_amount,
+                    sharpen_sigma=self.upscale_sharpen_sigma,
+                )
             self._upscaler.upscale_to_min(
                 Path(image_path),
                 self.upscale_min[0],

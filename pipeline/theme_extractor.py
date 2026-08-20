@@ -70,7 +70,8 @@ class ThemeContext:
             parts.append(self.composition)
         parts.extend([
             "cinematic photography", "16:9 aspect ratio",
-            "professional quality", "no text", "no watermark",
+            "professional quality", "8K, high resolution, sharp focus, "
+            "intricate detail", "no text", "no watermark",
         ])
         return ", ".join(parts)
 
