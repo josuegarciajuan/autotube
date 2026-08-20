@@ -451,6 +451,9 @@ export const api = {
   getActiveWorkers: () => request<any>('/monitor/workers'),
   getStatusBar: () => request<any>('/monitor/status-bar'),
   getQuotaStatus: () => request<any>('/system/quota-status'),
+  getSpamBlocks: () => request<any>('/system/spam-blocks'),
+  unblockSpamChannel: (channelId: number) =>
+    request<any>(`/system/spam-blocks/${channelId}/unblock`, { method: 'POST' }),
   getLLMCredits: () => request<any>('/monitor/llm-credits'),
   triggerLLMCreditCheck: () => request<any>('/monitor/llm-credits/check', { method: 'POST' }),
 
