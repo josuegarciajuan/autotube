@@ -158,6 +158,16 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None) -> in
             logger.error(
                 "Spam frequency reduction failed for %s: %s", channel_slug, _freq_exc,
             )
+        # ── Retener publicaciones ya programadas del canal bloqueado ──
+        # Los vídeos subidos como private con publishAt nativo caerían durante
+        # el bloqueo; se reprograman para después del fin del bloqueo + colchón.
+        try:
+            from api.services.spam_mitigation import hold_pending_publishes_for_block
+            hold_pending_publishes_for_block(channel_id, channel_slug, block_until, db=db)
+        except Exception as _hold_exc:
+            logger.error(
+                "Spam hold pending publishes failed for %s: %s", channel_slug, _hold_exc,
+            )
         return strikes
     except Exception as exc:
         logger.error("Failed to record spam strike for %s: %s", channel_slug, exc)
