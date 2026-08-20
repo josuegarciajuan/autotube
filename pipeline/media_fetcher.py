@@ -198,10 +198,11 @@ class MediaFetcher:
         # Build AI provider chain from config (always available — no auth needed)
         ai_cache_dir = str(settings.OUTPUT_DIR / "ai_cache" / "pollinations")
         try:
-            # ── Upscale local post-generación (ESPCN_x2) ──────────
+            # ── Upscale local post-generación (ESPCN_x2 + unsharp mask) ──
             # Pollinations devuelve 1024×576 aunque se pida 1920×1080; al
             # escalar en el render se ve borroso. Subimos a la resolución
-            # mínima objetivo del canal (config AI_UPSCALE_*).
+            # mínima objetivo del canal (config AI_UPSCALE_*) y aplicamos
+            # unsharp mask para nitidez percibida.
             if getattr(self._config, "AI_UPSCALE_ENABLED", True):
                 upscale_min = (
                     getattr(self._config, "AI_UPSCALE_MIN_WIDTH", 1920),
@@ -209,12 +210,23 @@ class MediaFetcher:
                 )
             else:
                 upscale_min = None
+            _upscale_model_raw = getattr(self._config, "AI_UPSCALE_MODEL", None)
+            upscale_model = (
+                _upscale_model_raw if isinstance(_upscale_model_raw, str) else "espcn"
+            )
+            upscale_sharpen = bool(getattr(self._config, "AI_UPSCALE_SHARPEN_ENABLED", True))
+            upscale_sharpen_amount = float(getattr(self._config, "AI_UPSCALE_SHARPEN_AMOUNT", 0.4))
+            upscale_sharpen_sigma = float(getattr(self._config, "AI_UPSCALE_SHARPEN_SIGMA", 2.0))
             self._pollinations = PollinationsProvider(
                 model=self._media_strategy.get("ai_pollinations_model") or "flux",
                 width=1920,
                 height=1080,
                 cache_dir=ai_cache_dir,
                 upscale_min=upscale_min,
+                upscale_model=upscale_model,
+                upscale_sharpen=upscale_sharpen,
+                upscale_sharpen_amount=upscale_sharpen_amount,
+                upscale_sharpen_sigma=upscale_sharpen_sigma,
             )
             logger.info("AI image provider registered: pollinations (free, no-auth)")
         except Exception as exc:
@@ -222,7 +234,16 @@ class MediaFetcher:
 
         try:
             sd_steps = self._media_strategy.get("ai_local_sd_steps", 20)
-            self._local_sd = LocalSDProvider(num_inference_steps=sd_steps)
+            self._local_sd = LocalSDProvider(
+                num_inference_steps=sd_steps,
+                width=768,
+                height=768,
+                upscale_min=upscale_min if upscale_min else None,
+                upscale_model=upscale_model if upscale_min else None,
+                upscale_sharpen=upscale_sharpen if upscale_min else False,
+                upscale_sharpen_amount=upscale_sharpen_amount,
+                upscale_sharpen_sigma=upscale_sharpen_sigma,
+            )
             logger.info("AI image provider registered: local_sd (free, CPU, ~3 min)")
         except Exception as exc:
             logger.warning("Local SD provider init failed: %s", exc)

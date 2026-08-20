@@ -37,8 +37,12 @@ logger = logging.getLogger(__name__)
 
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DEFAULT_STEPS = 20            # CPU-optimized (fewer steps = faster, still decent quality)
-DEFAULT_WIDTH = 512
-DEFAULT_HEIGHT = 512
+# 768×768 es el máximo nativo estable de SD 1.5. Antes era 512×512, que
+# ampliado a 1080p quedaba muy borroso. Aun así se upscalea después con
+# el AIImageUpscaler (ESPCN_x2 + unsharp mask) hasta la resolución mínima
+# objetivo.
+DEFAULT_WIDTH = 768
+DEFAULT_HEIGHT = 768
 REQUEST_TIMEOUT = 600         # 10 minutes for CPU generation
 
 
@@ -54,7 +58,7 @@ class LocalSDProvider:
         display_name="Stable Diffusion 1.5 (Local CPU)",
         auth_required=False,
         model=MODEL_ID,
-        default_resolution=(512, 512),
+        default_resolution=(768, 768),
         max_resolution=(768, 768),
         avg_latency_seconds=180.0,    # ~3 min on this Xeon
         rate_limit_per_minute=2,      # 2 workers in parallel
@@ -74,10 +78,30 @@ class LocalSDProvider:
         device: str = "cpu",
         num_inference_steps: int = DEFAULT_STEPS,
         model_id: Optional[str] = None,
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        upscale_min: Optional[tuple[int, int]] = None,
+        upscale_model: Optional[str] = None,
+        upscale_sharpen: bool = True,
+        upscale_sharpen_amount: float = 0.4,
+        upscale_sharpen_sigma: float = 2.0,
     ) -> None:
         self.device = device
         self.num_inference_steps = num_inference_steps
         self.model_id = model_id or MODEL_ID
+        self.width = width
+        self.height = height
+        # Resolución mínima objetivo (w, h). Si la imagen generada es menor,
+        # se upscalea localmente (ESPCN_x2 + unsharp mask) antes de guardar.
+        self.upscale_min: Optional[tuple[int, int]] = None
+        if upscale_min and len(upscale_min) == 2:
+            self.upscale_min = (int(upscale_min[0]), int(upscale_min[1]))
+        self.upscale_model: Optional[str] = upscale_model
+        # Unsharp mask post-upscale (nitidez percibida).
+        self.upscale_sharpen: bool = upscale_sharpen
+        self.upscale_sharpen_amount: float = upscale_sharpen_amount
+        self.upscale_sharpen_sigma: float = upscale_sharpen_sigma
+        self._upscaler = None  # lazy singleton
         self._pipe = None          # lazy-loaded
 
     # ── Properties ──────────────────────────────────────────
@@ -108,8 +132,8 @@ class LocalSDProvider:
             output_path: Where to save the generated PNG.
             seed: Random seed for reproducibility.
             negative_prompt: Things to avoid in the image.
-            width: Image width (default 512).
-            height: Image height (default 512).
+            width: Image width (default self.width = 768).
+            height: Image height (default self.height = 768).
 
         Returns:
             Path to the saved image, or ``None`` on failure.
@@ -117,8 +141,8 @@ class LocalSDProvider:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        w = width or DEFAULT_WIDTH
-        h = height or DEFAULT_HEIGHT
+        w = width or self.width
+        h = height or self.height
 
         try:
             pipe = self._load_pipe()
@@ -155,6 +179,12 @@ class LocalSDProvider:
             image = result.images[0]
             image.save(str(output_path))
 
+            # ── Upscale local post-generación (ESPCN_x2 + unsharp mask) ──
+            # SD 1.5 genera a 768×768; ampliado a 1080p el render se ve
+            # borroso. Subimos a la resolución mínima objetivo antes de
+            # guardar (mismo mecanismo que Pollinations).
+            self._maybe_upscale(output_path)
+
             logger.info(
                 "Local SD image generated: %s (%.1fs, %d steps)",
                 output_path, elapsed, self.num_inference_steps,
@@ -164,6 +194,34 @@ class LocalSDProvider:
         except Exception as exc:
             logger.error("Local SD generation failed: %s", exc)
             return None
+
+    # ── Internal: upscale ─────────────────────────────────────
+
+    def _maybe_upscale(self, image_path: Path) -> None:
+        """Upscale *image_path* a la resolución mínima configurada (si procede).
+
+        No-op si no hay resolución mínima configurada, si el upscaler no
+        está disponible o si la imagen ya cumple el mínimo. Nunca lanza:
+        degrada silenciosamente al comportamiento original.
+        """
+        if not self.upscale_min or not image_path or not Path(image_path).exists():
+            return
+        try:
+            if self._upscaler is None:
+                from pipeline.ai_upscaler import AIImageUpscaler
+                self._upscaler = AIImageUpscaler(
+                    model=self.upscale_model or "espcn",
+                    sharpen_enabled=self.upscale_sharpen,
+                    sharpen_amount=self.upscale_sharpen_amount,
+                    sharpen_sigma=self.upscale_sharpen_sigma,
+                )
+            self._upscaler.upscale_to_min(
+                Path(image_path),
+                self.upscale_min[0],
+                self.upscale_min[1],
+            )
+        except Exception as exc:
+            logger.debug("Local SD upscale skipped (%s): %s", image_path, exc)
 
     def is_available(self) -> bool:
         """Check whether the SD pipeline can be loaded.
