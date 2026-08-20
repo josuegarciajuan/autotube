@@ -4000,31 +4000,15 @@ def pre_render_clip_shorts_for_video(
             return []
         video = dict(video_row)
 
-        # ── v26: Calculate clip upload schedule ──
-        # If the long video has target_public_at, clips are scheduled after it.
-        # Otherwise (immediate mode), schedule from now.
-        target_public_at = video.get("target_public_at")
+        # ── v27: Calculate clip upload schedule ──
+        # Clips are scheduled for TODAY (same day as the long video), snapped to
+        # the next optimal shorts windows. They are NOT anchored to the long
+        # video's target_public_at, which in scheduled mode sits 2-3 days ahead
+        # and left clips stuck in 'ready' while recovery planner created doomed
+        # duplicate slots. Same-day clips may publish before the long is public.
         now_utc = datetime.now(_timezone.utc)
-        if target_public_at:
-            try:
-                if isinstance(target_public_at, str):
-                    anchor = datetime.fromisoformat(target_public_at.replace("Z", "+00:00"))
-                    if anchor.tzinfo is None:
-                        anchor = anchor.replace(tzinfo=_timezone.utc)
-                else:
-                    anchor = target_public_at
-                    if hasattr(anchor, 'tzinfo') and anchor.tzinfo is None:
-                        anchor = anchor.replace(tzinfo=_timezone.utc)
-                logger.info(
-                    "pre_render: anchoring clip uploads to target_public_at=%s",
-                    anchor.isoformat(),
-                )
-            except Exception:
-                anchor = now_utc
-                logger.debug("pre_render: failed to parse target_public_at, using now")
-        else:
-            anchor = now_utc
-            logger.info("pre_render: no target_public_at — using now as anchor")
+        anchor = now_utc
+        logger.info("pre_render: anchoring clip uploads to now (same-day) — %s", anchor.isoformat())
 
         # ── v10.3: Calculate clip upload schedule using optimal shorts windows ──
         # Instead of blind 60-min increments, snap each clip to the nearest
