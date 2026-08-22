@@ -632,8 +632,12 @@ REGLAS:
      Esta descripcion se inyectara en CADA escena donde aparezca.
    - appears_in_scenes: lista de indices de escena donde aparece.
    - variation_by_scene: para cada escena, variacion de encuadre
-     (ej. "medium shot walking", "close-up hands", "silhouette against fire").
+     (ej. "medium shot walking", "distant wide shot", "silhouette against fire").
    Si NO hay entidad central clara, usa type="none".
+   REGLA SI type="person": encuadra SIEMPRE en plano medio o general (nunca
+   primer plano del rostro, nunca ocupando el primer plano del encuadre).
+   Usa siluetas, contraluces o figuras a distancia para transmitir presencia
+   humana sin exponer detalles faciales.
 
 3. ELEMENTOS RECURRENTES. Hasta 5 elementos visuales que aparecen en
    multiples escenas como hilo conductor (ej. "columnas de marmol agrietadas",
@@ -647,10 +651,16 @@ REGLAS:
    establishing={establishing_pct}%, detail={detail_pct}%, mood={mood_pct}%,
    action={action_pct}%, symbolic={symbolic_pct}%.
    - establishing: gran angular, situa al espectador.
-   - detail: primer plano, intimidad, textura.
+   - detail: plano detalle de OBJETOS y texturas (intimidad con el objeto).
+     NUNCA primer plano del rostro de una persona.
    - mood: atmosfera pura, luz, sombras, emocion sin accion.
    - action: movimiento, tension, dinamismo.
    - symbolic: concepto abstracto, metafora visual pura.
+
+5b. PERSONAS A DISTANCIA. Si una escena incluye personas (protagonista o
+    figurantes), muestralas en plano medio o general: nunca primer plano del
+    rostro ni como sujeto ocupando el primer plano del encuadre. Prefiere
+    siluetas, contraluces o figuras pequenas integradas en el paisaje/escenario.
 
 6. DENSIDAD VISUAL. Ajusta visual_density segun la cantidad de narracion:
    - Mucha narracion (>3 palabras/seg) -> "simple" (fondos desenfocados,

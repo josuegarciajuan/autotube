@@ -34,10 +34,17 @@ _COLOR_ARC = [
 ]
 
 # ── Global negative prompt (shared across ALL generations) ────────
+# Personas: se prohíben los primeros planos del rostro — en escenas, la gente
+# debe aparecer a distancia (plano medio/general), nunca rellenando el encuadre
+# como sujeto en primer plano. Las manos deformadas son el error más común de
+# los modelos generativos al intentar acercar a una persona.
 NEGATIVE_PROMPT = (
     "text, letters, watermark, logo, signature, "
     "blurry, low quality, jpeg artifacts, "
     "deformed, ugly, extra limbs, bad anatomy, disfigured, duplicate, mutated, "
+    "deformed hands, extra fingers, fused fingers, bad hands, "
+    "close-up face, extreme close-up portrait, face filling frame, "
+    "foreground face, recognizable face, "
     "frame, border, collage, split screen, multiple views, photomontage, "
     "deep fried, oversaturated, cartoon, 3d render, plastic, doll-like, "
     "nudity, nsfw, gore, violence"
@@ -129,7 +136,8 @@ class VisualCoherenceEngine:
         Parameters
         ----------
         density:
-            ``"simple"`` → shallow DoF, minimal background.
+            ``"simple"`` → DOF moderado, pocos elementos (sin empujar al sujeto
+            al primer plano — evita rostros cercanos).
             ``"balanced"`` → natural depth.
             ``"rich"`` → deep DoF, detailed textures.
         """
@@ -140,7 +148,7 @@ class VisualCoherenceEngine:
 
         extras: dict[str, str] = {
             "simple": (
-                "shallow depth of field, blurred background, "
+                "moderate depth of field, subject at comfortable distance, "
                 "minimal elements, clean composition"
             ),
             "balanced": (
@@ -203,11 +211,25 @@ class VisualCoherenceEngine:
         return style_mod
 
     def _build_impact_style_prefix(self) -> str:
-        """Build the global impact and per-channel colour-grade layers."""
+        """Build the global impact and per-channel colour-grade layers.
+
+        The universal framing rules live HERE (not in the base prefix): this is
+        the layer that the truncation in ``MediaFetcher._build_ai_prompt``
+        PRESERVES (``protected_style``). The base prefix is dropped when a prompt
+        is truncated, so any rule placed only there would vanish in production
+        (where prompts always exceed the budget).
+        """
         return ", ".join(
             part for part in (
                 self._config_string(self._config, "AI_VISUAL_IMPACT_STYLE"),
                 self._config_string(self._config, "AI_VISUAL_COLOR_GRADING"),
+                # Universal framing rules (all channels, all AI providers):
+                # composición off-center (regla de tercios) y personas SIEMPRE
+                # a distancia. Refuerzo con NEGATIVE_PROMPT para los casos en
+                # que el modelo ignore el texto positivo.
+                "rule of thirds composition, off-center subject, "
+                "if people appear, show them at a distance: medium or wide shot, "
+                "never close-up or foreground",
             ) if part
         )
 

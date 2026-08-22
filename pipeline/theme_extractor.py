@@ -33,7 +33,7 @@ class ThemeContext:
     primary_subject: str = ""            # e.g. "human mind", "ancient ruins"
     mood: str = "misterioso"             # "misterioso", "esperanzador", "perturbador"
     lighting: str = "claroscuro"         # "claroscuro", "luz cenital", "luz dorada", "neón frío"
-    composition: str = "primeros planos" # "primeros planos", "planos generales", "simetría"
+    composition: str = "planos medios y generales"  # "planos medios y generales", "primeros planos", "simetría"
     era_decade: str = ""                 # Normalized: "1980s" instead of "los años ochenta"
 
     # ── Helper methods ─────────────────────────────────────
@@ -72,6 +72,8 @@ class ThemeContext:
             "cinematic photography", "16:9 aspect ratio",
             "professional quality", "8K, high resolution, sharp focus, "
             "intricate detail", "no text", "no watermark",
+            "if people appear, show them at a distance: medium or wide shot, "
+            "never close-up or foreground",
         ])
         return ", ".join(parts)
 
@@ -102,7 +104,12 @@ Determina:
 8. primary_subject: el sujeto o tema visual principal del video (ej: "human mind", "ancient ruins", "cosmic void")
 9. mood: el estado de ánimo predominante — uno de: "misterioso", "esperanzador", "perturbador", "melancólico", "épico", "sereno", "ominoso"
 10. lighting: estilo de iluminación — uno de: "claroscuro", "luz cenital", "luz dorada", "neón frío", "luz natural difusa", "contraluz", "penumbra"
-11. composition: tipo de encuadre preferido — uno de: "primeros planos", "planos generales", "simetría", "regla de tercios", "ángulo holandés", "plano detalle"
+11. composition: tipo de encuadre preferido — uno de: "planos medios y generales",
+    "primeros planos", "simetría", "regla de tercios", "ángulo holandés", "plano detalle".
+    REGLA DE PERSONAS: si la escena incluye personas, encuádralas en plano medio o
+    general (nunca primer plano del rostro, nunca como sujeto en primer plano del encuadre).
+    Prefiere "planos medios y generales" como valor por defecto salvo que el contenido
+    pida expresamente intimidad con un objeto (no con un rostro).
 12. era_decade: década normalizada (ej: "1980s", "1940s", "medieval", "futuro cercano") — NUNCA uses frases como "los años ochenta", siempre en formato "1980s"
 
 Responde SOLO con JSON:
@@ -147,7 +154,7 @@ class ThemeExtractor:
             "primary_subject": "",
             "mood": "misterioso",
             "lighting": "claroscuro",
-            "composition": "primeros planos",
+            "composition": "planos medios y generales",
             "era_decade": "",
         }
 
@@ -201,7 +208,7 @@ class ThemeExtractor:
                 primary_subject=data.get("primary_subject", ""),
                 mood=data.get("mood", "misterioso"),
                 lighting=data.get("lighting", "claroscuro"),
-                composition=data.get("composition", "primeros planos"),
+                composition=data.get("composition", "planos medios y generales"),
                 era_decade=data.get("era_decade", ""),
             )
 
@@ -238,7 +245,7 @@ class ThemeExtractor:
                 primary_subject="archivos",
                 mood="misterioso",
                 lighting="claroscuro",
-                composition="primeros planos",
+                composition="planos medios y generales",
                 era_decade="",
             )
 

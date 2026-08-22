@@ -44,6 +44,130 @@ def test_colour_arc_keeps_mid_video_colour_vivid_and_readable():
     assert "desaturat" not in style.lower()
 
 
+# ── Personas a distancia: regla universal de encuadre ────────────────
+
+def test_style_prefix_keeps_people_at_a_distance():
+    style = VisualCoherenceEngine(_config()).get_scene_style(scene_idx=2, total_scenes=5)
+
+    assert "medium or wide shot" in style
+    assert "never close-up" in style
+    assert "people appear" in style
+
+
+def test_tech_suffix_simple_no_shallow_dof():
+    """Densidad 'simple' ya no empuja al sujeto al primer plano."""
+    suffix = VisualCoherenceEngine.build_tech_suffix("simple")
+
+    assert "shallow depth of field" not in suffix
+    assert "blurred background" not in suffix
+    assert "moderate depth of field" in suffix
+    assert "subject at comfortable distance" in suffix
+
+
+def test_style_prefix_uses_rule_of_thirds():
+    style = VisualCoherenceEngine(_config()).base_style_prefix
+
+    assert "rule of thirds" in style
+    assert "off-center subject" in style
+
+
+def test_negative_prompt_rejects_close_up_faces_and_bad_hands():
+    negative = VisualCoherenceEngine.build_negative_prompt()
+
+    assert "close-up face" in negative
+    assert "extreme close-up portrait" in negative
+    assert "foreground face" in negative
+    assert "deformed hands" in negative
+    assert "extra fingers" in negative
+
+
+def test_theme_extractor_defaults_to_medium_and_wide_shots():
+    from pipeline.theme_extractor import ThemeContext
+
+    ctx = ThemeContext()
+    assert "planos medios y generales" in ctx.composition
+
+
+def test_pollo_prompt_keeps_people_at_a_distance():
+    from pipeline.theme_extractor import ThemeContext
+
+    ctx = ThemeContext(era_decade="1980s")
+    prompt = ctx.to_pollo_prompt("city street")
+
+    assert "medium or wide shot" in prompt
+    assert "never close-up or foreground" in prompt
+
+
+def test_build_ai_prompt_injects_era_decade():
+    from types import SimpleNamespace
+
+    fetcher = MediaFetcher(config=_config())
+    fetcher.set_theme_context(SimpleNamespace(era_decade="1980s", era=""))
+
+    prompt, _seed = fetcher._build_ai_prompt(
+        {"tipo": "desarrollo", "texto": "narration", "duration": 5},
+        scene_idx=0,
+        total_scenes=1,
+    )
+
+    assert "1980s" in prompt
+
+
+def test_ai_image_chain_adds_forbidden_elements_to_negative(tmp_path: Path):
+    from types import SimpleNamespace
+
+    fetcher = MediaFetcher(config=_config())
+    fetcher.set_theme_context(
+        SimpleNamespace(forbidden_elements=["smartphones", "modern buildings"])
+    )
+    pollinations = MagicMock()
+    output = tmp_path / "forbidden.jpg"
+    output.touch()
+    pollinations.generate.return_value = output
+    fetcher._pollinations = pollinations
+    fetcher._is_valid_ai_image = MagicMock(return_value=True)
+
+    fetcher._try_ai_image_chain(
+        {
+            "tipo": "desarrollo",
+            "search_query_en": "medieval marketplace",
+            "texto": "Merchants sell goods.",
+            "duration": 5,
+        },
+        scene_idx=0,
+        total_scenes=1,
+    )
+
+    negative = pollinations.generate.call_args.kwargs["negative_prompt"]
+    assert "smartphones" in negative
+    assert "modern buildings" in negative
+
+
+def test_ai_image_chain_negative_without_theme_is_global_only(tmp_path: Path):
+    fetcher = MediaFetcher(config=_config())
+    pollinations = MagicMock()
+    output = tmp_path / "plain.jpg"
+    output.touch()
+    pollinations.generate.return_value = output
+    fetcher._pollinations = pollinations
+    fetcher._is_valid_ai_image = MagicMock(return_value=True)
+
+    fetcher._try_ai_image_chain(
+        {
+            "tipo": "desarrollo",
+            "search_query_en": "empty desert",
+            "texto": "No theme context.",
+            "duration": 5,
+        },
+        scene_idx=0,
+        total_scenes=1,
+    )
+
+    negative = pollinations.generate.call_args.kwargs["negative_prompt"]
+    assert "close-up face" in negative  # global rule still present
+    assert "smartphones" not in negative
+
+
 def test_pollo_fallback_receives_same_coherent_prompt(tmp_path: Path):
     fetcher = MediaFetcher(config=_config())
     pollo = MagicMock()
@@ -113,9 +237,39 @@ def test_long_scene_prompt_retains_global_impact_and_channel_grade():
         total_scenes=1,
     )
 
-    assert len(prompt) <= 500
+    assert len(prompt) <= 1000
     assert "hybrid documentary YouTube impact" in prompt
     assert "channel-specific vivid amber grade" in prompt
+    # Regression: el marcador de escena NUNCA debe perderse en la truncación.
+    assert "scene 1/1" in prompt
+
+
+def test_long_prompt_keeps_scene_concept_under_production_style():
+    """Las configs de producción (impact style largo) ya no descartan el concepto."""
+    fetcher = MediaFetcher(config=_config(
+        AI_VISUAL_IMPACT_STYLE=(
+            "hybrid cinematic documentary photography with high-impact YouTube "
+            "visual storytelling, immediate readable focal subject, vivid "
+            "natural colour, strong subject-background separation, premium "
+            "editorial detail"
+        ),
+        AI_VISUAL_COLOR_GRADING=(
+            "vivid readable cinematic colour grade, natural skin tones, "
+            "preserved highlight and shadow detail"
+        ),
+    ))
+
+    scene = {
+        "tipo": "desarrollo",
+        "search_query_en": "merchant weighing gold scale ancient marketplace",
+        "texto": "Los mercaderes pesaban el oro.", "duration": 5,
+    }
+    prompt, _ = fetcher._build_ai_prompt(scene, scene_idx=2, total_scenes=10)
+
+    assert len(prompt) <= 1000
+    assert "scene 3/10" in prompt, "marcador de escena debe sobrevivir"
+    assert "merchant" in prompt, "concepto de escena debe sobrevivir"
+    assert "medium or wide shot" in prompt
 
 
 # ── Regression: duplicate AI prompts from incomplete visual bibles ──────────
