@@ -189,9 +189,16 @@ class ThemeExtractor:
                 response_format={"type": "json_object"},
             )
 
+            # ── Deterministic era normalization (post-process) ──
+            # The LLM may return free-form era values ("siglo_XVII",
+            # "los años ochenta", "17th century"). Normalize to canonical
+            # keys so the media pipeline can anchor stock searches to the
+            # right period. Unrecognized values are left unchanged.
+            from pipeline.era_terms import normalize_era
+
             ctx = ThemeContext(
                 genre=data.get("genre", ""),
-                era=data.get("era", ""),
+                era=normalize_era(data.get("era", "")),
                 visual_style=data.get("visual_style", ""),
                 key_motifs=data.get("key_motifs", []),
                 forbidden_elements=data.get("forbidden_elements", []),
@@ -202,7 +209,7 @@ class ThemeExtractor:
                 mood=data.get("mood", "misterioso"),
                 lighting=data.get("lighting", "claroscuro"),
                 composition=data.get("composition", "primeros planos"),
-                era_decade=data.get("era_decade", ""),
+                era_decade=normalize_era(data.get("era_decade", "")),
             )
 
             # ── Niche guardrail validation ────────────────────
