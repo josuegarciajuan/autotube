@@ -285,6 +285,20 @@ MEDIA_STRATEGY = {
         "action": 0.20,
         "symbolic": 0.10,
     },
+
+    # ── Stock Relevance & Era Anchoring (multi-channel) ────────
+    # When True, historical scenes anchor their stock queries with an
+    # era-specific phrase (e.g. "17th century wooden sailing ship") and
+    # skip anachronistic candidates (modern city footage) via provider
+    # metadata tags. Disabling restores the previous era-agnostic search.
+    "era_anchor_enabled": True,
+    # Minimum narrative-keyword overlap a candidate must reach to be
+    # preferred over lower-scored candidates. 1 = any keyword match.
+    "relevance_min_overlap": 1,
+    # When True (and >=2 candidates have metadata), ONE extra LLM call
+    # reorders candidates so the best match downloads first. Off by
+    # default — costs a call per page and adds latency.
+    "llm_relevance_filter": False,
 }
 
 # ═══════════════════════════════════════════════════════════════════
