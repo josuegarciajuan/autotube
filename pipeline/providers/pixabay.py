@@ -117,6 +117,9 @@ class PixabayVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=(actual_w, actual_h),
                 provider=self.name,
+                title=hit.get("user", "") or "",
+                tags=self._parse_tags(hit.get("tags", "")),
+                page_url=hit.get("pageURL", "") or "",
             )
 
         logger.info("Pixabay: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
@@ -189,6 +192,9 @@ class PixabayVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=(best.get("width", 0), best.get("height", 0)),
                 provider=self.name,
+                title=hit.get("user", "") or "",
+                tags=self._parse_tags(hit.get("tags", "")),
+                page_url=hit.get("pageURL", "") or "",
             ))
 
         return SearchPage(
@@ -319,6 +325,13 @@ class PixabayVideoProvider(BaseVideoProvider):
 
         logger.error("Pixabay API request failed after %d attempts", max_retries)
         return None
+
+    @staticmethod
+    def _parse_tags(tags_raw) -> list[str]:
+        """Parse the Pixabay ``tags`` field (comma-separated string) into a list."""
+        if not tags_raw:
+            return []
+        return [t.strip().lower() for t in str(tags_raw).split(",") if t and t.strip()]
 
     @staticmethod
     def _pick_best_quality(
