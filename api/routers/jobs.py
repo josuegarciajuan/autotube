@@ -122,4 +122,18 @@ def get_job(job_id: int):
     for k in ("created_at", "started_at", "finished_at"):
         if job.get(k):
             job[k] = str(job[k])
+    # ── Attach progress detail counters from the video row ──
+    # Lets the frontend polling fallback render upload MB / scene x/y
+    # even when the WebSocket monitor is unavailable.
+    if job.get("video_id"):
+        try:
+            v = db.get_video(job["video_id"])
+            if v:
+                job["progress_current"] = v.get("progress_current")
+                job["progress_total"] = v.get("progress_total")
+                job["phase"] = v.get("progress_phase") or job.get("phase")
+                if v.get("progress") is not None:
+                    job["progress"] = v.get("progress")
+        except Exception:
+            pass
     return job

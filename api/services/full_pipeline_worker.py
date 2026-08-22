@@ -731,11 +731,28 @@ def run_job(
     _heartbeat_thread.start()
 
     # ── 7. Set up progress callback ───────────────────────────
+    _last_detail_write = [0.0]  # throttle detail counters to ~1 write/s
+
     def _progress_to_db(percent: int, phase: str, message: str, **kwargs):
         try:
             db.update_video(video_id, progress=percent, progress_phase=phase)
         except Exception as exc:
             logger.debug("Progress DB write failed (non-fatal): %s", exc)
+        # ── Detail counters (upload bytes / scene x/y) — throttled ──
+        cur = kwargs.get("current")
+        tot = kwargs.get("total")
+        if cur is not None or tot is not None:
+            try:
+                now = time.time()
+                if now - _last_detail_write[0] >= 1.0:
+                    _last_detail_write[0] = now
+                    db.update_video(
+                        video_id,
+                        progress_current=cur,
+                        progress_total=tot,
+                    )
+            except Exception:
+                pass
 
     # ── 8. Load channel config ─────────────────────────────────
     try:

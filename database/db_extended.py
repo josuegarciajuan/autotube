@@ -1158,6 +1158,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v42: Cancel doomed UNLINKED pending clip slots (v27 shorts fix) ──
     _migrate_v42(conn, logger)
+
+    # ── v43: progress detail counters (upload bytes / scene x/y) ──
+    _migrate_v43(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2749,6 +2752,25 @@ def _migrate_v42(conn, logger):
         logger.warning("Migration v42: failed (%s)", exc)
 
 
+def _migrate_v43(conn, logger):
+    """Idempotent v43: progress detail counters on videos.
+
+    progress_current / progress_total let the subprocess worker persist
+    granular counters (upload bytes done/total, or scene x/y during render)
+    so the API monitor can broadcast them to the progress bar even when the
+    generation runs in a separate process.
+    """
+    for col, col_type in [
+        ("progress_current", "INTEGER"),
+        ("progress_total", "INTEGER"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {col_type}")
+            logger.info("Migration v43: added videos.%s", col)
+        except Exception:
+            pass  # column already exists
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -3158,7 +3180,9 @@ class ExtendedDatabase(Database):
                     # ── Cache-busting for frontend ──
                     "updated_at",
                     # ── Error diagnostics (v26) ──
-                    "error_message"]
+                    "error_message",
+                    # ── Progress detail counters (v43) ──
+                    "progress_current", "progress_total"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures

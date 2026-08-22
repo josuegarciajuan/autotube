@@ -377,11 +377,15 @@ class PipelineOrchestrator:
             pass
         logger.info("[%s] Orchestrator cleanup complete", self.canal)
 
-    def _emit_progress(self, percent: int, phase: str, message: str) -> None:
-        """Fire the progress callback (if set). No-op when running CLI standalone."""
+    def _emit_progress(self, percent: int, phase: str, message: str, **kwargs) -> None:
+        """Fire the progress callback (if set). No-op when running CLI standalone.
+
+        Extra kwargs (current/total/sub_phase/detail...) are forwarded so the
+        frontend can show richer data (bytes, scene x/y, sub-phase).
+        """
         if self._progress_cb:
             try:
-                self._progress_cb(percent, phase, message)
+                self._progress_cb(percent, phase, message, **kwargs)
             except Exception:
                 pass  # never let progress emission crash the pipeline
 
@@ -2034,6 +2038,26 @@ class PipelineOrchestrator:
 
             self._emit_progress(88, "upload", "Subiendo video a YouTube...")
             
+            # ── Granular upload progress (per chunk) ───────────────
+            # The uploader reports pct (0-100) + bytes per chunk. Map into the
+            # 88→100 slot of the phase and attach bytes so the frontend can
+            # render real MB, speed and ETA.
+            def _upload_pct_cb(pct: int):
+                self._emit_progress(
+                    min(99, 88 + int(pct * 0.12)), "upload",
+                    f"Subiendo... {pct}%",
+                )
+
+            def _upload_detail_cb(info: dict):
+                pct = info.get("pct") or 0
+                self._emit_progress(
+                    min(99, 88 + int(pct * 0.12)), "upload",
+                    f"Subiendo... {pct}%",
+                    current=info.get("bytes_done"),
+                    total=info.get("bytes_total"),
+                    sub_phase="chunk",
+                )
+
             # ── Heartbeat callback for upload phase ──────────────
             # Prevents false orphan detection during slow uploads by
             # pulsing the job's last_heartbeat_at between chunks.
@@ -2060,6 +2084,8 @@ class PipelineOrchestrator:
                 category_id=metadata.get("category_id", self.config.YT_CATEGORY_ID) if metadata else self.config.YT_CATEGORY_ID,
                 privacy=upload_privacy,
                 heartbeat_callback=upload_heartbeat,
+                progress_callback=_upload_pct_cb,
+                progress_callback_detail=_upload_detail_cb,
                 suggested_video_filename=filename_slug,
                 suggested_thumb_filename=filename_slug,
                 publish_at=upload_publish_at,
