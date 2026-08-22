@@ -3011,14 +3011,15 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         )
     
     # 3b. Memory guard: different threshold for prep vs render dispatch.
-    #     Prep phases (scrape→media) need ~1.5 GB. Render needs ~4 GB.
+    #     Prep phases (scrape→media) need ~1.5 GB. Render needs ~2.5 GB
+    #     (xfade_batch_size=25 → concat peak ~1.5 GB).
     if render_count > 0:
         # Dispatching a prep worker while a render is active
         if not _memory_ok(min_free_gb=1.5):
             logger.warning("Low memory (prep) — delaying planned slot dispatch")
             return None
     else:
-        if not _memory_ok(min_free_gb=4.0):
+        if not _memory_ok(min_free_gb=2.5):
             logger.warning("Low memory (render) — delaying planned slot dispatch")
             return None
     

@@ -146,10 +146,16 @@ FFMPEG_PRESET_DEFAULT = os.getenv("FFMPEG_PRESET_DEFAULT", "fast")
 # ~3 GB por batch de 50 segmentos y Kokoro/torch ~2.8 GB. Umbrales previos
 # (2000/3000/4000 MB) permitían arrancar fases pesadas con RAM justa y el
 # kernel mataba ffmpeg (rc=-9) y python3 (code -9) perdiendo horas de render.
+#
+# Rebajados el 2026-08-22: el concat por lotes pasó de 50 → 25 segmentos
+# (pico ~1.5 GB), así que el render ya no necesita 5 GB libres. Esto permite
+# operar en hosts co-localizados con ~3 GB efectivos disponibles. Kokoro sigue
+# exigiendo su umbral alto (torch ~3 GB) vía MIN_FREE_FOR_TTS_MB, pero el gate
+# TTS es ahora consciente del motor: edge-tts reutiliza MIN_FREE_FOR_RENDER_MB.
 VIDEO_MEMORY_GUARD_MB = int(os.getenv("VIDEO_MEMORY_GUARD_MB", "5000"))
 LOW_MEMORY_WARN_MB = int(os.getenv("LOW_MEMORY_WARN_MB", "1500"))
-MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "5000"))
-MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "6000"))
+MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "2500"))
+MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "2800"))
 # Kokoro-82M (torch) carga ~3 GB al generar TTS; necesita más margen que el render.
 MIN_FREE_FOR_TTS_MB = int(os.getenv("MIN_FREE_FOR_TTS_MB", "6000"))
 # Shorts: el render de un short lanza ffmpeg (pico 2-4 GB) dentro del proceso API.

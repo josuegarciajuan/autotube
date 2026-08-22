@@ -3686,7 +3686,9 @@ class VideoEditor:
         # to start, wait for it to recover; if it never does, abort with a
         # clear error instead of letting the kernel OOM-kill ffmpeg
         # mid-concat (rc=-9) and lose the whole render.
-        MIN_FREE_CONCAT_MB = 2500
+        # Con xfade_batch_size=25 el pico es ~1.5 GB, así que 2000 MB dan
+        # margen y permiten operar con ~3 GB efectivos disponibles.
+        MIN_FREE_CONCAT_MB = 2000
         from pipeline.ram_governor import available_mb, wait_for_ram
 
         n = len(segment_paths)
