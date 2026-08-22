@@ -625,3 +625,146 @@ class TestFetchUniquenessGate:
         )
         assert len(results) == 5
         assert all(r.get("type") == "image" for r in results)
+
+
+# ── Stock relevance & era anchoring (v9) ───────────────────────────
+
+class TestEraAnchoredSearchQuery:
+    """_build_search_query must keep a HIGH-priority era anchor for
+    historical scenes and skip it for timeless ones."""
+
+    @staticmethod
+    def _make_ctx(era_decade="17th century", era="siglo_XVII"):
+        from pipeline.theme_extractor import ThemeContext
+        return ThemeContext(
+            genre="historico_siglo_XVII",
+            era=era,
+            era_decade=era_decade,
+            key_motifs=["barcos", "hielo"],
+            forbidden_elements=["tecnología moderna"],
+            theme_keywords_en=["sailing", "ship", "arctic", "historical"],
+            primary_subject="wooden sailing ship",
+        )
+
+    def test_historical_query_keeps_era_anchor_and_is_not_truncated(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        ctx = self._make_ctx()
+        result = MediaFetcher._build_search_query(
+            "crew mutiny ship arctic ice",
+            theme_keywords=ctx.theme_keywords_en,
+            theme_ctx=ctx,
+        )
+        assert "17th century" in result, f"era anchor missing: {result!r}"
+        assert len(result) <= 100, f"query over budget: {result!r}"
+        assert result.strip()[-1] not in (" ",), "query ends with stray space"
+
+    def test_timeless_scene_has_no_era_anchor(self):
+        from pipeline.media_fetcher import MediaFetcher
+        from pipeline.theme_extractor import ThemeContext
+
+        ctx = ThemeContext(genre="documental", era="presente", era_decade="")
+        result = MediaFetcher._build_search_query(
+            "city skyline modern",
+            theme_keywords=[],
+            theme_ctx=ctx,
+        )
+        assert "17th century" not in result
+
+    def test_era_disabled_via_config_flag(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        ctx = self._make_ctx()
+        result = MediaFetcher._build_search_query(
+            "crew mutiny ship arctic ice",
+            theme_keywords=ctx.theme_keywords_en,
+            theme_ctx=ctx,
+            era_enabled=False,
+        )
+        assert "17th century" not in result
+
+
+class TestRelevanceAndAnachronism:
+    """_relevance_score / _is_anachronistic reject modern footage in
+    historical scenes and prefer era-appropriate candidates."""
+
+    def _make_fetcher(self):
+        from pipeline.media_fetcher import MediaFetcher
+        fetcher = MediaFetcher(config=_make_config())
+        return fetcher
+
+    @staticmethod
+    def _make_historical_ctx():
+        from pipeline.theme_extractor import ThemeContext
+        return ThemeContext(
+            genre="historico_siglo_XVII",
+            era="17th century",
+            era_decade="17th century",
+            key_motifs=["barcos"],
+            theme_keywords_en=["sailing", "ship", "historical"],
+            primary_subject="wooden sailing ship",
+        )
+
+    def test_modern_city_candidate_is_anachronistic(self):
+        fetcher = self._make_fetcher()
+        ctx = self._make_historical_ctx()
+        candidate = {"tags": ["modern", "city", "canal"], "title": "",
+                     "page_url": "", "url": "http://x/1.mp4"}
+        assert fetcher._is_anachronistic(candidate, ctx) is True
+
+    def test_sailing_ship_candidate_not_anachronistic_and_scores(self):
+        fetcher = self._make_fetcher()
+        ctx = self._make_historical_ctx()
+        scene = _make_scene_range(search_query_en="crew mutiny arctic ice")
+        candidate = {"tags": ["sailing", "ship", "arctic", "ice"], "title": "",
+                     "page_url": "", "url": "http://x/2.mp4"}
+        assert fetcher._is_anachronistic(candidate, ctx) is False
+        assert fetcher._relevance_score(candidate, scene, ctx) > 0
+
+    def test_anachronistic_candidate_gets_zero_or_penalized_score(self):
+        fetcher = self._make_fetcher()
+        ctx = self._make_historical_ctx()
+        scene = _make_scene_range(search_query_en="sailing ship arctic ice")
+        # Overlaps on "ship"/"arctic" but contains modern city terms
+        candidate = {"tags": ["ship", "arctic", "modern", "city"], "title": "",
+                     "page_url": "", "url": "http://x/3.mp4"}
+        score = fetcher._relevance_score(candidate, scene, ctx)
+        assert score >= 0
+        # Penalty must cancel the positive overlap
+        assert score < 1.0
+
+    def test_no_metadata_is_defensive_score_zero_not_anachronistic(self):
+        fetcher = self._make_fetcher()
+        ctx = self._make_historical_ctx()
+        candidate = {"tags": [], "title": "", "page_url": "", "url": "http://x/4.mp4"}
+        assert fetcher._is_anachronistic(candidate, ctx) is False
+        assert fetcher._relevance_score(candidate, {}, ctx) == 0
+
+
+class TestQueryPoolEraVariant:
+    """_build_query_pool must include an era-anchored variant for
+    historical scenes (exhaustive path uses pool queries directly)."""
+
+    def test_era_variant_present_in_pool(self):
+        from pipeline.media_fetcher import MediaFetcher
+        from pipeline.theme_extractor import ThemeContext
+
+        fetcher = MediaFetcher(config=_make_config())
+        ctx = ThemeContext(
+            genre="historico_siglo_XVII", era="17th century", era_decade="17th century",
+            key_motifs=["barcos"], theme_keywords_en=["sailing", "ship", "historical"],
+            primary_subject="wooden sailing ship",
+        )
+        scene = _make_scene_range(search_query_en="crew mutiny arctic ice")
+        pool = fetcher._build_query_pool(scene, ctx)
+        assert any("17th century" in q for q in pool), f"no era variant in pool: {pool}"
+
+    def test_no_era_variant_for_timeless_scene(self):
+        from pipeline.media_fetcher import MediaFetcher
+        from pipeline.theme_extractor import ThemeContext
+
+        fetcher = MediaFetcher(config=_make_config())
+        ctx = ThemeContext(genre="documental", era="presente", era_decade="")
+        scene = _make_scene_range(search_query_en="city skyline modern")
+        pool = fetcher._build_query_pool(scene, ctx)
+        assert not any("17th century" in q for q in pool)
