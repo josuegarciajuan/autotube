@@ -6,7 +6,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useGeneration, type ActiveJob } from '../context/GenerationContext'
 import { useGenerationProgress, type ProgressData } from '../hooks/useWebSocket'
 import { api } from '../lib/api'
-import { X, ChevronDown, ChevronUp, Loader2, CheckCircle, AlertCircle, Wand2, Layers, Ban, Upload, Globe } from 'lucide-react'
+import { X, ChevronDown, ChevronUp, Loader2, CheckCircle, AlertCircle, Wand2, Layers, Ban, Upload, Globe, Hourglass } from 'lucide-react'
 
 /** Human-readable label for each job action type. */
 function actionLabel(action: string): string {
@@ -44,11 +44,14 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
 
   const isCompleted = progress?.status === 'completed'
   const isFailed = progress?.status === 'failed'
+  const isQueued = job.status === 'queued'
   const pct = progress?.progress ?? 0
 
   // ── Stuck detection: if no progress after 45s disconnected, auto-dismiss ──
+  // Queued jobs are legitimately waiting for the queue consumer — never treat
+  // them as stuck.
   useEffect(() => {
-    const isStuck = !connected && pct === 0 && !isCompleted && !isFailed && !cancelling
+    const isStuck = !isQueued && !connected && pct === 0 && !isCompleted && !isFailed && !cancelling
 
     if (isStuck && !stuckTimerRef.current && !stuckDismissedRef.current) {
       stuckTimerRef.current = setTimeout(() => {
@@ -66,7 +69,7 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
         stuckTimerRef.current = undefined
       }
     }
-  }, [connected, pct, isCompleted, isFailed, cancelling, onDismiss])
+  }, [isQueued, connected, pct, isCompleted, isFailed, cancelling, onDismiss])
 
 
   // Cancel this job: sends cancel request to backend + cleans up
@@ -112,15 +115,19 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
         >
           <div className={`w-2 h-2 rounded-full shrink-0 ${
             isCompleted ? 'bg-green-400' : isFailed ? 'bg-red-400'
+            : isQueued ? 'bg-amber-400'
             : connected ? 'bg-neon-red animate-pulse' : 'bg-yellow-400'
           }`} />
           <span className="text-[11px] sm:text-xs text-gray-400 font-medium truncate">
             {job.channelName} · {
               cancelling ? 'Cancelando...' : isCompleted ? 'Completado' : isFailed ? 'Error'
+              : isQueued ? 'En cola'
               : `${actionLabel(job.action)} · ${pct}%`
             }
           </span>
-          <span className="ml-auto text-[10px] text-gray-500 tabular-nums">{pct}%</span>
+          <span className="ml-auto text-[10px] text-gray-500 tabular-nums">
+            {isQueued ? 'esperando...' : `${pct}%`}
+          </span>
           <ChevronUp size={14} className="text-gray-500 shrink-0" />
         </div>
       ) : (
@@ -130,7 +137,8 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
             {/* Header row */}
             <div className="flex items-center gap-2 mb-1.5">
               {actionIcon(job.action, 14, `shrink-0 ${
-                isCompleted ? 'text-green-400' : isFailed ? 'text-red-400' : 'text-neon-gold'
+                isCompleted ? 'text-green-400' : isFailed ? 'text-red-400'
+                : isQueued ? 'text-amber-400' : 'text-neon-gold'
               }`)}
               <span className="text-xs font-semibold text-white truncate">
                 {job.channelName}
@@ -144,13 +152,14 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
               <div className="flex items-center gap-1 ml-auto">
                 {isCompleted && <CheckCircle size={14} className="text-green-400 shrink-0" />}
                 {isFailed && <AlertCircle size={14} className="text-red-400 shrink-0" />}
-                {!isCompleted && !isFailed && !cancelling && <Loader2 size={12} className="text-neon-gold animate-spin shrink-0" />}
+                {isQueued && <Hourglass size={12} className="text-amber-400 shrink-0" />}
+                {!isQueued && !isCompleted && !isFailed && !cancelling && <Loader2 size={12} className="text-neon-gold animate-spin shrink-0" />}
                 {cancelling && <Loader2 size={12} className="text-yellow-400 animate-spin shrink-0" />}
                 {!isCompleted && !isFailed && (
                   <button
                     onClick={handleCancel}
                     disabled={cancelling}
-                    title="Cancelar generación"
+                    title={isQueued ? 'Cancelar de la cola' : 'Cancelar generación'}
                     className="p-0.5 text-gray-500 hover:text-red-400 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Ban size={14} />
@@ -175,11 +184,12 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
               <div
                 className={`h-full rounded-full transition-all duration-700 ease-out ${
                   isCompleted ? 'bg-green-500' : isFailed ? 'bg-red-500'
+                  : isQueued ? 'bg-amber-500/70'
                   : 'bg-gradient-to-r from-neon-red via-orange-500 to-neon-gold'
                 }`}
                 style={{ width: `${Math.min(pct, 100)}%` }}
               >
-                {!isCompleted && !isFailed && (
+                {!isQueued && !isCompleted && !isFailed && (
                   <div className="absolute inset-0 progress-shimmer" />
                 )}
               </div>
@@ -189,19 +199,33 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
             <div className="flex items-center justify-between text-[11px]">
               <div className="flex items-center gap-1.5 min-w-0">
                 <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                  connected ? 'bg-green-400' : 'bg-yellow-400'
+                  isQueued ? 'bg-amber-400' : connected ? 'bg-green-400' : 'bg-yellow-400'
                 }`} />
-                <span className="text-gray-500">
-                  {connected ? 'WS' : 'poll'}
-                </span>
-                {progress?.phase && (
+                {isQueued ? (
                   <>
+                    <span className="text-gray-500">cola</span>
                     <span className="text-gray-700">·</span>
-                    <span className="text-neon-cyan font-medium truncate">{progress.phase}</span>
+                    <span className="text-amber-400 font-medium truncate">En cola — esperando turno</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-gray-500">
+                      {connected ? 'WS' : 'poll'}
+                    </span>
+                    {progress?.phase && (
+                      <>
+                        <span className="text-gray-700">·</span>
+                        <span className="text-neon-cyan font-medium truncate">{progress.phase}</span>
+                      </>
+                    )}
                   </>
                 )}
               </div>
-              <span className="text-neon-red font-mono font-bold tabular-nums ml-2">{pct}%</span>
+              <span className={`font-mono font-bold tabular-nums ml-2 ${
+                isQueued ? 'text-amber-400' : 'text-neon-red'
+              }`}>
+                {isQueued ? '—' : `${pct}%`}
+              </span>
             </div>
 
             {/* Message + detail */}
@@ -226,12 +250,13 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
 export default function GenerationProgressBar() {
   const { activeJobs, clearAll, removeJob } = useGeneration()
 
-  // Show only jobs that are ACTUALLY running. Queued jobs (e.g. reassemble
-  // jobs waiting for the global queue consumer) have no progress yet — they
-  // would render dead bars at 0% that never resolve. Jobs without a status
-  // (optimistically added when the user presses "Generar", before the next
-  // API poll) are kept visible so dispatch feedback stays instant.
-  const visibleJobs = activeJobs.filter(j => j.status !== 'queued')
+  // Show ALL active jobs, including queued ones. Queued jobs (waiting for the
+  // global queue consumer) render in an explicit "En cola" state instead of
+  // being hidden — the user must see that a generation is waiting its turn.
+  // Jobs without a status (optimistically added when the user presses
+  // "Generar", before the next API poll) are also kept so dispatch feedback
+  // stays instant.
+  const visibleJobs = activeJobs
 
   if (visibleJobs.length === 0) {
     return null
@@ -244,7 +269,7 @@ export default function GenerationProgressBar() {
         <div className="flex items-center gap-1.5 px-3 py-1.5 bg-dark-700/90 backdrop-blur border-t border-surface-border/50">
           <Layers size={12} className="text-neon-gold" />
           <span className="text-[10px] text-gray-400 font-medium">
-            {visibleJobs.length} generaciones activas
+            {visibleJobs.length} generaciones en curso
           </span>
           <button
             onClick={clearAll}
