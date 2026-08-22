@@ -7,6 +7,7 @@ Rate limit: 200 req/h. Handles 429 with Retry-After header.
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -116,6 +117,8 @@ class PexelsVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=(best.get("width", 0), best.get("height", 0)),
                 provider=self.name,
+                page_url=video.get("url", "") or "",
+                tags=self._slug_tags(video.get("url", "") or ""),
             )
 
         logger.info("Pexels: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
@@ -181,6 +184,8 @@ class PexelsVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=(best.get("width", 0), best.get("height", 0)),
                 provider=self.name,
+                page_url=video.get("url", "") or "",
+                tags=self._slug_tags(video.get("url", "") or ""),
             ))
 
         # total_results includes all pages; per_page * max_accessible_pages
@@ -245,6 +250,32 @@ class PexelsVideoProvider(BaseVideoProvider):
         except requests.RequestException as exc:
             logger.error("Pexels API request failed: %s", exc)
             return None
+
+    @staticmethod
+    def _slug_tags(page_url: str) -> list[str]:
+        """Derive content tags from a Pexels video page URL slug.
+
+        Pexels Videos does not expose tags or titles in the API, but the
+        page URL embeds a descriptive slug:
+        ``https://www.pexels.com/video/aerial-view-of-city-123456/`` →
+        ``["aerial", "view", "city"]`` (id suffix and stop-ish short words
+        are dropped).
+        """
+        if not page_url:
+            return []
+        m = re.search(r"/video/([^/?#]+)", page_url)
+        if not m:
+            return []
+        slug = re.sub(r"-\d+$", "", m.group(1))
+        words = [w for w in re.split(r"[-\s]+", slug.lower()) if w and len(w) >= 3]
+        # dedupe preserving order
+        seen = set()
+        result = []
+        for w in words:
+            if w not in seen:
+                seen.add(w)
+                result.append(w)
+        return result
 
     @staticmethod
     def _pick_best_quality(

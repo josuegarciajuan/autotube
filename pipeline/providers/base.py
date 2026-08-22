@@ -16,12 +16,20 @@ class VideoAsset:
         duration: Video duration in seconds.
         resolution: (width, height) in pixels.
         provider: Name of the provider that sourced this asset.
+        title: Optional human-readable title of the clip (may be empty).
+        tags: Optional keyword tags describing the clip content. Used for
+              relevance/anachronism filtering before download.
+        page_url: Optional landing page URL of the clip (e.g. Pexels video
+                  page). Words in the page URL slug are used as derived tags.
     """
     url: str
     file_path: Path
     duration: float
     resolution: tuple  # (width, height)
     provider: str
+    title: str = ""
+    tags: list[str] = field(default_factory=list)
+    page_url: str = ""
 
 
 @dataclass
