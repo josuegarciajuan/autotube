@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import random
+import re
 import time
 from pathlib import Path
 
@@ -447,6 +448,7 @@ class MediaFetcher:
             query=block_query,
             theme_keywords=ctx.theme_keywords_en if ctx else None,
             theme_ctx=ctx,  # v8: pass full ThemeContext for richer anchoring
+            era_enabled=self._media_strategy.get("era_anchor_enabled", True),
         )
         logger.info("Built search query: %r (%d chars)", query, len(query))
 
@@ -2277,6 +2279,37 @@ class MediaFetcher:
     # ── Query pool builder ──────────────────────────────────────
 
     @staticmethod
+    def _theme_word_set(ctx) -> set[str]:
+        """All theme-related words of a ThemeContext (keywords, motifs,
+        primary subject, genre, era). Used to separate narrative keywords
+        from theme anchoring in queries and relevance scoring."""
+        theme_words: set[str] = set()
+        if not ctx:
+            return theme_words
+        if getattr(ctx, "theme_keywords_en", None):
+            for kw in ctx.theme_keywords_en:
+                for w in str(kw).lower().split():
+                    theme_words.add(w)
+        if getattr(ctx, "key_motifs", None):
+            for motif in ctx.key_motifs:
+                for w in str(motif).lower().split():
+                    theme_words.add(w)
+        if getattr(ctx, "primary_subject", None):
+            for w in ctx.primary_subject.lower().split():
+                theme_words.add(w)
+        if getattr(ctx, "genre", None) and ctx.genre != "documental":
+            for w in ctx.genre.lower().replace("_", " ").split():
+                theme_words.add(w)
+        era_decade = getattr(ctx, "era_decade", "") or ""
+        era = getattr(ctx, "era", "") or ""
+        if era_decade.lower() not in ("atemporal", "presente", ""):
+            theme_words.add(era_decade.lower())
+        elif era.lower() not in ("atemporal", "presente", ""):
+            for w in era.lower().replace("_", " ").split():
+                theme_words.add(w)
+        return theme_words
+
+    @staticmethod
     def _extract_narrative_keywords(query: str, ctx) -> str:
         """Extract only the narrative keywords from a search query.
 
@@ -2293,28 +2326,9 @@ class MediaFetcher:
         if not query:
             return ""
 
-        # Gather all theme-related words to strip
-        theme_words: set[str] = set()
-        if ctx:
-            if ctx.theme_keywords_en:
-                for kw in ctx.theme_keywords_en:
-                    for w in kw.lower().split():
-                        theme_words.add(w)
-            if ctx.key_motifs:
-                for motif in ctx.key_motifs:
-                    for w in motif.lower().split():
-                        theme_words.add(w)
-            if ctx.primary_subject:
-                for w in ctx.primary_subject.lower().split():
-                    theme_words.add(w)
-            if ctx.genre and ctx.genre != "documental":
-                for w in ctx.genre.lower().replace("_", " ").split():
-                    theme_words.add(w)
-            if ctx.era_decade and ctx.era_decade not in ("atemporal", "presente", ""):
-                theme_words.add(ctx.era_decade.lower())
-            elif ctx.era and ctx.era not in ("atemporal", "presente", ""):
-                for w in ctx.era.lower().replace("_", " ").split():
-                    theme_words.add(w)
+        # Gather all theme-related words to strip (shared helper so the
+        # relevance scorer sees the exact same theme vocabulary)
+        theme_words = MediaFetcher._theme_word_set(ctx)
 
         # Separate narrative words from theme/style words
         style_words = {
@@ -2323,7 +2337,7 @@ class MediaFetcher:
             "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
             "overhead", "style", "film", "video", "stock", "vertical",
             "establishing", "angle", "footage", "composition", "documentary",
-            "historical", "depth", "field", "color", "grading", "grade",
+            "depth", "field", "color", "grading", "grade",
             "wide", "close", "up", "detail", "low", "distant", "view",
             "alternative",
         }
@@ -2382,6 +2396,25 @@ class MediaFetcher:
         narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
         if narrative_heavy and narrative_heavy != base and narrative_heavy.strip():
             pool.append(narrative_heavy.strip())
+
+        # 2b. Era-anchored variant (HIGH priority for historical scenes).
+        #     Guarantees the FIRST search of a historical scene carries the
+        #     era anchor, even though the exhaustive path uses pool queries
+        #     directly (they never pass through _build_search_query).
+        era_phrase = None
+        if ctx and self._media_strategy.get("era_anchor_enabled", True):
+            from pipeline.era_terms import era_anchor
+            try:
+                era_phrase = era_anchor(ctx.era_decade, ctx.era)
+            except Exception:
+                era_phrase = None
+        if era_phrase and base:
+            v_narr = f"{narrative_heavy} {era_phrase}" if narrative_heavy else None
+            v_base = f"{base} {era_phrase}"
+            if v_narr and len(v_narr) <= 100 and v_narr not in pool:
+                pool.append(v_narr)
+            elif len(v_base) <= 100 and v_base not in pool:
+                pool.append(v_base)
 
         # 3. Base + directional variations (reduced to 3 from 5 — keep the
         #    most distinct ones; wide/close/distant have most visual variety)
@@ -2450,6 +2483,233 @@ class MediaFetcher:
 
         return result
 
+    # ── Relevance & anachronism filtering (v9) ─────────────────
+
+    def _candidate_text(self, candidate: dict) -> str:
+        """Join candidate metadata (tags + title + page-url slug words) into
+        lowercase text for relevance/anachronism matching. Empty when the
+        provider exposed no metadata."""
+        parts: list[str] = []
+        tags = candidate.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",")]
+        for t in tags:
+            if t and str(t).strip():
+                parts.append(str(t).strip())
+        title = candidate.get("title") or ""
+        if title and str(title).strip():
+            parts.append(str(title).strip())
+        page_url = candidate.get("page_url") or ""
+        if page_url:
+            # Pexels-style URLs embed a descriptive slug:
+            # /video/aerial-view-of-city-123456/ → "aerial view city"
+            m = re.search(r"/video/([^/?#]+)", str(page_url))
+            if m:
+                slug = re.sub(r"-\d+$", "", m.group(1))
+                parts.extend(w for w in re.split(r"[-\s]+", slug.lower()) if w)
+        return " ".join(parts).lower()
+
+    def _scene_narrative_keywords(self, scene: dict, ctx) -> list[str]:
+        """Narrative keywords of a scene: search_query_en minus style words
+        and theme keywords (same vocabulary as _extract_narrative_keywords)."""
+        query = scene.get("search_query_en", "") or ""
+        if not query:
+            return []
+        theme_words = MediaFetcher._theme_word_set(ctx)
+        kws: list[str] = []
+        for w in query.split():
+            wl = w.lower().strip(",.!?;:")
+            if not wl:
+                continue
+            if wl in MediaFetcher._STYLE_WORDS:
+                continue
+            if wl in theme_words:
+                continue
+            kws.append(wl)
+        return kws
+
+    def _is_anachronistic(self, candidate: dict, ctx) -> bool:
+        """True when the scene is historical (era anchor resolved) and the
+        candidate metadata contains modern/anachronistic terms."""
+        if not ctx:
+            return False
+        from pipeline.era_terms import anachronism_hits, era_anchor
+        try:
+            if era_anchor(ctx.era_decade, ctx.era) is None:
+                return False  # not a historical scene → no anachronism check
+        except Exception:
+            return False
+        text = self._candidate_text(candidate)
+        if not text:
+            return False
+        return bool(anachronism_hits(text))
+
+    def _relevance_score(self, candidate: dict, scene: dict, ctx) -> float:
+        """Score how well a candidate matches the scene's narrative keywords.
+
+        Base: +1 per narrative keyword found in candidate metadata (tags /
+        title / page-url slug). Strong penalty: -3 per anachronistic term
+        found in a historical scene. Returns a float >= 0; candidates with
+        no metadata score 0 (caller treats that as "unknown", not "bad").
+        """
+        kws = self._scene_narrative_keywords(scene, ctx)
+        if not kws:
+            return 0.0
+        text = self._candidate_text(candidate)
+        if not text:
+            return 0.0
+
+        text_tokens = set(text.split())
+        found = 0
+        for kw in kws:
+            if " " in kw:
+                if kw in text:
+                    found += 1
+            elif kw in text_tokens:
+                found += 1
+
+        score = float(found)
+
+        if found > 0 and self._is_anachronistic(candidate, ctx):
+            from pipeline.era_terms import anachronism_hits
+            try:
+                penalty = 3.0 * len(anachronism_hits(text))
+            except Exception:
+                penalty = 3.0
+            score -= penalty
+
+        return max(0.0, score)
+
+    def _llm_relevance_filter(self, candidates: list[dict], scene: dict) -> list[dict] | None:
+        """Reorder up to 8 candidates with ONE LLM call so the best match
+        comes first. Returns the reordered list, or None on any failure
+        (caller keeps the original order — never blocks the pipeline)."""
+        try:
+            from config.llm_client import create_llm_client
+            from config.llm_helpers import llm_json_call_or_fallback
+            from config.settings import LLM_MODEL_CREATIVE
+        except Exception:
+            return None
+
+        numbered = []
+        for i, c in enumerate(candidates[:8]):
+            tags = c.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",")]
+            tags_txt = ", ".join(str(t) for t in tags[:8]) if tags else "(sin tags)"
+            title = str(c.get("title") or "")
+            page_url = str(c.get("page_url") or "")[:90]
+            numbered.append(
+                f"{i}. tags: {tags_txt} | título: {title} | url: {page_url}"
+            )
+
+        scene_text = (str(scene.get("texto", "")) or "")[:400]
+        user_prompt = (
+            "Escena de un documental (texto narrado):\n"
+            f'"{scene_text}"\n\n'
+            "Candidatos de stock (índice y metadatos):\n"
+            + "\n".join(numbered)
+            + "\n\nElige el índice del clip que MEJOR encaja visualmente con la "
+              "escena, evitando anacronismos (material moderno en escenas "
+              "históricas). "
+              'Responde SOLO con JSON: {"best_index": N}'
+        )
+
+        try:
+            client = create_llm_client(timeout=45.0, max_retries=1)
+            data = llm_json_call_or_fallback(
+                client,
+                fallback={},
+                max_retries=1,
+                retry_delay=1.0,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": (
+                        "Eres un director de arte de stock footage. Eliges el clip "
+                        "más coherente con la narración de la escena."
+                    )},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=20,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            return None
+
+        best_index = None
+        try:
+            best_index = int(data.get("best_index"))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+        if not (0 <= best_index < len(candidates)):
+            return None
+
+        ordered = [candidates[best_index]]
+        ordered.extend(
+            c for i, c in enumerate(candidates) if i != best_index
+        )
+        logger.info(
+            "LLM relevance filter: best candidate %d/%d for scene %r",
+            best_index, len(candidates), (scene.get("search_query_en", "") or "")[:60],
+        )
+        return ordered
+
+    def _try_download_best_candidate(
+        self, asset_candidates: list[dict], provider, scene: dict, ctx,
+    ) -> dict | None:
+        """Score one page of candidates by narrative relevance (era-aware),
+        skip anachronistic ones, optionally refine with an LLM call, and
+        download the best non-duplicate that succeeds.
+
+        Defensive by design: candidates without metadata score 0 and are
+        still downloadable (conservative fallback — never blocks a page).
+        """
+        scored: list[tuple[float, dict]] = []
+        for candidate in asset_candidates:
+            if self._is_asset_duplicate(candidate):
+                continue
+            if self._is_anachronistic(candidate, ctx):
+                text = self._candidate_text(candidate)
+                logger.info(
+                    "Skipping anachronistic candidate for historical scene: %s",
+                    text[:100] or candidate.get("url", "")[:60],
+                )
+                continue
+            score = self._relevance_score(candidate, scene, ctx)
+            scored.append((score, candidate))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        # Prefer candidates that clear the relevance threshold; if none do
+        # (e.g. no metadata), fall back to the full page (current behavior).
+        min_overlap = float(self._media_strategy.get("relevance_min_overlap", 1))
+        if scored[0][0] >= min_overlap:
+            ordered = [c for s, c in scored if s >= min_overlap]
+        else:
+            ordered = [c for _, c in scored]
+
+        # Optional LLM refinement (opt-in per channel via media strategy)
+        if (
+            self._media_strategy.get("llm_relevance_filter", False)
+            and len(ordered) >= 2
+        ):
+            reordered = self._llm_relevance_filter(ordered, scene)
+            if reordered:
+                ordered = reordered
+
+        for candidate in ordered:
+            downloaded = self._download_candidate(provider, candidate)
+            if downloaded and downloaded.get("path"):
+                self._record_asset_used(candidate)
+                self._record_asset_for_history(downloaded)
+                return downloaded
+        return None
+
     # ── Exhaustive asset search with cross-rotation + pagination ─
 
     def _fetch_asset_exhaustive(
@@ -2488,14 +2748,14 @@ class MediaFetcher:
                     if not asset_candidates:
                         break  # no more results from this provider
 
-                    for candidate in asset_candidates:
-                        if not self._is_asset_duplicate(candidate):
-                            # Download the asset
-                            downloaded = self._download_candidate(provider, candidate)
-                            if downloaded and downloaded.get("path"):
-                                self._record_asset_used(candidate)
-                                self._record_asset_for_history(downloaded)
-                                return downloaded
+                    # Relevance-aware download: skips anachronistic candidates,
+                    # prefers high-scoring ones, falls back conservatively when
+                    # providers expose no metadata (v9).
+                    downloaded = self._try_download_best_candidate(
+                        asset_candidates, provider, scene, ctx,
+                    )
+                    if downloaded:
+                        return downloaded
 
                     # Check if there are more pages
                     total = asset_candidates[0].get("_total_available", 0)
@@ -2521,13 +2781,11 @@ class MediaFetcher:
                         )
                         if not asset_candidates:
                             break
-                        for candidate in asset_candidates:
-                            if not self._is_asset_duplicate(candidate):
-                                downloaded = self._download_candidate(provider, candidate)
-                                if downloaded and downloaded.get("path"):
-                                    self._record_asset_used(candidate)
-                                    self._record_asset_for_history(downloaded)
-                                    return downloaded
+                        downloaded = self._try_download_best_candidate(
+                            asset_candidates, provider, scene, ctx,
+                        )
+                        if downloaded:
+                            return downloaded
                         total = asset_candidates[0].get("_total_available", 0)
                         per_page = asset_candidates[0].get("_per_page", 20)
                         if total <= 0 or page * per_page >= total:
@@ -2632,6 +2890,11 @@ class MediaFetcher:
                     "duration": asset.duration,
                     "source": pname,
                     "provider": pname,
+                    # Metadata for relevance/anachronism filtering (v9).
+                    # Providers that don't expose it leave empty defaults.
+                    "title": getattr(asset, "title", ""),
+                    "tags": getattr(asset, "tags", []) or [],
+                    "page_url": getattr(asset, "page_url", ""),
                     "_total_available": sp.total_available,
                     "_per_page": sp.per_page,
                 })
@@ -3200,7 +3463,10 @@ class MediaFetcher:
         "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
         "overhead", "style", "film", "video", "stock", "vertical",
         "establishing", "angle", "footage", "composition", "documentary",
-        "historical", "depth", "field", "color", "grading", "grade",
+        # NOTE: "historical" is intentionally NOT a style word anymore —
+        # it is a real content signal (era anchor) that must survive
+        # query building so historical scenes stay period-anchored.
+        "depth", "field", "color", "grading", "grade",
     }
 
     @staticmethod
@@ -3210,16 +3476,21 @@ class MediaFetcher:
         theme_keywords: list[str] | None = None,
         theme_ctx = None,  # ThemeContext object (v8 — full context)
         max_len: int = 100,
+        era_enabled: bool = True,
     ) -> str:
         """Build a search query that fuses scene-specific narrative content with
         video-level theme context.
 
-        Strategy (v8 — full ThemeContext fusion):
+        Strategy (v9 — full ThemeContext fusion + era anchoring):
         1. Extract scene narrative keywords from the LLM query (primary subject)
-        2. Add primary_subject / genre / era_decade from ThemeContext as contextual anchors
-        3. Add 1-2 theme keywords as additional anchors (dedup with anchors above)
-        4. Filter out forbidden elements from the final query
-        5. Fit all within ``max_len`` chars, trimming from lowest priority.
+        2. Resolve a HIGH-priority era anchor (e.g. "17th century wooden sailing
+           ship") from ThemeContext.era_decade/era when the scene is historical.
+           Its budget is reserved BEFORE the rest is split, so it is never the
+           first thing trimmed.
+        3. Add primary_subject / genre from ThemeContext as contextual anchors
+        4. Add 1-2 theme keywords as additional anchors (dedup with anchors above)
+        5. Filter out forbidden elements from the final query
+        6. Fit all within ``max_len`` chars, trimming from lowest priority.
 
         The scene narrative content always leads the query so stock APIs weight it
         higher. Theme context fields serve as contextual anchors.
@@ -3237,9 +3508,21 @@ class MediaFetcher:
         if not scene_keywords and not has_theme_data:
             return query.strip()[:max_len]
 
-        # 2. Gather contextual anchors from ThemeContext (v8)
-        # Build anchor keywords list: [primary_subject keywords, era_decade, genre_keywords]
-        # These are HIGHER priority than theme_keywords because they define the visual world
+        # 2. Era anchor — HIGH priority for historical scenes (v9).
+        #    Resolved deterministically from the ThemeContext era fields
+        #    (era_terms.era_anchor). Returns None for timeless/present/future
+        #    eras, in which case behavior stays era-agnostic.
+        era_phrase: str | None = None
+        if era_enabled and theme_ctx:
+            from pipeline.era_terms import era_anchor
+            try:
+                era_phrase = era_anchor(theme_ctx.era_decade, theme_ctx.era)
+            except Exception:
+                era_phrase = None
+
+        # 2b. Gather contextual anchors from ThemeContext (primary_subject / genre).
+        #     Era is NOT added here when era_phrase resolved (it is appended
+        #     separately with reserved budget).
         ctx_anchors: list[str] = []
         if theme_ctx:
             # Primary subject keywords (e.g. "ancient Egyptian civilization")
@@ -3247,14 +3530,15 @@ class MediaFetcher:
                 ps_words = [w for w in theme_ctx.primary_subject.split()
                            if w.lower() not in MediaFetcher._STYLE_WORDS]
                 ctx_anchors.extend(ps_words[:3])
-            # Era/decade as anchor (only if meaningful, not "atemporal" or "presente")
-            if theme_ctx.era_decade and theme_ctx.era_decade.lower() not in ("atemporal", "presente", ""):
-                ctx_anchors.append(theme_ctx.era_decade)
-            elif theme_ctx.era and theme_ctx.era.lower() not in ("atemporal", "presente", ""):
-                # era field might be like "siglo_XIII" — extract meaningful part
-                era_clean = theme_ctx.era.replace("_", " ").strip()
-                if era_clean and len(era_clean) <= 15:
-                    ctx_anchors.extend(era_clean.split()[:2])
+            # Era/decade as low-priority anchor ONLY when no era_phrase resolved
+            if not era_phrase:
+                if theme_ctx.era_decade and theme_ctx.era_decade.lower() not in ("atemporal", "presente", ""):
+                    ctx_anchors.append(theme_ctx.era_decade)
+                elif theme_ctx.era and theme_ctx.era.lower() not in ("atemporal", "presente", ""):
+                    # era field might be like "siglo_XIII" — extract meaningful part
+                    era_clean = theme_ctx.era.replace("_", " ").strip()
+                    if era_clean and len(era_clean) <= 15:
+                        ctx_anchors.extend(era_clean.split()[:2])
             # Genre as anchor (only if not generic "documental")
             if theme_ctx.genre and theme_ctx.genre.lower() not in ("documental", "documentary", ""):
                 genre_clean = theme_ctx.genre.replace("_", " ").strip()
@@ -3263,15 +3547,24 @@ class MediaFetcher:
         # Dedup ctx_anchors against scene part (to be done after scene_part is built)
         ctx_anchors = list(dict.fromkeys(ctx_anchors))  # preserve order, remove dups
 
-        # 3. Allocate character budget
-        #    scene: ~60% (narrative subject — the scene's primary visual content)
-        #    ctx_anchors: ~15% (primary_subject / era / genre — defines visual world)
+        # 3. Allocate character budget — the era anchor gets a RESERVED slice
+        #    first (enough for phrases like "17th century wooden sailing ship"
+        #    up to min(35, max(20, 35% of max_len)) chars) so it always fits
+        #    and is never trimmed before the scene content.
+        era_budget = 0
+        if era_phrase:
+            era_budget = min(max_len, len(era_phrase) + 1)
+            era_budget = min(era_budget, max(20, int(max_len * 0.35)))
+        remaining = max_len - era_budget
+
+        #    scene: ~60% of remaining (narrative subject — primary visual content)
+        #    ctx_anchors: ~15% (primary_subject / genre — defines visual world)
         #    theme: ~15% (theme_keywords_en — complementary anchors)
         #    variation: ~10% (visual diversity — lowest priority, dropped first)
-        variation_budget = 12 if variation else 0
-        theme_budget = min(15, max_len - variation_budget)
-        ctx_budget = min(15, max_len - variation_budget - theme_budget)
-        scene_budget = max_len - variation_budget - ctx_budget - theme_budget
+        variation_budget = min(12 if variation else 0, max(0, remaining))
+        theme_budget = min(15, max(0, remaining - variation_budget))
+        ctx_budget = min(15, max(0, remaining - variation_budget - theme_budget))
+        scene_budget = max(0, remaining - variation_budget - ctx_budget - theme_budget)
 
         # 4. Build scene narrative part (fit within scene_budget chars)
         scene_part = ""
@@ -3286,7 +3579,7 @@ class MediaFetcher:
                 scene_part = scene_keywords[0][:scene_budget]  # first word, truncated
             elif has_theme_data:
                 # No scene keywords — build from context anchors + theme keywords instead
-                remaining = max_len - (len(variation) + 1 if variation else 0)
+                remaining = max_len - era_budget - (len(variation) + 1 if variation else 0)
                 all_anchors = ctx_anchors[:2] + (theme_keywords or [])
                 for kw in all_anchors[:3]:
                     candidate = f"{scene_part} {kw}".strip()
@@ -3297,12 +3590,12 @@ class MediaFetcher:
                 ctx_anchors = []  # already consumed
                 theme_keywords = None  # already consumed
 
-        # 5. Build ctx_anchor part (primary_subject/era/genre — max 2 keywords, dedup)
+        # 5. Build ctx_anchor part (primary_subject/genre — max 2 keywords, dedup)
         ctx_part = ""
         if ctx_anchors:
             scene_lower = scene_part.lower()
             fresh_anchors = [a for a in ctx_anchors[:2] if a.lower() not in scene_lower]
-            remaining = max_len - len(scene_part) - len(variation if variation else "") - 1
+            remaining = max_len - len(scene_part) - era_budget - len(variation if variation else "") - 1
             for kw in fresh_anchors:
                 candidate = f"{ctx_part} {kw}".strip()
                 if len(candidate) <= max(remaining, 8):
@@ -3318,7 +3611,7 @@ class MediaFetcher:
                 kw for kw in theme_keywords[:2]
                 if kw.lower() not in scene_and_ctx
             ]
-            remaining = max_len - len(scene_part) - len(ctx_part)
+            remaining = max_len - len(scene_part) - era_budget - len(ctx_part)
             if variation:
                 remaining -= (len(variation) + 1)  # space + variation
             for kw in fresh_keywords:
@@ -3328,8 +3621,17 @@ class MediaFetcher:
                 else:
                     break
 
-        # 7. Assemble: scene (primary) + ctx_anchor (visual world) + variation (diversity) + theme (anchor)
+        # 7. Assemble: scene (primary) + era anchor (HIGH priority, after subject)
+        #    + ctx_anchor (visual world) + variation (diversity) + theme (anchor)
         parts = [scene_part]
+        era_used = False
+        if era_phrase:
+            # Avoid duplicating an era anchor the LLM query already carries
+            # (e.g. "17th century wooden sailing ship arctic ice crew")
+            anchor_prefix = " ".join(era_phrase.split()[:2])
+            if anchor_prefix and anchor_prefix not in scene_part.lower():
+                parts.append(era_phrase)
+                era_used = True
         if ctx_part:
             parts.append(ctx_part)
         if variation:
@@ -3339,7 +3641,16 @@ class MediaFetcher:
 
         result = " ".join(parts)
 
+        # 7b. Historical guard: append "historical" at the end for historical
+        #     eras whose anchor does not already carry it, if the query has room.
+        if era_used and "historical" not in era_phrase.lower():
+            guard_candidate = f"{result} historical"
+            if len(guard_candidate) <= max_len:
+                result = guard_candidate
+
         # 8. Final safety: if still over budget, trim from right at last complete word
+        #    (trims variation/theme first — the era anchor is protected by its
+        #    reserved budget and sits before them).
         if len(result) > max_len:
             result = result[:max_len].rsplit(" ", 1)[0]
 
