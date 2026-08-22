@@ -20,15 +20,18 @@ export interface ProgressData {
 const MAX_RECONNECT_DELAY = 30000; // 30s max between reconnect attempts
 const INITIAL_RECONNECT_DELAY = 1000; // 1s first attempt
 const PING_INTERVAL = 25000;
+const STALE_AFTER_MS = 20000; // 20s without WS message → treat as stale, re-enable poll
 
 export function useGenerationProgress(jobId: number | null) {
   const [progress, setProgress] = useState<ProgressData | null>(null);
   const [connected, setConnected] = useState(false);
+  const [stale, setStale] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval>>();
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
   const attemptRef = useRef(0);
   const mountedRef = useRef(true);
+  const lastUpdateRef = useRef<number>(0);
 
   const connect = useCallback(() => {
     if (!jobId || !mountedRef.current) return;
@@ -45,6 +48,8 @@ export function useGenerationProgress(jobId: number | null) {
       if (!mountedRef.current) { ws.close(); return; }
       console.log('[Autotube WS] Connected');
       setConnected(true);
+      setStale(false);
+      lastUpdateRef.current = Date.now();
       attemptRef.current = 0; // reset backoff on successful connection
     };
 
@@ -78,6 +83,8 @@ export function useGenerationProgress(jobId: number | null) {
       try {
         const data = JSON.parse(event.data) as ProgressData;
         setProgress(data);
+        setStale(false);
+        lastUpdateRef.current = Date.now();
         if (data.status === 'completed' || data.status === 'failed') {
           console.log(`[Autotube WS] Job ${data.job_id} ${data.status}, closing`);
           ws.close(1000);
@@ -94,6 +101,7 @@ export function useGenerationProgress(jobId: number | null) {
     if (!jobId) {
       setProgress(null);
       setConnected(false);
+      setStale(false);
       return;
     }
 
@@ -117,6 +125,22 @@ export function useGenerationProgress(jobId: number | null) {
       }
     };
   }, [jobId, connect]);
+
+  // ── Staleness watchdog (separate effect so it doesn't reset the WS) ──
+  // If the WS stays open but stops delivering messages (API restarted and
+  // the monitor task died), the bar would freeze. After STALE_AFTER_MS of
+  // silence we flip `stale` so the polling fallback re-engages.
+  useEffect(() => {
+    if (!jobId || !connected) return;
+    const watchdog = setInterval(() => {
+      if (mountedRef.current && lastUpdateRef.current > 0
+          && Date.now() - lastUpdateRef.current > STALE_AFTER_MS) {
+        console.warn('[Autotube WS] No message for >20s — switching to poll fallback');
+        setStale(true);
+      }
+    }, 5000);
+    return () => clearInterval(watchdog);
+  }, [jobId, connected]);
 
   // ── Polling fallback: always do an initial fetch, then poll every 3s when WS is disconnected ──
   // v2.4.1: added max retries to prevent infinite polling on zombie jobs
@@ -147,7 +171,7 @@ export function useGenerationProgress(jobId: number | null) {
             });
             return;
           }
-          if (!connected && pollCount < MAX_POLLS) {
+          if ((!connected || stale) && pollCount < MAX_POLLS) {
             pollTimer = setTimeout(poll, 3000);
           }
           return;
@@ -159,6 +183,10 @@ export function useGenerationProgress(jobId: number | null) {
           progress: job.progress ?? 0,
           phase: job.phase ?? '',
           message: job.error_msg ? `Error: ${job.error_msg}` : (job.phase ? `Fase: ${job.phase}` : 'Generando...'),
+          sub_phase: job.sub_phase,
+          detail: job.detail,
+          current: job.progress_current ?? undefined,
+          total: job.progress_total ?? undefined,
         };
         if (active) {
           setProgress(prev => {
@@ -166,6 +194,8 @@ export function useGenerationProgress(jobId: number | null) {
             if (!prev || data.progress >= (prev.progress ?? 0)) return data;
             return prev;
           });
+          // A live poll response proves we're getting data → not stale anymore
+          lastUpdateRef.current = Date.now();
         }
         if (data.progress > 0) lastNonZeroProgress = true;
         if (data.status === 'completed' || data.status === 'failed') {
@@ -186,8 +216,8 @@ export function useGenerationProgress(jobId: number | null) {
         // ignore network errors, retry only if disconnected and not exhausted
         if (!active || pollCount >= MAX_POLLS) return;
       }
-      // Only schedule next poll if WS is still disconnected and we haven't hit max
-      if (active && !connected && pollCount < MAX_POLLS) {
+      // Only schedule next poll if WS is disconnected/stale and we haven't hit max
+      if (active && (!connected || stale) && pollCount < MAX_POLLS) {
         pollTimer = setTimeout(poll, 3000);
       }
     }
@@ -198,13 +228,15 @@ export function useGenerationProgress(jobId: number | null) {
       active = false;
       clearTimeout(pollTimer);
     };
-  }, [jobId, connected]);
+  }, [jobId, connected, stale]);
 
   const reset = useCallback(() => {
     setProgress(null);
     setConnected(false);
+    setStale(false);
     attemptRef.current = 0;
+    lastUpdateRef.current = 0;
   }, []);
 
-  return { progress, connected, reset };
+  return { progress, connected, stale, reset };
 }
