@@ -204,14 +204,17 @@ GOOGLE_NEWS_QUERIES = [
 # Visual Style
 IMAGE_STYLE_MODIFIERS = (
     "cinematic documentary photography, natural lighting, wide shot, 16:9, "
-    "professional photography, dramatic atmosphere, expedition landscape"
+    "professional photography, dramatic atmosphere, expedition landscape, "
+    "sharp crisp focus, vivid colour, high contrast, dynamic dramatic skies, "
+    "bokeh foreground detail"
 )
 AI_VISUAL_COLOR_GRADING = (
     "expedition colour grade, vivid alpine blue and storm teal, safety-orange "
-    "accents, dramatic but readable terrain detail"
+    "accents, dramatic but readable terrain detail, bright luminous highlights, "
+    "high contrast"
 )
 COLOR_PALETTE = {
-    "primary": (15, 40, 65), "secondary": (18, 28, 50), "accent": (255, 92, 0),
+    "primary": (35, 90, 130), "secondary": (18, 28, 50), "accent": (255, 92, 0),
     "text": (235, 240, 245), "text_shadow": (4, 6, 12), "tertiary": (35, 45, 55),
     "warning": (255, 92, 0),
 }

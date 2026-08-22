@@ -271,11 +271,13 @@ GOOGLE_NEWS_QUERIES = [
 IMAGE_STYLE_MODIFIERS = (
     "cinematic 16:9, warm golden hour photography, atmospheric lighting, "
     "professional documentary photography, mysterious and solemn mood, "
-    "earthy tones, dust particles in light rays"
+    "earthy tones, dust particles in light rays, sharp crisp detail, "
+    "vivid warm colours, high contrast, shallow depth of field with bokeh"
 )
 AI_VISUAL_COLOR_GRADING = (
     "sun-baked archaeological colour grade, vivid sandstone gold, terracotta "
-    "accents, deep umber shadows with readable ancient detail"
+    "accents, bright luminous highlights with readable ancient detail, "
+    "rich contrast, warm saturated tones"
 )
 COLOR_PALETTE = {
     "primary": (194, 154, 75), "secondary": (62, 38, 22), "accent": (168, 104, 52),

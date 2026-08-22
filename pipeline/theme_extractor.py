@@ -31,8 +31,8 @@ class ThemeContext:
 
     # ── NEW FIELDS (v2) ────────────────────────────────────
     primary_subject: str = ""            # e.g. "human mind", "ancient ruins"
-    mood: str = "misterioso"             # "misterioso", "esperanzador", "perturbador"
-    lighting: str = "claroscuro"         # "claroscuro", "luz cenital", "luz dorada", "neón frío"
+    mood: str = "épico"                  # "misterioso", "esperanzador", "perturbador", "épico"
+    lighting: str = "luz dorada"         # "claroscuro", "luz cenital", "luz dorada", "neón frío"
     composition: str = "primeros planos" # "primeros planos", "planos generales", "simetría"
     era_decade: str = ""                 # Normalized: "1980s" instead of "los años ochenta"
 
@@ -71,7 +71,9 @@ class ThemeContext:
         parts.extend([
             "cinematic photography", "16:9 aspect ratio",
             "professional quality", "8K, high resolution, sharp focus, "
-            "intricate detail", "no text", "no watermark",
+            "intricate detail", "vivid saturated colour, high contrast, "
+            "dramatic cinematic lighting, bokeh depth of field",
+            "no text", "no watermark",
         ])
         return ", ".join(parts)
 
@@ -101,7 +103,7 @@ Determina:
 7. color_palette: paleta de colores sugerida con primary, secondary, accent en hex
 8. primary_subject: el sujeto o tema visual principal del video (ej: "human mind", "ancient ruins", "cosmic void")
 9. mood: el estado de ánimo predominante — uno de: "misterioso", "esperanzador", "perturbador", "melancólico", "épico", "sereno", "ominoso"
-10. lighting: estilo de iluminación — uno de: "claroscuro", "luz cenital", "luz dorada", "neón frío", "luz natural difusa", "contraluz", "penumbra"
+10. lighting: estilo de iluminación — uno de: "luz dorada", "luz natural difusa", "luz cenital", "contraluz", "neón frío", "claroscuro", "penumbra". Prefiere luces brillantes y vívidas (luz dorada, luz natural difusa) salvo que el contenido exija deliberadamente oscuridad.
 11. composition: tipo de encuadre preferido — uno de: "primeros planos", "planos generales", "simetría", "regla de tercios", "ángulo holandés", "plano detalle"
 12. era_decade: década normalizada (ej: "1980s", "1940s", "medieval", "futuro cercano") — NUNCA uses frases como "los años ochenta", siempre en formato "1980s"
 
@@ -140,13 +142,13 @@ class ThemeExtractor:
         _DEFAULT_FALLBACK_DATA = {
             "genre": "documental",
             "era": "atemporal",
-            "visual_style": "oscuro_documental",
+            "visual_style": "cine_dramático",
             "key_motifs": [],
             "forbidden_elements": [],
             "theme_keywords_en": [],
             "primary_subject": "",
-            "mood": "misterioso",
-            "lighting": "claroscuro",
+            "mood": "épico",
+            "lighting": "luz dorada",
             "composition": "primeros planos",
             "era_decade": "",
         }
@@ -232,12 +234,12 @@ class ThemeExtractor:
             return ThemeContext(
                 genre="documental",
                 era="atemporal",
-                visual_style="oscuro_documental",
+                visual_style="cine_dramático",
                 key_motifs=["archivos", "documentos", "sombras"],
                 theme_keywords_en=["dark", "documentary", "atmosphere", "cinematic"],
                 primary_subject="archivos",
-                mood="misterioso",
-                lighting="claroscuro",
+                mood="épico",
+                lighting="luz dorada",
                 composition="primeros planos",
                 era_decade="",
             )

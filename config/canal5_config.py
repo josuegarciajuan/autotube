@@ -210,14 +210,16 @@ GOOGLE_NEWS_QUERIES = [
 IMAGE_STYLE_MODIFIERS = (
     "medical documentary cinematography, clinical lighting, 16:9 aspect ratio, "
     "professional scientific photography, clean sterile aesthetic, "
-    "cool teal and blue tones"
+    "cool teal and blue tones, sharp crisp detail, vivid colour, "
+    "high contrast, macro bokeh depth"
 )
 AI_VISUAL_COLOR_GRADING = (
     "clean medical colour grade, vivid clinical teal and cobalt, warm amber "
-    "diagnostic accents, readable whites and shadow detail"
+    "diagnostic accents, bright readable whites, luminous highlights, "
+    "crisp high contrast"
 )
 COLOR_PALETTE = {
-    "primary": (0, 95, 115), "secondary": (8, 20, 38), "accent": (220, 130, 40),
+    "primary": (0, 130, 165), "secondary": (8, 20, 38), "accent": (220, 130, 40),
     "text": (240, 245, 250), "text_shadow": (4, 6, 12), "tertiary": (30, 40, 50),
     "warning": (220, 130, 40),
 }

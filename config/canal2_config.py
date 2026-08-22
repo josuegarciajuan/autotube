@@ -409,11 +409,12 @@ GOOGLE_NEWS_QUERIES = [
 IMAGE_STYLE_MODIFIERS = (
     "warm cinematic photography, golden hour lighting, atmospheric, 16:9, "
     "professional photography, hopeful luminous mood, ethereal light rays, "
-    "soft focus, inspiring"
+    "sharp crisp focus, vivid colours, high contrast, soft bokeh background, inspiring"
 )
 AI_VISUAL_COLOR_GRADING = (
-    "luminous gold-and-indigo colour grade, warm amber highlights, rich navy "
-    "shadows, vivid readable ethereal glow"
+    "luminous gold-and-indigo colour grade, warm amber highlights, "
+    "vivid readable ethereal glow, bright luminous highlights, "
+    "rich contrast, punchy saturation"
 )
 
 COLOR_PALETTE = {

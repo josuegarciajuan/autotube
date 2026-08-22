@@ -1257,8 +1257,11 @@ class MediaFetcher:
           3. **Scene concept** — query or description from the scene dict.
           4. **Technical suffix** — aspect ratio, quality, density hints.
 
-        The prompt is truncated to ~500 characters to avoid overwhelming
-        the model with verbosity while preserving style consistency.
+        The prompt is truncated to ~700 characters to avoid overwhelming
+        the model with verbosity while preserving style consistency AND the
+        scene concept (with 500 chars, las configs de producción dejaban
+        remaining≈0 y descartaban el concepto entero → imágenes IA genéricas
+        que ignoraban la narración).
         """
         # ── Ensure coherence engine ──────────────────────────
         if self._coherence_engine is None:
@@ -1345,15 +1348,20 @@ class MediaFetcher:
         parts.append(tech)
         prompt = ", ".join(p for p in parts if p)
 
-        # Truncate to ~500 chars while retaining the global impact treatment
+        # Truncate to ~700 chars while retaining the global impact treatment
         # and channel grade. They are the shared visual contract for every AI
         # provider; concept/context remain present but yield length first.
-        if len(prompt) > 500:
+        # ⚠️ FIX: con el presupuesto de 500 chars, las configs de producción
+        # (impact style largo + colour grade) dejaban remaining=0 y DESCARTABAN
+        # el concepto de escena entero (prompt = solo estilo+técnica) — las
+        # imágenes IA ignoraban la narración. Subimos el tope a 700 y GARANTIZAMOS
+        # un suelo mínimo para el marcador de escena + concepto.
+        if len(prompt) > 700:
             protected_style = self._coherence_engine.impact_style_prefix
             overhead = 6 if context else 4  # ", " separators
-            remaining = max(0, 497 - len(protected_style) - len(tech) - overhead)
-            concept_budget = int(remaining * 0.7)
-            context_budget = remaining - concept_budget
+            remaining = max(60, 697 - len(protected_style) - len(tech) - overhead)
+            concept_budget = max(24, int(remaining * 0.7))
+            context_budget = max(0, remaining - concept_budget)
             concept_lead = concept[:concept_budget]
             context_lead = context[:context_budget] if context else ""
             trim_parts = [concept_lead]
@@ -1362,8 +1370,8 @@ class MediaFetcher:
             trim_parts.append(protected_style)
             trim_parts.append(tech)
             prompt = ", ".join(p for p in trim_parts if p)
-            if len(prompt) > 500:
-                prompt = prompt[:497] + "..."
+            if len(prompt) > 700:
+                prompt = prompt[:697] + "..."
 
         # ── Seed (protagonist consistency — Phase 3) ─────────
         seed = None

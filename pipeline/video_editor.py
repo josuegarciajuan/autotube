@@ -1701,11 +1701,28 @@ class VideoEditor:
             self.logger.info("Scene has no real media — caller will extend previous clip")
             return None
 
-        # Apply uniform color grading for visual coherence (P3)
+        # Apply uniform color grading for visual coherence (P3).
+        # ── Refuerzo SOLO para imágenes IA (escenas) ─────────────────────
+        # Las fotos IA (ai_pollinations / ai_local_sd / pollo_ai) salen de
+        # fábrica más planas y apagadas que el stock; se les aplica un grade
+        # más contrastado/vívido para que retengan al espectador. El stock y
+        # los placeholders mantienen el grade suave de siempre.
         if self._video_color_grade and media_type not in ("placeholder", "duplicate"):
             try:
                 import numpy as np
-                cg = self._video_color_grade
+                cg = dict(self._video_color_grade)
+                source = str(asset.get("source", ""))
+                is_ai_image = media_type == "image" and (
+                    source.startswith("ai_") or source == "pollo_ai"
+                )
+                if is_ai_image:
+                    cg["contrast"] = min(cg["contrast"] + 0.08, 1.25)
+                    cg["saturation"] = min(cg["saturation"] + 0.12, 1.35)
+                    cg["brightness"] = min(cg["brightness"] + 0.03, 1.08)
+                    self.logger.debug(
+                        "AI image grade boost: contrast=%.2f saturation=%.2f brightness=%.2f",
+                        cg["contrast"], cg["saturation"], cg["brightness"],
+                    )
                 if MOVIEPY_V2:
                     clip = clip.with_effects([
                         vfx.ColorCorrection(
