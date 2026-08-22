@@ -168,6 +168,54 @@ def test_ai_image_chain_negative_without_theme_is_global_only(tmp_path: Path):
     assert "smartphones" not in negative
 
 
+# ── Vívido / contraste / bokeh: regresión para imágenes IA de escena ──
+
+def test_tech_suffix_demands_bokeh_contrast_and_vibrancy():
+    suffix = VisualCoherenceEngine.build_tech_suffix("balanced")
+
+    assert "bokeh" in suffix
+    assert "high contrast" in suffix
+    assert "vibrant saturated colour" in suffix
+    assert "crisp in-focus subject" in suffix
+    assert "ultra sharp" in suffix
+    # "no blur" desapareció — se sustituye por enfoque positivo + bokeh.
+    assert "no blur" not in suffix
+
+
+def test_negative_prompt_rejects_dark_and_flat_renders():
+    negative = VisualCoherenceEngine.build_negative_prompt()
+
+    assert "dark" in negative
+    assert "underexposed" in negative
+    assert "low contrast" in negative
+    assert "flat" in negative
+    assert "washed out" in negative
+    assert "soft focus" in negative
+
+
+def test_palette_hint_never_says_dark_moody_or_muted():
+    hint = VisualCoherenceEngine._palette_to_hint(
+        {"primary": (15, 40, 65)}   # el primary más oscuro de producción (canal4)
+    )
+
+    assert "dark moody" not in hint
+    assert "muted" not in hint
+    assert hint  # siempre devuelve un hint positivo
+
+
+def test_defaults_impact_style_carries_bokeh_high_contrast_vivid():
+    from config import defaults
+
+    impact = defaults.AI_VISUAL_IMPACT_STYLE.lower()
+    grading = defaults.AI_VISUAL_COLOR_GRADING.lower()
+
+    assert "bokeh" in impact
+    assert "high contrast" in impact
+    assert "vivid" in impact
+    assert "luminous" in grading
+    assert "contrast" in grading
+
+
 def test_pollo_fallback_receives_same_coherent_prompt(tmp_path: Path):
     fetcher = MediaFetcher(config=_config())
     pollo = MagicMock()

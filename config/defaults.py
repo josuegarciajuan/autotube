@@ -135,12 +135,14 @@ IMAGE_STYLE_MODIFIERS = "cinematic documentary photography, 16:9, atmospheric"
 # visual language while retaining their own palette.
 AI_VISUAL_IMPACT_STYLE = (
     "hybrid cinematic documentary photography with high-impact YouTube visual "
-    "storytelling, immediate readable focal subject, vivid natural colour, "
-    "strong subject-background separation, premium editorial detail"
+    "storytelling, immediate readable focal subject, vivid saturated colour, "
+    "high contrast, dramatic dynamic lighting, strong subject-background "
+    "separation with creamy bokeh, premium editorial detail, eye-catching composition"
 )
 AI_VISUAL_COLOR_GRADING = (
-    "vivid readable cinematic colour grade, natural skin tones, preserved "
-    "highlight and shadow detail"
+    "vibrant high-contrast cinematic colour grade, luminous vivid colour, "
+    "bright luminous highlights with rich readable shadow detail, "
+    "natural skin tones, punchy saturation without oversaturation"
 )
 COLOR_PALETTE = {
     "primary": (40, 40, 60),
@@ -181,9 +183,12 @@ AI_UPSCALE_MODEL_URL = (
     "https://raw.githubusercontent.com/fannymonori/TF-ESPCN/master/export/ESPCN_x2.pb"
 )
 # Unsharp mask post-upscale (nitidez percibida).
+# 0.7/1.4: más agresivo que el 0.4/2.0 anterior — las fuentes 1024×576 quedan
+# notablemente más nítidas tras el upscale ESPCN_x2 (benchmark +56% con 0.4;
+# con 0.7 el halo sigue sin ser visible pero la textura se percibe más crispa).
 AI_UPSCALE_SHARPEN_ENABLED = True
-AI_UPSCALE_SHARPEN_AMOUNT = 0.4   # 0 = desactivado; ~0.4 equilibrado
-AI_UPSCALE_SHARPEN_SIGMA = 2.0    # radio del desenfoque gaussiano
+AI_UPSCALE_SHARPEN_AMOUNT = 0.7   # 0 = desactivado; 0.4 equilibrado → 0.7 vívido
+AI_UPSCALE_SHARPEN_SIGMA = 1.4    # radio del desenfoque gaussiano (más ajustado)
 
 # ═══════════════════════════════════════════════════════════════════
 # SUBTITLE STYLE (shared across all channels)

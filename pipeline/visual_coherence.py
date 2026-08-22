@@ -25,12 +25,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ── Colour-treatment arc (position 0..1 → prompt modifier) ────────
+# Intención: imágenes vívidas, de alto contraste y luminosas a lo largo de
+# TODO el vídeo (retener al espectador). Nada de "deep shadows" ni tonos
+# apagados: sombras ricas pero legibles, highlights luminosos, color saturado.
 _COLOR_ARC = [
-    (0.00, 0.15, "warm golden-hour light, rich amber tones, vivid readable detail"),
-    (0.15, 0.40, "natural daylight, lively true-to-life colour, readable subject separation"),
-    (0.40, 0.70, "deep cool shadows with saturated accents, vivid readable midtones"),
-    (0.70, 0.85, "bold cinematic contrast, rich colour separation, readable shadow detail"),
-    (0.85, 1.00, "warm hopeful light, luminous colour, vivid readable resolution"),
+    (0.00, 0.15, "warm golden-hour light, rich amber tones, vivid readable detail, luminous glow"),
+    (0.15, 0.40, "bright natural daylight, lively saturated colour, vivid readable subject separation"),
+    (0.40, 0.70, "bold vibrant colour, high contrast with luminous highlights, vivid readable midtones"),
+    (0.70, 0.85, "dynamic high-contrast cinematic grade, rich saturated colour, brilliant readable detail"),
+    (0.85, 1.00, "warm radiant light, luminous glowing colour, vivid readable resolution"),
 ]
 
 # ── Global negative prompt (shared across ALL generations) ────────
@@ -38,6 +41,10 @@ _COLOR_ARC = [
 # debe aparecer a distancia (plano medio/general), nunca rellenando el encuadre
 # como sujeto en primer plano. Las manos deformadas son el error más común de
 # los modelos generativos al intentar acercar a una persona.
+# Añadidos: términos que producen "filtro oscurecido" y fotos planas/borrosas.
+# Ojo: solo Local SD consume el negative_prompt; Pollinations lo ignora, así
+# que el lado POSITIVO del prompt (tech suffix + impact style) es el que
+# realmente garantiza viveza/contraste en todos los proveedores.
 NEGATIVE_PROMPT = (
     "text, letters, watermark, logo, signature, "
     "blurry, low quality, jpeg artifacts, "
@@ -46,7 +53,9 @@ NEGATIVE_PROMPT = (
     "close-up face, extreme close-up portrait, face filling frame, "
     "foreground face, recognizable face, "
     "frame, border, collage, split screen, multiple views, photomontage, "
-    "deep fried, oversaturated, cartoon, 3d render, plastic, doll-like, "
+    "deep fried, cartoon, 3d render, plastic, doll-like, "
+    "dark, underexposed, muddy shadows, flat, dull, muted colours, washed out, "
+    "grey haze, low contrast, soft focus, hazy, grainy, noisy, "
     "nudity, nsfw, gore, violence"
 )
 
@@ -142,22 +151,24 @@ class VisualCoherenceEngine:
             ``"rich"`` → deep DoF, detailed textures.
         """
         base = (
-            "16:9 aspect ratio, no text, no watermark, no blur, sharp focus, "
-            "8K, high resolution, intricate detail, ultra sharp"
+            "16:9 aspect ratio, no text, no watermark, crisp in-focus subject, "
+            "8K, high resolution, intricate detail, ultra sharp, "
+            "high contrast, vibrant saturated colour, dramatic cinematic lighting"
         )
 
         extras: dict[str, str] = {
             "simple": (
-                "moderate depth of field, subject at comfortable distance, "
+                "creamy bokeh background, moderate depth of field, "
+                "subject at comfortable distance, "
                 "minimal elements, clean composition"
             ),
             "balanced": (
                 "natural depth of field, balanced composition, "
-                "cinematic lighting"
+                "cinematic lighting, subtle background bokeh"
             ),
             "rich": (
                 "deep depth of field, detailed environment, "
-                "rich textures, complex lighting"
+                "rich textures, dynamic lighting, bokeh highlights"
             ),
         }
         extra = extras.get(density, extras["balanced"])
@@ -263,16 +274,17 @@ class VisualCoherenceEngine:
         else:
             temp = "neutral"
 
-        # --- brightness ---
+        # --- brightness (siempre positivo — nunca "dark moody"/"muted":
+        #     esos hints empujaban al modelo hacia filtros oscurecidos) ---
         avg = (r + g + b) / 3.0
         if avg < 70:
-            lum = "dark moody"
+            lum = "deep rich"
         elif avg < 140:
-            lum = "muted"
+            lum = "rich saturated"
         elif avg < 200:
-            lum = "bright"
+            lum = "bright vivid"
         else:
-            lum = "high-key"
+            lum = "luminous high-key"
 
         # --- dominant hue ---
         if g > r and g > b and g > 120:
