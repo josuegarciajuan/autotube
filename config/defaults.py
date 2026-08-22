@@ -264,6 +264,9 @@ MEDIA_STRATEGY = {
     "video_min_scene_duration": 6,
     # Avg quality threshold (0-1). Above this → keep searching up to 30%.
     "video_quality_threshold": 0.5,
+    # % of non-video scenes that prioritize real stock images (Pixabay/Unsplash)
+    # over AI-generated images. 0 = AI-first everywhere (previous behavior).
+    "stock_image_pct": 15,
 
     # ── Pollo AI (credits, kept as absolute last resort) ───────
     "pollo_ai_enabled": True,

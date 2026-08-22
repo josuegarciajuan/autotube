@@ -563,8 +563,8 @@ class MediaFetcher:
         scenes = scene_ranges
         n_scenes = len(scenes)
 
-        # ── Phase 2: Classify scenes (video_priority vs ai_image) ──
-        video_scenes, scene_types = self._classify_scenes(scenes)
+        # ── Phase 2: Classify scenes (video_priority vs stock_image vs ai_image) ──
+        video_scenes, stock_image_scenes, scene_types = self._classify_scenes(scenes)
 
         # ── RAM governor: hard-cap video assets to prevent OOM ──
         MAX_ABSOLUTE_VIDEOS = 50
@@ -595,9 +595,10 @@ class MediaFetcher:
         hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
         MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
         logger.info(
-            "Fase 2 classification: %d video-priority / %d ai-image (%d scenes), "
-            "hard cap %d videos, dynamic range %.0f-%.0f%%",
-            len(video_scenes), n_scenes - len(video_scenes), n_scenes,
+            "Fase 2 classification: %d video-priority / %d stock-image-priority / "
+            "%d ai-image (%d scenes), hard cap %d videos, dynamic range %.0f-%.0f%%",
+            len(video_scenes), len(stock_image_scenes),
+            n_scenes - len(video_scenes) - len(stock_image_scenes), n_scenes,
             MAX_ABSOLUTE_VIDEOS,
             self._media_strategy.get("video_scene_pct_min", 20),
             self._media_strategy.get("video_scene_pct_max", 30),
@@ -645,6 +646,7 @@ class MediaFetcher:
             scene_tipo = scene.get("tipo", "desarrollo")
             target_dur = scene.get("duration", 5)
             is_video_priority = i in video_scenes
+            is_stock_image_priority = i in stock_image_scenes
 
             # ── RAM safety: hard-cap video assets ────────────────
             _force_images = False
@@ -673,7 +675,8 @@ class MediaFetcher:
             logger.info(
                 "Scene %d/%d [%s]: %s dur=%.1fs",
                 i + 1, n_scenes, scene_tipo,
-                "video_priority" if is_video_priority else "ai_image",
+                ("video_priority" if is_video_priority else
+                 "stock_image_priority" if is_stock_image_priority else "ai_image"),
                 target_dur,
             )
 
@@ -689,6 +692,7 @@ class MediaFetcher:
                 ai_max=ai_max,
                 ai_enabled=ai_enabled,
                 force_images=_force_images,
+                is_stock_image_priority=is_stock_image_priority,
             )
 
             # ── Score video quality for dynamic control ───────────
@@ -1384,8 +1388,8 @@ class MediaFetcher:
 
     # ── Phase 2: Scene Classification & Tier System ───────────────
 
-    def _classify_scenes(self, scenes: list[dict]) -> tuple[set[int], dict[int, str]]:
-        """Classify every scene as ``video_priority`` or ``ai_image``.
+    def _classify_scenes(self, scenes: list[dict]) -> tuple[set[int], set[int], dict[int, str]]:
+        """Classify every scene as ``video_priority``, ``stock_image_priority`` or ``ai_image``.
 
         **Video-priority criteria** (any one is sufficient):
           1. Scene type is ``hook`` or ``climax`` (always forced).
@@ -1396,16 +1400,25 @@ class MediaFetcher:
         beyond the cap are reclassified as ``ai_image`` even if they
         meet the criteria.
 
+        **Stock-image priority** (only if ``stock_image_pct`` > 0):
+          Up to ``stock_image_pct``% of the remaining (non-video,
+          non-transition) scenes try real stock images (Pixabay/Unsplash)
+          before AI generation.  ``hook``/``climax`` are excluded — visual
+          coherence matters most there, so they stay AI-first.
+
         Returns
         -------
         video_scenes : set[int]
             Indices of scenes that should try stock video first.
+        stock_image_scenes : set[int]
+            Indices of scenes that should try stock images first.
         scene_types : dict[int, str]
-            ``"video_priority"`` or ``"ai_image"`` for every scene index.
+            ``"video_priority"``, ``"stock_image_priority"`` or ``"ai_image"``
+            for every scene index.
         """
         n_scenes = len(scenes)
         if n_scenes == 0:
-            return set(), {}
+            return set(), set(), {}
 
         total_duration = sum(s.get("duration", 5) for s in scenes) or 1.0
         min_dur = self._media_strategy.get("video_min_scene_duration", 10)
@@ -1448,19 +1461,48 @@ class MediaFetcher:
         candidates.sort(key=lambda x: x[0], reverse=True)
         video_scenes: set[int] = {idx for _, idx in candidates[:max_video]}
 
+        # ── Stock-image priority: X% of non-video scenes try real stock first ──
+        stock_image_pct = self._media_strategy.get("stock_image_pct", 0) / 100.0
+        stock_image_scenes: set[int] = set()
+        if stock_image_pct > 0:
+            max_stock_image = round(stock_image_pct * n_scenes)
+            si_candidates: list[tuple[int, int]] = []  # (priority, idx)
+            for idx, s in enumerate(scenes):
+                if idx in video_scenes:
+                    continue  # already video-priority
+                if s.get("is_transition", False):
+                    continue
+                # Hook/climax stay AI-first (coherence matters most there).
+                if s.get("tipo", "desarrollo") in ("hook", "climax"):
+                    continue
+                dur = s.get("duration", 5)
+                # Prefer longer scenes (real photos look better with more
+                # screen time) and desarrollo/reflexion scenes.
+                tipo = s.get("tipo", "desarrollo")
+                tipo_bonus = 20 if tipo in ("desarrollo", "reflexion") else 0
+                si_candidates.append((int(min(dur, 15) * 5) + tipo_bonus, idx))
+            si_candidates.sort(key=lambda x: x[0], reverse=True)
+            stock_image_scenes = {idx for _, idx in si_candidates[:max_stock_image]}
+
         # Build type map
         scene_types: dict[int, str] = {}
         for idx in range(n_scenes):
-            scene_types[idx] = "video_priority" if idx in video_scenes else "ai_image"
+            if idx in video_scenes:
+                scene_types[idx] = "video_priority"
+            elif idx in stock_image_scenes:
+                scene_types[idx] = "stock_image_priority"
+            else:
+                scene_types[idx] = "ai_image"
 
         logger.info(
-            "Scene classification: %d video-priority / %d ai-image (%d scenes total, "
-            "hook/climax: %d, max cap: %d)",
-            len(video_scenes), n_scenes - len(video_scenes), n_scenes,
+            "Scene classification: %d video-priority / %d stock-image-priority / "
+            "%d ai-image (%d scenes total, hook/climax: %d, max cap: %d)",
+            len(video_scenes), len(stock_image_scenes),
+            n_scenes - len(video_scenes) - len(stock_image_scenes), n_scenes,
             sum(1 for i in video_scenes if scenes[i].get("tipo") in ("hook", "climax")),
             max_video,
         )
-        return video_scenes, scene_types
+        return video_scenes, stock_image_scenes, scene_types
 
     def _fetch_with_ai_tiers(
         self,
@@ -1474,6 +1516,7 @@ class MediaFetcher:
         ai_max: int,
         ai_enabled: bool,
         force_images: bool = False,
+        is_stock_image_priority: bool = False,
     ) -> tuple[dict | None, int, dict]:
         """Fetch a media asset for *scene* using the 5-tier chain.
 
@@ -1481,6 +1524,13 @@ class MediaFetcher:
           TIER 1 → Stock Video (exhaustive)
           TIER 2 → AI Image (Pollinations → Local SD)
           TIER 3 → Stock Image (Pixabay → Unsplash)
+          TIER 4 → Pollo AI (credits, last resort)
+          TIER 5 → Placeholder
+
+        **Stock-image chain** (``is_stock_image_priority``):
+          TIER 1 → Stock Image (Pixabay → Unsplash)
+          TIER 2 → AI Image (Pollinations → Local SD)
+          TIER 3 → Stock Video (exhaustive)
           TIER 4 → Pollo AI (credits, last resort)
           TIER 5 → Placeholder
 
@@ -1504,6 +1554,8 @@ class MediaFetcher:
         # ── Choose tiers based on scene type ─────────────────
         if is_video_priority and not force_images:
             tiers = ["stock_video", "ai_image", "stock_image", "pollo_ai", "placeholder"]
+        elif is_stock_image_priority and not force_images:
+            tiers = ["stock_image", "ai_image", "stock_video", "pollo_ai", "placeholder"]
         else:
             tiers = ["ai_image", "stock_image", "stock_video", "pollo_ai", "placeholder"]
 

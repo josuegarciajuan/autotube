@@ -41,6 +41,7 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
     ("target_video_pct",      10.0,  90.0, 50.0,  "media_strategy target_video_pct"),
     ("max_video_blocks_pct",  10.0,  90.0, 50.0,  "media_strategy max_video_blocks_pct"),
     ("max_placeholder_pct",    0.0,  50.0,  0.0,  "media_strategy max_placeholder_pct"),
+    ("stock_image_pct",        0.0,  60.0, 15.0,  "media_strategy stock_image_pct"),
 ]
 
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary

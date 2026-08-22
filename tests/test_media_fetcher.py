@@ -625,3 +625,104 @@ class TestFetchUniquenessGate:
         )
         assert len(results) == 5
         assert all(r.get("type") == "image" for r in results)
+
+
+class TestStockImagePriority:
+    """stock_image_pct reclassifies ~X% of non-video scenes to try real
+    stock images (Pixabay/Unsplash) before AI generation."""
+
+    def _fetcher(self, **overrides):
+        from pipeline.media_fetcher import MediaFetcher
+        cfg = _make_config(
+            video_scene_pct_max=30,
+            video_scene_hard_cap=12,
+            video_min_scene_duration=6,
+            video_first_half_pct=40,
+            ai_image_primary=True,
+            **overrides,
+        )
+        return MediaFetcher(cfg)
+
+    def test_classify_assigns_roughly_15_percent(self):
+        """~15% of non-video scenes become stock_image_priority, disjoint
+        from video scenes, and never hook/climax."""
+        mf = self._fetcher(stock_image_pct=15)
+        scenes = [
+            _make_scene_range(tipo=t, duration=d, asset_idx=i)
+            for i, (t, d) in enumerate([
+                ("hook", 8), ("desarrollo", 8), ("desarrollo", 8),
+                ("desarrollo", 8), ("desarrollo", 8), ("desarrollo", 8),
+                ("reflexion", 5), ("cierre", 5), ("desarrollo", 8),
+                ("desarrollo", 8),
+            ])
+        ]
+        n = len(scenes)
+        video_scenes, stock_image_scenes, scene_types = mf._classify_scenes(scenes)
+
+        assert len(stock_image_scenes) == round(0.15 * n)
+        assert stock_image_scenes.isdisjoint(video_scenes)
+        for idx in stock_image_scenes:
+            assert scene_types[idx] == "stock_image_priority"
+            assert scenes[idx]["tipo"] not in ("hook", "climax")
+        # All scenes typed into one of the three buckets
+        assert set(scene_types.values()) <= {
+            "video_priority", "stock_image_priority", "ai_image",
+        }
+
+    def test_zero_pct_keeps_previous_behavior(self):
+        """stock_image_pct=0 → only video_priority and ai_image buckets."""
+        mf = self._fetcher(stock_image_pct=0)
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=8, asset_idx=i)
+            for i in range(6)
+        ]
+        video_scenes, stock_image_scenes, scene_types = mf._classify_scenes(scenes)
+
+        assert len(stock_image_scenes) == 0
+        assert all(v in ("video_priority", "ai_image")
+                   for v in scene_types.values())
+
+    def test_stock_image_chain_tries_stock_image_before_ai(self):
+        """stock_image_priority scenes fetch stock image first (want_video=False,
+        force_images=True) and never call the AI chain while it succeeds."""
+        mf = self._fetcher(stock_image_pct=15)
+        scene = _make_scene_range(tipo="desarrollo", duration=8, asset_idx=0)
+        img_asset = _make_image_result()
+
+        with patch.object(mf, "_build_query_pool", return_value=["test query"]), \
+             patch.object(mf, "_try_ai_image_chain") as ai_mock, \
+             patch.object(mf, "_fetch_asset_exhaustive") as fetch_mock:
+            fetch_mock.return_value = img_asset
+            asset, _, _ = mf._fetch_with_ai_tiers(
+                scene=scene, scene_idx=0, total_scenes=10,
+                is_video_priority=False, target_dur=8.0, ctx=None,
+                ai_used=0, ai_max=5, ai_enabled=True,
+                is_stock_image_priority=True,
+            )
+
+        assert asset == img_asset
+        ai_mock.assert_not_called()
+        kwargs = fetch_mock.call_args.kwargs
+        assert kwargs.get("want_video") is False
+        assert kwargs.get("force_images") is True
+
+    def test_ai_chain_tries_ai_before_stock_image(self):
+        """Plain ai_image scenes still try AI generation first — the stock
+        image change must not alter the default chain."""
+        mf = self._fetcher(stock_image_pct=15)
+        scene = _make_scene_range(tipo="desarrollo", duration=8, asset_idx=0)
+        ai_asset = _make_image_result(path="/tmp/ai.jpg", source="pollinations")
+
+        with patch.object(mf, "_build_query_pool", return_value=["test query"]), \
+             patch.object(mf, "_try_ai_image_chain", return_value=ai_asset) as ai_mock, \
+             patch.object(mf, "_fetch_asset_exhaustive") as fetch_mock:
+            asset, _, _ = mf._fetch_with_ai_tiers(
+                scene=scene, scene_idx=0, total_scenes=10,
+                is_video_priority=False, target_dur=8.0, ctx=None,
+                ai_used=0, ai_max=5, ai_enabled=True,
+                is_stock_image_priority=False,
+            )
+
+        assert asset == ai_asset
+        ai_mock.assert_called_once()
+        fetch_mock.assert_not_called()
