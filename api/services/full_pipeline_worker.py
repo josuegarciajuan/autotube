@@ -1297,6 +1297,17 @@ def run_job(
                     "selected_title": metadata.get("selected_title", ""),
                     "description": metadata.get("description", ""),
                 }, db)
+
+                # ── Antiban (ago 2026): título casi duplicado con contenido reciente ──
+                try:
+                    from api.services.shorts_scheduler import warn_if_title_similar
+                    warn_if_title_similar(
+                        channel_id, canal, video_id,
+                        metadata.get("selected_title", "") or "",
+                        db=db,
+                    )
+                except Exception:
+                    pass
             else:
                 # Save basic info even without metadata
                 db.update_video(

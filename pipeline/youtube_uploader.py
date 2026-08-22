@@ -69,6 +69,17 @@ class UploadAdmissionDeniedError(RuntimeError):
     pass
 
 
+class AccountDailyCapExceededError(UploadAdmissionDeniedError):
+    """La cuenta Google alcanzó su cap diario de subidas (antiban, ago 2026).
+
+    Se trata como una denegación de admisión local (retryable, sin impacto de
+    cuota ni señal de spam): el vídeo se conserva en awaiting_upload y se
+    reintenta al día siguiente. Evita que dos canales hermanos saturen la
+    cuenta compartida (los strikes de YouTube son por cuenta/proyecto).
+    """
+    pass
+
+
 class InvalidPublishAtError(ValueError):
     """publishAt is in the past (or within the safety buffer).
 
@@ -599,6 +610,30 @@ class YouTubeUploader:
                 logger.warning(
                     "[%s] spam-block gate check failed (fail-open): %s",
                     _gate_slug, _sb_err,
+                )
+
+        # ── Cap de subidas por cuenta Google (antiban, ago 2026) ──
+        # Los strikes son por cuenta/proyecto GCP: dos canales hermanos pueden
+        # saturar la cuenta aunque cada uno cumpla su cap individual. Si la
+        # cuenta ya subió su tope diario, la subida se rechaza localmente
+        # (AccountDailyCapExceededError → retryable, sin impacto de cuota ni
+        # señal de spam). Se comprueba ANTES de autenticar/emitir requests.
+        if _gate_slug:
+            try:
+                from api.services.spam_mitigation import (
+                    account_upload_slots_available, get_channel_account,
+                )
+                _account = get_channel_account(_gate_slug)
+                if _account and not account_upload_slots_available(_account):
+                    raise AccountDailyCapExceededError(
+                        f"account '{_account}' reached its daily upload cap — upload held (retry tomorrow)"
+                    )
+            except AccountDailyCapExceededError:
+                raise
+            except Exception as _cap_err:
+                logger.warning(
+                    "[%s] account-cap gate check failed (fail-open): %s",
+                    _gate_slug, _cap_err,
                 )
         video_path = Path(video_path)
         if not video_path.exists():

@@ -361,6 +361,15 @@ def spam_blocks():
         except Exception as exc:
             logger.warning("spam-blocks: build_spam_situation failed for #%s: %s", cid, exc)
             sit = {}
+        # Frecuencia original antes de la rebaja por spam (para mostrar "antes → ahora")
+        original_freq = None
+        try:
+            import json as _json
+            raw_restore = db.get_system_state(f"spam_freq_restore_{cid}")
+            if raw_restore:
+                original_freq = _json.loads(raw_restore)
+        except Exception:
+            original_freq = None
         out.append({
             "channel_id": cid,
             "slug": ch.get("slug", ""),
@@ -372,6 +381,9 @@ def spam_blocks():
             "freq_reduced": bool(sit.get("freq_reduced", False)),
             "scope": sit.get("scope", "none"),
             "why": sit.get("why", ""),
+            "last_removal": sit.get("last_removal"),
+            "current_freq": sit.get("current_freq"),
+            "original_freq": original_freq,
             "pending_publish": sit.get("pending_publish", {"total": 0, "within_block": []}),
         })
     return {"ok": True, "channels": out}

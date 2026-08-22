@@ -1883,6 +1883,15 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 timing_data=orch.collect_timing_json(),
             )
         
+        # ── Antiban (ago 2026): título casi duplicado con contenido reciente ──
+        # Aviso NO bloqueante: los títulos casi duplicados (shorts o long-form
+        # del mismo canal) son señal de spam de YouTube.
+        try:
+            from api.services.shorts_scheduler import warn_if_title_similar
+            warn_if_title_similar(channel_id, canal, video_id, titulo or "", db=db)
+        except Exception:
+            pass
+
         duracion = int(duracion)  # ensure int for format strings below
         dur_min = duracion // 60
         dur_sec = duracion % 60

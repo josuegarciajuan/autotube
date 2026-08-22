@@ -358,7 +358,16 @@ PUBLISH_WINDOW_SPREAD_MIN = 90
 # Mínimo de horas entre subidas long-form del MISMO canal. Evita que
 # un backlog de vídeos pasados se despache en ráfagas ("en fila") cuando
 # vuelve la cuota. Se lee vía config_json en upload_scheduler.
-MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS = 3
+# ago 2026 (antiban): 3h → 6h — el patrón de ráfagas alimentó el flag
+# de spam de YouTube (strikes de ago-2026 en los 4 canales).
+MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS = 6
+
+# ── Cap de subidas por cuenta Google (antiban, ago 2026) ─────────
+# Los strikes de YouTube se registran POR CUENTA/PROYECTO GCP, no por canal.
+# Dos canales hermanos que comparten cuenta pueden saturarla aunque cada uno
+# cumpla su cap individual. Límite de SUBIDAS TOTALES (long-form + shorts)
+# por cuenta Google y día. 0 = desactivado.
+ACCOUNT_DAILY_UPLOAD_CAP = 4
 
 # ═══════════════════════════════════════════════════════════════════
 # SHORTS DEFAULTS
@@ -390,7 +399,10 @@ SHORTS_ADAPTIVE_RATIO_MIN = 0.20      # Floor (never below 20% native)
 SHORTS_ADAPTIVE_RATIO_MAX = 0.60      # Ceiling (never above 60% native)
 SHORTS_ADAPTIVE_STEP = 0.10           # ±10% adjustment per evaluation
 SHORTS_MIN_NATIVE_PER_DAY = 1         # Minimum native shorts per day
-SHORTS_CLIPS_PER_LONG = 2             # Fixed: 2 clip shorts per long video (Fase 0)
+# ago 2026 (antiban): clips desactivados por defecto (2 → 0). Los clips
+# son contenido reciclado del long-form y el mayor imán de flag de spam
+# de YouTube. Per-channel overridable vía shorts_planning_config.
+SHORTS_CLIPS_PER_LONG = 0             # Fixed: clip shorts per long video (antiban: 0)
 SHORTS_HOOK_OVERLAY_FONT_SIZE = 48    # Hook text overlay (3s)
 SHORTS_HOOK_OVERLAY_DURATION_SEC = 3.0
 SHORTS_HOOK_OVERLAY_FADE_SEC = 0.3
