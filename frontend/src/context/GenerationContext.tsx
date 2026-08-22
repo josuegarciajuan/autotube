@@ -128,11 +128,25 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
 
     setActiveJobs(prev => {
       let changed = false
-      const result: ActiveJob[] = []
 
-      // Keep existing jobs that are still active, refresh names
+      // ── MERGE (not replace): keep optimistic jobs the API doesn't know yet ──
+      // Previous behavior rebuilt the list ONLY from apiJobs, silently dropping
+      // optimistic entries (bars added on button press with negative IDs, or
+      // jobs created milliseconds ago). That made the bottom bar vanish on the
+      // next 15s poll. We now keep every optimistic job (negative id or no
+      // status yet) plus every job still reported by the API. Jobs with a real
+      // status that disappeared from the API (finished/cleaned server-side)
+      // are dropped as before.
+      const kept: ActiveJob[] = []
+      for (const j of prev) {
+        if (apiJobIds.has(j.jobId) || j.jobId < 0 || !j.status) {
+          kept.push(j)
+        } else {
+          changed = true // real job no longer active server-side
+        }
+      }
       const storedMap = new Map<number, ActiveJob>()
-      for (const j of prev) storedMap.set(j.jobId, j)
+      for (const j of kept) storedMap.set(j.jobId, j)
 
       for (const j of apiJobs) {
         const jobId = j.id
@@ -148,10 +162,9 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
             existing.status = j.status
             changed = true
           }
-          result.push(existing)
         } else {
           // New job from API
-          result.push({
+          storedMap.set(jobId, {
             jobId,
             channelId: j.channel_id,
             channelName: channelNamesRef.current.get(j.channel_id) || `Canal ${j.channel_id}`,
@@ -164,6 +177,7 @@ export function GenerationProvider({ children }: { children: ReactNode }) {
         }
       }
 
+      const result = [...storedMap.values()]
       if (changed || result.length !== prev.length) {
         saveToStorage(result)
         return result

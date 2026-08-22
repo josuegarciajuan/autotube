@@ -3369,30 +3369,19 @@ class ExtendedDatabase(Database):
         return dict(row) if row else None
     
     def get_active_jobs(self) -> list[dict]:
-        """Return jobs with status 'queued' or 'running', excluding stale zombies.
-        
-        Safety filter: running jobs without a heartbeat for >60 min (or never emitted
-        one and started >60 min ago) are excluded to prevent zombie progress bars
-        from appearing in the UI before the orphan detector cleans them up.
-        Queued jobs are always returned (they haven't started yet).
+        """Return ALL jobs with status 'queued' or 'running'.
+
+        No stale-zombie filter here: a running job is a running job, even if it
+        has been alive >60 min without a heartbeat (long reassembles/slow renders
+        legitimately exceed that). Hiding them made the bottom progress bar
+        disappear mid-generation. Zombie cleanup is the orphan detector's job
+        (ORPHAN_TIMEOUT_MINUTES, marks dead jobs 'failed' in the DB), and the
+        frontend auto-dismisses bars that show no activity (stuck detection).
         """
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT * FROM generation_jobs 
-                WHERE status = 'queued'
-                UNION ALL
-                SELECT * FROM generation_jobs 
-                WHERE status = 'running'
-                  AND (
-                      -- Heartbeat mode: last heartbeat within 60 min → still alive
-                      (last_heartbeat_at IS NOT NULL 
-                       AND (julianday('now') - julianday(last_heartbeat_at)) * 1440 <= 60)
-                      OR
-                      -- No heartbeat yet: only include if started <60 min ago
-                      (last_heartbeat_at IS NULL 
-                       AND started_at IS NOT NULL
-                       AND (julianday('now') - julianday(started_at)) * 1440 <= 60)
-                  )
+                WHERE status IN ('queued', 'running')
                 ORDER BY created_at DESC
             """).fetchall()
         return [dict(r) for r in rows]
