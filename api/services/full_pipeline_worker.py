@@ -214,16 +214,18 @@ def _setup_worker_logging(job_id: int):
 
 # ── Memory guard for video assembly ────────────────────────────
 
-def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 6.0, max_wait_sec: int = 600) -> bool:
+def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.5, max_wait_sec: int = 600) -> bool:
     """Wait for free memory before starting memory-intensive video assembly.
     
     ffmpeg xfade concat of many segments can consume several GB of RAM.
     Running it while the system is near OOM triggers the kernel OOM killer
     or crashes with memory errors — both of which lose the entire render.
     
-    Threshold raised to 6 GB (2026-08-19): a batch of 50 concat segments
-    peaks ~3 GB and Kokoro TTS ~2.8 GB; the previous 2 GB floor allowed
-    OOM kills (rc=-9) mid-concat.
+    Umbral rebajado a 2.5 GB (2026-08-22): el concat por lotes pasó de 50 → 25
+    segmentos (pico ~1.5 GB), así que el ensamblaje ya no necesita 6 GB libres.
+    El pico de 50 segmentos (~3 GB) y Kokoro (~2.8 GB) que motivaron el umbral
+    de 6 GB ya no aplican: Kokoro se descarga antes de esta fase y el lote es
+    de 25.
 
     Returns True if memory is sufficient, False if critically low even
     after waiting (caller should fail the job gracefully).
@@ -986,10 +988,17 @@ def run_job(
             db.update_video(video_id, progress=40, progress_phase="tts")
         else:
             # ── RAM gate before TTS (avoid wasting 5-9 min of compute) ──
-            # Kokoro/torch carga ~3 GB: usar umbral TTS más alto
-            # que el genérico de render.
-            from config.settings import MIN_FREE_FOR_TTS_MB
-            if not _check_ram_gate(logger, timeout_sec=300, threshold=MIN_FREE_FOR_TTS_MB):
+            # Kokoro/torch carga ~3 GB: usar umbral TTS más alto que el
+            # genérico de render. edge-tts (WebSocket) apenas consume RAM, así
+            # que no debe exigírsele el umbral de Kokoro: se reutiliza el umbral
+            # de render, que ya cubre el resto de fases pesadas aguas abajo.
+            from config.settings import MIN_FREE_FOR_TTS_MB, MIN_FREE_FOR_RENDER_MB
+            try:
+                _tts_engine = str(getattr(config, "TTS_ENGINE", "kokoro") or "kokoro").lower()
+            except Exception:
+                _tts_engine = "kokoro"
+            _tts_threshold = MIN_FREE_FOR_TTS_MB if _tts_engine == "kokoro" else MIN_FREE_FOR_RENDER_MB
+            if not _check_ram_gate(logger, timeout_sec=300, threshold=_tts_threshold):
                 db.update_job(job_id, status="failed", error_msg="RAM insuficiente (pre-TTS gate)")
                 db.update_video(video_id, status="error", progress_phase="script",
                                 error_message="RAM insuficiente (pre-TTS gate)")
