@@ -1156,7 +1156,15 @@ class MediaFetcher:
         prompt, seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
         # Record the full prompt for the verification report.
         self._ai_prompt_log[scene_idx] = prompt
+        # Negative prompt: global terms + forbidden_elements (anacronismos) del
+        # theme extractor, que hoy solo se filtraban en queries de stock. La IA
+        # necesita verlos como negative para no generar elementos fuera de época.
         negative = VisualCoherenceEngine.build_negative_prompt()
+        tc = self._theme_context
+        if tc is not None and getattr(tc, "forbidden_elements", None):
+            forbidden = [f for f in tc.forbidden_elements if f]
+            if forbidden:
+                negative = f"{negative}, {', '.join(forbidden)}"
         output_dir = Path(settings.OUTPUT_DIR) / "ai_images" / scene.get("tipo", "escena")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"scene_{scene_idx:03d}_{hashlib.md5(prompt.encode()).hexdigest()[:10]}.jpg"
@@ -1257,7 +1265,7 @@ class MediaFetcher:
           3. **Scene concept** — query or description from the scene dict.
           4. **Technical suffix** — aspect ratio, quality, density hints.
 
-        The prompt is truncated to ~500 characters to avoid overwhelming
+        The prompt is truncated to ~1000 characters to avoid overwhelming
         the model with verbosity while preserving style consistency.
         """
         # ── Ensure coherence engine ──────────────────────────
@@ -1282,6 +1290,12 @@ class MediaFetcher:
             for elem in self._visual_bible.get("recurring_elements", [])[:3]:
                 if elem:
                     context_parts.append(elem)
+        # Temporal anchor from the theme extractor (era coherence across scenes)
+        tc = self._theme_context
+        if tc is not None:
+            era = getattr(tc, "era_decade", "") or getattr(tc, "era", "")
+            if era and era not in ("atemporal", "presente"):
+                context_parts.append(era)
         context = ", ".join(p for p in context_parts if p)
 
         # ── Layer 3: Scene concept ────────────────────────────
@@ -1322,7 +1336,7 @@ class MediaFetcher:
         # same concept (LLM repetition / padded entries / empty search_query),
         # and identical prompts → identical Pollinations cache key → the SAME
         # cached image for both scenes. The marker is PREPENDED so it survives
-        # the 500-char truncation below (which cuts `concept` from the END).
+        # the truncation below (which cuts `concept` from the END).
         concept = f"scene {scene_idx + 1}/{total_scenes}: {concept}"
 
         # ── Layer 4: Technical suffix ────────────────────────
@@ -1345,25 +1359,40 @@ class MediaFetcher:
         parts.append(tech)
         prompt = ", ".join(p for p in parts if p)
 
-        # Truncate to ~500 chars while retaining the global impact treatment
+        # Truncate to ~1000 chars while retaining the global impact treatment
         # and channel grade. They are the shared visual contract for every AI
         # provider; concept/context remain present but yield length first.
-        if len(prompt) > 500:
+        # ⚠️ FIX: con el presupuesto de 500 chars, las configs de producción
+        # (impact style largo + colour grade ≈ 460 + tech ≈ 190) dejaban
+        # remaining=0 y DESCARTABAN el concepto de escena entero (prompt =
+        # solo estilo+técnica) — las imágenes IA ignoraban la narración.
+        # Subimos el tope a ~1000 (Pollo AI admite 2000; Pollinations acepta
+        # prompts largos; Local SD corta por tokens CLIP igualmente) y
+        # GARANTIZAMOS un suelo mínimo para el marcador + concepto, cortando
+        # en límite de palabra limpio (nada de ", ," por cortes a mitad).
+        if len(prompt) > 1000:
             protected_style = self._coherence_engine.impact_style_prefix
             overhead = 6 if context else 4  # ", " separators
-            remaining = max(0, 497 - len(protected_style) - len(tech) - overhead)
-            concept_budget = int(remaining * 0.7)
-            context_budget = remaining - concept_budget
+            remaining = max(120, 997 - len(protected_style) - len(tech) - overhead)
+            concept_budget = max(40, int(remaining * 0.65))
+            context_budget = max(0, remaining - concept_budget)
             concept_lead = concept[:concept_budget]
             context_lead = context[:context_budget] if context else ""
+            # Cut at clean word boundaries so "a, b, " never leaves "a, , c".
+            if context_lead and context_budget < len(context) \
+                    and context[context_budget] not in (" ", ","):
+                context_lead = context_lead.rstrip().rsplit(" ", 1)[0]
+            if concept_lead and concept_budget < len(concept) \
+                    and concept[concept_budget] not in (" ", ","):
+                concept_lead = concept_lead.rstrip().rsplit(" ", 1)[0]
             trim_parts = [concept_lead]
             if context_lead:
                 trim_parts.append(context_lead)
             trim_parts.append(protected_style)
             trim_parts.append(tech)
             prompt = ", ".join(p for p in trim_parts if p)
-            if len(prompt) > 500:
-                prompt = prompt[:497] + "..."
+            if len(prompt) > 1000:
+                prompt = prompt[:997] + "..."
 
         # ── Seed (protagonist consistency — Phase 3) ─────────
         seed = None
