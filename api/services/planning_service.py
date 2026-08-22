@@ -383,7 +383,9 @@ MIN_GAP_MINUTES = 90               # minimum gap between generation START times 
 # v2 smart scheduling: realistic gap between completion of one job and start of next.
 # Previously 5 min (unrealistic). Now 30 min buffer, chained as: spacing = ch_dur + GAP.
 GLOBAL_GAP_MINUTES = 30            # buffer minutes between consecutive generation jobs
-MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # minimum hours between publish times for same channel (v10.1 collision fix)
+# ago 2026 (antiban): 3h → 6h — las ráfagas de publicación del mismo canal
+# alimentaron el flag de spam de YouTube (strikes de ago-2026).
+MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS = 6  # minimum hours between publish times for same channel (v10.1 collision fix; antiban 6h)
 BUFFER_PCT = 0.15                  # safety buffer on per-channel avg creation time
 DEFAULT_HORIZON_DAYS = 7           # days to plan ahead (today + 6)
 

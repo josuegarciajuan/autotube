@@ -88,6 +88,86 @@ def _project_sibling_channels(slug: str, db) -> list[dict]:
     return [c for c in channels if c.get("slug") == slug]
 
 
+# ── Cap de subidas por cuenta Google (antiban, ago 2026) ──────────
+# Los strikes de YouTube se registran por CUENTA/PROYECTO GCP, no por canal.
+# Dos canales hermanos que comparten cuenta pueden saturarla aunque cada uno
+# cumpla su cap individual. ACCOUNT_DAILY_UPLOAD_CAP (config/defaults.py)
+# limita las SUBIDAS TOTALES (long-form + shorts) por cuenta y día.
+
+def get_channel_account(channel_slug: str, db=None) -> str:
+    """Cuenta Google del canal (google_account) o '' si no tiene."""
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        ch = db.get_channel_by_slug(channel_slug)
+        return ((ch or {}).get("google_account") or "").strip()
+    except Exception:
+        return ""
+
+
+def get_account_upload_cap(db=None) -> int:
+    """Tope de subidas/día por cuenta Google (0 = desactivado)."""
+    try:
+        from config.defaults import ACCOUNT_DAILY_UPLOAD_CAP
+        return int(ACCOUNT_DAILY_UPLOAD_CAP or 0)
+    except Exception:
+        return 0
+
+
+def get_account_daily_uploads(account: str, db=None) -> int:
+    """Subidas de HOY (long-form + shorts, subidos o publicados) de una cuenta.
+
+    Cuenta long-form con uploaded_at/published_at de hoy y shorts con
+    published_at de hoy (los status 'generated' en cola NO cuentan).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    if not account:
+        return 0
+    try:
+        channels = [c for c in (db.get_channels(active_only=False) or [])
+                    if ((c.get("google_account") or "").strip()) == account]
+    except Exception:
+        return 0
+    ids = [int(c.get("id") or 0) for c in channels if c.get("id")]
+    if not ids:
+        return 0
+    ids_sql = ",".join(str(i) for i in ids)
+    today = __import__("datetime").date.today().isoformat()
+    import sqlite3
+    try:
+        with db._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                f"""SELECT
+                      (SELECT COUNT(*) FROM videos
+                        WHERE channel_id IN ({ids_sql})
+                          AND status IN ('uploaded','uploaded_private','published','warming')
+                          AND (date(uploaded_at) = ? OR date(published_at) = ?)) AS vids,
+                      (SELECT COUNT(*) FROM shorts
+                        WHERE channel_id IN ({ids_sql})
+                          AND status IN ('uploaded','published')
+                          AND date(published_at) = ?) AS shs""",
+                (today, today, today),
+            ).fetchone()
+        return int((row["vids"] or 0) + (row["shs"] or 0))
+    except Exception:
+        return 0
+
+
+def account_upload_slots_available(account: str, db=None) -> bool:
+    """True si la cuenta aún no ha alcanzado su cap diario de subidas.
+
+    cap <= 0 → guard desactivado (siempre disponible).
+    """
+    cap = get_account_upload_cap(db)
+    if cap <= 0:
+        return True
+    return get_account_daily_uploads(account, db) < cap
+
+
 def _reduce_one_channel(cid: int, slug: str, db) -> None:
     """Reduce long-form + shorts de un canal y guarda los valores originales."""
     cfg = db.get_channel_planning_config(cid) or {}
@@ -414,7 +494,66 @@ def ensure_spam_holds(db=None) -> dict:
             held_total += held
             channels_held.append(slug)
 
+    # ── Watchdog de detección temprana (antiban) ──
+    try:
+        check_deleted_yt_watchdog(db)
+    except Exception as exc:
+        logger.warning("deleted_yt watchdog failed: %s", exc)
+
     return {"buffer_extended": extended, "held": held_total, "channels": channels_held}
+
+
+def check_deleted_yt_watchdog(db=None) -> dict:
+    """Alerta temprana (antiban, ago 2026): si el nº de vídeos borrados por
+    YouTube (status='deleted_on_yt') sube, avisa ANTES de que se acumulen
+    strikes. Idempotente: guarda la última cifra vista en system_state y solo
+    alerta cuando la cifra actual supera el baseline. Se llama en
+    ensure_spam_holds (arranque de la API).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) c FROM videos WHERE status='deleted_on_yt'"
+            ).fetchone()
+        current = int(row[0])
+    except Exception:
+        return {"ok": False, "deleted_on_yt": None}
+
+    baseline_key = "deleted_yt_baseline"
+    try:
+        prev = int(db.get_system_state(baseline_key) or 0)
+    except (TypeError, ValueError):
+        prev = 0
+
+    if prev == 0 and current > 0:
+        db.set_system_state(baseline_key, str(current))
+        return {"ok": True, "deleted_on_yt": current, "delta": 0, "alerted": False}
+    if current > prev:
+        db.set_system_state(baseline_key, str(current))
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(
+                db,
+                entity_type="system", entity_id=None, channel_id=None,
+                alert_type="deleted_yt_increased", severity="warning",
+                title=f"YouTube eliminó {current - prev} vídeo(s) nuevo(s) (total {current})",
+                message=(
+                    f"El nº de vídeos borrados por YouTube subió de {prev} a {current}. "
+                    f"Es una señal temprana de flag de spam/IA: revisa los canales, "
+                    f"verifica el marcado 'contenido alterado/IA' y NO aumentes la "
+                    f"frecuencia de publicación."
+                ),
+                metadata={"prev": prev, "current": current, "delta": current - prev},
+            )
+        except Exception as exc:
+            logger.warning("deleted_yt watchdog alert failed: %s", exc)
+        return {"ok": True, "deleted_on_yt": current, "delta": current - prev, "alerted": True}
+    if current < prev:
+        db.set_system_state(baseline_key, str(current))
+    return {"ok": True, "deleted_on_yt": current, "delta": 0, "alerted": False}
 
 
 # ── Situación del canal + informe LLM (banner / modal) ───────────

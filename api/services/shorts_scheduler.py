@@ -312,6 +312,88 @@ def _titles_too_similar(title_a: str, title_b: str,
     overlap = len(a & b) / max(len(a), len(b))
     return overlap >= threshold
 
+
+def _recent_longform_titles(channel_id: int,
+                            days: int = TITLE_SIMILARITY_LOOKBACK_DAYS,
+                            limit: int = TITLE_SIMILARITY_LOOKBACK_LIMIT) -> list[tuple[int, str]]:
+    """Return [(video_id, titulo_final)] for recent long-form videos of the channel."""
+    import sqlite3 as _sql_titles
+    from config.settings import DATABASE_PATH as _DBP_T
+    try:
+        with _sql_titles.connect(str(_DBP_T), timeout=10) as _conn_t:
+            rows = _conn_t.execute(
+                """SELECT id, COALESCE(titulo_final, '') FROM videos
+                   WHERE channel_id = ? AND titulo_final IS NOT NULL AND titulo_final != ''
+                     AND date(created_at) >= date('now', 'localtime', ?)
+                   ORDER BY created_at DESC LIMIT ?""",
+                (channel_id, f"-{days} days", limit),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+    except Exception:
+        return []
+
+
+def _title_similar_to_recent(channel_id: int, title: str,
+                             check_shorts: bool = True,
+                             check_longform: bool = True) -> tuple[bool, str]:
+    """True si el título se parece a un short o long-form reciente del canal.
+
+    (antiban, ago 2026): los títulos casi duplicados entre shorts y long-form
+    son una señal clásica de spam de YouTube. Devuelve (es_similar, descripción
+    del conflicto) para logs/alertas.
+    """
+    if not title:
+        return False, ""
+    if check_shorts:
+        for prev_id, prev_title in _recent_short_titles(channel_id):
+            if _titles_too_similar(title, prev_title):
+                return True, f"short #{prev_id} '{prev_title[:50]}'"
+    if check_longform:
+        for prev_id, prev_title in _recent_longform_titles(channel_id):
+            if _titles_too_similar(title, prev_title):
+                return True, f"long-form #{prev_id} '{prev_title[:50]}'"
+    return False, ""
+
+
+def warn_if_title_similar(channel_id: int, channel_slug: str, video_id: int,
+                          title: str, db=None) -> bool:
+    """Alerta (una vez por vídeo) si un título long-form se parece a contenido
+    reciente del mismo canal. NO bloquea la generación: solo avisa al operador
+    (antiban, ago 2026). Devuelve True si era similar.
+    """
+    try:
+        similar, what = _title_similar_to_recent(channel_id, title,
+                                                 check_shorts=True, check_longform=True)
+        if not similar:
+            return False
+        logger.warning(
+            "[%s] Long-form title similar to recent %s: '%s' — señal de spam, revisar",
+            channel_slug, what, str(title)[:60],
+        )
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        key = f"title_sim_alert_{video_id}"
+        if db.get_system_state(key):
+            return True
+        db.set_system_state(key, "1")
+        from api.services.lifecycle_monitor import create_alert
+        create_alert(
+            db, entity_type="video", entity_id=video_id, channel_id=channel_id,
+            alert_type="title_similarity_warning", severity="warning",
+            title=f"Título de vídeo similar a contenido reciente ({channel_slug})",
+            message=(
+                f"El título del vídeo #{video_id} se parece a {what}. "
+                f"Los títulos casi duplicados son una señal clásica de spam de "
+                f"YouTube: edita el título antes de publicar si es un duplicado."
+            ),
+            metadata={"video_id": video_id, "conflict": what},
+        )
+        return True
+    except Exception as exc:
+        logger.debug("warn_if_title_similar failed: %s", exc)
+        return False
+
 # ── Auto-mark altered content helper (shorts) ─────────────────
 
 def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_id: int):
@@ -2996,18 +3078,20 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
     # ── Hard spam filter: title similarity guard ─────────────────
-    # Near-duplicate titles across shorts are a classic spam signal.
-    # If the generated title overlaps too much with a recent one, REJECT
-    # the script (return None) so the slot retries with different content
-    # instead of uploading a near-copy.
-    for prev_id, prev_title in _recent_short_titles(channel_id):
-        if _titles_too_similar(title, prev_title):
-            logger.warning(
-                "[%s] Title too similar to recent short #%d: '%s' ~ '%s' — "
-                "rejecting script, slot will retry with different content",
-                channel_slug, prev_id, title[:60], prev_title[:60],
-            )
-            return None
+    # Near-duplicate titles across shorts AND long-form are a classic spam
+    # signal. If the generated title overlaps too much with a recent one,
+    # REJECT the script (return None) so the slot retries with different
+    # content instead of uploading a near-copy.
+    _sim, _sim_what = _title_similar_to_recent(
+        channel_id, title, check_shorts=True, check_longform=True,
+    )
+    if _sim:
+        logger.warning(
+            "[%s] Title too similar to recent %s: '%s' ~ '%s' — "
+            "rejecting script, slot will retry with different content",
+            channel_slug, _sim_what, title[:60], title[:60],
+        )
+        return None
 
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False

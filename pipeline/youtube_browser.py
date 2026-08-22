@@ -441,10 +441,56 @@ class YouTubeBrowser:
             try:
                 self._ensure_browser()
                 page = self._context.new_page()
-                return self._do_mark(page, youtube_video_id)
+                ok = self._do_mark(page, youtube_video_id)
             except Exception as e:
                 logger.error("mark_altered_content failed for %s: %s", youtube_video_id, e)
-                return False
+                ok = False
+        if not ok:
+            self._alert_mark_failed(youtube_video_id)
+        return ok
+
+    def _alert_mark_failed(self, youtube_video_id: str) -> None:
+        """Alerta (una vez por vídeo) cuando falla el auto-marcado de
+        'contenido alterado/IA' en YouTube Studio.
+
+        Fallar en silencio deja el canal expuesto al flag de spam/IA de
+        YouTube (antiban, ago 2026): sin el marcado, el contenido generado
+        por IA es el principal desencadenante de eliminaciones.
+        """
+        try:
+            from database.db_extended import ExtendedDatabase
+            from api.services.lifecycle_monitor import create_alert
+            db = ExtendedDatabase()
+            key = f"altered_mark_alert_{youtube_video_id}"
+            if db.get_system_state(key):
+                return
+            db.set_system_state(key, "1")
+            channel_id = None
+            try:
+                slug = getattr(self, "account", "")
+                ch = db.get_channel_by_slug(slug) if slug else None
+                if ch:
+                    channel_id = ch.get("id")
+            except Exception:
+                channel_id = None
+            create_alert(
+                db,
+                entity_type="video" if channel_id else "channel",
+                entity_id=channel_id,
+                channel_id=channel_id,
+                alert_type="altered_content_mark_failed",
+                severity="warning",
+                title=f"Auto-marcado 'contenido alterado/IA' falló para {youtube_video_id}",
+                message=(
+                    f"No se pudo marcar el vídeo {youtube_video_id} como contenido "
+                    f"alterado/IA en YouTube Studio (Playwright). El canal queda expuesto "
+                    f"al flag de spam/IA de YouTube. Revisa el marcado manualmente o "
+                    f"verifica las sesiones de navegador (python3 scripts/yt_browser_login.py)."
+                ),
+                metadata={"video_id": youtube_video_id, "action": "marcado manual requerido"},
+            )
+        except Exception as exc:
+            logger.warning("mark-altered alert failed: %s", exc)
 
     def _do_mark(self, page, video_id: str) -> bool:
         try:
