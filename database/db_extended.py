@@ -713,12 +713,15 @@ def migrate_v2(db_path: str = None):
     # ── v12 one-time: bump channels to a minimum of 2 native + 2 clips_per_long ──
     # Fase 0 (ago 2026): el floor se bajó de 3 a 2 para respetar el objetivo
     # 50/50 (2 nativos + 2 clips) sin que el restart lo revierta a 3.
+    # ago 2026 (antiban): SOLO inicializa filas legacy (shorts_clips_per_long
+    # NULL) — ya NO fuerza native >= 2, porque la rebaja de frecuencia por
+    # strike (spam_mitigation._reduce_one_channel → native=1, clips=0) se
+    # revertía en cada arranque de la API.
     conn.execute("""
         UPDATE shorts_planning_config
         SET shorts_native_per_day = 2,
             shorts_clips_per_long = COALESCE(shorts_clips_per_long, 2)
-        WHERE shorts_native_per_day < 2
-           OR shorts_clips_per_long IS NULL
+        WHERE shorts_clips_per_long IS NULL
     """)
     conn.commit()
     
