@@ -1992,6 +1992,27 @@ def run_job(
             except Exception as exc_mar:
                 logger.warning("[MARATHON][%s] Failed to record completion: %s", canal, exc_mar)
 
+    except SystemExit as _sigexit:
+        # SIGTERM/SIGINT received (server restart / deploy). sys.exit() raises
+        # SystemExit (a BaseException, NOT Exception), so the `except Exception`
+        # block below never ran and the video stayed stuck in 'generating' forever.
+        # Reset it now to 'error/interrupted' so it's retryable instead of orphaned.
+        error_msg = "interrupted: SIGTERM (server restart)"
+        logger.warning(
+            "Worker interrupted by signal (code=%s) — resetting video #%d to error",
+            getattr(_sigexit, "code", "?"), video_id,
+        )
+        try:
+            _v = db.get_video(video_id)
+            if _v and _v.get("status") in ("generating", "ready"):
+                db.update_video(video_id, status="error",
+                                progress_phase="interrupted",
+                                error_message=error_msg)
+                logger.warning("Video #%d reset: generating → error/interrupted", video_id)
+        except Exception:
+            pass
+        raise  # conserva el exit code (143 para SIGTERM)
+
     except Exception as exc:
         tb = traceback.format_exc()
         tb_lines = tb.strip().split('\n')
@@ -2155,8 +2176,26 @@ def main():
             _kill_orphaned_ffmpeg()
             sys.exit(128 + signum)
 
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
+    # ── Diagnóstico del emisor (ago 2026): registrar QUIÉN envía SIGTERM ──
+    # Con SA_SIGINFO capturamos si_pid/si_uid del proceso emisor (permite
+    # distinguir systemd, _kill_orphaned_workers u otro). No bloquea nada.
+    def _signal_handler_info(signum, info, ctx):
+        logger.warning(
+            "Signal %d received from pid=%s uid=%s (comm=%s)",
+            signum,
+            getattr(info, "si_pid", "?"),
+            getattr(info, "si_uid", "?"),
+            getattr(info, "si_code", "?"),
+        )
+        _signal_handler(signum, ctx)
+
+    try:
+        signal.sigaction(signal.SIGTERM, _signal_handler_info)
+        signal.sigaction(signal.SIGINT, _signal_handler_info)
+    except (AttributeError, ValueError):
+        # Fallback si sigaction no está disponible (Python <3.8 sin SA_SIGINFO)
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
 
     # Run the job
     success = run_job(
