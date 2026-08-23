@@ -500,6 +500,16 @@ def ensure_spam_holds(db=None) -> dict:
     except Exception as exc:
         logger.warning("deleted_yt watchdog failed: %s", exc)
 
+    # ── Reanudación gradual post-strike (antiban, ago 2026) ──
+    # Aplica la fase vigente de cada canal (frecuencia long/shorts) ANTES de
+    # que el planning engine calcule el horizonte, para que los slots se
+    # generen con el ritmo correcto. replan=False: el planner corre después.
+    try:
+        from api.services.gradual_resume import apply_resume_phases
+        apply_resume_phases(db, replan=False)
+    except Exception as exc:
+        logger.warning("gradual resume phases skipped: %s", exc)
+
     return {"buffer_extended": extended, "held": held_total, "channels": channels_held}
 
 
