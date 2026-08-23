@@ -354,6 +354,15 @@ PUBLISH_JITTER_MIN = 15
 PUBLISH_WARMUP_MIN = 5
 PUBLISH_WINDOW_SPREAD_MIN = 90
 
+# ── Tope de publicaciones long-form por canal y día (antiban, ago 2026) ──
+# Tras strikes de spam, YouTube penaliza las ráfagas de publicaciones del mismo
+# canal (mismo día / misma hora). Este tope limita CUÁNTOS vídeos pueden hacerse
+# públicos por canal y día natural (tz local del canal), se aplique el camino
+# que se aplique (repack self-heal, planificación, esparcido post-strike).
+# Sobrescribible por canal vía config_json (MAX_LONGFORM_PUBLISH_PER_DAY).
+# Alineado con el techo antiban VIDEOS_PER_DAY_MAX=1 de gradual_resume.
+MAX_LONGFORM_PUBLISH_PER_DAY = 1
+
 # ── Upload spacing (backlog drain) ─────────────────────────────
 # Mínimo de horas entre subidas long-form del MISMO canal. Evita que
 # un backlog de vídeos pasados se despache en ráfagas ("en fila") cuando

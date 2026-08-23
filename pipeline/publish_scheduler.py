@@ -93,7 +93,12 @@ COUNTRY_UTC_OFFSETS = {
 # ── Variación permitida respecto al pico detectado por histórico ──
 HISTORY_SHIFT_MAX_HOURS = 2.5  # Máximo desplazamiento respecto a la heurística
 HISTORY_MIN_DATA_POINTS = 3    # Mínimos puntos de datos para confiar en histórico
-SAME_CHANNEL_PUBLISH_GAP_HOURS = 3  # v10.1: Mínimo de horas entre publicaciones del mismo canal
+# v10.1: Mínimo de horas entre publicaciones del mismo canal.
+# ago 2026 (antiban): 3h → 24h. El gap de 3h permitía hasta 8 publicaciones/día
+# del mismo canal (la ráfaga que alimentó los strikes de spam de ago-2026).
+# 24h = máx 1 publicación/día, el techo antiban (ver gradual_resume). El tope
+# diario real lo refuerza el repack con MAX_LONGFORM_PUBLISH_PER_DAY.
+SAME_CHANNEL_PUBLISH_GAP_HOURS = 24
 
 # ── Antelación máxima de publicación (clamp "no tan lejano") ──
 # (ago 2026): los vídeos subidos como private con publishAt heredan el
@@ -1405,14 +1410,34 @@ def repack_channel_publish_times(
         cursor_local += _td(days=1)
     cursor_utc = cursor_local.astimezone(_tz.utc)
 
+    # Tope diario (antiban, ago 2026): máx publicaciones por día natural local.
+    # Sobrescribible por canal vía config_json MAX_LONGFORM_PUBLISH_PER_DAY
+    # (config/defaults.py). Default 1 = el techo antiban (gradual_resume).
+    max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
+    max_per_day = max(1, max_per_day)
+
     safety_limit = now_utc + _td(hours=safety_ahead_hours)
     plan = []
+    day_used: dict = {}  # local date -> nº de vídeos asignados ese día
     for row in rows:
         video_id = row["id"]
         status = row["status"]
         yt_id = row["yt_video_id"] or ""
 
+        # ── Tope diario: si el día local del cursor ya está lleno, avanzar al
+        # siguiente día con hueco (a la hora pico). Así el repack NUNCA vuelve a
+        # apilar N vídeos del mismo canal el mismo día aunque gap_hours sea
+        # pequeño (p. ej. repacks legacy con gap de 3h). ──
+        guard = 0
+        cursor_local_now = cursor_utc.astimezone(tz)
+        while day_used.get(cursor_local_now.date(), 0) >= max_per_day and guard < 14:
+            cursor_local_now = cursor_local_now.replace(
+                hour=peak_hour, minute=0, second=0, microsecond=0,
+            ) + _td(days=1)
+            guard += 1
+        cursor_utc = cursor_local_now.astimezone(_tz.utc)
         slot = cursor_utc
+
         # awaiting_upload/ready: publish despues de upload + warmup + buffer 60min
         adjusted_upload_at = None
         up_raw = row["scheduled_upload_at"]
@@ -1447,10 +1472,11 @@ def repack_channel_publish_times(
             "requires_yt_update": requires_yt,
             "adjusted_upload_at": adjusted_upload_at,
         })
+        day_used[slot.astimezone(tz).date()] = day_used.get(slot.astimezone(tz).date(), 0) + 1
         cursor_utc = slot + _td(hours=gap_hours)
 
     logger.info(
-        "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s)",
-        slug, len(plan), gap_hours, peak_hour, tz_str,
+        "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s, máx %d/día)",
+        slug, len(plan), gap_hours, peak_hour, tz_str, max_per_day,
     )
     return plan

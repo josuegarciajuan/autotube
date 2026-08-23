@@ -20,6 +20,11 @@ a su hora original. Nunca se fuerza una publicación manual.
 import json
 import logging
 
+from pipeline.publish_scheduler import (
+    MAX_PUBLISH_AHEAD_SAFETY_HOURS,
+    SAME_CHANNEL_PUBLISH_GAP_HOURS,
+)
+
 logger = logging.getLogger("autotube.publish_repack")
 
 # Máximo de llamadas videos.update por invocación (self-heal lo acota; el
@@ -47,6 +52,8 @@ def apply_publish_repack(
     max_yt_updates: int | None = DEFAULT_MAX_YT_UPDATES,
     quota_gate: bool = True,
     force_yt: bool = False,
+    gap_hours: int | None = None,
+    safety_ahead_hours: int | None = None,
 ) -> dict:
     """Repack y (opcionalmente) aplicar el nuevo horario de publicación.
 
@@ -62,6 +69,13 @@ def apply_publish_repack(
             aunque su target_public_at en DB ya coincida con el plan (resync
             tras una desincronización DB/YT, p. ej. por límite de updates en
             pasadas anteriores).
+        gap_hours: separación mínima entre publicaciones del mismo canal.
+            None → SAME_CHANNEL_PUBLISH_GAP_HOURS (3h, histórico). Pasar un
+            valor mayor (p. ej. 24) convierte el repack en "máx 1 publicación
+            por día" — el techo antiban.
+        safety_ahead_hours: horizonte máximo de reprogramación (None → 120h).
+            Con gaps grandes y backlogs densos hay que subirlo (p. ej. 720h)
+            o el cap recorta y vuelve a apilar vídeos en el mismo instante.
 
     Returns:
         dict con {channel_id, slug, total, rescheduled, no_change, yt_failed,
@@ -106,6 +120,8 @@ def apply_publish_repack(
     plan = repack_channel_publish_times(
         db, channel_id, slug,
         timezone_str=tz_str, warmup_min=warmup,
+        gap_hours=gap_hours if gap_hours is not None else SAME_CHANNEL_PUBLISH_GAP_HOURS,
+        safety_ahead_hours=safety_ahead_hours if safety_ahead_hours is not None else MAX_PUBLISH_AHEAD_SAFETY_HOURS,
     )
     if not plan:
         return {
