@@ -143,6 +143,22 @@ def redistribution_enqueue(channel_id: int, video_ids: list[int] = None):
     return {"ok": True, "enqueued": created}
 
 
+@router.get("/channels/{channel_id}/redistribution/backlog")
+def redistribution_backlog(channel_id: int, platform: str = None, limit: int = 50):
+    """Cola pendiente legible (con título del vídeo) por canal/plataforma."""
+    db = get_db()
+    _channel_or_404(db, channel_id)
+    rows = db.get_redistribution_backlog(channel_id, platform, limit=min(limit, 200))
+    # Attach video titles
+    for row in rows:
+        v = db.get_video(row["video_id"])
+        row["video_title"] = (v or {}).get("titulo_final") or (v or {}).get("title") or ""
+        row["yt_video_id"] = (v or {}).get("yt_video_id") or ""
+        row["queue_order"] = row.get("queue_order") or row["id"]
+    rows.sort(key=lambda r: (r.get("queue_order") is None, r.get("queue_order") or 0))
+    return rows
+
+
 # ── Stats ──────────────────────────────────────────────────────
 
 

@@ -14,6 +14,7 @@ const ChannelDetail = lazy(() => import('./pages/ChannelDetail'))
 const VideoEditor = lazy(() => import('./pages/VideoEditor'))
 const Scheduling = lazy(() => import('./pages/Scheduling'))
 const Monitor = lazy(() => import('./pages/Monitor'))
+const Distribution = lazy(() => import('./pages/Distribution'))
 
 function PageLoader() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
                   <Route path="/videos/:id/edit" element={<VideoEditor />} />
                   <Route path="/scheduling" element={<Scheduling />} />
                   <Route path="/monitor" element={<Monitor />} />
+                  <Route path="/distribution" element={<Distribution />} />
                 </Route>
               </Routes>
             </Suspense>

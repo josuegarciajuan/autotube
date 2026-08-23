@@ -99,6 +99,31 @@ export const api = {
     request<any>(`/videos/${videoId}/republish-to/${platform}`, { method: 'POST' }),
   getChannelPlatformStats: (channelId: number) =>
     request<any[]>(`/channels/${channelId}/platform-stats`),
+
+  // Social redistribution (v44)
+  getRedistributionStatus: (channelId: number) =>
+    request<any>(`/channels/${channelId}/redistribution/status`),
+  startRedistribution: (channelId: number) =>
+    request<any>(`/channels/${channelId}/redistribution/start`, { method: 'POST' }),
+  pauseRedistribution: (channelId: number) =>
+    request<any>(`/channels/${channelId}/redistribution/pause`, { method: 'POST' }),
+  resumeRedistribution: (channelId: number) =>
+    request<any>(`/channels/${channelId}/redistribution/resume`, { method: 'POST' }),
+  enqueueRedistribution: (channelId: number) =>
+    request<any>(`/channels/${channelId}/redistribution/enqueue`, { method: 'POST' }),
+  getRedistributionBacklog: (channelId: number, platform?: string, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (platform) params.set('platform', platform)
+    return request<any[]>(`/channels/${channelId}/redistribution/backlog?${params}`)
+  },
+  getChannelSocialStats: (channelId: number) =>
+    request<any>(`/channels/${channelId}/social-stats`),
+  getVideoSocialStats: (videoId: number) =>
+    request<any>(`/videos/${videoId}/social-stats`),
+  collectSocialStats: (channelId?: number) => {
+    const qs = channelId ? `?channel_id=${channelId}` : ''
+    return request<any>(`/social-stats/collect${qs}`, { method: 'POST' })
+  },
   
   // Templates
   generateTemplate: (channelId: number, segmentType: string) =>
