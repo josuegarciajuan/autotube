@@ -30,6 +30,7 @@ from api.routers import monitor as monitor_router
 from api.routers import insights
 from api.routers import view_gap as view_gap_router
 from api.routers import quota as quota_router
+from api.routers import pacing as pacing_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT,
@@ -2946,6 +2947,7 @@ app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
 app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])
 app.include_router(quota_router.router, prefix="", tags=["Quota"])
+app.include_router(pacing_router.router, tags=["Pacing"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

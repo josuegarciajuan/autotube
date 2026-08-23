@@ -751,15 +751,22 @@ def _apply_same_channel_gap(db, ch_cfg: dict, channel_id: int,
                             candidate: datetime, now: datetime) -> datetime:
     """Push a candidate upload time forward to respect the same-channel minimum gap.
 
-    Reads MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS from channel config (default 3h).
-    The gap is a duration, so it is timezone-agnostic: the earliest allowed time
-    is now + (gap - minutes_since_last_upload). Returns candidate unchanged if
-    no gap applies or it is already beyond the earliest allowed time.
+    Reads MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS from the central pacing profile
+    (``same_channel_upload_gap_h``; strike=6h). The gap is a duration, so it is
+    timezone-agnostic: the earliest allowed time is now + (gap -
+    minutes_since_last_upload). Returns candidate unchanged if no gap applies or
+    it is already beyond the earliest allowed time.
     """
     try:
-        gap_hours = int(ch_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
-    except (TypeError, ValueError):
-        gap_hours = 3
+        from api.services.pacing_profile import get_pacing_value
+        gap_hours = int(get_pacing_value(
+            "same_channel_upload_gap_h", default=3, db=db,
+        ) or 3)
+    except Exception:
+        try:
+            gap_hours = int(ch_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
+        except (TypeError, ValueError):
+            gap_hours = 3
     if gap_hours <= 0:
         return candidate
     mins_ago = _minutes_since_last_upload(db, channel_id)
@@ -1067,9 +1074,15 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             except (json.JSONDecodeError, TypeError):
                 pass
             try:
-                gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
-            except (TypeError, ValueError):
-                gap_hours = 3
+                from api.services.pacing_profile import get_pacing_value
+                gap_hours = int(get_pacing_value(
+                    "same_channel_upload_gap_h", default=3, db=db,
+                ) or 3)
+            except Exception:
+                try:
+                    gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
+                except (TypeError, ValueError):
+                    gap_hours = 3
             if gap_hours > 0:
                 mins_ago = _minutes_since_last_upload(db, ch_id)
                 if mins_ago is not None and mins_ago < gap_hours * 60:

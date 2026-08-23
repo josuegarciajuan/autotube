@@ -109,12 +109,24 @@ def get_channel_account(channel_slug: str, db=None) -> str:
 
 
 def get_account_upload_cap(db=None) -> int:
-    """Tope de subidas/día por cuenta Google (0 = desactivado)."""
+    """Tope de subidas/día por cuenta Google (0 = desactivado).
+
+    Fuente: perfil central de pacing (``account_daily_upload_cap``), con
+    fallback a la constante antiban de defaults.py.
+    """
     try:
-        from config.defaults import ACCOUNT_DAILY_UPLOAD_CAP
-        return int(ACCOUNT_DAILY_UPLOAD_CAP or 0)
+        from api.services.pacing_profile import get_pacing_value
+        return int(get_pacing_value(
+            "account_daily_upload_cap",
+            default=0,
+            db=db,
+        ) or 0)
     except Exception:
-        return 0
+        try:
+            from config.defaults import ACCOUNT_DAILY_UPLOAD_CAP
+            return int(ACCOUNT_DAILY_UPLOAD_CAP or 0)
+        except Exception:
+            return 0
 
 
 def get_account_daily_uploads(account: str, db=None) -> int:

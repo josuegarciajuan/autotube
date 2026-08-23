@@ -5,6 +5,7 @@ import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlannin
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
 import ChannelConfigCard from '../components/ChannelConfigCard'
+import PacingProfileCard from '../components/PacingProfileCard'
 import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
 interface ChannelSummary {
@@ -555,6 +556,9 @@ export default function Scheduling() {
           </div>
         </div>
       )}
+
+      {/* ── Section 0: Perfil de cadencia (strike mode) ── */}
+      <PacingProfileCard />
 
       {/* ── Section 1: Pipeline Visual (3-columnas) ── */}
       <section className="glass rounded-xl p-5 space-y-3">

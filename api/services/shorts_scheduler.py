@@ -285,7 +285,7 @@ def _global_shorts_daily_cap_reached(db=None) -> bool:
                    WHERE status = 'published'
                      AND date(published_at) = date('now', 'localtime')"""
             ).fetchone()
-        return (row[0] if row else 0) >= GLOBAL_SHORTS_PER_DAY_CAP
+        return (row[0] if row else 0) >= _global_shorts_daily_cap()
     except Exception:
         return False
 
@@ -310,7 +310,7 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
                      AND date(created_at) = date('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()
-        return (row[0] if row else 0) >= SHORTS_HARD_PER_CHANNEL_DAILY_CAP
+        return (row[0] if row else 0) >= _hard_daily_cap()
     except Exception:
         return False
 
@@ -682,6 +682,50 @@ SHORT_GEN_LEAD_MIN_CLIP_ONTHEFLY = 15  # on-the-fly clip: extract + render + upl
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
 SHORTS_COOLDOWN_MINUTES = 180  # min gap between same-channel shorts (60→180: anti-spam tras penalización YT)
 
+
+# ── Pacing dinámico (perfil central "strike mode") ──────────────
+# Las constantes de arriba son el FALLBACK del perfil "strike" (no cambia el
+# comportamiento actual). El perfil activo (system_state["pacing_profile"])
+# gobierna estas claves; relajar los strikes = cambiar el perfil y todo se
+# reajusta. Ver api/services/pacing_profile.py.
+
+def _pacing_int(key: str, default: int) -> int:
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return int(get_pacing_value(key, default=default) or default)
+    except Exception:
+        return default
+
+
+def _hard_daily_cap() -> int:
+    """Cap duro de shorts por canal y día (total native+clip)."""
+    return _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
+
+
+def _global_shorts_daily_cap() -> int:
+    """Cap global de shorts/día entre todos los canales."""
+    return _pacing_int("shorts_global_day", GLOBAL_SHORTS_PER_DAY_CAP)
+
+
+def _shorts_cooldown_minutes() -> int:
+    """Cooldown mínimo entre shorts del mismo canal."""
+    return _pacing_int("shorts_cooldown_min", SHORTS_COOLDOWN_MINUTES)
+
+
+def _same_type_gap_minutes() -> int:
+    """Gap mínimo de publicación native↔native / clip↔clip."""
+    return _pacing_int("shorts_same_type_gap_min", SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+
+
+def _cross_type_gap_minutes() -> int:
+    """Gap mínimo de publicación native↔clip."""
+    return _pacing_int("shorts_cross_type_gap_min", CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+
+
+def _min_shorts_gap_minutes() -> int:
+    """Gap mínimo de generación entre shorts del mismo canal."""
+    return _pacing_int("shorts_min_gap_min", MIN_SHORTS_GAP_MINUTES)
+
 # ── Native fallback windows (used when no optimal slots available) ──
 NATIVE_WINDOWS = [
     (9, 30),     # morning
@@ -976,12 +1020,12 @@ def _build_shorts_slots_for_channel(
                 continue  # This resolved slot is after us — not a collision
             if slot_type == prev_type:
                 # Same type: enforce publish-level gap
-                if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                    pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                if pushed_min - prev_min < _same_type_gap_minutes():
+                    pushed_min = prev_min + _same_type_gap_minutes()
             else:
                 # Cross-type (native↔clip): enforce publish gap (v10.3)
-                if pushed_min - prev_min < CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                    pushed_min = prev_min + CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                if pushed_min - prev_min < _cross_type_gap_minutes():
+                    pushed_min = prev_min + _cross_type_gap_minutes()
         pushed_min = pushed_min  # no end-of-day clamp — _minutes_to_utc_slot handles overflow
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
@@ -995,7 +1039,7 @@ def _build_shorts_slots_for_channel(
         pushed = minutes_val
         for prev_min, prev_type, _, _ in deduped:
             if prev_type == stype and prev_min == pushed:
-                pushed = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                pushed = prev_min + _same_type_gap_minutes()
         deduped.append((pushed, stype, long_pos, rank))
     resolved = deduped
 
@@ -1086,8 +1130,8 @@ def _build_filler_slots_for_channel(
         # Resolve collisions with existing slots (same type = native)
         pushed_min = total_min
         for prev_min in sorted(existing_minutes):
-            if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+            if pushed_min - prev_min < _same_type_gap_minutes():
+                pushed_min = prev_min + _same_type_gap_minutes()
 
         existing_minutes.append(pushed_min)
         existing_minutes.sort()
@@ -1868,7 +1912,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     # Tope global duro de shorts/día (anti-spam YouTube)
     if _global_shorts_daily_cap_reached(db):
-        logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", GLOBAL_SHORTS_PER_DAY_CAP)
+        logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", _global_shorts_daily_cap())
         return None
 
     # ── Cola de shorts nativos generados durante bloqueos: subir gradualmente ──
@@ -2034,12 +2078,12 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         logger.info(
                             "Force dispatch: slot #%d (%s) — tope duro diario "
                             "(%d short(s)/día) — cancelando slot",
-                            slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                            slot_id, slug, _hard_daily_cap(),
                         )
                         _failed_force_ids.add(slot_id)
                         db.update_shorts_slot_status(
                             slot_id, "cancelled",
-                            error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
+                            error_message=f"hard daily cap ({_hard_daily_cap()}/día)",
                         )
                         continue
 
@@ -2087,7 +2131,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             logger.info(
                                 "Force dispatch: slot #%d (%s) — cooldown active "
                                 "(< %d min), trying next channel",
-                                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+                                slot_id, slug, _shorts_cooldown_minutes(),
                             )
                             _failed_force_ids.add(slot_id)
                             continue
@@ -2290,23 +2334,23 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             logger.info(
                 "Shorts slot #%d (%s) skipped: cooldown active "
                 "(last short < %d min ago) — trying next channel",
-                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+                slot_id, slug, _shorts_cooldown_minutes(),
             )
             _skipped_slot_ids.add(slot_id)
             continue
 
         # 5a. HARD per-channel daily cap (anti-strike, NO saltable por catch-up
-        # ni force-dispatch): máx SHORTS_HARD_PER_CHANNEL_DAILY_CAP shorts
-        # subidos hoy por canal. Lo que dispara el flag de YouTube es la SUBIDA.
+        # ni force-dispatch): máx shorts subidos hoy por canal (perfil de
+        # pacing). Lo que dispara el flag de YouTube es la SUBIDA.
         if _channel_hard_daily_short_cap_reached(channel_id, db):
             logger.info(
                 "Shorts slot #%d (%s) skipped: tope duro diario alcanzado "
                 "(%d short(s) subidos hoy) — cancelando slot",
-                slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                slot_id, slug, _hard_daily_cap(),
             )
             db.update_shorts_slot_status(
                 slot_id, "cancelled",
-                error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
+                error_message=f"hard daily cap ({_hard_daily_cap()}/día)",
             )
             _skipped_slot_ids.add(slot_id)
             continue
@@ -2338,8 +2382,8 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 "Shorts slot #%d (%s) skipped: publish conflict "
                 "(%s within %d min same-type / %d min cross-type) — trying next channel",
                 slot_id, slug, short_type,
-                SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
-                CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+                _same_type_gap_minutes(),
+                _cross_type_gap_minutes(),
             )
             _skipped_slot_ids.add(slot_id)
             continue
@@ -2908,7 +2952,7 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
         if _channel_hard_daily_short_cap_reached(channel_id, _db_s):
             logger.info(
                 "[standalone] %s: tope duro diario (%d/día) alcanzado — skip",
-                channel_slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                channel_slug, _hard_daily_cap(),
             )
             return None
 
@@ -3637,7 +3681,7 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
     if _channel_hard_daily_short_cap_reached(channel_id, db):
         logger.info(
             "[%s] Queued short #%d skipped: tope duro diario (%d/día) — se mantiene en cola",
-            slug, short_id, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+            slug, short_id, _hard_daily_cap(),
         )
         return False
 
@@ -5023,7 +5067,7 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
 
     Returns True if the channel is clear to dispatch another short.
     Returns False if the channel's last completed short was less than
-    SHORTS_COOLDOWN_MINUTES ago.
+    SHORTS_COOLDOWN_MINUTES (o el cooldown del perfil de pacing) ago.
     """
     last_completed = db.get_channel_last_short_completed_at(channel_id)
     if last_completed is None:
@@ -5036,7 +5080,7 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
         # (DEFAULT_TIMEZONE) shifted it -2h and expired the cooldown early.
         last_utc = last_time.replace(tzinfo=UTC)
         elapsed = (datetime.now(UTC) - last_utc).total_seconds()
-        return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
+        return elapsed >= _shorts_cooldown_minutes() * 60
     except (ValueError, TypeError):
         return True  # Can't parse — let it proceed
 
@@ -5100,10 +5144,10 @@ def _same_type_shorts_slot_conflict(
                 f"{hours_late:.1f}", CATCH_UP_BYPASS_HOURS,
             )
 
-    # ── Same-type gap (45 min) ──
-    same_gap = timedelta(minutes=SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
-    # ── Cross-type gap (20 min) ──
-    cross_gap = timedelta(minutes=CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+    # ── Same-type gap (perfil de pacing) ──
+    same_gap = timedelta(minutes=_same_type_gap_minutes())
+    # ── Cross-type gap (perfil de pacing) ──
+    cross_gap = timedelta(minutes=_cross_type_gap_minutes())
 
     # ── Check 1: shorts_planned_slots — same-type ──
     window_same_start = (target_dt - same_gap).strftime("%Y-%m-%d %H:%M:%S")
@@ -5234,12 +5278,12 @@ def _same_type_shorts_slot_conflict(
                         if pub_dt.tzinfo is None:
                             pub_dt = pub_dt.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
                         gap_min = abs((target_dt - pub_dt).total_seconds()) / 60.0
-                        if gap_min < CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
+                        if gap_min < _cross_type_gap_minutes():
                             logger.debug(
                                 "Published cross-type conflict: %s slot ch=%d too close "
                                 "to published %s short #%d (%.0f min gap < %d min)",
                                 short_type, channel_id, pub_type, row["id"],
-                                gap_min, CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+                                gap_min, _cross_type_gap_minutes(),
                             )
                             return True
                     except (ValueError, TypeError):
