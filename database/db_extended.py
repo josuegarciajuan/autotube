@@ -30,12 +30,11 @@ _PUBLISH_VERIFY_LOCK = threading.Lock()
 _PUBLISH_VERIFY_INFLIGHT: set = set()   # video ids being verified right now
 _PUBLISH_RETRY_MINUTES = 20             # fixed interval between wall-scrape checks
 _PUBLISH_GRACE_MINUTES = 180            # grace window past reference time before raising alert
-# ago 2026 (antiban): tope de reintentos de verificación por vídeo. La alerta
-# publish_not_detected ya se emite a las 3h (grace); 12 reintentos × 20 min =
-# ~4h de comprobación total. A partir de ahí se DEJA de consultar YouTube
-# (wall-scrape) para no mantener un bucle de peticiones contra la plataforma;
-# la alerta queda como señal para el operador.
-_PUBLISH_VERIFY_MAX_RETRIES = 12
+# ago 2026 (antiban): tope de reintentos de verificación por vídeo. Comportamiento
+# humano: máximo 3 intentos (3 × 20 min = ~1h) y se desiste — comprobación final
+# vía yt-dlp (0 cuota) y alerta `publish_verify_exhausted`. NUNCA un bucle de
+# peticiones contra YouTube; el vídeo queda marcado para revisión del operador.
+_PUBLISH_VERIFY_MAX_RETRIES = 3
 _CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
 _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
 
@@ -310,19 +309,53 @@ def _raise_publish_not_detected_alert(video_id: int, channel_slug: str,
 def _schedule_publish_retry(video_id: int, delay_minutes: int):
     """Schedule a retry verification in `delay_minutes` minutes.
 
-    Anti-bucle (antiban, ago 2026): tras _PUBLISH_VERIFY_MAX_RETRIES se deja de
-    reprogramar — la alerta publish_not_detected (emitida al superar el grace)
-    queda como señal para el operador y no se mantiene un bucle de peticiones
-    contra YouTube.
+    Anti-bucle (antiban, ago 2026): comportamiento humano — máximo
+    _PUBLISH_VERIFY_MAX_RETRIES intentos (~1h) y si no se confirma se DESISTE:
+    comprobación final vía yt-dlp (0 cuota, cubre el punto ciego del feed RSS)
+    y, si sigue sin aparecer, alerta `publish_verify_exhausted` + se deja de
+    consultar YouTube. El vídeo queda marcado para revisión del operador.
     """
     db = ExtendedDatabase()
     if _get_retry_count(video_id) >= _PUBLISH_VERIFY_MAX_RETRIES:
         vlog = logger.getChild("publish_verify")
+        video = db.get_video(video_id)
+        yt_video_id = (video or {}).get("yt_video_id") or ""
+        slug = (video or {}).get("canal") or (video or {}).get("channel_slug") or "?"
         vlog.warning(
-            "Video #%d: verificación de publicación alcanzó el tope de %d reintentos — "
-            "se detiene (alerta publish_not_detected pendiente para revisión)",
+            "Video #%d: verificación alcanzó el tope de %d reintentos — desistiendo",
             video_id, _PUBLISH_VERIFY_MAX_RETRIES,
         )
+        # ── Última comprobación 0-cuota: si está público, marcarlo (no alertar) ──
+        try:
+            if yt_video_id and _ytdlp_confirm_public(yt_video_id):
+                vlog.info(
+                    "[%s] ✅ Video #%d confirmado público vía yt-dlp en el último intento",
+                    slug, video_id,
+                )
+                _mark_video_published(video_id, slug, yt_video_id)
+                return
+        except Exception as _yt_final:
+            vlog.debug("yt-dlp final check skipped: %s", _yt_final)
+        # ── Desistir: alerta + detener (no más peticiones contra YouTube) ──
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(
+                db,
+                entity_type="video", entity_id=video_id, channel_id=None,
+                alert_type="publish_verify_exhausted",
+                severity="warning",
+                title=f"Vídeo #{video_id} sin confirmar tras {_PUBLISH_VERIFY_MAX_RETRIES} intentos",
+                message=(
+                    f"La verificación de publicación (wall-scrape RSS) desistió tras "
+                    f"{_PUBLISH_VERIFY_MAX_RETRIES} intentos sin encontrar el vídeo "
+                    f"público (yt={yt_video_id or '?'}, canal={slug}). Puede estar "
+                    f"aún procesándose, ser privado, o haberse eliminado. Revisa en "
+                    f"YouTube Studio el estado real y resuélvelo manualmente."
+                ),
+                metadata={"video_id": video_id, "slug": slug, "yt_video_id": yt_video_id},
+            )
+        except Exception as _al_exc:
+            vlog.warning("publish_verify_exhausted alert failed: %s", _al_exc)
         return
     retry_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=delay_minutes)
     with db._connect() as conn:
