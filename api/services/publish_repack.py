@@ -262,6 +262,25 @@ def apply_publish_repack(
                          AND status = 'pending'""",
                     (new_target, video_id),
                 )
+                # ── Re-programado OK: limpiar hold de emergencia y resetear ──
+                # contadores de verificación (antiban, ago 2026). El verifier
+                # (database.db_extended._verify_published_status_bg) omite los
+                # vídeos con marcador publish_hold_done_{yt_id}; sin limpiarlo,
+                # un vídeo retenido se saltaría la verificación para siempre
+                # aunque ya tenga un nuevo target. El reset de retry_count/
+                # retry_at da presupuesto fresco (3 intentos) al nuevo ciclo.
+                try:
+                    conn.execute(
+                        "DELETE FROM system_state WHERE key = ?",
+                        (f"publish_hold_done_{item['yt_video_id']}",),
+                    )
+                    conn.execute(
+                        "UPDATE videos SET published_retry_count = 0, "
+                        "published_retry_at = NULL WHERE id = ?",
+                        (video_id,),
+                    )
+                except Exception:
+                    pass
                 conn.commit()
         except Exception as exc:
             logger.error("[%s] repack: DB update failed #%d: %s", slug, video_id, exc)

@@ -35,6 +35,13 @@ _PUBLISH_GRACE_MINUTES = 180            # grace window past reference time befor
 # vía yt-dlp (0 cuota) y alerta `publish_verify_exhausted`. NUNCA un bucle de
 # peticiones contra YouTube; el vídeo queda marcado para revisión del operador.
 _PUBLISH_VERIFY_MAX_RETRIES = 3
+# Cooldown tras desistir (antiban, ago 2026): el vídeo desistido NO se vuelve a
+# verificar durante esta ventana (24h). Sin esto, _maybe_trigger_publish_verification
+# re-dispara cada 5 min indefinidamente (published_retry_at queda en el pasado y
+# published_verified_at en NULL), martilleando YouTube con wall-scrapes + yt-dlp.
+# El repack (con cuota libre) re-programa el vídeo a futuro; al pasar el nuevo
+# target, la verificación se reanuda de forma natural.
+_PUBLISH_DESIST_COOLDOWN_MINUTES = 1440
 _CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
 _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
 
@@ -118,6 +125,26 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
         now_utc = datetime.now(_dt_timezone.utc)
         db = ExtendedDatabase()
         video = db.get_video(video_id) or {}
+
+        # ── Hold de emergencia (antiban, ago 2026): vídeo retenido a Privado ──
+        # Si existe publish_hold_done_{yt_id}, el vídeo fue puesto en 'Privado
+        # sin programar' (0 cuota) durante una agotación de cuota para evitar el
+        # patrón de ráfaga. No está público POR DISEÑO: verificar y alertar
+        # (publish_not_detected / publish_verify_exhausted) sería un falso
+        # positivo. El marcador se limpia en publish_repack al re-programar, así
+        # que la verificación se reanuda cuando el vídeo vuelve a tener un
+        # target real.
+        if yt_video_id:
+            try:
+                if db.get_system_state(f"publish_hold_done_{yt_video_id}"):
+                    vlog.info(
+                        "[%s] Video #%d (yt=%s) retenido (hold de emergencia) — "
+                        "verificación omitida",
+                        channel_slug, video_id, yt_video_id,
+                    )
+                    return
+            except Exception as _hold_exc:
+                vlog.debug("[%s] hold check skipped: %s", channel_slug, _hold_exc)
 
         # ── Resolve the channel timezone for human-readable logs ──
         tz_name = "UTC"
@@ -371,6 +398,27 @@ def _schedule_publish_retry(video_id: int, delay_minutes: int):
             )
         except Exception as _al_exc:
             vlog.warning("publish_verify_exhausted alert failed: %s", _al_exc)
+        # ── Cooldown de desistencia (antiban, ago 2026): detener el re-disparo ──
+        # Sin este backoff el bucle de 5 min re-dispara la verificación para
+        # siempre. Fijamos el próximo intento a _PUBLISH_DESIST_COOLDOWN_MINUTES
+        # vista: si el vídeo se re-programa (repack con cuota libre), su
+        # target_public_at pasa a futuro y la verificación se reanuda cuando
+        # llegue; si no, no se vuelve a consultar YouTube hasta pasado el
+        # cooldown.
+        try:
+            desist_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=_PUBLISH_DESIST_COOLDOWN_MINUTES)
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE videos SET published_retry_at = ? WHERE id = ?",
+                    (desist_at.isoformat(), video_id),
+                )
+                conn.commit()
+            vlog.info(
+                "Video #%d: cooldown de desistencia aplicado (próximo intento en %d min)",
+                video_id, _PUBLISH_DESIST_COOLDOWN_MINUTES,
+            )
+        except Exception as _cd_exc:
+            vlog.debug("desist cooldown update failed: %s", _cd_exc)
         return
     retry_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=delay_minutes)
     with db._connect() as conn:
