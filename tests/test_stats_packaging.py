@@ -108,7 +108,7 @@ def test_batch_update_video_analytics_persiste_ctr(stats_db):
 
 
 def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
-    """El bulk query incluye impressions + impressionsClickThroughRate."""
+    """El bulk query incluye impressions + impressionsClickThroughRate + likes/comments."""
     import pipeline.youtube_stats as ys
 
     captured = {}
@@ -117,7 +117,8 @@ def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
         def __init__(self, **kw):
             captured.update(kw)
         def execute(self):
-            return {"rows": [["VID1", "10", "120", "1", "20.5", "50", "1500", "0.042"]]}
+            return {"rows": [["VID1", "10", "120", "1", "20.5", "50",
+                              "1500", "0.042", "30", "5"]]}
 
     class FakeReports:
         def query(self, **kw):
@@ -132,5 +133,10 @@ def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
 
     result = obj.get_all_videos_analytics(["VID1"], days=30)
     assert "impressions,impressionsClickThroughRate" in captured.get("metrics", "")
+    # ago 2026: likes/comments vía Analytics API (fallback cuando el Data API
+    # está agotado — yt-dlp ya no los expone en la watch page pública).
+    assert "likes,comments" in captured.get("metrics", "")
     assert result["VID1"]["impressions"] == "1500"
     assert result["VID1"]["impressionsClickThroughRate"] == "0.042"
+    assert result["VID1"]["likes"] == "30"
+    assert result["VID1"]["comments"] == "5"

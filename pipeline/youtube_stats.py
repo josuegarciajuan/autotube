@@ -329,7 +329,13 @@ class YouTubeStatsFetcher:
 
         Uses dimensions=video to fetch estimatedMinutesWatched,
         averageViewDuration, subscribersGained, averageViewPercentage, views,
-        impressions and impressionsClickThroughRate for all videos at once.
+        impressions, impressionsClickThroughRate, likes and comments for all
+        videos at once.
+
+        ago 2026: `likes`/`comments` (métricas de la Analytics API, cuota
+        separada) son la fuente fiable de likes/comments cuando la cuota del
+        Data API está agotada — yt-dlp ya no los expone en la watch page
+        pública. Son valores del período de la ventana (365d por defecto).
 
         Args:
             video_ids: List of YouTube video IDs.
@@ -339,7 +345,7 @@ class YouTubeStatsFetcher:
             Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration,
                                          subscribersGained, averageViewPercentage,
                                          analyticsViews, impressions,
-                                         impressionsClickThroughRate}
+                                         impressionsClickThroughRate, likes, comments}
             Empty dict if no analytics data available.
         """
         if not self._analytics_service:
@@ -364,7 +370,7 @@ class YouTubeStatsFetcher:
                         ids="channel==MINE",
                         startDate=start_date,
                         endDate=end_date,
-                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views,impressions,impressionsClickThroughRate",
+                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views,impressions,impressionsClickThroughRate,likes,comments",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
@@ -374,7 +380,7 @@ class YouTubeStatsFetcher:
                 rows = resp.get("rows", [])
                 for row in rows:
                     # row: [video_id, estMinWatched, avgViewDur, subsGained, avgViewPct,
-                    #       views, impressions, impressionsClickThroughRate]
+                    #       views, impressions, impressionsClickThroughRate, likes, comments]
                     vid = row[0]
                     result[vid] = {
                         "estimatedMinutesWatched": str(row[1]) if len(row) > 1 and row[1] else "0",
@@ -386,6 +392,13 @@ class YouTubeStatsFetcher:
                         # La API devuelve CTR como fracción (0.05 = 5%); se
                         # convierte a porcentaje al persistir en DB.
                         "impressionsClickThroughRate": str(row[7]) if len(row) > 7 and row[7] else "0",
+                        # ago 2026: likes/comments vía Analytics API — la única
+                        # fuente fiable cuando la cuota del Data API está agotada
+                        # (yt-dlp ya no los expone en la watch page pública).
+                        # Son valores del período (ventana de 365d); para estos
+                        # canales (< 1 año) equivalen prácticamente a lifetime.
+                        "likes": str(row[8]) if len(row) > 8 and row[8] else "0",
+                        "comments": str(row[9]) if len(row) > 9 and row[9] else "0",
                     }
                 logger.debug(
                     "Bulk analytics: %d videos returned for %d requested (batch %d/%d)",
@@ -1043,6 +1056,9 @@ class YouTubeStatsFetcher:
         # load failure should not disable it.
         scrape_enabled = bool(scrape_fallback)
         max_concurrency = 6
+        min_interval_h = 24
+        max_age_days = 45
+        shorts_max_age_days = 7
         try:
             from config.config_bridge import get_channel_config
             cfg = get_channel_config(self.slug)
@@ -1051,6 +1067,15 @@ class YouTubeStatsFetcher:
             )
             max_concurrency = int(
                 getattr(cfg, "STATS_SCRAPE_MAX_CONCURRENCY", 6)
+            )
+            min_interval_h = int(
+                getattr(cfg, "STATS_SCRAPE_MIN_INTERVAL_H", 24)
+            )
+            max_age_days = int(
+                getattr(cfg, "STATS_SCRAPE_MAX_AGE_DAYS", 45)
+            )
+            shorts_max_age_days = int(
+                getattr(cfg, "STATS_SCRAPE_SHORTS_MAX_AGE_DAYS", 7)
             )
         except Exception:
             pass
@@ -1214,22 +1239,61 @@ class YouTubeStatsFetcher:
         # Collect public views/likes/comments for videos/shorts that did NOT get
         # real Data API rows this run. Runs when quota is exhausted or in
         # scrape-only mode.
+        #
+        # ago 2026: incremental + age window. Instead of re-scraping EVERY
+        # video/short on every run (~9 min for all channels), only scrape items
+        # that (a) lack a fresh stats row (< STATS_SCRAPE_MIN_INTERVAL_H) and
+        # (b) were uploaded within STATS_SCRAPE_MAX_AGE_DAYS (videos) /
+        # STATS_SCRAPE_SHORTS_MAX_AGE_DAYS (shorts). Older items keep getting
+        # views/watch-time from the Analytics API (separate quota) below.
         scraped_video_stats: dict[str, dict] = {}
         scraped_short_stats: dict[str, dict] = {}
         analytics_fallback_video_ids: set[int] = set()
         analytics_fallback_short_ids: set[int] = set()
         if scraper and quota_exhausted:
+            try:
+                eligible_v = db.get_scrape_eligible_video_ids(
+                    channel["id"] if channel else None,
+                    min_interval_h=min_interval_h,
+                    max_age_days=max_age_days,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Scrape eligibility query failed (%s) — falling back to full scrape", exc
+                )
+                eligible_v = {v["id"] for v in videos if v.get("yt_video_id")}
             remaining_v = [
                 v["yt_video_id"] for v in videos
                 if v.get("yt_video_id") and v["id"] not in inserted_video_ids
+                and v["id"] in eligible_v
             ]
             if remaining_v:
+                logger.info(
+                    "[%s] scrape: %d/%d videos eligible (fresh/old skipped)",
+                    self.slug, len(remaining_v), len(videos),
+                )
                 scraped_video_stats = scraper.get_video_stats_batch(remaining_v)
+            try:
+                eligible_s = db.get_scrape_eligible_short_ids(
+                    channel["id"] if channel else None,
+                    min_interval_h=min_interval_h,
+                    max_age_days=shorts_max_age_days,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Scrape eligibility (shorts) failed (%s) — falling back to full scrape", exc
+                )
+                eligible_s = {s["id"] for s in shorts if s.get("youtube_id")}
             remaining_s = [
                 s["youtube_id"] for s in shorts
                 if s.get("youtube_id") and s["id"] not in inserted_short_ids
+                and s["id"] in eligible_s
             ]
             if remaining_s:
+                logger.info(
+                    "[%s] scrape: %d/%d shorts eligible (fresh/old skipped)",
+                    self.slug, len(remaining_s), len(shorts),
+                )
                 scraped_short_stats = scraper.get_video_stats_batch(remaining_s)
 
         # ── Bulk video analytics (Analytics API — separate quota, always works) ──
@@ -1264,8 +1328,17 @@ class YouTubeStatsFetcher:
                                     sdata.get("viewCount")
                                     or bdata.get("analyticsViews", "0")
                                 ),
-                                "likeCount": sdata.get("likeCount", "0"),
-                                "commentCount": sdata.get("commentCount", "0"),
+                                # ago 2026: likes/comments vía Analytics API
+                                # (métrica de período 365d ≈ lifetime aquí); el
+                                # scrape de yt-dlp ya no los devuelve (None→0).
+                                "likeCount": (
+                                    bdata.get("likes")
+                                    or sdata.get("likeCount", "0")
+                                ),
+                                "commentCount": (
+                                    bdata.get("comments")
+                                    or sdata.get("commentCount", "0")
+                                ),
                                 "estimatedMinutesWatched": float(
                                     bdata.get("estimatedMinutesWatched", 0) or 0
                                 ),
@@ -1359,8 +1432,14 @@ class YouTubeStatsFetcher:
                                         sdata.get("viewCount")
                                         or bdata.get("analyticsViews", "0")
                                     ),
-                                    "likeCount": sdata.get("likeCount", "0"),
-                                    "commentCount": sdata.get("commentCount", "0"),
+                                    "likeCount": (
+                                        bdata.get("likes")
+                                        or sdata.get("likeCount", "0")
+                                    ),
+                                    "commentCount": (
+                                        bdata.get("comments")
+                                        or sdata.get("commentCount", "0")
+                                    ),
                                     "estimatedMinutesWatched": float(
                                         bdata.get("estimatedMinutesWatched", 0) or 0
                                     ),
@@ -1391,6 +1470,10 @@ class YouTubeStatsFetcher:
         # Handles videos/shorts that got scraped data but were not inserted by
         # either the Data API batch or the Analytics fallback (e.g. channels
         # without an OAuth token have no Analytics service at all).
+        # NOTA ago 2026: en este path solo hay datos de yt-dlp → likeCount/
+        # commentCount quedarán a 0 (YouTube ya no los expone en la watch page
+        # pública). Es un límite real de los canales sin token; con token, los
+        # likes/comments llegan vía Analytics API en el fallback de arriba.
         if scraper and quota_exhausted:
             pure_v = 0
             for v in videos:
