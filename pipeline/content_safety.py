@@ -52,6 +52,10 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         "de 15 años", "de 16 años", "de 17 años", "de 5 años", "de 6 años",
         "de 7 años", "menores de edad", "infante", "pequeño de", "pequeña de",
         "niño que", "niña que", "niño de", "niña de",
+        # Nacimiento / condiciones congénitas (suelen implicar a un bebé/menor)
+        "nació con", "nacio con", "al nacer", "de nacimiento", "congénito",
+        "congenito", "recién nacid", "recien nacid", "dos cabezas", "dos caras",
+        "siames", "gemelos unidos", "bebé nació", "bebe nacio", "recién parido",
     ],
     "autolesion": [
         "autolesión", "autolesion", "suicid", "cortarse las venas", "ahorcó",
