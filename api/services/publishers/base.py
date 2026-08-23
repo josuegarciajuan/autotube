@@ -120,6 +120,14 @@ class AbstractVideoPublisher(ABC):
         """Get current processing/publishing status. Override per platform."""
         return {"status": "unknown"}
 
+    async def validate(self, channel_id: int) -> dict:
+        """Validate stored credentials for this platform (no browser).
+
+        Returns {"ok": bool, "message": str}. Used by the "Test" button for
+        API-based platforms. Default: not implemented.
+        """
+        return {"ok": False, "message": "Validación no implementada para esta plataforma"}
+
     async def update_metadata(self, platform_video_id: str,
                               title: str = None, description: str = None,
                               tags: list[str] = None) -> bool:

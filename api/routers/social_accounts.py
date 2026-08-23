@@ -207,10 +207,12 @@ def update_social_timing(channel_id: int, data: SocialTimingUpdate):
 async def test_social_account(channel_id: int, platform: str):
     """Test login to a social media platform with current credentials.
 
-    Opens a VISIBLE browser (headless=false), attempts login with stored
-    credentials, takes a screenshot, and saves cookies on success.
+    API-based platforms (rumble, dailymotion, facebook, bluesky, mastodon)
+    are validated with a direct API call — no browser needed.
+    Playwright platforms (tiktok, twitter, instagram, reddit) open a VISIBLE
+    browser, attempt login, take a screenshot, and save cookies on success.
 
-    Returns {ok, message, screenshot_path, cookies_saved}.
+    Returns {ok, message, screenshot_path?, cookies_saved?}.
     """
     import asyncio
     import base64
@@ -230,10 +232,45 @@ async def test_social_account(channel_id: int, platform: str):
     # Decrypt password
     from pipeline.social_encryption import get_encryption
     enc = get_encryption()
-    password = enc.decrypt(acct["encrypted_password"])
-    if not password:
+    pw = enc.decrypt(acct["encrypted_password"])
+    if not pw:
         raise HTTPException(400, f"Failed to decrypt password for {platform}")
 
+    # ── API-based platforms: validate directly, no browser ──
+    API_PLATFORMS = {"rumble", "dailymotion", "facebook", "bluesky", "mastodon"}
+    if platform_lower in API_PLATFORMS:
+        try:
+            if platform_lower in ("bluesky", "mastodon"):
+                from pipeline.social_api_publishers import validate_bluesky, validate_mastodon
+                creds = {"username": acct["username"], "password": pw}
+                result = (validate_bluesky if platform_lower == "bluesky"
+                          else validate_mastodon)(creds)
+            else:
+                from api.services.publishers.base import get_publisher
+                pub = get_publisher(platform_lower)
+                result = await pub.validate(channel_id)
+        except Exception as exc:
+            db.update_social_error(acct["id"], str(exc)[:1000])
+            raise HTTPException(500, f"Test failed: {exc}")
+
+        ok = bool(result.get("ok"))
+        if ok:
+            db.upsert_social_account(
+                channel_id=channel_id, platform=platform_lower,
+                username=acct["username"], encrypted_password=acct["encrypted_password"],
+                enabled=acct.get("enabled", True),
+            )
+            db.update_social_cookies(acct["id"], acct.get("cookies_json") or "")
+        else:
+            db.update_social_error(acct["id"], result.get("message", "Credenciales inválidas")[:1000])
+        return {
+            "ok": ok,
+            "message": result.get("message", "OK" if ok else "Falló"),
+            "screenshot_path": None,
+            "cookies_saved": False,
+        }
+
+    # ── Playwright platforms: browser login (existing behavior) ──
     # Screenshot dir
     screenshot_dir = Path(__file__).resolve().parent.parent.parent / "output" / "social_tests"
     os.makedirs(screenshot_dir, exist_ok=True)
@@ -251,7 +288,7 @@ async def test_social_account(channel_id: int, platform: str):
                 channel_id=channel_id,
                 platform=platform_lower,
                 username=acct["username"],
-                password=password,
+                password=pw,
             )
 
             # Take screenshot regardless of result

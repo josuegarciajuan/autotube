@@ -286,6 +286,26 @@ class RumblePublisher(AbstractVideoPublisher):
             desc += f"\n\n——\n📺 Video original en YouTube: {metadata.yt_video_url}"
         return desc
 
+    async def validate(self, channel_id: int) -> dict:
+        """Valida la API key: carga y hace una llamada autenticada ligera.
+
+        Rumble no expone /me; usamos /upload/status con un id dummy:
+        401/403 → key inválida; cualquier otra respuesta → auth OK.
+        """
+        if not self._authenticate(channel_id):
+            return {"ok": False, "message": "API key no configurada o vacía"}
+        try:
+            resp = requests.get(
+                f"{RUMBLE_API_BASE}/upload/status/validate-test",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=15,
+            )
+            if resp.status_code in (401, 403):
+                return {"ok": False, "message": f"API key rechazada (HTTP {resp.status_code})"}
+            return {"ok": True, "message": "API key válida"}
+        except Exception as exc:
+            return {"ok": False, "message": f"Error al validar: {exc}"}
+
     async def get_status(self, platform_video_id: str) -> dict:
         """Get current Rumble video status."""
         if not self._api_key:

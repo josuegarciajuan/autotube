@@ -324,6 +324,23 @@ class DailymotionPublisher(AbstractVideoPublisher):
             )
         return desc[:3000]
 
+    async def validate(self, channel_id: int) -> dict:
+        """Valida client_id/client_secret: autentica + GET /v2/me (200 = válido)."""
+        if not self._authenticate(channel_id):
+            return {"ok": False, "message": "Credenciales inválidas o incompletas"}
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        try:
+            resp = requests.get(
+                f"{DAILY_API_BASE}/me",
+                headers=headers, timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"ok": True, "message": f"API válida — usuario {data.get('username', '')}"}
+            return {"ok": False, "message": f"GET /me HTTP {resp.status_code}"}
+        except Exception as exc:
+            return {"ok": False, "message": f"Error al validar: {exc}"}
+
     async def get_status(self, platform_video_id: str) -> dict:
         """GET /v2/videos/{id} → processing/encoding status."""
         if not self._access_token:

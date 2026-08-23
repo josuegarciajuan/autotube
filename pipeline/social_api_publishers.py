@@ -231,3 +231,41 @@ def publish_mastodon(content, creds: dict) -> dict:
     except Exception as exc:
         logger.exception("[Mastodon] publish error")
         return {"success": False, "error": str(exc)}
+
+
+# ════════════════════════════════════════════════════════════════
+# Validación de credenciales (botón "Test" en la UI)
+# ════════════════════════════════════════════════════════════════
+
+
+def validate_bluesky(creds: dict) -> dict:
+    """Comprueba que el handle + app password son válidos (createSession)."""
+    handle = (creds.get("username") or "").strip()
+    pw = (creds.get("password") or "").strip()
+    if not handle or not pw:
+        return {"ok": False, "message": "Faltan handle o app password"}
+    session = _bsky_session(handle, pw)
+    if session:
+        return {"ok": True, "message": f"Sesión válida como {session.get('handle', handle)}"}
+    return {"ok": False, "message": "createSession falló — credenciales inválidas"}
+
+
+def validate_mastodon(creds: dict) -> dict:
+    """Comprueba instancia + token vía verify_credentials (200 = válido)."""
+    username = (creds.get("username") or "").strip()
+    tok = (creds.get("password") or "").strip()
+    instance, user = _mastodon_split_username(username)
+    if not instance or not tok:
+        return {"ok": False, "message": "Faltan instancia (user@instancia) o token"}
+    try:
+        resp = requests.get(
+            f"https://{instance}/api/v1/accounts/verify_credentials",
+            headers={"Authorization": f"Bearer {tok}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            acct = resp.json().get("username", user)
+            return {"ok": True, "message": f"Token válido para @{acct}@{instance}"}
+        return {"ok": False, "message": f"verify_credentials HTTP {resp.status_code} — token inválido"}
+    except Exception as exc:
+        return {"ok": False, "message": f"Error al validar: {exc}"}

@@ -446,6 +446,21 @@ class FacebookVideoPublisher(AbstractVideoPublisher):
             )
         return desc[:63206]  # Facebook description limit
 
+    async def validate(self, channel_id: int) -> dict:
+        """Valida el page access token: GET /me (200 = válido)."""
+        if not self._authenticate(channel_id):
+            return {"ok": False, "message": "Token de página inválido o no configurado"}
+        tok = self._page_token
+        resp = requests.get(
+            f"{FACEBOOK_GRAPH_URL}/me",
+            params={"access_token": tok, "fields": "id,name"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"ok": True, "message": f"Página válida: {data.get('name', '')} (id={data.get('id', '')})"}
+        return {"ok": False, "message": f"GET /me HTTP {resp.status_code}: {resp.text[:200]}"}
+
     async def get_status(self, platform_video_id: str) -> dict:
         """Get Facebook video processing status."""
         if not self._page_token:
