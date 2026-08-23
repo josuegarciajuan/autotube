@@ -18,9 +18,44 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("autotube.lifecycle")
+
+# ── Task-liveness watchdog (background loops de api/main.py) ───
+# Cada loop de fondo debe tocar su heartbeat (touch_task_heartbeat) al menos
+# una vez por iteración. Si el heartbeat es más viejo que su timeout, el loop
+# se considera muerto/bloqueado y se crea una alerta CRITICA task_stalled.
+# (Un scheduler muerto para todo el sistema en silencio — el gap más peligroso.)
+TASK_TIMEOUTS = {
+    "schedule_checker": 900,        # loop principal (cada 60s) — timeout 15 min
+    "publish_verify": 900,          # verificación de publicación (5 min)
+    "upload_health_checker": 900,   # monitor de procesamiento YT
+    "quota_recovery": 1200,         # recuperación de cuota (6h)
+    "resume_phase": 6 * 3600,       # avance de fases post-strike (6h)
+    "redistribution": 3600,         # backfill espejo social
+    "queue_consumer": 1200,         # consumidor de cola de jobs
+    "health_monitor": 1200,         # este mismo health-check (90s)
+}
+
+# entity_id estable por task: hash() está randomizado entre procesos, así que
+# un mapeo literal garantiza dedup (entity_type+entity_id+alert_type) estable
+# aunque la API se reinicie.
+_TASK_ENTITY_IDS = {name: idx + 1 for idx, name in enumerate(TASK_TIMEOUTS)}
+
+# ── Fallback journal de alertas ────────────────────────────────
+# Cuando la DB no está disponible (worker crasheado, DB bloqueada, etc.), la
+# alerta se escribe a este journal en vez de perderse en silencio.
+_ALERTS_JOURNAL_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "logs" / "alerts_fallback.log"
+)
+
+# ── Umbrales de los health-checks nuevos (Fase 1) ──────────────
+AWAITING_UPLOAD_STUCK_HOURS = 48
+UPLOAD_RETRY_THRESHOLD = 4          # intentos de subida fallidos/48h
+SHORT_READY_STUCK_HOURS = 24
+CONTENT_SAFETY_REJECTIONS = 3       # fallos de script "sin contenido" /24h
 
 # ── UTC timestamp helper ──────────────────────────────────────
 def _utcnow():
@@ -127,6 +162,108 @@ def log_event(db, *,
         logger.warning("Failed to log lifecycle event: %s", exc)
 
 
+def _write_alert_journal(alert_type: str, severity: str, title: str,
+                         message: Optional[str], metadata: Optional[dict]) -> None:
+    """Append an alert to the fallback journal when the DB is unavailable.
+
+    One JSON object per line, readable by scripts and operators. The journal
+    guarantees an alert is NEVER lost silently even if SQLite is down.
+    """
+    try:
+        entry = {
+            "ts": _utcnow().isoformat(timespec="seconds"),
+            "alert_type": alert_type,
+            "severity": severity,
+            "title": title,
+            "message": message,
+            "metadata": metadata,
+        }
+        _ALERTS_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_ALERTS_JOURNAL_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        logger.error("Could not write alert journal for '%s'", alert_type)
+
+
+def emit_alert(db=None, *,
+               entity_type: str,
+               entity_id: Optional[int] = None,
+               channel_id: Optional[int] = None,
+               alert_type: str,
+               severity: str = 'warning',
+               title: str,
+               message: Optional[str] = None,
+               metadata: Optional[dict] = None,
+               journal: bool = True) -> Optional[int]:
+    """Unified alert emission — safe to call from ANY process.
+
+    Entry point único para toda alerta del sistema (pipeline worker,
+    schedulers, API, scripts). Envuelve create_alert() y, si la DB no está
+    disponible, escribe la alerta al journal de respaldo
+    (logs/alerts_fallback.log) en vez de perderla en silencio.
+
+    Returns:
+        alert id si se creó, None si fue deduplicada/cooldown, y None con
+        journal si la DB no estaba disponible.
+    """
+    if db is None:
+        try:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        except Exception as exc:
+            logger.error("emit_alert: cannot open DB (%s) — journaling '%s'", exc, alert_type)
+            db = None
+    if db is not None:
+        # Probe de disponibilidad: create_alert traga sus propias excepciones
+        # internas y devolvería None indistintamente (dedup vs fallo). El probe
+        # distingue el caso "DB caída" para poder escribir al journal.
+        try:
+            with db._connect() as conn:
+                conn.execute("SELECT 1").fetchone()
+        except Exception as exc:
+            logger.error("emit_alert: DB probe failed (%s) — journaling '%s'", exc, alert_type)
+            db = None
+    if db is not None:
+        try:
+            return create_alert(
+                db, entity_type=entity_type, entity_id=entity_id,
+                channel_id=channel_id, alert_type=alert_type,
+                severity=severity, title=title, message=message,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.error("emit_alert: create_alert raised (%s) — journaling '%s'", exc, alert_type)
+            db = None
+    if journal and db is None:
+        _write_alert_journal(alert_type, severity, title, message, metadata)
+        logger.warning("emit_alert journaled (%s/%s): %s", severity, alert_type, title)
+    return None
+
+
+def touch_task_heartbeat(task_name: str) -> None:
+    """Record liveness heartbeat for a background loop (api/main.py).
+
+    El health monitor compara estos heartbeats contra TASK_TIMEOUTS y crea una
+    alerta crítica 'task_stalled' cuando un loop queda en silencio. Best-effort:
+    nunca lanza.
+    """
+    if task_name not in TASK_TIMEOUTS:
+        logger.debug("Unknown task heartbeat '%s' — ignored", task_name)
+        return
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db = ExtendedDatabase()
+        with _db._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_state(key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"task_heartbeat_{task_name}", _utcnow().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("task heartbeat '%s' failed: %s", task_name, exc)
+
+
 def check_all_health(db) -> dict:
     """Scan all active entities and generate/update alerts.
 
@@ -168,6 +305,24 @@ def check_all_health(db) -> dict:
 
     # ── Check 10: Channel consecutive generation failures (v26) ──
     created += _check_channel_failure_streak(db)
+
+    # ── Check 11: Background loops alive (task-liveness watchdog) ──
+    created += _check_tasks_alive(db)
+
+    # ── Check 12: Videos finished but stuck in awaiting_upload ──
+    created += _check_awaiting_upload_stuck(db)
+
+    # ── Check 13: Upload retry loop (same video failing uploads) ──
+    created += _check_upload_retry_loop(db)
+
+    # ── Check 14: Last stats collection ended in error ──
+    created += _check_stats_collection_failed(db)
+
+    # ── Check 15: Shorts rendered but never uploaded ──
+    created += _check_short_ready_stuck(db)
+
+    # ── Check 16: Channel starving for content (all candidates rejected) ──
+    created += _check_content_safety_starvation(db)
 
     logger.info(
         "Health check: %d alerts created, %d resolved",
@@ -1123,4 +1278,287 @@ def _check_channel_failure_streak(db) -> int:
         except Exception as exc:
             logger.warning("Failure-streak alert for %s failed: %s", slug, exc)
 
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 11: Task-liveness watchdog (background loops)
+# ═══════════════════════════════════════════════════════════════
+
+def _check_tasks_alive(db) -> int:
+    """Alert when a background loop's heartbeat is stale (task dead/stalled).
+
+    Cada loop de api/main.py toca su heartbeat vía touch_task_heartbeat().
+    Si el heartbeat supera su timeout, el loop está muerto o bloqueado y el
+    sistema entero puede estar parado en silencio → alerta CRITICA.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            for task_name, timeout_s in TASK_TIMEOUTS.items():
+                row = conn.execute(
+                    "SELECT value FROM system_state WHERE key = ?",
+                    (f"task_heartbeat_{task_name}",),
+                ).fetchone()
+                if not row or not row.get("value"):
+                    continue  # nunca hizo heartbeat — no es nuestra señal
+                try:
+                    hb = datetime.fromisoformat(row["value"])
+                except (ValueError, TypeError):
+                    continue
+                age_s = (_utcnow() - hb).total_seconds()
+                if age_s <= timeout_s:
+                    continue
+                created += _maybe_create_alert(
+                    db, conn, "system", _TASK_ENTITY_IDS[task_name], None,
+                    "task_stalled", "critical",
+                    f"Loop de fondo '{task_name}' sin respuesta",
+                    (f"Sin heartbeat desde hace {int(age_s)}s (timeout: {timeout_s}s). "
+                     "El loop de la API puede estar muerto o bloqueado — "
+                     "revisar logs/api_dev.log o logs/api.log y reiniciar la API."),
+                    {"task": task_name, "age_s": int(age_s), "timeout_s": timeout_s},
+                )
+    except Exception as exc:
+        logger.warning("Task-liveness check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 12: Videos finished but stuck in awaiting_upload
+# ═══════════════════════════════════════════════════════════════
+
+def _check_awaiting_upload_stuck(db) -> int:
+    """Alert when a finished video sits in 'awaiting_upload' too long.
+
+    Un video generado OK que nunca se sube (scheduler parado, subida fallando
+    sin marcar error) no debe quedarse en silencio. Se excluyen videos cuyo
+    proyecto GCP tiene la cuota agotada (esperar es lo esperado) y los que
+    tienen scheduled_upload_at futuro (esperan su hora programada).
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, v.canal, v.titulo_final,
+                          v.generation_finished_at, v.scheduled_upload_at
+                   FROM videos v
+                   WHERE v.status = 'awaiting_upload'
+                     AND (v.scheduled_upload_at IS NULL
+                          OR v.scheduled_upload_at < datetime('now'))
+                     AND COALESCE(v.generation_finished_at, v.created_at)
+                         < datetime('now', ?)
+                     AND v.id NOT IN (
+                         SELECT entity_id FROM pipeline_alerts
+                         WHERE entity_type = 'video' AND resolved = 0
+                         AND alert_type = 'awaiting_upload_stuck'
+                     )
+                   ORDER BY v.id DESC LIMIT 20""",
+                (f'-{AWAITING_UPLOAD_STUCK_HOURS} hours',),
+            ).fetchall()
+
+            for row in rows:
+                try:
+                    if db.is_quota_exhausted_for_channel(row["canal"]):
+                        continue  # cuota agotada: esperar es lo esperado
+                except Exception:
+                    pass
+                title = row["titulo_final"] or f"Video #{row['id']}"
+                created += _maybe_create_alert(
+                    db, conn, "video", row["id"], row["channel_id"],
+                    "awaiting_upload_stuck", "warning",
+                    f"Video '{title[:60]}' sin subir desde hace >{AWAITING_UPLOAD_STUCK_HOURS}h",
+                    (f"Generado pero en 'awaiting_upload' >{AWAITING_UPLOAD_STUCK_HOURS}h "
+                     "sin fecha de subida pendiente. El upload scheduler no lo "
+                     "despacha — revisar scheduler o errores de subida."),
+                    {"phase": "upload",
+                     "finished_at": row["generation_finished_at"],
+                     "scheduled_upload_at": row["scheduled_upload_at"]},
+                )
+    except Exception as exc:
+        logger.warning("Awaiting-upload stuck check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 13: Upload retry loop
+# ═══════════════════════════════════════════════════════════════
+
+def _check_upload_retry_loop(db) -> int:
+    """Alert when a video keeps failing upload attempts (retry loop).
+
+    Si un video acumula >= UPLOAD_RETRY_THRESHOLD jobs de subida fallidos en
+    48h, la subida no progresa (token, política YT, cuota...) y hay que mirarlo.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, v.canal, v.titulo_final,
+                          COUNT(g.id) as fail_count, MAX(g.created_at) as last_fail_at
+                   FROM videos v
+                   JOIN generation_jobs g ON g.video_id = v.id
+                     AND g.status = 'failed'
+                     AND g.action = 'upload_only'
+                     AND g.created_at > datetime('now', '-48 hours')
+                   WHERE v.status IN ('awaiting_upload', 'ready', 'uploaded_private')
+                   GROUP BY v.id
+                   HAVING fail_count >= ?
+                   ORDER BY fail_count DESC LIMIT 10""",
+                (UPLOAD_RETRY_THRESHOLD,),
+            ).fetchall()
+
+            for row in rows:
+                title = row["titulo_final"] or f"Video #{row['id']}"
+                created += _maybe_create_alert(
+                    db, conn, "video", row["id"], row["channel_id"],
+                    "upload_retry_loop", "warning",
+                    f"Video '{title[:60]}' en bucle de reintentos de subida "
+                    f"({row['fail_count']} fallos/48h)",
+                    (f"{row['fail_count']} intentos de subida fallidos en 48h "
+                     f"(umbral: {UPLOAD_RETRY_THRESHOLD}). La subida no progresa — "
+                     "revisar error_msg del último job (cuota, token, política YT)."),
+                    {"fail_count": row["fail_count"], "last_fail_at": row["last_fail_at"]},
+                )
+    except Exception as exc:
+        logger.warning("Upload retry-loop check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 14: Stats collection ended in error
+# ═══════════════════════════════════════════════════════════════
+
+def _check_stats_collection_failed(db) -> int:
+    """Alert when the last on-demand stats collection ended in error.
+
+    Lee system_state['stats_collection_state'] (persistido por
+    api/main.py::_pin_stats_state). Auto-resuelve cuando una recolección
+    posterior termina en 'success'/'idle'.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            raw = conn.execute(
+                "SELECT value FROM system_state WHERE key = 'stats_collection_state'"
+            ).fetchone()
+            if not raw or not raw.get("value"):
+                return 0
+            try:
+                state = json.loads(raw["value"])
+            except (json.JSONDecodeError, TypeError):
+                return 0
+            status = state.get("status")
+            if status in ("success", "idle"):
+                # Auto-resolver alertas previas cuando la recolección ya funciona
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           message = message || ' [Auto-resuelto: recolección OK]'
+                       WHERE alert_type = 'stats_collection_failed' AND resolved = 0"""
+                )
+                conn.commit()
+                return 0
+            if status != "error":
+                return 0
+            err = state.get("error") or "error desconocido"
+            created += _maybe_create_alert(
+                db, conn, "system", 0, None,
+                "stats_collection_failed", "warning",
+                "Recolección de stats falló",
+                (f"La última recolección de stats terminó en error: {err}. "
+                 "Reintentar desde el dashboard o revisar tokens/cuota."),
+                {"error": str(err)[:500], "finished_at": state.get("finished_at")},
+            )
+    except Exception as exc:
+        logger.warning("Stats collection check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 15: Shorts rendered but never uploaded
+# ═══════════════════════════════════════════════════════════════
+
+def _check_short_ready_stuck(db) -> int:
+    """Alert when a rendered short sits in 'ready' past its schedule.
+
+    Un short listo para subir con fecha programada ya pasada (o sin fecha)
+    indica que el scheduler de shorts no lo despacha.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT s.id, s.channel_id, s.title, s.scheduled_date, s.created_at
+                   FROM shorts s
+                   WHERE s.status = 'ready'
+                     AND s.created_at < datetime('now', ?)
+                     AND (s.scheduled_date IS NULL
+                          OR s.scheduled_date <= date('now'))
+                     AND s.id NOT IN (
+                         SELECT entity_id FROM pipeline_alerts
+                         WHERE entity_type = 'short' AND resolved = 0
+                         AND alert_type = 'short_ready_stuck'
+                     )
+                   ORDER BY s.id DESC LIMIT 20""",
+                (f'-{SHORT_READY_STUCK_HOURS} hours',),
+            ).fetchall()
+
+            for row in rows:
+                title = row["title"] or f"Short #{row['id']}"
+                created += _maybe_create_alert(
+                    db, conn, "short", row["id"], row["channel_id"],
+                    "short_ready_stuck", "warning",
+                    f"Short '{title[:60]}' renderizado sin subir",
+                    (f"Short en 'ready' desde hace >{SHORT_READY_STUCK_HOURS}h con fecha "
+                     f"programada {row['scheduled_date'] or 'sin fecha'} ya pasada. "
+                     "El scheduler de shorts no lo sube — revisar dispatch."),
+                    {"scheduled_date": row["scheduled_date"], "created_at": row["created_at"]},
+                )
+    except Exception as exc:
+        logger.warning("Short ready-stuck check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 16: Channel starving for content (all candidates rejected)
+# ═══════════════════════════════════════════════════════════════
+
+def _check_content_safety_starvation(db) -> int:
+    """Alert when a channel repeatedly fails script generation with no content.
+
+    Proxy de inanición de contenido: >= CONTENT_SAFETY_REJECTIONS fallos de
+    script 'sin contenido disponible' en 24h (todos los candidatos rechazados
+    por seguridad o fuentes vacías). Indica fuentes degradadas o un nicho
+    sistemáticamente bloqueado por el filtro anti-strike.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.channel_id, v.canal, COUNT(*) as cnt,
+                          MAX(v.created_at) as last_at
+                   FROM videos v
+                   WHERE v.status = 'error'
+                     AND v.progress_phase = 'script'
+                     AND v.error_message LIKE '%contenido disponible%'
+                     AND v.created_at > datetime('now', '-24 hours')
+                   GROUP BY v.channel_id
+                   HAVING cnt >= ?
+                   ORDER BY cnt DESC""",
+                (CONTENT_SAFETY_REJECTIONS,),
+            ).fetchall()
+
+            for row in rows:
+                slug = row["canal"] or f"channel #{row['channel_id']}"
+                created += _maybe_create_alert(
+                    db, conn, "channel", row["channel_id"], row["channel_id"],
+                    "content_safety_starvation", "warning",
+                    f"Canal {slug}: {row['cnt']} guiones fallidos sin contenido (24h)",
+                    (f"{row['cnt']} fallos de script en 24h por 'sin contenido disponible' "
+                     "(todos los candidatos rechazados por seguridad o fuentes vacías). "
+                     "Revisar subreddits/fuentes del canal y el filtro de seguridad."),
+                    {"count": row["cnt"], "last_at": row["last_at"]},
+                )
+    except Exception as exc:
+        logger.warning("Content-safety starvation check failed: %s", exc)
     return created
