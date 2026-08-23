@@ -189,6 +189,12 @@ export default function RecentVideos({ videos }: RecentVideosProps) {
                     Error en pipeline
                   </div>
                 ) : null}
+                {v.status === 'held' ? (
+                  <div className="mt-1.5 flex items-center gap-1 text-[10px] text-red-400">
+                    <AlertTriangle size={10} />
+                    Retenido — revisar
+                  </div>
+                ) : null}
               </div>
             )
           })}

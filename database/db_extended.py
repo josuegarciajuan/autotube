@@ -30,6 +30,12 @@ _PUBLISH_VERIFY_LOCK = threading.Lock()
 _PUBLISH_VERIFY_INFLIGHT: set = set()   # video ids being verified right now
 _PUBLISH_RETRY_MINUTES = 20             # fixed interval between wall-scrape checks
 _PUBLISH_GRACE_MINUTES = 180            # grace window past reference time before raising alert
+# ago 2026 (antiban): tope de reintentos de verificación por vídeo. La alerta
+# publish_not_detected ya se emite a las 3h (grace); 12 reintentos × 20 min =
+# ~4h de comprobación total. A partir de ahí se DEJA de consultar YouTube
+# (wall-scrape) para no mantener un bucle de peticiones contra la plataforma;
+# la alerta queda como señal para el operador.
+_PUBLISH_VERIFY_MAX_RETRIES = 12
 _CHANNEL_LAST_VERIFY: dict[str, datetime] = {}  # per-channel rate-limit: last trigger time
 _CHANNEL_VERIFY_COOLDOWN = 120          # seconds — min gap between verifications per channel
 
@@ -302,8 +308,22 @@ def _raise_publish_not_detected_alert(video_id: int, channel_slug: str,
 
 
 def _schedule_publish_retry(video_id: int, delay_minutes: int):
-    """Schedule a retry verification in `delay_minutes` minutes."""
+    """Schedule a retry verification in `delay_minutes` minutes.
+
+    Anti-bucle (antiban, ago 2026): tras _PUBLISH_VERIFY_MAX_RETRIES se deja de
+    reprogramar — la alerta publish_not_detected (emitida al superar el grace)
+    queda como señal para el operador y no se mantiene un bucle de peticiones
+    contra YouTube.
+    """
     db = ExtendedDatabase()
+    if _get_retry_count(video_id) >= _PUBLISH_VERIFY_MAX_RETRIES:
+        vlog = logger.getChild("publish_verify")
+        vlog.warning(
+            "Video #%d: verificación de publicación alcanzó el tope de %d reintentos — "
+            "se detiene (alerta publish_not_detected pendiente para revisión)",
+            video_id, _PUBLISH_VERIFY_MAX_RETRIES,
+        )
+        return
     retry_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=delay_minutes)
     with db._connect() as conn:
         conn.execute(
