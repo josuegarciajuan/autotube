@@ -670,7 +670,7 @@ export default function Dashboard() {
 
       {/* ═══════ NIVEL 2: Top Videos ═══════ */}
       {topVideos.length > 0 && (
-        <CollapsibleSection title="Top Videos" icon="🏆">
+        <CollapsibleSection title="Top Videos y Shorts" icon="🏆">
           <TopVideos videos={topVideos} />
         </CollapsibleSection>
       )}
