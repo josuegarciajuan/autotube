@@ -17,6 +17,7 @@ import pickle
 import shutil
 import threading
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Optional
 
@@ -271,6 +272,94 @@ class YouTubeUploader:
                 "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
             ) from exc
 
+    @staticmethod
+    def _channel_alert_entity_id(slug: str) -> int:
+        """Stable positive entity_id for a channel slug (crc32).
+
+        pipeline_alerts deduplica por (entity_type, entity_id, alert_type);
+        hash() está randomizado entre procesos, así que se usa crc32 para que
+        el dedup sobreviva reinicios de la API.
+        """
+        try:
+            return abs(zlib.crc32(str(slug or "unknown").encode("utf-8"))) % (10 ** 6)
+        except Exception:
+            return 0
+
+    def _alert_yt_upload_error(self, error_reason: str, message: str,
+                                severity: str = "warning", caller: str = ""):
+        """Alert on a non-quota YouTube upload rejection (policy/auth/limit).
+
+        La cuota ya tiene su alerta dedicada (quota_exhausted). Cualquier otro
+        rechazo de YouTube (cuenta no verificada, signup, auth, invalidTitle,
+        política...) bloquea la subida y necesita acción del operador — no debe
+        quedar en silencio. Dedup por canal: una sola alerta activa.
+        """
+        try:
+            from api.services.lifecycle_monitor import emit_alert
+            from database.db_extended import ExtendedDatabase
+            _adb = ExtendedDatabase()
+            slug = self.channel_slug or self.account_name or "unknown"
+            emit_alert(
+                _adb, entity_type="system",
+                entity_id=self._channel_alert_entity_id(slug),
+                channel_id=None,
+                alert_type="yt_upload_error", severity=severity,
+                title=f"YouTube rechazó la subida ({error_reason or 'error'}) — {slug}",
+                message=message,
+                metadata={"channel": slug, "reason": error_reason,
+                          "caller": caller},
+            )
+        except Exception:
+            pass
+
+    def _resolve_yt_token_alert(self):
+        """Auto-resolve yt_token_invalid alerts once the token refreshes/works."""
+        try:
+            from database.db_extended import ExtendedDatabase
+            _adb = ExtendedDatabase()
+            slug = self.account_name or "unknown"
+            with _adb._connect() as conn:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           message = message || ' [Auto-resuelto: token YT renovado]'
+                       WHERE alert_type = 'yt_token_invalid' AND resolved = 0
+                         AND entity_id = ?""",
+                    (self._channel_alert_entity_id(slug),),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def _alert_token_invalid(self, exc: Exception):
+        """Critical alert: the OAuth token could not be refreshed.
+
+        Un token YT inválido/revocado para la cuenta Google bloquea las
+        subidas de TODOS los canales que la comparten — debe verse.
+        """
+        try:
+            from api.services.lifecycle_monitor import emit_alert
+            from database.db_extended import ExtendedDatabase
+            _adb = ExtendedDatabase()
+            slug = self.account_name or "unknown"
+            emit_alert(
+                _adb, entity_type="system",
+                entity_id=self._channel_alert_entity_id(slug),
+                channel_id=None,
+                alert_type="yt_token_invalid", severity="critical",
+                title=f"Token de YouTube inválido/revocado — cuenta {slug}",
+                message=(
+                    f"El refresh token de la cuenta '{slug}' falló: {exc}\n\n"
+                    f"🔧 Acción requerida: re-autenticar el canal "
+                    f"(OAuth flow: Canales → Autenticar, o scripts/oauth_quick.py). "
+                    f"Las subidas de los canales que comparten esta cuenta "
+                    f"quedarán bloqueadas hasta renovarlo."
+                ),
+                metadata={"account": slug, "error": str(exc)[:500]},
+            )
+        except Exception:
+            pass
+
     def _safe_unlink(self) -> None:
         """Delete the token file, but only if no other thread just saved fresh credentials.
 
@@ -351,8 +440,10 @@ class YouTubeUploader:
                     try:
                         self._credentials.refresh(Request())
                         logger.info("Token refreshed successfully.")
+                        self._resolve_yt_token_alert()
                     except Exception as exc:
                         logger.warning("Token refresh failed: %s", exc)
+                        self._alert_token_invalid(exc)
                         self._safe_unlink()
                         self._credentials = None
                 else:
@@ -1445,26 +1536,39 @@ class YouTubeUploader:
                     # Distinguish between auth issues and YouTube-specific errors
                     error_reason = self._http_error_reason(exc)
                     if error_reason == "uploadLimitExceeded":
-                        raise RuntimeError(
+                        _msg = (
                             "YouTube rechazó el vídeo: la cuenta NO está verificada y el vídeo supera 15 minutos. "
                             "Verifica la cuenta en youtube.com/verify."
-                        ) from exc
+                        )
+                        self._alert_yt_upload_error(error_reason, _msg,
+                                                     severity="critical", caller="_resumable_upload")
+                        raise RuntimeError(_msg) from exc
                     if error_reason == "youtubeSignupRequired":
-                        raise RuntimeError(
+                        _msg = (
                             "La cuenta de YouTube requiere registro adicional (youtube.com/create_channel)."
-                        ) from exc
+                        )
+                        self._alert_yt_upload_error(error_reason, _msg,
+                                                     severity="critical", caller="_resumable_upload")
+                        raise RuntimeError(_msg) from exc
                     if error_reason == "quotaExceeded":
                         self._mark_quota_exhausted(caller="_resumable_upload")
                         raise QuotaExhaustedError(
                             "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
                         ) from exc
                     logger.error("Auth/permission error (%s): %s", error_reason or "unknown", exc)
+                    self._alert_yt_upload_error(
+                        error_reason or "auth_error",
+                        f"Error de autenticación/permisos en la subida ({error_reason or 'unknown'}): {exc}. "
+                        "Revisar el token OAuth de la cuenta.",
+                        severity="critical", caller="_resumable_upload",
+                    )
                     raise
                 if exc.resp.status in (500, 502, 503, 504):
                     if consecutive_errors >= MAX_RETRIES:
-                        raise RuntimeError(
-                            f"Upload failed after {MAX_RETRIES} consecutive server errors: {exc}"
-                        )
+                        _msg = f"Upload failed after {MAX_RETRIES} consecutive server errors: {exc}"
+                        self._alert_yt_upload_error("server_error", _msg,
+                                                     severity="warning", caller="_resumable_upload")
+                        raise RuntimeError(_msg)
                     delay = RETRY_BASE_DELAY * (2 ** consecutive_errors)
                     logger.warning(
                         "Server error %s — retrying in %ds (error %d/%d)",
@@ -1487,22 +1591,30 @@ class YouTubeUploader:
                     except Exception:
                         pass
                     if error_reason == "uploadLimitExceeded":
-                        raise RuntimeError(
+                        _msg = (
                             "YouTube rechazó el vídeo: supera el límite de duración permitido. "
                             "Verifica la cuenta en youtube.com/verify para subir vídeos de más de 15 min."
-                        ) from exc
+                        )
+                        self._alert_yt_upload_error(error_reason, _msg,
+                                                     severity="warning", caller="_resumable_upload")
+                        raise RuntimeError(_msg) from exc
                     if error_reason == "invalidTitle":
-                        raise RuntimeError(
-                            f"Título inválido: {exc}"
-                        ) from exc
-                    raise RuntimeError(f"YouTube rechazó la subida (400 {error_reason}): {exc}") from exc
+                        _msg = f"Título inválido: {exc}"
+                        self._alert_yt_upload_error(error_reason, _msg,
+                                                     severity="warning", caller="_resumable_upload")
+                        raise RuntimeError(_msg) from exc
+                    _msg = f"YouTube rechazó la subida (400 {error_reason}): {exc}"
+                    self._alert_yt_upload_error(error_reason or "bad_request", _msg,
+                                                 severity="warning", caller="_resumable_upload")
+                    raise RuntimeError(_msg) from exc
                 raise
             except (OSError, ConnectionError) as exc:
                 consecutive_errors += 1
                 if consecutive_errors >= MAX_RETRIES:
-                    raise RuntimeError(
-                        f"Upload failed after {MAX_RETRIES} consecutive network errors: {exc}"
-                    )
+                    _msg = f"Upload failed after {MAX_RETRIES} consecutive network errors: {exc}"
+                    self._alert_yt_upload_error("network_error", _msg,
+                                                 severity="warning", caller="_resumable_upload")
+                    raise RuntimeError(_msg)
                 delay = RETRY_BASE_DELAY * (2 ** consecutive_errors)
                 logger.warning(
                     "Network error: %s — retrying in %ds (error %d/%d)",
