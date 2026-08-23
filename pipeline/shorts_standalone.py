@@ -112,6 +112,7 @@ def run_standalone_short(
     channel_id: int = 0,
     job_id: int = None,
     target_upload_at: str = None,
+    generate_only: bool = False,
 ) -> Optional[int]:
     """Run a complete standalone short pipeline for a given topic.
 
@@ -124,6 +125,9 @@ def run_standalone_short(
         channel_id: DB channel ID
         job_id: generation_jobs ID for progress tracking
         target_upload_at: scheduled publish time (ISO 8601)
+        generate_only: True → deja el short en cola (status='generated', sin
+            subir); la válvula de goteo lo despachará. False → subida inmediata
+            (legacy).
 
     Returns:
         short_id (int) on success, None on failure
@@ -238,7 +242,53 @@ def run_standalone_short(
             scene_ranges=scene_ranges,
         )
 
-        # ── Upload ─────────────────────────────────────────
+        # ── Cola unificada (ago 2026): generate_only → status='generated' ──
+        # El standalone renderizado se mueve a la cola de shorts (SIN subir);
+        # la válvula de goteo (_upload_queued_shorts) lo despachará respetando
+        # todos los topes. Además registra el short en la tabla `shorts` (antes
+        # los standalone subidos ni siquiera se registraban aquí).
+        if generate_only:
+            import shutil as _shutil_so
+            import sqlite3 as _sql_so
+            import time as _time_so
+            from config.settings import OUTPUT_DIR as _OUT_SO, DATABASE_PATH as _DBP_SO
+
+            _out_dir = _OUT_SO / "videos" / "shorts"
+            _out_dir.mkdir(parents=True, exist_ok=True)
+            _final = _out_dir / f"standalone_{channel_slug}_{int(_time_so.time())}.mp4"
+            _shutil_so.move(str(render_path), str(_final))
+
+            _title = (script.get("titulo") or script.get("title") or "Short")[:100]
+            _hook = (script.get("hook_text") or script.get("hook") or "")[:100]
+            _topic = (topic.get("tema") or topic.get("title") or "")[:200]
+            with _sql_so.connect(str(_DBP_SO), timeout=30) as _conn_so:
+                cur = _conn_so.execute(
+                    """INSERT INTO shorts
+                       (channel_id, type, title, hook_title, hook_text, topic,
+                        status, file_path)
+                       VALUES (?, 'standalone', ?, ?, ?, ?, 'generated', ?)""",
+                    (channel_id, _title, _title[:60], _hook, _topic, str(_final)),
+                )
+                _short_id_so = cur.lastrowid
+                _conn_so.commit()
+
+            # ── Cleanup temp files (el render ya se movió a la cola) ──
+            try:
+                shutil.rmtree(output_dir, ignore_errors=True)
+            except Exception:
+                for f in [audio_path, srt_path]:
+                    try:
+                        Path(f).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            logger.info(
+                "[standalone] %s: Short GENERADO y en cola (status=generated): %s",
+                channel_slug, _title[:40],
+            )
+            return _short_id_so
+
+        # ── Upload (legacy inmediato, solo si generate_only=False) ──
         # _phase_upload_short(script, video_path) — el título sale del script,
         # no se pasan kwargs extra (bug previo: 'short_content'/'render_path'/
         # 'target_upload_at' no existían en la firma → TypeError).
