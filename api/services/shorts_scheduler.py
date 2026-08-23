@@ -1898,6 +1898,15 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
     if _shorts_paused(db):
         return None
 
+    # Gobernador de fábrica (Fase 4): disco bajo o créditos LLM → no generar.
+    try:
+        from api.services.factory_governor import factory_ok
+        if not factory_ok(db):
+            logger.debug("Fill cola nativos: gobernador de fábrica bloquea generación")
+            return None
+    except Exception:
+        pass
+
     # Memoria: el render de un short es ffmpeg in-process (pico 2-4 GB).
     from config.settings import MIN_FREE_FOR_SHORTS_DISPATCH_MB
     if not _memory_ok(min_free_gb=MIN_FREE_FOR_SHORTS_DISPATCH_MB / 1024.0):

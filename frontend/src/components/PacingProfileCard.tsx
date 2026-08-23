@@ -1,12 +1,28 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
-import { ShieldAlert, ShieldCheck, Loader2, AlertTriangle, Gauge } from 'lucide-react'
+import { ShieldAlert, ShieldCheck, Loader2, AlertTriangle, Gauge, Database, HardDrive } from 'lucide-react'
 
 interface PacingSummary {
   active_profile: string
   available_profiles: string[]
   pacing: Record<string, any>
   active_channels: { id: number; slug: string; name: string; google_account: string }[]
+}
+
+interface FactoryStatus {
+  factory_ok: boolean
+  disk: { free_mb: number; min_mb: number; ok: boolean }
+  credits: Record<string, { status?: string; balance_usd?: number; has_quota?: boolean }>
+  credits_ok: boolean
+  backlog: {
+    awaiting_upload: number
+    warming: number
+    queued_shorts: number
+    total_items: number
+    daily_capacity: number
+    eta_days: number
+  }
+  continuous_generation: boolean
 }
 
 const PROFILE_META: Record<string, { label: string; color: string; desc: string }> = {
@@ -41,6 +57,7 @@ function PacingRow({ label, value, unit }: { label: string; value: any; unit?: s
 
 export default function PacingProfileCard() {
   const [summary, setSummary] = useState<PacingSummary | null>(null)
+  const [factory, setFactory] = useState<FactoryStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -50,7 +67,9 @@ export default function PacingProfileCard() {
     setLoading(true)
     setError(null)
     try {
-      setSummary(await api.getPacingProfile())
+      const [s, f] = await Promise.all([api.getPacingProfile(), api.getFactoryStatus()])
+      setSummary(s)
+      setFactory(f)
     } catch (e: any) {
       setError(e?.message || 'No se pudo cargar el perfil de cadencia.')
     } finally {
@@ -183,6 +202,52 @@ export default function PacingProfileCard() {
           <PacingRow label="Filtro content_safety" value={p.content_safety_disabled ? 'desactivado' : 'activo'} />
         </div>
       </div>
+
+      {/* ── Estado de la fábrica (Fase 4) ── */}
+      {factory && (
+        <div className="border-t border-surface-border/50 pt-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[10px] uppercase tracking-wide text-gray-500 flex items-center gap-1.5">
+              <Database size={11} /> Estado de la fábrica
+            </p>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${
+              factory.factory_ok
+                ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
+                : 'text-red-400 border-red-500/40 bg-red-500/10'
+            }`}>
+              {factory.factory_ok ? 'Generando' : 'Pausada'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div className="bg-dark-700/40 rounded-lg p-2">
+              <p className="text-gray-500 flex items-center gap-1"><HardDrive size={10} /> Disco</p>
+              <p className={`font-medium ${factory.disk.ok ? 'text-gray-200' : 'text-red-400'}`}>
+                {(factory.disk.free_mb / 1024).toFixed(1)} GB
+                <span className="text-gray-500 ml-1">/ {(factory.disk.min_mb / 1024).toFixed(0)}</span>
+              </p>
+            </div>
+            <div className="bg-dark-700/40 rounded-lg p-2">
+              <p className="text-gray-500">Credits LLM</p>
+              <p className={`font-medium ${factory.credits_ok ? 'text-gray-200' : 'text-red-400'}`}>
+                {factory.credits_ok ? 'OK' : 'Sin crédito'}
+              </p>
+            </div>
+            <div className="bg-dark-700/40 rounded-lg p-2">
+              <p className="text-gray-500">En cola</p>
+              <p className="font-medium text-gray-200">{factory.backlog.total_items} <span className="text-gray-500 text-[10px]">items</span></p>
+              <p className="text-[10px] text-gray-500">+{factory.backlog.queued_shorts} shorts</p>
+            </div>
+            <div className="bg-dark-700/40 rounded-lg p-2">
+              <p className="text-gray-500">ETA drenaje</p>
+              <p className="font-medium text-neon-cyan">{factory.backlog.eta_days ?? '—'} <span className="text-gray-500 text-[10px]">días</span></p>
+              <p className="text-[10px] text-gray-500">cap {factory.backlog.daily_capacity}/día</p>
+            </div>
+          </div>
+          <p className="text-[10px] text-gray-600 mt-2">
+            Fábrica continua: {factory.continuous_generation ? 'activa (genera 24/7)' : 'inactiva (ventana 36h)'}
+          </p>
+        </div>
+      )}
     </section>
   )
 }

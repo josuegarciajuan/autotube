@@ -41,6 +41,7 @@ export const api = {
   // Pacing (strike mode profile)
   getPacingProfile: () => request<any>(`/pacing/profile`),
   setPacingProfile: (profile: string) => request<any>(`/pacing/profile`, { method: 'PUT', body: JSON.stringify({ profile }) }),
+  getFactoryStatus: () => request<any>(`/pacing/factory-status`),
   // Channels
   getChannels: (activeOnly = false) => request<any[]>(`/channels?active_only=${activeOnly}`),
   getChannel: (id: number) => request<any>(`/channels/${id}`),

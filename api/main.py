@@ -1289,6 +1289,18 @@ async def _schedule_checker_loop():
                 except Exception as exc:
                     logger.debug("Daily shorts ensure: %s", exc)
 
+                # ── Backlog TTL diario (Fase 4): señalar vídeos con >14 días en cola ──
+                try:
+                    _last_ttl = _sched_db.get_system_state("last_backlog_ttl_sweep")
+                    if _last_ttl != _today_local:
+                        from api.services.planning_service import sweep_stale_backlog
+                        result = await asyncio.to_thread(sweep_stale_backlog, db=_sched_db)
+                        _sched_db.set_system_state("last_backlog_ttl_sweep", _today_local)
+                        if result.get("flagged", 0):
+                            logger.info("Backlog TTL sweep: %d vídeo(s) señalados", result["flagged"])
+                except Exception as exc:
+                    logger.debug("Backlog TTL sweep: %s", exc)
+
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
                 # Fase cuota (ago 2026): gate solo cuando TODOS los proyectos

@@ -90,6 +90,12 @@ USE_SUBPROCESS_WORKER = os.getenv("USE_SUBPROCESS_WORKER", "true").lower() in ("
 # gobierna el ritmo real de subidas. Ver planning_service.top_up_horizon.
 CONTINUOUS_GENERATION_ENABLED = os.getenv("CONTINUOUS_GENERATION_ENABLED", "false").lower() in ("1", "true", "yes")
 
+# ── Gobernador de fábrica (Fase 4) ─────────────────────────────
+# Disco libre mínimo (MB) para permitir GENERACIÓN continua. La cola sin
+# límite acumula vídeos renderizados; por debajo de este umbral la fábrica
+# pausa hasta que se libere espacio (fail-open ante error de medición).
+MIN_FREE_DISK_MB = int(os.getenv("MIN_FREE_DISK_MB", "5000"))
+
 
 # ── LLM Provider (DeepSeek / OpenAI) ──────────────────────────
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")

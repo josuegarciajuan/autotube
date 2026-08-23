@@ -3006,6 +3006,16 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
             return None
     except Exception:
         pass
+
+    # 2c-bis. Gobernador de fábrica (Fase 4): disco bajo o créditos LLM
+    # agotados → pausar generación automática (la planificación sigue).
+    try:
+        from api.services.factory_governor import factory_ok
+        if not factory_ok(db):
+            logger.info("Planned slot deferred: gobernador de fábrica bloquea generación")
+            return None
+    except Exception:
+        pass
     
     # 2c. Phase-pipelining guard: allow up to 1 render + 1 prep concurrently.
     #     - If no render is active → dispatch any job (it will claim render slot).
@@ -3329,6 +3339,54 @@ def top_up_horizon(db=None, horizon_days: int = DEFAULT_HORIZON_DAYS,
             ", ".join(f"{k}={v}" for k, v in by_channel.items()),
         )
     return {"added": added, "days_planned": days_planned, "by_channel": by_channel}
+
+
+def sweep_stale_backlog(db=None, max_age_days: int = 14) -> dict:
+    """TTL de cola (Fase 4): detecta vídeos generados que llevan demasiado
+    tiempo sin publicarse y crea una alerta ``stale_backlog`` por cada uno.
+
+    Con la fábrica continua la cola crece sin límite; un vídeo que espera
+    más de ``max_age_days`` en awaiting_upload probablemente publicará
+    contenido 'viejo'. La alerta permite regenerar título/thumbnail o
+    descartarlo. NO borra nada (solo señal).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    flagged = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, canal, channel_id FROM videos
+                   WHERE status = 'awaiting_upload'
+                     AND created_at < datetime('now', 'localtime', ?)""",
+                (f"-{max_age_days} days",),
+            ).fetchall()
+        for row in rows or []:
+            try:
+                from api.services.lifecycle_monitor import create_alert
+                create_alert(
+                    db,
+                    entity_type="video",
+                    entity_id=row["id"],
+                    channel_id=row["channel_id"],
+                    alert_type="stale_backlog",
+                    severity="warning",
+                    title="Vídeo en cola más de %d días" % max_age_days,
+                    message=(
+                        f"El vídeo #{row['id']} ({row.get('canal') or '?'}) lleva más de "
+                        f"{max_age_days} días en awaiting_upload. Con la fábrica continua "
+                        "puede publicar contenido viejo: revisar título/thumbnail o descartar."
+                    ),
+                )
+                flagged += 1
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("sweep_stale_backlog failed: %s", exc)
+    if flagged:
+        logger.info("Backlog TTL: %d vídeo(s) con >%d días en cola señalados", flagged, max_age_days)
+    return {"flagged": flagged}
 
 
 def _ensure_never_dry(db) -> bool:
