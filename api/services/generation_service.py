@@ -4092,11 +4092,13 @@ async def reconnect_active_workers():
                     class _ExistingProcess:
                         def __init__(self, pid):
                             self.pid = pid
+                            self.returncode = None  # fix ago 2026: _monitor_worker_progress lee proc.returncode
                         def poll(self):
                             try:
                                 os.kill(self.pid, 0)
                                 return None  # Still alive
                             except (ProcessLookupError, PermissionError):
+                                self.returncode = -1  # Dead
                                 return -1  # Dead
                         def wait(self, timeout=None):
                             import time as _t
@@ -4104,6 +4106,10 @@ async def reconnect_active_workers():
                                 if self.poll() is not None:
                                     return
                                 _t.sleep(1)
+                        def terminate(self):
+                            pass  # no-op defensivo: no matar un worker ajeno reenganchado
+                        def kill(self):
+                            pass
 
                     proc = _ExistingProcess(worker_pid)
                     _active_workers[job_id] = proc
