@@ -174,10 +174,20 @@ def _spread_phase1_pending(db, cid: int, slug: str, start_dt: datetime) -> int:
             )
             hour, minute = orig_dt.hour, orig_dt.minute
         except (ValueError, TypeError):
+            orig_dt = None
             hour, minute = 12, 0
         new_dt = target_day.replace(hour=hour, minute=minute, tzinfo=timezone.utc)
         if new_dt <= now:
             new_dt = target_day.replace(hour=12, minute=0, tzinfo=timezone.utc)
+        # Ya está en el día correcto → no tocar (evita 50 ud/vídeo de
+        # set_publish_at en cada arranque de la API).
+        if orig_dt is not None:
+            try:
+                orig_utc = orig_dt.replace(tzinfo=timezone.utc) if orig_dt.tzinfo is None else orig_dt.astimezone(timezone.utc)
+                if orig_utc == new_dt:
+                    continue
+            except (ValueError, TypeError):
+                pass
         new_iso = new_dt.isoformat()
         # 1. DB (siempre).
         try:
