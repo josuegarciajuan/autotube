@@ -16,12 +16,14 @@ import {
 import { api } from '../../lib/api'
 import { useQuotaStatus, useResumeStatus } from '../../hooks/useQueries'
 
-// Persistencia del plegado: guardamos la FIRMA del último conjunto de avisos
-// que el usuario colapsó. La firma solo incluye identidad/severidad (nunca las
-// cuentas atrás), así que la tira se re-expande ÚNICAMENTE ante avisos nuevos
-// (strike/bloqueo/cuota/sesión); si solo cambian los contadores de tiempo,
-// respeta el estado manual del usuario (plegado o desplegado).
-const LS_KEY = 'alertcenter_collapsed_sig_v2'
+// Persistencia del plegado: guardamos el CONJUNTO DE IDENTIDADES de los
+// avisos presentes cuando el usuario colapsó la tira (array JSON, no una
+// firma hash). La auto-expansión SOLO se dispara si aparece una identidad
+// que NO estaba en ese conjunto (aviso realmente nuevo: strike/bloqueo/
+// cuota/sesión). Durante la carga asíncrona de datos tras un refresco el
+// conjunto actual es un SUBCONJUNTO del colapsado, así que la tira respeta
+// el estado manual del usuario (plegado o desplegado).
+const LS_KEY = 'alertcenter_collapsed_ids_v3'
 // Estado manual plegado/desplegado (persistido para sobrevivir a refrescos).
 const EXPANDED_KEY = 'alertcenter_expanded_v1'
 
@@ -82,10 +84,16 @@ interface AlertCenterProps {
   onOpenReport: (channel: SpamBlock) => void
 }
 
-function sigOf(s: string): string {
-  let h = 0
-  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
-  return String(h)
+// Identidad estable de cada aviso (sin contadores temporales: restan_h,
+// remaining_hours). Dos avisos con la misma identidad = el MISMO aviso.
+function spamId(c: SpamBlock): string {
+  return `spam:${c.channel_id}:${c.strikes}:${c.blocked ? 1 : 0}:${c.freq_reduced ? 1 : 0}`
+}
+function quotaId(p: QuotaProject): string {
+  return `quota:${p.project_id || 'x'}:${p.account || 'x'}`
+}
+function sessionId(s: { account: string; channels: string[] }): string {
+  return `session:${s.account}`
 }
 
 function fmtRestan(restan_h: number): string {
@@ -124,7 +132,12 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [spamBlocks, setSpamBlocks] = useState<SpamBlock[]>([])
   const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
   const [expanded, setExpanded] = useState<boolean>(() => localStorage.getItem(EXPANDED_KEY) !== '0')
-  const [collapsedSig, setCollapsedSig] = useState<string>(() => localStorage.getItem(LS_KEY) || '')
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(LS_KEY) || '[]')
+      return new Set(Array.isArray(raw) ? raw.filter((x: unknown) => typeof x === 'string') : [])
+    } catch { return new Set() }
+  })
   const [busy, setBusy] = useState<number | null>(null)
   const [applyingAll, setApplyingAll] = useState(false)
   const { data: quotaStatus } = useQuotaStatus()
@@ -197,39 +210,37 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const totalAvisos = spamBlocks.length + quotaProjects.length + sessionWarnings.length
   const hasBlocked = spamBlocks.some(c => c.blocked)
 
-  const currentSig = useMemo(() => {
-    // Firma ESTABLE: solo identidad/severidad de los avisos. Excluimos
-    // deliberadamente los contadores temporales (restan_h, remaining_hours),
-    // que cambian en cada poll y provocaban que la tira se re-expandiera sola
-    // aunque no hubiera ningún aviso nuevo.
-    return sigOf(JSON.stringify({
-      spam: spamBlocks.map(c => [c.channel_id, c.strikes, c.blocked, c.freq_reduced, c.scope]),
-      quota: quotaProjects.map(p => [p.project_id, p.account, p.channels]),
-      sessions: sessionWarnings.map(s => [s.account, s.channels]),
-    }))
+  // Identidades de los avisos ACTUALES (ordenadas para determinismo).
+  const currentIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const c of spamBlocks) ids.add(spamId(c))
+    for (const p of quotaProjects) ids.add(quotaId(p))
+    for (const s of sessionWarnings) ids.add(sessionId(s))
+    return [...ids].sort()
   }, [spamBlocks, quotaProjects, sessionWarnings])
 
   // Auto-expansión SOLO ante avisos realmente nuevos: si el usuario colapsó
-  // (collapsedSig guardado) y la firma actual difiere, se re-abre. Si solo
-  // cambiaron los contadores de tiempo, la firma no cambia y se respeta el
-  // estado manual (plegado o desplegado). Nunca fuerza colapso.
+  // (collapsedIds no vacío) y aparece una identidad que NO estaba en el
+  // conjunto colapsado, se re-abre. Durante la carga asíncrona de datos el
+  // conjunto actual es un subconjunto del colapsado (monótono creciente),
+  // por lo que NUNCA se re-expande por datos parciales. Nunca fuerza colapso.
   useEffect(() => {
-    if (!currentSig || !totalAvisos) return
-    if (collapsedSig && currentSig !== collapsedSig) {
+    if (collapsedIds.size === 0) return
+    if (currentIds.some(id => !collapsedIds.has(id))) {
       setExpanded(true)
       localStorage.setItem(EXPANDED_KEY, '1')
     }
-  }, [currentSig, collapsedSig, totalAvisos])
+  }, [currentIds, collapsedIds])
 
   function handleToggle() {
     setExpanded(prev => {
       const next = !prev
       localStorage.setItem(EXPANDED_KEY, next ? '1' : '0')
-      if (!next && currentSig) {
-        setCollapsedSig(currentSig)
-        localStorage.setItem(LS_KEY, currentSig)
+      if (!next) {
+        setCollapsedIds(new Set(currentIds))
+        localStorage.setItem(LS_KEY, JSON.stringify(currentIds))
       } else {
-        setCollapsedSig('')
+        setCollapsedIds(new Set())
         localStorage.removeItem(LS_KEY)
       }
       return next
