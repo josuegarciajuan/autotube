@@ -84,7 +84,15 @@ def dispatch_next_priority_slot(db=None) -> dict[str, Any] | None:
         return dispatched_shorts[0]
 
     # ── Phase 2: fallback to long-form ──────────────────────────
-    long_candidate = db.get_next_available_slot(max_future_hours=36)
+    try:
+        from api.services.planning_service import continuous_generation_enabled
+        if continuous_generation_enabled(db):
+            _cont = db.get_continuous_generation_candidates(limit=1)
+            long_candidate = _cont[0] if _cont else None
+        else:
+            long_candidate = db.get_next_available_slot(max_future_hours=36)
+    except Exception:
+        long_candidate = db.get_next_available_slot(max_future_hours=36)
     if long_candidate:
         slot_id = long_candidate["id"]
         slug = long_candidate.get("channel_slug", "?")

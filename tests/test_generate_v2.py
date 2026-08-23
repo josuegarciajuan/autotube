@@ -4,7 +4,8 @@ Run:  python3 -m pytest tests/test_generate_v2.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import json
 import pytest

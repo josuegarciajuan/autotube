@@ -366,12 +366,14 @@ estas reglas DURAS. No relajarlas sin justificación:
    rechaza (`return None`) el render si `_valid_assets_total == 0` o la fracción de
    escenas con asset real < `SHORTS_MIN_VALID_ASSET_RATIO` (0.5). El fallback de fondo
    liso ya no se sube.
-2. **Máx 1 short/día por canal (hard cap).** `SHORTS_HARD_PER_CHANNEL_DAILY_CAP = 1`,
-   forzado en dispatch normal, force-dispatch (NO saltable por bypass) y cola de nativos.
+2. **Máx 1 short/día por canal (hard cap).** Valor por defecto del **perfil de pacing
+   `strike`** (`shorts_per_channel_day`), forzado en dispatch normal, force-dispatch
+   (NO saltable por bypass) y cola de nativos.
 3. **Espaciado global anti-ráfaga entre canales.** `api/services/upload_spacing.py`
-   impone `GLOBAL_UPLOAD_SPACING_MIN = 45` min entre subidas de CANALES DISTINTOS. Se
-   aplica en `pipeline/youtube_uploader.py::upload()` (choke point único) vía
-   `_wait_global_upload_spacing()`, y se registra con `record_upload()` tras subir.
+   impone `global_upload_spacing_min` (perfil `strike` = 45 min) entre subidas de
+   CANALES DISTINTOS. Se aplica en `pipeline/youtube_uploader.py::upload()` (choke
+   point único) vía `_wait_global_upload_spacing()`, y se registra con
+   `record_upload()` tras subir.
 4. **Filtro duro de temas sensibles.** `pipeline/content_safety.py` rechaza menores
    (en contexto médico/criminal), autolesión/suicidio, claims médicos de cura,
    violencia gráfica y desinformación sanitaria. Se aplica en shorts (native y
@@ -383,8 +385,36 @@ estas reglas DURAS. No relajarlas sin justificación:
    barre los últimos N vídeos/shorts (0 cuota) y crea alerta `silent_removal` si YouTube
    borró algo retroactivamente que constaba como publicado.
 
-Sobrescrituras en runtime (system_state): `content_safety_disabled=true` (kill-switch del
-filtro), `global_upload_spacing_min` (minutos de espaciado).
+### 🎛️ Perfil central de cadencia ("strike mode") — `api/services/pacing_profile.py`
+
+Todas las reglas de **frecuencia y espaciado** se centralizan en un ÚNICO perfil
+persistido en `system_state["pacing_profile"]` (`strike` | `recovery` | `normal`).
+Relajar los strikes = **cambiar el perfil en un clic** (panel → Programación →
+"Perfil de Cadencia" o `PUT /api/pacing/profile`) y todo el sistema se reajusta solo:
+
+| Clave | strike (hoy) | recovery | normal |
+|---|---|---|---|
+| `shorts_per_channel_day` | 1 | 2 | 3 |
+| `shorts_global_day` | 6 | 8 | 12 |
+| `max_longform_publish_day` | 1 | 1 | 2 |
+| `same_channel_publish_gap_h` | 24 | 12 | 6 |
+| `same_channel_upload_gap_h` | 6 | 4 | 3 |
+| `global_upload_spacing_min` | 45 | 30 | 20 |
+| `account_daily_upload_cap` | 4 | 6 | 8 |
+| `shorts_cooldown_min` | 180 | 120 | 90 |
+| `shorts_same_type_gap_min` | 240 | 180 | 120 |
+| `shorts_cross_type_gap_min` | 20 | 20 | 20 |
+
+- Resolución: override manual `system_state["pacing_<clave>"]` (kill-switch puntual)
+  > perfil activo > perfil `strike` (fallback). Para las claves de pacing, el perfil
+  **GANA sobre config_json por canal** (deprecados como override: `MAX_LONGFORM_PUBLISH_PER_DAY`,
+  `MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS`, `ACCOUNT_DAILY_UPLOAD_CAP`).
+- `content_safety_disabled` (kill-switch del filtro) y `global_upload_spacing_min`
+  (override manual legacy) siguen funcionando con máxima prioridad.
+
+Consumidores actuales: `upload_spacing`, `shorts_scheduler` (caps duros, cooldown,
+gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigation`
+(cap por cuenta), `upload_scheduler` (gap de subida mismo-canal).
 
 ## Proxy residencial (implementado, desactivado)
 ```env

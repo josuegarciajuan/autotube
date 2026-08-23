@@ -4,10 +4,10 @@ Run:  python3 -m pytest tests/test_video_offset_regression.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 

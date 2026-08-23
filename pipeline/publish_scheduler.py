@@ -100,6 +100,24 @@ HISTORY_MIN_DATA_POINTS = 3    # Mínimos puntos de datos para confiar en histó
 # diario real lo refuerza el repack con MAX_LONGFORM_PUBLISH_PER_DAY.
 SAME_CHANNEL_PUBLISH_GAP_HOURS = 24
 
+
+def _same_channel_publish_gap_hours(db=None) -> int:
+    """Gap mínimo entre publicaciones del mismo canal (horas).
+
+    Fuente: perfil central de pacing (``same_channel_publish_gap_h``), con
+    fallback a la constante antiban. El perfil es el switch central "strike
+    mode": relajar los strikes = cambiar el perfil y todo se reajusta.
+    """
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return int(get_pacing_value(
+            "same_channel_publish_gap_h",
+            default=SAME_CHANNEL_PUBLISH_GAP_HOURS,
+            db=db,
+        ))
+    except Exception:
+        return SAME_CHANNEL_PUBLISH_GAP_HOURS
+
 # ── Antelación máxima de publicación (clamp "no tan lejano") ──
 # (ago 2026): los vídeos subidos como private con publishAt heredan el
 # target_public_at del slot planificado, que puede estar a días vista
@@ -276,7 +294,7 @@ def _avoid_channel_collision(
     try:
         import sqlite3
         from datetime import timedelta as _timedelta
-        min_gap = _timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)
+        min_gap = _timedelta(hours=_same_channel_publish_gap_hours(db))
         # Cross-channel: minimum 30 min gap between different channels
         MIN_CROSS_CHANNEL_GAP_MINUTES = 30
         cross_gap = _timedelta(minutes=MIN_CROSS_CHANNEL_GAP_MINUTES)
@@ -1330,7 +1348,7 @@ def repack_channel_publish_times(
     slug: str,
     timezone_str: str = "Europe/Madrid",
     warmup_min: int = 60,
-    gap_hours: int = SAME_CHANNEL_PUBLISH_GAP_HOURS,
+    gap_hours: int | None = None,
     safety_ahead_hours: int = MAX_PUBLISH_AHEAD_SAFETY_HOURS,
 ) -> list[dict]:
     """Repack ALL pending publish times of a channel with >= gap_hours spacing.
@@ -1355,6 +1373,10 @@ def repack_channel_publish_times(
         requires_yt_update, adjusted_upload_at}
     """
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    # Gap desde el perfil central de pacing si no se pasó explícito.
+    if gap_hours is None:
+        gap_hours = _same_channel_publish_gap_hours(db)
 
     # ── 1. Candidatos ──
     try:
@@ -1421,9 +1443,16 @@ def repack_channel_publish_times(
     cursor_utc = cursor_local.astimezone(_tz.utc)
 
     # Tope diario (antiban, ago 2026): máx publicaciones por día natural local.
-    # Sobrescribible por canal vía config_json MAX_LONGFORM_PUBLISH_PER_DAY
-    # (config/defaults.py). Default 1 = el techo antiban (gradual_resume).
-    max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
+    # Fuente: perfil central de pacing (``max_longform_publish_day``). El perfil
+    # GANA sobre config_json por canal — relajar los strikes = cambiar perfil.
+    max_per_day = 1
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        max_per_day = int(get_pacing_value(
+            "max_longform_publish_day", default=1, db=db,
+        ) or 1)
+    except Exception:
+        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
     max_per_day = max(1, max_per_day)
 
     safety_limit = now_utc + _td(hours=safety_ahead_hours)

@@ -4,7 +4,8 @@ Run:  python3 -m pytest tests/test_content_prompt.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 from prompts.base_prompts import build_content_only_prompt, build_outline_prompt

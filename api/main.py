@@ -31,6 +31,7 @@ from api.routers import insights
 from api.routers import view_gap as view_gap_router
 from api.routers import quota as quota_router
 from api.routers import redistribution as redistribution_router
+from api.routers import pacing as pacing_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT,
@@ -1288,24 +1289,43 @@ async def _schedule_checker_loop():
                     await _process_shorts_recovery_planner()
                     last_shorts_recovery_check = now
 
-                # ── Horizon replan (v40): at most once every 24h since the LAST
-                # replan (manual o automático). El timestamp vive en system_state
-                # (get_last_replan_ts), así el gate sobrevive a reinicios de la API.
-                # Las emergencias siguen disparando de inmediato vía smart_replan /
-                # _ensure_never_dry (que llaman a compute_and_store_horizon).
+                # ── Horizon replan / top-up (v40 + Fase 1 continua) ──
+                # Modo fábrica continua: top-up incremental cada 15 min (no borra
+                # slots, extiende hacia delante). Modo clásico: replan completo
+                # con gate de 24h desde el último replan (manual o automático).
                 try:
                     from api.services.planning_service import (
                         compute_and_store_horizon, get_last_replan_ts,
-                        HORIZON_REPLAN_INTERVAL_HOURS,
+                        HORIZON_REPLAN_INTERVAL_HOURS, continuous_generation_enabled,
+                        top_up_horizon,
                     )
-                    if now - get_last_replan_ts(_sched_db) >= HORIZON_REPLAN_INTERVAL_HOURS * 3600:
-                        result = await asyncio.to_thread(
-                            compute_and_store_horizon, horizon_days=7, db=_sched_db
-                        )
-                        logger.info(
-                            "Horizon replan (24h gate): %d slots, %d days",
-                            result.get("total_slots", 0), result.get("days_planned", 0),
-                        )
+                    if continuous_generation_enabled(_sched_db):
+                        _last_topup_ts = 0.0
+                        try:
+                            _raw_tu = _sched_db.get_system_state("last_horizon_topup_ts")
+                            if _raw_tu:
+                                _last_topup_ts = float(_raw_tu)
+                        except (TypeError, ValueError):
+                            _last_topup_ts = 0.0
+                        if now - _last_topup_ts >= 15 * 60:
+                            result = await asyncio.to_thread(top_up_horizon, db=_sched_db)
+                            try:
+                                _sched_db.set_system_state("last_horizon_topup_ts", str(time.time()))
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Horizon top-up: +%d slots, %d día(s) planificados",
+                                result.get("added", 0), result.get("days_planned", 0),
+                            )
+                    else:
+                        if now - get_last_replan_ts(_sched_db) >= HORIZON_REPLAN_INTERVAL_HOURS * 3600:
+                            result = await asyncio.to_thread(
+                                compute_and_store_horizon, horizon_days=7, db=_sched_db
+                            )
+                            logger.info(
+                                "Horizon replan (24h gate): %d slots, %d days",
+                                result.get("total_slots", 0), result.get("days_planned", 0),
+                            )
                 except Exception as exc:
                     logger.debug("Horizon replan: %s", exc)
 
@@ -1320,6 +1340,18 @@ async def _schedule_checker_loop():
                         _sched_db.set_system_state("last_shorts_daily_ensure", _today_local)
                 except Exception as exc:
                     logger.debug("Daily shorts ensure: %s", exc)
+
+                # ── Backlog TTL diario (Fase 4): señalar vídeos con >14 días en cola ──
+                try:
+                    _last_ttl = _sched_db.get_system_state("last_backlog_ttl_sweep")
+                    if _last_ttl != _today_local:
+                        from api.services.planning_service import sweep_stale_backlog
+                        result = await asyncio.to_thread(sweep_stale_backlog, db=_sched_db)
+                        _sched_db.set_system_state("last_backlog_ttl_sweep", _today_local)
+                        if result.get("flagged", 0):
+                            logger.info("Backlog TTL sweep: %d vídeo(s) señalados", result["flagged"])
+                except Exception as exc:
+                    logger.debug("Backlog TTL sweep: %s", exc)
 
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
@@ -3028,6 +3060,7 @@ app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"]
 app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])
 app.include_router(quota_router.router, prefix="", tags=["Quota"])
 app.include_router(redistribution_router.router, prefix="", tags=["Redistribution"])
+app.include_router(pacing_router.router, tags=["Pacing"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")

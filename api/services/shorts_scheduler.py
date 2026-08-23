@@ -314,7 +314,7 @@ def _global_shorts_daily_cap_reached(db=None) -> bool:
                    WHERE status = 'published'
                      AND date(published_at) = date('now', 'localtime')"""
             ).fetchone()
-        return (row[0] if row else 0) >= GLOBAL_SHORTS_PER_DAY_CAP
+        return (row[0] if row else 0) >= _global_shorts_daily_cap()
     except Exception:
         return False
 
@@ -339,7 +339,7 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
                      AND date(created_at) = date('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()
-        return (row[0] if row else 0) >= SHORTS_HARD_PER_CHANNEL_DAILY_CAP
+        return (row[0] if row else 0) >= _hard_daily_cap()
     except Exception:
         return False
 
@@ -711,6 +711,50 @@ SHORT_GEN_LEAD_MIN_CLIP_ONTHEFLY = 15  # on-the-fly clip: extract + render + upl
 # ── Shorts cooldown: minimum minutes between same-channel shorts ──
 SHORTS_COOLDOWN_MINUTES = 180  # min gap between same-channel shorts (60→180: anti-spam tras penalización YT)
 
+
+# ── Pacing dinámico (perfil central "strike mode") ──────────────
+# Las constantes de arriba son el FALLBACK del perfil "strike" (no cambia el
+# comportamiento actual). El perfil activo (system_state["pacing_profile"])
+# gobierna estas claves; relajar los strikes = cambiar el perfil y todo se
+# reajusta. Ver api/services/pacing_profile.py.
+
+def _pacing_int(key: str, default: int) -> int:
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return int(get_pacing_value(key, default=default) or default)
+    except Exception:
+        return default
+
+
+def _hard_daily_cap() -> int:
+    """Cap duro de shorts por canal y día (total native+clip)."""
+    return _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
+
+
+def _global_shorts_daily_cap() -> int:
+    """Cap global de shorts/día entre todos los canales."""
+    return _pacing_int("shorts_global_day", GLOBAL_SHORTS_PER_DAY_CAP)
+
+
+def _shorts_cooldown_minutes() -> int:
+    """Cooldown mínimo entre shorts del mismo canal."""
+    return _pacing_int("shorts_cooldown_min", SHORTS_COOLDOWN_MINUTES)
+
+
+def _same_type_gap_minutes() -> int:
+    """Gap mínimo de publicación native↔native / clip↔clip."""
+    return _pacing_int("shorts_same_type_gap_min", SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+
+
+def _cross_type_gap_minutes() -> int:
+    """Gap mínimo de publicación native↔clip."""
+    return _pacing_int("shorts_cross_type_gap_min", CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+
+
+def _min_shorts_gap_minutes() -> int:
+    """Gap mínimo de generación entre shorts del mismo canal."""
+    return _pacing_int("shorts_min_gap_min", MIN_SHORTS_GAP_MINUTES)
+
 # ── Native fallback windows (used when no optimal slots available) ──
 NATIVE_WINDOWS = [
     (9, 30),     # morning
@@ -1005,12 +1049,12 @@ def _build_shorts_slots_for_channel(
                 continue  # This resolved slot is after us — not a collision
             if slot_type == prev_type:
                 # Same type: enforce publish-level gap
-                if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                    pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                if pushed_min - prev_min < _same_type_gap_minutes():
+                    pushed_min = prev_min + _same_type_gap_minutes()
             else:
                 # Cross-type (native↔clip): enforce publish gap (v10.3)
-                if pushed_min - prev_min < CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                    pushed_min = prev_min + CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                if pushed_min - prev_min < _cross_type_gap_minutes():
+                    pushed_min = prev_min + _cross_type_gap_minutes()
         pushed_min = pushed_min  # no end-of-day clamp — _minutes_to_utc_slot handles overflow
         resolved.append((pushed_min, slot_type, long_pos, slot_rank))
 
@@ -1024,7 +1068,7 @@ def _build_shorts_slots_for_channel(
         pushed = minutes_val
         for prev_min, prev_type, _, _ in deduped:
             if prev_type == stype and prev_min == pushed:
-                pushed = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+                pushed = prev_min + _same_type_gap_minutes()
         deduped.append((pushed, stype, long_pos, rank))
     resolved = deduped
 
@@ -1115,8 +1159,8 @@ def _build_filler_slots_for_channel(
         # Resolve collisions with existing slots (same type = native)
         pushed_min = total_min
         for prev_min in sorted(existing_minutes):
-            if pushed_min - prev_min < SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
-                pushed_min = prev_min + SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES
+            if pushed_min - prev_min < _same_type_gap_minutes():
+                pushed_min = prev_min + _same_type_gap_minutes()
 
         existing_minutes.append(pushed_min)
         existing_minutes.sort()
@@ -1856,6 +1900,153 @@ def cleanup_excessive_shorts_slots(db=None) -> dict:
 
 # ── Smart shorts slot dispatcher ───────────────────────────────
 
+def _fill_native_short_queue(db=None, loop=None) -> dict | None:
+    """Relleno masivo de la cola de shorts nativos (generar SIN subir, Fase 2).
+
+    Cuando no hay ningún slot nativo DUE para subir, la fábrica de shorts
+    genera un nativo más a la cola (``generate_only`` → shorts.status='generated')
+    hasta alcanzar MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL por canal. La válvula
+    de goteo (``_upload_queued_native_shorts``) sube la cola paulatinamente
+    según el perfil de pacing (1/día por canal en strike), colocando cada
+    short en su hora pico.
+
+    Guards: un short a la vez (global), RAM, shorts no pausados. Elige el
+    canal con MENOS cola (justicia aproximada). Genera UNO por tick para no
+    saturar LLM/RAM — la frecuencia la dicta el tick del scheduler.
+
+    Returns:
+        dict con el slot/job despachado, o None si no hay nada que rellenar.
+    """
+    import random
+    from datetime import datetime as _dt_fill, timedelta as _td_fill, timezone as _tz_fill
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    if _shorts_paused(db):
+        return None
+
+    # Gobernador de fábrica (Fase 4): disco bajo o créditos LLM → no generar.
+    try:
+        from api.services.factory_governor import factory_ok
+        if not factory_ok(db):
+            logger.debug("Fill cola nativos: gobernador de fábrica bloquea generación")
+            return None
+    except Exception:
+        pass
+
+    # Memoria: el render de un short es ffmpeg in-process (pico 2-4 GB).
+    from config.settings import MIN_FREE_FOR_SHORTS_DISPATCH_MB
+    if not _memory_ok(min_free_gb=MIN_FREE_FOR_SHORTS_DISPATCH_MB / 1024.0):
+        return None
+
+    # Un short a la vez (global)
+    try:
+        active_global = db.get_active_shorts_job()
+    except Exception:
+        active_global = None
+    if active_global:
+        return None
+
+    try:
+        from config.defaults import MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL
+        target = int(MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL or 0)
+    except Exception:
+        target = 60
+    if target <= 0:
+        return None
+
+    # Canal con MENOS cola por debajo del tope
+    best = None
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return None
+    for ch in channels:
+        cid = int(ch.get("id", 0) or 0)
+        slug = ch.get("slug", "")
+        if not cid:
+            continue
+        try:
+            sc_rows = db.get_shorts_planning_config(cid)
+            sc = sc_rows[0] if sc_rows else {}
+        except Exception:
+            sc = {}
+        if not sc.get("shorts_enabled", True):
+            continue
+        # Canales spam-bloqueados ya rellenan su cola por su propia ruta
+        # (generate_only durante el bloqueo) — no duplicar aquí.
+        if _channel_shorts_spam_blocked(cid, db):
+            continue
+        try:
+            queued = db.count_queued_native_shorts(cid)
+        except Exception:
+            queued = 0
+        if queued >= target:
+            continue
+        if best is None or queued < best["queued"]:
+            best = {"channel_id": cid, "slug": slug, "queued": queued}
+    if best is None:
+        return None
+
+    cid = best["channel_id"]
+    slug = best["slug"]
+
+    # Slot nativo FUTURO (mañana en una ventana pico) — la generación ocurre
+    # ahora, la publicación la gobierna la válvula cuando toque.
+    try:
+        tomorrow = date.today() + timedelta(days=1)
+        window = random.choice(NATIVE_WINDOWS)
+        total_min = window[0] * 60 + window[1]
+        slot_dict = _minutes_to_utc_slot(
+            tomorrow.isoformat(), total_min, cid, slug,
+            short_type="native", tz=DEFAULT_TIMEZONE,
+        )
+        target_upload_at = slot_dict.get("target_upload_at")
+        scheduled_at = slot_dict.get("scheduled_at") or _dt_fill.now(_tz_fill.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as exc:
+        logger.debug("Fill: slot time computation failed (%s) — usando ahora+26h", exc)
+        target_upload_at = (_dt_fill.now(_tz_fill.utc) + _td_fill(hours=26)).strftime("%Y-%m-%d %H:%M:%S")
+        scheduled_at = _dt_fill.now(_tz_fill.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Crear slot + job y despachar en generate_only (cola, sin subir)
+    try:
+        slot_id = db.create_shorts_slot(
+            cid, tomorrow.isoformat(), scheduled_at,
+            target_upload_at=target_upload_at, short_type="native",
+        )
+        job_id = db.create_job(cid, "generate_native_short")
+        db.update_job(job_id, status="running")
+        db.update_shorts_slot_status(slot_id, "running", job_id=job_id)
+
+        _fill_coro = _dispatch_short_async(
+            slot_id=slot_id,
+            job_id=job_id,
+            channel_id=cid,
+            channel_slug=slug,
+            short_type="native",
+            target_upload_at=target_upload_at,
+            generate_only=True,
+        )
+        if loop is not None:
+            import asyncio as _asyncio_fill
+            _asyncio_fill.run_coroutine_threadsafe(_fill_coro, loop)
+        else:
+            import asyncio as _asyncio_fill2
+            _asyncio_fill2.create_task(_fill_coro)
+    except Exception as exc:
+        logger.warning("[%s] Fill native queue failed: %s", slug, exc)
+        return None
+
+    logger.info(
+        "[%s] Fill cola nativos: slot #%d en cola (pub %s, cola=%d/%d)",
+        slug, slot_id, str(target_upload_at)[:16], best["queued"] + 1, target,
+    )
+    return {"slot_id": slot_id, "job_id": job_id, "channel_slug": slug,
+            "short_type": "native", "fill": True}
+
+
 def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
@@ -1888,6 +2079,14 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     if _youtube_quota_blocked(db):
         logger.info("Shorts dispatch: YouTube quota exhausted — uploads paused")
+        # La fábrica de shorts NO se detiene con la cuota: genera a la cola
+        # (generate_only, sin subir) para drenarla al recuperar cuota.
+        try:
+            _fill = _fill_native_short_queue(db=db, loop=loop)
+            if _fill:
+                return _fill
+        except Exception as exc:
+            logger.warning("Shorts dispatch: fill durante pausa de cuota falló: %s", exc)
         return None
 
     # Kill-switch global de shorts (manual): shorts_paused / scheduler_paused
@@ -1897,7 +2096,14 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     # Tope global duro de shorts/día (anti-spam YouTube)
     if _global_shorts_daily_cap_reached(db):
-        logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", GLOBAL_SHORTS_PER_DAY_CAP)
+        logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", _global_shorts_daily_cap())
+        # El tope aplica a SUBIDAS; la generación a cola puede seguir.
+        try:
+            _fill = _fill_native_short_queue(db=db, loop=loop)
+            if _fill:
+                return _fill
+        except Exception as exc:
+            logger.warning("Shorts dispatch: fill tras tope global falló: %s", exc)
         return None
 
     # ── Cola de shorts nativos generados durante bloqueos: subir gradualmente ──
@@ -2041,6 +2247,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             f"Force dispatch sin slots viables tras {_force_retry} intentos "
                             f"(bypass={_force_bypass_guards})."
                         )
+                        # ── Fase 2: sin slots subibles → rellenar cola de nativos ──
+                        try:
+                            _fill = _fill_native_short_queue(db=db, loop=loop)
+                            if _fill:
+                                return _fill
+                        except Exception as exc:
+                            logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
                         return None
 
                     slot_id = force_slot["id"]
@@ -2067,12 +2280,12 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         logger.info(
                             "Force dispatch: slot #%d (%s) — tope duro diario "
                             "(%d short(s)/día) — cancelando slot",
-                            slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                            slot_id, slug, _hard_daily_cap(),
                         )
                         _failed_force_ids.add(slot_id)
                         db.update_shorts_slot_status(
                             slot_id, "cancelled",
-                            error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
+                            error_message=f"hard daily cap ({_hard_daily_cap()}/día)",
                         )
                         continue
 
@@ -2120,7 +2333,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             logger.info(
                                 "Force dispatch: slot #%d (%s) — cooldown active "
                                 "(< %d min), trying next channel",
-                                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+                                slot_id, slug, _shorts_cooldown_minutes(),
                             )
                             _failed_force_ids.add(slot_id)
                             continue
@@ -2327,23 +2540,23 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             logger.info(
                 "Shorts slot #%d (%s) skipped: cooldown active "
                 "(last short < %d min ago) — trying next channel",
-                slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+                slot_id, slug, _shorts_cooldown_minutes(),
             )
             _skipped_slot_ids.add(slot_id)
             continue
 
         # 5a. HARD per-channel daily cap (anti-strike, NO saltable por catch-up
-        # ni force-dispatch): máx SHORTS_HARD_PER_CHANNEL_DAILY_CAP shorts
-        # subidos hoy por canal. Lo que dispara el flag de YouTube es la SUBIDA.
+        # ni force-dispatch): máx shorts subidos hoy por canal (perfil de
+        # pacing). Lo que dispara el flag de YouTube es la SUBIDA.
         if _channel_hard_daily_short_cap_reached(channel_id, db):
             logger.info(
                 "Shorts slot #%d (%s) skipped: tope duro diario alcanzado "
                 "(%d short(s) subidos hoy) — cancelando slot",
-                slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                slot_id, slug, _hard_daily_cap(),
             )
             db.update_shorts_slot_status(
                 slot_id, "cancelled",
-                error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
+                error_message=f"hard daily cap ({_hard_daily_cap()}/día)",
             )
             _skipped_slot_ids.add(slot_id)
             continue
@@ -2375,8 +2588,8 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 "Shorts slot #%d (%s) skipped: publish conflict "
                 "(%s within %d min same-type / %d min cross-type) — trying next channel",
                 slot_id, slug, short_type,
-                SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
-                CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+                _same_type_gap_minutes(),
+                _cross_type_gap_minutes(),
             )
             _skipped_slot_ids.add(slot_id)
             continue
@@ -2529,6 +2742,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     _alert_shorts_dispatch_exhausted(
         "Dispatch principal sin slot despachable (p. ej. clips sin vídeo fuente)."
     )
+    # ── Fase 2: sin slots subibles → rellenar cola de nativos (generación a cola) ──
+    try:
+        _fill = _fill_native_short_queue(db=db, loop=loop)
+        if _fill:
+            return _fill
+    except Exception as exc:
+        logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
     return None
 
 
@@ -2950,7 +3170,7 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
         if _channel_hard_daily_short_cap_reached(channel_id, _db_s):
             logger.info(
                 "[standalone] %s: tope duro diario (%d/día) alcanzado — skip",
-                channel_slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                channel_slug, _hard_daily_cap(),
             )
             return None
 
@@ -3679,7 +3899,7 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
     if _channel_hard_daily_short_cap_reached(channel_id, db):
         logger.info(
             "[%s] Queued short #%d skipped: tope duro diario (%d/día) — se mantiene en cola",
-            slug, short_id, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+            slug, short_id, _hard_daily_cap(),
         )
         return False
 
@@ -3689,6 +3909,32 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
         return False
 
     title = (short_record.get("title") or "Short")[:100]
+    # ── Fase 2: la cola respeta la hora pico del slot planificado ──
+    # Si el slot del short tiene target_upload_at futuro → subir como private
+    # con publishAt (publicación programada en la franja óptima). Si no hay
+    # slot o el target ya pasó → publicación inmediata.
+    privacy = "public"
+    publish_at = None
+    try:
+        with db._connect() as conn:
+            slot_row = conn.execute(
+                """SELECT target_upload_at FROM shorts_planned_slots
+                   WHERE short_id = ? AND status = 'completed'
+                   ORDER BY id DESC LIMIT 1""",
+                (short_id,),
+            ).fetchone()
+        if slot_row and slot_row["target_upload_at"]:
+            publish_at = _safe_publish_at(
+                slot_row["target_upload_at"], slug, channel_id=channel_id,
+            )
+            if publish_at:
+                privacy = "private"
+                logger.info(
+                    "[%s] Queued short #%d: publicación programada en hora pico (%s)",
+                    slug, short_id, str(publish_at)[:19],
+                )
+    except Exception as exc:
+        logger.debug("[%s] Queued short #%d: slot publish lookup failed: %s", slug, short_id, exc)
     try:
         result = uploader.upload(
             video_path=file_path,
@@ -3696,7 +3942,8 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
             description=description[:5000],
             tags=hashtags[:60],
             category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-            privacy="public",
+            privacy=privacy,
+            publish_at=publish_at,
         )
     except Exception as exc:
         logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
@@ -5065,7 +5312,7 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
 
     Returns True if the channel is clear to dispatch another short.
     Returns False if the channel's last completed short was less than
-    SHORTS_COOLDOWN_MINUTES ago.
+    SHORTS_COOLDOWN_MINUTES (o el cooldown del perfil de pacing) ago.
     """
     last_completed = db.get_channel_last_short_completed_at(channel_id)
     if last_completed is None:
@@ -5078,7 +5325,7 @@ def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
         # (DEFAULT_TIMEZONE) shifted it -2h and expired the cooldown early.
         last_utc = last_time.replace(tzinfo=UTC)
         elapsed = (datetime.now(UTC) - last_utc).total_seconds()
-        return elapsed >= SHORTS_COOLDOWN_MINUTES * 60
+        return elapsed >= _shorts_cooldown_minutes() * 60
     except (ValueError, TypeError):
         return True  # Can't parse — let it proceed
 
@@ -5142,10 +5389,10 @@ def _same_type_shorts_slot_conflict(
                 f"{hours_late:.1f}", CATCH_UP_BYPASS_HOURS,
             )
 
-    # ── Same-type gap (45 min) ──
-    same_gap = timedelta(minutes=SAME_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
-    # ── Cross-type gap (20 min) ──
-    cross_gap = timedelta(minutes=CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES)
+    # ── Same-type gap (perfil de pacing) ──
+    same_gap = timedelta(minutes=_same_type_gap_minutes())
+    # ── Cross-type gap (perfil de pacing) ──
+    cross_gap = timedelta(minutes=_cross_type_gap_minutes())
 
     # ── Check 1: shorts_planned_slots — same-type ──
     window_same_start = (target_dt - same_gap).strftime("%Y-%m-%d %H:%M:%S")
@@ -5276,12 +5523,12 @@ def _same_type_shorts_slot_conflict(
                         if pub_dt.tzinfo is None:
                             pub_dt = pub_dt.replace(tzinfo=DEFAULT_TIMEZONE).astimezone(UTC)
                         gap_min = abs((target_dt - pub_dt).total_seconds()) / 60.0
-                        if gap_min < CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES:
+                        if gap_min < _cross_type_gap_minutes():
                             logger.debug(
                                 "Published cross-type conflict: %s slot ch=%d too close "
                                 "to published %s short #%d (%.0f min gap < %d min)",
                                 short_type, channel_id, pub_type, row["id"],
-                                gap_min, CROSS_TYPE_SHORTS_PUBLISH_GAP_MINUTES,
+                                gap_min, _cross_type_gap_minutes(),
                             )
                             return True
                     except (ValueError, TypeError):

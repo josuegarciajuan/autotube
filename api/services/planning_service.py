@@ -2912,6 +2912,29 @@ def _pick_round_robin(candidates: list[dict], db) -> dict | None:
     return None  # no channel has ready candidates
 
 
+def continuous_generation_enabled(db=None) -> bool:
+    """Fábrica continua long-form: despachar el siguiente slot pendiente por orden
+    de publicación (sin ventana de 36h) al terminar cada job.
+
+    Fuentes (mayor prioridad): system_state["continuous_generation"] (toggle en
+    runtime) > config.settings.CONTINUOUS_GENERATION_ENABLED (default False).
+    """
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        raw = db.get_system_state("continuous_generation")
+        if raw is not None and raw != "":
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    try:
+        from config.settings import CONTINUOUS_GENERATION_ENABLED
+        return bool(CONTINUOUS_GENERATION_ENABLED)
+    except Exception:
+        return False
+
+
 def process_planned_slots(db=None, loop=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
@@ -2953,7 +2976,11 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     # 2. Find candidate slots and pick the best one by priority score
     from datetime import date as _date
     today_str = _date.today().isoformat()
-    candidates = db.get_priority_slot_candidates(max_future_hours=36, limit=20)
+    if continuous_generation_enabled(db):
+        # Fábrica continua: sin ventana temporal — el siguiente por publicar.
+        candidates = db.get_continuous_generation_candidates(limit=20)
+    else:
+        candidates = db.get_priority_slot_candidates(max_future_hours=36, limit=20)
     if not candidates:
         return None
     
@@ -2981,6 +3008,30 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         logger.debug("Planned slot skipped: channel %d already has active job #%d",
                      next_slot["channel_id"], active["id"])
         return None
+
+    # 2c. Marathon priority (Fase 3): con backlog profundo, un maratón ENCOLADO
+    # cuyo canal está libre se despacha ANTES que un slot nuevo (más watch-time
+    # por video). _queue_consumer (siguiente paso del tick) lo tomará.
+    try:
+        from api.services.marathon_service import _queued_marathon_dispatchable, marathon_backlog_deep
+        if _queued_marathon_dispatchable(db) and marathon_backlog_deep(db):
+            logger.info(
+                "Planned slot deferred: maratón encolado + backlog profundo — "
+                "prioridad para el maratón",
+            )
+            return None
+    except Exception:
+        pass
+
+    # 2c-bis. Gobernador de fábrica (Fase 4): disco bajo o créditos LLM
+    # agotados → pausar generación automática (la planificación sigue).
+    try:
+        from api.services.factory_governor import factory_ok
+        if not factory_ok(db):
+            logger.info("Planned slot deferred: gobernador de fábrica bloquea generación")
+            return None
+    except Exception:
+        pass
     
     # 2c. Phase-pipelining guard: allow up to 1 render + 1 prep concurrently.
     #     - If no render is active → dispatch any job (it will claim render slot).
@@ -3211,14 +3262,161 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     }
 
 
+def top_up_horizon(db=None, horizon_days: int = DEFAULT_HORIZON_DAYS,
+                   max_ahead_days: int = 30) -> dict:
+    """Extiende el horizonte de planificación HACIA DELANTE (incremental).
+
+    La fábrica continua consume slots por orden de publicación; cuando los
+    pendientes se agotan, este top-up añade días nuevos SIN borrar los slots
+    existentes (a diferencia de compute_and_store_horizon, que recrea todo).
+    Por canal: se añaden días hasta que la cobertura pendiente alcanza
+    horizon_days o max_ahead_days de antelación (tope de seguridad).
+
+    Returns:
+        {"added": int, "days_planned": int, "by_channel": {slug: n}, "skipped": bool}
+    """
+    from datetime import date as _date, timedelta as _td
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    channels = db.get_channels(active_only=True)
+    channel_configs = []
+    for ch in channels or []:
+        if _channel_paused_for_planning(db, ch["id"]):
+            continue
+        cfg = db.get_channel_planning_config(ch["id"])
+        if cfg.get("planning_enabled", True) and cfg.get("videos_per_day", 0) > 0:
+            channel_configs.append(cfg)
+    if not channel_configs:
+        return {"added": 0, "days_planned": 0, "by_channel": {},
+                "skipped": True, "reason": "no planning channels"}
+    channel_configs = _augment_channel_configs(db, channel_configs)
+
+    today = _date.today()
+    target_end = today + _td(days=horizon_days)
+    max_end = today + _td(days=max_ahead_days)
+    added = 0
+    days_planned = 0
+    by_channel = {}
+
+    for cfg in channel_configs:
+        ch_id = int(cfg.get("channel_id", 0) or 0)
+        if not ch_id:
+            continue
+        # Fechas con slot pendiente de este canal (para no recomputar/duplicar)
+        try:
+            with db._connect() as conn:
+                date_rows = conn.execute(
+                    """SELECT DISTINCT date_key FROM planned_slots
+                       WHERE channel_id = ? AND status = 'pending'
+                         AND date_key >= date('now', 'localtime')""",
+                    (ch_id,),
+                ).fetchall()
+                covered_dates = {r["date_key"] for r in date_rows} if date_rows else set()
+        except Exception:
+            covered_dates = set()
+
+        cursor = today
+        ch_added = 0
+        guard = 0
+        while cursor <= target_end and cursor <= max_end:
+            cursor_iso = cursor.isoformat()
+            if cursor_iso in covered_dates:
+                cursor += _td(days=1)
+                continue
+            day_slots = []
+            try:
+                day_slots = compute_daily_slots(cursor_iso, [cfg], db=db) or []
+            except Exception as exc:
+                logger.debug("top_up: compute_daily_slots(%s) failed: %s", cursor_iso, exc)
+            if day_slots:
+                try:
+                    db.create_planned_slots_batch(day_slots)
+                except Exception as exc:
+                    logger.debug("top_up: insert %s failed: %s", cursor_iso, exc)
+                    day_slots = []
+            if day_slots:
+                added += len(day_slots)
+                ch_added += len(day_slots)
+                days_planned += 1
+                covered_dates.add(cursor_iso)
+            cursor += _td(days=1)
+            guard += 1
+            if guard > max_ahead_days + 5:
+                break
+        by_channel[cfg.get("slug", str(ch_id))] = ch_added
+
+    if added:
+        logger.info(
+            "Horizon top-up: +%d slots across %d día(s) (%s)",
+            added, days_planned,
+            ", ".join(f"{k}={v}" for k, v in by_channel.items()),
+        )
+    return {"added": added, "days_planned": days_planned, "by_channel": by_channel}
+
+
+def sweep_stale_backlog(db=None, max_age_days: int = 14) -> dict:
+    """TTL de cola (Fase 4): detecta vídeos generados que llevan demasiado
+    tiempo sin publicarse y crea una alerta ``stale_backlog`` por cada uno.
+
+    Con la fábrica continua la cola crece sin límite; un vídeo que espera
+    más de ``max_age_days`` en awaiting_upload probablemente publicará
+    contenido 'viejo'. La alerta permite regenerar título/thumbnail o
+    descartarlo. NO borra nada (solo señal).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    flagged = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, canal, channel_id FROM videos
+                   WHERE status = 'awaiting_upload'
+                     AND created_at < datetime('now', 'localtime', ?)""",
+                (f"-{max_age_days} days",),
+            ).fetchall()
+        for row in rows or []:
+            try:
+                from api.services.lifecycle_monitor import create_alert
+                create_alert(
+                    db,
+                    entity_type="video",
+                    entity_id=row["id"],
+                    channel_id=row["channel_id"],
+                    alert_type="stale_backlog",
+                    severity="warning",
+                    title="Vídeo en cola más de %d días" % max_age_days,
+                    message=(
+                        f"El vídeo #{row['id']} ({row.get('canal') or '?'}) lleva más de "
+                        f"{max_age_days} días en awaiting_upload. Con la fábrica continua "
+                        "puede publicar contenido viejo: revisar título/thumbnail o descartar."
+                    ),
+                )
+                flagged += 1
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("sweep_stale_backlog failed: %s", exc)
+    if flagged:
+        logger.info("Backlog TTL: %d vídeo(s) con >%d días en cola señalados", flagged, max_age_days)
+    return {"flagged": flagged}
+
+
 def _ensure_never_dry(db) -> bool:
     """Fallback: if no slot could be dispatched, check if the pipeline is empty
     and auto-replan the horizon to keep generation flowing.
     
     Returns True if a replan was triggered.
     """
-    # Check if there's at least one pending slot in the next 72h
-    candidates = db.get_priority_slot_candidates(max_future_hours=72, limit=1)
+    # Check if there's at least one pending slot (72h window legacy; sin ventana
+    # temporal en modo fábrica continua).
+    if continuous_generation_enabled(db):
+        candidates = db.get_continuous_generation_candidates(limit=1)
+    else:
+        candidates = db.get_priority_slot_candidates(max_future_hours=72, limit=1)
     if candidates:
         return False  # slots exist, just not dispatchable right now
     
@@ -3244,7 +3442,17 @@ def _ensure_never_dry(db) -> bool:
         "Triggering emergency horizon replan."
     )
     try:
-        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        if continuous_generation_enabled(db):
+            # Fábrica continua: primero intentar top-up incremental (no borra);
+            # si no añade nada (p. ej. canal pausado), replan completo.
+            top = top_up_horizon(db=db, horizon_days=DEFAULT_HORIZON_DAYS)
+            if top.get("added", 0) > 0:
+                logger.info(
+                    "Emergency top-up: +%d slots across %d día(s)",
+                    top["added"], top["days_planned"],
+                )
+                return True
+        result = compute_and_store_horizon(horizon_days=DEFAULT_HORIZON_DAYS, db=db, force_replan=True)
         logger.info(
             "Emergency replan complete: %d slots across %d days",
             result.get("total_slots", 0), result.get("days_planned", 0),

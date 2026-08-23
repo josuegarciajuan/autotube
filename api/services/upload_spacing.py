@@ -26,8 +26,9 @@ import time
 logger = logging.getLogger("autotube.upload_spacing")
 
 # Mínimo de minutos entre subidas de CANALES DISTINTOS. Sobrescribible en
-# runtime vía system_state["global_upload_spacing_min"] (para relajarlo o
-# endurecerlo sin tocar código).
+# runtime vía system_state["global_upload_spacing_min"] (kill-switch manual,
+# máxima prioridad) o vía el perfil central de pacing (pacing_profile) — el
+# switch "strike mode" que relaja/endurece todas las reglas de golpe.
 GLOBAL_UPLOAD_SPACING_MIN = 45
 
 _TS_KEY = "last_upload_any_ts"
@@ -42,11 +43,23 @@ def _get_db():
 
 
 def _spacing_min_minutes(db) -> int:
+    # 1) Kill-switch manual (back-compat con el override documentado).
     try:
         raw = db.get_system_state(_MIN_KEY)
         if raw:
             return int(float(raw))
     except (TypeError, ValueError):
+        pass
+    # 2) Perfil central de pacing (strike/recovery/normal).
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        value = get_pacing_value(
+            "global_upload_spacing_min",
+            default=GLOBAL_UPLOAD_SPACING_MIN,
+            db=db,
+        )
+        return int(float(value))
+    except Exception:
         pass
     return GLOBAL_UPLOAD_SPACING_MIN
 
