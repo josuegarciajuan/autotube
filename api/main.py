@@ -2973,6 +2973,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Contenido no cacheable por defecto ──────────────────────────
+# Garantiza que TODA respuesta sin Cache-Control explícito (API JSON,
+# HTML, etc.) se sirva como no-store: un recargo de la página siempre
+# muestra los últimos cambios aplicados. Las respuestas que YA definen
+# su política se respetan tal cual (assets hasheados con cache inmutable,
+# media con NO_CACHE_*, SSE con no-cache, thumbnails con ETag).
+class NoCacheMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                if not any(k.lower() == b"cache-control" for k, _ in headers):
+                    headers.append((b"cache-control", b"no-store, no-cache, must-revalidate"))
+                    headers.append((b"pragma", b"no-cache"))
+                    headers.append((b"expires", b"0"))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+app.add_middleware(NoCacheMiddleware)
+
 # ── API Routers ──────────────────────────────────────────────
 
 app.include_router(auth.router, prefix="/api", tags=["Auth"])
@@ -3535,7 +3564,9 @@ if STATIC_DIR.exists():
     app.mount("/autotube/assets", static_assets, name="autotube_assets")
     
     # ── Also serve root-level files under /autotube/ path ──
-    @app.get("/autotube/{path:path}")
+    # HEAD explícito: validadores/proxies de caché usan HEAD para comprobar
+    # frescura; sin él devolvían 405.
+    @app.api_route("/autotube/{path:path}", methods=["GET", "HEAD"])
     async def autotube_spa_fallback(path: str):
         """Serve SPA under /autotube/ base path — matches vite's base config."""
         if path.startswith("api/"):
@@ -3547,7 +3578,7 @@ if STATIC_DIR.exists():
             return FileResponse(full_path, headers=NO_CACHE)
         return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
     
-    @app.get("/{path:path}")
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     async def spa_fallback(path: str):
         """Serve React SPA — all non-API routes go to index.html."""
         if path.startswith("api/"):
@@ -3557,6 +3588,6 @@ if STATIC_DIR.exists():
             return FileResponse(full_path, headers=NO_CACHE)
         return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
     
-    @app.get("/")
+    @app.api_route("/", methods=["GET", "HEAD"])
     async def root():
         return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
