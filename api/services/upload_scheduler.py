@@ -1095,7 +1095,14 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             try:
                 cfg = json.loads(entry["row"].get("config_json") or "{}")
                 vpd = cfg.get("videos_per_day", 1)
-                ch_vpd[ch_id] = max(vpd, 1)  # at least 1
+                # Techo antiban (ago 2026): máx 1 long-form/día por canal.
+                # La frecuencia de 2/día fue la causa raíz de los strikes de spam.
+                try:
+                    from config.defaults import LONGFORM_DAILY_HARD_CAP
+                    cap = int(LONGFORM_DAILY_HARD_CAP or 1)
+                except Exception:
+                    cap = 1
+                ch_vpd[ch_id] = min(max(vpd, 1), cap)
             except Exception:
                 ch_vpd[ch_id] = 1
 

@@ -415,16 +415,32 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
        same inputs always give the same result.
     2. Alternate pattern (legacy): if 'alternate_pattern' is set, it takes
        precedence over the random boost.
+
+    Techo antiban (ago 2026): el resultado NUNCA supera
+    LONGFORM_DAILY_HARD_CAP (1/día) — la causa raíz de los strikes fue la
+    frecuencia de 2 long-forms/día. El cap es uniforme y permanente.
     """
+    try:
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
+    except Exception:
+        cap = 1
+
     # Legacy alternate pattern takes precedence if explicitly set
     pattern = ch.get("alternate_pattern")
     if pattern and isinstance(pattern, list) and len(pattern) >= 2:
         day_ordinal = datetime.strptime(date_str, "%Y-%m-%d").toordinal()
         offset = ch.get("alternate_offset", 0)
         idx = (day_ordinal + offset) % len(pattern)
-        return int(pattern[idx])
+        return min(int(pattern[idx]), cap)
 
-    base = int(ch.get("videos_per_day", 2) or 2)
+    # videos_per_day=0 está RESERVADO para el breaker de fallos (canal pausado):
+    # nunca usar `or 2` aquí o un canal pausado se reactivaría como 2/día.
+    vpd_raw = ch.get("videos_per_day", 2)
+    if vpd_raw in (None, ""):
+        base = 2
+    else:
+        base = int(vpd_raw)
     if base <= 0:
         return 0
 
@@ -437,8 +453,8 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     roll = h / 0xFFFFFFFF
 
     if roll < boost_weight:
-        return base + 1
-    return base
+        return min(base + 1, cap)
+    return min(base, cap)
 
 
 # ── Quota-aware planning (ago 2026) ────────────────────────────

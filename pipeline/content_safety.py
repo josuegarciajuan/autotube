@@ -17,6 +17,12 @@ Las categorías bloqueadas son:
   - claims médicos de cura/tratamiento ("cura milagrosa", "tratamiento garantizado")
   - detalle gráfico de muertes / violencia extrema / gore
   - conspiranoia sanitaria / desinformación médica
+  - true-crime / violencia sensacionalista (asesinatos, desapariciones, secuestros)
+  - sobrenatural presentado como real en primera persona ("la luna me susurraba",
+    "mensaje del universo", críptidos) — el patrón de contenido eliminado de canal2
+  - marcadores clickbait de alto riesgo: "MALDITO", "IMPOSIBLE", "INCREÍBLE",
+    "que NADIE te contó" — sobrerrepresentados 4-9x en videos eliminados vs.
+    supervivientes (ver análisis de ago 2026)
 
 Uso:
     from pipeline.content_safety import classify_topic_safety
@@ -79,6 +85,31 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         "vacunas causan", "vacuna causa", "el autismo lo causan las vacunas",
         "5g enferma", "curar el autismo", "la tierra es plana y",
         "virus fue creado en un laboratorio para", "engaño global de salud",
+    ],
+    "true_crime": [
+        # Asesinatos, desapariciones, secuestros y violencia sensacionalista.
+        # Datos ago 2026: canal4/canal5 eliminaron "guerrilla asesinó",
+        # "129 hombres desaparecieron", "5 perdidos y NUNCA regresaron",
+        # "lo hallaron en el granero". Este nicho alimenta el flag de spam.
+        "asesin", "desapareci", "sin rastro", "hallaron", "secuestr",
+        "nunca regres", "cadaver", "encontrado muerto", "encontrado sin vida",
+        "homicid", "estrangul", "enterrado vivo", "tortura",
+    ],
+    "sobrenatural_como_real": [
+        # Sobrenatural/esotérico en PRIMERA PERSONA o presentado como REAL
+        # (el patrón de canal2 eliminado: "la luna me susurraba", "mensaje del
+        # universo", "3 críptidos", "destino estaba marcado"). El folklore
+        # narrativo ("fantasma", "demonio") NO se bloquea: sobrevive en shorts.
+        "me susurra", "susurraba", "criptid", "mensaje del universo",
+        "intenta enviarte", "senales del universo", "me habla",
+        "desde el mas alla", "destino estaba marcado", "infancia paranormal",
+        "poseido",
+    ],
+    "clickbait_riesgo": [
+        # Marcadores de clickbait sobrerrepresentados en eliminados (análisis
+        # ago 2026, ratio 4-9x vs. supervivientes). Decisión binaria del
+        # operador: se bloquean, no se moderan.
+        "maldit", "que nadie te conto", "increible", "imposible",
     ],
 }
 
