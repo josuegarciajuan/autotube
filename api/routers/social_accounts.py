@@ -63,7 +63,7 @@ def upsert_social_account(channel_id: int, platform: str, data: SocialAccountCre
         raise HTTPException(404, "Channel not found")
 
     valid_platforms = {"tiktok", "twitter", "instagram", "facebook", "reddit", "rumble",
-                       "dailymotion", "bluesky", "mastodon", "odysee"}
+                       "dailymotion", "bluesky", "mastodon"}
     platform_lower = platform.lower()
     if platform_lower not in valid_platforms:
         raise HTTPException(400, f"Invalid platform '{platform}'. Valid: {valid_platforms}")

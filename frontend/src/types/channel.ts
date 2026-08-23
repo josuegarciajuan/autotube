@@ -378,12 +378,6 @@ export const SOCIAL_PLATFORMS = [
     strategy: 'Teaser con hashtags de nicho + enlace a YouTube. Credencial: user@instancia + token.',
     link: 'direct',
   },
-  {
-    id: 'odysee', label: 'Odysee', icon: '🧪', color: '#f06b01',
-    description: 'Video espejo opcional (LBRY).',
-    strategy: 'Re-subida completa. Opcional — solo si sobra capacidad.',
-    link: 'none',
-  },
 ] as const
 
 export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {

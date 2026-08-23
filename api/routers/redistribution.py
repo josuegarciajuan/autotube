@@ -48,7 +48,7 @@ def _redistribution_cfg(channel_id: int) -> dict:
 def _get_platforms(channel_id: int) -> tuple[list[str], list[str]]:
     cfg = _redistribution_cfg(channel_id)
     espejo = [p for p in cfg.get("enabled_platforms", []) if p in
-              ("rumble", "dailymotion", "facebook", "odysee")]
+              ("rumble", "dailymotion", "facebook")]
     embudo = [p for p in cfg.get("embudo_platforms", []) if p in
               ("bluesky", "mastodon")]
     return espejo, embudo
