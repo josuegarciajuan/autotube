@@ -617,6 +617,43 @@ CROSS_PLATFORM_SETTINGS = {
         "cross_reference_yt": False,        # TikTok penalizes external links
         "upload_delay_min": 30,
     },
+    "dailymotion": {
+        "privacy": "public",
+        "cross_reference_yt": True,
+        "sync_metadata": True,
+        "upload_delay_min": 5,
+        "language": "es",
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════
+# SOCIAL REDISTRIBUTION DEFAULTS (backfill progresivo del catálogo)
+# ═══════════════════════════════════════════════════════════════
+# Máquina A (espejo): re-subida completa de vídeos ya publicados en YouTube
+#   → rumble, dailymotion, facebook (API gratuita, toleran re-subida).
+# Máquina B (embudo): teaser/link card que redirige a YouTube
+#   → bluesky, mastodon (API gratuita, sin revisión).
+#
+# El backfill NUNCA es un dump masivo: drena la cola a un ritmo configurado
+# (warmup lento los primeros días para cuentas nuevas, luego régimen).
+SOCIAL_REDISTRIBUTION = {
+    # Plataformas espejo: sube el vídeo COMPLETO (horizontal) vía API.
+    "enabled_platforms": ["rumble", "dailymotion", "facebook"],
+    # Plataformas embudo: post de texto + enlace (teaser), sin vídeo completo.
+    "embudo_platforms": ["bluesky", "mastodon"],
+    # Subidas por día por plataforma (régimen estable, tras el warmup).
+    "daily_cap": {
+        "rumble": 3, "dailymotion": 3, "facebook": 2,
+        "bluesky": 3, "mastodon": 3,
+    },
+    # Días de arranque lento tras activar una plataforma (cuenta nueva).
+    "warmup_days": 7,
+    "warmup_daily_cap": 1,
+    # Dirección del backfill: 'oldest' (más antiguo primero) o 'newest'.
+    "backlog_direction": "oldest",
+    # Recogida de stats sociales automática. Mantener False: se dispara con
+    # el botón "Recolectar stats" (no consume cuota de YouTube).
+    "stats_auto_collect": False,
 }
 
 # ═══════════════════════════════════════════════════════════════════
