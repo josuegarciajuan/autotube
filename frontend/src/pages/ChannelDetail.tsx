@@ -11,7 +11,7 @@ import PublicationModeToggle from '../components/PublicationModeToggle'
 import WatchTimeChart from '../components/WatchTimeChart'
 import HorariosTab from '../components/HorariosTab'
 import { CONFIG_SECTIONS, type ConfigSection, type ConfigField, LIFECYCLE_ACTION_LABELS, LIFECYCLE_STATUS_LABELS, type LifecycleActionType, SOCIAL_PLATFORMS, type ChannelInsight } from '../types/channel'
-import SocialAccountsPanel from '../components/SocialAccountsPanel'
+import SocialDistributionTab from '../components/SocialDistributionTab'
 import InsightsTab from '../components/InsightsTab'
 import ShortTypeComparison from '../components/ShortTypeComparison'
 
@@ -219,6 +219,7 @@ export default function ChannelDetail() {
   const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '', yt_studio_url: '' })
   const [saving, setSaving] = useState(false)
   const [videoStats, setVideoStats] = useState<Record<string, any>>({})
+  const [videoSocialStats, setVideoSocialStats] = useState<Record<number, any[]>>({})
   const [shortStats, setShortStats] = useState<Record<string, any>>({})
   const [channelYtStats, setChannelYtStats] = useState<any>(null)
   const [channelShortsStats, setChannelShortsStats] = useState<any>(null)
@@ -226,7 +227,6 @@ export default function ChannelDetail() {
   const [marathonAnalytics, setMarathonAnalytics] = useState<any>(null)
   const [showConfigModal, setShowConfigModal] = useState(false)
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
-  const [showSocialModal, setShowSocialModal] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [refreshingStats, setRefreshingStats] = useState(false)
   const [statsRefreshMsg, setStatsRefreshMsg] = useState<string | null>(null)
@@ -270,7 +270,7 @@ export default function ChannelDetail() {
   const [nativeShortResult, setNativeShortResult] = useState<{ ok: boolean; message: string; url?: string } | null>(null)
   
   // Tab state for Videos/Shorts/Live/Growth/Promotion/Slots
-  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion' | 'slots' | 'insights'>('videos')
+  const [videoTab, setVideoTab] = useState<'videos' | 'shorts' | 'live' | 'growth' | 'promotion' | 'slots' | 'insights' | 'social'>('videos')
   const [shorts, setShorts] = useState<any[]>([])
   const [loadingShorts, setLoadingShorts] = useState(false)
 
@@ -419,6 +419,14 @@ export default function ChannelDetail() {
     if (ytIds.length === 0) return
     api.getVideoStats(ytIds).then(stats => setVideoStats(stats)).catch(() => {})
   }, [videos])
+
+  // Fetch bulk per-video per-network stats (one query) for the video grid
+  useEffect(() => {
+    if (!channel?.id) return
+    api.getChannelVideosSocialStats(channel.id)
+      .then(data => { if (data && typeof data === 'object') setVideoSocialStats(data) })
+      .catch(() => {})
+  }, [channel?.id])
 
   // Fetch channel-level YouTube stats (total views, watch hours)
   useEffect(() => {
@@ -1205,8 +1213,8 @@ export default function ChannelDetail() {
           className="flex items-center gap-1.5 px-3 py-2 bg-purple-500/10 border border-purple-500/30 text-purple-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-purple-500/20 transition-colors">
           <Film size={14} /> <span className="hidden sm:inline">Templates</span><span className="sm:hidden">Tmpl</span>
         </button>
-        <button onClick={() => setShowSocialModal(true)}
-          title="Configurar cuentas de redes sociales"
+        <button onClick={() => setVideoTab('social')}
+          title="Identidad, credenciales y rendimiento por red"
           className="flex items-center gap-1.5 px-3 py-2 bg-green-500/10 border border-green-500/30 text-green-400 rounded-lg text-xs sm:text-sm font-medium hover:bg-green-500/20 transition-colors">
           <Share2 size={14} /> <span className="hidden sm:inline">Redes</span><span className="sm:hidden">Red</span>
         </button>
@@ -1314,6 +1322,12 @@ export default function ChannelDetail() {
             }`}
             onClick={() => setVideoTab('insights')}
           ><Brain size={14} className="inline mr-1" />Insights AI</button>
+          <button
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+              videoTab === 'social' ? 'bg-dark-700 text-white' : 'text-gray-500 hover:text-white'
+            }`}
+            onClick={() => setVideoTab('social')}
+          ><Share2 size={14} className="inline mr-1" />Redes</button>
           
           {/* ── Filters: playlists + error toggle ── */}
           {videoTab === 'videos' && (
@@ -1637,6 +1651,8 @@ export default function ChannelDetail() {
             channel={channel}
             setChannel={setChannel}
           />
+        ) : videoTab === 'social' ? (
+          <SocialDistributionTab channelId={channelId} />
         ) : videoTab === 'shorts' ? (
           <div>
           {nativeShortResult && (
@@ -1901,6 +1917,33 @@ export default function ChannelDetail() {
                   ) : (
                     <VideoTiming timing={v.timing_data} />
                   )}
+                  {/* ── Stats por red social (distribución) ── */}
+                  {(() => {
+                    const netRows = (videoSocialStats[v.id] || []).filter((r: any) => r.status === 'published')
+                    if (netRows.length === 0) return null
+                    return (
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[10px] text-gray-500">
+                        {netRows.map((r: any) => {
+                          const meta = SOCIAL_PLATFORMS.find((p: any) => p.id === r.platform)
+                          const when = r.uploaded_at ? formatDateTime(r.uploaded_at) : '—'
+                          return (
+                            <span key={r.platform}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700/60 border border-surface-border/50"
+                              title={`${meta?.label || r.platform} · ${r.views} vistas · ${r.likes} likes · ${r.comments} comentarios\nPublicado en la red: ${when}`}>
+                              <span>{meta?.icon || '🌐'}</span>
+                              <span className="text-gray-300 tabular-nums">{formatShortNumber(r.views)}</span>
+                              <span className="text-gray-600 tabular-nums">{when}</span>
+                              {r.platform_video_url && (
+                                <a href={r.platform_video_url} target="_blank" rel="noopener noreferrer"
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-neon-cyan hover:text-neon-cyan/70" title="Ver en la red">↗</a>
+                              )}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
                   <div className="flex gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {v.thumbnail_path && <button onClick={e => { e.preventDefault(); e.stopPropagation(); handleDownloadThumbnail(v.id) }} className="text-[11px] text-neon-cyan bg-neon-cyan/10 px-2 py-0.5 rounded hover:bg-neon-cyan/20 flex items-center gap-1"><Download size={11} /> Mini</button>}
                     {v.status === 'ready' && !v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-red bg-neon-red/10 px-2 py-0.5 rounded hover:bg-neon-red/20">Subir a YT</button>}
@@ -2342,22 +2385,6 @@ export default function ChannelDetail() {
       )}
 
       {/* --- Social Media Modal --- */}
-      {showSocialModal && channel?.id && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSocialModal(false)}>
-          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto animate-slide-up" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
-                <Share2 size={20} className="text-green-400" /> 🌐 Redes Sociales
-              </h3>
-              <button onClick={() => setShowSocialModal(false)}
-                className="px-3 py-1.5 bg-dark-600 text-gray-400 rounded-lg text-xs hover:bg-dark-500">
-                <X size={14} />
-              </button>
-            </div>
-            <SocialAccountsPanel channelId={channel.id} />
-          </div>
-        </div>
-      )}
     </div>
   )
 }

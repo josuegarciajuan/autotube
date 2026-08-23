@@ -173,6 +173,19 @@ def channel_social_stats(channel_id: int):
     }
 
 
+@router.get("/channels/{channel_id}/videos-social-stats")
+def channel_videos_social_stats(channel_id: int):
+    """Bulk: stats por red de TODOS los vídeos del canal en una sola query.
+
+    Devuelve {video_id: [{platform, platform_video_id, platform_video_url,
+    status, views, likes, comments, reposts, uploaded_at}, ...]} para pintar
+    en el listado de vídeos sin N+1.
+    """
+    db = get_db()
+    _channel_or_404(db, channel_id)
+    return db.get_channel_videos_social_stats(channel_id)
+
+
 @router.get("/videos/{video_id}/social-stats")
 def video_social_stats(video_id: int):
     """Stats por red de un vídeo concreto + histórico reciente."""

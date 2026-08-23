@@ -7,6 +7,7 @@ from api.schemas.models import (
     SocialAccountCreate,
     SocialAccountUpdate,
     SocialAccountResponse,
+    SocialRevealRequest,
     SocialTimingUpdate,
 )
 
@@ -14,8 +15,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _set_existing(existing: dict, col: str, value: str) -> None:
+    """Store an already-encrypted value in a social account row dict."""
+    existing[col] = value
+
+
 def _row_to_response(row: dict) -> SocialAccountResponse:
-    """Convert DB row → SocialAccountResponse."""
+    """Convert DB row → SocialAccountResponse.
+
+    Secrets are NEVER returned: only presence flags (has_*). The encrypted
+    password itself never leaves the server through this endpoint.
+    """
     return SocialAccountResponse(
         id=row["id"],
         channel_id=row["channel_id"],
@@ -27,6 +37,11 @@ def _row_to_response(row: dict) -> SocialAccountResponse:
         last_error=row.get("last_error"),
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
+        account_email=row.get("account_email") or None,
+        notes=row.get("notes") or None,
+        has_email_password=bool(row.get("account_email_password")),
+        has_account_password=bool(row.get("account_password")),
+        has_api_key=bool(row.get("encrypted_password")),
     )
 
 
@@ -35,18 +50,15 @@ def _row_to_response(row: dict) -> SocialAccountResponse:
 @router.get("/{channel_id}/social-accounts")
 def list_social_accounts(channel_id: int):
     """List all social media accounts configured for a channel.
-    Passwords are never returned — only usernames and status."""
+    Passwords are never returned — only usernames, identity fields
+    (email/notes) and presence flags (has_api_key, has_*_password)."""
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
 
     try:
-        from pipeline.social_encryption import get_encryption
         accounts = db.get_channel_social_accounts(channel_id)
-        # Mask passwords
-        for acct in accounts:
-            acct["encrypted_password"] = "****"
         return [_row_to_response(a) for a in accounts]
     except Exception as exc:
         raise HTTPException(500, f"Error listing accounts: {exc}")
@@ -56,7 +68,8 @@ def list_social_accounts(channel_id: int):
 def upsert_social_account(channel_id: int, platform: str, data: SocialAccountCreate):
     """Create or update social media credentials for a channel.
 
-    The password is encrypted with Fernet before storage."""
+    The API token (password) and the identity secrets (account_email_password,
+    account_password) are encrypted with Fernet before storage."""
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
@@ -71,14 +84,14 @@ def upsert_social_account(channel_id: int, platform: str, data: SocialAccountCre
     try:
         from pipeline.social_encryption import get_encryption
         enc = get_encryption()
-        encrypted_pw = enc.encrypt(data.password)
+        encrypted_pw = enc.encrypt(data.password) if data.password else ""
 
         db.upsert_social_account(
-            channel_id=channel_id,
-            platform=platform_lower,
-            username=data.username,
-            encrypted_password=encrypted_pw,
-            enabled=data.enabled,
+            channel_id, platform_lower, data.username, encrypted_pw, data.enabled,
+            data.account_email or None,
+            enc.encrypt(data.account_email_password) if data.account_email_password else None,
+            enc.encrypt(data.account_password) if data.account_password else None,
+            data.notes or None,
         )
 
         accounts = db.get_channel_social_accounts(channel_id)
@@ -128,16 +141,25 @@ def update_social_account(channel_id: int, platform: str, data: SocialAccountUpd
         if data.username is not None:
             existing["username"] = data.username
         if data.password is not None:
-            existing["encrypted_password"] = enc.encrypt(data.password)
+            _set_existing(existing, "encrypted_password", enc.encrypt(data.password))
         if data.enabled is not None:
             existing["enabled"] = data.enabled
+        # Identity fields (v45): None preserva el valor existente.
+        if data.account_email is not None:
+            existing["account_email"] = data.account_email or None
+        if data.account_email_password is not None:
+            _set_existing(existing, "account_email_password",
+                          enc.encrypt(data.account_email_password))
+        if data.account_password is not None:
+            _set_existing(existing, "account_password", enc.encrypt(data.account_password))
+        if data.notes is not None:
+            existing["notes"] = data.notes or None
 
         db.upsert_social_account(
-            channel_id=channel_id,
-            platform=platform.lower(),
-            username=existing["username"],
-            encrypted_password=existing["encrypted_password"],
-            enabled=existing["enabled"],
+            channel_id, platform.lower(), existing["username"],
+            existing["encrypted_password"], existing["enabled"],
+            existing.get("account_email"), existing.get("account_email_password"),
+            existing.get("account_password"), existing.get("notes"),
         )
 
         accounts = db.get_channel_social_accounts(channel_id)
@@ -146,6 +168,50 @@ def update_social_account(channel_id: int, platform: str, data: SocialAccountUpd
                 return _row_to_response(acct)
     except Exception as exc:
         raise HTTPException(500, f"Error updating account: {exc}")
+
+
+# ── Reveal credential (under demand) ─────────────────────────
+
+@router.post("/{channel_id}/social-accounts/{platform}/reveal")
+def reveal_social_credential(channel_id: int, platform: str, data: SocialRevealRequest):
+    """Reveal a single stored credential value (decrypted) on demand.
+
+    Allowed fields: 'api_key' (encrypted_password), 'email_password'
+    (account_email_password), 'account_password' (account_password).
+    Used by the UI to show the credential "a mano" with an explicit click.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    platform_lower = platform.lower()
+    acct = db.get_social_account(channel_id, platform_lower)
+    if not acct:
+        raise HTTPException(404, f"No credentials configured for {platform}")
+
+    field = data.field
+    if field == "api_key":
+        column = "encrypted_password"
+    elif field == "email_password":
+        column = "account_email_password"
+    elif field == "account_password":
+        column = "account_password"
+    else:
+        raise HTTPException(400, f"Invalid field '{field}'. Valid: api_key, email_password, account_password")
+
+    encrypted = acct.get(column)
+    if not encrypted:
+        raise HTTPException(404, f"No {field} stored for {platform}")
+
+    try:
+        from pipeline.social_encryption import get_encryption
+        enc = get_encryption()
+        value = enc.decrypt(encrypted)
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to decrypt {field}: {exc}")
+
+    return {"ok": True, "field": field, "value": value}
 
 
 # ── Timing configuration ─────────────────────────────────────

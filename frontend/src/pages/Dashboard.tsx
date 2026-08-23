@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useDashboard, useRecentEvents, useQuotaStatus } from '../hooks/useQueries'
-import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap } from 'lucide-react'
+import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChannelFilter } from '../context/ChannelFilterContext'
 import { useEasterEgg } from '../context/EasterEggContext'
@@ -91,6 +91,10 @@ export default function Dashboard() {
   const [collectStatsError, setCollectStatsError] = useState(false)
   const [collectStatsState, setCollectStatsState] = useState<any>(null)
   const [collectStatsFinishedAt, setCollectStatsFinishedAt] = useState<string | null>(null)
+  // Social network stats collection (0 cuota YouTube)
+  const [collectingSocialStats, setCollectingSocialStats] = useState(false)
+  const [socialStatsMsg, setSocialStatsMsg] = useState<string | null>(null)
+  const [socialStatsError, setSocialStatsError] = useState(false)
 
   // Previous KPI snapshot — captured before stats collection, cleared on manual refresh
   const [previousKpis, setPreviousKpis] = useState<Record<string, number> | null>(null)
@@ -250,6 +254,26 @@ export default function Dashboard() {
       setCollectStatsMsg(`Error: ${e.message || 'desconocido'}`)
       setCollectingStats(false)
     }
+  }
+
+  async function handleCollectSocialStats() {
+    if (collectingSocialStats) return
+    setCollectingSocialStats(true)
+    setSocialStatsError(false)
+    setSocialStatsMsg('Recolectando stats de redes sociales...')
+    try {
+      const res = await api.collectSocialStats()  // global: todos los canales, 0 cuota
+      const results = res?.results || {}
+      const keys = Object.keys(results)
+      const parts = keys.length
+        ? keys.map(p => `${p}: ${results[p].updated}/${results[p].checked}`).join(' · ')
+        : 'sin vídeos publicados en redes'
+      setSocialStatsMsg(`Stats sociales listas — ${parts}`)
+    } catch (e: any) {
+      setSocialStatsError(true)
+      setSocialStatsMsg(`Error: ${e.message || 'desconocido'}`)
+    }
+    setCollectingSocialStats(false)
   }
 
   async function handleRecalculateSlots() {
@@ -414,6 +438,15 @@ export default function Dashboard() {
           <span>{collectingStats ? 'Recolectando...' : 'Recolectar stats'}</span>
         </button>
         <button
+          onClick={handleCollectSocialStats}
+          disabled={collectingSocialStats}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-green-500/20 bg-green-500/5 text-green-400 hover:bg-green-500/10 hover:border-green-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Recolectar stats de redes sociales (Rumble, Dailymotion, Facebook, Bluesky, Mastodon) — 0 cuota de YouTube"
+        >
+          {collectingSocialStats ? <Loader2 size={13} className="animate-spin" /> : <Share2 size={13} />}
+          <span>{collectingSocialStats ? 'Recolectando...' : 'Recolectar stats sociales'}</span>
+        </button>
+        <button
           onClick={handleStabilize}
           disabled={stabilizing}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/40 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
@@ -448,6 +481,27 @@ export default function Dashboard() {
               {collectStatsFinishedAt && <span className="text-[10px] opacity-60 ml-1">({collectStatsFinishedAt})</span>}
             </span>
             <button onClick={() => { setCollectStatsMsg(null); setCollectStatsState(null) }} className="opacity-60 hover:opacity-100 transition-opacity">
+              <X size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Social stats collection feedback */}
+      {socialStatsMsg && (
+        <div className={`rounded-lg border animate-fade-in ${
+          collectingSocialStats ? 'bg-green-500/5 border-green-500/20'
+            : socialStatsError ? 'bg-amber-500/5 border-amber-500/20'
+            : 'bg-green-500/5 border-green-500/20'
+        }`}>
+          <div className={`flex items-center justify-between gap-2 text-xs py-2 px-3 ${
+            collectingSocialStats ? 'text-green-400' : socialStatsError ? 'text-amber-400' : 'text-green-400'
+          }`}>
+            <span className="flex items-center gap-1.5 font-medium">
+              {collectingSocialStats ? <Loader2 size={12} className="animate-spin" /> : socialStatsError ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+              {socialStatsMsg}
+            </span>
+            <button onClick={() => setSocialStatsMsg(null)} className="opacity-60 hover:opacity-100 transition-opacity">
               <X size={13} />
             </button>
           </div>
