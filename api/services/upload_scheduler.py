@@ -1260,6 +1260,21 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # ── v23: Overlap guard — detect and auto-fix if multiple videos share the same target_public_at ──
     effective_target = _check_for_overlapping_targets(db, channel_id, slug, effective_target, video_id)
 
+    # ── Frescura (Fase 4 bis): refrescar título+thumbnail si el vídeo lleva
+    # demasiado tiempo en cola (fábrica continua → contenido 'viejo').
+    # Fail-open: si el refresco falla, la subida continúa con el título actual.
+    try:
+        from api.services.freshness import is_stale, refresh_stale_video
+        if is_stale(db, video_id):
+            fres = refresh_stale_video(db, video_id)
+            if fres.get("refreshed"):
+                logger.info(
+                    "[%s] Video #%d refrescado antes de subir (título nuevo, thumbnail=%s)",
+                    slug, video_id, fres.get("thumbnail"),
+                )
+    except Exception as exc:
+        logger.debug("Freshness refresh skipped (%s): %s", slug, exc)
+
     logger.info(
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",
         video_id, slug, vp.name,

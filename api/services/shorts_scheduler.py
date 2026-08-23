@@ -212,6 +212,20 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
             "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
         )
 
+        # ── Fase 4 bis: un strike nuevo DEVUELVE el perfil de pacing a 'strike'.
+        # Cierra el bucle adaptativo: strike → (7 días limpios) → recovery →
+        # (21 días limpios) → normal; un nuevo strike → strike otra vez.
+        try:
+            from api.services.pacing_profile import set_pacing_profile, get_active_profile_name
+            if get_active_profile_name(db) != "strike":
+                set_pacing_profile("strike", db)
+                logger.warning(
+                    "[%s] Pacing: strike #%d → perfil de pacing restaurado a 'strike'",
+                    channel_slug, strikes,
+                )
+        except Exception as _apt_exc:
+            logger.debug("Pacing reset-to-strike skipped: %s", _apt_exc)
+
         # ── Alerta formal (StatusBar + AlertsPanel) ──
         try:
             from api.services.lifecycle_monitor import create_alert

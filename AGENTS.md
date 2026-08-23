@@ -411,10 +411,22 @@ Relajar los strikes = **cambiar el perfil en un clic** (panel → Programación 
   `MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS`, `ACCOUNT_DAILY_UPLOAD_CAP`).
 - `content_safety_disabled` (kill-switch del filtro) y `global_upload_spacing_min`
   (override manual legacy) siguen funcionando con máxima prioridad.
+- **Transición automática** (`pacing_profile.auto_transition_profile`, check diario):
+  strike → recovery tras 7 días sin strikes/remociones; recovery → normal tras 21.
+  Un strike nuevo (`_record_short_spam_strike`) DEVUELVE el perfil a `strike` al
+  instante. Kill-switch: `AUTO_PACING_TRANSITION=false` o
+  `system_state["auto_pacing_transition"]="false"`.
 
 Consumidores actuales: `upload_spacing`, `shorts_scheduler` (caps duros, cooldown,
 gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigation`
 (cap por cuenta), `upload_scheduler` (gap de subida mismo-canal).
+
+## 🍃 Frescura en publicación (fábrica continua)
+Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran
+"stale": antes de subirlos, `upload_scheduler` regenera título (LLM vía
+`MetadataGenerator` reutilizando el guion) y thumbnail
+(`thumbnail_service.regenerate_thumbnail_for_video`). Fail-open: si el refresco
+falla, la subida continúa con el título actual.
 
 ## Proxy residencial (implementado, desactivado)
 ```env

@@ -223,3 +223,151 @@ def _coerce(key: str, raw: str):
         except (TypeError, ValueError):
             return profile_value
     return str(raw)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Transición automática de perfil (Fase 4 bis)
+# ═══════════════════════════════════════════════════════════════
+# Tras N días SIN actividad de strike (bloqueos, remociones, eliminaciones
+# silenciosas), el sistema escala solo: strike → recovery → normal. Kill-switch:
+# settings.AUTO_PACING_TRANSITION=False o system_state["auto_pacing_transition"]
+# = "false" desactiva la transición automática.
+
+def _auto_transition_recovery_days() -> int:
+    try:
+        from config.settings import AUTO_TRANSITION_RECOVERY_DAYS
+        return max(1, int(AUTO_TRANSITION_RECOVERY_DAYS or 7))
+    except Exception:
+        return 7
+
+
+def _auto_transition_normal_days() -> int:
+    try:
+        from config.settings import AUTO_TRANSITION_NORMAL_DAYS
+        return max(1, int(AUTO_TRANSITION_NORMAL_DAYS or 21))
+    except Exception:
+        return 21
+
+
+def auto_transition_enabled(db=None) -> bool:
+    """Kill-switch de la transición automática (settings > system_state)."""
+    try:
+        if db is None:
+            db = _get_db()
+        raw = db.get_system_state("auto_pacing_transition")
+        if raw is not None and raw != "":
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    try:
+        from config.settings import AUTO_PACING_TRANSITION
+        return bool(AUTO_PACING_TRANSITION)
+    except Exception:
+        return True
+
+
+def last_strike_activity_epoch(db=None) -> float:
+    """Epoch del último evento de strike/remoción (global, todos los canales).
+
+    Fuentes: bloqueos activos/vencidos (shorts_spam_blocked_until_*), última
+    remoción registrada (shorts_spam_last_removal_*.detected_at) y alertas
+    spam_strike / silent_removal en pipeline_alerts. 0.0 si nunca hubo.
+    """
+    import json as _json
+    from datetime import datetime as _dt
+
+    if db is None:
+        db = _get_db()
+    last = 0.0
+    now_epoch = __import__("time").time()
+    try:
+        for ch in db.get_channels(active_only=False) or []:
+            cid = ch.get("id")
+            if not cid:
+                continue
+            try:
+                raw_block = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
+                if raw_block:
+                    ts = float(raw_block)
+                    # Un bloqueo ACTIVO cuenta como actividad 'ahora mismo'
+                    last = max(last, now_epoch if ts > now_epoch else ts)
+            except (TypeError, ValueError):
+                pass
+            try:
+                raw_rem = db.get_system_state(f"shorts_spam_last_removal_{cid}")
+                if raw_rem:
+                    d = _json.loads(raw_rem)
+                    detected = d.get("detected_at") if isinstance(d, dict) else None
+                    if detected:
+                        ts = _dt.fromisoformat(str(detected).replace("Z", "+00:00")).timestamp()
+                        last = max(last, ts)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Alertas recientes de strike / eliminación silenciosa
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT created_at FROM pipeline_alerts
+                   WHERE alert_type IN ('spam_strike', 'silent_removal')
+                   ORDER BY created_at DESC LIMIT 1""",
+            ).fetchone()
+        if rows and rows["created_at"]:
+            try:
+                last = max(last, _dt.strptime(rows["created_at"], "%Y-%m-%d %H:%M:%S").timestamp())
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+    return last
+
+
+def clean_days_since_strike(db=None) -> float:
+    """Días consecutivos SIN actividad de strike (0 si hay bloqueo activo)."""
+    import time as _time
+    if db is None:
+        db = _get_db()
+    last = last_strike_activity_epoch(db)
+    if last <= 0:
+        return float("inf")  # nunca hubo strike → limpio desde siempre
+    return max(0.0, (_time.time() - last) / 86400.0)
+
+
+def auto_transition_profile(db=None) -> dict:
+    """Escala el perfil automáticamente si hay suficientes días limpios.
+
+    strike → recovery tras AUTO_TRANSITION_RECOVERY_DAYS (7) días limpios.
+    recovery → normal tras AUTO_TRANSITION_NORMAL_DAYS (21) días limpios.
+    normal → no-op (ya es el máximo).
+
+    Returns:
+        {"transitioned": bool, "from": str, "to": str, "clean_days": float}
+    """
+    if db is None:
+        db = _get_db()
+    if not auto_transition_enabled(db):
+        return {"transitioned": False, "from": get_active_profile_name(db),
+                "to": get_active_profile_name(db), "clean_days": clean_days_since_strike(db),
+                "reason": "kill-switch"}
+    current = get_active_profile_name(db)
+    clean = clean_days_since_strike(db)
+    if current == "strike" and clean >= _auto_transition_recovery_days():
+        set_pacing_profile("recovery", db)
+        logger.info(
+            "Pacing: transición automática strike → recovery tras %.0f días sin strikes",
+            clean,
+        )
+        return {"transitioned": True, "from": "strike", "to": "recovery",
+                "clean_days": round(clean, 1), "reason": "clean_days"}
+    if current == "recovery" and clean >= _auto_transition_normal_days():
+        set_pacing_profile("normal", db)
+        logger.info(
+            "Pacing: transición automática recovery → normal tras %.0f días sin strikes",
+            clean,
+        )
+        return {"transitioned": True, "from": "recovery", "to": "normal",
+                "clean_days": round(clean, 1), "reason": "clean_days"}
+    return {"transitioned": False, "from": current, "to": current,
+            "clean_days": round(clean, 1) if clean != float("inf") else None,
+            "reason": "not_clean"}
