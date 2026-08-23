@@ -185,10 +185,11 @@ MIN_FREE_FOR_RENDER_MB = int(os.getenv("MIN_FREE_FOR_RENDER_MB", "2500"))
 MIN_FREE_FOR_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_DISPATCH_MB", "2800"))
 # Kokoro-82M (torch) carga ~3 GB al generar TTS; necesita más margen que el render.
 MIN_FREE_FOR_TTS_MB = int(os.getenv("MIN_FREE_FOR_TTS_MB", "6000"))
-# Gate del ensamblaje de video (ffmpeg exact-concat ~3 GB pico). Histórico:
-# hardcodeado a 6 GB en full_pipeline_worker._check_memory_before_video; ahora
-# env-driven para ajustarlo al presupuesto real del host (18 GB compartido).
-MIN_FREE_FOR_ASSEMBLY_MB = int(os.getenv("MIN_FREE_FOR_ASSEMBLY_MB", "6000"))
+# Gate del ensamblaje de video (ffmpeg exact-concat por lotes de 25 segmentos,
+# pico ~1.5 GB). El umbral efectivo de _check_memory_before_video es 2.5 GB
+# (rebajado 2026-08-22: el concat por lotes redujo el pico de 6 GB a ~1.5 GB).
+# Env-driven para ajustarlo al presupuesto real del host sin tocar código.
+MIN_FREE_FOR_ASSEMBLY_MB = int(os.getenv("MIN_FREE_FOR_ASSEMBLY_MB", "2500"))
 # Shorts: el render de un short lanza ffmpeg (pico 2-4 GB) dentro del proceso API.
 # Un gate de solo 1 GB permitía dispatchar shorts con RAM justa y el kernel
 # OOM-killeaba la API (y con ella los shorts in-process). Subido a 3 GB.
