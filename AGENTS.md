@@ -357,6 +357,35 @@ porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto
 - **Consumo evitado:** ~36,720 unidades/día de YouTube API quota.
 - **Para reactivarlo:** justificar impacto en cuota, cambiar `BACKFILL_ENABLED = True`, descomentar el loop en `api/main.py`, y quitar el `sys.exit(0)` en el script.
 
+## 🛡️ Invariantes anti-strike de YouTube (ago 2026)
+
+Tras 3 strikes por spam/IA en 4 días (canal5 19/8, canal4 20/8, canal3 22/8), rigen
+estas reglas DURAS. No relajarlas sin justificación:
+
+1. **Nunca subir un short con render degradado (solid bg).** `api/services/shorts_scheduler.py`
+   rechaza (`return None`) el render si `_valid_assets_total == 0` o la fracción de
+   escenas con asset real < `SHORTS_MIN_VALID_ASSET_RATIO` (0.5). El fallback de fondo
+   liso ya no se sube.
+2. **Máx 1 short/día por canal (hard cap).** `SHORTS_HARD_PER_CHANNEL_DAILY_CAP = 1`,
+   forzado en dispatch normal, force-dispatch (NO saltable por bypass) y cola de nativos.
+3. **Espaciado global anti-ráfaga entre canales.** `api/services/upload_spacing.py`
+   impone `GLOBAL_UPLOAD_SPACING_MIN = 45` min entre subidas de CANALES DISTINTOS. Se
+   aplica en `pipeline/youtube_uploader.py::upload()` (choke point único) vía
+   `_wait_global_upload_spacing()`, y se registra con `record_upload()` tras subir.
+4. **Filtro duro de temas sensibles.** `pipeline/content_safety.py` rechaza menores
+   (en contexto médico/criminal), autolesión/suicidio, claims médicos de cura,
+   violencia gráfica y desinformación sanitaria. Se aplica en shorts (native y
+   standalone) y en long-forms (`orchestrator.phase_generate_script`, pre y post-guion).
+5. **Verificación post-subida endurecida.** `POST_UPLOAD_VERIFY_RETRIES=4`,
+   `POST_UPLOAD_VERIFY_DELAY=10`, con fallback a la watch page (0 cuota) para NO
+   registrar strike por lag de indexado (watch page "private"/"available" ⇒ no strike).
+6. **Sweep diario de eliminaciones silenciosas.** `scripts/check_video_removals.py`
+   barre los últimos N vídeos/shorts (0 cuota) y crea alerta `silent_removal` si YouTube
+   borró algo retroactivamente que constaba como publicado.
+
+Sobrescrituras en runtime (system_state): `content_safety_disabled=true` (kill-switch del
+filtro), `global_upload_spacing_min` (minutos de espaciado).
+
 ## Proxy residencial (implementado, desactivado)
 ```env
 PROXY_ENABLED=false           # true = activar
