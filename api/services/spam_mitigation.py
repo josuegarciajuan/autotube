@@ -38,7 +38,9 @@ _RESTORE_KEY = "spam_freq_restore_{channel_id}"
 # Los vídeos ya subidos como 'private' con publishAt nativo se reprograman para
 # caer DESPUÉS del fin del bloqueo, conservando un margen y gaps entre vídeos.
 SPAM_HOLD_PUBLISH_MARGIN_MIN = 60   # primera publicación >=1h tras el desbloqueo
-SPAM_HOLD_PUBLISH_GAP_HOURS = 3     # conservar 3h entre publicaciones del mismo canal
+# ago 2026 (antiban): 3h → 24h. Tras un bloqueo, las publicaciones retenidas se
+# liberan a 1/día (techo antiban), no en ráfaga de 3h que reincidiría el flag.
+SPAM_HOLD_PUBLISH_GAP_HOURS = 24    # conservar 1 publicación/día tras el desbloqueo
 # Diferencia de colchón a añadir a bloques grabados antes del colchón de 6h.
 SPAM_BLOCK_BUFFER_DELTA_HOURS = 2
 
@@ -510,7 +512,47 @@ def ensure_spam_holds(db=None) -> dict:
     except Exception as exc:
         logger.warning("gradual resume phases skipped: %s", exc)
 
-    return {"buffer_extended": extended, "held": held_total, "channels": channels_held}
+    # ── Esparcido global de publicaciones pendientes (antiban, ago 2026) ──
+    # Un canal sin strike propio (ej. hermano de proyecto) puede acumular un
+    # backlog de vídeos "calentando" con publishAt a 3h → 8 publicaciones/día,
+    # la ráfaga que YouTube penaliza. _spread_phase1_pending solo cubre canales
+    # con strike propio en Fase 1; aquí se esparce a máx 1/día CUALQUIER canal
+    # activo (fase 0, 1 o 2) con más de 1 publicación pendiente. Idempotente:
+    # solo mueve lo que esté mal, y los canales bloqueados ya fueron retenidos.
+    spread_total = 0
+    try:
+        from api.services.gradual_resume import (
+            _phase_for, load_plan, spread_pending_publishes,
+        )
+        _plan_map = load_plan(db) or {}
+        for ch in (db.get_channels(active_only=True) or []):
+            cid = int(ch.get("id", 0) or 0)
+            slug = ch.get("slug", "")
+            if not cid or not slug:
+                continue
+            # En Fase 1 (strike propio) el esparcido ya lo hace
+            # _spread_phase1_pending con su patrón 0,2,4 — no duplicar.
+            try:
+                if _phase_for(_plan_map.get(cid, {}), datetime.now(timezone.utc).date()) == 1:
+                    continue
+            except Exception:
+                pass
+            try:
+                spread_total += spread_pending_publishes(
+                    db, cid, slug, max_per_day=1,
+                )
+            except Exception as exc:
+                logger.warning("spread_pending_publishes[%s] skipped: %s", slug, exc)
+    except Exception as exc:
+        logger.warning("global publish spread skipped: %s", exc)
+
+
+    return {
+        "buffer_extended": extended,
+        "held": held_total,
+        "channels": channels_held,
+        "spread_pending": spread_total,
+    }
 
 
 def check_deleted_yt_watchdog(db=None) -> dict:

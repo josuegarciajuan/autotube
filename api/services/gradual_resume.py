@@ -224,6 +224,148 @@ def _spread_phase1_pending(db, cid: int, slug: str, start_dt: datetime) -> int:
     return moved
 
 
+def spread_pending_publishes(
+    db,
+    channel_id: int,
+    slug: str,
+    max_per_day: int = 1,
+    start_dt: datetime | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Reprograma las publicaciones pendientes de un canal a máx ``max_per_day``/día.
+
+    Generalización de ``_spread_phase1_pending`` para CUALQUIER canal (strike
+    propio, hermano o sin strike): un backlog de vídeos ya subidos como private
+    con publishAt a 3h de separación = 8 publicaciones/día del mismo canal, la
+    ráfaga que alimenta los strikes de spam (ago 2026). Este esparcido reparte
+    los pendientes a 1 por día natural (por defecto), conservando la hora
+    original de cada vídeo, empezando por ``start_dt`` (default: hoy).
+
+    Idempotente: si el vídeo ya está en el día/hora correctos se salta (evita
+    50 ud/vídeo de set_publish_at en cada arranque de la API).
+
+    Args:
+        db: ExtendedDatabase.
+        channel_id: ID del canal.
+        slug: slug del canal (log + uploader).
+        max_per_day: máx publicaciones por día natural (default 1 = techo antiban).
+        start_dt: primer día a partir del cual repartir (UTC). Default: hoy.
+        dry_run: si True, solo loguea el plan sin escribir nada.
+
+    Returns:
+        Nº de vídeos reprogramados.
+    """
+    try:
+        from api.services.spam_mitigation import _pending_publish_all
+        pending = _pending_publish_all(channel_id, db) or []
+    except Exception:
+        return 0
+    if len(pending) <= max_per_day:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    if start_dt is None:
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+
+    uploader = None
+    moved = 0
+    day_idx = 0
+    used_in_day = 0
+
+    for v in pending:
+        # Avanzar de día hasta un día >= hoy con hueco (máx max_per_day/día).
+        guard = 0
+        while guard < 365:
+            target_day = start_dt + timedelta(days=day_idx)
+            if target_day.date() >= now.date() and used_in_day < max_per_day:
+                break
+            day_idx += 1
+            used_in_day = 0
+            guard += 1
+        used_in_day += 1
+
+        try:
+            orig_dt = datetime.fromisoformat(
+                str(v.get("target_public_at", "")).replace("Z", "+00:00").replace(" ", "T")
+            )
+            if orig_dt.tzinfo is None:
+                orig_dt = orig_dt.replace(tzinfo=timezone.utc)
+            hour, minute = orig_dt.hour, orig_dt.minute
+        except (ValueError, TypeError):
+            orig_dt = None
+            hour, minute = 12, 0
+
+        new_dt = target_day.replace(hour=hour, minute=minute, tzinfo=timezone.utc)
+        if new_dt <= now:
+            new_dt = target_day.replace(hour=12, minute=0, tzinfo=timezone.utc)
+
+        # Ya en el día/hora correctos → no tocar (evita 50 ud/vídeo en cada arranque).
+        if orig_dt is not None:
+            try:
+                if (orig_dt.date(), orig_dt.hour, orig_dt.minute) == (
+                    new_dt.date(), new_dt.hour, new_dt.minute
+                ):
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        new_iso = new_dt.isoformat()
+        if dry_run:
+            logger.info(
+                "[%s] spread[%d] DRY: #%s %s → %s",
+                slug, channel_id, v.get("id"), str(v.get("target_public_at", ""))[:19], new_iso[:19],
+            )
+            moved += 1
+            continue
+
+        # 1. DB (siempre) + tablas auxiliares.
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE videos SET target_public_at = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?",
+                    (new_iso, v["id"]),
+                )
+                conn.execute(
+                    "UPDATE planned_slots SET target_public_at = ? WHERE video_id = ?",
+                    (new_iso, v["id"]),
+                )
+                conn.execute(
+                    """UPDATE video_lifecycle_actions SET scheduled_for = ?
+                       WHERE video_id = ? AND action_type = 'go_public'
+                         AND status = 'pending'""",
+                    (new_iso, v["id"]),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("spread publish: DB update failed for video %s: %s", v["id"], exc)
+            continue
+
+        # 2. YouTube nativo (best-effort, solo si hay yt_video_id).
+        yt_id = v.get("video_id") or v.get("yt_video_id")
+        if yt_id:
+            try:
+                if uploader is None:
+                    from pipeline.youtube_uploader import YouTubeUploader
+                    uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
+                uploader.set_publish_at(yt_id, new_iso)
+            except Exception as exc:
+                logger.warning(
+                    "spread publish: set_publish_at failed para %s (%s): %s",
+                    yt_id, slug, exc,
+                )
+        moved += 1
+
+    if moved and not dry_run:
+        logger.warning(
+            "⚠️ Publish spread [%s]: %d publicación(es) reprogramada(s) a máx %d/día",
+            slug, moved, max_per_day,
+        )
+    return moved
+
+
 def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> dict:
     """Aplica la fase vigente de cada canal (config de planning + shorts).
 
