@@ -6153,6 +6153,33 @@ class ExtendedDatabase(Database):
         candidates = [dict(r) for r in rows]
         # Filter out slots in cooldown
         return [s for s in candidates if not self._is_slot_in_cooldown(s)]
+
+    def get_continuous_generation_candidates(self, limit: int = 20) -> list[dict]:
+        """Pending slots in GENERATION order with NO time window (continuous factory).
+
+        Fábrica continua (Fase 1): el siguiente video que debe publicarse antes
+        (target_public_at ASC) se genera primero, sin importar lo lejos que esté
+        su publicación. A diferencia de get_priority_slot_candidates, NO limita a
+        la ventana de pull-forward: genera por delante para llenar la cola
+        (awaiting_upload) mientras la válvula de publicación la drena.
+
+        Skips slots in dispatch cooldown (v12 backoff).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT ps.*, c.name as channel_name, c.slug as channel_slug,
+                          c.config_json
+                   FROM planned_slots ps
+                   JOIN channels c ON ps.channel_id = c.id
+                   WHERE ps.status = 'pending'
+                     AND ps.date_key >= date('now', 'localtime')
+                   ORDER BY COALESCE(ps.target_public_at, ps.target_upload_at) ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        candidates = [dict(r) for r in rows]
+        # Filter out slots in cooldown
+        return [s for s in candidates if not self._is_slot_in_cooldown(s)]
     
     def count_videos_generated_today(self, channel_id: int) -> int:
         """Count videos generated, uploading, or uploaded today for a channel."""

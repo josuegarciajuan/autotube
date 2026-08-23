@@ -2896,6 +2896,29 @@ def _pick_round_robin(candidates: list[dict], db) -> dict | None:
     return None  # no channel has ready candidates
 
 
+def continuous_generation_enabled(db=None) -> bool:
+    """Fábrica continua long-form: despachar el siguiente slot pendiente por orden
+    de publicación (sin ventana de 36h) al terminar cada job.
+
+    Fuentes (mayor prioridad): system_state["continuous_generation"] (toggle en
+    runtime) > config.settings.CONTINUOUS_GENERATION_ENABLED (default False).
+    """
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        raw = db.get_system_state("continuous_generation")
+        if raw is not None and raw != "":
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    try:
+        from config.settings import CONTINUOUS_GENERATION_ENABLED
+        return bool(CONTINUOUS_GENERATION_ENABLED)
+    except Exception:
+        return False
+
+
 def process_planned_slots(db=None, loop=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
@@ -2937,7 +2960,11 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     # 2. Find candidate slots and pick the best one by priority score
     from datetime import date as _date
     today_str = _date.today().isoformat()
-    candidates = db.get_priority_slot_candidates(max_future_hours=36, limit=20)
+    if continuous_generation_enabled(db):
+        # Fábrica continua: sin ventana temporal — el siguiente por publicar.
+        candidates = db.get_continuous_generation_candidates(limit=20)
+    else:
+        candidates = db.get_priority_slot_candidates(max_future_hours=36, limit=20)
     if not candidates:
         return None
     
@@ -3195,14 +3222,113 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     }
 
 
+def top_up_horizon(db=None, horizon_days: int = DEFAULT_HORIZON_DAYS,
+                   max_ahead_days: int = 30) -> dict:
+    """Extiende el horizonte de planificación HACIA DELANTE (incremental).
+
+    La fábrica continua consume slots por orden de publicación; cuando los
+    pendientes se agotan, este top-up añade días nuevos SIN borrar los slots
+    existentes (a diferencia de compute_and_store_horizon, que recrea todo).
+    Por canal: se añaden días hasta que la cobertura pendiente alcanza
+    horizon_days o max_ahead_days de antelación (tope de seguridad).
+
+    Returns:
+        {"added": int, "days_planned": int, "by_channel": {slug: n}, "skipped": bool}
+    """
+    from datetime import date as _date, timedelta as _td
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    channels = db.get_channels(active_only=True)
+    channel_configs = []
+    for ch in channels or []:
+        if _channel_paused_for_planning(db, ch["id"]):
+            continue
+        cfg = db.get_channel_planning_config(ch["id"])
+        if cfg.get("planning_enabled", True) and cfg.get("videos_per_day", 0) > 0:
+            channel_configs.append(cfg)
+    if not channel_configs:
+        return {"added": 0, "days_planned": 0, "by_channel": {},
+                "skipped": True, "reason": "no planning channels"}
+    channel_configs = _augment_channel_configs(db, channel_configs)
+
+    today = _date.today()
+    target_end = today + _td(days=horizon_days)
+    max_end = today + _td(days=max_ahead_days)
+    added = 0
+    days_planned = 0
+    by_channel = {}
+
+    for cfg in channel_configs:
+        ch_id = int(cfg.get("channel_id", 0) or 0)
+        if not ch_id:
+            continue
+        # Fechas con slot pendiente de este canal (para no recomputar/duplicar)
+        try:
+            with db._connect() as conn:
+                date_rows = conn.execute(
+                    """SELECT DISTINCT date_key FROM planned_slots
+                       WHERE channel_id = ? AND status = 'pending'
+                         AND date_key >= date('now', 'localtime')""",
+                    (ch_id,),
+                ).fetchall()
+                covered_dates = {r["date_key"] for r in date_rows} if date_rows else set()
+        except Exception:
+            covered_dates = set()
+
+        cursor = today
+        ch_added = 0
+        guard = 0
+        while cursor <= target_end and cursor <= max_end:
+            cursor_iso = cursor.isoformat()
+            if cursor_iso in covered_dates:
+                cursor += _td(days=1)
+                continue
+            day_slots = []
+            try:
+                day_slots = compute_daily_slots(cursor_iso, [cfg], db=db) or []
+            except Exception as exc:
+                logger.debug("top_up: compute_daily_slots(%s) failed: %s", cursor_iso, exc)
+            if day_slots:
+                try:
+                    db.create_planned_slots_batch(day_slots)
+                except Exception as exc:
+                    logger.debug("top_up: insert %s failed: %s", cursor_iso, exc)
+                    day_slots = []
+            if day_slots:
+                added += len(day_slots)
+                ch_added += len(day_slots)
+                days_planned += 1
+                covered_dates.add(cursor_iso)
+            cursor += _td(days=1)
+            guard += 1
+            if guard > max_ahead_days + 5:
+                break
+        by_channel[cfg.get("slug", str(ch_id))] = ch_added
+
+    if added:
+        logger.info(
+            "Horizon top-up: +%d slots across %d día(s) (%s)",
+            added, days_planned,
+            ", ".join(f"{k}={v}" for k, v in by_channel.items()),
+        )
+    return {"added": added, "days_planned": days_planned, "by_channel": by_channel}
+
+
 def _ensure_never_dry(db) -> bool:
     """Fallback: if no slot could be dispatched, check if the pipeline is empty
     and auto-replan the horizon to keep generation flowing.
     
     Returns True if a replan was triggered.
     """
-    # Check if there's at least one pending slot in the next 72h
-    candidates = db.get_priority_slot_candidates(max_future_hours=72, limit=1)
+    # Check if there's at least one pending slot (72h window legacy; sin ventana
+    # temporal en modo fábrica continua).
+    if continuous_generation_enabled(db):
+        candidates = db.get_continuous_generation_candidates(limit=1)
+    else:
+        candidates = db.get_priority_slot_candidates(max_future_hours=72, limit=1)
     if candidates:
         return False  # slots exist, just not dispatchable right now
     
@@ -3228,7 +3354,17 @@ def _ensure_never_dry(db) -> bool:
         "Triggering emergency horizon replan."
     )
     try:
-        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        if continuous_generation_enabled(db):
+            # Fábrica continua: primero intentar top-up incremental (no borra);
+            # si no añade nada (p. ej. canal pausado), replan completo.
+            top = top_up_horizon(db=db, horizon_days=DEFAULT_HORIZON_DAYS)
+            if top.get("added", 0) > 0:
+                logger.info(
+                    "Emergency top-up: +%d slots across %d día(s)",
+                    top["added"], top["days_planned"],
+                )
+                return True
+        result = compute_and_store_horizon(horizon_days=DEFAULT_HORIZON_DAYS, db=db, force_replan=True)
         logger.info(
             "Emergency replan complete: %d slots across %d days",
             result.get("total_slots", 0), result.get("days_planned", 0),

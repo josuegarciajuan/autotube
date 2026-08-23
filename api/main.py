@@ -1237,24 +1237,43 @@ async def _schedule_checker_loop():
                     await _process_shorts_recovery_planner()
                     last_shorts_recovery_check = now
 
-                # ── Horizon replan (v40): at most once every 24h since the LAST
-                # replan (manual o automático). El timestamp vive en system_state
-                # (get_last_replan_ts), así el gate sobrevive a reinicios de la API.
-                # Las emergencias siguen disparando de inmediato vía smart_replan /
-                # _ensure_never_dry (que llaman a compute_and_store_horizon).
+                # ── Horizon replan / top-up (v40 + Fase 1 continua) ──
+                # Modo fábrica continua: top-up incremental cada 15 min (no borra
+                # slots, extiende hacia delante). Modo clásico: replan completo
+                # con gate de 24h desde el último replan (manual o automático).
                 try:
                     from api.services.planning_service import (
                         compute_and_store_horizon, get_last_replan_ts,
-                        HORIZON_REPLAN_INTERVAL_HOURS,
+                        HORIZON_REPLAN_INTERVAL_HOURS, continuous_generation_enabled,
+                        top_up_horizon,
                     )
-                    if now - get_last_replan_ts(_sched_db) >= HORIZON_REPLAN_INTERVAL_HOURS * 3600:
-                        result = await asyncio.to_thread(
-                            compute_and_store_horizon, horizon_days=7, db=_sched_db
-                        )
-                        logger.info(
-                            "Horizon replan (24h gate): %d slots, %d days",
-                            result.get("total_slots", 0), result.get("days_planned", 0),
-                        )
+                    if continuous_generation_enabled(_sched_db):
+                        _last_topup_ts = 0.0
+                        try:
+                            _raw_tu = _sched_db.get_system_state("last_horizon_topup_ts")
+                            if _raw_tu:
+                                _last_topup_ts = float(_raw_tu)
+                        except (TypeError, ValueError):
+                            _last_topup_ts = 0.0
+                        if now - _last_topup_ts >= 15 * 60:
+                            result = await asyncio.to_thread(top_up_horizon, db=_sched_db)
+                            try:
+                                _sched_db.set_system_state("last_horizon_topup_ts", str(time.time()))
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Horizon top-up: +%d slots, %d día(s) planificados",
+                                result.get("added", 0), result.get("days_planned", 0),
+                            )
+                    else:
+                        if now - get_last_replan_ts(_sched_db) >= HORIZON_REPLAN_INTERVAL_HOURS * 3600:
+                            result = await asyncio.to_thread(
+                                compute_and_store_horizon, horizon_days=7, db=_sched_db
+                            )
+                            logger.info(
+                                "Horizon replan (24h gate): %d slots, %d days",
+                                result.get("total_slots", 0), result.get("days_planned", 0),
+                            )
                 except Exception as exc:
                     logger.debug("Horizon replan: %s", exc)
 
