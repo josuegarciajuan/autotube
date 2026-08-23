@@ -61,6 +61,63 @@ def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime 
         pass
     return False
 
+def _marathon_backlog_per_channel(db=None) -> int:
+    """Umbral de backlog por canal (para disparar maratones) desde el perfil de pacing.
+
+    Fase 3 (fábrica continua): con cola profunda los maratones se disparan solos.
+    El perfil central gobierna el umbral (strike=4, recovery=3, normal=2) — al
+    relajar los strikes, más maratones (más watch-time por video).
+    """
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return int(get_pacing_value(
+            "marathon_backlog_per_channel",
+            default=4, db=db,
+        ) or 4)
+    except Exception:
+        from config.defaults import MARATHON_BACKLOG_PER_CHANNEL
+        return int(MARATHON_BACKLOG_PER_CHANNEL or 4)
+
+
+def marathon_backlog_deep(db=None, active_channels: int | None = None) -> bool:
+    """True si el backlog acumulado supera el umbral del perfil de pacing.
+
+    backlog = awaiting_upload + uploaded_private (todas las canales)
+    umbral  = marathon_backlog_per_channel(perfil) × canales activos
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    if active_channels is None:
+        try:
+            active_channels = len(db.get_channels(active_only=True) or [])
+        except Exception:
+            active_channels = 1
+    per_ch = _marathon_backlog_per_channel(db)
+    return active_channels > 0 and calculate_backlog(db) >= per_ch * active_channels
+
+
+def _queued_marathon_dispatchable(db) -> bool:
+    """True si hay un maratón ENCOLADO cuyo canal está libre (puede despacharse ya).
+
+    La fábrica continua de slots DEBE ceder el turno al maratón encolado cuando
+    el backlog es profundo: el maratón aporta más watch-time por video.
+    """
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """SELECT gj.id, gj.channel_id FROM generation_jobs gj
+                   JOIN videos v ON gj.video_id = v.id
+                   WHERE v.is_marathon = 1 AND gj.status = 'queued'
+                   ORDER BY gj.id ASC LIMIT 1""",
+            ).fetchone()
+            if not row:
+                return False
+        return db.get_running_job_for_channel(row["channel_id"]) is None
+    except Exception:
+        return False
+
+
 def calculate_backlog(db) -> int:
     """Calculate total backlog: awaiting_upload + uploaded_private across all channels.
 
@@ -186,7 +243,7 @@ def check_and_dispatch_marathon(db) -> dict | None:
     """Main entry point: check backlog and enqueue a marathon if conditions are met.
 
     Condition: (awaiting_upload + uploaded_private) across ALL channels
-               >= MARATHON_BACKLOG_PER_CHANNEL × número de canales activos.
+               >= marathon_backlog_per_channel(perfil) × canales activos.
 
     Called by the schedule checker loop every ~60 minutes.
     Does NOT create planned_slots or fire subprocesses directly.
@@ -196,7 +253,6 @@ def check_and_dispatch_marathon(db) -> dict | None:
     Returns:
         dict with dispatch info if a marathon was enqueued, or None.
     """
-    from config.defaults import MARATHON_BACKLOG_PER_CHANNEL
     from config.settings import YT_REMEDIATION_MODE
 
     if YT_REMEDIATION_MODE:
@@ -217,22 +273,24 @@ def check_and_dispatch_marathon(db) -> dict | None:
     backlog = awaiting + warming
 
     # 2. Dynamic threshold: per-channel value × active channels
+    #    (Fase 3: el umbral por canal viene del perfil de pacing — al relajar
+    #    los strikes, el umbral baja y los maratones se disparan más).
     active_channels = db.get_channels(active_only=True)
     active_count = len(active_channels) if active_channels else 1
-    min_backlog = MARATHON_BACKLOG_PER_CHANNEL * active_count
+    min_backlog = _marathon_backlog_per_channel(db) * active_count
 
     if backlog < min_backlog:
         logger.debug(
             "Marathon: awaiting=%d + warming=%d = %d < %d (per_ch=%d × ch=%d), skipping",
             awaiting, warming, backlog, min_backlog,
-            MARATHON_BACKLOG_PER_CHANNEL, active_count,
+            _marathon_backlog_per_channel(db), active_count,
         )
         return None
 
     logger.info(
         "Marathon: awaiting=%d + warming=%d = %d >= %d (per_ch=%d × ch=%d) — evaluating candidates",
         awaiting, warming, backlog, min_backlog,
-        MARATHON_BACKLOG_PER_CHANNEL, active_count,
+        _marathon_backlog_per_channel(db), active_count,
     )
 
     # 2. Guard: don't enqueue if there's already a queued or running marathon job

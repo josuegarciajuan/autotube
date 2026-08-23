@@ -2992,6 +2992,20 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         logger.debug("Planned slot skipped: channel %d already has active job #%d",
                      next_slot["channel_id"], active["id"])
         return None
+
+    # 2c. Marathon priority (Fase 3): con backlog profundo, un maratón ENCOLADO
+    # cuyo canal está libre se despacha ANTES que un slot nuevo (más watch-time
+    # por video). _queue_consumer (siguiente paso del tick) lo tomará.
+    try:
+        from api.services.marathon_service import _queued_marathon_dispatchable, marathon_backlog_deep
+        if _queued_marathon_dispatchable(db) and marathon_backlog_deep(db):
+            logger.info(
+                "Planned slot deferred: maratón encolado + backlog profundo — "
+                "prioridad para el maratón",
+            )
+            return None
+    except Exception:
+        pass
     
     # 2c. Phase-pipelining guard: allow up to 1 render + 1 prep concurrently.
     #     - If no render is active → dispatch any job (it will claim render slot).
