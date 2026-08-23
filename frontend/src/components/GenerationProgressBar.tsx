@@ -31,13 +31,52 @@ function actionIcon(action: string, size: number, className: string) {
   }
 }
 
+// ── Phase model: order + colors for the mini tracker and bar accent ──
+const PHASES = ['scrape', 'script', 'tts', 'media', 'video', 'metadata', 'upload'] as const
+
+/** 4px tracker dot color per phase (static classes — Tailwind purge-safe). */
+const PHASE_DOT: Record<string, string> = {
+  scrape: 'bg-cyan-400', script: 'bg-blue-400', tts: 'bg-violet-400',
+  media: 'bg-pink-400', video: 'bg-orange-400', metadata: 'bg-emerald-400', upload: 'bg-sky-400',
+}
+
+/** Progress-bar gradient accent per phase. */
+const PHASE_BAR: Record<string, string> = {
+  scrape: 'bg-gradient-to-r from-cyan-500 to-cyan-400',
+  script: 'bg-gradient-to-r from-blue-500 to-blue-400',
+  tts: 'bg-gradient-to-r from-violet-500 to-violet-400',
+  media: 'bg-gradient-to-r from-pink-500 to-pink-400',
+  video: 'bg-gradient-to-r from-orange-500 to-amber-400',
+  metadata: 'bg-gradient-to-r from-emerald-500 to-emerald-400',
+  upload: 'bg-gradient-to-r from-sky-500 to-cyan-400',
+}
+
+function fmtBytes(b: number): string {
+  if (!Number.isFinite(b) || b <= 0) return ''
+  if (b >= 1048576) return `${(b / 1048576).toFixed(1)} MB`
+  return `${Math.round(b / 1024)} KB`
+}
+
+function fmtDuration(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s) || s < 0) return ''
+  const m = Math.floor(s / 60)
+  const r = Math.floor(s % 60)
+  return `${m}:${String(r).padStart(2, '0')}`
+}
+
+function fmtSpeed(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return ''
+  if (bps >= 1048576) return `${(bps / 1048576).toFixed(1)} MB/s`
+  return `${Math.round(bps / 1024)} KB/s`
+}
+
 /** Individual progress bar for a single job.
  *  Must be a separate component so useGenerationProgress hook works per jobId. */
 function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => void }) {
   const [minimized, setMinimized] = useState(false)
   const [dismissed, setDismissed] = useState(false)
   const [cancelling, setCancelling] = useState(false)
-  const { progress, connected } = useGenerationProgress(job.jobId)
+  const { progress, connected, stale } = useGenerationProgress(job.jobId)
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const stuckTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const stuckDismissedRef = useRef(false)
@@ -46,6 +85,68 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
   const isFailed = progress?.status === 'failed'
   const isQueued = job.status === 'queued'
   const pct = progress?.progress ?? 0
+  const phase = progress?.phase ?? ''
+
+  // ── Elapsed + live upload metrics (client-side speed/ETA) ──
+  const [now, setNow] = useState(() => Date.now())
+  const startRef = useRef<number>(Date.now())
+  const lastSampleRef = useRef<{ t: number; bytes: number } | null>(null)
+  const [uploadStats, setUploadStats] = useState<{ speed: number | null; etaS: number | null }>({ speed: null, etaS: null })
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Compute upload speed/ETA from (bytes_done, timestamp) samples.
+  // Re-samples every time current/total arrive via WS or poll.
+  useEffect(() => {
+    const cur = progress?.current
+    const tot = progress?.total
+    if (typeof cur !== 'number' || typeof tot !== 'number' || tot <= 0) {
+      lastSampleRef.current = null
+      return
+    }
+    const tMs = Date.now()
+    const prev = lastSampleRef.current
+    if (prev && cur > prev.bytes) {
+      const dt = (tMs - prev.t) / 1000
+      if (dt >= 0.8) {
+        const speed = (cur - prev.bytes) / dt
+        lastSampleRef.current = { t: tMs, bytes: cur }
+        setUploadStats({ speed, etaS: speed > 0 ? (tot - cur) / speed : null })
+        return
+      }
+    } else if (!prev) {
+      lastSampleRef.current = { t: tMs, bytes: cur }
+    }
+  }, [progress?.current, progress?.total])
+
+  const elapsedS = Math.max(0, Math.floor((now - startRef.current) / 1000))
+  const globalEtaS = pct >= 5 ? (elapsedS / (pct / 100)) - elapsedS : null
+
+  const showUploadBytes = phase === 'upload' && typeof progress?.current === 'number' && typeof progress?.total === 'number' && progress.total > 0
+  const showScene = phase === 'video' && typeof progress?.current === 'number' && typeof progress?.total === 'number' && progress.total > 0
+
+  // One dense metrics line (replaces the generic message text, same height)
+  const metricsLine = isQueued ? null
+    : isCompleted || isFailed
+      ? (progress?.message ?? (isCompleted ? 'Completado' : 'Error'))
+      : showUploadBytes
+        ? `${pct}% · ${fmtBytes(progress!.current!)}/${fmtBytes(progress!.total!)}`
+          + (uploadStats.speed ? ` · ${fmtSpeed(uploadStats.speed)}` : '')
+          + (uploadStats.etaS != null ? ` · ETA ${fmtDuration(uploadStats.etaS)}` : '')
+          + ` · ⏱ ${fmtDuration(elapsedS)}`
+        : showScene
+          ? `escena ${progress!.current}/${progress!.total} · ⏱ ${fmtDuration(elapsedS)}`
+          : `⏱ ${fmtDuration(elapsedS)}${globalEtaS != null && globalEtaS > 0 ? ` · ~${fmtDuration(globalEtaS)} restante` : ''}`
+
+  const fullTooltip = [
+    job.channelName && `${job.channelName}`,
+    actionLabel(job.action),
+    progress?.message,
+    progress?.detail,
+  ].filter(Boolean).join(' — ')
 
   // ── Stuck detection: if no progress after 45s disconnected, auto-dismiss ──
   // Queued jobs are legitimately waiting for the queue consumer — never treat
@@ -106,7 +207,7 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
   }
 
   return (
-    <div className="border-t border-surface-border">
+    <div className="border-t border-surface-border" title={fullTooltip}>
       {/* Minimized bar */}
       {minimized ? (
         <div
@@ -116,7 +217,7 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
           <div className={`w-2 h-2 rounded-full shrink-0 ${
             isCompleted ? 'bg-green-400' : isFailed ? 'bg-red-400'
             : isQueued ? 'bg-amber-400'
-            : connected ? 'bg-neon-red animate-pulse' : 'bg-yellow-400'
+            : connected && !stale ? 'bg-neon-red animate-pulse' : 'bg-yellow-400'
           }`} />
           <span className="text-[11px] sm:text-xs text-gray-400 font-medium truncate">
             {job.channelName} · {
@@ -179,13 +280,13 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
               </div>
             </div>
 
-            {/* Progress bar */}
+            {/* Progress bar — accent color per phase */}
             <div className="relative h-2 bg-dark-900 rounded-full overflow-hidden mb-1">
               <div
                 className={`h-full rounded-full transition-all duration-700 ease-out ${
                   isCompleted ? 'bg-green-500' : isFailed ? 'bg-red-500'
                   : isQueued ? 'bg-amber-500/70'
-                  : 'bg-gradient-to-r from-neon-red via-orange-500 to-neon-gold'
+                  : (PHASE_BAR[phase] ?? 'bg-gradient-to-r from-neon-red via-orange-500 to-neon-gold')
                 }`}
                 style={{ width: `${Math.min(pct, 100)}%` }}
               >
@@ -195,29 +296,40 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
               </div>
             </div>
 
-            {/* Phase + status row */}
+            {/* Phase tracker + status row (same height as before) */}
             <div className="flex items-center justify-between text-[11px]">
               <div className="flex items-center gap-1.5 min-w-0">
-                <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                  isQueued ? 'bg-amber-400' : connected ? 'bg-green-400' : 'bg-yellow-400'
-                }`} />
                 {isQueued ? (
                   <>
-                    <span className="text-gray-500">cola</span>
-                    <span className="text-gray-700">·</span>
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-amber-400" />
                     <span className="text-amber-400 font-medium truncate">En cola — esperando turno</span>
                   </>
                 ) : (
                   <>
-                    <span className="text-gray-500">
-                      {connected ? 'WS' : 'poll'}
+                    {/* 7-ticks mini phase tracker */}
+                    <div className="flex items-center gap-[3px] shrink-0" title={PHASES.join(' → ')}>
+                      {PHASES.map((p, i) => {
+                        const idx = PHASES.indexOf(phase as (typeof PHASES)[number])
+                        const done = idx > i
+                        const active = idx === i
+                        return (
+                          <span
+                            key={p}
+                            title={p}
+                            className={`w-[5px] h-[5px] rounded-full transition-colors ${
+                              done ? (PHASE_DOT[p] ?? 'bg-emerald-400')
+                                : active ? `${PHASE_DOT[p] ?? 'bg-white'} animate-pulse`
+                                : 'bg-dark-700'
+                            }`}
+                          />
+                        )
+                      })}
+                    </div>
+                    <span className="text-gray-500 shrink-0">
+                      {connected && !stale ? 'WS' : stale ? 'reconectando' : 'poll'}
                     </span>
-                    {progress?.phase && (
-                      <>
-                        <span className="text-gray-700">·</span>
-                        <span className="text-neon-cyan font-medium truncate">{progress.phase}</span>
-                      </>
-                    )}
+                    <span className="text-gray-700 shrink-0">·</span>
+                    <span className="text-neon-cyan font-medium truncate">{phase || '…'}</span>
                   </>
                 )}
               </div>
@@ -228,13 +340,13 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
               </span>
             </div>
 
-            {/* Message + detail */}
-            {progress?.message && (
-              <p className="text-[11px] text-gray-300 mt-1 leading-relaxed truncate">
-                {progress.message}
+            {/* Metrics line (dense, same height as the old message line) */}
+            {!isQueued && (
+              <p className="text-[11px] text-gray-300 mt-1 leading-relaxed truncate tabular-nums">
+                {metricsLine}
               </p>
             )}
-            {progress?.detail && (
+            {progress?.detail && !isQueued && (
               <p className="text-[10px] text-slate-500 mt-0.5 truncate">
                 {progress.detail}
               </p>

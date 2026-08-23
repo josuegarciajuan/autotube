@@ -548,6 +548,7 @@ class YouTubeUploader:
         language: str = "es",
         heartbeat_callback=None,
         progress_callback=None,
+        progress_callback_detail=None,
         suggested_video_filename: str = None,
         suggested_thumb_filename: str = None,
         publish_at: str = None,
@@ -563,6 +564,9 @@ class YouTubeUploader:
           to signal the orphan detector that the upload is still alive.
         - progress_callback: optional callable(pct: int) invoked on each chunk
           with the upload progress percentage (0-100).
+        - progress_callback_detail: optional callable(dict) invoked on each chunk
+          with {"pct": int, "bytes_done": int|None, "bytes_total": int|None}
+          so the UI can show real MB + speed + ETA.
         - suggested_video_filename: if provided, the video file is copied to a
           temp file with this name (preserving .mp4 extension) before upload.
           YouTube uses the filename for SEO — a keyword-rich stem helps ranking.
@@ -778,7 +782,8 @@ class YouTubeUploader:
                     reference_id=reference_id,
                     content_class="short" if "short" in str(video_path).lower() else "long",
                     transport=lambda request_started: self._upload_transport(
-                        request, request_started, heartbeat_callback, progress_callback
+                        request, request_started, heartbeat_callback, progress_callback,
+                        progress_callback_detail,
                     ),
                 )
             except UploadDispatchBlocked as exc:
@@ -1281,17 +1286,18 @@ class YouTubeUploader:
     # ── Helpers ─────────────────────────────────────────────────
 
     def _upload_transport(self, request: Any, request_started, heartbeat_callback=None,
-                          progress_callback=None) -> dict:
+                          progress_callback=None, progress_callback_detail=None) -> dict:
         """Explicit dispatcher transport boundary for a resumable upload."""
         request_started()
         return self._resumable_upload(
             request,
             heartbeat_callback=heartbeat_callback,
             progress_callback=progress_callback,
+            progress_callback_detail=progress_callback_detail,
         )
 
     def _resumable_upload(self, request: Any, heartbeat_callback=None,
-                           progress_callback=None) -> dict:
+                           progress_callback=None, progress_callback_detail=None) -> dict:
         response = None
         error_count = 0
         consecutive_errors = 0
@@ -1303,13 +1309,24 @@ class YouTubeUploader:
                 if status:
                     pct = int(status.progress() * 100)
                     logger.info("Upload progress: %d%%", pct)
-                    # ── Propagate progress to external callback ──
-                    if progress_callback and pct != last_reported_pct:
+                    if pct != last_reported_pct:
                         last_reported_pct = pct
-                        try:
-                            progress_callback(pct)
-                        except Exception:
-                            pass
+                        # ── Propagate progress to external callback ──
+                        if progress_callback:
+                            try:
+                                progress_callback(pct)
+                            except Exception:
+                                pass
+                        # ── Richer payload: bytes for MB/speed/ETA in the UI ──
+                        if progress_callback_detail:
+                            try:
+                                progress_callback_detail({
+                                    "pct": pct,
+                                    "bytes_done": getattr(status, "resumable_progress", None),
+                                    "bytes_total": getattr(status, "total_size", None),
+                                })
+                            except Exception:
+                                pass
                 if response is not None:
                     return response
                 consecutive_errors = 0  # reset on successful chunk

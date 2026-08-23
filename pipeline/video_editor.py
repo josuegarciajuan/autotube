@@ -623,6 +623,8 @@ class VideoEditor:
                             video_id,
                             progress=_pct,
                             progress_phase="video",
+                            progress_current=_total_done,
+                            progress_total=_total,
                         )
                     except Exception:
                         pass  # never let a DB write crash the render
@@ -636,7 +638,8 @@ class VideoEditor:
                     _pct = 60 + int(_total_done / _total * 15)
                     try:
                         progress_cb(_pct, "video",
-                            f"Renderizando escenas: {_total_done}/{_total}...")
+                            f"Renderizando escenas: {_total_done}/{_total}...",
+                            current=_total_done, total=_total)
                     except Exception:
                         pass
 

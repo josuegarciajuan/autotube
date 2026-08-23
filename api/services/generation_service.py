@@ -2211,8 +2211,18 @@ async def start_upload_job(job_id: int, video_id: int):
                                    video_id=video_id, detail="Verificando credenciales OAuth")
         
         from orchestrator import PipelineOrchestrator
-        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
-        
+        loop = asyncio.get_running_loop()
+
+        def _progress_cb(percent: int, phase: str, message: str, **kwargs):
+            """Forward orchestrator progress (upload thread → asyncio loop)."""
+            asyncio.run_coroutine_threadsafe(
+                _broadcast_progress(job_id, percent, phase, message, video_id=video_id, **kwargs),
+                loop,
+            )
+
+        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id,
+                                    progress_callback=_progress_cb)
+
         # ── Run auth in thread pool to avoid blocking event loop ──
         auth_ok, _ = await _run_in_executor(lambda: orch.uploader.authenticate(), timeout=60)
         if not auth_ok:
@@ -2220,7 +2230,7 @@ async def start_upload_job(job_id: int, video_id: int):
                 "Error: Fallo autenticacion YouTube", "failed", video_id,
                 detail="No se pudo autenticar. Verifica las credenciales del canal.")
             return
-        
+
         await _broadcast_progress(job_id, 30, "upload", "Subiendo video...",
                                    video_id=video_id,
                                    detail="Transfiriendo archivo a YouTube (puede tardar)")
@@ -2236,20 +2246,10 @@ async def start_upload_job(job_id: int, video_id: int):
         else:
             tags = tags_raw or []
         
-        # ── Progress callback: maps YouTube 0-100% → our 30-90% ──
-        # Called from the upload thread, so only does sync DB updates.
-        # The background monitor task (below) handles WebSocket broadcasts.
-        def _upload_progress_cb(yt_pct: int):
-            """Sync progress callback — safe to call from thread."""
-            try:
-                our_pct = 30 + int(yt_pct * 0.6)  # map 0-100 → 30-90
-                db2 = _get_db()
-                db2.update_job(job_id, progress=our_pct, phase="upload")
-                db2.update_video(video_id, progress=our_pct, progress_phase="upload")
-            except Exception:
-                pass
-
         # ── Background monitor: broadcasts DB progress via WebSocket ──
+        # (Safety net — the orchestrator now emits granular upload progress
+        # directly via _progress_cb; this poller covers edge cases where the
+        # callback thread couldn't schedule on the loop.)
         monitor_stop = asyncio.Event()
 
         async def _upload_monitor():
@@ -2430,7 +2430,17 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                                    video_id=video_id)
 
         from orchestrator import PipelineOrchestrator
-        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id)
+        loop = asyncio.get_running_loop()
+
+        def _progress_cb(percent: int, phase: str, message: str, **kwargs):
+            """Forward orchestrator progress (upload thread → asyncio loop)."""
+            asyncio.run_coroutine_threadsafe(
+                _broadcast_progress(job_id, percent, phase, message, video_id=video_id, **kwargs),
+                loop,
+            )
+
+        orch = PipelineOrchestrator(canal=canal, db_video_id=video_id,
+                                    progress_callback=_progress_cb)
 
         # ── Run auth in thread pool to avoid blocking event loop ──
         auth_ok, _ = await _run_in_executor(lambda: orch.uploader.authenticate(), timeout=60)
@@ -2471,24 +2481,6 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
                                    video_id=video_id)
 
         upload_start = time.time()
-
-        # ── Progress callback ──
-        def _upload_progress_cb(yt_pct: int):
-            try:
-                our_pct = 20 + int(yt_pct * 0.6)
-                db2 = _get_db()
-                db2.update_job(job_id, progress=our_pct, phase="upload")
-                db2.update_video(video_id, progress=our_pct, progress_phase="upload")
-                # Broadcast via WebSocket for real-time feedback in the progress bar
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(_broadcast_progress(
-                        job_id, our_pct, "upload", f"Subiendo... {yt_pct}%", video_id=video_id
-                    ))
-                except RuntimeError:
-                    pass  # no running loop — polling fallback handles it
-            except Exception:
-                pass
 
         # ── Use orch.uploader with private mode ──
         # The orchestrator's phase_upload handles scheduled vs immediate
@@ -3846,6 +3838,7 @@ async def _monitor_worker_progress(
     poll_interval = 2.0  # seconds — fast enough for responsive UI
     ticks_since_broadcast = 0  # force periodic broadcast during long phases
     BROADCAST_EVERY_N_TICKS = 8  # every ~16s (8 * 2.0s)
+    monitor_started_at = time.time()
 
     logger.info("Progress monitor started for job #%d (worker pid=%d)", job_id, proc.pid)
 
@@ -3873,6 +3866,9 @@ async def _monitor_worker_progress(
             current_progress = video.get("progress", 0) if video else 0
             current_phase = video.get("progress_phase", "") if video else ""
             current_status = video.get("status", "") if video else ""
+            current_detail = (
+                video.get("progress_current"), video.get("progress_total")
+            ) if video else (None, None)
 
             # Detect progress changes and broadcast
             force_broadcast = ticks_since_broadcast >= BROADCAST_EVERY_N_TICKS
@@ -3899,6 +3895,19 @@ async def _monitor_worker_progress(
                     f"Procesando: {current_phase}" if current_phase else "Procesando...",
                 )
 
+                # ── Detail-aware message: upload bytes / scene x/y ──
+                cur, tot = current_detail
+                if cur is not None and tot:
+                    try:
+                        if current_phase == "upload":
+                            _mb_done = cur / 1048576
+                            _mb_tot = tot / 1048576
+                            message = f"Subiendo... {_mb_done:.1f}/{_mb_tot:.1f} MB"
+                        elif current_phase == "video":
+                            message = f"Renderizando escenas: {cur}/{tot}..."
+                    except Exception:
+                        pass
+
                 status = None
                 if current_status == "error":
                     status = "failed"
@@ -3913,7 +3922,11 @@ async def _monitor_worker_progress(
                 await _broadcast_progress(
                     job_id, current_progress, current_phase,
                     message, status, video_id,
-                    detail=f"Worker pid={proc.pid} | {current_phase}",
+                    detail=(
+                        f"Worker pid={proc.pid} | {current_phase} | "
+                        f"{int(time.time() - monitor_started_at)}s"
+                    ),
+                    current=cur, total=tot,
                 )
 
             # Check if job is done (terminal status in DB)
