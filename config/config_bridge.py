@@ -352,14 +352,16 @@ def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
             if "MEDIA_STRATEGY" in safe:
                 merged["MEDIA_STRATEGY"] = safe["MEDIA_STRATEGY"]
             # Preserve DB-only planning keys
-            for key in ("videos_per_day", "planning_enabled"):
+            for key in ("videos_per_day", "planning_enabled",
+                        "alternate_pattern", "alternate_offset"):
                 if key in existing_db and key not in merged:
                     merged[key] = existing_db[key]
             safe = merged
         else:
             # Full replace: Python values overwrite everything (manual sync).
             # Keep DB-only planning keys that don't exist in Python configs.
-            for key in ("videos_per_day", "planning_enabled"):
+            for key in ("videos_per_day", "planning_enabled",
+                        "alternate_pattern", "alternate_offset"):
                 if key in existing_db and key not in safe:
                     safe[key] = existing_db[key]
 
