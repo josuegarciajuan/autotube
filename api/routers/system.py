@@ -445,6 +445,35 @@ def spam_restore_frequency(channel_id: int):
     }
 
 
+# ── Reanudación gradual post-strike (UI) ─────────────────────────
+
+@router.get("/system/resume-status")
+def resume_status(channel_id: int = None):
+    """Estado de la reanudación gradual post-strike por canal.
+
+    Devuelve por canal: fase actual (0=bloqueado, 1=1 long cada 2 días,
+    2=1 long/día), fuente del plan (unblock/sibling/permanent), countdown a la
+    siguiente fase, frecuencia actual, strikes/bloqueo y publicaciones
+    pendientes (esparcido de Fase 1). Lectura ligera (0 cuota de YouTube API).
+    """
+    from api.services.gradual_resume import resume_status_detailed
+    channels = resume_status_detailed()
+    if channel_id:
+        channels = [c for c in channels if int(c.get("channel_id", 0)) == int(channel_id)]
+    return {"ok": True, "channels": channels}
+
+
+@router.post("/system/resume/apply")
+def resume_apply():
+    """Re-aplica las fases de reanudación hoy (+ replan del horizonte de 7 días).
+
+    Equivale al CLI `scripts/gradual_resume.py --apply`. Idempotente: solo
+    avanza fases y respeta el techo antiban. Devuelve el detalle por canal.
+    """
+    from api.services.gradual_resume import apply_resume_phases
+    return apply_resume_phases(replan=True)
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 def _purge_dir(dir_path: Path) -> int:

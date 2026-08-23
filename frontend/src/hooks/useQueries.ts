@@ -33,6 +33,17 @@ export function useQuotaStatus() {
   })
 }
 
+// ── Reanudación gradual post-strike (poll every 60s) ──
+export function useResumeStatus(channelId?: number) {
+  return useQuery({
+    queryKey: ['resume-status', channelId ?? 'all'],
+    queryFn: () => api.getResumeStatus(channelId),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
 // ── Monitor page ──
 export function useMonitorDashboard() {
   return useQuery({
