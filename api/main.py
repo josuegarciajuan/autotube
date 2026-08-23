@@ -251,6 +251,7 @@ async def lifespan(app: FastAPI):
 
     # ── PAUSE GATE: skip all auto-planning/dispatch when operator paused scheduling ──
     _scheduler_paused = False
+    _startup_tasks = None  # fix ago 2026: debe cancelarse en shutdown para no colgar el apagado
     try:
         from database.db_extended import ExtendedDatabase
         _paused_db = ExtendedDatabase()
@@ -409,44 +410,36 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    # fix ago 2026: apagado NO bloqueante. Los loops corren operaciones
+    # síncronas vía run_in_executor (threads que no se pueden cancelar), por lo
+    # que `await task` podía colgarse >60s y systemd mataba el servicio con
+    # SIGKILL ("Failed with result 'timeout'"). Se cancela todo y se espera con
+    # timeout acotado — el proceso sale en <10s.
     if _watchdog_task is not None:
         _watchdog_task.cancel()
+    _shutdown_tasks = [
+        schedule_task, health_monitor_task, publish_verify_task,
+        health_checker_task, quota_recovery_task, resume_phase_task,
+        redistribution_task,
+    ]
+    if _startup_tasks is not None:
+        _shutdown_tasks.append(_startup_tasks)
+    for _t in _shutdown_tasks:
         try:
-            await _watchdog_task
-        except asyncio.CancelledError:
+            _t.cancel()
+        except Exception:
             pass
-    schedule_task.cancel()
-    health_monitor_task.cancel()
-    publish_verify_task.cancel()
-    health_checker_task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*_shutdown_tasks, return_exceptions=True),
+            timeout=8,
+        )
+    except asyncio.TimeoutError:
+        logging.getLogger("autotube.startup").warning(
+            "Shutdown: %d task(s) did not cancel within 8s — proceeding (threads del run_in_executor no son cancelables)",
+            len(_shutdown_tasks),
+        )
     shorts_backfill_task = None  # permanently disabled
-    quota_recovery_task.cancel()
-    resume_phase_task.cancel()
-    redistribution_task.cancel()
-    try:
-        await schedule_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await health_monitor_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await publish_verify_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await health_checker_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await quota_recovery_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await redistribution_task
-    except asyncio.CancelledError:
-        pass
 
     # ── WAL checkpoint at shutdown (Fase cuota ago 2026) ──
     # Evita WALs gigantes/corrupción al matar el proceso con cambios sin

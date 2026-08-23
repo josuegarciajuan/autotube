@@ -3475,6 +3475,9 @@ def _is_transient_failure(error_msg: str) -> bool:
         "timeout", "memory guard", "broken pipe", "brokenpipe",
         "orphaned: process lost", "memory", "abortado: memoria",
         "ram too low", "ram insuficiente",
+        # ago 2026: muertes por SIGTERM/reinicio de API NO son fallos
+        # permanentes — reintentable con backoff (fix videos atascados en 'generando')
+        "interrupted", "sigterm", "server restart",
     ]
     return any(p in error_msg for p in _TRANSIENT)
 
@@ -3516,7 +3519,9 @@ def count_channel_consecutive_failures(db, channel_id: int) -> int:
     count = 0
     for row in rows:
         err = (row["error_msg"] or "").lower()
-        if _is_transient_failure(err):
+        # Regla de seguridad (ago 2026): error vacío/NULL (muerte por SIGTERM
+        # sin mensaje) resetea la racha — nunca cuenta como fallo permanente.
+        if _is_transient_failure(err) or err == "":
             break  # transient failure resets the streak
         count += 1
     return count
@@ -3674,6 +3679,8 @@ def _sync_running_slots(db):
         "timeout", "memory guard", "broken pipe", "brokenpipe",
         "orphaned: process lost", "memory", "abortado: memoria",
         "ram too low", "ram insuficiente",
+        # ago 2026: SIGTERM/reinicio de API → reintentable, NO permanente
+        "interrupted", "sigterm", "server restart",
     ]
     
     for s in running_slots:
@@ -3695,7 +3702,9 @@ def _sync_running_slots(db):
             any_completed = True
         elif job["status"] in ("failed", "cancelled"):
             error_msg = (job.get("error_msg") or "").lower()
-            is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS)
+            # Regla de seguridad: un error vacío/NULL (firma de muerte por
+            # SIGTERM que no llegó a escribir mensaje) NUNCA es permanente.
+            is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS) or error_msg == ""
             if is_transient:
                 # Apply backoff instead of cancelling — v12
                 result = db.record_slot_dispatch_failure(job_id)
