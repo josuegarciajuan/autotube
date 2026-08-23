@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
+import { useResumeStatus } from '../hooks/useQueries'
 import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2, CheckCircle } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
@@ -304,6 +305,29 @@ export default function ChannelDetail() {
   // Find active job for THIS channel (for inline progress display)
   const channelActiveJob = activeJobs.find(j => j.channelId === channelId)
   const { progress } = useGenerationProgress(channelActiveJob?.jobId ?? null)
+
+  // ── Reanudación post-strike (fases) ──
+  const { data: resumeData } = useResumeStatus(channelId)
+  const resumeEntry: any = (resumeData?.ok && Array.isArray(resumeData.channels))
+    ? resumeData.channels[0] || null
+    : null
+  const [applyingResume, setApplyingResume] = useState(false)
+  const [resumeResult, setResumeResult] = useState<string | null>(null)
+
+  async function handleApplyResume() {
+    setApplyingResume(true)
+    setResumeResult(null)
+    try {
+      const res = await api.applyResumePhases()
+      const applied = (res?.applied || []).find((a: any) => a.slug === channel?.slug)
+      setResumeResult(applied
+        ? `✅ Fase ${applied.phase} aplicada: ${applied.action}`
+        : '✅ Fases re-aplicadas (replan 7 días)')
+    } catch (e: any) {
+      setResumeResult(`❌ Error: ${e.message || 'desconocido'}`)
+    }
+    setApplyingResume(false)
+  }
 
   // Block generation if ANY job is active for this channel
   const busy = generating || isChannelBusy(channelId)
@@ -1042,6 +1066,96 @@ export default function ChannelDetail() {
           </div>
         </div>
       </div>
+
+      {/* --- Tarjeta de reanudación post-strike --- */}
+      {resumeEntry && (resumeEntry.phase_today > 0 || resumeEntry.blocked || (resumeEntry.strikes || 0) > 0) && (
+        <div className="mt-4 rounded-xl border border-cyan-500/25 bg-dark-800/60 px-4 py-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <TrendingUp size={16} className="text-cyan-300 flex-shrink-0" />
+            <span className="font-semibold text-sm text-cyan-200">Reanudación post-strike</span>
+            {resumeEntry.phase_today === 1 && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                Fase 1 · 1 long cada 2 días
+              </span>
+            )}
+            {resumeEntry.phase_today === 2 && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                Fase 2 · 1 long/día
+              </span>
+            )}
+            {resumeEntry.blocked && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-neon-red/20 text-neon-red border border-neon-red/40">
+                BLOQUEADO {resumeEntry.restan_h ? `~${resumeEntry.restan_h.toFixed(1)}h` : ''}
+              </span>
+            )}
+            <span className="ml-auto text-[11px] text-gray-500">
+              {resumeEntry.source === 'sibling'
+                ? `espera a ${resumeEntry.sibling_of || 'canal hermano'} estable`
+                : resumeEntry.source === 'permanent' ? 'régimen permanente' : 'strike propio'}
+            </span>
+          </div>
+
+          {/* Línea de fases 0 → 1 → 2 */}
+          <div className="mt-2.5 flex items-center gap-1.5">
+            {[0, 1, 2].map(p => (
+              <div key={p} className="flex-1">
+                <div className={`h-1.5 rounded-full ${resumeEntry.phase_today >= p
+                  ? (p === 0 ? 'bg-red-500/60' : p === 1 ? 'bg-cyan-400/70' : 'bg-emerald-400/70')
+                  : 'bg-dark-600'}`} />
+                <div className={`mt-0.5 text-[9px] text-center ${resumeEntry.phase_today === p ? 'text-white font-semibold' : 'text-gray-600'}`}>
+                  {p === 0 ? 'Bloqueo' : p === 1 ? 'Fase 1' : 'Fase 2'}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
+            {resumeEntry.phase_today === 1 && typeof resumeEntry.days_remaining_in_phase === 'number' && (
+              <span className="text-cyan-300">
+                <Clock size={11} className="inline mr-1" />
+                {resumeEntry.days_remaining_in_phase > 0
+                  ? `Quedan ${resumeEntry.days_remaining_in_phase} día${resumeEntry.days_remaining_in_phase !== 1 ? 's' : ''} de Fase 1`
+                  : 'Pasa a Fase 2 hoy'}
+                {resumeEntry.next_transition_iso && (
+                  <span className="text-gray-500"> · Fase 2 desde {new Date(resumeEntry.next_transition_iso).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}</span>
+                )}
+              </span>
+            )}
+            <span>Frecuencia: <b className="text-gray-200">
+              long {resumeEntry.freq?.videos_per_day ?? 1}{resumeEntry.freq?.alternate_pattern ? ` (alt ${JSON.stringify(resumeEntry.freq.alternate_pattern)})` : ''} · shorts {resumeEntry.freq?.shorts_native_per_day ?? 1} · clips {resumeEntry.freq?.shorts_clips_per_long ?? 0}
+            </b></span>
+          </div>
+
+          {/* Próximas publicaciones */}
+          {(resumeEntry.pending_publish?.upcoming?.length ?? 0) > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-gray-500">Publicaciones:</span>
+              {(resumeEntry.pending_publish.upcoming || []).map((p: any, i: number) => (
+                <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
+                  {p.target_public_at
+                    ? new Date(p.target_public_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                    : p.video_id || '?'}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {resumeResult && (
+            <div className={`mt-2 p-2 rounded-lg text-xs ${resumeResult.startsWith('✅') ? 'bg-emerald-600/10 border border-emerald-600/30 text-emerald-400' : 'bg-red-600/10 border border-red-600/30 text-red-400'}`}>
+              {resumeResult}
+            </div>
+          )}
+
+          <button
+            onClick={handleApplyResume}
+            disabled={applyingResume}
+            className="mt-2 flex items-center gap-1.5 px-3 py-1.5 text-xs bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 rounded-lg hover:bg-cyan-500 hover:text-dark-900 transition-all disabled:opacity-50"
+          >
+            {applyingResume ? <RefreshCw size={12} className="animate-spin" /> : <TrendingUp size={12} />}
+            {applyingResume ? 'Aplicando...' : 'Re-aplicar fases (replan 7 días)'}
+          </button>
+        </div>
+      )}
 
       {/* --- Quick actions bar --- */}
       <div className="flex items-center gap-1.5 sm:gap-2 mt-4 mb-6 flex-wrap">

@@ -458,6 +458,12 @@ export const api = {
     request<any>(`/system/spam-blocks/${channelId}/restore-frequency`, { method: 'POST' }),
   getSpamReport: (channelId: number) =>
     request<any>(`/system/spam-blocks/${channelId}/report`),
+  getResumeStatus: (channelId?: number) => {
+    const qs = channelId ? `?channel_id=${channelId}` : ''
+    return request<any>(`/system/resume-status${qs}`)
+  },
+  applyResumePhases: () =>
+    request<any>('/system/resume/apply', { method: 'POST' }),
   getLLMCredits: () => request<any>('/monitor/llm-credits'),
   triggerLLMCreditCheck: () => request<any>('/monitor/llm-credits/check', { method: 'POST' }),
 

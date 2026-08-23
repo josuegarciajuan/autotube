@@ -397,7 +397,10 @@ async def lifespan(app: FastAPI):
     
     # Launch quota recovery loop (auto-resume scheduler after 6h)
     quota_recovery_task = asyncio.create_task(_quota_recovery_loop())
-    
+
+    # Launch gradual resume phase loop (avance autónomo de fases post-strike)
+    resume_phase_task = asyncio.create_task(_resume_phase_loop())
+
     yield
     
     # Shutdown
@@ -759,6 +762,48 @@ def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> list:
         elif dispatch_uploads is not None:
             dispatch_uploads()
     return recovered
+
+
+async def _resume_phase_loop():
+    """Background loop: avance autónomo de las fases de reanudación post-strike.
+
+    Las fases (0=bloqueado → 1=1 long cada 2 días → 2=1 long/día) se aplicaban
+    solo en el arranque de la API (ensure_spam_holds). Este loop las re-evalúa
+    cada 6 h para que un canal avance de fase (ej. día 6 → Fase 2) SIN necesidad
+    de reiniciar ni ejecutar comandos. replan=False: el planning engine ya
+    regenera el horizonte por su cuenta.
+    """
+    import asyncio as _asyncio
+
+    _logger = logging.getLogger("autotube.resume_phase")
+
+    await _asyncio.sleep(300)  # Let API stabilize first
+
+    _logger.info("Resume-phase loop started (check every 6h, avance autónomo de fases)")
+
+    while True:
+        try:
+            from database.db_extended import ExtendedDatabase
+            from api.services.gradual_resume import apply_resume_phases
+            _db = ExtendedDatabase()
+
+            def _apply_once():
+                return apply_resume_phases(_db, replan=False)
+
+            result = await _asyncio.wait_for(
+                _asyncio.to_thread(_apply_once),
+                timeout=90,
+            )
+            changed = [a for a in (result or {}).get("applied", []) if a.get("phase", 0) > 0]
+            if changed:
+                _logger.warning(
+                    "Resume-phase tick: %d canal(es) con fase activa (%s)",
+                    len(changed),
+                    ", ".join(f"{a['slug']}=fase{a['phase']}" for a in changed),
+                )
+        except Exception as exc:
+            _logger.warning("Resume-phase tick failed (no crítico): %s", exc)
+        await _asyncio.sleep(6 * 3600)
 
 
 async def _quota_recovery_loop():

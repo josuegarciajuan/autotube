@@ -10,9 +10,11 @@ import {
   ExternalLink,
   Wrench,
   CheckCircle2,
+  TrendingUp,
+  ListOrdered,
 } from 'lucide-react'
 import { api } from '../../lib/api'
-import { useQuotaStatus } from '../../hooks/useQueries'
+import { useQuotaStatus, useResumeStatus } from '../../hooks/useQueries'
 
 // Persistencia del plegado: guardamos la FIRMA del último conjunto de avisos
 // que el usuario colapsó. Si llegan avisos nuevos (firma distinta), la tira se
@@ -34,6 +36,32 @@ interface SpamBlock {
   current_freq?: { videos_per_day?: number; shorts_native_per_day?: number; shorts_clips_per_long?: number }
   original_freq?: { videos_per_day?: number; shorts_native_per_day?: number; shorts_clips_per_long?: number }
   pending_publish?: { total?: number; within_block?: any[] }
+}
+
+// Estado de reanudación post-strike (endpoint /system/resume-status)
+interface ResumeEntry {
+  channel_id: number
+  slug: string
+  name: string
+  source: string
+  sibling_of?: string
+  start_iso: string
+  phase_today: number
+  phase_label: string
+  days_elapsed?: number
+  days_remaining_in_phase?: number | null
+  next_transition_iso?: string | null
+  freq?: {
+    videos_per_day?: number
+    alternate_pattern?: number[] | null
+    shorts_native_per_day?: number
+    shorts_clips_per_long?: number
+  }
+  strikes?: number
+  blocked?: boolean
+  restan_h?: number
+  freq_reduced?: boolean
+  pending_publish?: { total?: number; upcoming?: { video_id?: string; target_public_at?: string }[] }
 }
 
 interface QuotaProject {
@@ -94,7 +122,25 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [expanded, setExpanded] = useState<boolean>(true)
   const [collapsedSig, setCollapsedSig] = useState<string>(() => localStorage.getItem(LS_KEY) || '')
   const [busy, setBusy] = useState<number | null>(null)
+  const [applyingAll, setApplyingAll] = useState(false)
   const { data: quotaStatus } = useQuotaStatus()
+  const { data: resumeData } = useResumeStatus()
+
+  // Índice channel_id → estado de reanudación (para enriquecer las tarjetas)
+  const resumeMap: Record<number, ResumeEntry> = useMemo(() => {
+    const m: Record<number, ResumeEntry> = {}
+    if (resumeData?.ok && Array.isArray(resumeData.channels)) {
+      for (const c of resumeData.channels as ResumeEntry[]) {
+        m[Number(c.channel_id)] = c
+      }
+    }
+    return m
+  }, [resumeData])
+
+  const resumeChannels = useMemo(
+    () => Object.values(resumeMap).filter(c => c.phase_today > 0 || c.blocked),
+    [resumeMap],
+  )
 
   const loadSpamBlocks = useCallback(async () => {
     try {
@@ -192,6 +238,36 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     setBusy(null)
   }
 
+  async function handleApplyAll() {
+    if (applyingAll) return
+    setApplyingAll(true)
+    try {
+      await api.applyResumePhases()
+      await loadSpamBlocks()
+    } catch { /* noop */ }
+    setApplyingAll(false)
+  }
+
+  function phaseBadge(phase: number): { label: string; cls: string } {
+    if (phase === 1) return { label: 'Fase 1 · 1 long/2 días', cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' }
+    if (phase === 2) return { label: 'Fase 2 · 1 long/día', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
+    return { label: 'No iniciado', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30' }
+  }
+
+  function phaseCountdown(r: ResumeEntry): string {
+    if (r.phase_today === 1 && typeof r.days_remaining_in_phase === 'number') {
+      const n = r.days_remaining_in_phase
+      return n <= 0 ? 'pasa a Fase 2 hoy' : `quedan ${n} día${n !== 1 ? 's' : ''} · pasa a Fase 2`
+    }
+    if (r.phase_today === 0 && r.blocked && typeof r.restan_h === 'number' && r.restan_h > 0) {
+      return `bloqueado ~${r.restan_h.toFixed(1)}h`
+    }
+    if (r.next_transition_iso) {
+      return `desde ${new Date(r.start_iso).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}`
+    }
+    return ''
+  }
+
   if (totalAvisos === 0) return null
 
   const barTone = hasBlocked
@@ -243,9 +319,43 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
       {/* ── Panel expandido ── */}
       {expanded && (
         <div className="px-4 pb-3 pt-1 space-y-2.5 max-h-[55vh] overflow-y-auto animate-fade-in">
+          {/* ── Reanudación post-strike (fases) ── */}
+          {resumeChannels.length > 0 && (
+            <div className="rounded-lg border border-cyan-500/25 px-3 py-2 bg-dark-800/60">
+              <div className="flex items-center gap-2 flex-wrap">
+                <TrendingUp size={14} className="text-cyan-300 flex-shrink-0" />
+                <span className="font-semibold text-sm text-cyan-200">Reanudación post-strike</span>
+                <span className="text-[10px] text-gray-500">
+                  {resumeChannels.filter(c => c.phase_today === 1).length} en Fase 1 · {resumeChannels.filter(c => c.phase_today === 2).length} en Fase 2
+                </span>
+                <button
+                  onClick={handleApplyAll}
+                  disabled={applyingAll}
+                  className="ml-auto flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 rounded-md hover:bg-cyan-500 hover:text-dark-900 transition-all disabled:opacity-50"
+                >
+                  {applyingAll ? <RefreshCw size={12} className="animate-spin" /> : <TrendingUp size={12} />}
+                  {applyingAll ? 'Aplicando...' : 'Re-aplicar fases'}
+                </button>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {resumeChannels.map(r => {
+                  const b = phaseBadge(r.phase_today)
+                  const cd = phaseCountdown(r)
+                  return (
+                    <span key={r.channel_id} className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${b.cls}`}>
+                      {r.name || r.slug} · {b.label}
+                      {cd && <span className="opacity-80"> · {cd}</span>}
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Strikes / spam */}
           {spamBlocks.map(c => {
             const isBlocked = c.blocked
+            const res = resumeMap[c.channel_id]
             const durTotal = (c.strikes >= 2 ? 168 : 72) + 6
             const pct = isBlocked && c.restan_h > 0
               ? Math.max(0, Math.min(100, 100 * (1 - c.restan_h / durTotal)))
@@ -282,6 +392,16 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
                     </span>
                   )}
                   <span className="text-[10px] text-gray-500">{scopeLabel}</span>
+                  {res && res.phase_today > 0 && (
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${phaseBadge(res.phase_today).cls}`}>
+                      {phaseBadge(res.phase_today).label}
+                    </span>
+                  )}
+                  {res && phaseCountdown(res) && (
+                    <span className="text-[10px] text-cyan-300/80 flex items-center gap-1">
+                      <Clock size={10} /> {phaseCountdown(res)}
+                    </span>
+                  )}
                 </div>
 
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -321,6 +441,23 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
                       <span>Detectado: {new Date(removal.detected_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                     )}
                     {removal.reason && <span className="italic">“{removal.reason}”</span>}
+                  </div>
+                )}
+
+                {/* Próximas publicaciones (esparcido Fase 1) */}
+                {res && (res.pending_publish?.upcoming?.length ?? 0) > 0 && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
+                    <span className="flex items-center gap-1 text-gray-400">
+                      <ListOrdered size={11} />
+                      Publicaciones ({res.pending_publish?.total}):
+                    </span>
+                    {(res.pending_publish?.upcoming ?? []).slice(0, 6).map((p, i) => (
+                      <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
+                        {p.target_public_at
+                          ? new Date(p.target_public_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                          : p.video_id || '?'}
+                      </span>
+                    ))}
                   </div>
                 )}
 

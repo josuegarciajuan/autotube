@@ -365,12 +365,16 @@ def resume_status(db=None) -> list[dict]:
     for cid, entry in sorted(plan.items(), key=lambda kv: kv[1].get("slug", "")):
         ch = db.get_channel(cid)
         slug = ch.get("slug", "") if ch else entry.get("slug", str(cid))
+        name = ch.get("name", "") if ch else slug
         cfg = db.get_channel_planning_config(cid) or {}
         sc_list = db.get_shorts_planning_config(channel_id=cid) or []
         sc = sc_list[0] if sc_list else {}
         out.append({
+            "channel_id": cid,
             "slug": slug,
+            "name": name,
             "source": entry.get("source", "?"),
+            "sibling_of": entry.get("sibling_of", ""),
             "start_iso": entry.get("start_iso", ""),
             "phase_today": _phase_for(entry, today),
             "freq": {
@@ -380,4 +384,83 @@ def resume_status(db=None) -> list[dict]:
                 "shorts_clips_per_long": sc.get("shorts_clips_per_long"),
             },
         })
+    return out
+
+
+def _phase_label(phase: int, source: str = "") -> str:
+    """Etiqueta humana de la fase."""
+    if phase == 0:
+        return "Bloqueado / no iniciado"
+    if phase == 1:
+        return "Fase 1 — 1 long cada 2 días"
+    return "Fase 2 — 1 long/día"
+
+
+def resume_status_detailed(db=None) -> list[dict]:
+    """Estado detallado de reanudación por canal, para la UI.
+
+    Combina resume_status() + build_spam_situation() (strikes/bloqueo/frecuencia
+    rebajada) + _pending_publish_all() (publicaciones pendientes), y calcula el
+    countdown a la siguiente fase. Lectura ligera (0 cuota de YouTube API).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    from api.services.spam_mitigation import (
+        build_spam_situation, _pending_publish_all,
+    )
+    base = resume_status(db)
+    today = datetime.now(timezone.utc).date()
+    out = []
+    for r in base:
+        cid = int(r["channel_id"])
+        phase = int(r["phase_today"])
+        r["phase_label"] = _phase_label(phase, r.get("source", ""))
+
+        # Timeline: días transcurridos / restantes / siguiente transición
+        try:
+            start_dt = datetime.fromisoformat(r["start_iso"]).date()
+        except (ValueError, TypeError):
+            start_dt = today
+        days_elapsed = (today - start_dt).days
+        r["days_elapsed"] = max(0, days_elapsed)
+        r["next_transition_iso"] = None
+        if phase == 0 and days_elapsed < 0:
+            r["days_remaining_in_phase"] = -days_elapsed
+            r["next_transition_iso"] = start_dt.isoformat()
+        elif phase == 1:
+            remaining = PHASE1_DAYS - days_elapsed
+            r["days_remaining_in_phase"] = max(0, remaining)
+            r["next_transition_iso"] = (start_dt + timedelta(days=PHASE1_DAYS + 1)).isoformat()
+        else:
+            r["days_remaining_in_phase"] = None
+            r["next_transition_iso"] = None
+
+        # Strikes / bloqueo / frecuencia (reutiliza el módulo de spam)
+        try:
+            sit = build_spam_situation(cid, db) or {}
+            r["strikes"] = sit.get("strikes", 0)
+            r["blocked"] = bool(sit.get("blocked", False))
+            r["restan_h"] = sit.get("restan_h", 0.0)
+            r["freq_reduced"] = bool(sit.get("freq_reduced", False))
+        except Exception:
+            r["strikes"] = 0
+            r["blocked"] = False
+            r["restan_h"] = 0.0
+            r["freq_reduced"] = False
+
+        # Publicaciones pendientes (esparcido de Fase 1 visible en la UI)
+        try:
+            pending = _pending_publish_all(cid, db) or []
+            r["pending_publish"] = {
+                "total": len(pending),
+                "upcoming": [
+                    {"video_id": p.get("video_id") or p.get("yt_video_id") or "",
+                     "target_public_at": p.get("target_public_at", "")}
+                    for p in pending
+                ],
+            }
+        except Exception:
+            r["pending_publish"] = {"total": 0, "upcoming": []}
+        out.append(r)
     return out
