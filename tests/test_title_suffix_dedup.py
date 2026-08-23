@@ -48,12 +48,35 @@ def test_append_suffix_empty_is_noop():
 
 
 def test_append_suffix_strips_wrapper_symbols():
-    assert _append_title_suffix("Título", "(REAL)") == "Título (REAL)"
+    # "(REAL)" es sufijo de credibilidad clickbait → neutralizado, no se añade
+    assert _append_title_suffix("Título", "(REAL)") == "Título"
+
+
+def test_append_suffix_keeps_factual_suffix():
+    # Sufijo factual (año) sí se añade
+    assert _append_title_suffix("Título", "(2026)") == "Título (2026)"
 
 
 def test_normalize_title_suffix_uppercases_and_strips():
-    assert _normalize_title_suffix("(impactante)") == "IMPACTANTE"
+    assert _normalize_title_suffix("(documental)") == "DOCUMENTAL"
     assert _normalize_title_suffix("") == ""
+
+
+def test_normalize_title_suffix_neutralizes_clickbait():
+    # (antiban): sufijos de credibilidad clickbait → "" (nunca al título)
+    assert _normalize_title_suffix("(REAL)") == ""
+    assert _normalize_title_suffix("(impactante)") == ""
+    assert _normalize_title_suffix("CASO REAL") == ""
+
+
+def test_strip_clickbait_suffix_removes_real_and_tails():
+    from pipeline.metadata_generator import _strip_clickbait_suffix as strip
+    assert strip("El caso Mariska Mast (REAL)") == "El caso Mariska Mast"
+    assert strip("Esto (REVELACIÓN) (REAL)") == "Esto"
+    assert strip("Ocultó (REAL). ASOMBROSO.") == "Ocultó"
+    assert strip("Desafía todo (REAL) [CLASIFICADO]") == "Desafía todo"
+    assert strip("Un IMPERIO (REAL) — El Misterio Antediluviana") == "Un IMPERIO"
+    assert strip("Volvió LOCOS (2026)") == "Volvió LOCOS (2026)"
 
 
 # ── title_enricher._collapse_trailing_parentheticals ─────────────────
