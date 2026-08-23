@@ -325,16 +325,31 @@ class DashboardStats(BaseModel):
 # ── Social Media Accounts ───────────────────────────────────
 
 class SocialAccountCreate(BaseModel):
-    platform: str  # 'tiktok', 'twitter', 'instagram', 'facebook', 'reddit', 'rumble'
+    platform: Optional[str] = None  # redundante con el path; el router usa el path
     username: str
-    password: str  # plaintext — server encrypts before storing
+    password: str  # API token/key — plaintext, server encrypts before storing
     enabled: bool = True
+    # Identity fields (v45): correo de registro, contraseña del correo,
+    # contraseña de login de la plataforma y notas. Se cifran en servidor.
+    account_email: Optional[str] = None
+    account_email_password: Optional[str] = None
+    account_password: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class SocialAccountUpdate(BaseModel):
     username: Optional[str] = None
-    password: Optional[str] = None
+    password: Optional[str] = None  # API token/key (plaintext)
     enabled: Optional[bool] = None
+    account_email: Optional[str] = None
+    account_email_password: Optional[str] = None
+    account_password: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class SocialRevealRequest(BaseModel):
+    """Petición de revelado de una credencial concreta."""
+    field: str  # 'api_key' | 'email_password' | 'account_password'
 
 
 class SocialAccountResponse(BaseModel):
@@ -348,6 +363,12 @@ class SocialAccountResponse(BaseModel):
     last_error: Optional[str] = None
     created_at: str
     updated_at: str
+    # Identity fields (v45) — los secretos se devuelven SOLO como flags.
+    account_email: Optional[str] = None
+    notes: Optional[str] = None
+    has_email_password: bool = False
+    has_account_password: bool = False
+    has_api_key: bool = False
 
 
 class SocialTimingUpdate(BaseModel):

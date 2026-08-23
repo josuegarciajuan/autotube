@@ -55,14 +55,21 @@ class SocialCredentialEncryption:
 
     @staticmethod
     def _load_or_generate_key() -> bytes:
-        """Try env var → file → generate new key."""
+        """Try env var → file → generate new key.
+
+        Fernet() expects the key as a URL-safe base64 STRING (44 chars), not
+        the raw decoded bytes. All load paths therefore return the string form
+        after validating it decodes to 32 bytes.
+        """
         from cryptography.fernet import Fernet
 
         # 1. env var
         env_val = os.getenv(_ENV_VAR)
         if env_val:
             try:
-                return base64.urlsafe_b64decode(env_val.encode("utf-8"))
+                raw = base64.urlsafe_b64decode(env_val.encode("utf-8"))
+                if len(raw) == 32:
+                    return env_val.encode("utf-8")
             except Exception:
                 logger.warning("SOCIAL_ENCRYPTION_KEY is not valid base64 — generating new key")
 
@@ -70,7 +77,10 @@ class SocialCredentialEncryption:
         if _KEY_FILE.exists():
             try:
                 with open(_KEY_FILE, "rb") as f:
-                    return base64.urlsafe_b64decode(f.read().strip())
+                    key = f.read().strip()
+                raw = base64.urlsafe_b64decode(key)
+                if len(raw) == 32:
+                    return key
             except Exception:
                 logger.warning("social_encryption.key is corrupt — regenerating")
 

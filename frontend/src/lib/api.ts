@@ -78,10 +78,12 @@ export const api = {
   
   // Social Media Accounts
   getSocialAccounts: (channelId: number) => request<any[]>(`/channels/${channelId}/social-accounts`),
-  saveSocialAccount: (channelId: number, platform: string, data: { username: string; password: string; enabled: boolean }) =>
+  saveSocialAccount: (channelId: number, platform: string, data: { username: string; password: string; enabled: boolean; account_email?: string; account_email_password?: string; account_password?: string; notes?: string }) =>
     request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'PUT', body: JSON.stringify(data) }),
-  updateSocialAccount: (channelId: number, platform: string, data: { username?: string; password?: string; enabled?: boolean }) =>
+  updateSocialAccount: (channelId: number, platform: string, data: { username?: string; password?: string; enabled?: boolean; account_email?: string; account_email_password?: string; account_password?: string; notes?: string }) =>
     request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  revealSocialCredential: (channelId: number, platform: string, field: string) =>
+    request<any>(`/channels/${channelId}/social-accounts/${platform}/reveal`, { method: 'POST', body: JSON.stringify({ field }) }),
   deleteSocialAccount: (channelId: number, platform: string) =>
     request<any>(`/channels/${channelId}/social-accounts/${platform}`, { method: 'DELETE' }),
   testSocialLogin: (channelId: number, platform: string) =>
@@ -122,6 +124,8 @@ export const api = {
   },
   getChannelSocialStats: (channelId: number) =>
     request<any>(`/channels/${channelId}/social-stats`),
+  getChannelVideosSocialStats: (channelId: number) =>
+    request<any>(`/channels/${channelId}/videos-social-stats`),
   getVideoSocialStats: (videoId: number) =>
     request<any>(`/videos/${videoId}/social-stats`),
   collectSocialStats: (channelId?: number) => {

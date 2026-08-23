@@ -321,6 +321,12 @@ export interface SocialAccount {
   last_error: string | null
   created_at: string
   updated_at: string
+  // v45 identity fields — secretos solo como flags
+  account_email?: string | null
+  notes?: string | null
+  has_email_password?: boolean
+  has_account_password?: boolean
+  has_api_key?: boolean
 }
 
 export const SOCIAL_PLATFORMS = [

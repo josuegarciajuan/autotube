@@ -1279,6 +1279,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v45: thumbnail_style por video (loop CTR→estilo, D2 ago 2026) ──
     _migrate_v45(conn, logger)
+
+    # ── v46: social account identity fields (email, login password, notes) ──
+    _migrate_v46(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2976,6 +2979,39 @@ def _migrate_v45(conn, logger):
     except sqlite3.OperationalError:
         pass  # column already exists — idempotent
     conn.commit()
+
+
+def _migrate_v46(conn, logger):
+    """Idempotent v46: social account identity fields.
+
+    Extends channel_social_accounts so each platform credential can carry the
+    full account identity used during signup (kept at hand inside Autotube):
+    - account_email            → email used to register the account (plain).
+    - account_email_password   → password of that email (Fernet-encrypted).
+    - account_password         → login password of the platform web UI (Fernet).
+    - notes                    → free notes (recovery info, phone, etc.).
+
+    encrypted_password stays untouched: it remains the API token/key consumed
+    by the publishers (rumble key, dailymotion client JSON, fb page token,
+    bluesky app password, mastodon token).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('channel_social_accounts')").fetchall()}
+    for col, col_type in [
+        ("account_email", "TEXT"),
+        ("account_email_password", "TEXT"),
+        ("account_password", "TEXT"),
+        ("notes", "TEXT"),
+    ]:
+        if col not in cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE channel_social_accounts ADD COLUMN {col} {col_type}"
+                )
+                logger.info("Migration v46: added channel_social_accounts.%s", col)
+            except Exception as exc:
+                logger.warning("Migration v46: failed to add channel_social_accounts.%s: %s", col, exc)
+    conn.commit()
+    logger.info("Migration v46: social account identity fields ensured")
 
 
 def _migrate_v10(conn, logger):
@@ -8907,20 +8943,47 @@ class ExtendedDatabase(Database):
     def upsert_social_account(
         self, channel_id: int, platform: str, username: str,
         encrypted_password: str, enabled: bool = True,
+        account_email: str = None, account_email_password: str = None,
+        account_password: str = None, notes: str = None,
     ) -> bool:
-        """Insert or update a social media account credential."""
+        """Insert or update a social media account credential.
+
+        Identity fields are optional; None values preserve the existing row,
+        so callers that only set the API token (e.g. the /test endpoint) never
+        clobber identity data.
+        """
         with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO channel_social_accounts
-                   (channel_id, platform, username, encrypted_password, enabled, updated_at)
-                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(channel_id, platform) DO UPDATE SET
-                   username = excluded.username,
-                   encrypted_password = excluded.encrypted_password,
-                   enabled = excluded.enabled,
-                   updated_at = CURRENT_TIMESTAMP""",
-                (channel_id, platform, username, encrypted_password, int(enabled)),
-            )
+            existing = conn.execute(
+                "SELECT * FROM channel_social_accounts WHERE channel_id = ? AND platform = ?",
+                (channel_id, platform),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE channel_social_accounts SET
+                       username = ?, encrypted_password = ?, enabled = ?,
+                       account_email = ?, account_email_password = ?,
+                       account_password = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (
+                        username if username is not None else existing["username"],
+                        encrypted_password if encrypted_password is not None else existing["encrypted_password"],
+                        int(enabled) if enabled is not None else existing["enabled"],
+                        account_email if account_email is not None else existing["account_email"],
+                        account_email_password if account_email_password is not None else existing["account_email_password"],
+                        account_password if account_password is not None else existing["account_password"],
+                        notes if notes is not None else existing["notes"],
+                        existing["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO channel_social_accounts
+                       (channel_id, platform, username, encrypted_password, enabled,
+                        account_email, account_email_password, account_password, notes, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                    (channel_id, platform, username, encrypted_password, int(enabled),
+                     account_email, account_email_password, account_password, notes),
+                )
             conn.commit()
         return True
 
@@ -9302,6 +9365,27 @@ class ExtendedDatabase(Database):
                 (video_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_channel_videos_social_stats(self, channel_id: int) -> dict:
+        """Bulk per-video per-platform stats for a channel (one query).
+
+        Returns {video_id: [{platform, platform_video_id, platform_video_url,
+        status, views, likes, comments, reposts, uploaded_at}, ...]} so the
+        channel video list can render network stats without N+1 requests.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT video_id, platform, platform_video_id, platform_video_url,
+                          status, views, likes, comments, reposts, uploaded_at
+                   FROM platform_videos
+                   WHERE channel_id = ?
+                   ORDER BY video_id, platform""",
+                (channel_id,),
+            ).fetchall()
+        result: dict = {}
+        for r in rows:
+            result.setdefault(r["video_id"], []).append(dict(r))
+        return result
 
     # ── video_asset_history helpers (v9 cross-video dedup) ─────
 
