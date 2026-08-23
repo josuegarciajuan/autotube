@@ -8905,6 +8905,22 @@ class ExtendedDatabase(Database):
             rows = conn.execute(q + " ORDER BY created_at DESC", params).fetchall()
         return [dict(r) for r in rows]
 
+    def get_published_platform_videos(self, channel_id: int = None,
+                                      platform: str = None) -> list[dict]:
+        """Get all platform_videos rows in status 'published' (for stats collection)."""
+        with self._connect() as conn:
+            q = "SELECT * FROM platform_videos WHERE status = 'published'"
+            params: list = []
+            if channel_id:
+                q += " AND channel_id = ?"
+                params.append(channel_id)
+            if platform:
+                q += " AND platform = ?"
+                params.append(platform)
+            q += " ORDER BY id ASC"
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
     # ── v44: Social redistribution (backlog, pacing, stats) ─────
 
     def enqueue_redistribution_backlog(self, channel_id: int, platforms: list[str],
@@ -8977,6 +8993,18 @@ class ExtendedDatabase(Database):
                 (channel_id, platform),
             ).fetchone()
         return dict(row) if row else None
+
+    def count_platform_published_today(self, channel_id: int, platform: str) -> int:
+        """Count platform_videos published to a platform since UTC midnight."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as c FROM platform_videos
+                   WHERE channel_id = ? AND platform = ?
+                     AND status = 'published'
+                     AND uploaded_at >= datetime('now', 'start of day')""",
+                (channel_id, platform),
+            ).fetchone()
+        return int(row["c"]) if row else 0
 
     def upsert_redistribution_state(self, channel_id: int, platform: str,
                                     daily_cap: int = None, warmup_until: str = None,

@@ -30,6 +30,7 @@ from api.routers import monitor as monitor_router
 from api.routers import insights
 from api.routers import view_gap as view_gap_router
 from api.routers import quota as quota_router
+from api.routers import redistribution as redistribution_router
 from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT,
@@ -401,6 +402,9 @@ async def lifespan(app: FastAPI):
     # Launch gradual resume phase loop (avance autónomo de fases post-strike)
     resume_phase_task = asyncio.create_task(_resume_phase_loop())
 
+    # Launch social redistribution loop (backfill espejo progresivo)
+    redistribution_task = asyncio.create_task(_redistribution_loop())
+
     yield
     
     # Shutdown
@@ -416,6 +420,8 @@ async def lifespan(app: FastAPI):
     health_checker_task.cancel()
     shorts_backfill_task = None  # permanently disabled
     quota_recovery_task.cancel()
+    resume_phase_task.cancel()
+    redistribution_task.cancel()
     try:
         await schedule_task
     except asyncio.CancelledError:
@@ -434,6 +440,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await quota_recovery_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await redistribution_task
     except asyncio.CancelledError:
         pass
 
@@ -923,6 +933,48 @@ async def _quota_recovery_loop():
             _logger.warning("Quota recovery loop error: %s", _exc, exc_info=True)
         
         await _asyncio.sleep(1800)  # Check every 30 minutes
+
+
+async def _redistribution_loop():
+    """Background loop: drena la cola espejo (Máquina A) a ritmo seguro.
+
+    Una subida por tick (10 min), respetando warm-up, cap diario y backoff
+    por plataforma. Las subidas se hacen vía API (Rumble/Dailymotion/Facebook)
+    — no compiten por RAM con la generación long-form.
+    """
+    import asyncio as _asyncio
+
+    _logger = logging.getLogger("autotube.redistribution")
+
+    await _asyncio.sleep(180)  # Let API stabilize first
+
+    _logger.info("Redistribution loop started (1 upload/tick, cada 10 min)")
+
+    while True:
+        try:
+            from database.db_extended import ExtendedDatabase
+            from api.services.redistribution_worker import redistribution_tick
+            _db = ExtendedDatabase()
+
+            def _tick_once():
+                return redistribution_tick(_db)
+
+            result = await _asyncio.wait_for(
+                _asyncio.to_thread(_tick_once),
+                timeout=600,
+            )
+            if result.get("uploaded"):
+                _logger.info(
+                    "Redistribution tick: %s",
+                    ", ".join(result["uploaded"]),
+                )
+            elif result.get("channels_checked"):
+                # Log solo cada cierto ruido: skip si nada que subir
+                if len(result.get("skipped", [])) <= 3:
+                    _logger.debug("Redistribution tick: %s", result)
+        except Exception as _exc:
+            _logger.warning("Redistribution tick failed (no crítico): %s", _exc)
+        await _asyncio.sleep(600)  # cada 10 minutos
 
 
 async def _shorts_backfill_loop():
@@ -2946,6 +2998,7 @@ app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
 app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])
 app.include_router(quota_router.router, prefix="", tags=["Quota"])
+app.include_router(redistribution_router.router, prefix="/api", tags=["Redistribution"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")
