@@ -626,7 +626,7 @@ DESCRIPTION_TEMPLATE = """✨ {titulo}
 THUMBNAIL_BORDER_WIDTH = 5
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#CC0000"
-THUMBNAIL_SHOW_4K_BADGE = True
+THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
 THUMBNAIL_VISUAL_STYLE = "moody_atmospheric"
@@ -650,47 +650,7 @@ THUMBNAIL_MANUAL_STYLE = {
     ),
 }
 
-THUMBNAIL_STYLE = {
-    "layout": "image_full_background_text_overlay",
-    "max_text_words": 4,
-    "text_color": "warm_gold_on_deep_indigo",
-    "font_style": "bold_elegant_sans_or_serif",
-    "image_treatment": "warm_luminous_golden_hour_ethereal_glow",
-    "background": "#0F203E", "accent_color": "#D4AF37",
-    "face_policy": (
-        "Real faces (public domain or stock) YES — eyes looking up, expressions of wonder. "
-        "Survivors, protagonists. Warm lighting, natural expressions. "
-        "AI-generated faces: NO. Siluetas a contraluz, manos juntas, personas "
-        "mirando al horizonte OK."
-    ),
-    "number_preference": "odd_numbers_for_lists",
-    "gold_accent_rule": (
-        "Golden underline or light ray on key element boosts CTR. "
-        "Warm, hopeful aesthetic. NEVER use dark horror styling. "
-        "NEVER use blood red or black backgrounds for this channel."
-    ),
-}
 
-THUMBNAIL_TEMPLATES = {
-    "the_light": {
-        "description": "Backlit figure, golden hour, ray of light, hopeful expression",
-        "text_position": "bottom_third_centered", "text_words": "2-3",
-        "accent": "golden_light_ray_or_glow",
-        "best_for": "Survivor stories, miracle interventions, NDE accounts",
-    },
-    "the_coincidence": {
-        "description": "Split composition: two related elements connected by visual thread/line",
-        "text_position": "center_bridging", "text_words": "3-4",
-        "accent": "golden_connecting_line",
-        "best_for": "Coincidence stories, synchronicities, parallel lives",
-    },
-    "the_evidence": {
-        "description": "Vintage document, newspaper clipping, or photograph with warm sepia treatment",
-        "text_position": "bottom_over_gradient", "text_words": "3-4",
-        "accent": "magnifying_glass_or_circle_highlight",
-        "best_for": "Documented miracles, verified predictions, historical evidence",
-    },
-}
 
 # ═══════════════════════════════════════════════════════════════════
 # VIDEO TIMING & MONETIZATION

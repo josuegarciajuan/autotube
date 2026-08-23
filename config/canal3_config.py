@@ -443,7 +443,7 @@ DESCRIPTION_TEMPLATE = """🏛️ {titulo}
 # THUMBNAIL
 # ═══════════════════════════════════════════════════════════════════
 THUMBNAIL_BORDER_WIDTH = 5
-THUMBNAIL_FONT_FAMILY = "DejaVuSerif-Bold"
+THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#D4A843"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#1A0F08"
@@ -460,28 +460,6 @@ THUMBNAIL_MANUAL_STYLE = {
         "cinematic composition, 16:9 aspect ratio, warm earthy tones, "
         "professional archaeology photography"
     ),
-}
-THUMBNAIL_STYLE = {
-    "layout": "image_full_background_text_overlay", "max_text_words": 4,
-    "text_color": "warm_gold_on_dark_earth", "font_style": "bold_elegant_serif",
-    "image_treatment": "ancient_ruins_golden_hour_mysterious",
-    "background": "#1A0F08", "accent_color": "#D4A843",
-    "face_policy": ("Ancient statues and faces from artifacts YES. Close-up of stone carvings, "
-                    "golden masks, sculptures. AI-generated faces: NO. Siluetas de exploradores OK."),
-    "number_preference": "odd_numbers_for_lists",
-    "gold_accent_rule": ("Golden light ray or dust motes illuminating ruins boosts CTR. "
-                         "NEVER use neon or modern styling."),
-}
-THUMBNAIL_TEMPLATES = {
-    "the_ruins": {"description": "Wide shot of ancient ruins at golden hour", "text_position": "bottom_third_centered",
-                  "text_words": "2-3", "accent": "golden_dust_light_ray",
-                  "best_for": "Lost cities, temple discoveries, architectural marvels"},
-    "the_artifact": {"description": "Close-up of mysterious artifact or golden mask", "text_position": "center_over_gradient",
-                     "text_words": "3-4", "accent": "spotlight_on_artifact",
-                     "best_for": "Mysterious objects, technological anomalies, forbidden artifacts"},
-    "the_map": {"description": "Ancient map, parchment texture, compass rose, sepia tones", "text_position": "bottom_over_gradient",
-                "text_words": "3-4", "accent": "magnifying_glass_or_compass",
-                "best_for": "Lost cities, expeditions, geographic mysteries"},
 }
 
 # ═══════════════════════════════════════════════════════════════════

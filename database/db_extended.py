@@ -1276,6 +1276,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v44: social redistribution (platform stats + pacing) ──
     _migrate_v44(conn, logger)
+
+    # ── v45: thumbnail_style por video (loop CTR→estilo, D2 ago 2026) ──
+    _migrate_v45(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2950,6 +2953,31 @@ def _migrate_v44(conn, logger):
     logger.info("Migration v44: redistribution tables ensured")
 
 
+def _migrate_v45(conn, logger):
+    """Idempotent v45 migration: thumbnail_style/layout columns en videos.
+
+    Cierra el loop CTR→estilo (D2, ago 2026): con la instrumentación de CTR
+    (video_stats_history.ctr, B1) cada video guarda el estilo visual de su
+    miniatura (p.ej. "distress_signal") y su layout (p.ej. "split_face") para
+    poder medir qué packaging genera mejor CTR e iterar con datos.
+    """
+    try:
+        conn.execute(
+            "ALTER TABLE videos ADD COLUMN thumbnail_style TEXT DEFAULT ''"
+        )
+        logger.info("Migration v45: added thumbnail_style column to videos")
+    except sqlite3.OperationalError:
+        pass  # column already exists — idempotent
+    try:
+        conn.execute(
+            "ALTER TABLE videos ADD COLUMN thumbnail_layout TEXT DEFAULT ''"
+        )
+        logger.info("Migration v45: added thumbnail_layout column to videos")
+    except sqlite3.OperationalError:
+        pass  # column already exists — idempotent
+    conn.commit()
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -4328,6 +4356,59 @@ class ExtendedDatabase(Database):
         return result
 
     # ── Video Stats History ────────────────────────────────────
+
+    def update_video_thumbnail_style(self, video_id: int, style: str,
+                                     layout: str = "") -> bool:
+        """Registra el estilo visual y layout de la miniatura de un video.
+
+        D2 (ago 2026): cierra el loop CTR→estilo. Con CTR ya instrumentado
+        (B1), permite agregar CTR promedio por estilo de miniatura y saber
+        qué packaging funciona. ``style`` = visual_style (p.ej. "distress_signal"),
+        ``layout`` = plantilla de composición (p.ej. "split_face").
+        """
+        if not video_id or not style:
+            return False
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE videos SET thumbnail_style = ?, thumbnail_layout = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (style, layout or "", video_id),
+                )
+                conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def get_thumbnail_style_ctr(self, channel_id: int) -> list[dict]:
+        """CTR promedio por estilo de miniatura (packaging loop, D2 ago 2026).
+
+        Agrega el último snapshot de ctr/impressions de cada video publicado
+        agrupado por videos.thumbnail_style. Solo estilos con >=1 video con
+        datos; ordenados por CTR desc.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT v.thumbnail_style AS style,
+                          COUNT(*) AS videos,
+                          ROUND(AVG(vsh.ctr), 2) AS avg_ctr,
+                          SUM(vsh.impressions) AS total_impressions,
+                          SUM(vsh.views) AS total_views
+                   FROM videos v
+                   JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                   )
+                   WHERE v.channel_id = ?
+                     AND v.yt_video_id IS NOT NULL
+                     AND v.thumbnail_style IS NOT NULL
+                     AND v.thumbnail_style != ''
+                   GROUP BY v.thumbnail_style
+                   ORDER BY avg_ctr DESC""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def insert_video_stats(self, video_id: int, yt_video_id: str, stats: dict) -> int | None:
         """Insert a snapshot of YouTube video statistics."""

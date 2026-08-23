@@ -323,6 +323,8 @@ export const api = {
     request<any>(`/channels/${channelId}/analytics/growth?days=${days}`),
   getChannelContentRanking: (channelId: number, sort = 'views', limit = 20) =>
     request<any>(`/channels/${channelId}/analytics/content?sort=${sort}&limit=${limit}`),
+  getThumbnailStyleCtr: (channelId: number) =>
+    request<any>(`/channels/${channelId}/analytics/thumbnail-styles`),
   getVideoAnalytics: (videoId: number) =>
     request<any>(`/videos/${videoId}/analytics`),
   getChannelsComparison: () =>
