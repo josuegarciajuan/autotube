@@ -4526,6 +4526,68 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── Scrape eligibility (incremental + age window) ─────────
+    # ago 2026: the public-scrape fallback used to re-scrape EVERY video and
+    # short on every run when the Data API quota was exhausted (~9 min for
+    # all channels). These helpers bound the work: skip items scraped within
+    # `min_interval_h` hours (fresh) and items older than `max_age_days`
+    # (their stats barely move; the Analytics API still refreshes all videos).
+
+    def get_scrape_eligible_video_ids(self, channel_id: int,
+                                      min_interval_h: int = 24,
+                                      max_age_days: int = 45) -> set[int]:
+        """DB ids of videos eligible for public scraping this run.
+
+        A video qualifies when it has a YouTube id, was uploaded within the
+        last ``max_age_days`` days, and has NO row in ``video_stats_history``
+        fresher than ``min_interval_h`` hours.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id FROM videos v
+                   WHERE v.channel_id = ?
+                     AND v.yt_video_id IS NOT NULL
+                     AND COALESCE(v.uploaded_at, v.created_at)
+                         >= datetime('now', ?)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM video_stats_history h
+                         WHERE h.video_id = v.id
+                           AND h.fetched_at >= datetime('now', ?)
+                     )""",
+                (channel_id,
+                 f"-{int(max_age_days)} days",
+                 f"-{int(min_interval_h)} hours"),
+            ).fetchall()
+        return {r["id"] for r in rows}
+
+    def get_scrape_eligible_short_ids(self, channel_id: int,
+                                      min_interval_h: int = 24,
+                                      max_age_days: int = 7) -> set[int]:
+        """DB ids of shorts eligible for public scraping this run.
+
+        A short qualifies when it is published, has a YouTube id, was
+        created/published within the last ``max_age_days`` days, and has NO
+        row in ``short_stats`` fresher than ``min_interval_h`` hours.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT s.id FROM shorts s
+                   WHERE s.channel_id = ?
+                     AND s.status = 'published'
+                     AND s.youtube_id IS NOT NULL
+                     AND COALESCE(s.published_at, s.created_at)
+                         >= datetime('now', ?)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM short_stats h
+                         WHERE h.short_id = s.id
+                           AND h.fetched_at >= datetime('now', ?)
+                     )""",
+                (channel_id,
+                 f"-{int(max_age_days)} days",
+                 f"-{int(min_interval_h)} hours"),
+            ).fetchall()
+        return {r["id"] for r in rows}
+
     # ── Bulk Analytics Updates ─────────────────────────────────
 
     def batch_update_video_analytics(

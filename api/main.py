@@ -2751,7 +2751,7 @@ async def _process_lifecycle_actions():
 import time as _time_module
 
 # ── Stats collection timeout watchdog ───────────────────────────
-_STATS_COLLECTION_TIMEOUT = 300  # seconds — auto-reset to error if stuck "running" > 5 min
+_STATS_COLLECTION_TIMEOUT = 900  # seconds — auto-reset to error if stuck "running" > 15 min (bumped from 300: a full scrape-mode run with the incremental window can legitimately exceed 5 min)
 
 # Tracks the state of on-demand stats collection so the UI can show
 # real progress/result feedback (survives page reloads + server restarts).

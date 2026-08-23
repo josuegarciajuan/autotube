@@ -725,4 +725,14 @@ SEO_SCORE_WEIGHTS = {
 # channels without an OAuth token (public data needs no auth).
 STATS_SCRAPE_FALLBACK_ENABLED = True
 # Parallel yt-dlp requests when scraping (1 request per video/short).
-STATS_SCRAPE_MAX_CONCURRENCY = 6
+STATS_SCRAPE_MAX_CONCURRENCY = 8
+# ── Scrape optimization (ago 2026): incremental + age window ──
+# Videos/shorts scraped within this window are skipped (fresh data).
+STATS_SCRAPE_MIN_INTERVAL_H = 24
+# Only scrape long-form videos uploaded in the last N days (older videos'
+# public stats barely move daily; their watch-time/views still arrive via
+# the Analytics API on every run, which covers all videos regardless).
+STATS_SCRAPE_MAX_AGE_DAYS = 45
+# Shorts age window is much smaller: shorts flood daily and their stats
+# freeze after the initial burst, so scraping old shorts is pure waste.
+STATS_SCRAPE_SHORTS_MAX_AGE_DAYS = 7
