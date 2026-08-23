@@ -29,16 +29,26 @@ logging.basicConfig(
 logger = logging.getLogger("batch_thumbnails")
 
 
-def fetch_videos(db_path: str, canal: str) -> list[dict]:
-    """Return all uploaded videos for the given channel, ordered by id ASC."""
+DEFAULT_STATUSES = ("published", "uploaded_private", "unlisted")
+
+
+def fetch_videos(db_path: str, canal: str, statuses: tuple[str, ...]) -> list[dict]:
+    """Return all uploaded videos for the given channel, ordered by id ASC.
+
+    Filtra por los estados reales del sistema (no existe 'uploaded'):
+    published / uploaded_private / unlisted. Los videos aún en cola
+    (awaiting_upload, ready) se regeneran solos por frescura al subirse.
+    """
+    placeholders = ",".join("?" for _ in statuses)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT v.* FROM videos v "
         "JOIN channels c ON v.channel_id = c.id "
-        "WHERE c.slug = ? AND v.status = 'uploaded' AND v.titulo_final IS NOT NULL AND v.titulo_final != '' "
+        f"WHERE c.slug = ? AND v.status IN ({placeholders}) "
+        "AND v.titulo_final IS NOT NULL AND v.titulo_final != '' "
         "ORDER BY v.id ASC",
-        (canal,),
+        (canal, *statuses),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -83,17 +93,20 @@ def process_one(
     cfg,
     maker: ThumbnailMaker,
     db_path: str,
+    canal: str,
     channel_display: str,
     channel_desc: str,
     channel_theme: str,
 ) -> bool:
     """Generate a thumbnail for a single video. Returns True on success."""
     video_id = video["id"]
+    # El slug del canal se lee del propio video — nunca hardcodeado.
+    video_canal = video.get("canal") or canal
     title = video.get("titulo_final", "Historia Impactante")
     keywords = fetch_keywords(video)
     script_text = fetch_script_text(db_path, video.get("script_id"))
 
-    logger.info("Video #%s: %s", video_id, title)
+    logger.info("Video #%s (%s): %s", video_id, video_canal, title)
 
     thumb_path = maker.make_viral_thumbnail(
         title=title,
@@ -101,7 +114,7 @@ def process_one(
         keywords=keywords[:10] if keywords else [],
         scene_images=None,
         script_text=script_text[:1500] if script_text else "",
-        canal_slug="canal4",
+        canal_slug=video_canal,
         channel_display_name=channel_display,
         channel_description=channel_desc,
         channel_theme=channel_theme,
@@ -118,14 +131,19 @@ def main() -> int:
     parser.add_argument("--canal", required=True, help="Channel slug")
     parser.add_argument("--sleep", type=int, default=60, help="Seconds between videos")
     parser.add_argument("--dry-run", action="store_true", help="List videos without generating")
+    parser.add_argument(
+        "--statuses", nargs="+", default=list(DEFAULT_STATUSES),
+        help=f"Estados a incluir (default: {' '.join(DEFAULT_STATUSES)})",
+    )
     args = parser.parse_args()
 
     db_path = PROJECT_ROOT / "autotube.db"
 
     # ── Fetch videos ───────────────────────────────────────────
-    videos = fetch_videos(str(db_path), args.canal)
+    statuses = tuple(s.strip() for s in args.statuses if s.strip())
+    videos = fetch_videos(str(db_path), args.canal, statuses)
     if not videos:
-        logger.warning("No uploaded videos found for canal=%s", args.canal)
+        logger.warning("No videos with statuses %s found for canal=%s", statuses, args.canal)
         return 0
 
     logger.info("Found %d uploaded videos for %s", len(videos), args.canal)
@@ -166,6 +184,7 @@ def main() -> int:
                 cfg=cfg,
                 maker=maker,
                 db_path=str(db_path),
+                canal=args.canal,
                 channel_display=channel_display,
                 channel_desc=channel_desc,
                 channel_theme=channel_theme,
