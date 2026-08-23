@@ -483,6 +483,9 @@ export const api = {
     const params = severity ? `?severity=${severity}` : ''
     return request<any>(`/monitor/alerts/resolve-all${params}`, { method: 'POST' })
   },
+  getSilencedAlertTypes: () => request<any>('/monitor/alerts/silenced-types'),
+  silenceAlertType: (alertType: string, silenced: boolean = true) =>
+    request<any>(`/monitor/alerts/silence-type?alert_type=${encodeURIComponent(alertType)}&silenced=${silenced}`, { method: 'POST' }),
   triggerHealthCheck: () =>
     request<any>('/monitor/health-check', { method: 'POST' }),
   getSystemMetrics: () => request<any>('/monitor/system'),
