@@ -159,7 +159,7 @@ def _get_silenced_alert_types(conn) -> set:
         row = conn.execute(
             "SELECT value FROM system_state WHERE key = 'silenced_alert_types'"
         ).fetchone()
-        if not row or not row.get("value"):
+        if not row or not row["value"]:
             return set()
         data = json.loads(row["value"])
         return set(data) if isinstance(data, list) else set()

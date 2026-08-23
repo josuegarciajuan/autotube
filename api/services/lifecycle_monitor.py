@@ -957,8 +957,8 @@ _PLATFORM_AUTH_PATTERNS = (
 
 def _build_platform_failed_message(row: dict) -> str:
     """Build a human-readable alert message for a non-auth platform failure."""
-    platform = row.get("platform", "?").title()
-    ch_name = row.get("channel_name", "?")
+    platform = row["platform"].title()
+    ch_name = row.get("channel_name") or "?"
     error = (row.get("error_message") or "Error desconocido")[:300]
     return (
         f"El último intento de publicar en {platform} para el canal "
@@ -1027,7 +1027,7 @@ def _check_platform_publish_failed(db) -> int:
                 if existing:
                     conn.execute(
                         "UPDATE pipeline_alerts SET message = ? WHERE id = ?",
-                        (_build_platform_failed_message(row), existing["id"]),
+                        (_build_platform_failed_message(dict(row)), existing["id"]),
                     )
                     continue
 
@@ -1037,7 +1037,7 @@ def _check_platform_publish_failed(db) -> int:
                     db, conn, "system", channel_id, channel_id,
                     alert_type, "warning",
                     f"Publicación en {platform_label} falló — {ch_name}",
-                    _build_platform_failed_message(row),
+                    _build_platform_failed_message(dict(row)),
                     {"platform": row["platform"], "channel_slug": row["slug"],
                      "last_error": (row["error_message"] or "")[:500]},
                 )
@@ -1406,7 +1406,7 @@ def _check_tasks_alive(db) -> int:
                     "SELECT value FROM system_state WHERE key = ?",
                     (f"task_heartbeat_{task_name}",),
                 ).fetchone()
-                if not row or not row.get("value"):
+                if not row or not row["value"]:
                     continue  # nunca hizo heartbeat — no es nuestra señal
                 try:
                     hb = datetime.fromisoformat(row["value"])
@@ -1547,7 +1547,7 @@ def _check_stats_collection_failed(db) -> int:
             raw = conn.execute(
                 "SELECT value FROM system_state WHERE key = 'stats_collection_state'"
             ).fetchone()
-            if not raw or not raw.get("value"):
+            if not raw or not raw["value"]:
                 return 0
             try:
                 state = json.loads(raw["value"])
