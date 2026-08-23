@@ -17,9 +17,13 @@ import { api } from '../../lib/api'
 import { useQuotaStatus, useResumeStatus } from '../../hooks/useQueries'
 
 // Persistencia del plegado: guardamos la FIRMA del último conjunto de avisos
-// que el usuario colapsó. Si llegan avisos nuevos (firma distinta), la tira se
-// re-expande sola; si no cambió nada, respeta el estado plegado.
-const LS_KEY = 'alertcenter_collapsed_sig_v1'
+// que el usuario colapsó. La firma solo incluye identidad/severidad (nunca las
+// cuentas atrás), así que la tira se re-expande ÚNICAMENTE ante avisos nuevos
+// (strike/bloqueo/cuota/sesión); si solo cambian los contadores de tiempo,
+// respeta el estado manual del usuario (plegado o desplegado).
+const LS_KEY = 'alertcenter_collapsed_sig_v2'
+// Estado manual plegado/desplegado (persistido para sobrevivir a refrescos).
+const EXPANDED_KEY = 'alertcenter_expanded_v1'
 
 interface SpamBlock {
   channel_id: number
@@ -119,7 +123,7 @@ function fmtFreq(block: SpamBlock): string {
 export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [spamBlocks, setSpamBlocks] = useState<SpamBlock[]>([])
   const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
-  const [expanded, setExpanded] = useState<boolean>(true)
+  const [expanded, setExpanded] = useState<boolean>(() => localStorage.getItem(EXPANDED_KEY) !== '0')
   const [collapsedSig, setCollapsedSig] = useState<string>(() => localStorage.getItem(LS_KEY) || '')
   const [busy, setBusy] = useState<number | null>(null)
   const [applyingAll, setApplyingAll] = useState(false)
@@ -194,26 +198,39 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const hasBlocked = spamBlocks.some(c => c.blocked)
 
   const currentSig = useMemo(() => {
+    // Firma ESTABLE: solo identidad/severidad de los avisos. Excluimos
+    // deliberadamente los contadores temporales (restan_h, remaining_hours),
+    // que cambian en cada poll y provocaban que la tira se re-expandiera sola
+    // aunque no hubiera ningún aviso nuevo.
     return sigOf(JSON.stringify({
-      spam: spamBlocks.map(c => [c.channel_id, c.strikes, Math.round(c.restan_h * 10), c.blocked, c.freq_reduced, c.scope]),
-      quota: quotaProjects.map(p => [p.project_id, Math.round((p.remaining_hours || 0) * 10)]),
+      spam: spamBlocks.map(c => [c.channel_id, c.strikes, c.blocked, c.freq_reduced, c.scope]),
+      quota: quotaProjects.map(p => [p.project_id, p.account, p.channels]),
       sessions: sessionWarnings.map(s => [s.account, s.channels]),
     }))
   }, [spamBlocks, quotaProjects, sessionWarnings])
 
-  // Auto-colapso/expansión según la firma de avisos (localStorage).
+  // Auto-expansión SOLO ante avisos realmente nuevos: si el usuario colapsó
+  // (collapsedSig guardado) y la firma actual difiere, se re-abre. Si solo
+  // cambiaron los contadores de tiempo, la firma no cambia y se respeta el
+  // estado manual (plegado o desplegado). Nunca fuerza colapso.
   useEffect(() => {
     if (!currentSig || !totalAvisos) return
-    if (currentSig === collapsedSig) setExpanded(false)
-    else setExpanded(true)
+    if (collapsedSig && currentSig !== collapsedSig) {
+      setExpanded(true)
+      localStorage.setItem(EXPANDED_KEY, '1')
+    }
   }, [currentSig, collapsedSig, totalAvisos])
 
   function handleToggle() {
     setExpanded(prev => {
       const next = !prev
+      localStorage.setItem(EXPANDED_KEY, next ? '1' : '0')
       if (!next && currentSig) {
         setCollapsedSig(currentSig)
         localStorage.setItem(LS_KEY, currentSig)
+      } else {
+        setCollapsedSig('')
+        localStorage.removeItem(LS_KEY)
       }
       return next
     })

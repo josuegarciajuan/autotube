@@ -73,7 +73,19 @@ function fmtSpeed(bps: number): string {
 /** Individual progress bar for a single job.
  *  Must be a separate component so useGenerationProgress hook works per jobId. */
 function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => void }) {
-  const [minimized, setMinimized] = useState(false)
+  // Estado de minimizado persistido por job: sobrevive a refrescos y a
+  // remontajes del slot, de modo que la barra se queda como la dejó el usuario.
+  const minKey = `autotube_job_minimized_${job.jobId}`
+  const [minimized, setMinimized] = useState<boolean>(() => localStorage.getItem(minKey) === '1')
+
+  function setMinimizedPersist(v: boolean) {
+    setMinimized(v)
+    try {
+      if (v) localStorage.setItem(minKey, '1')
+      else localStorage.removeItem(minKey)
+    } catch { /* localStorage no disponible */ }
+  }
+
   const [dismissed, setDismissed] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const { progress, connected, stale } = useGenerationProgress(job.jobId)
@@ -212,7 +224,7 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
       {minimized ? (
         <div
           className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 bg-dark-800/95 backdrop-blur cursor-pointer hover:bg-dark-700/95"
-          onClick={() => setMinimized(false)}
+          onClick={() => setMinimizedPersist(false)}
         >
           <div className={`w-2 h-2 rounded-full shrink-0 ${
             isCompleted ? 'bg-green-400' : isFailed ? 'bg-red-400'
@@ -266,7 +278,7 @@ function JobProgressSlot({ job, onDismiss }: { job: ActiveJob; onDismiss: () => 
                     <Ban size={14} />
                   </button>
                 )}
-                <button onClick={() => setMinimized(true)}
+                <button onClick={() => setMinimizedPersist(true)}
                   className="p-0.5 text-gray-500 hover:text-white">
                   <ChevronDown size={14} />
                 </button>
