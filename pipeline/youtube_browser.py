@@ -26,7 +26,10 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TOKENS_DIR = PROJECT_ROOT / "tokens"
+# TOKENS_DIR override: permite ejecutar scripts desde una worktree (git) apuntando
+# a los tokens/sesiones reales del árbol de producción (p. ej. emergencias).
+# Ej: YT_BROWSER_TOKENS_DIR=/root/autotube/tokens python3 scripts/hold_...
+TOKENS_DIR = Path(os.getenv("YT_BROWSER_TOKENS_DIR") or (PROJECT_ROOT / "tokens"))
 
 # -- Selectors (confirmed working 2026-07-17, updated 2026-07-21) --
 SEL_MOSTRAR_MAS = "text=Mostrar más"
@@ -675,6 +678,223 @@ class YouTubeBrowser:
             return False
         except Exception as e:
             logger.error("[ES] End screen error for %s: %s", video_id, e)
+            try: page.close()
+            except Exception: pass
+            return False
+
+    def set_video_private_unschedule(self, youtube_video_id: str) -> bool:
+        """Pone un vídeo en 'Privado' (desprogramado) vía YouTube Studio — 0 cuota API.
+
+        Anti-ráfaga (ago 2026): cuando la cuota del Data API está agotada, un vídeo
+        subido como privado con publishAt vencido puede salir en ráfaga (el patrón
+        que alimentó los strikes de spam). Este método abre el vídeo en Studio y
+        selecciona 'Privado', cancelando cualquier publishAt programado: el vídeo
+        queda físicamente incapaz de publicarse hasta que se re-programe después
+        (repack con cuota libre).
+
+        Usa la MISMA sesión de navegador/lock que mark_altered_content. Fail-safe:
+        devuelve False si no puede cambiar/confirmar la visibilidad; nunca deja el
+        vídeo en un estado peor que 'privado'.
+        """
+        with self._lock:
+            try:
+                self._ensure_browser()
+                page = self._context.new_page()
+                ok = self._do_set_private(page, youtube_video_id)
+            except Exception as e:
+                logger.error("set_video_private_unschedule failed for %s: %s", youtube_video_id, e)
+                ok = False
+            if not ok:
+                self._alert_hold_failed(youtube_video_id)
+            return ok
+
+    def _alert_hold_failed(self, youtube_video_id: str) -> None:
+        """Alerta (una vez por vídeo) cuando falla el hold a 'Privado' en Studio.
+
+        Antiban (ago 2026): si el hold falla y el vídeo tiene publishAt vencido,
+        puede publicarse en ráfaga. La alerta pide revisión humana (Studio manual).
+        """
+        try:
+            from database.db_extended import ExtendedDatabase
+            from api.services.lifecycle_monitor import create_alert
+            db = ExtendedDatabase()
+            key = f"publish_hold_alert_{youtube_video_id}"
+            if db.get_system_state(key):
+                return
+            db.set_system_state(key, "1")
+            channel_id = None
+            try:
+                slug = getattr(self, "account", "")
+                ch = db.get_channel_by_slug(slug) if slug else None
+                if ch:
+                    channel_id = ch.get("id")
+            except Exception:
+                channel_id = None
+            create_alert(
+                db,
+                entity_type="video" if channel_id else "channel",
+                entity_id=channel_id,
+                channel_id=channel_id,
+                alert_type="publish_hold_failed",
+                severity="warning",
+                title=f"Hold a Privado falló para {youtube_video_id}",
+                message=(
+                    f"No se pudo poner el vídeo {youtube_video_id} en 'Privado' vía "
+                    f"YouTube Studio (Playwright). Si tiene publishAt vencido puede "
+                    f"publicarse en ráfaga. Pásalo a Privado manualmente en Studio o "
+                    f"verifica la sesión del navegador (python3 scripts/yt_browser_login.py)."
+                ),
+                metadata={"video_id": youtube_video_id, "action": "hold manual requerido"},
+            )
+        except Exception as exc:
+            logger.warning("publish-hold alert failed: %s", exc)
+
+    def _do_set_private(self, page, video_id: str) -> bool:
+        """Internal: set a video to 'Privado' (unscheduled) on the edit page.
+
+        Flujo validado contra Studio real (ago 2026): el control de visibilidad
+        es `ytcp-video-metadata-visibility` (#visibility-text). Al abrirlo sale el
+        diálogo `ytcp-video-visibility-select` con dos contenedores:
+          - #first-container ("Guardar o publicar", colapsado): radios Público/
+            Oculto/Privado — se expande con #first-container-expand-button.
+          - #second-container ("Programar", activo cuando el vídeo tiene
+            publishAt programado): fecha + "Programar como público" + "Hecho".
+        Para desprogramar y dejar el vídeo en Privado: expandir el primer
+        contenedor, seleccionar Público→Privado (fuerza la deselección de
+        "Programar"), "Hecho", y Guardar. Fail-safe: cada paso verifica.
+        """
+        try:
+            human_delay(1.0, 3.0, "hold: initial")
+            edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
+            page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
+            human_delay(4.0, 8.0, "hold: page load")
+            if "/video/" not in page.url or "/edit" not in page.url:
+                logger.error("[HOLD] Navigation failed: %s", page.url[:120])
+                page.close()
+                return False
+
+            try:
+                page.wait_for_selector("[id='title-textarea']", timeout=10000, state="visible")
+            except PlaywrightTimeout:
+                logger.warning("[HOLD] Title field not found, continuing")
+            human_delay(2.0, 4.0, "hold: editor settle")
+
+            # ── Current visibility state ──
+            vis_el = page.query_selector("ytcp-video-metadata-visibility")
+            if not vis_el:
+                logger.error("[HOLD] Visibility control not found for %s — fail-safe", video_id)
+                page.close()
+                return False
+            try:
+                current = (vis_el.inner_text() or "").strip()
+            except Exception:
+                current = ""
+            logger.info("[HOLD] %s current visibility: %r", video_id, current)
+
+            if "privado" in current.lower() or "private" in current.lower():
+                logger.info("[HOLD] %s already private — no-op", video_id)
+                page.close()
+                return True
+
+            # ── Open the visibility dialog ──
+            human_delay(0.5, 1.5, "hold: open dialog")
+            try:
+                vis_el.click()
+                human_delay(1.5, 3.0, "hold: dialog open")
+            except Exception as e:
+                logger.error("[HOLD] Could not open visibility dialog: %s", e)
+                page.close()
+                return False
+
+            # ── Expand first container (Guardar o publicar) if collapsed ──
+            exp_btn = page.query_selector("ytcp-icon-button#first-container-expand-button")
+            if exp_btn and exp_btn.is_visible():
+                exp_btn.click()
+                human_delay(1.5, 3.0, "hold: first container expanded")
+            else:
+                logger.info("[HOLD] First container already expanded (or no expand btn)")
+
+            # ── Select Público → Privado (forces deselection of 'Programar') ──
+            def _click_radio(text: str) -> bool:
+                for el in page.query_selector_all("tp-yt-paper-radio-button"):
+                    try:
+                        t = (el.inner_text() or "").strip().split("\n")[0]
+                        if t == text and el.is_visible():
+                            el.click()
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            if not _click_radio("Público"):
+                logger.warning("[HOLD] 'Público' radio not found for %s — trying Privado directly", video_id)
+            human_delay(0.5, 1.5, "hold: publico")
+            if not _click_radio("Privado"):
+                logger.error("[HOLD] 'Privado' radio not found for %s — aborting (fail-safe)", video_id)
+                page.close()
+                return False
+            human_delay(0.8, 1.8, "hold: privado")
+
+            # ── Click 'Hecho' (Done) to apply ──
+            hecho = None
+            for _ in range(10):
+                hecho = page.query_selector("text=Hecho")
+                if hecho and hecho.is_visible():
+                    break
+                time.sleep(1)
+            if not hecho:
+                logger.error("[HOLD] 'Hecho' not found for %s — aborting (fail-safe)", video_id)
+                page.close()
+                return False
+            hecho.click()
+            human_delay(1.5, 3.0, "hold: done clicked")
+
+            # ── Verify dialog applied: visibility-text must show 'Privado' ──
+            try:
+                vis_after = (vis_el.inner_text() or "").strip()
+            except Exception:
+                vis_after = ""
+            if "privado" not in vis_after.lower() and "private" not in vis_after.lower():
+                logger.error(
+                    "[HOLD] Visibility NOT 'Privado' after dialog for %s (still %r) — fail-safe",
+                    video_id, vis_after,
+                )
+                page.close()
+                return False
+            logger.info("[HOLD] %s dialog applied → %r", video_id, vis_after)
+
+            # ── Save ──
+            save_el = None
+            for _ in range(30):
+                save_el = page.query_selector(SEL_GUARDAR_ENABLED)
+                if save_el and save_el.is_enabled():
+                    break
+                time.sleep(1)
+            if not save_el:
+                logger.error("[HOLD] Save never enabled for %s", video_id)
+                page.close()
+                return False
+
+            human_delay(0.8, 2.0, "hold: click save")
+            save_el.click()
+            human_delay(2.0, 4.0, "hold: save settling")
+
+            try:
+                page.wait_for_selector(SEL_SAVE_CONFIRM, timeout=5000, state="attached")
+                logger.info("[HOLD] Save confirmed for %s", video_id)
+            except PlaywrightTimeout:
+                logger.info("[HOLD] No save toast for %s (clicked anyway)", video_id)
+
+            logger.info("[HOLD] ✅ %s confirmado como 'Privado'", video_id)
+            page.close()
+            return True
+        except PlaywrightTimeout as e:
+            logger.error("[HOLD] Timeout for %s: %s", video_id, e)
+            try: page.close()
+            except Exception: pass
+            return False
+        except Exception as e:
+            logger.error("[HOLD] Error for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
