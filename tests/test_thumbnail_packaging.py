@@ -69,6 +69,40 @@ def test_dedupe_overlay_titulo_vacio():
     assert m._dedupe_overlay("Título", "") == ""
 
 
+# ── Regresión: el prompt de escena secundaria NUNCA se pinta ────
+# Bug: el recuadro inferior izquierdo de la miniatura mostraba
+# "UN PRIMER PLANO DE UN DIARIO D..." (= secondary_scene[:30].upper()).
+# Fix: _draw_insets usa etiqueta fija o escena real. Estos tests
+# bloquean cualquier reintroducción del parámetro en la composición.
+
+def test_compose_final_no_acepta_secondary_scene():
+    """_compose_final NO puede recibir secondary_scene (parámetro eliminado)."""
+    import inspect
+    from pipeline.thumbnail_maker import ThumbnailMaker
+    sig = inspect.signature(ThumbnailMaker._compose_final)
+    assert "secondary_scene" not in sig.parameters
+
+
+def test_draw_insets_nunca_pinta_el_prompt():
+    """El recuadro inset usa etiqueta fija; el prompt no puede llegar ahí."""
+    import inspect
+    from pipeline.thumbnail_maker import ThumbnailMaker
+    src = inspect.getsource(ThumbnailMaker._draw_insets)
+    # El bug original truncaba el prompt como etiqueta:
+    assert "secondary_scene" not in src
+    # La etiqueta del recuadro A (inferior izquierdo) es fija:
+    assert 'label_a = "DOCUMENTO REAL" if "documento" in title.lower() else "EVIDENCIA"' in src
+
+
+def test_flujo_thumbnails_sin_secondary_scene():
+    """Ningún punto del flujo v2 pasa secondary_scene a la composición."""
+    import inspect
+    from pipeline.thumbnail_maker import ThumbnailMaker
+    for method_name in ("make_viral_thumbnail", "make_variant_thumbnails", "_compose_final"):
+        src = inspect.getsource(getattr(ThumbnailMaker, method_name))
+        assert "secondary_scene=" not in src, f"{method_name} reintroduce secondary_scene"
+
+
 # ── Config: P2 (4K badge off + sans-serif) ──────────────────────
 
 def test_config_4k_badge_off_y_sans():
