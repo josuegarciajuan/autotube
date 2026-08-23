@@ -7,7 +7,8 @@ Run:  python3 -m pytest tests/test_memory_cleanup.py -v
 """
 
 import sys
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gc
 import pytest
