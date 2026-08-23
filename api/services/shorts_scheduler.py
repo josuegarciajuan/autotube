@@ -2894,6 +2894,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 slot_rank=slot_rank, job_id=job_id,
                 target_upload_at=target_upload_at,
                 generate_only=generate_only,
+                slot_id=slot_id,
             )
         elif short_type == "standalone":
             short_id = await asyncio.to_thread(
@@ -2990,20 +2991,33 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     slot_id, retries + 1,
                 )
             else:
+                # Preservar el motivo REAL registrado por _native_fail() (fix ago 2026:
+                # antes se pisaba con el genérico y no había alerta de fallo).
+                _reason = ""
+                try:
+                    _row = conn.execute(
+                        "SELECT error_message FROM shorts_planned_slots WHERE id = ?",
+                        (slot_id,),
+                    ).fetchone()
+                    _reason = (_row["error_message"] if _row and _row["error_message"] else "")
+                except Exception:
+                    _reason = ""
                 conn.execute(
                     "UPDATE shorts_planned_slots SET status = 'cancelled', "
-                    "error_message = 'Exhausted retries (2/2)', "
+                    "error_message = COALESCE(error_message, 'Exhausted retries (2/2)'), "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (slot_id,),
                 )
                 conn.execute(
                     "UPDATE generation_jobs SET status = 'failed', "
-                    "error_msg = 'No short_id returned (exhausted retries)' WHERE id = ?",
+                    "error_msg = COALESCE(error_msg, 'No short_id returned (exhausted retries)') WHERE id = ?",
                     (job_id,),
                 )
                 conn.commit()
                 conn.close()
-                logger.warning("Shorts slot #%d exhausted retries — cancelled", slot_id)
+                logger.warning("Shorts slot #%d exhausted retries — cancelled (%s)",
+                               slot_id, _reason[:100] or "sin motivo")
+                _alert_short_dispatch_failed(slot_id, channel_id, _reason)
     except __import__("pipeline.youtube_uploader", fromlist=["SpamRemovalError"]).SpamRemovalError as e:
         # ── HARD SPAM FILTER ──
         # YouTube removed the uploaded short. NEVER retry (each retry is a new
@@ -3093,6 +3107,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 )
                 conn.commit()
                 logger.warning("Shorts slot #%d exhausted retries after crash — cancelled: %s", slot_id, str(e)[:100])
+                _alert_short_dispatch_failed(slot_id, channel_id, f"Exception: {str(e)[:200]}")
             conn.close()
         except Exception:
             pass
@@ -3181,6 +3196,66 @@ def _update_short_job_progress(job_id: int | None, progress: int, phase: str):
         logger.warning("Short job progress update failed for #%d: %s", job_id, e)
 
 
+def _native_fail(slot_id: int | None, job_id: int | None, reason: str) -> None:
+    """Registra el MOTIVO REAL de un fallo de native short en slot y job.
+
+    (fix ago 2026) Antes cada fallo hacía solo `return None`: el dispatcher
+    veía un genérico "No short_id returned" y no se creaba ninguna alerta —
+    la barra de generación "saltaba" en silencio. Con esto, el motivo queda
+    en `shorts_planned_slots.error_message` y `generation_jobs.error_msg`
+    para que `_dispatch_short_async` pueda alertar al agotar los reintentos.
+    """
+    if not slot_id and not job_id:
+        return
+    try:
+        import sqlite3
+        from config.settings import DATABASE_PATH
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=15)
+        if slot_id:
+            conn.execute(
+                "UPDATE shorts_planned_slots SET error_message = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (reason[:300], slot_id),
+            )
+        if job_id:
+            conn.execute(
+                "UPDATE generation_jobs SET error_msg = ? WHERE id = ?",
+                (reason[:300], job_id),
+            )
+        conn.commit()
+        conn.close()
+        logger.warning("[native] short slot #%s job #%s fail: %s", slot_id, job_id, reason)
+    except Exception as e:
+        logger.warning("Native short fail record failed (slot=%s job=%s): %s",
+                       slot_id, job_id, e)
+
+
+def _alert_short_dispatch_failed(slot_id: int, channel_id: int, reason: str) -> None:
+    """Alerta (deduplicada) cuando un slot de short se CANCELA tras agotar reintentos.
+
+    (fix ago 2026) Los fallos de native short eran silenciosos: job 'failed' sin
+    alerta. create_alert deduplica por (entity_type, entity_id, alert_type), así
+    que hay UNA sola alerta sin resolver por slot.
+    """
+    try:
+        from api.services.lifecycle_monitor import create_alert
+        from database.db_extended import ExtendedDatabase
+        create_alert(
+            ExtendedDatabase(),
+            entity_type="short", entity_id=slot_id, channel_id=channel_id,
+            alert_type="short_dispatch_failed",
+            severity="warning",
+            title=f"Short cancelado tras reintentos (slot #{slot_id})",
+            message=(
+                f"El slot de short #{slot_id} se canceló tras agotar los reintentos "
+                f"(2/2). Motivo: {reason or 'desconocido'}. El short NO se publicó."
+            ),
+            metadata={"slot_id": slot_id, "reason": reason},
+        )
+    except Exception as _alert_exc:
+        logger.warning("short dispatch failed alert error: %s", _alert_exc)
+
+
 # ── Standalone short generation ──────────────────────────────────
 
 def _dispatch_standalone_short(channel_id: int, channel_slug: str,
@@ -3254,7 +3329,8 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
 def _dispatch_native_short(channel_id: int, channel_slug: str,
                             slot_rank: int = 0, job_id: int = None,
                             target_upload_at: str = None,
-                            generate_only: bool = False) -> int | None:
+                            generate_only: bool = False,
+                            slot_id: int = None) -> int | None:
     """Generate and publish a native Short.
 
     Uses the existing native short generation pipeline (LLM script → TTS → render → upload).
@@ -3399,6 +3475,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         )
     except Exception as e:
         logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
+        _native_fail(slot_id, job_id, f"script LLM error: {str(e)[:200]}")
         return None
 
     # 1a-bis. Type guard: llm_json_call may return a list (when the LLM
@@ -3407,6 +3484,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     if not isinstance(script, dict):
         logger.error("Short script generation returned unexpected type %s for %s",
                      type(script).__name__, channel_slug)
+        _native_fail(slot_id, job_id, f"script LLM devolvió tipo inesperado: {type(script).__name__}")
         return None
 
     # 1b. Validate script completeness (with smart truncation for over-long scripts)
@@ -3418,6 +3496,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                              and "words" not in e and "Blocks" not in e and "blocks" not in e]
         if structural_errors:
             logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
+            _native_fail(slot_id, job_id, f"script inválido: {structural_errors[:3]}")
             return None
 
         bloques_for_trim = script.get("bloques", [])
@@ -3452,6 +3531,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                     "Short script still invalid after trimming for %s: %s",
                     channel_slug, errors2,
                 )
+                _native_fail(slot_id, job_id, f"script inválido tras recorte: {errors2[:3]}")
                 return None
         elif total_words < _MIN_WORDS:
             logger.warning(
@@ -3480,6 +3560,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             "rejecting script, slot will retry with different content",
             channel_slug, _sim_what, title[:60], title[:60],
         )
+        _native_fail(slot_id, job_id, f"título similar a {_sim_what}")
         return None
 
     # ── Hard content-safety filter (anti-strike) ─────────────────
@@ -3501,6 +3582,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 "(slot reintentará con otro tema)",
                 channel_slug, title[:60], _safety.reason,
             )
+            _native_fail(slot_id, job_id, f"contenido no seguro: {_safety.reason}")
             return None
     except Exception as _cs_exc:
         logger.warning("[%s] Content-safety filter error (fail-open): %s", channel_slug, _cs_exc)
@@ -3564,6 +3646,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 "[%s] Still too long after re-trim (est %.1fs > 55s) — aborting",
                 channel_slug, new_est,
             )
+            _native_fail(slot_id, job_id, f"guion demasiado largo tras recorte (est {new_est:.1f}s)")
             return None  # will be caught by retry mechanism
 
     # 2. Segmented TTS
@@ -3590,6 +3673,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         audio_duration = tts_result["duration_sec"] + 1.5
     except RuntimeError as e:
         logger.error("Short TTS failed for %s: %s", channel_slug, e)
+        _native_fail(slot_id, job_id, f"TTS falló: {str(e)[:200]}")
         return None
 
     _update_short_job_progress(job_id, 25, "tts")
@@ -3686,6 +3770,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             "subir solid-bg (riesgo de strike IA). Slot reintentará.",
             channel_slug, _valid_assets_total, _asset_positions,
         )
+        _native_fail(
+            slot_id, job_id,
+            f"render degradado ({_valid_assets_total}/{_asset_positions} assets reales)",
+        )
         return None
 
     # 4. Render hybrid (video + Ken Burns images + xfade)
@@ -3719,10 +3807,12 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             "Hybrid render failed for %s — rejecting slot (no solid-bg upload): %s",
             channel_slug, e,
         )
+        _native_fail(slot_id, job_id, f"render híbrido falló: {str(e)[:200]}")
         return None
 
     if not video_path.exists():
         logger.error("Render produced no output file for %s", channel_slug)
+        _native_fail(slot_id, job_id, "render no produjo archivo de salida")
         return None
 
     _update_short_job_progress(job_id, 75, "render")
@@ -3746,6 +3836,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             conn.close()
         except Exception as e:
             logger.error("[%s] Failed to register generated native short: %s", channel_slug, e)
+            _native_fail(slot_id, job_id, f"registro de short generado falló: {str(e)[:200]}")
             return None
         # Record assets in short_asset_history for cross-short dedup
         if asset_items:
@@ -3765,6 +3856,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
     if not uploader.authenticate():
         logger.error("YouTube auth failed for %s", channel_slug)
+        _native_fail(slot_id, job_id, "autenticación YouTube falló")
         return None
 
     # Cross-promotion
@@ -3808,6 +3900,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     yt_id = result.get("video_id")
     if not yt_id:
         logger.error("Upload failed for %s: no video ID", channel_slug)
+        _native_fail(slot_id, job_id, "subida falló: sin video ID")
         return None
 
     # 6. Register in DB
