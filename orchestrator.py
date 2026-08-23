@@ -954,6 +954,35 @@ class PipelineOrchestrator:
             if fallback:
                 content_items = fallback
 
+        # ── Fase 3 bis: el maratón ABSORBE la cola de temas pendientes ──
+        # Con la fábrica continua la cola acumula contenido sin publicar; se
+        # fusionan los temas unused (raw_content sin consumir) con el scrape
+        # profundo para que el maratón digiera la cola del canal en vez de
+        # repetir los mismos temas en vídeos sueltos. Dedup por título/url.
+        if content_items:
+            try:
+                extra = self.db.get_unused_content(canal=self.canal, limit=10)
+                if extra:
+                    seen_titles = {
+                        (str(i.get("title") or "")[:120], str(i.get("url") or ""))
+                        for i in content_items if i.get("id")
+                    }
+                    merged = 0
+                    for item in extra:
+                        key = (str(item.get("title") or "")[:120], str(item.get("url") or ""))
+                        if key in seen_titles or not item.get("id"):
+                            continue
+                        seen_titles.add(key)
+                        content_items.append(item)
+                        merged += 1
+                    if merged:
+                        logger.info(
+                            "[MARATHON][%s] Cola absorbida: +%d temas pendientes fusionados al maratón",
+                            self.canal, merged,
+                        )
+            except Exception as exc:
+                logger.debug("[MARATHON][%s] Merge de cola no disponible: %s", self.canal, exc)
+
         if not content_items:
             # Last resort: use any available content
             content_items = self.db.get_unused_content(canal=self.canal, limit=10)

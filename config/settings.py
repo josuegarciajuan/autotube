@@ -96,6 +96,18 @@ CONTINUOUS_GENERATION_ENABLED = os.getenv("CONTINUOUS_GENERATION_ENABLED", "fals
 # pausa hasta que se libere espacio (fail-open ante error de medición).
 MIN_FREE_DISK_MB = int(os.getenv("MIN_FREE_DISK_MB", "5000"))
 
+# ── Frescura en publicación (Fase 4 bis) ───────────────────────
+# Días en cola (awaiting_upload) a partir de los cuales un vídeo se considera
+# 'stale': antes de subirlo se regeneran título (LLM) y thumbnail.
+FRESHNESS_REFRESH_DAYS = int(os.getenv("FRESHNESS_REFRESH_DAYS", "7"))
+
+# ── Transición automática de perfil (Fase 4 bis) ───────────────
+# Tras N días SIN strikes/remociones, el sistema escala solo el perfil de
+# pacing: strike → recovery (RECOVERY_DAYS) → normal (NORMAL_DAYS).
+AUTO_PACING_TRANSITION = os.getenv("AUTO_PACING_TRANSITION", "true").lower() in ("1", "true", "yes")
+AUTO_TRANSITION_RECOVERY_DAYS = int(os.getenv("AUTO_TRANSITION_RECOVERY_DAYS", "7"))
+AUTO_TRANSITION_NORMAL_DAYS = int(os.getenv("AUTO_TRANSITION_NORMAL_DAYS", "21"))
+
 
 # ── LLM Provider (DeepSeek / OpenAI) ──────────────────────────
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")

@@ -1353,6 +1353,22 @@ async def _schedule_checker_loop():
                 except Exception as exc:
                     logger.debug("Backlog TTL sweep: %s", exc)
 
+                # ── Transición automática de perfil (Fase 4 bis): strike → recovery
+                # → normal tras N días sin strikes (kill-switch: auto_pacing_transition) ──
+                try:
+                    _last_apt = _sched_db.get_system_state("last_auto_pacing_check")
+                    if _last_apt != _today_local:
+                        from api.services.pacing_profile import auto_transition_profile
+                        apt = await asyncio.to_thread(auto_transition_profile, db=_sched_db)
+                        _sched_db.set_system_state("last_auto_pacing_check", _today_local)
+                        if apt.get("transitioned"):
+                            logger.info(
+                                "Auto-pacing: %s → %s (%.0f días limpios)",
+                                apt.get("from"), apt.get("to"), apt.get("clean_days") or 0,
+                            )
+                except Exception as exc:
+                    logger.debug("Auto-pacing transition: %s", exc)
+
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
                 # Fase cuota (ago 2026): gate solo cuando TODOS los proyectos
