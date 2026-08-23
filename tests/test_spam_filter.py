@@ -25,6 +25,50 @@ def test_titles_too_similar_empty_and_short():
     assert _titles_too_similar("a b c", "a b c") is True
 
 
+def test_title_similar_guard_never_flags_itself(monkeypatch):
+    """Regression: a long-form video must NOT flag itself (title already saved
+    in `videos` when the check runs). `exclude_longform_id` skips it."""
+    from api.services import shorts_scheduler as ss
+
+    own_title = "Masacre de Pascommuck: la familia que escapó del INFIERNO (REAL)"
+
+    # Simulate the DB already containing the video's own title (saved before
+    # the check runs): with exclude_longform_id=2220 it must NOT match itself.
+    monkeypatch.setattr(
+        ss, "_recent_longform_titles",
+        lambda ch, days=30, limit=30, exclude_id=None: (
+            [] if exclude_id == 2220 else [(2220, own_title)]
+        ),
+    )
+    similar, what = ss._title_similar_to_recent(
+        5, own_title,
+        check_shorts=False, check_longform=True, exclude_longform_id=2220,
+    )
+    assert similar is False, f"video must not flag itself: {what}"
+
+    # Same title WITHOUT exclusion → still detected as similar (guard works)
+    similar, what = ss._title_similar_to_recent(
+        5, own_title, check_shorts=False, check_longform=True,
+    )
+    assert similar is True and "long-form #2220" in what
+
+
+def test_title_similar_guard_detects_other_recent_video(monkeypatch):
+    """Regression: exclusion must NOT hide a genuinely similar title from a
+    DIFFERENT recent video."""
+    from api.services import shorts_scheduler as ss
+
+    monkeypatch.setattr(
+        ss, "_recent_longform_titles",
+        lambda ch, days=30, limit=30, exclude_id=None: [(100, "El misterio de la expedición perdida en el Ártico")],
+    )
+    similar, what = ss._title_similar_to_recent(
+        5, "El misterio de la expedición que se perdió en el Ártico",
+        check_shorts=False, check_longform=True, exclude_longform_id=999,
+    )
+    assert similar is True and "long-form #100" in what
+
+
 def _minimal_db(tmp_path, name):
     """Create a minimal SQLite DB with just the system_state table."""
     import sqlite3

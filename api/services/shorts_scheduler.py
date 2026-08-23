@@ -394,19 +394,28 @@ def _titles_too_similar(title_a: str, title_b: str,
 
 def _recent_longform_titles(channel_id: int,
                             days: int = TITLE_SIMILARITY_LOOKBACK_DAYS,
-                            limit: int = TITLE_SIMILARITY_LOOKBACK_LIMIT) -> list[tuple[int, str]]:
-    """Return [(video_id, titulo_final)] for recent long-form videos of the channel."""
+                            limit: int = TITLE_SIMILARITY_LOOKBACK_LIMIT,
+                            exclude_id: Optional[int] = None) -> list[tuple[int, str]]:
+    """Return [(video_id, titulo_final)] for recent long-form videos of the channel.
+
+    `exclude_id`: opcional, salta ese vídeo de la lista (evita que un vídeo se
+    compare contra su PROPIO título ya guardado en la DB — el bug del falso
+    positivo "se parece a long-form #N" donde N es el propio vídeo).
+    """
     import sqlite3 as _sql_titles
     from config.settings import DATABASE_PATH as _DBP_T
     try:
         with _sql_titles.connect(str(_DBP_T), timeout=10) as _conn_t:
-            rows = _conn_t.execute(
-                """SELECT id, COALESCE(titulo_final, '') FROM videos
-                   WHERE channel_id = ? AND titulo_final IS NOT NULL AND titulo_final != ''
-                     AND date(created_at) >= date('now', 'localtime', ?)
-                   ORDER BY created_at DESC LIMIT ?""",
-                (channel_id, f"-{days} days", limit),
-            ).fetchall()
+            sql = """SELECT id, COALESCE(titulo_final, '') FROM videos
+                     WHERE channel_id = ? AND titulo_final IS NOT NULL AND titulo_final != ''
+                       AND date(created_at) >= date('now', 'localtime', ?)"""
+            params: list = [channel_id, f"-{days} days"]
+            if exclude_id is not None:
+                sql += " AND id != ?"
+                params.append(exclude_id)
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            rows = _conn_t.execute(sql, params).fetchall()
         return [(r[0], r[1]) for r in rows]
     except Exception:
         return []
@@ -414,12 +423,17 @@ def _recent_longform_titles(channel_id: int,
 
 def _title_similar_to_recent(channel_id: int, title: str,
                              check_shorts: bool = True,
-                             check_longform: bool = True) -> tuple[bool, str]:
+                             check_longform: bool = True,
+                             exclude_longform_id: Optional[int] = None) -> tuple[bool, str]:
     """True si el título se parece a un short o long-form reciente del canal.
 
     (antiban, ago 2026): los títulos casi duplicados entre shorts y long-form
     son una señal clásica de spam de YouTube. Devuelve (es_similar, descripción
     del conflicto) para logs/alertas.
+
+    `exclude_longform_id`: id del vídeo cuyo título se está comprobando; se
+    excluye de la comparación contra long-forms para que un vídeo NUNCA se
+    flagge a sí mismo (el título ya está guardado en `videos` cuando se chequea).
     """
     if not title:
         return False, ""
@@ -428,7 +442,8 @@ def _title_similar_to_recent(channel_id: int, title: str,
             if _titles_too_similar(title, prev_title):
                 return True, f"short #{prev_id} '{prev_title[:50]}'"
     if check_longform:
-        for prev_id, prev_title in _recent_longform_titles(channel_id):
+        for prev_id, prev_title in _recent_longform_titles(
+                channel_id, exclude_id=exclude_longform_id):
             if _titles_too_similar(title, prev_title):
                 return True, f"long-form #{prev_id} '{prev_title[:50]}'"
     return False, ""
@@ -442,7 +457,8 @@ def warn_if_title_similar(channel_id: int, channel_slug: str, video_id: int,
     """
     try:
         similar, what = _title_similar_to_recent(channel_id, title,
-                                                 check_shorts=True, check_longform=True)
+                                                 check_shorts=True, check_longform=True,
+                                                 exclude_longform_id=video_id)
         if not similar:
             return False
         logger.warning(
