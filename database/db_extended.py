@@ -8263,10 +8263,22 @@ class ExtendedDatabase(Database):
 
     def count_queued_native_shorts(self, channel_id: int) -> int:
         """Shorts nativos generados y en cola (status='generated', sin subir)."""
+        return self.count_queued_shorts(channel_id)
+
+    def count_queued_shorts(self, channel_id: int) -> int:
+        """Shorts en cola listos para subir (generados, sin youtube_id).
+
+        Cola unificada (ago 2026): native/standalone con status='generated' y
+        clip pre-renderizados con status='ready'. Todos tienen archivo en disco.
+        """
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) AS cnt FROM shorts
-                   WHERE channel_id = ? AND type = 'native' AND status = 'generated'""",
+                   WHERE channel_id = ?
+                     AND ((type IN ('native','standalone') AND status = 'generated')
+                       OR (type = 'clip' AND status = 'ready'))
+                     AND file_path IS NOT NULL AND file_path != ''
+                     AND (youtube_id IS NULL OR youtube_id = '')""",
                 (channel_id,),
             ).fetchone()
         return int(row["cnt"]) if row else 0
@@ -8277,13 +8289,27 @@ class ExtendedDatabase(Database):
         Devuelve los más antiguos primero (FIFO). Solo los que tienen archivo
         en disco y aún sin youtube_id.
         """
+        return self.get_queued_shorts(channel_id, limit=limit)
+
+    def get_queued_shorts(self, channel_id: int, limit: int = 1) -> list[dict]:
+        """Shorts en cola listos para subir, de TODOS los tipos (FIFO).
+
+        Cola unificada (ago 2026): la válvula de goteo despacha por este método
+        cualquier short generado sin subir — native/standalone con
+        status='generated' y clip pre-renderizados con status='ready'.
+
+        Devuelve los más antiguos primero (por id). Solo shorts con archivo en
+        disco y aún sin youtube_id.
+        """
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT id, channel_id, title, hook_title, hook_text, topic,
-                          file_path, status, created_at
+                """SELECT id, channel_id, type, title, hook_title, hook_text, topic,
+                          source_video_id, file_path, status, created_at
                    FROM shorts
-                   WHERE channel_id = ? AND type = 'native' AND status = 'generated'
+                   WHERE channel_id = ?
+                     AND ((type IN ('native','standalone') AND status = 'generated')
+                       OR (type = 'clip' AND status = 'ready'))
                      AND file_path IS NOT NULL AND file_path != ''
                      AND (youtube_id IS NULL OR youtube_id = '')
                    ORDER BY id ASC LIMIT ?""",
