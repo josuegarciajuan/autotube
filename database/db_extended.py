@@ -5365,6 +5365,7 @@ class ExtendedDatabase(Database):
                         WHERE vsh2.video_id = v.id AND vsh2.views > 0
                     )
                     WHERE 1=1 {top_where}
+                      AND NOT (v.duracion_seg IS NULL AND (v.video_path IS NULL OR v.video_path = ''))
                     ORDER BY vsh.views DESC LIMIT 25""",
                 ch_params,
             ).fetchall()
