@@ -378,18 +378,48 @@ def _recent_short_titles(channel_id: int,
         return []
 
 
+# Palabras función que NO deben contar como evidencia de título duplicado
+# (fix ago 2026). Dos títulos de temas distintos pueden compartir artículos y
+# conectores ("el/la/de/que/en/the/of...") y dar un overlap alto sin ser spam.
+TITLE_SIMILARITY_STOPWORDS = frozenset({
+    "el", "la", "los", "las", "lo", "un", "una", "unos", "unas",
+    "y", "o", "u", "e", "de", "del", "que", "quien", "cual", "a", "al",
+    "en", "con", "por", "para", "sin", "sobre", "entre", "hasta", "desde",
+    "se", "su", "sus", "mi", "tu", "es", "son", "era", "fue", "no", "si",
+    "cuando", "como", "mas", "más", "pero", "porque", "también", "hay",
+    "the", "and", "of", "to", "in", "for", "on", "with", "at", "from",
+    "by", "is", "are", "was", "this", "that", "an",
+})
+
+
 def _titles_too_similar(title_a: str, title_b: str,
                         threshold: float = TITLE_SIMILARITY_THRESHOLD) -> bool:
-    """Token-overlap similarity. Near-duplicate titles = spam signal."""
+    """Token-overlap similarity. Near-duplicate titles = spam signal.
+
+    (fix ago 2026) Usa DOS métricas para no debilitar el anti-spam:
+    - `meaningful` overlap: solo palabras con contenido (sin stopwords) —
+      detecta duplicados reales de contenido y evita falsos positivos por
+      palabras función ("EL MISTERIO DE LA CASA..." vs "EL MISTERIO DE LA
+      MONTAÑA..." ya NO chocan solo por el patrón de gancho).
+    - `raw` overlap ≥ 0.8: red de seguridad para títulos casi idénticos
+      literalmente (p. ej. el MISMO título repetido, que daba 1.0 y era el
+      caso que se veía en bucle en los logs).
+    """
     if not title_a or not title_b:
         return False
     import re as _re_sim
-    a = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_a.lower()))
-    b = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_b.lower()))
-    if not a or not b:
+    raw_a = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_a.lower()))
+    raw_b = set(_re_sim.findall(r"[a-z0-9áéíóúüñ]+", title_b.lower()))
+    if not raw_a or not raw_b:
         return False
-    overlap = len(a & b) / max(len(a), len(b))
-    return overlap >= threshold
+    meaningful_a = raw_a - TITLE_SIMILARITY_STOPWORDS
+    meaningful_b = raw_b - TITLE_SIMILARITY_STOPWORDS
+    if meaningful_a and meaningful_b:
+        meaningful_overlap = len(meaningful_a & meaningful_b) / max(len(meaningful_a), len(meaningful_b))
+        if meaningful_overlap >= threshold:
+            return True
+    raw_overlap = len(raw_a & raw_b) / max(len(raw_a), len(raw_b))
+    return raw_overlap >= 0.8
 
 
 def _recent_longform_titles(channel_id: int,
@@ -3380,6 +3410,35 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             f"que identifique claramente de qué trata este Short.\n"
         )
 
+    # 0a. Recent TITLES as negatives (fix ago 2026) — el guard de títulos compara
+    #     TÍTULOS (overlap ≥ 60%), pero al LLM solo se le pasaban los TEMAS, así
+    #     que regeneraba títulos casi idénticos y el slot reintentaba en bucle.
+    #     Ahora se listan los títulos recientes con una regla explícita.
+    recent_titles: list[str] = []
+    try:
+        recent_titles = (
+            [t for _, t in _recent_short_titles(channel_id)]
+            + [t for _, t in _recent_longform_titles(channel_id)]
+        )
+        # Dedup preservando orden + cap
+        recent_titles = list(dict.fromkeys(t for t in recent_titles if t))[:15]
+    except Exception:
+        recent_titles = []
+    title_warning = ""
+    if recent_titles:
+        title_warning = (
+            "\n\n⚠️ TÍTULOS YA USADOS RECIENTEMENTE (NO los repitas):\n"
+            + "\n".join(f'  - "{t[:80]}"' for t in recent_titles)
+            + "\n\nRegla DURA: tu campo 'titulo' NO debe compartir más del 50% de "
+              "palabras con NINGUNO de los títulos anteriores. Inventa un título y "
+              "un ángulo NUEVOS (otro tema, otro gancho, otra perspectiva).\n"
+        )
+    else:
+        title_warning = (
+            "\n\nGenera un título ORIGINAL que no repita el patrón de títulos "
+            "recientes del canal.\n"
+        )
+
     # 0b. Extract visual theme context (v8) — run BEFORE script generation
     #      so the LLM can generate theme-aware search queries
     theme_context = None
@@ -3426,118 +3485,178 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         tl.append("\nUsa este contexto para generar search_query_en ancladas al MISMO mundo visual.")
         theme_block = "\n".join(tl) + "\n"
 
-    # 1. Script via LLM
+    # 1. Script via LLM — bucle anti-título-repetido (fix ago 2026)
+    #    El guard de títulos rechaza overlaps ≥ 60% con títulos recientes. Antes
+    #    eso descartaba TODO el script y el slot reintentaba desde cero con el
+    #    mismo prompt (mismos títulos). Ahora se reintenta el LLM hasta 3 veces
+    #    con feedback del conflicto ANTES de rendirse.
     from config.llm_client import create_llm_client
     from config.llm_helpers import llm_json_call
+    from pipeline.shorts_tts import validate_short_script, MAX_WORD_COUNT as _MAX_WORDS, MIN_WORD_COUNT as _MIN_WORDS
     client = create_llm_client(enable_thinking=False)
 
-    try:
-        script = llm_json_call(
-            client,
-            max_retries=3,
-            retry_delay=2.0,
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": (
-                f"Genera un Short viral en español de ~50-58 segundos (~70-85 palabras totales, minimo 70). "
-                f"Canal: {display_name} — {niche}. Tagline: {tagline}."
-                f"{topic_warning}"
-                f"{theme_block}"  # v8: visual theme context for query anchoring
-                f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
-                f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
-                f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 18. "
-                f"El total debe superar 70 palabras y no exceder 90. "
-                f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
-                f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
-                f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
-                f"Incluye tema + detalles visuales (iluminacion, tipo de plano, atmosfera, accion). "
-                f"NO uses espanol (las APIs de stock no lo entienden). "
-                f"Ademas genera 'theme_keywords_en': 5-8 keywords EN INGLES del tema visual GLOBAL "
-                f"del short para mantener coherencia entre escenas. "
-                f"Devuelve SOLO JSON: "
-                f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
-                f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
-                f'"theme_keywords_en": ["global", "theme", "keywords"], '
-                f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
-                f'"search_query_en": "english keywords for stock search"}}, '
-                f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
-                f'"search_query_en": "english keywords"}}, '
-                f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
-                f'"search_query_en": "english keywords"}}, '
-                f'{{"tipo": "desarrollo3", "texto": "2-3 frases con detalle adicional (opcional)", '
-                f'"search_query_en": "english keywords"}}, '
-                f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
-                f'"search_query_en": "english keywords"}}, '
-                f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
-                f'"search_query_en": "english keywords"}}]}}. '
-                f"NADA MAS fuera del JSON. El array bloques debe tener entre 5 y 7 elementos."
-            )}],
-            temperature=0.9, max_tokens=1800,
-        )
-    except Exception as e:
-        logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
-        _native_fail(slot_id, job_id, f"script LLM error: {str(e)[:200]}")
-        return None
-
-    # 1a-bis. Type guard: llm_json_call may return a list (when the LLM
-    # outputs a JSON array instead of an object), which would crash
-    # validate_short_script below with "'list' has no attribute 'get'".
-    if not isinstance(script, dict):
-        logger.error("Short script generation returned unexpected type %s for %s",
-                     type(script).__name__, channel_slug)
-        _native_fail(slot_id, job_id, f"script LLM devolvió tipo inesperado: {type(script).__name__}")
-        return None
-
-    # 1b. Validate script completeness (with smart truncation for over-long scripts)
-    from pipeline.shorts_tts import validate_short_script, MAX_WORD_COUNT as _MAX_WORDS, MIN_WORD_COUNT as _MIN_WORDS
-    errors = validate_short_script(script)
-    if errors:
-        # Separate structural errors from word-count issues
-        structural_errors = [e for e in errors if "too long" not in e and "too short" not in e
-                             and "words" not in e and "Blocks" not in e and "blocks" not in e]
-        if structural_errors:
-            logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
-            _native_fail(slot_id, job_id, f"script inválido: {structural_errors[:3]}")
+    MAX_SCRIPT_ATTEMPTS = 3
+    conflict_feedback = ""
+    script = None
+    for _attempt in range(MAX_SCRIPT_ATTEMPTS):
+        _is_last = (_attempt == MAX_SCRIPT_ATTEMPTS - 1)
+        try:
+            script = llm_json_call(
+                client,
+                max_retries=3,
+                retry_delay=2.0,
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": (
+                    f"Genera un Short viral en español de ~50-58 segundos (~70-85 palabras totales, minimo 70). "
+                    f"Canal: {display_name} — {niche}. Tagline: {tagline}."
+                    f"{topic_warning}"
+                    f"{title_warning}"
+                    f"{theme_block}"  # v8: visual theme context for query anchoring
+                    f"{conflict_feedback}"
+                    f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
+                    f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
+                    f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 18. "
+                    f"El total debe superar 70 palabras y no exceder 90. "
+                    f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
+                    f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
+                    f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
+                    f"Incluye tema + detalles visuales (iluminacion, tipo de plano, atmosfera, accion). "
+                    f"NO uses espanol (las APIs de stock no lo entienden). "
+                    f"Ademas genera 'theme_keywords_en': 5-8 keywords EN INGLES del tema visual GLOBAL "
+                    f"del short para mantener coherencia entre escenas. "
+                    f"Devuelve SOLO JSON: "
+                    f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
+                    f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
+                    f'"theme_keywords_en": ["global", "theme", "keywords"], '
+                    f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
+                    f'"search_query_en": "english keywords for stock search"}}, '
+                    f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
+                    f'"search_query_en": "english keywords"}}, '
+                    f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
+                    f'"search_query_en": "english keywords"}}, '
+                    f'{{"tipo": "desarrollo3", "texto": "2-3 frases con detalle adicional (opcional)", '
+                    f'"search_query_en": "english keywords"}}, '
+                    f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
+                    f'"search_query_en": "english keywords"}}, '
+                    f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
+                    f'"search_query_en": "english keywords"}}]}}. '
+                    f"NADA MAS fuera del JSON. El array bloques debe tener entre 5 y 7 elementos."
+                )}],
+                temperature=0.9, max_tokens=1800,
+            )
+        except Exception as e:
+            logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
+            _native_fail(slot_id, job_id, f"script LLM error: {str(e)[:200]}")
             return None
 
-        bloques_for_trim = script.get("bloques", [])
-        total_words = sum(len(b.get("texto", "").split()) for b in bloques_for_trim)
-
-        if total_words > _MAX_WORDS:
-            # Trim words from blocks: desarrollo → climax → cierre → hook (last resort)
-            trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
-            words_to_remove = total_words - _MAX_WORDS
-
-            for block_type in trim_order:
-                if words_to_remove <= 0:
-                    break
-                for b in bloques_for_trim:
-                    if b.get("tipo") == block_type:
-                        words = b.get("texto", "").split()
-                        min_words = 5 if block_type not in ("hook", "cierre") else 7
-                        if len(words) > min_words:
-                            remove_from_block = min(words_to_remove, len(words) - min_words)
-                            b["texto"] = " ".join(words[:len(words) - remove_from_block])
-                            words_to_remove -= remove_from_block
-
-            logger.warning(
-                "[%s] Script trimmed from %d to ~%d words (LLM exceeded limit of %d)",
-                channel_slug, total_words, _MAX_WORDS, _MAX_WORDS,
-            )
-
-            # Re-validate after trimming
-            errors2 = validate_short_script(script)
-            if errors2:
-                logger.error(
-                    "Short script still invalid after trimming for %s: %s",
-                    channel_slug, errors2,
+        # 1a-bis. Type guard: llm_json_call may return a list (when the LLM
+        # outputs a JSON array instead of an object), which would crash
+        # validate_short_script below with "'list' has no attribute 'get'".
+        if not isinstance(script, dict):
+            if not _is_last:
+                conflict_feedback = (
+                    "❌ La respuesta anterior no era un objeto JSON válido. "
+                    "Devuelve SOLO un objeto JSON con el schema indicado.\n"
                 )
-                _native_fail(slot_id, job_id, f"script inválido tras recorte: {errors2[:3]}")
+                continue
+            logger.error("Short script generation returned unexpected type %s for %s",
+                         type(script).__name__, channel_slug)
+            _native_fail(slot_id, job_id, f"script LLM devolvió tipo inesperado: {type(script).__name__}")
+            return None
+
+        # 1b. Validate script completeness (with smart truncation for over-long scripts)
+        errors = validate_short_script(script)
+        if errors:
+            # Separate structural errors from word-count issues
+            structural_errors = [e for e in errors if "too long" not in e and "too short" not in e
+                                 and "words" not in e and "Blocks" not in e and "blocks" not in e]
+            if structural_errors:
+                if not _is_last:
+                    conflict_feedback = (
+                        f"❌ El script anterior no cumplía el schema: {structural_errors[:2]}. "
+                        f"Regénéralo cumpliendo EXACTAMENTE el schema indicado.\n"
+                    )
+                    continue
+                logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
+                _native_fail(slot_id, job_id, f"script inválido: {structural_errors[:3]}")
                 return None
-        elif total_words < _MIN_WORDS:
+
+            bloques_for_trim = script.get("bloques", [])
+            total_words = sum(len(b.get("texto", "").split()) for b in bloques_for_trim)
+
+            if total_words > _MAX_WORDS:
+                # Trim words from blocks: desarrollo → climax → cierre → hook (last resort)
+                trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
+                words_to_remove = total_words - _MAX_WORDS
+
+                for block_type in trim_order:
+                    if words_to_remove <= 0:
+                        break
+                    for b in bloques_for_trim:
+                        if b.get("tipo") == block_type:
+                            words = b.get("texto", "").split()
+                            min_words = 5 if block_type not in ("hook", "cierre") else 7
+                            if len(words) > min_words:
+                                remove_from_block = min(words_to_remove, len(words) - min_words)
+                                b["texto"] = " ".join(words[:len(words) - remove_from_block])
+                                words_to_remove -= remove_from_block
+
+                logger.warning(
+                    "[%s] Script trimmed from %d to ~%d words (LLM exceeded limit of %d)",
+                    channel_slug, total_words, _MAX_WORDS, _MAX_WORDS,
+                )
+
+                # Re-validate after trimming
+                errors2 = validate_short_script(script)
+                if errors2:
+                    if not _is_last:
+                        conflict_feedback = (
+                            f"❌ El script anterior seguía inválido tras el recorte: {errors2[:2]}. "
+                            f"Genera un script más corto (~70-85 palabras).\n"
+                        )
+                        continue
+                    logger.error(
+                        "Short script still invalid after trimming for %s: %s",
+                        channel_slug, errors2,
+                    )
+                    _native_fail(slot_id, job_id, f"script inválido tras recorte: {errors2[:3]}")
+                    return None
+            elif total_words < _MIN_WORDS:
+                logger.warning(
+                    "[%s] Script has only %d words (< %d min) — proceeding anyway",
+                    channel_slug, total_words, _MIN_WORDS,
+                )
+
+        # ── Hard spam filter: title similarity guard (dentro del bucle) ──
+        # Near-duplicate titles across shorts AND long-form are a classic spam
+        # signal. Si choca y quedan intentos → regenerar con feedback; si no,
+        # rendirse (el slot reintentará en otro tick).
+        _title_candidate = (script.get("titulo") or script.get("title") or "Short")[:100]
+        _sim, _sim_what = _title_similar_to_recent(
+            channel_id, _title_candidate, check_shorts=True, check_longform=True,
+        )
+        if _sim:
+            if not _is_last:
+                conflict_feedback = (
+                    f"\n\n❌ RECHAZADO: tu título '{_title_candidate[:60]}' es demasiado "
+                    f"parecido a {_sim_what} (ya publicado). Genera un script NUEVO "
+                    f"con un tema y un título COMPLETAMENTE distintos (máx 50% "
+                    f"palabras compartidas).\n"
+                )
+                logger.warning(
+                    "[%s] Title similar (intento %d/%d): '%s' ~ %s — regenerando con feedback",
+                    channel_slug, _attempt + 1, MAX_SCRIPT_ATTEMPTS,
+                    _title_candidate[:60], _sim_what,
+                )
+                continue
             logger.warning(
-                "[%s] Script has only %d words (< %d min) — proceeding anyway",
-                channel_slug, total_words, _MIN_WORDS,
+                "[%s] Title too similar to recent %s: '%s' ~ '%s' — "
+                "rejecting script, slot will retry with different content",
+                channel_slug, _sim_what, _title_candidate[:60], _title_candidate[:60],
             )
+            _native_fail(slot_id, job_id, f"título similar a {_sim_what} (tras {MAX_SCRIPT_ATTEMPTS} intentos)")
+            return None
+        break  # script válido y título sin conflicto
 
     _update_short_job_progress(job_id, 10, "script")
 
@@ -3545,23 +3664,6 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
-
-    # ── Hard spam filter: title similarity guard ─────────────────
-    # Near-duplicate titles across shorts AND long-form are a classic spam
-    # signal. If the generated title overlaps too much with a recent one,
-    # REJECT the script (return None) so the slot retries with different
-    # content instead of uploading a near-copy.
-    _sim, _sim_what = _title_similar_to_recent(
-        channel_id, title, check_shorts=True, check_longform=True,
-    )
-    if _sim:
-        logger.warning(
-            "[%s] Title too similar to recent %s: '%s' ~ '%s' — "
-            "rejecting script, slot will retry with different content",
-            channel_slug, _sim_what, title[:60], title[:60],
-        )
-        _native_fail(slot_id, job_id, f"título similar a {_sim_what}")
-        return None
 
     # ── Hard content-safety filter (anti-strike) ─────────────────
     # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
