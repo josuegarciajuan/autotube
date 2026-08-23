@@ -354,7 +354,6 @@ class ThumbnailMaker:
         text_gancho = brief.text_gancho if hasattr(brief, 'text_gancho') and brief.text_gancho else ""
         text_complemento = brief.text_complemento if hasattr(brief, 'text_complemento') and brief.text_complemento else ""
         badge_text = brief.badge_text if hasattr(brief, 'badge_text') and brief.badge_text else ""
-        secondary_scene = brief.secondary_scene if hasattr(brief, 'secondary_scene') and brief.secondary_scene else ""
 
         # ── P3 (ago 2026): el texto de la miniatura NUNCA debe repetir el
         # inicio del título (mata el curiosity gap y el CTR). Se recortan los
@@ -395,7 +394,6 @@ class ThumbnailMaker:
             text_gancho=text_gancho,
             text_complemento=text_complemento,
             badge_text=badge_text,
-            secondary_scene=secondary_scene,
             layout=getattr(brief, 'layout', '') or '',
             inset_image_path=inset_path,
         )
@@ -519,7 +517,6 @@ class ThumbnailMaker:
             l1 = self._dedupe_overlay(title, l1)
             overlay = self._dedupe_overlay(title, overlay)
             badge = getattr(brief, 'badge_text', '') or ''
-            secondary = getattr(brief, 'secondary_scene', '') or ''
             layout = getattr(brief, 'layout', '') or ''
             
             thumb_path = self._compose_final(
@@ -533,7 +530,6 @@ class ThumbnailMaker:
                 text_gancho=l1,
                 text_complemento=l2,
                 badge_text=badge,
-                secondary_scene=secondary,
                 layout=layout,
                 inset_image_path=inset_path,
             )
@@ -944,7 +940,6 @@ class ThumbnailMaker:
         text_gancho: str = "",
         text_complemento: str = "",
         badge_text: str = "",
-        secondary_scene: str = "",
         layout: str = "",
         inset_image_path: Path | None = None,
     ) -> Path:
@@ -954,7 +949,10 @@ class ThumbnailMaker:
         1. Color grading (contrast + saturation per style, 1.5x boost)
         2. Focus vignette (strength varies by layout)
         3. Dark gradient overlay (opacity and range vary by layout)
-        4. Inset recuadros — ONLY when layout profile allows them
+        4. Inset recuadros — ONLY when layout profile allows them.
+           IMPORTANTE: los recuadros NUNCA pintan texto libre (prompts de
+           escena secundaria). Usan una escena real del video o una etiqueta
+           fija corta. No reintroducir secondary_scene aquí.
         5. Marketing text overlay (1 or 2 lines depending on layout)
         6. Badge stamp / 4K — ONLY when layout profile allows it
         7. Accent border (weight varies by layout)
