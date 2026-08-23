@@ -1378,6 +1378,16 @@ def repack_channel_publish_times(
         logger.info("[%s] repack: no hay publicaciones pendientes", slug)
         return []
 
+    # ── Horizonte de seguridad ESCALABLE (antiban, ago 2026) ──────────
+    # El cap fijo de 5 días (MAX_PUBLISH_AHEAD_SAFETY_HOURS) recortaba y APILABA
+    # vídeos de colas largas en el mismo instante: con el gap antiban de 24h
+    # (1 publicación/día) una cola de N vídeos necesita N días, y una cola de 20
+    # vídeos excedía el cap → varios vídeos caían al safety_limit con el MISMO
+    # timestamp (p. ej. 4 vídeos a 2026-08-28T18:42:05.726688), recreando la
+    # ráfaga de mismo día/hora. El horizonte efectivo escala con la cola para
+    # que el cap NUNCA recorte una cola legítima de 1/día.
+    safety_ahead_hours = max(safety_ahead_hours, gap_hours * max(1, len(rows) + 2))
+
     # ── 2. Config de pico para el primer slot ──
     try:
         ch = db.get_channel(channel_id)
