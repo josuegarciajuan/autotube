@@ -3961,17 +3961,35 @@ async def _monitor_worker_progress(
                     job_id, job_status,
                     proc.returncode if not process_alive else "still running",
                 )
-                # ── Trigger immediate dispatch of next pending slot ──────
-                # Bypasses the 5-min checker loop tick so queued slots
-                # fire as soon as the active worker releases resources.
-                # Uses deterministic interleaving: shorts always tried first
-                # because they generate faster (~10 min vs ~45 min).
-                try:
-                    from api.services.priority_dispatcher import dispatch_next_priority_slot
-                    db2 = _get_db()
-                    dispatch_next_priority_slot(db=db2)
-                except Exception:
-                    pass
+                # ── Anti-thrash (fix ago 2026) ─────────────────────────
+                # Si el worker murió MUY temprano (scrape, progress < 12), el
+                # re-dispatch inmediato alimentaba un bucle de 1 worker cada
+                # ~2 min (thrash) cuando la API se reiniciaba. En ese caso
+                # dejamos que el checker loop (5 min) reintente con backoff.
+                _early_scrape_death = (
+                    job_status == "failed"
+                    and video is not None
+                    and (video.get("progress") or 0) < 12
+                    and (video.get("progress_phase") or "") in ("scrape", "interrupted", "error")
+                )
+                if _early_scrape_death:
+                    logger.info(
+                        "Job #%d died early in scrape (progress=%s, phase=%s) — "
+                        "deferring immediate re-dispatch (anti-thrash)",
+                        job_id, video.get("progress"), video.get("progress_phase"),
+                    )
+                else:
+                    # ── Trigger immediate dispatch of next pending slot ──────
+                    # Bypasses the 5-min checker loop tick so queued slots
+                    # fire as soon as the active worker releases resources.
+                    # Uses deterministic interleaving: shorts always tried first
+                    # because they generate faster (~10 min vs ~45 min).
+                    try:
+                        from api.services.priority_dispatcher import dispatch_next_priority_slot
+                        db2 = _get_db()
+                        dispatch_next_priority_slot(db=db2)
+                    except Exception:
+                        pass
                 break
 
     except asyncio.CancelledError:
