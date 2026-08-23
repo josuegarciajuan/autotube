@@ -1126,7 +1126,10 @@ def run_job(
             # ffmpeg xfade concat of 200+ segments with crossfades consumes
             # GBs of memory. If we're already near OOM, the concat will crash
             # or trigger the kernel OOM killer, killing other processes.
-            if not _check_memory_before_video(logger):
+            from config.settings import MIN_FREE_FOR_ASSEMBLY_MB
+            if not _check_memory_before_video(
+                logger, min_free_gb=MIN_FREE_FOR_ASSEMBLY_MB / 1024.0
+            ):
                 error_msg = "RAM insuficiente para ensamblaje de video — se aborta para prevenir OOM kill"
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg, phase="video")
