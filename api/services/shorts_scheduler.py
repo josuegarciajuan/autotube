@@ -1871,6 +1871,144 @@ def cleanup_excessive_shorts_slots(db=None) -> dict:
 
 # ── Smart shorts slot dispatcher ───────────────────────────────
 
+def _fill_native_short_queue(db=None, loop=None) -> dict | None:
+    """Relleno masivo de la cola de shorts nativos (generar SIN subir, Fase 2).
+
+    Cuando no hay ningún slot nativo DUE para subir, la fábrica de shorts
+    genera un nativo más a la cola (``generate_only`` → shorts.status='generated')
+    hasta alcanzar MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL por canal. La válvula
+    de goteo (``_upload_queued_native_shorts``) sube la cola paulatinamente
+    según el perfil de pacing (1/día por canal en strike), colocando cada
+    short en su hora pico.
+
+    Guards: un short a la vez (global), RAM, shorts no pausados. Elige el
+    canal con MENOS cola (justicia aproximada). Genera UNO por tick para no
+    saturar LLM/RAM — la frecuencia la dicta el tick del scheduler.
+
+    Returns:
+        dict con el slot/job despachado, o None si no hay nada que rellenar.
+    """
+    import random
+    from datetime import datetime as _dt_fill, timedelta as _td_fill, timezone as _tz_fill
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    if _shorts_paused(db):
+        return None
+
+    # Memoria: el render de un short es ffmpeg in-process (pico 2-4 GB).
+    from config.settings import MIN_FREE_FOR_SHORTS_DISPATCH_MB
+    if not _memory_ok(min_free_gb=MIN_FREE_FOR_SHORTS_DISPATCH_MB / 1024.0):
+        return None
+
+    # Un short a la vez (global)
+    try:
+        active_global = db.get_active_shorts_job()
+    except Exception:
+        active_global = None
+    if active_global:
+        return None
+
+    try:
+        from config.defaults import MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL
+        target = int(MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL or 0)
+    except Exception:
+        target = 60
+    if target <= 0:
+        return None
+
+    # Canal con MENOS cola por debajo del tope
+    best = None
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return None
+    for ch in channels:
+        cid = int(ch.get("id", 0) or 0)
+        slug = ch.get("slug", "")
+        if not cid:
+            continue
+        try:
+            sc_rows = db.get_shorts_planning_config(cid)
+            sc = sc_rows[0] if sc_rows else {}
+        except Exception:
+            sc = {}
+        if not sc.get("shorts_enabled", True):
+            continue
+        # Canales spam-bloqueados ya rellenan su cola por su propia ruta
+        # (generate_only durante el bloqueo) — no duplicar aquí.
+        if _channel_shorts_spam_blocked(cid, db):
+            continue
+        try:
+            queued = db.count_queued_native_shorts(cid)
+        except Exception:
+            queued = 0
+        if queued >= target:
+            continue
+        if best is None or queued < best["queued"]:
+            best = {"channel_id": cid, "slug": slug, "queued": queued}
+    if best is None:
+        return None
+
+    cid = best["channel_id"]
+    slug = best["slug"]
+
+    # Slot nativo FUTURO (mañana en una ventana pico) — la generación ocurre
+    # ahora, la publicación la gobierna la válvula cuando toque.
+    try:
+        tomorrow = date.today() + timedelta(days=1)
+        window = random.choice(NATIVE_WINDOWS)
+        total_min = window[0] * 60 + window[1]
+        slot_dict = _minutes_to_utc_slot(
+            tomorrow.isoformat(), total_min, cid, slug,
+            short_type="native", tz=DEFAULT_TIMEZONE,
+        )
+        target_upload_at = slot_dict.get("target_upload_at")
+        scheduled_at = slot_dict.get("scheduled_at") or _dt_fill.now(_tz_fill.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as exc:
+        logger.debug("Fill: slot time computation failed (%s) — usando ahora+26h", exc)
+        target_upload_at = (_dt_fill.now(_tz_fill.utc) + _td_fill(hours=26)).strftime("%Y-%m-%d %H:%M:%S")
+        scheduled_at = _dt_fill.now(_tz_fill.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Crear slot + job y despachar en generate_only (cola, sin subir)
+    try:
+        slot_id = db.create_shorts_slot(
+            cid, tomorrow.isoformat(), scheduled_at,
+            target_upload_at=target_upload_at, short_type="native",
+        )
+        job_id = db.create_job(cid, "generate_native_short")
+        db.update_job(job_id, status="running")
+        db.update_shorts_slot_status(slot_id, "running", job_id=job_id)
+
+        _fill_coro = _dispatch_short_async(
+            slot_id=slot_id,
+            job_id=job_id,
+            channel_id=cid,
+            channel_slug=slug,
+            short_type="native",
+            target_upload_at=target_upload_at,
+            generate_only=True,
+        )
+        if loop is not None:
+            import asyncio as _asyncio_fill
+            _asyncio_fill.run_coroutine_threadsafe(_fill_coro, loop)
+        else:
+            import asyncio as _asyncio_fill2
+            _asyncio_fill2.create_task(_fill_coro)
+    except Exception as exc:
+        logger.warning("[%s] Fill native queue failed: %s", slug, exc)
+        return None
+
+    logger.info(
+        "[%s] Fill cola nativos: slot #%d en cola (pub %s, cola=%d/%d)",
+        slug, slot_id, str(target_upload_at)[:16], best["queued"] + 1, target,
+    )
+    return {"slot_id": slot_id, "job_id": job_id, "channel_slug": slug,
+            "short_type": "native", "fill": True}
+
+
 def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
@@ -1903,6 +2041,14 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     if _youtube_quota_blocked(db):
         logger.info("Shorts dispatch: YouTube quota exhausted — uploads paused")
+        # La fábrica de shorts NO se detiene con la cuota: genera a la cola
+        # (generate_only, sin subir) para drenarla al recuperar cuota.
+        try:
+            _fill = _fill_native_short_queue(db=db, loop=loop)
+            if _fill:
+                return _fill
+        except Exception as exc:
+            logger.warning("Shorts dispatch: fill durante pausa de cuota falló: %s", exc)
         return None
 
     # Kill-switch global de shorts (manual): shorts_paused / scheduler_paused
@@ -1913,6 +2059,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     # Tope global duro de shorts/día (anti-spam YouTube)
     if _global_shorts_daily_cap_reached(db):
         logger.info("Shorts dispatch: tope global diario alcanzado (%d shorts) — pausa", _global_shorts_daily_cap())
+        # El tope aplica a SUBIDAS; la generación a cola puede seguir.
+        try:
+            _fill = _fill_native_short_queue(db=db, loop=loop)
+            if _fill:
+                return _fill
+        except Exception as exc:
+            logger.warning("Shorts dispatch: fill tras tope global falló: %s", exc)
         return None
 
     # ── Cola de shorts nativos generados durante bloqueos: subir gradualmente ──
@@ -2052,6 +2205,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             "(bypass=%s)",
                             _force_retry, _force_bypass_guards,
                         )
+                        # ── Fase 2: sin slots subibles → rellenar cola de nativos ──
+                        try:
+                            _fill = _fill_native_short_queue(db=db, loop=loop)
+                            if _fill:
+                                return _fill
+                        except Exception as exc:
+                            logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
                         return None
 
                     slot_id = force_slot["id"]
@@ -2531,6 +2691,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     # Exhausted all retries (e.g. all pending clip slots have no source)
     logger.warning("Shorts dispatch: exhausted %d clip retries — no dispatchable slot", _MAX_CLIP_RETRIES)
+    # ── Fase 2: sin slots subibles → rellenar cola de nativos (generación a cola) ──
+    try:
+        _fill = _fill_native_short_queue(db=db, loop=loop)
+        if _fill:
+            return _fill
+    except Exception as exc:
+        logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
     return None
 
 
@@ -3691,6 +3858,32 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
         return False
 
     title = (short_record.get("title") or "Short")[:100]
+    # ── Fase 2: la cola respeta la hora pico del slot planificado ──
+    # Si el slot del short tiene target_upload_at futuro → subir como private
+    # con publishAt (publicación programada en la franja óptima). Si no hay
+    # slot o el target ya pasó → publicación inmediata.
+    privacy = "public"
+    publish_at = None
+    try:
+        with db._connect() as conn:
+            slot_row = conn.execute(
+                """SELECT target_upload_at FROM shorts_planned_slots
+                   WHERE short_id = ? AND status = 'completed'
+                   ORDER BY id DESC LIMIT 1""",
+                (short_id,),
+            ).fetchone()
+        if slot_row and slot_row["target_upload_at"]:
+            publish_at = _safe_publish_at(
+                slot_row["target_upload_at"], slug, channel_id=channel_id,
+            )
+            if publish_at:
+                privacy = "private"
+                logger.info(
+                    "[%s] Queued short #%d: publicación programada en hora pico (%s)",
+                    slug, short_id, str(publish_at)[:19],
+                )
+    except Exception as exc:
+        logger.debug("[%s] Queued short #%d: slot publish lookup failed: %s", slug, short_id, exc)
     try:
         result = uploader.upload(
             video_path=file_path,
@@ -3698,7 +3891,8 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
             description=description[:5000],
             tags=hashtags[:60],
             category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-            privacy="public",
+            privacy=privacy,
+            publish_at=publish_at,
         )
     except Exception as exc:
         logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)

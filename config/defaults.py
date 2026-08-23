@@ -421,8 +421,10 @@ SHORTS_MAX_DURATION_SEC = 58.0          # YouTube Shorts max = 60 s; leave 2 s b
 # ── Shorts en cola durante bloqueo por spam (ago 2026) ──────────
 # Durante el ban, los shorts nativos se GENERAN y quedan con status 'generated'
 # (sin subir) para despachar la cola al desbloquearse. Tope por canal para no
-# llenar disco/LLM.
-MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL = 30
+# llenar disco/LLM. ago 2026 (Fase 2 fábrica continua): 30 → 60 — la cola es
+# el "backlog de shorts" que la válvula de goteo drena según el perfil de
+# pacing (1/día por canal en strike).
+MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL = 60
 
 # ═══════════════════════════════════════════════════════════════════
 # THUMBNAIL DEFAULTS
