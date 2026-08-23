@@ -58,6 +58,30 @@ def _format_local(dt: datetime, tz_name: str) -> Optional[str]:
         return None
 
 
+def _ytdlp_confirm_public(yt_video_id: str) -> bool:
+    """Confirma (0 cuota) si un vídeo está público vía yt-dlp watch-page.
+
+    Punto ciego del wall-scrape RSS: el feed público solo conserva ~15 entradas;
+    en un canal con mucha actividad, un vídeo público puede caer fuera del feed
+    y el verifier lo daría por "no publicado" indefinidamente (vídeos atascados
+    en 'uploaded'/'uploaded_private' sin published_at, con alertas eternas).
+    Este fallback comprueba la watch page con yt-dlp (0 cuota de Data API, el
+    mismo mecanismo que usa youtube_stats_scraper). Solo se invoca cuando el
+    vídeo lleva pasado el grace period y NO aparece en el feed, así que no añade
+    coste en el camino feliz.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["yt-dlp", "--skip-download", "--no-warnings", "--print", "%(id)s",
+             f"https://www.youtube.com/watch?v={yt_video_id}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.returncode == 0 and out.stdout.strip() == yt_video_id
+    except Exception:
+        return False
+
+
 def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: str):
     """Background verification via FREE channel-wall scraping (public RSS feed).
 
@@ -158,6 +182,23 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
             elapsed_min if elapsed_min is not None else -1.0,
             retry_count,
         )
+
+        # ── RSS blind spot: fuera del feed → confirmación vía yt-dlp (0 cuota) ──
+        # Si el vídeo lleva pasado el grace period y no aparece en el feed (el
+        # feed RSS solo conserva ~15 entradas), la watch page con yt-dlp decide:
+        # público → marcar publicado; no público → alerta (flujo previo).
+        if elapsed_min is not None and elapsed_min >= _PUBLISH_GRACE_MINUTES:
+            try:
+                if _ytdlp_confirm_public(yt_video_id):
+                    vlog.info(
+                        "[%s] ✅ Video #%d (yt=%s) confirmado público vía yt-dlp "
+                        "(fallback: feed RSS limitado a ~15 entradas)",
+                        channel_slug, video_id, yt_video_id,
+                    )
+                    _mark_video_published(video_id, channel_slug, yt_video_id)
+                    return
+            except Exception as yt_exc:
+                vlog.debug("[%s] yt-dlp fallback skipped: %s", channel_slug, yt_exc)
 
         # ── Raise system alert once grace period is exceeded ──
         if elapsed_min is not None and elapsed_min >= _PUBLISH_GRACE_MINUTES:
