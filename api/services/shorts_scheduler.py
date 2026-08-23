@@ -53,6 +53,17 @@ TITLE_SIMILARITY_THRESHOLD = 0.6
 TITLE_SIMILARITY_LOOKBACK_DAYS = 30
 TITLE_SIMILARITY_LOOKBACK_LIMIT = 30
 
+# Anti-strike (ago 2026): NUNCA subir un short con el render degradado a fondo
+# de color sólido (solid bg = voz TTS + subtítulos sobre color plano = firma
+# clásica de "AI slop" que YouTube elimina en segundos). Si la fracción de
+# escenas con asset visual real cae por debajo de este umbral, se rechaza el
+# render y el slot reintenta (re-genera) con más RAM/assets, en vez de subir.
+SHORTS_MIN_VALID_ASSET_RATIO = 0.5
+# Cap duro de shorts por canal y día (total native+clip), independiente de la
+# config de planning y NO saltable por el force-dispatch/catch-up. El usuario
+# pidió explícitamente "1 short al día por canal" tras los strikes.
+SHORTS_HARD_PER_CHANNEL_DAILY_CAP = 1
+
 
 def _safe_publish_at(target_upload_at, channel_slug: str, channel_id: int = None,
                      db=None) -> str | None:
@@ -275,6 +286,31 @@ def _global_shorts_daily_cap_reached(db=None) -> bool:
                      AND date(published_at) = date('now', 'localtime')"""
             ).fetchone()
         return (row[0] if row else 0) >= GLOBAL_SHORTS_PER_DAY_CAP
+    except Exception:
+        return False
+
+
+def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
+    """True si el canal ya SUBIÓ hoy >= SHORTS_HARD_PER_CHANNEL_DAILY_CAP shorts.
+
+    Cap duro por canal (native+clip), independiente de la config de planning y
+    NO saltable por force-dispatch/catch-up. Cuenta cualquier short con
+    youtube_id asignado hoy (subido, aunque sea private programado), porque lo
+    que dispara el flag de YouTube es la SUBIDA, no la publicación.
+    """
+    try:
+        import sqlite3 as _sql_pc
+        from config.settings import DATABASE_PATH as _DBP_PC
+        with _sql_pc.connect(str(_DBP_PC), timeout=10) as _conn_pc:
+            row = _conn_pc.execute(
+                """SELECT COUNT(*) FROM shorts
+                   WHERE channel_id = ?
+                     AND youtube_id IS NOT NULL
+                     AND youtube_id != ''
+                     AND date(created_at) = date('now', 'localtime')""",
+                (channel_id,),
+            ).fetchone()
+        return (row[0] if row else 0) >= SHORTS_HARD_PER_CHANNEL_DAILY_CAP
     except Exception:
         return False
 
@@ -1991,6 +2027,22 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         _failed_force_ids.add(slot_id)
                         continue
 
+                    # ── HARD per-channel daily cap — SIEMPRE (incluso en bypass) ──
+                    # A diferencia del resto de guards, este NO se salta nunca:
+                    # es la garantía de "1 short/día por canal" tras los strikes.
+                    if _channel_hard_daily_short_cap_reached(channel_id, db):
+                        logger.info(
+                            "Force dispatch: slot #%d (%s) — tope duro diario "
+                            "(%d short(s)/día) — cancelando slot",
+                            slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+                        )
+                        _failed_force_ids.add(slot_id)
+                        db.update_shorts_slot_status(
+                            slot_id, "cancelled",
+                            error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
+                        )
+                        continue
+
                     # ── Hard spam filter: channel blocked by a spam strike ──
                     _spam_gen_only_f = False
                     if _channel_shorts_spam_blocked(channel_id):
@@ -2239,6 +2291,22 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 "Shorts slot #%d (%s) skipped: cooldown active "
                 "(last short < %d min ago) — trying next channel",
                 slot_id, slug, SHORTS_COOLDOWN_MINUTES,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
+
+        # 5a. HARD per-channel daily cap (anti-strike, NO saltable por catch-up
+        # ni force-dispatch): máx SHORTS_HARD_PER_CHANNEL_DAILY_CAP shorts
+        # subidos hoy por canal. Lo que dispara el flag de YouTube es la SUBIDA.
+        if _channel_hard_daily_short_cap_reached(channel_id, db):
+            logger.info(
+                "Shorts slot #%d (%s) skipped: tope duro diario alcanzado "
+                "(%d short(s) subidos hoy) — cancelando slot",
+                slot_id, slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+            )
+            db.update_shorts_slot_status(
+                slot_id, "cancelled",
+                error_message=f"hard daily cap ({SHORTS_HARD_PER_CHANNEL_DAILY_CAP}/día)",
             )
             _skipped_slot_ids.add(slot_id)
             continue
@@ -2834,6 +2902,16 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
     logger = logging.getLogger("autotube.standalone")
 
     try:
+        from database.db_extended import ExtendedDatabase
+        _db_s = ExtendedDatabase()
+        # HARD per-channel daily cap (anti-strike).
+        if _channel_hard_daily_short_cap_reached(channel_id, _db_s):
+            logger.info(
+                "[standalone] %s: tope duro diario (%d/día) alcanzado — skip",
+                channel_slug, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+            )
+            return None
+
         from pipeline.shorts_standalone import discover_standalone_topics, run_standalone_short
 
         # Discover 3 trending topics, pick the best one
@@ -2844,6 +2922,23 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
 
         topic = topics[0]  # Best topic first
         logger.info("[standalone] %s: running for topic '%s'", channel_slug, topic.get("title", "?"))
+
+        # Content-safety pre-filter (anti-strike): rechazar temas sensibles.
+        try:
+            from pipeline.content_safety import classify_topic_safety
+            _safety = classify_topic_safety(
+                topic=topic.get("title", "") or topic.get("tema", ""),
+                title=topic.get("title", ""),
+                script_texts=[topic.get("description", ""), topic.get("hook", "")],
+            )
+            if not _safety.safe:
+                logger.warning(
+                    "[standalone] %s: tema rechazado por seguridad — %s",
+                    channel_slug, _safety.reason,
+                )
+                return None
+        except Exception as _cs_exc:
+            logger.warning("[standalone] %s: safety check error (fail-open): %s", channel_slug, _cs_exc)
 
         short_id = run_standalone_short(
             channel_slug=channel_slug,
@@ -3093,6 +3188,29 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         )
         return None
 
+    # ── Hard content-safety filter (anti-strike) ─────────────────
+    # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
+    # gráfica, desinformación sanitaria) ANTES de gastar TTS/render/upload.
+    # Igual que el guard de títulos: return None → el slot reintenta con otro
+    # contenido. Evita repetir los strikes de canal5 (casos médicos de menores).
+    try:
+        from pipeline.content_safety import classify_topic_safety
+        _bloque_textos = [b.get("texto", "") for b in bloques if isinstance(b, dict)]
+        _safety = classify_topic_safety(
+            topic=topic, title=title,
+            script_texts=[hook_text] + _bloque_textos,
+            config=ch_config,
+        )
+        if not _safety.safe:
+            logger.warning(
+                "[%s] Contenido rechazado por filtro de seguridad: '%s' — %s "
+                "(slot reintentará con otro tema)",
+                channel_slug, title[:60], _safety.reason,
+            )
+            return None
+    except Exception as _cs_exc:
+        logger.warning("[%s] Content-safety filter error (fail-open): %s", channel_slug, _cs_exc)
+
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False
     cta_variants = getattr(ch_config, "SHORTS_SUBSCRIBE_CTA_VARIANTS", [])
@@ -3257,6 +3375,25 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         render_assets = asset_items
         render_ranges = None
 
+    # ── Anti-strike: rechazar renders degradados (solid bg = AI-spam) ──
+    # Si no hay assets reales, o la fracción de escenas con visual real es muy
+    # baja, NO subir: el resultado sería fondo liso + TTS + subtítulos, que es
+    # exactamente la firma que YouTube elimina a los ~20 s. Se devuelve None
+    # para que el slot reintente con otra ventana de RAM/assets.
+    _valid_assets_total = sum(1 for a in asset_items if a is not None)
+    _asset_positions = len(asset_items) if asset_items else 0
+    _degraded = (
+        _valid_assets_total == 0
+        or (_asset_positions > 0 and (_valid_assets_total / _asset_positions) < SHORTS_MIN_VALID_ASSET_RATIO)
+    )
+    if _degraded:
+        logger.warning(
+            "[%s] Short render DEGRADADO (%d/%d assets reales) — rechazado para no "
+            "subir solid-bg (riesgo de strike IA). Slot reintentará.",
+            channel_slug, _valid_assets_total, _asset_positions,
+        )
+        return None
+
     # 4. Render hybrid (video + Ken Burns images + xfade)
     video_path = output_dir / f"sched_short_{channel_slug}_{ts}.mp4"
 
@@ -3281,22 +3418,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             progress_cb=_shorts_render_progress,
         )
     except Exception as e:
-        logger.warning("Hybrid render failed, falling back to solid bg: %s", e)
-        # render_short_hybrid internally uses solid-color bg when asset_items is empty,
-        # but if it raised an exception (e.g. complex FFmpeg filter error),
-        # re-render with empty assets to force the solid-bg path
-        try:
-            render_short_hybrid(
-                asset_items=[],
-                audio_path=audio_path,
-                output_path=video_path,
-                audio_duration=audio_duration,
-                bg_color_hex=bg_color,
-                srt_path=srt_path if srt_path.exists() else None,
-            )
-        except Exception as e2:
-            logger.error("Solid-bg fallback render also failed for %s: %s", channel_slug, e2)
-            return None
+        # Anti-strike: NUNCA subir un render degradado a fondo sólido. Si el
+        # render híbrido falla (ffmpeg timeout bajo presión de RAM, etc.), se
+        # rechaza y el slot reintenta, en vez de subir solid-bg (AI-spam).
+        logger.warning(
+            "Hybrid render failed for %s — rejecting slot (no solid-bg upload): %s",
+            channel_slug, e,
+        )
+        return None
 
     if not video_path.exists():
         logger.error("Render produced no output file for %s", channel_slug)
@@ -3502,6 +3631,14 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
     # Quota guard (proyecto del canal)
     if _youtube_quota_blocked(channel_slug=slug):
         logger.info("[%s] Queued short upload skipped: cuota bloqueada", slug)
+        return False
+
+    # HARD per-channel daily cap (anti-strike): no subir si ya se subió hoy.
+    if _channel_hard_daily_short_cap_reached(channel_id, db):
+        logger.info(
+            "[%s] Queued short #%d skipped: tope duro diario (%d/día) — se mantiene en cola",
+            slug, short_id, SHORTS_HARD_PER_CHANNEL_DAILY_CAP,
+        )
         return False
 
     uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
