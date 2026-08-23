@@ -1552,7 +1552,12 @@ def run_job(
             # ── v26: Pre-render clip shorts during F1 (generate_only) ──
             # Generate clip shorts from the source MP4 BEFORE cleanup, so they
             # go directly to "Pendiente subida" with scheduled upload times.
-            # The source MP4 is preserved for F2 upload, so extraction works.
+            # Flag anti-bucle (antiban, ago 2026): True si el upload falló por
+            # condición transient (cap diario / cuota) que se difiere al
+            # siguiente día PT. Hace que el job se marque 'failed' (cuenta en
+            # el presupuesto de reintentos) y que el scheduler no re-despache
+            # el vídeo cada minuto.
+            _upload_retryable_fail = False
             if action == "generate_only":
                 vp = video_data.get("video_path", "") if video_data else ""
                 if vp and Path(vp).exists():
@@ -1827,15 +1832,27 @@ def run_job(
                         getattr(orch, "_upload_admission_denied", False)
                     )
                     if db.is_quota_exhausted_for_channel(canal):
+                        from api.services.yt_retry_guard import next_pt_day_retry_str
+                        retry_at = next_pt_day_retry_str()
                         db.update_video(video_id, progress=0, status="awaiting_upload",
-                                        error_message="YouTube API quota exhausted",
-                                        progress_phase="upload", scheduled_upload_at=None)
-                        logger.info("[%s] Upload failed due to quota exhaustion — keeping awaiting_upload", canal)
+                                        error_message="YouTube API quota exhausted (reintento mañana PT)",
+                                        progress_phase="upload", scheduled_upload_at=retry_at)
+                        logger.info(
+                            "[%s] Upload failed (quota) — diferido a %s (no bucle)",
+                            canal, retry_at,
+                        )
+                        _upload_retryable_fail = True
                     elif admission_denied:
+                        from api.services.yt_retry_guard import next_pt_day_retry_str
+                        retry_at = next_pt_day_retry_str()
                         db.update_video(video_id, progress=0, status="awaiting_upload",
-                                        error_message="Upload admission denied locally — retry pending",
-                                        progress_phase="upload", scheduled_upload_at=None)
-                        logger.info("[%s] Upload admission denied locally — keeping awaiting_upload (retry)", canal)
+                                        error_message="Upload admission denied locally (reintento mañana PT)",
+                                        progress_phase="upload", scheduled_upload_at=retry_at)
+                        logger.info(
+                            "[%s] Upload admission denied — diferido a %s (retry mañana, no bucle)",
+                            canal, retry_at,
+                        )
+                        _upload_retryable_fail = True
                     else:
                         db.update_video(video_id, progress=95, status="ready")
                 except Exception:
@@ -1849,7 +1866,9 @@ def run_job(
                     pass
 
         # ── Success ──────────────────────────────────────────
-        success = True
+        # Si el upload falló por condición transient (cap/cuota), el job se
+        # marca 'failed' para que cuente en el presupuesto anti-bucle.
+        success = not _upload_retryable_fail
         pipeline_duration = int((time.time() - pipeline_start))
         logger.info("PIPELINE COMPLETE in %d seconds", pipeline_duration)
         

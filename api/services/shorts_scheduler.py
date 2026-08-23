@@ -2487,6 +2487,28 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
     # Exhausted all retries (e.g. all pending clip slots have no source)
     logger.warning("Shorts dispatch: exhausted %d clip retries — no dispatchable slot", _MAX_CLIP_RETRIES)
+    # Anti-bucle (antiban, ago 2026): al agotar el presupuesto de reintentos se
+    # alerta al operador en vez de rendirse en silencio. create_alert deduplica
+    # (1 alerta sin resolver por tipo), así que no spamea en cada tick.
+    try:
+        from api.services.lifecycle_monitor import create_alert
+        from database.db_extended import ExtendedDatabase
+        create_alert(
+            ExtendedDatabase(),
+            entity_type="system", entity_id=None, channel_id=None,
+            alert_type="shorts_dispatch_exhausted",
+            severity="warning",
+            title="Shorts: presupuesto de reintentos agotado — sin slot despachable",
+            message=(
+                f"El dispatcher de shorts agotó sus {_MAX_CLIP_RETRIES} reintentos sin "
+                f"encontrar un slot válido (p. ej. clips sin vídeo fuente, cooldowns o "
+                f"cap diario). Los slots afectados quedaron pendientes/cancelados. "
+                f"Revisa el log 'Shorts dispatch' para identificar la causa."
+            ),
+            metadata={"max_retries": _MAX_CLIP_RETRIES},
+        )
+    except Exception as _alert_exc:
+        logger.warning("shorts dispatch alert failed: %s", _alert_exc)
     return None
 
 

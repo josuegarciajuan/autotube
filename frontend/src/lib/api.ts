@@ -704,6 +704,7 @@ export function statusBadge(status: string): string {
     cancelled: 'badge-error',
     unlisted: 'badge-uploaded_private',
     private_quality_issue: 'badge-error',
+    held: 'badge-error',
   };
   return map[status] || 'badge-draft';
 }
@@ -728,6 +729,7 @@ export function statusLabel(status: string): string {
     cancelled: 'Cancelado',
     unlisted: 'No listado',
     private_quality_issue: 'Error calidad',
+    held: 'Retenido (revisar)',
   };
   return map[status] || status;
 }

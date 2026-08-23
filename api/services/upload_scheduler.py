@@ -27,7 +27,11 @@ from pathlib import Path
 logger = logging.getLogger("autotube.upload_scheduler")
 
 MAX_CONCURRENT_UPLOADS = 1  # One upload at a time (avoids YouTube rate limits)
-MAX_UPLOAD_RETRY_PER_VIDEO = 10  # Max upload attempts before marking video as error
+# ago 2026 (antiban): 10 → 3. Presupuesto de reintentos de subida por vídeo
+# antes de quedar 'held' + alerta. Ninguna acción contra YouTube puede
+# reintentar en bucle infinito (señal de automatización); al agotar el
+# presupuesto se retiene el vídeo y se alerta al operador (yt_retry_guard).
+MAX_UPLOAD_RETRY_PER_VIDEO = 3  # Max upload attempts before marking video as held
 # ^ Increased from 3 → 10 (2026-08-09): Long backoff allows surviving multi-hour
 #   outages (quota exhaustion, server restarts, YouTube processing delays).
 #   Glass Box auto-recovery provides a final safety net if all 10 fail.
@@ -633,6 +637,50 @@ def _channels_need_repack(db, now) -> list[int]:
             sorted(score.items(), key=lambda kv: kv[1], reverse=True)]
 
 
+def _hold_exhausted_uploads(db) -> int:
+    """Marca 'held' + alerta los vídeos que agotaron el presupuesto de subida.
+
+    Anti-bucle (antiban, ago 2026): el filtro SQL de la selección excluye en
+    silencio los vídeos con >= MAX_UPLOAD_RETRY_PER_VIDEO intentos fallidos
+    (jobs upload_only status='failed'). Sin este scan quedarían invisibles para
+    el operador. Aquí se retienen (status='held') y se crea una alerta para que
+    un humano investigue — nunca se sigue reintentando contra YouTube.
+
+    Returns:
+        Nº de vídeos retenidos.
+    """
+    from api.services.yt_retry_guard import hold_video
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, c.slug,
+                          (SELECT COUNT(*) FROM generation_jobs gj
+                           WHERE gj.video_id = v.id AND gj.action = 'upload_only'
+                             AND gj.status = 'failed') n
+                   FROM videos v JOIN channels c ON c.id = v.channel_id
+                   WHERE v.status = 'awaiting_upload'
+                   ORDER BY n DESC"""
+            ).fetchall()
+    except Exception as exc:
+        logger.debug("hold scan skipped: %s", exc)
+        return 0
+
+    held = 0
+    for r in rows:
+        if int(r["n"]) >= MAX_UPLOAD_RETRY_PER_VIDEO:
+            try:
+                if hold_video(
+                    db, r["id"], r["slug"], "upload",
+                    f"{r['n']} intentos de subida fallidos (tope {MAX_UPLOAD_RETRY_PER_VIDEO})",
+                ):
+                    held += 1
+            except Exception as exc:
+                logger.warning("hold #%d failed: %s", r["id"], exc)
+    if held:
+        logger.warning("⛔ %d vídeo(s) retenidos (held) por agotar reintentos de subida", held)
+    return held
+
+
 def _recover_far_future_published(db) -> int:
     """Reprogramar el horario de publicación de canales con vídeos "calentando".
 
@@ -825,6 +873,16 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # This catches videos that got stuck due to server restart / worker crash
     # where the startup recovery didn't revert them (e.g. race condition, missed tick).
     _recover_stuck_uploading_videos(db)
+
+    # ── 0c. Anti-bucle: vídeos que agotaron el presupuesto de reintentos ──
+    # El filtro SQL de la selección excluye silenciosamente los vídeos con >=
+    # MAX_UPLOAD_RETRY_PER_VIDEO fallos; sin este scan quedarían invisibles.
+    # Se marcan 'held' + alerta (yt_retry_guard) para revisión humana. NUNCA
+    # reintentar en bucle contra YouTube.
+    try:
+        _hold_exhausted_uploads(db)
+    except Exception as exc:
+        logger.debug("hold-exhausted scan skipped: %s", exc)
 
     # ── 0b. Consistency scan: fix stale target_public_at / far-future scheduled_upload_at ──
     # Self-heals the "publish before upload" and "upload too far" inconsistencies.
@@ -1205,12 +1263,14 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         pass
     if retry_count >= MAX_UPLOAD_RETRY_PER_VIDEO:
         logger.warning(
-            "Video %d: exceeded max upload retries (%d/%d) — marking as error",
+            "Video %d: exceeded max upload retries (%d/%d) — holding (held) + alert",
             video_id, retry_count, MAX_UPLOAD_RETRY_PER_VIDEO,
         )
-        db.update_video(video_id, status="error",
-                         progress_phase="upload",
-                         progress=0)
+        from api.services.yt_retry_guard import hold_video
+        hold_video(
+            db, video_id, slug, "upload",
+            f"{retry_count} intentos de subida fallidos (tope {MAX_UPLOAD_RETRY_PER_VIDEO})",
+        )
         return None
 
     # ── 5. Create upload job and dispatch (Fase 1.3: subproceso independiente) ──

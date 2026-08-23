@@ -1771,6 +1771,7 @@ export default function ChannelDetail() {
                     {displayStatus === 'generating' && <Loader2 size={9} className="animate-spin" />}
                     {displayStatus === 'reassembling' && <Loader2 size={9} className="animate-spin" />}
                     {displayStatus === 'error' && <AlertCircle size={9} />}
+                    {displayStatus === 'held' && <AlertCircle size={9} />}
                     {statusLabel(displayStatus)}
                   </span>
                   {(v.source_mode === 'viral' || v.source_url) && (
@@ -1792,7 +1793,7 @@ export default function ChannelDetail() {
                        displayStatus === 'uploaded' || displayStatus === 'uploaded_private' ? <Upload size={10} className="text-blue-400" /> :
                        displayStatus === 'scheduled' || displayStatus === 'warming' ? <Clock size={10} className="text-neon-gold" /> :
                        displayStatus === 'generating' || displayStatus === 'reassembling' ? <Loader2 size={10} className="animate-spin text-neon-red" /> :
-                       displayStatus === 'error' ? <AlertCircle size={10} className="text-red-400" /> :
+                       displayStatus === 'error' || displayStatus === 'held' ? <AlertCircle size={10} className="text-red-400" /> :
                        <Clock size={10} />}
                       <span>{statusLabel(displayStatus)}</span>
                     </span>
@@ -1899,7 +1900,7 @@ export default function ChannelDetail() {
                     {v.thumbnail_path && <button onClick={e => { e.preventDefault(); e.stopPropagation(); handleDownloadThumbnail(v.id) }} className="text-[11px] text-neon-cyan bg-neon-cyan/10 px-2 py-0.5 rounded hover:bg-neon-cyan/20 flex items-center gap-1"><Download size={11} /> Mini</button>}
                     {v.status === 'ready' && !v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-red bg-neon-red/10 px-2 py-0.5 rounded hover:bg-neon-red/20">Subir a YT</button>}
                     {v.yt_video_id && <button onClick={e => { e.preventDefault(); handleUpload(v.id) }} className="text-[11px] text-neon-gold bg-neon-gold/10 px-2 py-0.5 rounded hover:bg-neon-gold/20">Resubir</button>}
-                    {(displayStatus === 'error' || displayStatus === 'failed') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
+                    {(displayStatus === 'error' || displayStatus === 'failed' || displayStatus === 'held') && <button onClick={e => { e.preventDefault(); setDeleteTarget(v.id) }} className="text-[11px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded hover:bg-red-400/20 flex items-center gap-1"><Trash2 size={11} /> Eliminar</button>}
                   </div>
                 </div>
               </div>
