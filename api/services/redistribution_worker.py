@@ -20,7 +20,7 @@ PAUSE_KEY = "redistribution_paused_{channel_id}"
 MIN_INTERVAL_MIN = 15          # mínimo entre subidas a una misma plataforma
 MAX_UPLOADS_PER_TICK = 1       # una subida por tick global (sequencial)
 
-_ESPEJO_PLATFORMS = ("rumble", "dailymotion", "facebook", "odysee")
+_ESPEJO_PLATFORMS = ("rumble", "dailymotion", "facebook")
 
 
 def _parse_ts(value) -> datetime | None:

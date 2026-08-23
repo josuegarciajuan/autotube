@@ -4,6 +4,7 @@ import { api, formatDuration, formatDate, formatDateTime, formatTimingMs, status
   import { ArrowLeft, Play, Pause, Save, Upload, Image, Volume2, RefreshCw, Film, Edit3, Wand2, CheckCircle, XCircle, Loader2, ExternalLink, BarChart3 } from 'lucide-react'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import ScheduledPublishPanel from '../components/ScheduledPublishPanel'
+import VideoSocialStats from '../components/VideoSocialStats'
 
 export default function VideoEditor() {
   const { id } = useParams<{ id: string }>()
@@ -289,6 +290,9 @@ export default function VideoEditor() {
           </button>
         </div>
       )}
+
+      {/* Social distribution stats (v44) */}
+      <VideoSocialStats videoId={videoId} />
 
       {/* Metadata Editor */}
       {showMetadataEditor && (
