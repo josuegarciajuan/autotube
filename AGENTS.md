@@ -381,9 +381,19 @@ estas reglas DURAS. No relajarlas sin justificación:
 5. **Verificación post-subida endurecida.** `POST_UPLOAD_VERIFY_RETRIES=4`,
    `POST_UPLOAD_VERIFY_DELAY=10`, con fallback a la watch page (0 cuota) para NO
    registrar strike por lag de indexado (watch page "private"/"available" ⇒ no strike).
-6. **Sweep diario de eliminaciones silenciosas.** `scripts/check_video_removals.py`
-   barre los últimos N vídeos/shorts (0 cuota) y crea alerta `silent_removal` si YouTube
-   borró algo retroactivamente que constaba como publicado.
+ 6. **Sweep diario de eliminaciones silenciosas.** `scripts/check_video_removals.py`
+    barre los últimos N vídeos/shorts (0 cuota) y crea alerta `silent_removal` si YouTube
+    borró algo retroactivamente que constaba como publicado.
+7. **Hold de emergencia a Privado (0 cuota).** Cuando la cuota del Data API está
+   agotada y hay vídeos `uploaded_private` con publishAt vencido (riesgo de ráfaga:
+   el patrón que alimentó los strikes), el repack NO puede reprogramarlos
+   (`set_publish_at` = 403). `scripts/hold_pending_publishes.py` los pone en
+   **Privado sin programar** vía YouTube Studio (Playwright, 0 cuota):
+   `python3 scripts/hold_pending_publishes.py --canal canal2` (usa
+   `DATABASE_PATH` y `YT_BROWSER_TOKENS_DIR` si se ejecuta desde una worktree).
+   Tras el reset PT (~07:00 UTC), el repack los re-programa 1/día solo.
+   El repack respeta el breaker real `quota_exhausted_{project}` (skip limpio
+   en vez de martillear 403) — fix anti-thrash de ago 2026.
 
 ### 🎛️ Perfil central de cadencia ("strike mode") — `api/services/pacing_profile.py`
 

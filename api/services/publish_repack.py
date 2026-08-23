@@ -104,8 +104,46 @@ def apply_publish_repack(
     # ── Cuota (solo cuando quota_gate=True) ──
     if quota_gate:
         try:
-            from api.services.quota_tracker import get_channel_project, project_has_free_capacity
+            from api.services.quota_tracker import (
+                get_channel_project,
+                project_has_free_capacity,
+                is_quota_exhausted_for_channel,
+            )
             project = get_channel_project(slug)
+            # 1) Circuit-breaker real (403 detectado por el dispatcher): la
+            #    reserva local (get_daily_usage) NO siempre refleja el 403 real,
+            #    así que sin este check el repack martillea set_publish_at
+            #    condenados (403) cada minuto. (ago 2026: anti-thrash)
+            try:
+                raw = db.get_system_state(f"quota_exhausted_{project}")
+                if raw:
+                    logger.info(
+                        "[%s] repack skipped: project %s con cuota EXHAUSTADA (breaker) — "
+                        "se reintentará tras el reset PT",
+                        slug, project,
+                    )
+                    return {
+                        "channel_id": channel_id, "slug": slug,
+                        "total": 0, "rescheduled": 0, "no_change": 0,
+                        "yt_failed": 0, "quota_skipped": 1, "details": [],
+                    }
+            except Exception:
+                pass
+            # 2) Breaker per-channel (misma señal, por slug)
+            try:
+                if is_quota_exhausted_for_channel(slug):
+                    logger.info(
+                        "[%s] repack skipped: cuota agotada (is_quota_exhausted_for_channel)",
+                        slug,
+                    )
+                    return {
+                        "channel_id": channel_id, "slug": slug,
+                        "total": 0, "rescheduled": 0, "no_change": 0,
+                        "yt_failed": 0, "quota_skipped": 1, "details": [],
+                    }
+            except Exception:
+                pass
+            # 3) Reserva local (margen de seguridad adicional)
             if not project_has_free_capacity(project, min_free_pct=10.0):
                 logger.info("[%s] repack skipped: project %s sin capacidad libre", slug, project)
                 return {

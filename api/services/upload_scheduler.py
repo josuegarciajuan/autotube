@@ -633,6 +633,32 @@ def _channels_need_repack(db, now) -> list[int]:
     except Exception:
         pass
 
+    # Excluir canales cuyo proyecto GCP tiene la cuota EXHAUSTADA (breaker real
+    # `quota_exhausted_{project}`). (ago 2026, anti-thrash) Sin este filtro, el
+    # repack replanifica el canal CADA MINUTO mientras el 403 impide reprogramar
+    # nada: la DB se remueve sin converger y el plan re-calculado a veces vuelve
+    # a apilar vídeos (clamp de safety_limit). Al liberarse la cuota (reset PT),
+    # el breaker se limpia y el canal vuelve a entrar en el repack.
+    try:
+        from api.services.quota_tracker import get_channel_project
+        _quota_blocked = set()
+        for ch in db.get_channels(active_only=False):
+            try:
+                project = get_channel_project(ch["slug"])
+                if db.get_system_state(f"quota_exhausted_{project}"):
+                    _quota_blocked.add(int(ch["id"]))
+            except Exception:
+                continue
+        if _quota_blocked:
+            logger.debug(
+                "repack detection: %d canal(es) con proyecto en breaker de cuota "
+                "— se omiten hasta el reset",
+                len(_quota_blocked),
+            )
+            score = {k: v for k, v in score.items() if k not in _quota_blocked}
+    except Exception:
+        pass
+
     return [ch_id for ch_id, _ in
             sorted(score.items(), key=lambda kv: kv[1], reverse=True)]
 
