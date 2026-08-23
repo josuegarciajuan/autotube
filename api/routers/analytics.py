@@ -58,6 +58,8 @@ def get_channel_content_ranking(channel_id: int, limit: int = 20, sort: str = "v
             "estimated_minutes_watched": round(v.get("estimated_minutes_watched") or 0, 1),
             "average_view_duration": round(v.get("average_view_duration") or 0, 1),
             "subscribers_gained": v.get("subscribers_gained") or 0,
+            "impressions": v.get("impressions") or 0,
+            "ctr": v.get("ctr") or 0,
             "revenue_min": round(v.get("estimated_revenue_min") or rev_min, 2),
             "revenue_max": round(v.get("estimated_revenue_max") or rev_max, 2),
             "engagement_rate": engagement_rate,

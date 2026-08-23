@@ -40,15 +40,15 @@ CHANNEL_KEYWORDS = [
 CANAL_INITIALS = "AM"
 LOGO_SIZE = 180
 
-PROD_SCRIPT_WORDS_MIN = 2000
-PROD_SCRIPT_WORDS_MAX = 3500
-PROD_SCRIPT_SCENES_MIN = 10
-PROD_SCRIPT_SCENES_MAX = 18
-PROD_SCRIPT_BLOCKS_MIN = 10
-PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 10
-PROD_VIDEO_DURATION_MAX = 14
-VIDEO_AVERAGE_DURATION_MIN = 12
+PROD_SCRIPT_WORDS_MIN = 900
+PROD_SCRIPT_WORDS_MAX = 1500
+PROD_SCRIPT_SCENES_MIN = 6
+PROD_SCRIPT_SCENES_MAX = 10
+PROD_SCRIPT_BLOCKS_MIN = 6
+PROD_SCRIPT_BLOCKS_MAX = 10
+PROD_VIDEO_DURATION_MIN = 6
+PROD_VIDEO_DURATION_MAX = 9
+VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 CANAL_TONE = (
@@ -77,6 +77,13 @@ TITLE_FORMULAS = [
     "{condition}: La Enfermedad que la Ciencia No Puede Explicar",
     "Desperto del Coma Hablando un Idioma que Nunca Aprendio",
     "{number} Personas con Habilidades que la Ciencia No Entiende",
+    # ago 2026: formulas de payoff/story (outliers de retencion 30-55% y
+    # titulos que si rinden: pregunta + misterio + dato concreto)
+    "¿Por qué {fenomeno} sigue sin explicación {anios} después?",
+    "El día que {evento} cambió {todo} para siempre",
+    "La verdad sobre {misterio}: {dato} que nadie esperaba",
+    "{protagonista}: la historia de {desenlace} y nadie lo vio venir",
+    "Lo que {lugar} ocultó durante {anios}: {revelacion}",
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
@@ -118,6 +125,8 @@ SCRIPT_HOOK_RULE = (
     "seguian sin saber que tenia.'\n"
     "EJEMPLO INCORRECTO: 'Las enfermedades raras afectan a millones de "
     "personas en todo el mundo y son un desafio para la medicina moderna...'."
+    "PROMESA EN 30-90 SEGUNDOS: el espectador debe saber en el PRIMER MINUTO Y MEDIO qué va a descubrir y por qué merece la pena quedarse. Tras la frase de impacto, DILE EXPLÍCITAMENTE lo que va a aprender: «En los próximos minutos vas a descubrir quién... / qué pasó... / la verdad sobre...». NUNCA dejes la promesa para después del minuto 1.5: si el espectador no conoce el payoff en 90 segundos, abandona (la retención mediana actual es <20% en videos largos). Como el video ahora dura 6-9 minutos, la introducción (impacto + promesa + retención) NO debe superar los 90 segundos en total."
+
 )
 SCRIPT_STRUCTURE = [
     {"step": "EL SINTOMA", "time_pct": "0-10%",

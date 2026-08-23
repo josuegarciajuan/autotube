@@ -518,7 +518,7 @@ NADA MAS fuera del JSON."""
         )
         longform_url = None
         channel_id = self.db.get_channel_by_slug(self.channel_slug).get("id") if self.db else None
-        if should_cross_promote(self.config) and channel_id is not None:
+        if getattr(self.config, "SHORTS_DESCRIPTION_LINK_ENABLED", True) and channel_id is not None:
             longform_url = get_best_longform_link(channel_id)
 
         channel_url = getattr(self.config, "YOUTUBE_CHANNEL_URL", "")

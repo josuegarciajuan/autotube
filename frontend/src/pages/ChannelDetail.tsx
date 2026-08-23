@@ -1540,9 +1540,10 @@ export default function ChannelDetail() {
                       <tr className="text-gray-500 border-b border-white/5">
                         <th className="text-left py-2 font-medium">Video</th>
                         <th className="text-right py-2 font-medium">Vistas</th>
-                        <th className="text-right py-2 font-medium">Watch h</th>
-                        <th className="text-right py-2 font-medium">Likes</th>
-                        <th className="text-right py-2 font-medium hidden sm:table-cell">Revenue est.</th>
+                        <th className="text-right py-2 font-medium">Impr.</th>
+                        <th className="text-right py-2 font-medium">CTR</th>
+                        <th className="text-right py-2 font-medium hidden sm:table-cell">Watch h</th>
+                        <th className="text-right py-2 font-medium hidden md:table-cell">Likes</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1552,13 +1553,17 @@ export default function ChannelDetail() {
                             <span className="text-gray-300 line-clamp-1">{v.title}</span>
                           </td>
                           <td className="py-2 text-right font-mono tabular-nums text-neon-cyan">{formatShortNumber(v.views)}</td>
-                          <td className="py-2 text-right font-mono tabular-nums text-green-400">
+                          <td className="py-2 text-right font-mono tabular-nums text-gray-400">
+                            {v.impressions > 0 ? formatShortNumber(v.impressions) : '—'}
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums"
+                              style={{ color: v.ctr >= 3 ? '#4ade80' : v.ctr > 0 ? '#fbbf24' : '#6b7280' }}>
+                            {v.ctr > 0 ? `${v.ctr.toFixed(1)}%` : '—'}
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-green-400 hidden sm:table-cell">
                             {v.estimated_minutes_watched ? `${Math.round(v.estimated_minutes_watched / 6) / 10}h` : '—'}
                           </td>
-                          <td className="py-2 text-right font-mono tabular-nums text-neon-gold">{formatShortNumber(v.likes)}</td>
-                          <td className="py-2 text-right font-mono tabular-nums text-green-400 hidden sm:table-cell">
-                            ${v.revenue_min?.toFixed(2)}–${v.revenue_max?.toFixed(2)}
-                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-neon-gold hidden md:table-cell">{formatShortNumber(v.likes)}</td>
                         </tr>
                       ))}
                     </tbody>

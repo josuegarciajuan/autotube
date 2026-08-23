@@ -61,14 +61,14 @@ QUICK_TEST_IMAGES_PER_SCENE = 3
 # PRODUCTION DEFAULTS (override per channel)
 # ═══════════════════════════════════════════════════════════════════
 
-PROD_SCRIPT_WORDS_MIN = 2000
-PROD_SCRIPT_WORDS_MAX = 3500
-PROD_SCRIPT_SCENES_MIN = 10
-PROD_SCRIPT_SCENES_MAX = 18
-PROD_SCRIPT_BLOCKS_MIN = 10
-PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 10
-PROD_VIDEO_DURATION_MAX = 14
+PROD_SCRIPT_WORDS_MIN = 900
+PROD_SCRIPT_WORDS_MAX = 1500
+PROD_SCRIPT_SCENES_MIN = 6
+PROD_SCRIPT_SCENES_MAX = 10
+PROD_SCRIPT_BLOCKS_MIN = 6
+PROD_SCRIPT_BLOCKS_MAX = 10
+PROD_VIDEO_DURATION_MIN = 6
+PROD_VIDEO_DURATION_MAX = 9
 
 # Scene duration enforcement
 # Media-specific limits are used by the production timeline.  The legacy
@@ -82,7 +82,7 @@ SCENE_DURATION_MIN = 8.0
 SCENE_DURATION_MAX = 16.0
 
 # Average video duration target
-VIDEO_AVERAGE_DURATION_MIN = 12
+VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 # ═══════════════════════════════════════════════════════════════════
@@ -404,6 +404,12 @@ SHORTS_CLIP_SCHEDULE = [
 # SHORTS_LONGFORM_LINK_ENABLED es el master switch: False apaga todo el
 # cross-promote de shorts (run_post_publish_promotion) en las 5 rutas de subida.
 SHORTS_LONGFORM_LINK_ENABLED = False
+# ago 2026 (E3 funnel): el link al long-form en la DESCRIPCIÓN del short es
+# GRATIS (solo texto, 0 cuota de YouTube API) y es el principal embudo
+# short→long. Independiente de SHORTS_LONGFORM_LINK_ENABLED (que solo apaga
+# playlist/comentario, que SÍ cuestan cuota). Los shorts nuevos SIEMPRE llevan
+# "📺 Video completo → youtu.be/XXXX" en su descripción.
+SHORTS_DESCRIPTION_LINK_ENABLED = True
 SHORTS_PLAYLIST_AUTO = False
 SHORTS_FIRST_COMMENT_LINK = False
 SHORTS_PER_VIDEO_PLAYLIST = False

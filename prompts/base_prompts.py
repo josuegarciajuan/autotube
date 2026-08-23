@@ -395,7 +395,7 @@ REGLAS ESENCIALES:
 
 1. ESPANOL LATINOAMERICANO. Nada de vosotros, os, conjugaciones ibericas. Usa ustedes, tu o usted.
 
-2. HOOK IMPACTANTE. La primera frase debe ser un dato demoledor, un hecho concreto con fecha y numero, o un cliffhanger. NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a hablar de". Entra directo al contenido mas fascinante.
+2. HOOK IMPACTANTE + PROMESA EN 30-90 SEGUNDOS. La primera frase debe ser un dato demoledor, un hecho concreto con fecha y numero, o un cliffhanger. NUNCA: "Hola", "Bienvenidos", "En este video", "Hoy vamos a hablar de". Entra directo al contenido mas fascinante. Y en el PRIMER MINUTO Y MEDIO del guion el espectador debe saber EXACTAMENTE lo que va a descubrir y por que merece la pena quedarse: dile explicitamente el payoff ("En los proximos minutos vas a descubrir quien... / que paso... / la verdad sobre..."). NUNCA dejes la promesa para despues del minuto 1.5: si el espectador no conoce el payoff en 90 segundos, abandona. La introduccion completa (impacto + promesa + gancho de retencion) no debe superar los 90 segundos.
 
 3. NO INVENTES DATOS. Fechas, nombres, lugares y testimonios deben ser fieles a las fuentes. Si hay debate, menciona la incertidumbre. {substance}
 

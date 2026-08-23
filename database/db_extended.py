@@ -4316,14 +4316,22 @@ class ExtendedDatabase(Database):
 
     def insert_video_stats(self, video_id: int, yt_video_id: str, stats: dict) -> int | None:
         """Insert a snapshot of YouTube video statistics."""
+        # ago 2026: ctr/impressions (packaging) se persisten si vienen en el dict
+        # (la Analytics API devuelve fracción; la columna ctr guarda porcentaje).
+        impressions = int(stats.get("impressions", 0) or 0)
+        ctr_raw = stats.get("ctr", stats.get("impressionsClickThroughRate", 0) or 0)
+        try:
+            ctr_pct = round(float(ctr_raw) * 100, 2) if float(ctr_raw) <= 1 else round(float(ctr_raw), 2)
+        except (TypeError, ValueError):
+            ctr_pct = 0.0
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO video_stats_history
                    (video_id, yt_video_id, views, likes, comments,
                     estimated_minutes_watched, average_view_duration,
                     subscribers_gained, estimated_revenue_min, estimated_revenue_max,
-                    embeddable)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    embeddable, impressions, ctr)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     yt_video_id,
@@ -4336,6 +4344,8 @@ class ExtendedDatabase(Database):
                     float(stats.get("estimated_revenue_min", 0)),
                     float(stats.get("estimated_revenue_max", 0)),
                     1 if stats.get("embeddable", True) else 0,
+                    impressions,
+                    ctr_pct,
                 ),
             )
             conn.commit()
@@ -4392,10 +4402,17 @@ class ExtendedDatabase(Database):
         """Update estimated_minutes_watched, average_view_duration, subscribers_gained
         for multiple videos from a single Analytics API call.
 
+        ago 2026: además persiste `impressions` y `ctr` (% clicks/impresiones) —
+        las dos métricas del packaging (primer factor del algoritmo de YouTube)
+        que hasta ahora quedaban a 0 en video_stats_history. La API devuelve
+        impressionsClickThroughRate como fracción (0.05 = 5%) y se convierte a
+        porcentaje para la columna ctr.
+
         Args:
             video_id_map: Dict mapping yt_video_id → internal video id.
             analytics_data: Dict mapping yt_video_id → {estimatedMinutesWatched,
-                            averageViewDuration, subscribersGained}
+                            averageViewDuration, subscribersGained, impressions,
+                            impressionsClickThroughRate}
 
         Returns:
             Number of rows updated.
@@ -4436,18 +4453,23 @@ class ExtendedDatabase(Database):
                 emw = float(data.get("estimatedMinutesWatched", 0))
                 avd = float(data.get("averageViewDuration", 0))
                 subg = int(float(data.get("subscribersGained", 0)))
+                impressions = int(float(data.get("impressions", 0) or 0))
+                ctr_frac = float(data.get("impressionsClickThroughRate", 0) or 0)
+                ctr_pct = round(ctr_frac * 100, 2)  # fracción → porcentaje
                 has_analytics = 1 if emw > 0 or data.get("averageViewPercentage", "0") != "0" else 0
                 cursor = conn.execute(
                     """UPDATE video_stats_history
                        SET estimated_minutes_watched = ?,
                            average_view_duration = ?,
                            subscribers_gained = ?,
+                           impressions = ?,
+                           ctr = ?,
                            analytics_data_exists = ?
                        WHERE id = (
                            SELECT MAX(id) FROM video_stats_history
                            WHERE video_id = ? AND yt_video_id = ?
                        )""",
-                    (emw, avd, subg, has_analytics, aid, yt_id),
+                    (emw, avd, subg, impressions, ctr_pct, has_analytics, aid, yt_id),
                 )
                 if cursor.rowcount > 0:
                     updated += 1
@@ -5259,7 +5281,7 @@ class ExtendedDatabase(Database):
         return [dict(r) for r in rows]
 
     def get_channel_content_ranking(self, channel_id: int, limit: int = 20) -> list[dict]:
-        """Rank videos by views with revenue and retention data."""
+        """Rank videos by views with revenue, retention and packaging data."""
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT v.id, v.titulo_final, v.yt_video_id, v.yt_url, v.duracion_seg,
@@ -5267,7 +5289,8 @@ class ExtendedDatabase(Database):
                           vsh.views, vsh.likes, vsh.comments,
                           vsh.estimated_minutes_watched, vsh.average_view_duration,
                           vsh.subscribers_gained, vsh.estimated_revenue_min,
-                          vsh.estimated_revenue_max, vsh.fetched_at as stats_updated
+                          vsh.estimated_revenue_max, vsh.fetched_at as stats_updated,
+                          vsh.impressions, vsh.ctr
                    FROM videos v
                    JOIN video_stats_history vsh ON vsh.id = (
                        SELECT MAX(vsh2.id) FROM video_stats_history vsh2

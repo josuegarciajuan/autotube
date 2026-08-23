@@ -39,16 +39,16 @@ CHANNEL_KEYWORDS = [
 CANAL_INITIALS = "ESR"
 LOGO_SIZE = 180
 
-PROD_SCRIPT_WORDS_MIN = 2200
-PROD_SCRIPT_WORDS_MAX = 3800
-PROD_SCRIPT_SCENES_MIN = 10
-PROD_SCRIPT_SCENES_MAX = 18
-PROD_SCRIPT_BLOCKS_MIN = 10
-PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 12
-PROD_VIDEO_DURATION_MAX = 16
-VIDEO_AVERAGE_DURATION_MIN = 14
-VIDEO_DURATION_DISCREPANCY_MIN = 3
+PROD_SCRIPT_WORDS_MIN = 900
+PROD_SCRIPT_WORDS_MAX = 1500
+PROD_SCRIPT_SCENES_MIN = 6
+PROD_SCRIPT_SCENES_MAX = 10
+PROD_SCRIPT_BLOCKS_MIN = 6
+PROD_SCRIPT_BLOCKS_MAX = 10
+PROD_VIDEO_DURATION_MIN = 6
+PROD_VIDEO_DURATION_MAX = 9
+VIDEO_AVERAGE_DURATION_MIN = 7
+VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 CANAL_TONE = (
     "Grave, tenso y profundamente humano. Narrativa documental que oscila "
@@ -75,6 +75,13 @@ TITLE_FORMULAS = [
     "Sobrevivio {number} Dias en {location}. Nadie Sabe Como.",
     "{number} Personas Entraron en {location}. Ninguna Salio.",
     "La Expedicion que Te Hara Preguntarte si Habrias Sobrevivido",
+    # ago 2026: formulas de payoff/story (outliers de retencion 30-55% y
+    # titulos que si rinden: pregunta + misterio + dato concreto)
+    "¿Por qué {fenomeno} sigue sin explicación {anios} después?",
+    "El día que {evento} cambió {todo} para siempre",
+    "La verdad sobre {misterio}: {dato} que nadie esperaba",
+    "{protagonista}: la historia de {desenlace} y nadie lo vio venir",
+    "Lo que {lugar} ocultó durante {anios}: {revelacion}",
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
@@ -112,6 +119,8 @@ SCRIPT_HOOK_RULE = (
     "Inglaterra en dos barcos de ultima generacion. Ninguno volvio a ver "
     "a su familia jamas.'\nEJEMPLO INCORRECTO: 'Las expediciones polares del "
     "siglo XIX fueron un periodo de intensa exploracion artica que...'."
+    "PROMESA EN 30-90 SEGUNDOS: el espectador debe saber en el PRIMER MINUTO Y MEDIO qué va a descubrir y por qué merece la pena quedarse. Tras la frase de impacto, DILE EXPLÍCITAMENTE lo que va a aprender: «En los próximos minutos vas a descubrir quién... / qué pasó... / la verdad sobre...». NUNCA dejes la promesa para después del minuto 1.5: si el espectador no conoce el payoff en 90 segundos, abandona (la retención mediana actual es <20% en videos largos). Como el video ahora dura 6-9 minutos, la introducción (impacto + promesa + retención) NO debe superar los 90 segundos en total."
+
 )
 SCRIPT_STRUCTURE = [
     {"step": "EL FRIO", "time_pct": "0-10%",
