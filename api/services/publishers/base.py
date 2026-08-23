@@ -16,6 +16,7 @@ _MODULE_MAP = {
     "facebook": "api.services.publishers.facebook_video",
     "rumble": "api.services.publishers.rumble",
     "tiktok": "api.services.publishers.tiktok_api",
+    "dailymotion": "api.services.publishers.dailymotion",
 }
 
 

@@ -20,7 +20,14 @@ const DEFAULT_TIMING: Record<string, number> = {
   instagram: 120,
   facebook: 180,
   reddit: 240,
+  rumble: 5,
+  dailymotion: 15,
+  bluesky: 90,
+  mastodon: 100,
 }
+
+// Plataformas cuya credencial es un TOKEN/KEY (no contraseña de navegador)
+const TOKEN_PLATFORMS = ['rumble', 'facebook', 'dailymotion', 'bluesky', 'mastodon']
 
 export default function SocialAccountsPanel({ channelId }: Props) {
   const [accounts, setAccounts] = useState<SocialAccount[]>([])
@@ -202,7 +209,7 @@ export default function SocialAccountsPanel({ channelId }: Props) {
                       className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full"
                     />
                     <input
-                      type="password" placeholder={['rumble', 'facebook'].includes(platform.id) ? 'Access Token / API Key' : 'Contraseña'} value={form.password}
+                      type="password" placeholder={TOKEN_PLATFORMS.includes(platform.id) ? 'Access Token / API Key' : 'Contraseña'} value={form.password}
                       onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))}
                       className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full"
                     />

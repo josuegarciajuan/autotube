@@ -291,6 +291,8 @@ export type LifecycleActionType =
   | 'social_reel_instagram'
   | 'social_post_facebook'
   | 'social_post_reddit'
+  | 'social_link_bluesky'
+  | 'social_link_mastodon'
 
 export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
   playlist_add: 'Añadir a playlists',
@@ -304,6 +306,8 @@ export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
   social_reel_instagram: 'Publicar Reel en Instagram',
   social_post_facebook: 'Publicar en Facebook',
   social_post_reddit: 'Publicar en Reddit',
+  social_link_bluesky: 'Publicar teaser en Bluesky',
+  social_link_mastodon: 'Publicar teaser en Mastodon',
 }
 
 export interface SocialAccount {
@@ -354,6 +358,30 @@ export const SOCIAL_PLATFORMS = [
     id: 'rumble', label: 'Rumble', icon: '🎬', color: '#56c758',
     description: 'Video long-form completo. Monetización desde día 1 sin requisitos de suscriptores.',
     strategy: 'Sube el video completo vía API. Rumble licencia contenido viral a Yahoo/MSN/Newsweek generando ingresos adicionales por licensing.',
+    link: 'none',
+  },
+  {
+    id: 'dailymotion', label: 'Dailymotion', icon: '🎥', color: '#0066dc',
+    description: 'Video long-form completo (espejo). API v2 gratuita, audiencia europea.',
+    strategy: 'Re-subida del video completo con enlace a YouTube en la descripción. Credencial: client_id + client_secret (JSON).',
+    link: 'direct',
+  },
+  {
+    id: 'bluesky', label: 'Bluesky', icon: '🦋', color: '#0a7aff',
+    description: 'Post de texto + link card (teaser). API gratuita, sin revisión.',
+    strategy: 'Teaser con hook + enlace directo clicable a YouTube. Credencial: handle + app password.',
+    link: 'direct',
+  },
+  {
+    id: 'mastodon', label: 'Mastodon', icon: '🐘', color: '#6364ff',
+    description: 'Post de texto + enlace (teaser). API libre, sin revisión.',
+    strategy: 'Teaser con hashtags de nicho + enlace a YouTube. Credencial: user@instancia + token.',
+    link: 'direct',
+  },
+  {
+    id: 'odysee', label: 'Odysee', icon: '🧪', color: '#f06b01',
+    description: 'Video espejo opcional (LBRY).',
+    strategy: 'Re-subida completa. Opcional — solo si sobra capacidad.',
     link: 'none',
   },
 ] as const

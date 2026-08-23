@@ -1225,6 +1225,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v43: progress detail counters (upload bytes / scene x/y) ──
     _migrate_v43(conn, logger)
+
+    # ── v44: social redistribution (platform stats + pacing) ──
+    _migrate_v44(conn, logger)
     
     conn.commit()
     conn.close()
@@ -2833,6 +2836,70 @@ def _migrate_v43(conn, logger):
             logger.info("Migration v43: added videos.%s", col)
         except Exception:
             pass  # column already exists
+
+
+def _migrate_v44(conn, logger):
+    """Idempotent v44: social redistribution — stats + pacing.
+
+    Extends the cross-platform publishing system (v27) with:
+    - Snapshot stats columns on platform_videos (fast UI display).
+    - platform_video_stats time-series table (espejo de video_stats_history).
+    - redistribution_state per-channel/platform pacing (warmup, daily cap,
+      backoff) para el backfill progresivo sin riesgo de ban.
+    """
+    # 1. Snapshot stats columns on platform_videos (idempotent)
+    pv_cols = {row[1] for row in conn.execute("PRAGMA table_info('platform_videos')").fetchall()}
+    for col, col_type in [
+        ("views", "INTEGER DEFAULT 0"),
+        ("likes", "INTEGER DEFAULT 0"),
+        ("comments", "INTEGER DEFAULT 0"),
+        ("reposts", "INTEGER DEFAULT 0"),
+        ("queue_order", "INTEGER"),
+    ]:
+        if col not in pv_cols:
+            try:
+                conn.execute(f"ALTER TABLE platform_videos ADD COLUMN {col} {col_type}")
+                logger.info("Migration v44: added platform_videos.%s", col)
+            except Exception as exc:
+                logger.warning("Migration v44: failed to add platform_videos.%s: %s", col, exc)
+
+    # 2. platform_video_stats time-series table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS platform_video_stats (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform_video_id  INTEGER NOT NULL REFERENCES platform_videos(id) ON DELETE CASCADE,
+            platform           TEXT    NOT NULL,
+            views              INTEGER DEFAULT 0,
+            likes              INTEGER DEFAULT 0,
+            comments           INTEGER DEFAULT 0,
+            reposts            INTEGER DEFAULT 0,
+            fetched_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pvs_platform_video "
+        "ON platform_video_stats(platform_video_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pvs_platform "
+        "ON platform_video_stats(platform)"
+    )
+
+    # 3. redistribution_state pacing table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS redistribution_state (
+            channel_id       INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            platform         TEXT    NOT NULL,
+            daily_cap        INTEGER DEFAULT 3,
+            warmup_until     TIMESTAMP,
+            backoff_until    TIMESTAMP,
+            last_publish_at  TIMESTAMP,
+            updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (channel_id, platform)
+        )
+    """)
+    conn.commit()
+    logger.info("Migration v44: redistribution tables ensured")
 
 
 def _migrate_v10(conn, logger):
@@ -8783,10 +8850,12 @@ class ExtendedDatabase(Database):
 
     def update_platform_video(self, record_id: int, **kwargs) -> None:
         """Update a platform_videos row. Supports: status, platform_video_id,
-        platform_video_url, error_message, privacy, metadata_json, attempts.
+        platform_video_url, error_message, privacy, metadata_json, attempts,
+        views, likes, comments, reposts.
         Sets uploaded_at when status='published'."""
         allowed = {"status", "platform_video_id", "platform_video_url",
-                   "error_message", "privacy", "metadata_json", "attempts"}
+                   "error_message", "privacy", "metadata_json", "attempts",
+                   "views", "likes", "comments", "reposts"}
         fields = []
         values = []
         for k, v in kwargs.items():
@@ -8854,6 +8923,205 @@ class ExtendedDatabase(Database):
                 q += " AND platform = ?"
                 params.append(platform)
             rows = conn.execute(q + " ORDER BY created_at DESC", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_published_platform_videos(self, channel_id: int = None,
+                                      platform: str = None) -> list[dict]:
+        """Get all platform_videos rows in status 'published' (for stats collection)."""
+        with self._connect() as conn:
+            q = "SELECT * FROM platform_videos WHERE status = 'published'"
+            params: list = []
+            if channel_id:
+                q += " AND channel_id = ?"
+                params.append(channel_id)
+            if platform:
+                q += " AND platform = ?"
+                params.append(platform)
+            q += " ORDER BY id ASC"
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── v44: Social redistribution (backlog, pacing, stats) ─────
+
+    def enqueue_redistribution_backlog(self, channel_id: int, platforms: list[str],
+                                       video_ids: list[int] = None) -> int:
+        """Enqueue published videos as pending platform_videos rows for backfill.
+
+        Only videos already published to YouTube (status='published' or with
+        yt_video_id) are enqueued. Existing rows are left untouched, so this is
+        idempotent. Returns the number of new pending rows created.
+        """
+        if not platforms:
+            return 0
+        created = 0
+        with self._connect() as conn:
+            if video_ids:
+                rows = conn.execute(
+                    "SELECT id, yt_video_id FROM videos WHERE channel_id = ? AND id IN ({}) "
+                    "ORDER BY id".format(",".join("?" * len(video_ids))),
+                    (channel_id, *video_ids),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, yt_video_id FROM videos WHERE channel_id = ? "
+                    "AND (status = 'published' OR yt_video_id IS NOT NULL) "
+                    "ORDER BY id",
+                    (channel_id,),
+                ).fetchall()
+            for v in rows:
+                if not v["yt_video_id"]:
+                    continue
+                for platform in platforms:
+                    exists = conn.execute(
+                        "SELECT id FROM platform_videos WHERE video_id = ? AND platform = ?",
+                        (v["id"], platform),
+                    ).fetchone()
+                    if exists:
+                        continue
+                    # queue_order = insertion order (oldest video first)
+                    conn.execute(
+                        """INSERT INTO platform_videos
+                           (video_id, channel_id, platform, status, privacy, queue_order)
+                           VALUES (?, ?, ?, 'pending', 'public', ?)""",
+                        (v["id"], channel_id, platform, v["id"]),
+                    )
+                    created += 1
+            conn.commit()
+        return created
+
+    def get_redistribution_backlog(self, channel_id: int, platform: str = None,
+                                   limit: int = 100) -> list[dict]:
+        """Get pending redistribution rows ordered by queue_order (oldest first)."""
+        with self._connect() as conn:
+            q = ("SELECT * FROM platform_videos WHERE channel_id = ? AND status = 'pending'")
+            params: list = [channel_id]
+            if platform:
+                q += " AND platform = ?"
+                params.append(platform)
+            q += " ORDER BY queue_order IS NULL, queue_order ASC, id ASC"
+            if limit:
+                q += " LIMIT ?"
+                params.append(limit)
+            rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_redistribution_state(self, channel_id: int, platform: str) -> dict | None:
+        """Get pacing state for a channel+platform."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM redistribution_state WHERE channel_id = ? AND platform = ?",
+                (channel_id, platform),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_platform_published_today(self, channel_id: int, platform: str) -> int:
+        """Count platform_videos published to a platform since UTC midnight."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as c FROM platform_videos
+                   WHERE channel_id = ? AND platform = ?
+                     AND status = 'published'
+                     AND uploaded_at >= datetime('now', 'start of day')""",
+                (channel_id, platform),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+    def upsert_redistribution_state(self, channel_id: int, platform: str,
+                                    daily_cap: int = None, warmup_until: str = None,
+                                    backoff_until: str = None,
+                                    last_publish_at: str = None) -> bool:
+        """Create or update pacing state for a channel+platform."""
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM redistribution_state WHERE channel_id = ? AND platform = ?",
+                (channel_id, platform),
+            ).fetchone()
+            if existing:
+                fields = ["updated_at = CURRENT_TIMESTAMP"]
+                values: list = []
+                if daily_cap is not None:
+                    fields.append("daily_cap = ?"); values.append(daily_cap)
+                if warmup_until is not None:
+                    fields.append("warmup_until = ?"); values.append(warmup_until)
+                if backoff_until is not None:
+                    fields.append("backoff_until = ?"); values.append(backoff_until)
+                if last_publish_at is not None:
+                    fields.append("last_publish_at = ?"); values.append(last_publish_at)
+                values += [channel_id, platform]
+                conn.execute(
+                    f"UPDATE redistribution_state SET {', '.join(fields)} "
+                    "WHERE channel_id = ? AND platform = ?",
+                    values,
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO redistribution_state
+                       (channel_id, platform, daily_cap, warmup_until,
+                        backoff_until, last_publish_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (channel_id, platform,
+                     daily_cap if daily_cap is not None else 3,
+                     warmup_until, backoff_until, last_publish_at),
+                )
+            conn.commit()
+        return True
+
+    def record_platform_video_stats(self, platform_video_id: int, platform: str,
+                                    views: int = 0, likes: int = 0,
+                                    comments: int = 0, reposts: int = 0) -> None:
+        """Insert a stats snapshot + update the latest snapshot on platform_videos."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO platform_video_stats
+                   (platform_video_id, platform, views, likes, comments, reposts)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (platform_video_id, platform, views, likes, comments, reposts),
+            )
+            conn.execute(
+                "UPDATE platform_videos SET views=?, likes=?, comments=?, reposts=?, "
+                "last_checked_at=CURRENT_TIMESTAMP WHERE id=?",
+                (views, likes, comments, reposts, platform_video_id),
+            )
+            conn.commit()
+
+    def get_platform_video_stats_history(self, platform_video_id: int,
+                                         limit: int = 30) -> list[dict]:
+        """Get stats time-series for a platform video (most recent first)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM platform_video_stats WHERE platform_video_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (platform_video_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_channel_social_stats(self, channel_id: int) -> list[dict]:
+        """Aggregate per-platform stats for a channel (published rows only)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT platform,
+                          COUNT(*) as total_published,
+                          COALESCE(SUM(views), 0)   as total_views,
+                          COALESCE(SUM(likes), 0)   as total_likes,
+                          COALESCE(SUM(comments), 0) as total_comments,
+                          COALESCE(SUM(reposts), 0)  as total_reposts
+                   FROM platform_videos
+                   WHERE channel_id = ? AND status = 'published'
+                   GROUP BY platform ORDER BY platform""",
+                (channel_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_video_social_stats(self, video_id: int) -> list[dict]:
+        """Per-platform stats for a single video (published rows with links)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT platform, platform_video_id, platform_video_url, status,
+                          views, likes, comments, reposts, uploaded_at
+                   FROM platform_videos
+                   WHERE video_id = ? ORDER BY platform""",
+                (video_id,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     # ── video_asset_history helpers (v9 cross-video dedup) ─────
