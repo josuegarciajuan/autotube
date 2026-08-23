@@ -482,6 +482,12 @@ async def _queue_consumer():
     logger = logging.getLogger("autotube.queue")
     
     try:
+        from api.services.lifecycle_monitor import touch_task_heartbeat
+        touch_task_heartbeat("queue_consumer")
+    except Exception:
+        pass
+    
+    try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
         
@@ -576,6 +582,8 @@ async def _publish_verify_loop():
     
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("publish_verify")
             # Pause gate: skip only when the operator explicitly paused the
             # scheduler. Scraping consumes NO quota, so we intentionally ignore
             # quota-exhaustion and remediation mode here (unlike the old
@@ -653,6 +661,8 @@ async def _upload_health_checker_loop():
 
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("upload_health_checker")
             # ── Quota guard: skip health checks when YouTube API is exhausted ──
             from database.db_extended import ExtendedDatabase
             _hdb = ExtendedDatabase()
@@ -688,6 +698,8 @@ async def _health_monitor_loop():
     logger.info("Health monitor loop started (interval: 90s)")
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("health_monitor")
             from api.services.lifecycle_monitor import check_all_health
             db = get_db()
             # Offload to thread pool — check_all_health() makes sync sqlite3
@@ -794,6 +806,8 @@ async def _resume_phase_loop():
 
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("resume_phase")
             from database.db_extended import ExtendedDatabase
             from api.services.gradual_resume import apply_resume_phases
             _db = ExtendedDatabase()
@@ -838,6 +852,8 @@ async def _quota_recovery_loop():
 
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("quota_recovery")
             from database.db_extended import ExtendedDatabase
             _db = ExtendedDatabase()
 
@@ -953,6 +969,8 @@ async def _redistribution_loop():
 
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("redistribution")
             from database.db_extended import ExtendedDatabase
             from api.services.redistribution_worker import redistribution_tick
             _db = ExtendedDatabase()
@@ -1094,6 +1112,8 @@ async def _schedule_checker_loop():
 
     while True:
         try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("schedule_checker")
             if first_run:
                 first_run = False
                 sleep_sec = 0  # immediate first run

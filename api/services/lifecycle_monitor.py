@@ -324,6 +324,9 @@ def check_all_health(db) -> dict:
     # ── Check 16: Channel starving for content (all candidates rejected) ──
     created += _check_content_safety_starvation(db)
 
+    # ── Check 17: Cross-platform publish failures (non-auth) ──
+    created += _check_platform_publish_failed(db)
+
     logger.info(
         "Health check: %d alerts created, %d resolved",
         created, resolved,
@@ -938,6 +941,109 @@ def _check_platform_auth_errors(db) -> int:
             conn.commit()
     except Exception as exc:
         logger.warning("Platform auth check failed: %s", exc)
+    return created
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 17: Cross-platform publish failures (non-auth)
+# ═══════════════════════════════════════════════════════════════
+
+# Patrones que ya cubre _check_platform_auth_errors (no duplicar alertas).
+_PLATFORM_AUTH_PATTERNS = (
+    "token", "401", "403", "auth", "expired", "permission",
+    "invalid", "not authenticated", "credentials",
+)
+
+
+def _build_platform_failed_message(row: dict) -> str:
+    """Build a human-readable alert message for a non-auth platform failure."""
+    platform = row.get("platform", "?").title()
+    ch_name = row.get("channel_name", "?")
+    error = (row.get("error_message") or "Error desconocido")[:300]
+    return (
+        f"El último intento de publicar en {platform} para el canal "
+        f"«{ch_name}» falló (error no-auth):\n\n{error}\n\n"
+        f"🔧 Revisar credenciales/config de la plataforma en "
+        f"Canales → {ch_name} → Cuentas Sociales → {platform}, "
+        f"o la política de contenido de la plataforma."
+    )
+
+
+def _check_platform_publish_failed(db) -> int:
+    """Alert on cross-platform publish failures that are NOT auth-related.
+
+    Los fallos de auth ya tienen su alerta (platform_token_expired_*). Los
+    fallos no-auth (rate limit, media rechazada, error de la plataforma,
+    publisher no disponible...) quedaban en silencio. Dedup por
+    (channel, platform) y auto-resuelve cuando una subida posterior triunfa.
+    """
+    created = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT pv.channel_id, pv.platform, pv.error_message,
+                          pv.created_at, ch.name as channel_name, ch.slug
+                   FROM platform_videos pv
+                   JOIN channels ch ON ch.id = pv.channel_id
+                   WHERE pv.status = 'failed'
+                     AND pv.error_message IS NOT NULL
+                     AND pv.created_at > datetime('now', '-14 days')
+                   ORDER BY pv.created_at DESC
+                """
+            ).fetchall()
+
+            for row in rows:
+                err = (row["error_message"] or "").lower()
+                if any(p in err for p in _PLATFORM_AUTH_PATTERNS):
+                    continue  # ya lo cubre platform_token_expired_*
+                alert_type = f"platform_publish_failed_{row['platform']}"
+                channel_id = row["channel_id"]
+
+                # ¿Hubo una subida exitosa DESPUÉS de este fallo? → arreglado
+                success = conn.execute(
+                    """SELECT id FROM platform_videos
+                       WHERE channel_id = ? AND platform = ?
+                         AND status = 'published' AND uploaded_at > ?
+                       LIMIT 1""",
+                    (channel_id, row["platform"], row["created_at"]),
+                ).fetchone()
+                if success:
+                    conn.execute(
+                        """UPDATE pipeline_alerts
+                           SET resolved = 1, resolved_at = datetime('now'),
+                               message = message || ' [Auto-resuelto: subida posterior OK]'
+                           WHERE entity_type = 'system' AND entity_id = ?
+                             AND alert_type = ? AND resolved = 0""",
+                        (channel_id, alert_type),
+                    )
+                    continue
+
+                existing = conn.execute(
+                    """SELECT id FROM pipeline_alerts
+                       WHERE entity_type = 'system' AND entity_id = ?
+                         AND alert_type = ? AND resolved = 0 LIMIT 1""",
+                    (channel_id, alert_type),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE pipeline_alerts SET message = ? WHERE id = ?",
+                        (_build_platform_failed_message(row), existing["id"]),
+                    )
+                    continue
+
+                platform_label = row["platform"].title()
+                ch_name = row["channel_name"] or "?"
+                created += _maybe_create_alert(
+                    db, conn, "system", channel_id, channel_id,
+                    alert_type, "warning",
+                    f"Publicación en {platform_label} falló — {ch_name}",
+                    _build_platform_failed_message(row),
+                    {"platform": row["platform"], "channel_slug": row["slug"],
+                     "last_error": (row["error_message"] or "")[:500]},
+                )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Platform publish-failed check failed: %s", exc)
     return created
 
 
