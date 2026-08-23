@@ -153,6 +153,30 @@ def _get_worker_process_ram_mb(pid: Optional[int]) -> Optional[int]:
         return None
 
 
+def _get_silenced_alert_types(conn) -> set:
+    """Read the operator-silenced alert types from system_state (JSON array)."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = 'silenced_alert_types'"
+        ).fetchone()
+        if not row or not row["value"]:
+            return set()
+        data = json.loads(row["value"])
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def _set_silenced_alert_types(conn, types: list) -> None:
+    """Persist the silenced alert types to system_state."""
+    conn.execute(
+        "INSERT OR REPLACE INTO system_state(key, value, updated_at) "
+        "VALUES ('silenced_alert_types', ?, datetime('now'))",
+        (json.dumps(list(types), ensure_ascii=False),),
+    )
+    conn.commit()
+
+
 def _get_script_health(conn) -> dict:
     """Aggregate script generation health metrics for the monitor dashboard.
 
@@ -290,19 +314,30 @@ def get_monitor_dashboard():
                 "SELECT COUNT(*) as c FROM shorts WHERE status = 'failed' AND created_at > datetime('now', '-7 days')"
             ).fetchone()["c"]
 
-            # Alert counts
+            # Alert counts (excluye tipos silenciados por el operador)
+            silenced = _get_silenced_alert_types(conn)
+            sil_cond = ""
+            sil_params = []
+            if silenced:
+                placeholders = ",".join("?" * len(silenced))
+                sil_cond = f" AND alert_type NOT IN ({placeholders})"
+                sil_params = sorted(silenced)
             alerts_critical = conn.execute(
-                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'critical' AND resolved = 0"
+                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'critical' AND resolved = 0" + sil_cond,
+                sil_params,
             ).fetchone()["c"]
             alerts_warning = conn.execute(
-                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'warning' AND resolved = 0"
+                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'warning' AND resolved = 0" + sil_cond,
+                sil_params,
             ).fetchone()["c"]
             alerts_info = conn.execute(
-                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'info' AND resolved = 0"
+                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'info' AND resolved = 0" + sil_cond,
+                sil_params,
             ).fetchone()["c"]
             alerts_total = alerts_critical + alerts_warning + alerts_info
             alerts_unacknowledged = conn.execute(
-                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE acknowledged = 0 AND resolved = 0"
+                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE acknowledged = 0 AND resolved = 0" + sil_cond,
+                sil_params,
             ).fetchone()["c"]
 
             # Health score (0-100): capped per-category penalties
@@ -464,6 +499,13 @@ def get_alerts(
                 conditions.append("channel_id = ?")
                 params.append(channel_id)
 
+            # ── Excluir tipos silenciados por el operador ──
+            silenced = _get_silenced_alert_types(conn)
+            if silenced:
+                placeholders = ",".join("?" * len(silenced))
+                conditions.append(f"pa.alert_type NOT IN ({placeholders})")
+                params.extend(sorted(silenced))
+
             where_clause = " AND ".join(conditions) if conditions else "1=1"
             params.append(limit)
 
@@ -515,6 +557,42 @@ def res_all_alerts(
     db = get_db()
     count = resolve_all_alerts(db, severity=severity)
     return {"ok": True, "resolved": count}
+
+
+@router.get("/monitor/alerts/silenced-types")
+def get_silenced_types():
+    """Get the alert types silenced by the operator."""
+    db = get_db()
+    try:
+        with db._connect() as conn:
+            silenced = _get_silenced_alert_types(conn)
+            return {"ok": True, "types": sorted(silenced)}
+    except Exception as exc:
+        logger.error("Get silenced types error: %s", exc)
+        return {"ok": False, "types": [], "error": str(exc)}
+
+
+@router.post("/monitor/alerts/silence-type")
+def silence_type(alert_type: str, silenced: bool = True):
+    """Silence/un-silence an alert type (persisted in system_state).
+
+    Los tipos silenciados se ocultan del panel, del contador crítico de la
+    StatusBar y del health-score del dashboard — para ruido conocido que no
+    requiere acción (el operador decide cuándo reactivarlos).
+    """
+    db = get_db()
+    try:
+        with db._connect() as conn:
+            silenced_types = _get_silenced_alert_types(conn)
+            if silenced:
+                silenced_types.add(alert_type)
+            else:
+                silenced_types.discard(alert_type)
+            _set_silenced_alert_types(conn, sorted(silenced_types))
+            return {"ok": True, "types": sorted(silenced_types)}
+    except Exception as exc:
+        logger.error("Silence-type error: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 @router.get("/monitor/events")
@@ -646,9 +724,15 @@ def get_status_bar():
             active_shorts = conn.execute(
                 "SELECT COUNT(*) as c FROM shorts WHERE status IN ('extracting','rendering','uploading')"
             ).fetchone()["c"]
-            critical_alerts = conn.execute(
-                "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'critical' AND resolved = 0"
-            ).fetchone()["c"]
+            # critical alerts (excluye tipos silenciados)
+            _silenced_crit = _get_silenced_alert_types(conn)
+            _crit_sql = "SELECT COUNT(*) as c FROM pipeline_alerts WHERE severity = 'critical' AND resolved = 0"
+            _crit_params: list = []
+            if _silenced_crit:
+                _ph = ",".join("?" * len(_silenced_crit))
+                _crit_sql += f" AND alert_type NOT IN ({_ph})"
+                _crit_params = sorted(_silenced_crit)
+            critical_alerts = conn.execute(_crit_sql, _crit_params).fetchone()["c"]
             # RAM (quick)
             from pipeline.ram_governor import available_mb
             ram_available = available_mb()
