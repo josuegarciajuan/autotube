@@ -363,6 +363,15 @@ PUBLISH_WINDOW_SPREAD_MIN = 90
 # Alineado con el techo antiban VIDEOS_PER_DAY_MAX=1 de gradual_resume.
 MAX_LONGFORM_PUBLISH_PER_DAY = 1
 
+# ── Techo duro de cadencia (antiban, ago 2026) ─────────────────────
+# Tras 3 strikes de spam en 4 días (canal5 19/8, canal4 20/8, canal3 22/8), la
+# causa raíz confirmada fue la FRECUENCIA (2 long-forms + 2 shorts/día percibidos
+# como spam). Este techo limita a 1 long-form/día por canal en TODOS los puntos
+# de decisión: planificación (planning_service._resolve_videos_per_day), subidas
+# de backlog (upload_scheduler) y restauración post-strike (spam_mitigation).
+# Uniforme: se aplica a todos los canales por igual, sin excepciones.
+LONGFORM_DAILY_HARD_CAP = 1
+
 # ── Upload spacing (backlog drain) ─────────────────────────────
 # Mínimo de horas entre subidas long-form del MISMO canal. Evita que
 # un backlog de vídeos pasados se despache en ráfagas ("en fila") cuando

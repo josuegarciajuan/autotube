@@ -290,9 +290,13 @@ def reduce_publication_frequency_after_strike(channel_id: int, slug: str,
 
 
 def restore_publication_frequency(channel_id: int, db=None) -> bool:
-    """Restaura la frecuencia original de un canal tras la penalización.
+    """Restaura la frecuencia de un canal tras la penalización, CON techo antiban.
 
-    Devuelve True si había valores guardados y se restauraron.
+    ago 2026: la restauración ya NO vuelve a los valores originales (2 long + 2-3
+    shorts/día era la causa raíz de los strikes). Restaura CAPADA al techo
+    antiban: máx 1 long-form/día, 1 short nativo/día y 0 clips. El boost
+    probabilístico queda desactivado (0.0) para que el +1 aleatorio no deshaga
+    el techo. Devuelve True si había valores guardados y se restauraron.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
@@ -306,20 +310,31 @@ def restore_publication_frequency(channel_id: int, db=None) -> bool:
     except (json.JSONDecodeError, TypeError):
         return False
 
+    try:
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
+    except Exception:
+        cap = 1
+
     db.update_channel_planning_config(
         channel_id,
-        videos_per_day=int(original.get("videos_per_day", 2) or 2),
-        videos_day_boost_weight=float(original.get("videos_day_boost_weight", 0.7) or 0.7),
+        videos_per_day=min(int(original.get("videos_per_day", 2) or 2), cap),
+        videos_day_boost_weight=0.0,
     )
     db.update_shorts_planning_config(
         channel_id,
         {
-            "shorts_native_per_day": int(original.get("shorts_native_per_day", 3) or 3),
-            "shorts_clips_per_long": int(original.get("shorts_clips_per_long", 3) or 3),
+            "shorts_native_per_day": min(
+                int(original.get("shorts_native_per_day", 3) or 3), 1
+            ),
+            "shorts_clips_per_long": 0,
         },
     )
     db.set_system_state(_RESTORE_KEY.format(channel_id=channel_id), "")
-    logger.warning("Spam frequency restored for channel #%s", channel_id)
+    logger.warning(
+        "Spam frequency restored for channel #%s (capado a %d long + 1 short/día)",
+        channel_id, cap,
+    )
     return True
 
 

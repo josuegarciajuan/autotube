@@ -219,12 +219,13 @@ class TestBudgetDerivation:
 
 class TestAllocation:
     def test_future_day_caps_per_project(self, quota_env, quota_db):
-        """Deseados 2-3 longs/canal + 2 nativos/canal; cupo 6 por proyecto.
+        """Techo antiban: 1 long/canal/día; cupo 6 por proyecto.
 
-        Invariantes:
+        Invariantes (ago 2026, LONGFORM_DAILY_HARD_CAP=1):
+          - longs = 2 por proyecto (1/canal × 2 canales), NUNCA más
           - longs + nativos (subidas planificadas) <= max_uploads
           - los clips (1 por long) se reservan antes que los nativos
-          - con longs+clips >= cupo, no quedan nativos planificados
+          - con longs+clips < cupo, quedan nativos hasta llenar el cupo
         """
         alloc = compute_daily_upload_allocation(quota_db, _day(3))
         for proj in (PROJECT_A, PROJECT_B):
@@ -235,12 +236,12 @@ class TestAllocation:
             clips = sum(c["clips_est"] for c in chans.values())
             # Subidas planificadas dentro del cupo
             assert longs + natives <= data["max_uploads"]
-            # Long-first: al menos los 4 longs base (2/canal) concedidos
-            assert longs >= 4
+            # Techo antiban: 1 long/canal → 2 longs por proyecto (no 4)
+            assert longs == 2
             # Clips = 1 por long planificado
             assert clips >= longs
-            # Con longs + reserva de clips >= cupo → 0 nativos (prioridad baja)
-            assert natives == 0
+            # Cupo sobrante (6 - 2 longs - 2 clips = 2) permite nativos
+            assert natives >= 1
 
     def test_allocation_round_robin_fairness(self, quota_env, quota_db):
         """Con vpd=1 por canal, los longs se reparten equitativamente."""
@@ -331,8 +332,13 @@ class TestShortsCap:
             assert per_channel.get(ch_id, 0) <= 1, f"ch{ch_id}: natives > cap"
 
     def test_native_shorts_zero_when_cupo_agotado(self, quota_env, quota_db, monkeypatch):
-        """vpd=2 → 4 longs + 2 clips consumen el cupo → 0 nativos planificados."""
+        """Cupo del proyecto agotado por longs+clips → 0 nativos planificados."""
         from api.services import shorts_scheduler
+        # Techo antiban: 2 longs (1/canal) × 3 clips/long = 8 subidas > cupo 6
+        # → los nativos (prioridad más baja) se quedan a 0.
+        with quota_db._connect() as conn:
+            conn.execute("UPDATE shorts_planning_config SET shorts_clips_per_long = 3")
+            conn.commit()
         monkeypatch.setattr(shorts_scheduler, "get_shorts_distribution",
                             lambda ch_id, db, date_str: (2, 0))
         monkeypatch.setattr(shorts_scheduler, "_get_yesterday_published_count",

@@ -511,18 +511,21 @@ class TestPreview:
         assert len(result["days"]) == 7
 
     def test_preview_overrides_apply(self, seeded_db):
-        """Overrides change the simulated slots count."""
+        """Overrides change the simulated slots count, capped at 1/day (antiban)."""
         db = _get_extended_db(seeded_db)
         
         # Without overrides: 3 channels × 1/day = 3
         normal = preview_week(db=db)
         assert normal["days"][0]["slots"] != []  # should have slots
         
-        # With overrides: canal2→3/day, others unchanged → 5 total
+        # With overrides: canal2→3/day is CAPADO a 1/día por el techo antiban
+        # (LONGFORM_DAILY_HARD_CAP=1, ago 2026): 1 + 1 + 1 = 3 total.
         overrides = {"canal2": {"videos_per_day": 3}}
         modified = preview_week(overrides=overrides, db=db)
         day0_slots = modified["days"][0]["slots"]
-        assert len(day0_slots) == 5  # 3 + 1 + 1
+        assert len(day0_slots) == 3  # techo: nadie supera 1/día
+        canal2_count = sum(1 for s in day0_slots if s["channel_slug"] == "canal2")
+        assert canal2_count == 1
 
     def test_preview_does_not_persist(self, seeded_db):
         """Preview should not write to planned_slots."""
