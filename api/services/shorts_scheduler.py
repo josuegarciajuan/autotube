@@ -2039,7 +2039,8 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         )
                         _alert_shorts_dispatch_exhausted(
                             f"Force dispatch sin slots viables tras {_force_retry} intentos "
-                            f"(bypass={_force_bypass_guards})."
+                            f"(bypass={_force_bypass_guards}). Slots intentados: "
+                            f"{list(sorted(_failed_force_ids))[:20] or 'ninguno'}."
                         )
                         return None
 
@@ -2224,7 +2225,8 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 _LAST_ALL_EXHAUSTED_AT = time.time()
                 _alert_shorts_dispatch_exhausted(
                     f"Force dispatch agotó sus {_MAX_CLIP_RETRIES} intentos (todos los "
-                    f"slots bloqueados por guards o sin fuente)."
+                    f"slots bloqueados por guards o sin fuente). Slots intentados: "
+                    f"{list(sorted(_failed_force_ids))[:20] or 'ninguno'}."
                 )
                 return None
             else:

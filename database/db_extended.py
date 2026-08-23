@@ -339,20 +339,35 @@ def _schedule_publish_retry(video_id: int, delay_minutes: int):
         # ── Desistir: alerta + detener (no más peticiones contra YouTube) ──
         try:
             from api.services.lifecycle_monitor import create_alert
+            retry_count = _get_retry_count(video_id)
+            target_txt = (video or {}).get("target_public_at") or "—"
             create_alert(
                 db,
-                entity_type="video", entity_id=video_id, channel_id=None,
+                entity_type="video", entity_id=video_id,
+                channel_id=(video or {}).get("channel_id"),
                 alert_type="publish_verify_exhausted",
                 severity="warning",
                 title=f"Vídeo #{video_id} sin confirmar tras {_PUBLISH_VERIFY_MAX_RETRIES} intentos",
                 message=(
                     f"La verificación de publicación (wall-scrape RSS) desistió tras "
-                    f"{_PUBLISH_VERIFY_MAX_RETRIES} intentos sin encontrar el vídeo "
-                    f"público (yt={yt_video_id or '?'}, canal={slug}). Puede estar "
-                    f"aún procesándose, ser privado, o haberse eliminado. Revisa en "
-                    f"YouTube Studio el estado real y resuélvelo manualmente."
+                    f"{retry_count} reintentos sin encontrar el vídeo público "
+                    f"(yt={yt_video_id or '?'}, canal={slug}).\n"
+                    f"target_public_at: {target_txt}\n"
+                    f"El check final yt-dlp (0 cuota) tampoco lo confirmó público.\n"
+                    f"Puede estar aún procesándose, ser privado, haberse eliminado, o "
+                    f"haber quedado fuera del feed RSS. Revisa en YouTube Studio el "
+                    f"estado real (watch: https://youtube.com/watch?v={yt_video_id or '?'}) "
+                    f"y resuélvelo manualmente."
                 ),
-                metadata={"video_id": video_id, "slug": slug, "yt_video_id": yt_video_id},
+                metadata={
+                    "video_id": video_id,
+                    "slug": slug,
+                    "yt_video_id": yt_video_id,
+                    "channel_id": (video or {}).get("channel_id"),
+                    "retry_count": retry_count,
+                    "target_public_at": target_txt,
+                    "final_ytdlp_check": "negative",
+                },
             )
         except Exception as _al_exc:
             vlog.warning("publish_verify_exhausted alert failed: %s", _al_exc)
