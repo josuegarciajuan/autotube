@@ -371,7 +371,7 @@ DESCRIPTION_TEMPLATE = """⛵ {titulo}
 THUMBNAIL_BORDER_WIDTH = 7
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF5C00"
-THUMBNAIL_SHOW_4K_BADGE = True
+THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 THUMBNAIL_VISUAL_STYLE = "distress_signal"
 THUMBNAIL_RESCUE_MAYDAY = False
@@ -379,9 +379,13 @@ THUMBNAIL_RESCUE_COORDINATES = True
 THUMBNAIL_RESCUE_SIN_SENAL = True
 THUMBNAIL_ALLOW_FACES = True
 THUMBNAIL_CONCEPT_DIRECTIVE = (
-    "El rostro humano con expresion de sorpresa/impacto PUEDE aparecer pero "
-    "PEQUEÑO (max ~25-30% del encuadre), integrado en el entorno de la expedicion. "
-    "El PAISAJE/ENTORNO de la expedicion es el protagonista."
+    "El PAISAJE/ENTORNO de la expedicion es el protagonista, PERO incluye SIEMPRE "
+    "un ROSTRO HUMANO REAL de stock como ancla emocional: expresion extrema de "
+    "sorpresa, miedo o determinacion, contacto visual directo, ocupando 30-45% "
+    "del encuadre (regla: las caras suben el CTR +38%). El rostro debe ser de "
+    "BANCO DE IMAGENES REAL (stock), NUNCA generado por IA ni con menores. "
+    "Si no hay rostro de stock relevante para la escena, usa silueta a contraluz "
+    "o figura humana en escala media."
 )
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "distress_signal",
@@ -393,26 +397,6 @@ THUMBNAIL_MANUAL_STYLE = {
         "cold desaturated cinematography, arctic survival atmosphere, emergency orange accents, "
         "dramatic natural lighting, photorealistic, 16:9, National Geographic documentary style"
     ),
-}
-THUMBNAIL_STYLE = {
-    "layout": "image_full_background_text_overlay", "max_text_words": 4,
-    "text_color": "frost_white_on_arctic_blue", "font_style": "bold_sans_serif_condensed",
-    "image_treatment": "cold_desaturated_dramatic_contrast_documentary",
-    "background": "#060C18", "accent_color": "#FF5C00",
-    "face_policy": "Real faces YES — weathered, cold, expeditionary expressions. AI-generated faces: NO.",
-    "number_preference": "odd_numbers_for_lists",
-    "rescue_orange_accent_rule": "Orange distress accents on danger elements boost CTR.",
-}
-THUMBNAIL_TEMPLATES = {
-    "the_ship": {"description": "Ship trapped in ice, cold blue tones", "text_position": "bottom_third",
-                 "text_words": "2-3", "accent": "red_highlight_on_ice",
-                 "best_for": "Naufragios y expediciones maritimas"},
-    "the_mountain": {"description": "Summit or cliff face, figure for scale, storm clouds", "text_position": "upper_or_center_third",
-                     "text_words": "2-3", "accent": "red_line_on_route",
-                     "best_for": "Expediciones de montaña"},
-    "the_survivor": {"description": "Close-up portrait or silhouette, weather-beaten", "text_position": "bottom_over_dark_gradient",
-                     "text_words": "3-4", "accent": "red_arrow_on_eyes",
-                     "best_for": "Historias de supervivientes"},
 }
 
 VIDEO_MIDROLL_STRATEGY = (

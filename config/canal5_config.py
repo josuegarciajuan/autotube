@@ -363,7 +363,7 @@ DESCRIPTION_TEMPLATE = """🧬 {titulo}
 THUMBNAIL_BORDER_WIDTH = 5
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF2D55"
-THUMBNAIL_SHOW_4K_BADGE = True
+THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 THUMBNAIL_VISUAL_STYLE = "clinical_mystery"
 THUMBNAIL_MEDICAL_ECG = True
@@ -371,10 +371,13 @@ THUMBNAIL_MEDICAL_CROSS = False
 THUMBNAIL_MEDICAL_DIAGNOSIS = False
 THUMBNAIL_ALLOW_FACES = True
 THUMBNAIL_CONCEPT_DIRECTIVE = (
-    "Canal medico-cientifico. El rostro humano PUEDE aparecer con expresion de "
-    "preocupacion/asombro PROFESIONAL. Priorizar imagenes clinicas y cientificas "
-    "de alto impacto: radiografias, resonancias magneticas, helices de ADN, "
-    "estructuras celulares al microscopio, monitores cardiacos ECG. SIN sangre visible."
+    "Canal medico-cientifico. Prioriza imagenes clinicas de alto impacto "
+    "(radiografias, resonancias, ADN, ECG), PERO incluye cuando exista un "
+    "ROSTRO HUMANO REAL de stock con expresion extrema de asombro, preocupacion "
+    "o alivio (contacto visual directo, 30-45% del encuadre; las caras suben el "
+    "CTR +38%). El rostro debe ser de BANCO DE IMAGENES REAL (stock), NUNCA "
+    "generado por IA ni con menores. SIN sangre visible. El elemento clinico "
+    "sigue siendo el ancla contextual del fondo."
 )
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "clinical_mystery",
@@ -388,26 +391,6 @@ THUMBNAIL_MANUAL_STYLE = {
         "heart monitor ECG waveforms, scientific documentary style, 16:9, photorealistic, "
         "no text overlay, no gore, no explicit blood or open wounds, medical journal quality"
     ),
-}
-THUMBNAIL_STYLE = {
-    "layout": "image_full_background_text_overlay", "max_text_words": 4,
-    "text_color": "clinical_white_on_teal_dark", "font_style": "bold_sans_serif_clean",
-    "image_treatment": "clinical_cool_contrast_documentary",
-    "background": "#081426", "accent_color": "#DC8228",
-    "face_policy": "Real faces YES — patient portraits with dignified expressions. AI-generated faces: NO.",
-    "number_preference": "odd_numbers_for_lists",
-    "medical_viral_rule": "Red/cyan medical alert accents on key elements boost CTR dramatically.",
-}
-THUMBNAIL_TEMPLATES = {
-    "the_scan": {"description": "Radiografia o resonancia magnetica", "text_position": "bottom_third",
-                 "text_words": "2-3", "accent": "amber_highlight_on_anomaly",
-                 "best_for": "Casos con evidencia radiologica"},
-    "the_patient": {"description": "Retrato o silueta del paciente, iluminacion clinica", "text_position": "bottom_over_dark_gradient",
-                    "text_words": "3-4", "accent": "amber_light_on_face",
-                    "best_for": "Historias de supervivientes"},
-    "the_lab": {"description": "Microscopio, tubos de ensayo, laboratorio", "text_position": "center_or_bottom",
-                "text_words": "2-3", "accent": "amber_accent_on_equipment",
-                "best_for": "Casos sobre investigacion medica"},
 }
 
 VIDEO_MIDROLL_STRATEGY = (

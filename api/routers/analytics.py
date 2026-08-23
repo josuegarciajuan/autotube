@@ -211,6 +211,28 @@ def get_generation_failures(channel_id: int, days: int = 7):
 # ── Advanced Analytics: CTR, retention, traffic, demographics ──
 
 
+@router.get("/channels/{channel_id}/analytics/thumbnail-styles")
+def get_channel_thumbnail_styles(channel_id: int):
+    """CTR promedio por estilo de miniatura (loop packaging, D2 ago 2026).
+
+    Agrega ctr/impressions/views por ``videos.thumbnail_style`` (el estilo
+    visual usado al generar cada miniatura). Permite ver qué estilo de
+    packaging rinde mejor y decidir con datos.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+
+    styles = db.get_thumbnail_style_ctr(channel_id)
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch["name"],
+        "channel_slug": ch["slug"],
+        "styles": styles,
+    }
+
+
 @router.get("/channels/{channel_id}/analytics/ctr")
 def get_channel_ctr(channel_id: int):
     """Get CTR, retention, and impressions summary for a channel.

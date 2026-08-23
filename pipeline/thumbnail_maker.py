@@ -356,6 +356,12 @@ class ThumbnailMaker:
         badge_text = brief.badge_text if hasattr(brief, 'badge_text') and brief.badge_text else ""
         secondary_scene = brief.secondary_scene if hasattr(brief, 'secondary_scene') and brief.secondary_scene else ""
 
+        # ── P3 (ago 2026): el texto de la miniatura NUNCA debe repetir el
+        # inicio del título (mata el curiosity gap y el CTR). Se recortan los
+        # tokens duplicados del overlay/gancho antes de componer. ──
+        final_overlay = self._dedupe_overlay(title, final_overlay)
+        text_gancho = self._dedupe_overlay(title, text_gancho)
+
         # ── F3: Image Generation + QC ──────────────────────────
         if base_image_path and Path(base_image_path).exists():
             logger.info("[Thumbnail v2] F3: Using existing base image (skip generation)")
@@ -395,6 +401,20 @@ class ThumbnailMaker:
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
+
+        # ── P1 (ago 2026): registrar estilo + layout para el loop CTR→estilo ──
+        if video_id:
+            try:
+                from database.db_extended import ExtendedDatabase
+                db = ExtendedDatabase()
+                db.update_video_thumbnail_style(
+                    video_id,
+                    str(style.get("visual_style", "") or ""),
+                    str(getattr(brief, 'layout', '') or ''),
+                )
+            except Exception as exc:
+                logger.warning("[Thumbnail v2] thumbnail_style persist failed: %s", exc)
+
         return thumb_path
 
     def make_variant_thumbnails(
@@ -495,6 +515,9 @@ class ThumbnailMaker:
             l1 = getattr(brief, 'text_gancho', '') or ''
             l2 = getattr(brief, 'text_complemento', '') or ''
             overlay = f"{l1} {l2}".strip() if l1 or l2 else getattr(brief, 'text_overlay', '')
+            # P3: no repetir el inicio del título en el texto de la miniatura
+            l1 = self._dedupe_overlay(title, l1)
+            overlay = self._dedupe_overlay(title, overlay)
             badge = getattr(brief, 'badge_text', '') or ''
             secondary = getattr(brief, 'secondary_scene', '') or ''
             layout = getattr(brief, 'layout', '') or ''
@@ -516,13 +539,59 @@ class ThumbnailMaker:
             )
             variant_paths.append(thumb_path)
             logger.info(
-                "[Thumbnail v2] Variant %d/%d: %s (overlay: '%s')",
-                i + 1, len(variant_briefs), thumb_path.name, overlay[:40],
+                "[Thumbnail v2] ✅ Variant %d/%d complete: %s", i + 1, len(variant_briefs), thumb_path
             )
-        
+
+        # ── P1 (ago 2026): registrar estilo usado (loop CTR→estilo) ──
+        if video_id:
+            try:
+                from database.db_extended import ExtendedDatabase
+                db = ExtendedDatabase()
+                db.update_video_thumbnail_style(
+                    video_id,
+                    str(style.get("visual_style", "") or ""),
+                    str(getattr(variant_briefs[0], 'layout', '') or ''),
+                )
+            except Exception as exc:
+                logger.warning("[Thumbnail v2] thumbnail_style persist failed (variants): %s", exc)
+
         return variant_paths
 
     # ── F1: Style Engine helpers ──────────────────────────────
+
+    def _dedupe_overlay(self, title: str, overlay: str) -> str:
+        """Recorta del overlay las palabras que repiten el INICIO del título.
+
+        Regla de psicología CTR: el texto de la miniatura NUNCA debe repetir
+        las primeras 3 palabras del título (redundancia = menos curiosidad).
+        Si el overlay empieza por 2+ palabras consecutivas iguales al inicio
+        del título, se eliminan esas palabras del overlay.
+
+        Ejemplo: título "La Atlántida: ¿pruebas reales?" + overlay
+        "La Atlántida NO existió" → overlay queda "NO existió".
+        """
+        if not overlay or not title:
+            return overlay
+        try:
+            title_words = [w for w in title.strip().lower().split() if w]
+            overlay_words = overlay.strip().split()
+            if not overlay_words or len(title_words) < 2:
+                return overlay
+            # Cuántas palabras del overlay coinciden en orden con el inicio del título
+            overlap = 0
+            for tw, ow in zip(title_words, [w.lower().strip('¿?¡!.,:;') for w in overlay_words]):
+                if tw.strip('¿?¡!.,:;') == ow:
+                    overlap += 1
+                    if overlap >= 2:
+                        break
+                else:
+                    break
+            if overlap >= 2:
+                trimmed = " ".join(overlay_words[overlap:]).strip()
+                return trimmed or overlay  # nunca devolver vacío
+            return overlay
+        except Exception:
+            return overlay
 
     def _get_or_create_style(
         self,
@@ -997,13 +1066,16 @@ class ThumbnailMaker:
         stroke_w = max(3, self.text_stroke_width + 2)
 
         # ── L1 (gancho) — larger for 1-line layouts ─────────
+        # P6 (ago 2026): texto más grande para legibilidad en móvil (miniaturas
+        # pequeñas). Regla psicología: 25-35% del alto; 17-19% es el máximo
+        # legible sin recortes con _fit_text_to_box. Antes 13-17%.
         if text_gancho_v:
             # Bigger font when there is only one text line
             if comp["text_lines"] == 1:
-                gancho_font_size = max(72, int(self.height * 0.17))
+                gancho_font_size = max(80, int(self.height * 0.19))
                 l1_y_pct = 0.38   # more centred
             else:
-                gancho_font_size = max(62, int(self.height * 0.13))
+                gancho_font_size = max(72, int(self.height * 0.16))
                 l1_y_pct = 0.52  # lower third
             gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
             if gancho_font:
@@ -1022,7 +1094,7 @@ class ThumbnailMaker:
 
         # ── L2 (complemento) — only when 2-line layout ─────
         if comp["text_lines"] >= 2 and text_complemento_v:
-            comp_font_size = max(32, int(self.height * 0.07))
+            comp_font_size = max(44, int(self.height * 0.09))
             comp_font = _find_font(comp_font_size, bold=True, font_name=self.font_family)
             if comp_font and 'l1_y' in locals():
                 bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
