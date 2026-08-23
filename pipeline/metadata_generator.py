@@ -56,14 +56,14 @@ Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y
   • Pregunta retórica que genera necesidad de respuesta — ej: "¿Qué filmó esta cámara a 11.000 metros?"
   • Revelación exclusiva — ej: "Lo que NADIE te contó sobre [tema]"
   • Contraste emocional extremo — ej: "Entró al quirófano riendo. Salió sin poder hablar."
-  • Paréntesis informativo al final para añadir credibilidad — ej: "(REAL)", "(Documental)", "(2026)"
+  • Sufijo factual opcional al final SOLO si aporta contexto verificable — ej: "(2026)", "(Caso de 1921)". NUNCA "(REAL)", "(CASO REAL)", "(IMPACTANTE)", "(REVELACIÓN)", "(ARCHIVOS CIA)", "(EXPEDIENTE)": son señal clásica de spam/clickbait para YouTube.
 - POWER WORDS por categoría (usa al menos 1 de cada categoría a lo largo de los metadatos, no solo en el título):
   ⚡ URGENCIA / EXCLUSIVIDAD: REVELADO, FILTRADO, CENSURADO, INÉDITO, CLASIFICADO, CONFIDENCIAL, PROHIBIDO, EXCLUSIVA
   💥 IMPACTO EMOCIONAL: ESCALOFRIANTE, DESGARRADOR, INEXPLICABLE, DEMOLEDOR, SOBRECOGEDOR, ESTREMECEDOR, ALUCINANTE, ATERRADOR
   🔍 CURIOSIDAD / MISTERIO: OCULTO, SECRETO, PERTURBADOR, SINIESTRO, ENIGMÁTICO, IMPACTANTE, INCREÍBLE, INSÓLITO
 - Clickbait ÉTICO: el título promete algo que el video REALMENTE entrega.
 - CAPITALIZACIÓN: escribe el título como una frase normal en español — SOLO la primera letra en mayúscula y los nombres propios. NUNCA pongas cada palabra en mayúscula (Title Case). Puedes poner UNA palabra clave en MAYÚSCULAS para destacar (máximo 1 por título).
-- AÑADE un sufijo entre paréntesis SIEMPRE que aporte credibilidad: (REAL), (CASO REAL), (DOCUMENTAL), (ARCHIVOS CIA), (2026), (EXPEDIENTE). El sufijo va al final del título, después de un espacio, y no cuenta para los 40-65 chars objetivo.
+- PROHIBIDO añadir sufijos de credibilidad clickbait: (REAL), (CASO REAL), (REVELACIÓN), (IMPACTANTE), (ARCHIVOS CIA), (EXPEDIENTE). YouTube los trata como spam y multiplican el riesgo de strike. La credibilidad se construye con DETALLES concretos del título, no con etiquetas vacías. A lo sumo un sufijo factual verificable como (2026).
 - El título debe crear una sensación de "TENGO que ver esto" al hacer scroll.
 
 🧠 PSICOLOGÍA DEL CLICK (APLICADA AL TÍTULO):
@@ -72,12 +72,12 @@ Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y
 - Emotional Arousal (high-arousal words): sorpresa, ira, miedo, asombro → comparten más.
 - Von Restorff Effect: el título debe destacar entre los demás resultados de búsqueda.
 - Números impares: 20% más CTR que los pares. Usa 3, 5, 7, 9, 11.
-- Credibilidad por señal: un sufijo entre paréntesis (REAL, DOCUMENTAL) actúa como señal de confianza → reduce el escepticismo del clickbait y aumenta CTR en nichos de curiosidad/misterio.
+- La credibilidad NO se declara, se demuestra: un sufijo vacío "(REAL)" no aporta información y es señal clásica de spam/clickbait. Mejor un dato concreto en el cuerpo del título.
 
 Ejemplos de buena capitalización:
-  CORRECTO: "Nadie creyó su predicción. 3 días después ocurrió (REAL)"
-  CORRECTO: "5 médicos vieron esto y NO pudieron explicarlo (Documental)"
-  CORRECTO: "El experimento que volvió LOCOS a 5 personas (ARCHIVOS CIA)"
+  CORRECTO: "Nadie creyó su predicción. 3 días después ocurrió"
+  CORRECTO: "5 médicos vieron esto y NO pudieron explicarlo"
+  CORRECTO: "El experimento que volvió LOCOS a 5 personas"
   INCORRECTO: "El Milagro Que Dejó Sin Palabras A 5 Médicos"
   INCORRECTO (empieza con artículo débil sin impacto): "La historia que nadie te contó sobre..."
 
@@ -125,15 +125,15 @@ Ahora la miniatura tiene DOS líneas de texto en vez de una:
 
 ═══ COHERENCIA TÍTULO ↔ MINIATURA ═══
 El título, L1 y L2 deben trabajar JUNTOS, sin repetirse:
-- TÍTULO: promete el tema principal + el gancho ("5 médicos vieron esto y NO pudieron explicarlo (REAL)").
+- TÍTULO: promete el tema principal + el gancho ("5 médicos vieron esto y NO pudieron explicarlo").
 - L1 (thumbnail): palabra-gancho extraída del título ("5 MÉDICOS" o "SIN EXPLICACIÓN").
 - L2 (thumbnail): el complemento intrigante ("El informe secreto").
 - Juntos deben contar una mini-historia de 3 actos que obligue a hacer clic.
 
 Responde SIEMPRE en formato JSON con exactamente estas claves:
 {
-  "title": "Título viral en español (40-65 chars ideal, max 100, solo primera letra mayúscula + 1 palabra en CAPS + sufijo entre paréntesis)",
-  "title_suffix": "REAL | DOCUMENTAL | CASO REAL | ARCHIVOS CIA | 2026 | EXPEDIENTE | '' si no aplica",
+  "title": "Título viral en español (40-65 chars ideal, max 100, solo primera letra mayúscula + 1 palabra en CAPS, SIN sufijos de credibilidad clickbait tipo (REAL))",
+  "title_suffix": "SIEMPRE '' (vacío). PROHIBIDO: REAL, CASO REAL, REVELACIÓN, IMPACTANTE, ARCHIVOS CIA, EXPEDIENTE.",
   "description": "CAPÍTULOS CON TIMESTAMPS EN LA PRIMERA LÍNEA + luego 2-3 líneas de resumen + desarrollo + CTAs + 3-5 hashtags al final",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "thumbnail_text": "LÍNEA1 IMPACTO MAX 12 CHARS | línea2 complemento max 24 chars (separadas por |)",
@@ -535,8 +535,8 @@ ESCENAS DEL VIDEO:
 {scenes_text}
 
 INSTRUCCIONES:
-1. Genera 1 ÚNICO título viral optimizado (40-65 chars): keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll. Añade sufijo entre paréntesis si aporta credibilidad: (REAL), (DOCUMENTAL), etc.
-2. Si el título lleva sufijo parentético, sepáralo en el campo "title_suffix". Si no, déjalo vacío.
+1. Genera 1 ÚNICO título viral optimizado (40-65 chars): keyword al inicio, patrón de alto CTR, power words, curiosidad extrema. IMPOSIBLE de ignorar al hacer scroll. PROHIBIDO añadir sufijos de credibilidad clickbait como (REAL), (CASO REAL), (IMPACTANTE), (REVELACIÓN), (ARCHIVOS CIA), (EXPEDIENTE).
+2. Deja "title_suffix" SIEMPRE vacío (""). No uses sufijos de credibilidad clickbait.
 3. Crea una descripción SEO. **LOS CAPÍTULOS CON TIMESTAMPS DEBEN SER LA PRIMERA LÍNEA**, sin introducción previa ni resumen delante. YouTube indexa los timestamps como Key Moments. Después de los capítulos, añade un hook irresistible en las primeras 125 chars (sin contar timestamps), desarrollo y hashtags al final.
 4. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
 5. Crea DOS LÍNEAS de texto para la miniatura separadas por | : L1 (máx 12 chars, palabra-gancho en MAYÚSCULAS) | L2 (máx 24 chars, complemento intrigante). No repitas el título.
@@ -586,6 +586,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
 
             # ── Safety net: enforce at least one power word ────────
             title = enforce_power_words(title, power_words)
+
+            # ── Antiban (ago 2026): quitar sufijos de credibilidad clickbait
+            # tipo (REAL)/(CASO REAL) por si el LLM los incluyó igualmente.
+            title = _strip_clickbait_suffix(title)
 
             description = result.get("description", "")
             # Truncate description to 5000 bytes
@@ -700,6 +704,9 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         # ── Safety net: enforce at least one power word ────────────
         power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
         title = enforce_power_words(title, power_words)
+
+        # ── Antiban: quitar sufijos clickbait (REAL) también en fallback ──
+        title = _strip_clickbait_suffix(title)
         
         # ── Unique keyword selection per video ─────────────────────
         # Even in fallback, avoid using the same static keyword set
@@ -898,8 +905,56 @@ Mantén MISMA longitud. NO uses las mismas power words."""
 
 
 def _normalize_title_suffix(raw_suffix: str) -> str:
-    """Normaliza el campo title_suffix del LLM a una palabra limpia en mayúsculas."""
-    return (raw_suffix or "").strip().upper().strip("()（）[]")
+    """Normaliza el campo title_suffix del LLM a una palabra limpia en mayúsculas.
+
+    (antiban, ago 2026): los sufijos de credibilidad clickbait (REAL, CASO REAL,
+    REVELACIÓN, IMPACTANTE, ARCHIVOS CIA, EXPEDIENTE) se neutralizan a '' para
+    que NUNCA se añadan al título.
+    """
+    suffix = (raw_suffix or "").strip().upper().strip("()（）[]")
+    if " ".join(suffix.lower().split()) in _SPAM_TITLE_SUFFIXES:
+        return ""
+    return suffix
+
+
+# (antiban, ago 2026): sufijos de credibilidad clickbait — señal clásica de spam
+# de YouTube. Normalización en minúsculas, palabras unidas por un espacio.
+_SPAM_TITLE_SUFFIXES = frozenset({
+    "real", "caso real", "revelación", "revelacion", "impactante",
+    "archivos cia", "expediente",
+})
+
+
+def _strip_clickbait_suffix(title: str) -> str:
+    """Quita sufijos de credibilidad clickbait del FINAL del título.
+
+    Maneja sufijos repetidos "(REVELACIÓN) (REAL)" y colas decorativas tras el
+    sufijo: "(REAL). ASOMBROSO.", "(REAL) [CLASIFICADO]", "(REAL) — El Misterio
+    Antediluviana", "(REAL) — ¿Emergió?". No toca años "(2026)" ni otros
+    paréntesis no spam en el cuerpo del título.
+    """
+    if not title:
+        return title
+    text = title.strip()
+    while True:
+        match = _SPAM_SUFFIX_TAIL_RE.search(text)
+        if not match:
+            break
+        suffix_words = " ".join(
+            _re_spam.findall(match.group("suffix").lower())
+        )
+        if suffix_words not in _SPAM_TITLE_SUFFIXES:
+            break
+        text = text[: match.start()].rstrip()
+    return text.strip(" .·•–—-")
+
+
+_SPAM_SUFFIX_TAIL_RE = _re.compile(
+    r"(?P<suffix>\s*\([^()]+\)\s*)"
+    r"(?P<tail>(?:\.\s+[^\n()]{1,60}|\[[^\n()]{1,40}\]|\s*[—–-]\s*[^\n()]{1,80}))?\s*$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+_re_spam = _re.compile(r"[a-záéíóúüñ0-9]+")
 
 
 def _append_title_suffix(title: str, raw_suffix: str) -> str:
