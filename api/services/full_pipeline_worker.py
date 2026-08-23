@@ -48,6 +48,7 @@ from api.services.lifecycle_monitor import (
     log_phase_start,
     log_phase_end,
     log_phase_error,
+    emit_alert,
 )
 from api.utils import db_now
 
@@ -97,6 +98,28 @@ def _clamp_seed_upload_at(raw_seed: str, canal: str):
     except Exception as exc:
         _log.debug("[%s] Could not parse seed upload_at '%s': %s", canal, raw_seed, exc)
         return None
+
+
+def _alert_nonfatal(db, video_id: int, channel_id: int, phase: str,
+                    exc, extra: dict = None):
+    """Alert on a non-fatal phase failure (silent degradation).
+
+    Los fallos no-fatales (metadata, thumbnails A/B, cross-platform, stats...)
+    degradan la calidad del output pero no matan el pipeline. Antes quedaban en
+    logger.warning silencioso; ahora se crean como alerta 'phase_nonfatal'
+    (una por video, dedup por entity_type+entity_id+alert_type) para que el
+    operador los vea y los solvente a posteriori.
+    """
+    try:
+        emit_alert(
+            db, entity_type='video', entity_id=video_id, channel_id=channel_id,
+            alert_type='phase_nonfatal', severity='warning',
+            title=f"Video #{video_id}: fallo no-fatal en fase '{phase}'",
+            message=f"La fase '{phase}' falló pero el pipeline continuó: {exc}",
+            metadata={"phase": phase, "detail": str(exc)[:500], **(extra or {})},
+        )
+    except Exception:
+        pass
 
 
 # ── Logging setup ──────────────────────────────────────────────────
@@ -154,8 +177,26 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
                 wlog.info("[%s] IA altered content marked for %s", canal, yt_video_id)
             else:
                 wlog.warning("[%s] Failed to mark altered content for %s — continuing to end screens anyway", canal, yt_video_id)
+                emit_alert(
+                    None, entity_type='video', entity_id=video_id,
+                    alert_type='phase_nonfatal', severity='warning',
+                    title=f"Video #{video_id}: fallo no-fatal en fase 'auto_mark_ia'",
+                    message=f"No se marcó 'contenido alterado/IA' para {yt_video_id}. "
+                            "Riesgo de strike si el contenido es IA y no está marcado.",
+                    metadata={"phase": "auto_mark_ia", "yt_video_id": yt_video_id},
+                )
         except Exception as e:
             wlog.warning("[%s] IA-mark error for %s: %s — continuing to end screens anyway", canal, yt_video_id, e)
+            try:
+                emit_alert(
+                    None, entity_type='video', entity_id=video_id,
+                    alert_type='phase_nonfatal', severity='warning',
+                    title=f"Video #{video_id}: fallo no-fatal en fase 'auto_mark_ia'",
+                    message=f"Error marcando 'contenido alterado/IA' para {yt_video_id}: {e}",
+                    metadata={"phase": "auto_mark_ia", "yt_video_id": yt_video_id},
+                )
+            except Exception:
+                pass
 
         # ── Step 2: Configure end screens (always attempted, with retries) ──
         try:
@@ -177,6 +218,17 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
                     wlog.info("[%s] ✅ End screens configured for %s", canal, yt_video_id)
                 else:
                     wlog.warning("[%s] ❌ Failed to configure end screens for %s after all retries", canal, yt_video_id)
+                    try:
+                        emit_alert(
+                            None, entity_type='video', entity_id=video_id,
+                            alert_type='phase_nonfatal', severity='warning',
+                            title=f"Video #{video_id}: fallo no-fatal en fase 'end_screens'",
+                            message=f"No se pudieron configurar las pantallas finales para {yt_video_id} "
+                                    "tras 3 reintentos. Configurarlas manualmente en YouTube Studio.",
+                            metadata={"phase": "end_screens", "yt_video_id": yt_video_id},
+                        )
+                    except Exception:
+                        pass
             else:
                 wlog.debug("[%s] AUTO_END_SCREENS disabled, skipping", canal)
         except Exception as e:
@@ -1208,6 +1260,7 @@ def run_job(
                 metadata = orch.phase_metadata(script, video_data)
             except Exception as meta_exc:
                 logger.warning("Metadata generation failed (non-fatal): %s", meta_exc)
+                _alert_nonfatal(db, video_id, channel_id, "metadata", meta_exc)
                 metadata = None
             
             if metadata and isinstance(metadata, dict):
@@ -1301,6 +1354,10 @@ def run_job(
                             "[MARATHON][%s] Title validation crashed: %s — keeping original title",
                             canal, tv_exc,
                         )
+                        _alert_nonfatal(
+                            db, video_id, channel_id, "marathon_title_validation",
+                            tv_exc, {"is_marathon": True},
+                        )
                         # Keep the title that phase_metadata() already generated
 
                 db.update_video(video_id, progress=85, progress_phase="metadata")
@@ -1371,6 +1428,7 @@ def run_job(
                         db.insert_scenes_batch(video_id, scenes_data)
             except Exception as exc:
                 logger.warning("Scene saving failed (non-fatal): %s", exc)
+                _alert_nonfatal(db, video_id, channel_id, "scenes", exc)
 
         # ═══════════════════════════════════════════════════════
         # Phase 5.5: Post-validation (quality gate before upload)
@@ -1482,6 +1540,7 @@ def run_job(
                     )
             except Exception as ab_exc:
                 logger.warning("[AB] Thumbnail variant generation failed (non-fatal): %s", ab_exc)
+                _alert_nonfatal(db, video_id, channel_id, "ab_thumbnails", ab_exc)
                 ab_test_variant_paths = []
 
         # ═══════════════════════════════════════════════════════
@@ -1577,6 +1636,10 @@ def run_job(
                         logger.warning(
                             "[%s] Pre-render clip shorts during F1 failed (non-fatal): %s",
                             canal, _pre_render_err,
+                        )
+                        _alert_nonfatal(
+                            db, video_id, channel_id, "pre_render_clips",
+                            _pre_render_err, {"stage": "generate_only"},
                         )
         else:
             db.update_video(video_id, progress=90, progress_phase="upload")
@@ -1719,6 +1782,10 @@ def run_job(
                                            platform, result.error)
                 except Exception as cross_exc:
                     logger.warning("[%s] Cross-platform publishing skipped: %s", canal, cross_exc)
+                    _alert_nonfatal(
+                        db, video_id, channel_id, "cross_platform",
+                        cross_exc, {"yt_video_id": yt_video_id},
+                    )
 
                 # ── Auto-mark altered content (IA) via browser ──
                 try:
@@ -1734,6 +1801,10 @@ def run_job(
                             ).start()
                 except Exception as e:
                     logger.warning("[%s] Failed to trigger auto-mark IA: %s", canal, e)
+                    _alert_nonfatal(
+                        db, video_id, channel_id, "auto_mark_ia",
+                        e, {"yt_video_id": yt_video_id},
+                    )
 
                 if pub_mode == "scheduled":
                     tp = video_record.get("target_public_at", "?") if video_record else "?"
@@ -1754,6 +1825,10 @@ def run_job(
                                      canal, yt_video_id, planned_public_at)
                     except Exception as lc_exc:
                         logger.warning("[%s] Failed to schedule lifecycle actions: %s", canal, lc_exc)
+                        _alert_nonfatal(
+                            db, video_id, channel_id, "lifecycle_schedule",
+                            lc_exc, {"yt_video_id": yt_video_id},
+                        )
                 else:
                     logger.info("📤 PUBLICADO: %s", yt_url)
 
@@ -1777,6 +1852,10 @@ def run_job(
                         logger.warning(
                             "[%s] Pre-render clip shorts failed (non-fatal): %s",
                             canal, _pre_render_err,
+                        )
+                        _alert_nonfatal(
+                            db, video_id, channel_id, "pre_render_clips",
+                            _pre_render_err, {"stage": "post_upload"},
                         )
 
                 if vp and Path(vp).exists():
@@ -1817,6 +1896,10 @@ def run_job(
                         logger.warning("[%s] Auth failed for stats fetch, saved baseline", canal)
                 except Exception as stats_exc:
                     logger.warning("[%s] Failed to collect post-upload stats: %s", canal, stats_exc)
+                    _alert_nonfatal(
+                        db, video_id, channel_id, "post_upload_stats",
+                        stats_exc, {"yt_video_id": yt_video_id},
+                    )
                     try:
                         db.insert_video_stats(video_id=video_id, yt_video_id=yt_video_id,
                                              stats={"viewCount": 0, "likeCount": 0, "commentCount": 0})
