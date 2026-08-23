@@ -101,7 +101,7 @@ def publish_to_platform(video_id: int, platform: str) -> PlatformVideoResponse:
     Works even if CROSS_PLATFORM_UPLOAD is disabled for the platform
     (this is a manual override).
     """
-    VALID = {"facebook", "rumble", "tiktok"}
+    VALID = {"facebook", "rumble", "tiktok", "dailymotion"}
     if platform not in VALID:
         raise HTTPException(400, f"Invalid platform '{platform}'. Valid: {VALID}")
 
@@ -178,7 +178,7 @@ def publish_to_platform(video_id: int, platform: str) -> PlatformVideoResponse:
 @router.post("/videos/{video_id}/republish-to/{platform}")
 def republish_to_platform(video_id: int, platform: str) -> PlatformVideoResponse:
     """Retry a failed cross-platform publish."""
-    VALID = {"facebook", "rumble", "tiktok"}
+    VALID = {"facebook", "rumble", "tiktok", "dailymotion"}
     if platform not in VALID:
         raise HTTPException(400, f"Invalid platform '{platform}'. Valid: {VALID}")
 

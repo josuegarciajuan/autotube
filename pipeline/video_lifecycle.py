@@ -20,6 +20,7 @@ pipeline. The scheduler in api/main.py processes pending actions every 15 min.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -286,6 +287,8 @@ class VideoLifecycleManager:
             ("social_reel_instagram", "instagram"),
             ("social_post_facebook", "facebook"),
             ("social_post_reddit", "reddit"),
+            ("social_link_bluesky", "bluesky"),
+            ("social_link_mastodon", "mastodon"),
         ]
 
         social_config = None
@@ -1006,6 +1009,8 @@ class VideoLifecycleManager:
             "facebook": 180,
             "reddit": 240,
             "rumble": 5,
+            "bluesky": 90,
+            "mastodon": 100,
         }
 
     def _has_social_account(self, platform: str) -> bool:
@@ -1032,6 +1037,8 @@ class VideoLifecycleManager:
             "social_reel_instagram": "instagram",
             "social_post_facebook": "facebook",
             "social_post_reddit": "reddit",
+            "social_link_bluesky": "bluesky",
+            "social_link_mastodon": "mastodon",
         }
         platform = platform_map.get(action_type)
         if not platform:
@@ -1134,6 +1141,13 @@ class VideoLifecycleManager:
             caption_text=caption.text[:2000],
             status="publishing",
         )
+
+        # ── 5b. API-based platforms (Bluesky, Mastodon): no browser ──
+        if platform in ("bluesky", "mastodon"):
+            return self._publish_api_social_post(
+                platform, log_id, action, acct, password,
+                caption, yt_url, video,
+            )
 
         # ── 6. Generate clip if needed (TikTok, Instagram) ──
         clip_path = ""
@@ -1247,6 +1261,67 @@ class VideoLifecycleManager:
             )
             self.db.update_social_error(acct["id"], str(exc)[:1000])
             return False
+
+    def _publish_api_social_post(self, platform: str, log_id: int, action: dict,
+                                 acct: dict, pw: str, caption,
+                                 yt_url: str, video: dict | None) -> bool:
+        """Publish a teaser via pure API (Bluesky / Mastodon) — no browser.
+
+        These platforms have free open REST APIs and only need a token, so we
+        skip Playwright entirely. This is the Máquina B (embudo) path.
+        """
+        from pipeline.social_api_publishers import publish_bluesky, publish_mastodon
+
+        content = SocialContent(
+            platform=platform,
+            text=caption.text,
+            yt_url=yt_url,
+            hashtags=caption.hashtags,
+            link_strategy="direct",
+        )
+
+        thumbnail_path = (video or {}).get("thumbnail_path") or ""
+
+        try:
+            if platform == "bluesky":
+                result = publish_bluesky(
+                    content,
+                    {"username": acct["username"], "password": pw},
+                    thumbnail_path=thumbnail_path,
+                )
+            else:
+                result = publish_mastodon(
+                    content,
+                    {"username": acct["username"], "password": pw},
+                )
+        except Exception as exc:
+            logger.error("[%s] API publish failed for %s: %s", self.slug, platform, exc)
+            self.db.update_social_post_result(
+                log_id, "failed", error_message=str(exc)[:2000],
+            )
+            self.db.update_social_error(acct["id"], str(exc)[:1000])
+            return False
+
+        if result.get("success") and result.get("post_url"):
+            self.db.update_social_post_result(
+                log_id, "published",
+                post_url=result["post_url"],
+                post_id=result.get("post_id"),
+            )
+            self.db.update_lifecycle_action_status(
+                action["id"], "executed",
+                result_json=json.dumps({
+                    "post_url": result["post_url"], "platform": platform,
+                }),
+            )
+            logger.info("[%s] Published to %s: %s", self.slug, platform, result["post_url"])
+            return True
+
+        error = result.get("error", "publish returned no URL")
+        self.db.update_social_post_result(log_id, "failed", error_message=error[:2000])
+        self.db.update_social_error(acct["id"], error[:1000])
+        logger.warning("[%s] Failed to publish to %s: %s", self.slug, platform, error)
+        return False
 
     # ════════════════════════════════════════════════════════════
     # Manual triggers (called from API endpoints)

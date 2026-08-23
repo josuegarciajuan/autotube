@@ -584,6 +584,7 @@ CROSS_PLATFORM_UPLOAD = {
     "facebook": False,   # Graph API v18+ video upload (In-Stream Ads)
     "rumble": False,     # Upload API (Rumble Player + licensing)
     "tiktok": False,     # Content Posting API (clip upload)
+    "dailymotion": False,  # API v2 upload (audiencia europea)
 }
 
 # Per-platform settings for video uploads.

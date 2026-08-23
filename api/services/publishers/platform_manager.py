@@ -21,6 +21,7 @@ PLATFORM_MAP = {
     "facebook": "facebook",
     "rumble": "rumble",
     "tiktok": "tiktok",
+    "dailymotion": "dailymotion",
 }
 
 
@@ -110,6 +111,12 @@ class PlatformPublishManager:
         if targets.get("tiktok"):
             results["tiktok"] = await self._publish_one(
                 "tiktok", video_id, video_meta,
+            )
+
+        # ── Dailymotion ──────────────────────────────────
+        if targets.get("dailymotion"):
+            results["dailymotion"] = await self._publish_one(
+                "dailymotion", video_id, video_meta,
             )
 
         return results
