@@ -88,12 +88,13 @@ def words_per_minute_real(canal_config: Any) -> float:
 def words_for_duration(canal_config: Any, duration_minutes: float) -> int:
     """How many words to generate to fill *duration_minutes*.
 
-    Includes a 20 % cushion so that the final video is more likely
-    to be *longer* rather than shorter than the target.
+    Includes a 5 % cushion (SPEED_COLCHON) so that the final video is more
+    likely to be *longer* rather than shorter than the target — tight enough
+    to avoid overshoot.
 
     Example
     -------
-    canal2, 14 minutes → 14 × 165 × 1.20 = 2772 palabras
+    canal2, 14 minutes → 14 × 165 × 1.05 ≈ 2426 palabras
     """
     real_wpm = words_per_minute_real(canal_config)
     raw = duration_minutes * real_wpm * SPEED_COLCHON
@@ -108,7 +109,7 @@ def duration_for_words(canal_config: Any, word_count: int) -> float:
 
     Example
     -------
-    canal2, 2772 palabras → 2772 / (165 × 1.20) = 14.0 minutos
+    canal2, 2426 palabras → 2426 / (165 × 1.05) ≈ 14.0 minutos
     """
     real_wpm = words_per_minute_real(canal_config)
     if real_wpm <= 0:

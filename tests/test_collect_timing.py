@@ -44,13 +44,18 @@ class TestCollectTiming:
         """collect_timing_json() returns a parseable JSON string matching collect_timing()."""
         orch, _ = self._make_orchestrator()
 
+        # Snapshot first: total_duration_ms is WALL-CLOCK based and keeps
+        # ticking — comparing the serialized value against a later live read
+        # was flaky under CPU contention (the ms counter advances in between).
+        snap = orch.collect_timing()
         json_str = orch.collect_timing_json()
         parsed = json.loads(json_str)
 
         assert "phases" in parsed
         assert "total_duration_ms" in parsed
-        assert parsed["phases"] == orch.collect_timing()["phases"]
-        assert parsed["total_duration_ms"] == orch.collect_timing()["total_duration_ms"]
+        assert parsed["phases"] == snap["phases"]
+        # Allow the wall-clock counter to tick between snapshot and stringify
+        assert abs(parsed["total_duration_ms"] - snap["total_duration_ms"]) <= 1000
 
     # ── _pipeline_start behaviour ─────────────────────────────────
 

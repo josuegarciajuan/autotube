@@ -17,12 +17,12 @@ class TestComputeWordTarget:
     """Test _compute_word_target() with real channel configs."""
 
     def test_canal2_production(self):
-        """14 min, -10% rate → 2772 palabras."""
+        """14 min, -10% rate → 2426 palabras (165 wpm × 1.05 colchón)."""
         sg = ScriptGenerator(MockDB(), MockConfigCanal2)
         wt = sg._compute_word_target(14.0)
-        assert wt["palabras_objetivo"] == 2772
-        assert wt["words_min"] == 2356   # 2772 * 0.85
-        assert wt["words_max"] == 3603   # 2772 * 1.3
+        assert wt["palabras_objetivo"] == 2426
+        assert wt["words_min"] == 2062   # 2426 * 0.85 = 2062.1
+        assert wt["words_max"] == 3153   # 2426 * 1.3 = 3153.8
         assert wt["duration_target"] == 14.0
         assert wt["blocks_min"] >= 3
         assert wt["blocks_max"] >= 5
@@ -31,8 +31,8 @@ class TestComputeWordTarget:
         """12 min, -8% rate."""
         sg = ScriptGenerator(MockDB(), MockConfigCanal3)
         wt = sg._compute_word_target(12.0)
-        # 12 × 150 × 1.08 × 1.20 = 2333
-        assert 2200 <= wt["palabras_objetivo"] <= 2500
+        # 12 × 150 × 1.08 × 1.05 = 2041.2 → 2042
+        assert 1950 <= wt["palabras_objetivo"] <= 2150
         assert wt["words_min"] > 0
         assert wt["duration_target"] == 12.0
 
@@ -40,8 +40,8 @@ class TestComputeWordTarget:
         """14 min, 0.85 speed (direct multiplier = 85% of neutral)."""
         sg = ScriptGenerator(MockDB(), MockConfigKokoro)
         wt = sg._compute_word_target(14.0)
-        # 14 × 150 × 0.85 × 1.20 = 2142
-        assert 1900 <= wt["palabras_objetivo"] <= 2400
+        # 14 × 150 × 0.85 × 1.05 = 1874.25 → 1875
+        assert 1800 <= wt["palabras_objetivo"] <= 1950
 
     def test_small_target(self):
         """Even 1-minute target works."""

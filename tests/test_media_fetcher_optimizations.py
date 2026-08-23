@@ -204,6 +204,10 @@ class TestFetchForScriptOptimizations:
 
         fetcher = MediaFetcher(config=_make_config(target_video_pct=0))
         fetcher.video_providers = []
+        # Skip the real AI-image tier so the stock-image tier (Pixabay-first)
+        # is the one that fetches. Without this, real Pollinations generation
+        # succeeds and the mock below is never reached.
+        fetcher._ai_image_primary = False
 
         scenes = [
             _make_scene(start=0, duration=5, asset_idx=0),
@@ -218,10 +222,18 @@ class TestFetchForScriptOptimizations:
         def mock_fetch_exhaustive(scene, query_pool, want_video, target_dur, ctx, force_images=False):
             source = "pixabay_photo"
             call_sources.append(source)
-            return {"path": "/tmp/test.jpg", "type": "image", "duration": None, "source": source}
+            # Distinct path per scene: the uniqueness gate aborts if the same
+            # image path is assigned to two scenes (anti-repeat invariant).
+            idx = scene.get("asset_idx", 0)
+            return {"path": f"/tmp/test_{idx}.jpg", "type": "image",
+                    "duration": None, "source": source}
 
         fetcher._fetch_asset_exhaustive = MagicMock(side_effect=mock_fetch_exhaustive)
         fetcher._try_pollo_scene = MagicMock(return_value=None)
+        # Image-fallback scene expansion is out of scope for this test
+        fetcher._reconcile_actual_image_fallbacks = (
+            lambda scenes, results, fn: (scenes, results)
+        )
 
         results = fetcher.fetch_for_script(
             bloques=[{"texto": "test", "tipo": "desarrollo"} for _ in range(2)],

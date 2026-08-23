@@ -2022,7 +2022,18 @@ def _migrate_v22(conn, logger):
         # ALTER TABLE ADD COLUMN is NOT idempotent in SQLite — check first.
         for stmt_text in sql.split(";"):
             stmt_text = stmt_text.strip()
-            if not stmt_text or stmt_text.startswith("--"):
+            if not stmt_text:
+                continue
+            # A semicolon-delimited chunk may START with comment lines
+            # (schema_v22.sql has comments before CREATE TABLE).  Strip the
+            # comment LINES so the real statement is not skipped.
+            _kept = []
+            for _ln in stmt_text.split("\n"):
+                if _ln.strip().startswith("--"):
+                    continue
+                _kept.append(_ln)
+            stmt_text = "\n".join(_kept).strip()
+            if not stmt_text:
                 continue
             if stmt_text.upper().startswith("ALTER TABLE"):
                 col_name = "emergency_mode"

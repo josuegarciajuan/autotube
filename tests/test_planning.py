@@ -48,83 +48,25 @@ def sample_channels():
 
 
 @pytest.fixture
-def test_db_path(tmp_path):
-    """Create a temporary SQLite database with the planned_slots table."""
+def test_db_path(tmp_path, monkeypatch):
+    """Create a temporary SQLite database with the FULL real schema.
+
+    Built via the real migration chain (init_db + migrate_v2) instead of a
+    hand-crafted minimal schema: the planning service (and the API app startup)
+    run migrations/ALTERs that require the complete table set. A minimal schema
+    drifted from the real one (missing target_public_at, worker_pid, etc.) and
+    broke every service/API test.
+    """
     db_path = tmp_path / "test_planning.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
-    
-    # Create channels table (full schema matching ExtendedDatabase expectations)
-    conn.execute("""
-        CREATE TABLE channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            slug TEXT NOT NULL UNIQUE,
-            config_json TEXT NOT NULL DEFAULT '{}',
-            active BOOLEAN NOT NULL DEFAULT 1,
-            description TEXT,
-            banner_url TEXT,
-            avatar_url TEXT,
-            yt_channel_id TEXT,
-            yt_channel_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Create generation_jobs table
-    conn.execute("""
-        CREATE TABLE generation_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER,
-            video_id INTEGER,
-            action TEXT DEFAULT 'generate_and_upload',
-            status TEXT DEFAULT 'queued',
-            progress INTEGER DEFAULT 0,
-            phase TEXT,
-            error_msg TEXT,
-            started_at TIMESTAMP,
-            finished_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Create planned_slots table
-    conn.execute("""
-        CREATE TABLE planned_slots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            date_key TEXT NOT NULL,
-            scheduled_at TIMESTAMP NOT NULL,
-            target_upload_at TIMESTAMP,
-            status TEXT NOT NULL DEFAULT 'pending',
-            job_id INTEGER REFERENCES generation_jobs(id) ON DELETE SET NULL,
-            video_id INTEGER REFERENCES videos(id) ON DELETE SET NULL,
-            slot_position INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("CREATE INDEX idx_ps_date ON planned_slots(date_key, status)")
-    conn.execute("CREATE INDEX idx_ps_channel ON planned_slots(channel_id, date_key)")
-    
-    # Create videos table
-    conn.execute("""
-        CREATE TABLE videos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            canal TEXT,
-            channel_id INTEGER,
-            video_path TEXT DEFAULT '',
-            status TEXT DEFAULT 'draft',
-            progress INTEGER DEFAULT 0,
-            progress_phase TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            yt_video_id TEXT,
-            yt_url TEXT
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+
+    from config import settings
+    monkeypatch.setattr(settings, "DATABASE_PATH", str(db_path))
+
+    from database.db import init_db
+    from database.db_extended import migrate_v2
+    init_db(str(db_path))
+    migrate_v2(str(db_path))
+
     return db_path
 
 
@@ -280,32 +222,43 @@ class TestComputeDailySlots:
         assert len(slots) == 0
 
     def test_multiple_videos_per_day(self, sample_channels):
-        """2/day and 3/day produce correct counts."""
+        """Techo antiban: videos_per_day > LONGFORM_DAILY_HARD_CAP → cap slots.
+
+        Desde ago-2026 rige un cap duro de longs/día/canal
+        (LONGFORM_DAILY_HARD_CAP, perfil strike = 1): pedir 2 o 3 videos
+        al día produce SOLO `cap` slots. La distribución multi-slot por
+        canal quedó desactivada de forma deliberada (causa raíz de los
+        strikes fue la frecuencia de 2 longs/día).
+        """
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
         configs = [dict(sample_channels[0])]
+
         configs[0]["videos_per_day"] = 1
         slots_1 = compute_daily_slots("2026-07-15", configs)
-        assert len(slots_1) == 1
-        
+        assert len(slots_1) == min(1, cap)
+
         configs[0]["videos_per_day"] = 2
         slots_2 = compute_daily_slots("2026-07-15", configs)
-        assert len(slots_2) == 2
-        
+        assert len(slots_2) == cap, "2/day must be capped to LONGFORM_DAILY_HARD_CAP"
+
         configs[0]["videos_per_day"] = 3
         slots_3 = compute_daily_slots("2026-07-15", configs)
-        assert len(slots_3) == 3
-    
+        assert len(slots_3) == cap, "3/day must be capped to LONGFORM_DAILY_HARD_CAP"
+
     def test_many_videos_per_day_respect_gaps(self, sample_channels):
-        """With 5 videos/day, all gaps must still be >= MIN_GAP_MINUTES."""
+        """Con videos_per_day=5 el cap antiban sigue produciendo solo `cap` slots.
+
+        La lógica de gaps multi-slot por canal queda sin efecto mientras
+        LONGFORM_DAILY_HARD_CAP=1; el gap entre canales ya lo cubre
+        test_minimum_gap_between_slots.
+        """
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
         configs = [dict(sample_channels[0])]
         configs[0]["videos_per_day"] = 5
         slots = compute_daily_slots("2026-07-15", configs)
-        assert len(slots) == 5
-        
-        for i in range(1, len(slots)):
-            ph, pm = map(int, slots[i-1]["scheduled_at"][11:16].split(":"))
-            ch, cm = map(int, slots[i]["scheduled_at"][11:16].split(":"))
-            gap = (ch * 60 + cm) - (ph * 60 + pm)
-            assert gap >= MIN_GAP_MINUTES
+        assert len(slots) == cap
 
     def test_slots_sorted_chronologically(self, sample_channels):
         slots = compute_daily_slots("2026-07-15", sample_channels)
@@ -351,41 +304,47 @@ class TestPlanningService:
         assert len(slots) == 3  # still 3, not 6
 
     def test_sync_midday_adds_slots(self, seeded_db):
-        """Increasing videos_per_day adds new slots."""
+        """Activar planificación (0 → 1/day) añade slots; 1 → 3/day queda capado."""
         db = _get_extended_db(seeded_db)
         today = date.today().isoformat()
-        compute_and_store_slots(today, db=db)
-        
-        # Change canal2 from 1 to 3/day
-        db.update_channel_planning_config(1, videos_per_day=3)
-        
-        result = sync_midday(db=db)
-        assert result["added"] > 0
-        
-        ch_slots = db.get_planned_slots(date_key=today, channel_id=1)
-        assert len(ch_slots) == 3
 
-    def test_sync_midday_cancels_excess(self, seeded_db):
-        """Decreasing videos_per_day cancels excess pending slots."""
-        db = _get_extended_db(seeded_db)
-        today = date.today().isoformat()
-        
-        # Start with 3/day for canal2
-        db.update_channel_planning_config(1, videos_per_day=3)
+        # Pausar canal2 → 0 slots
+        db.update_channel_planning_config(1, videos_per_day=0)
         compute_and_store_slots(today, db=db)
-        
-        ch_slots_before = db.get_planned_slots(date_key=today, channel_id=1)
-        assert len(ch_slots_before) == 3
-        
-        # Reduce to 1/day
+        assert len(db.get_planned_slots(date_key=today, channel_id=1)) == 0
+
+        # Reactivar a 1/day → sync_midday añade el slot
         db.update_channel_planning_config(1, videos_per_day=1)
         result = sync_midday(db=db)
+        assert result["added"] > 0
+
+        # Pedir 3/day sigue capado a LONGFORM_DAILY_HARD_CAP (1)
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
+        db.update_channel_planning_config(1, videos_per_day=3)
+        sync_midday(db=db)
+        ch_slots = db.get_planned_slots(date_key=today, channel_id=1)
+        assert len(ch_slots) == cap
+
+    def test_sync_midday_cancels_excess(self, seeded_db):
+        """Reducir videos_per_day a 0 cancela los slots pendientes sobrantes."""
+        db = _get_extended_db(seeded_db)
+        today = date.today().isoformat()
+
+        # 1 slot pendiente para canal2
+        compute_and_store_slots(today, db=db)
+        ch_slots_before = db.get_planned_slots(date_key=today, channel_id=1)
+        assert len(ch_slots_before) >= 1
+
+        # Pausar a 0/day → sync_midday cancela el exceso
+        db.update_channel_planning_config(1, videos_per_day=0)
+        result = sync_midday(db=db)
         assert result["cancelled"] > 0
-        
-        # Check: only 1 non-cancelled slot remains
+
+        # Check: no quedan slots activos para canal2
         ch_slots_after = db.get_planned_slots(date_key=today, channel_id=1)
         active = [s for s in ch_slots_after if s["status"] != "cancelled"]
-        assert len(active) == 1
+        assert len(active) == 0
 
     def test_sync_midday_disabling_channel(self, seeded_db):
         """Disabling planning cancels all pending slots for that channel."""
@@ -682,8 +641,9 @@ class TestPlanningAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["days"]) == 7
-        # canal2=4 + canal3=1 + canal4=1 = 6 slots (if all active)
-        assert len(data["days"][0]["slots"]) >= 4
+        # Techo antiban: videos_per_day > 1 se capa a LONGFORM_DAILY_HARD_CAP (1).
+        # canal2=1(cap) + canal3=1 + canal4=1 = 3 slots (si todos activos)
+        assert len(data["days"][0]["slots"]) >= 3
     
     def test_409_guard_on_generate(self):
         """If a job is running, POST /api/videos/generate returns 409."""
@@ -744,11 +704,14 @@ class TestEdgeCases:
         assert slots == []
 
     def test_single_channel_multiple_slots(self, sample_channels):
+        """Techo antiban: un canal con videos_per_day=5 produce SOLO `cap` slots."""
+        from config.defaults import LONGFORM_DAILY_HARD_CAP
+        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
         configs = [dict(sample_channels[0])]
         configs[0]["videos_per_day"] = 5
         slots = compute_daily_slots("2026-07-15", configs)
-        assert len(slots) == 5
-        
+        assert len(slots) == cap
+
         # All must have same channel_id
         for s in slots:
             assert s["channel_id"] == configs[0]["channel_id"]
