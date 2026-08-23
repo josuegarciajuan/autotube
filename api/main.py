@@ -2998,7 +2998,7 @@ app.include_router(monitor_router.router, prefix="/api", tags=["Monitor"])
 app.include_router(insights.router, prefix="/api/channels", tags=["Insights AI"])
 app.include_router(view_gap_router.router, prefix="/api", tags=["View Gap"])
 app.include_router(quota_router.router, prefix="", tags=["Quota"])
-app.include_router(redistribution_router.router, prefix="/api", tags=["Redistribution"])
+app.include_router(redistribution_router.router, prefix="", tags=["Redistribution"])
 
 # WebSocket
 @app.websocket("/ws/progress/{job_id}")
