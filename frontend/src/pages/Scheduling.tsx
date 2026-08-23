@@ -13,7 +13,7 @@ interface ChannelSummary {
   channel_name: string
   channel_slug: string
   videos: { pending: number; running: number; completed: number; cancelled: number }
-  shorts: { pending: number; running: number; completed: number }
+  shorts: { pending: number; running: number; completed: number; generated: number }
   next_time: string | null
   next_kind: string | null
 }
@@ -101,7 +101,7 @@ function TodayStatus() {
         map.set(id, {
           channel_id: id, channel_name: name, channel_slug: slug,
           videos: { pending: 0, running: 0, completed: 0, cancelled: 0 },
-          shorts: { pending: 0, running: 0, completed: 0 },
+          shorts: { pending: 0, running: 0, completed: 0, generated: 0 },
           next_time: null, next_kind: null,
         })
       }
@@ -122,6 +122,7 @@ function TodayStatus() {
       if (s.status === 'completed') ch.shorts.completed++
       else if (s.status === 'running') ch.shorts.running++
       else if (s.status === 'pending') ch.shorts.pending++
+      else if (s.status === 'generated') ch.shorts.generated++
       if (s.status === 'pending' && s.scheduled_at && (!ch.next_time || s.scheduled_at < ch.next_time)) {
         ch.next_time = s.scheduled_at; ch.next_kind = 'short'
       }
@@ -159,7 +160,7 @@ function TodayStatus() {
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       {channels.map((ch) => {
         const colors = getChannelStyles({ channel_id: ch.channel_id, channel_slug: ch.channel_slug })
-        const allDone = ch.videos.pending === 0 && ch.videos.running === 0 && ch.shorts.pending === 0 && ch.shorts.running === 0
+        const allDone = ch.videos.pending === 0 && ch.videos.running === 0 && ch.shorts.pending === 0 && ch.shorts.running === 0 && ch.shorts.generated === 0
         const hasRunning = ch.videos.running > 0 || ch.shorts.running > 0
         const hasPending = ch.videos.pending > 0 || ch.shorts.pending > 0
         const hasCancelled = ch.videos.cancelled > 0
@@ -214,7 +215,10 @@ function TodayStatus() {
                 {ch.shorts.pending > 0 && (
                   <span title={`${ch.shorts.pending} shorts pendientes de generar`} className="px-1.5 py-0.5 rounded bg-purple-400/10 text-purple-400 text-[10px]">{ch.shorts.pending}⏳</span>
                 )}
-                {ch.shorts.completed === 0 && ch.shorts.running === 0 && ch.shorts.pending === 0 && (
+                {ch.shorts.generated > 0 && (
+                  <span title={`${ch.shorts.generated} shorts generados en cola, pendientes de subir`} className="px-1.5 py-0.5 rounded bg-sky-400/15 text-sky-400 text-[10px]">{ch.shorts.generated}⏸</span>
+                )}
+                {ch.shorts.completed === 0 && ch.shorts.running === 0 && ch.shorts.pending === 0 && ch.shorts.generated === 0 && (
                   <span className="text-gray-600 text-[10px]">—</span>
                 )}
               </div>
@@ -269,6 +273,63 @@ function ShortsSection() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {activeConfigs.map(ch => (<ShortsCard key={ch.channel_id} config={ch} onUpdate={(d) => update(ch.channel_id, d)} />))}
       </div>
+    </div>
+  )
+}
+
+// ── Cola de shorts generados (status='generated') ─────────
+// (fix ago 2026) Shorts nativos renderizados pero SIN subir (p. ej. durante
+// bloqueos de spam o cuota) antes eran invisibles en Programación.
+function QueuedShortsSection() {
+  const { data: shortsToday, refetch } = useShortsSlotsToday()
+  const [uploading, setUploading] = useState<number | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const queued = shortsToday?.queued || []
+
+  if (!queued.length) return null
+
+  const handleUpload = async (shortId: number) => {
+    setUploading(shortId); setMsg(null)
+    try {
+      const res = await api.uploadQueuedShort(shortId)
+      setMsg(res?.ok ? `Short #${shortId} subido.` : `No se pudo subir el short #${shortId}.`)
+    } catch (e: any) {
+      setMsg(e?.message || `Error al subir el short #${shortId}.`)
+    } finally {
+      setUploading(null)
+      refetch()
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium text-white flex items-center gap-2">
+        <Smartphone size={14} className="text-sky-400" /> Cola de shorts generados ({queued.length})
+        <span className="text-[10px] text-gray-500 font-normal">renderizados, pendientes de subir</span>
+      </h4>
+      <div className="bg-dark-700/40 rounded-xl border border-sky-400/20 overflow-hidden">
+        {queued.map((q: any) => (
+          <div key={q.short_id} className="flex items-center gap-3 px-3 py-2 border-b border-surface-border/40 last:border-0 text-xs">
+            <span className="text-gray-500 font-mono">#{q.short_id}</span>
+            <span className="text-gray-200 truncate flex-1">{q.title}</span>
+            <span className="text-gray-500 shrink-0">{q.channel_name || q.channel_slug}</span>
+            <span className="text-gray-600 font-mono shrink-0">{q.created_at?.slice(0, 16)}</span>
+            {q.file_exists ? (
+              <span className="text-emerald-400 text-[10px] shrink-0">✓ archivo</span>
+            ) : (
+              <span className="text-red-400 text-[10px] shrink-0" title="El archivo ya no existe en disco">✗ sin archivo</span>
+            )}
+            <button
+              onClick={() => handleUpload(q.short_id)}
+              disabled={uploading === q.short_id || !q.file_exists}
+              className="px-2 py-1 rounded bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {uploading === q.short_id ? 'Subiendo...' : 'Subir ahora'}
+            </button>
+          </div>
+        ))}
+      </div>
+      {msg && <p className="text-xs text-gray-400">{msg}</p>}
     </div>
   )
 }
@@ -576,6 +637,7 @@ export default function Scheduling() {
            <span className="text-xs text-gray-500 font-normal">(Europe/Madrid)</span>
         </h3>
         <TodayStatus />
+        <QueuedShortsSection />
       </section>
 
       {/* ── Section 3: Configuracion ─────────────────────── */}

@@ -304,6 +304,9 @@ export const api = {
     const params = channelId ? `?channel_id=${channelId}` : ''
     return request<any>(`/planning/shorts-slots/week${params}`)
   },
+  // Sube ahora un short nativo en cola (status='generated') — fix ago 2026
+  uploadQueuedShort: (shortId: number) =>
+    request<any>(`/planning/shorts-queue/upload/${shortId}`, { method: 'POST' }),
 
   // System
   stabilizeSystem: () => request<any>('/system/stabilize', { method: 'POST' }),

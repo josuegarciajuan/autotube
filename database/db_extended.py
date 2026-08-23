@@ -8291,6 +8291,28 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_queued_generated_shorts(self) -> list[dict]:
+        """Todos los shorts nativos 'generated' (en cola, sin subir), FIFO.
+
+        (fix ago 2026) Expone la cola real de shorts renderizados que aún no se
+        han publicado (p. ej. durante bloqueos de spam o cuota) para que la
+        vista Programación la muestre. Solo los que tienen archivo en disco y
+        aún sin youtube_id.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT s.id, s.channel_id, s.title, s.hook_title, s.created_at,
+                          s.file_path, c.name as channel_name, c.slug as channel_slug
+                   FROM shorts s
+                   JOIN channels c ON s.channel_id = c.id
+                   WHERE s.type = 'native' AND s.status = 'generated'
+                     AND s.file_path IS NOT NULL AND s.file_path != ''
+                     AND (s.youtube_id IS NULL OR s.youtube_id = '')
+                   ORDER BY s.id ASC""",
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_shorts_slot_status(self, slot_id: int, status: str,
                                    source_video_id: int = None,
                                    short_id: int = None,

@@ -2971,11 +2971,14 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             )
 
         if short_id:
-            # Mark slot as completed
+            # Mark slot as completed (o 'generated' si es generate_only: el
+            # short está renderizado y EN COLA, todavía NO publicado — fix ago
+            # 2026, antes se marcaba 'completed' y era invisible en Programación).
+            _slot_status = "generated" if generate_only else "completed"
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
             conn.execute(
-                "UPDATE shorts_planned_slots SET status = 'completed', short_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (short_id, slot_id),
+                "UPDATE shorts_planned_slots SET status = ?, short_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (_slot_status, short_id, slot_id),
             )
             conn.execute(
                 "UPDATE generation_jobs SET status = 'completed' WHERE id = ?",
@@ -2983,7 +2986,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             )
             conn.commit()
             conn.close()
-            logger.info("Shorts slot #%d completed: short_id=%d", slot_id, short_id)
+            logger.info("Shorts slot #%d %s: short_id=%d", slot_id, _slot_status, short_id)
         else:
             # ── Retry logic: don't permanently cancel on first failure ──
             # TTS or script failures are often transient (LLM word count,
@@ -4145,8 +4148,8 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
     try:
         with db._connect() as conn:
             slot_row = conn.execute(
-                """SELECT target_upload_at FROM shorts_planned_slots
-                   WHERE short_id = ? AND status = 'completed'
+                """SELECT id, target_upload_at FROM shorts_planned_slots
+                   WHERE short_id = ? AND status IN ('generated', 'completed')
                    ORDER BY id DESC LIMIT 1""",
                 (short_id,),
             ).fetchone()
@@ -4189,6 +4192,15 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
                    WHERE id=?""",
                 (yt_id, result.get("url", ""), short_id),
             )
+            # Slot en cola → completado (ahora sí está publicado; fix ago 2026:
+            # el estado 'generated' lo mantenía visible en Programación).
+            if slot_row:
+                conn.execute(
+                    """UPDATE shorts_planned_slots
+                       SET status='completed', updated_at=CURRENT_TIMESTAMP
+                       WHERE id=?""",
+                    (slot_row["id"],),
+                )
             conn.commit()
     except Exception as exc:
         logger.warning("Queued short #%d: DB update failed: %s", short_id, exc)

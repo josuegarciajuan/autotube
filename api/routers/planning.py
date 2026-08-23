@@ -1,11 +1,16 @@
 """Planning router — dynamic daily video scheduling API."""
 
+import logging
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date as dt_date, timedelta
 
 from api.deps import get_db
+
+logger = logging.getLogger("autotube.planning")
 
 router = APIRouter()
 
@@ -408,7 +413,12 @@ def get_shorts_slots(
 
 @router.get("/shorts-slots/today")
 def get_today_shorts_slots():
-    """Get today's shorts slots with KPIs."""
+    """Get today's shorts slots with KPIs + la cola de shorts nativos generados.
+
+    (fix ago 2026) La cola real de shorts 'generated' (renderizados pero sin
+    subir, p. ej. durante bloqueos de spam o cuota) vive en la tabla `shorts`
+    y antes NO aparecía en Programación. Se expone como `queued`.
+    """
     db = get_db()
     today = dt_date.today().isoformat()
     slots = db.get_shorts_planned_slots(date_key=today)
@@ -418,6 +428,24 @@ def get_today_shorts_slots():
     running = sum(1 for s in slots if s["status"] == "running")
     completed = sum(1 for s in slots if s["status"] == "completed")
     cancelled = sum(1 for s in slots if s["status"] == "cancelled")
+    generated_slots = sum(1 for s in slots if s["status"] == "generated")
+
+    # ── Cola de shorts nativos generados (status='generated') ──
+    queued = []
+    try:
+        for r in db.get_queued_generated_shorts():
+            fp = r.get("file_path") or ""
+            queued.append({
+                "short_id": r["id"],
+                "channel_id": r["channel_id"],
+                "channel_name": r.get("channel_name") or "",
+                "channel_slug": r.get("channel_slug") or "",
+                "title": (r.get("title") or "")[:100],
+                "created_at": str(r.get("created_at") or ""),
+                "file_exists": bool(fp) and Path(fp).exists(),
+            })
+    except Exception as exc:
+        logger.warning("shorts-slots/today: queued lookup failed: %s", exc)
 
     for s in slots:
         for k in ("scheduled_at", "target_upload_at", "created_at"):
@@ -431,8 +459,33 @@ def get_today_shorts_slots():
         "running": running,
         "completed": completed,
         "cancelled": cancelled,
+        "generated": generated_slots,
+        "queued": queued,
+        "queued_count": len(queued),
         "slots": slots,
     }
+
+
+@router.post("/shorts-queue/upload/{short_id}")
+def upload_queued_short(short_id: int):
+    """Sube AHORA un short nativo en cola (status='generated') manualmente.
+
+    (fix ago 2026) Acción manual para drenar la cola de shorts generados que
+    quedaron esperando (p. ej. tras expirar bloqueo de spam / cuota).
+    """
+    from api.services.shorts_scheduler import _upload_queued_native_short
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase()
+    try:
+        queued = db.get_queued_generated_shorts()
+        rec = next((q for q in queued if int(q.get("id") or 0) == short_id), None)
+    except Exception as exc:
+        logger.warning("shorts-queue/upload: lookup failed: %s", exc)
+        rec = None
+    if not rec:
+        raise HTTPException(404, f"Short #{short_id} no está en cola (status='generated')")
+    ok = _upload_queued_native_short(rec, db=db)
+    return {"ok": bool(ok), "short_id": short_id, "uploaded": bool(ok)}
 
 
 @router.get("/shorts-slots/week")
