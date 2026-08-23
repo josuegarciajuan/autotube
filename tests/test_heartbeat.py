@@ -46,7 +46,8 @@ def db():
             progress INTEGER DEFAULT 0, phase TEXT,
             error_msg TEXT, started_at TIMESTAMP, finished_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_heartbeat_at TIMESTAMP, retry_count INTEGER DEFAULT 0
+            last_heartbeat_at TIMESTAMP, retry_count INTEGER DEFAULT 0,
+            worker_pid INTEGER
         );
         CREATE TABLE IF NOT EXISTS pipeline_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,12 +150,12 @@ class TestHeartbeatOrphanDetection:
         )
 
     def test_job_with_stale_heartbeat_is_orphaned(self, db):
-        """A job whose last heartbeat was >20 min ago is dead."""
+        """A job whose last heartbeat was >HEARTBEAT_ORPHAN_TIMEOUT_MIN is dead."""
         job = self._create_running_video_job(db, seconds_ago=3600, with_heartbeat=False)
 
-        # Set heartbeat to 25 min ago (beyond 20 min threshold)
+        # Set heartbeat to 65 min ago (beyond the 60 min default timeout)
         db._conn.execute(
-            "UPDATE generation_jobs SET last_heartbeat_at = datetime('now', '-1500 seconds') WHERE id=?",
+            "UPDATE generation_jobs SET last_heartbeat_at = datetime('now', '-3900 seconds') WHERE id=?",
             (job["id"],),
         )
         # Also need a video row for the JOIN

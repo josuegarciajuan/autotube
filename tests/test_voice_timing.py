@@ -87,13 +87,13 @@ def test_wpm_edge_tts_slow():
 # ── words_for_duration ────────────────────────────────────────
 
 def test_words_14min_edge_tts():
-    """14 min * 165 wpm * 1.20 colchón = 2772."""
-    assert words_for_duration(EdgeTTSConfig, 14.0) == 2772
+    """14 min * 165 wpm * 1.05 colchón = 2426 (ceil(2425.5))."""
+    assert words_for_duration(EdgeTTSConfig, 14.0) == 2426
 
 
 def test_words_10min_edge_tts():
-    """10 min * 150 * 1.10 * 1.20 = 1980."""
-    assert words_for_duration(EdgeTTSConfig, 10.0) == 1980
+    """10 min * 150 * 1.10 * 1.05 = 1733 (ceil(1732.5))."""
+    assert words_for_duration(EdgeTTSConfig, 10.0) == 1733
 
 
 def test_words_minimum():
@@ -103,15 +103,15 @@ def test_words_minimum():
 
 # ── duration_for_words ────────────────────────────────────────
 
-def test_duration_2772_words():
-    """2772 / (165 * 1.20) = 14.0 minutes."""
-    assert duration_for_words(EdgeTTSConfig, 2772) == 14.0
+def test_duration_14min_words():
+    """2426 / (165 * 1.05) = 14.0 minutes."""
+    assert duration_for_words(EdgeTTSConfig, 2426) == 14.0
 
 
 def test_duration_500_words():
-    """500 / (165 * 1.20) ≈ 2.5 minutes."""
+    """500 / (165 * 1.05) ≈ 2.9 minutes."""
     dur = duration_for_words(EdgeTTSConfig, 500)
-    assert 2.4 <= dur <= 2.6
+    assert 2.7 <= dur <= 3.1
 
 
 def test_roundtrip():
@@ -132,10 +132,11 @@ def test_zero_words():
 
 
 def test_colchon_applied():
-    """SPEED_COLCHON 1.20 means 20% extra words for safety."""
+    """SPEED_COLCHON 1.05 means 5% extra words (ceil rounding)."""
+    import math
     raw_words = 14.0 * BASE_WORDS_PER_MINUTE * voice_speed_factor(EdgeTTSConfig)
     with_colchon = words_for_duration(EdgeTTSConfig, 14.0)
-    assert with_colchon == int(raw_words * SPEED_COLCHON)
+    assert with_colchon == max(50, int(math.ceil(raw_words * SPEED_COLCHON)))
 
 # ── Ampliación: más tasas y edge cases ──────────────────────
 

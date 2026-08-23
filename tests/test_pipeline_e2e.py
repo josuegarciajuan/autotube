@@ -23,7 +23,7 @@ class TestPipelineE2E:
 
         # Step 1: Calculate words via voice_timing
         target_words = words_for_duration(MockConfigCanal2, 14.0)
-        assert target_words == 2772
+        assert target_words == 2426
 
         # Step 2: Create ScriptGenerator and word target
         sg = ScriptGenerator(MockDB(), MockConfigCanal2)
@@ -32,8 +32,8 @@ class TestPipelineE2E:
         word_target = sg._compute_word_target(14.0)
         assert word_target["palabras_objetivo"] == target_words
 
-        # Step 3: Mock the LLM for enrichment
-        content_words = ["palabra " * 100 for _ in range(28)]
+        # Step 3: Mock the LLM for enrichment (24 × 100 palabras ≈ target 2426)
+        content_words = ["palabra " * 100 for _ in range(24)]
         enrichment_data = make_mock_llm_response(content_words)
         sg.client.chat.completions.create.return_value = \
             make_mock_openai_response(enrichment_data)

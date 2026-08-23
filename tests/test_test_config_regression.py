@@ -95,18 +95,20 @@ class TestConfigBridge:
         assert len(bloques) == 8, "Without MAX_SCRIPT_BLOCKS, no truncation should occur"
 
     def test_scene_duration_max_propagated(self):
-        """SCENE_DURATION_MAX must be propagated to orch config."""
-        import importlib
-        cfg = importlib.import_module("config.canal2_config")
+        """SCENE_DURATION_MAX must be propagated to orch config.
 
-        orch_config = {}
-        for _k in ("VIDEO_RESOLUTION", "FFMPEG_PRESET", "SCENE_DURATION_MAX"):
-            if hasattr(cfg, _k):
-                orch_config[_k] = getattr(cfg, _k)
+        Channel configs no longer inherit defaults directly: the merge happens
+        in config_bridge.get_channel_config() (AGENTS.md invariant). The
+        bridge output must carry SCENE_DURATION_MAX so test_video.py /
+        orchestrator can read it.
+        """
+        from config.config_bridge import get_channel_config
 
-        assert "SCENE_DURATION_MAX" in orch_config, (
-            "SCENE_DURATION_MAX MUST be in the test_video.py for-loop bridge!"
+        cfg = get_channel_config("canal2")
+
+        assert hasattr(cfg, "SCENE_DURATION_MAX"), (
+            "SCENE_DURATION_MAX MUST come from defaults via the config bridge!"
         )
-        assert orch_config["SCENE_DURATION_MAX"] >= 9.0, (
-            f"SCENE_DURATION_MAX should be >= 9, got {orch_config.get('SCENE_DURATION_MAX')}"
+        assert cfg.SCENE_DURATION_MAX >= 9.0, (
+            f"SCENE_DURATION_MAX should be >= 9, got {cfg.SCENE_DURATION_MAX}"
         )

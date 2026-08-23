@@ -117,10 +117,10 @@ class TestOutlinePassing:
         sg.client.chat.completions.create.return_value = \
             make_mock_openai_response({"bloques": [{"texto": "Test block"}]})
 
-        with patch("pipeline.script_generator.importlib.import_module") as mock_import:
-            mock_prompts = MagicMock()
-            mock_prompts.build_content_only_prompt.return_value = "prompt with outline"
-            mock_import.return_value = mock_prompts
+        # _generate_blocks_batch imports build_content_only_prompt locally
+        # from prompts.base_prompts → patch the source module attribute.
+        with patch("prompts.base_prompts.build_content_only_prompt") as mock_build:
+            mock_build.return_value = "prompt with outline"
 
             outline = {"chapters": [{"titulo": "Cap 1"}]}
             sg._generate_blocks_batch(
@@ -129,8 +129,8 @@ class TestOutlinePassing:
             )
 
             # Verify the mock was called with outline and batch_num
-            assert mock_prompts.build_content_only_prompt.called
-            call_kwargs = mock_prompts.build_content_only_prompt.call_args.kwargs
+            assert mock_build.called
+            call_kwargs = mock_build.call_args.kwargs
             assert "outline" in call_kwargs
             assert call_kwargs["outline"] == outline
             assert call_kwargs.get("batch_num") == 2
@@ -141,13 +141,11 @@ class TestOutlinePassing:
         sg.client.chat.completions.create.return_value = \
             make_mock_openai_response({"bloques": [{"texto": "OK"}]})
 
-        with patch("pipeline.script_generator.importlib.import_module") as mock_import:
-            mock_prompts = MagicMock()
-            mock_prompts.build_content_only_prompt.return_value = "prompt"
-            mock_import.return_value = mock_prompts
+        with patch("prompts.base_prompts.build_content_only_prompt") as mock_build:
+            mock_build.return_value = "prompt"
 
             result = sg._generate_blocks_batch(
                 {"id": 1, "title": "Test"}, None, 250, "source",
             )
             assert len(result) == 1
-            assert mock_prompts.build_content_only_prompt.called
+            assert mock_build.called
