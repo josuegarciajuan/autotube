@@ -328,8 +328,8 @@ class YouTubeStatsFetcher:
         """Get analytics for multiple videos in a single API call.
 
         Uses dimensions=video to fetch estimatedMinutesWatched,
-        averageViewDuration, subscribersGained, averageViewPercentage, and
-        analytics-sourced views for all videos at once.
+        averageViewDuration, subscribersGained, averageViewPercentage, views,
+        impressions and impressionsClickThroughRate for all videos at once.
 
         Args:
             video_ids: List of YouTube video IDs.
@@ -338,7 +338,8 @@ class YouTubeStatsFetcher:
         Returns:
             Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration,
                                          subscribersGained, averageViewPercentage,
-                                         analyticsViews}
+                                         analyticsViews, impressions,
+                                         impressionsClickThroughRate}
             Empty dict if no analytics data available.
         """
         if not self._analytics_service:
@@ -363,7 +364,7 @@ class YouTubeStatsFetcher:
                         ids="channel==MINE",
                         startDate=start_date,
                         endDate=end_date,
-                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views",
+                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views,impressions,impressionsClickThroughRate",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
@@ -372,7 +373,8 @@ class YouTubeStatsFetcher:
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
-                    # row: [video_id, estMinWatched, avgViewDur, subsGained, avgViewPct, views]
+                    # row: [video_id, estMinWatched, avgViewDur, subsGained, avgViewPct,
+                    #       views, impressions, impressionsClickThroughRate]
                     vid = row[0]
                     result[vid] = {
                         "estimatedMinutesWatched": str(row[1]) if len(row) > 1 and row[1] else "0",
@@ -380,6 +382,10 @@ class YouTubeStatsFetcher:
                         "subscribersGained": str(row[3]) if len(row) > 3 and row[3] else "0",
                         "averageViewPercentage": str(row[4]) if len(row) > 4 and row[4] else "0",
                         "analyticsViews": str(row[5]) if len(row) > 5 and row[5] else "0",
+                        "impressions": str(row[6]) if len(row) > 6 and row[6] else "0",
+                        # La API devuelve CTR como fracción (0.05 = 5%); se
+                        # convierte a porcentaje al persistir en DB.
+                        "impressionsClickThroughRate": str(row[7]) if len(row) > 7 and row[7] else "0",
                     }
                 logger.debug(
                     "Bulk analytics: %d videos returned for %d requested (batch %d/%d)",
@@ -1268,6 +1274,13 @@ class YouTubeStatsFetcher:
                                 ),
                                 "subscribersGained": int(
                                     float(bdata.get("subscribersGained", 0) or 0)
+                                ),
+                                "impressions": int(
+                                    float(bdata.get("impressions", 0) or 0)
+                                ),
+                                # fracción (0.05 = 5%) → insert_video_stats convierte a %
+                                "impressionsClickThroughRate": float(
+                                    bdata.get("impressionsClickThroughRate", 0) or 0
                                 ),
                                 "is_analytics_fallback": True,
                             }

@@ -54,15 +54,15 @@ LOGO_SIZE = 140
 # ═══════════════════════════════════════════════════════════════════
 # PRODUCTION TARGETS
 # ═══════════════════════════════════════════════════════════════════
-PROD_SCRIPT_WORDS_MIN = 2200
-PROD_SCRIPT_WORDS_MAX = 3800
-PROD_SCRIPT_SCENES_MIN = 10
-PROD_SCRIPT_SCENES_MAX = 18
-PROD_SCRIPT_BLOCKS_MIN = 10
-PROD_SCRIPT_BLOCKS_MAX = 18
-PROD_VIDEO_DURATION_MIN = 12
-PROD_VIDEO_DURATION_MAX = 16
-VIDEO_AVERAGE_DURATION_MIN = 14
+PROD_SCRIPT_WORDS_MIN = 900
+PROD_SCRIPT_WORDS_MAX = 1500
+PROD_SCRIPT_SCENES_MIN = 6
+PROD_SCRIPT_SCENES_MAX = 10
+PROD_SCRIPT_BLOCKS_MIN = 6
+PROD_SCRIPT_BLOCKS_MAX = 10
+PROD_VIDEO_DURATION_MIN = 6
+PROD_VIDEO_DURATION_MAX = 9
+VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
 # ═══════════════════════════════════════════════════════════════════
@@ -101,6 +101,13 @@ TITLE_FORMULAS = [
     "Antes de {civilización_famosa}, Existió {civilización_olvidada}",
     "El Oscuro Secreto de {civilización} que la Historia Oficial Ocultó",
     "Tenían Tecnología que No Deberían Tener: El Misterio de {lugar}",
+    # ago 2026: formulas de payoff/story (outliers de retencion 30-55% y
+    # titulos que si rinden: pregunta + misterio + dato concreto)
+    "¿Por qué {fenomeno} sigue sin explicación {anios} después?",
+    "El día que {evento} cambió {todo} para siempre",
+    "La verdad sobre {misterio}: {dato} que nadie esperaba",
+    "{protagonista}: la historia de {desenlace} y nadie lo vio venir",
+    "Lo que {lugar} ocultó durante {anios}: {revelacion}",
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
@@ -153,6 +160,8 @@ SCRIPT_HOOK_RULE = (
     "'Quédate, porque lo que viene a continuación es aún más increíble'. "
     "Esta frase debe colocarse inmediatamente después de enumerar lo que el "
     "espectador va a descubrir, como cierre de la introducción."
+    "PROMESA EN 30-90 SEGUNDOS: el espectador debe saber en el PRIMER MINUTO Y MEDIO qué va a descubrir y por qué merece la pena quedarse. Tras la frase de impacto, DILE EXPLÍCITAMENTE lo que va a aprender: «En los próximos minutos vas a descubrir quién... / qué pasó... / la verdad sobre...». NUNCA dejes la promesa para después del minuto 1.5: si el espectador no conoce el payoff en 90 segundos, abandona (la retención mediana actual es <20% en videos largos). Como el video ahora dura 6-9 minutos, la introducción (impacto + promesa + retención) NO debe superar los 90 segundos en total."
+
 )
 SCRIPT_STRUCTURE = [
     {"step": "EL DESCUBRIMIENTO", "time_pct": "0-10%",

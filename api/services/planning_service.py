@@ -4200,7 +4200,7 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         should_cross_promote,
     )
     longform_url = None
-    if should_cross_promote(ch_config):
+    if getattr(ch_config, "SHORTS_DESCRIPTION_LINK_ENABLED", True):
         longform_url = get_best_longform_link(channel_id)
 
     channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")

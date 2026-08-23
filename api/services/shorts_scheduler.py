@@ -3743,7 +3743,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         should_cross_promote,
     )
     longform_url = None
-    if should_cross_promote(ch_config):
+    if getattr(ch_config, "SHORTS_DESCRIPTION_LINK_ENABLED", True):
         longform_url = get_best_longform_link(channel_id)
 
     channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
@@ -3879,7 +3879,7 @@ def _upload_queued_native_short(short_record: dict, db=None) -> bool:
         from pipeline.shorts_cross_promote import (
             build_short_description, get_best_longform_link, should_cross_promote,
         )
-        if should_cross_promote(ch_config):
+        if getattr(ch_config, "SHORTS_DESCRIPTION_LINK_ENABLED", True):
             longform_url = get_best_longform_link(channel_id)
         channel_url = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
         description = build_short_description(
@@ -4110,7 +4110,7 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
                 should_cross_promote,
             )
             longform_url = None
-            if should_cross_promote(ch_config):
+            if getattr(ch_config, "SHORTS_DESCRIPTION_LINK_ENABLED", True):
                 longform_url = get_best_longform_link(channel_id, source_video_id=short_data.get("source_video_id"))
 
             channel_url_value = getattr(ch_config, "YOUTUBE_CHANNEL_URL", "")
