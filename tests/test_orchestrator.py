@@ -115,41 +115,47 @@ class TestPhaseGenerateScript:
 
 
 class TestDiskCleanup:
-    """Cleanup moved from phase_video to phase_media to prevent deleting
-    downloaded video files before assembly can use them."""
+    """Cleanup runs ONCE in run_full_pipeline (pre-pipeline, lock-aware),
+    never inside phase_media/phase_video where it could delete freshly
+    downloaded assets before assembly uses them."""
 
-    def test_cleanup_in_phase_media_not_phase_video(self):
-        """Disk cleanup (video_clips, output/temp) must run in phase_media
-        BEFORE downloading new assets, NOT in phase_video where it would
-        delete freshly downloaded files."""
+    def test_cleanup_in_run_full_pipeline_not_in_phases(self):
+        """video_clips/output/temp cleanup must live in run_full_pipeline and
+        NOT in phase_media/phase_video."""
         import ast
         src = Path("/root/autotube/orchestrator.py").read_text()
         tree = ast.parse(src)
 
-        phase_media_ok = False
-        phase_video_ok = True  # should NOT have shutil.rmtree for cleanup
-
+        run_cleanup_ok = False
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
                 func_src = ast.get_source_segment(src, node)
-                if node.name == "phase_media":
+                if node.name == "run_full_pipeline":
                     assert "video_clips" in func_src, \
-                        "phase_media must clean video_clips dir"
+                        "run_full_pipeline must clean video_clips dir"
                     assert "output/temp" in func_src, \
-                        "phase_media must clean output/temp dir"
-                    assert "shutil.rmtree" in func_src, \
-                        "phase_media must use shutil.rmtree"
-                    assert "before media fetch" in func_src, \
-                        "phase_media cleanup log must say 'before media fetch'"
-                    phase_media_ok = True
-                elif node.name == "phase_video":
-                    # Must NOT contain shutil.rmtree for cleanup (only disk_usage)
-                    assert "shutil.disk_usage" in func_src, \
-                        "phase_video must still log disk space"
-                    assert "Disk free before render" in func_src, \
-                        "phase_video must log disk space"
-                    # Verify old cleanup block was removed
-                    assert "Cleaned up" not in func_src, \
-                        "phase_video must NOT have old cleanup block"
+                        "run_full_pipeline must clean output/temp dir"
+                    run_cleanup_ok = True
+                elif node.name in ("phase_media", "phase_video"):
+                    # Regression guard: neither phase may delete downloaded assets
+                    assert "video_clips" not in func_src, \
+                        f"{node.name} must NOT clean video_clips (deletes fresh assets)"
 
-        assert phase_media_ok, "phase_media method not found in orchestrator.py"
+        assert run_cleanup_ok, "run_full_pipeline method not found in orchestrator.py"
+
+    def test_phase_video_still_logs_disk_space(self):
+        """phase_video must still log disk space before render."""
+        import ast
+        src = Path("/root/autotube/orchestrator.py").read_text()
+        tree = ast.parse(src)
+
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "phase_video":
+                func_src = ast.get_source_segment(src, node)
+                assert "shutil.disk_usage" in func_src, \
+                    "phase_video must still log disk space"
+                assert "Disk free before render" in func_src, \
+                    "phase_video must log disk space"
+                found = True
+        assert found, "phase_video method not found in orchestrator.py"

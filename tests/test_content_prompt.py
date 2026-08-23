@@ -29,9 +29,9 @@ class TestContentPromptStructure:
             source_text="Contenido fuente de prueba."
         )
         assert "CONTINUIDAD NARRATIVA" in prompt
-        assert "NO repitas" in prompt
+        assert "PROHIBIDO repetir" in prompt
         assert "AVANZA" in prompt
-        assert "historia empezó así" in prompt.lower()
+        assert "historia empezo asi" in prompt.lower()
 
     def test_prompt_shows_beginning(self):
         """First blocks appear as 'La historia empezó así'."""
@@ -59,7 +59,7 @@ class TestContentPromptStructure:
             word_guidance=250,
         )
         assert "Desenlace" in prompt
-        assert "Lo ÚLTIMO que narraste" in prompt
+        assert "Lo ULTIMO que narraste" in prompt
 
     def test_prompt_includes_source_text(self):
         """Source text appears in the prompt."""
@@ -106,7 +106,7 @@ class TestOutlinePrompt:
         )
         assert "HECHOS CONCRETOS" in prompt, "Must demand concrete facts"
         assert "PROHIBIDO" in prompt, "Must forbid empty language"
-        assert "metáforas vacías" in prompt, "Must explicitly ban empty metaphors"
+        assert "metaforas vacias" in prompt, "Must explicitly ban empty metaphors"
 
     def test_has_chapter_structure(self):
         """Outline must produce chapter JSON with required fields."""
@@ -147,10 +147,10 @@ class TestContentPromptWithOutline:
             outline=outline,
             batch_num=1,
         )
-        assert "CONTEXTO DEL CAPÍTULO" in prompt, "Must inject outline context"
+        assert "CONTEXTO DEL CAPITULO" in prompt, "Must inject outline context"
         assert "El Misterio Inicial" in prompt, "Must include chapter title"
         assert "En 1972" in prompt, "Must include concrete facts"
-        assert "HECHOS CONCRETOS QUE DEBES INCLUIR" in prompt
+        assert "HECHOS CONCRETOS A INCLUIR" in prompt
 
     def test_handles_empty_outline_gracefully(self):
         """Empty outline should not break the prompt."""

@@ -145,7 +145,6 @@ class TestSecondPass:
     @patch("pipeline.media_fetcher.time.sleep", return_value=None)
     def test_second_pass_triggers_below_min(self, mock_sleep):
         """Below min_video_pct → second pass tries generic queries."""
-        import importlib
         from pipeline.media_fetcher import MediaFetcher
 
         cfg = _make_config(
@@ -155,34 +154,39 @@ class TestSecondPass:
         )
         fetcher = MediaFetcher(config=cfg)
 
-        # 5 scenes: scenes 0,1 have video slots, but only scene 0 got video
+        # 5 scenes: scenes 0,1 are hook/climax → video-priority by type, but
+        # the v2 fetch returns images for ALL scenes (videos "failed").
         scenes = [
-            _make_scene_range(start=0, duration=5, media_tipo="video", asset_idx=0),
-            _make_scene_range(start=5, duration=5, media_tipo="video", asset_idx=1),
+            _make_scene_range(start=0, duration=5, media_tipo="video", asset_idx=0, tipo="hook"),
+            _make_scene_range(start=5, duration=5, media_tipo="video", asset_idx=1, tipo="climax"),
             _make_scene_range(start=10, duration=5, media_tipo="imagen", asset_idx=2),
             _make_scene_range(start=15, duration=5, media_tipo="imagen", asset_idx=3),
             _make_scene_range(start=20, duration=5, media_tipo="imagen", asset_idx=4),
         ]
 
-        # Mock providers: first call finds 1 video, second pass rescues 1 more
+        # v2 path: per-scene fetch (unique image per scene to satisfy dedup)
+        def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
+                             target_dur, ctx, ai_used, ai_max, ai_enabled,
+                             force_images=False, is_stock_image_priority=False):
+            return (_make_image_result(path=f"/tmp/img_{scene_idx}.jpg"), 0, {})
+
+        fetcher._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
+
+        # Second pass rescue: first 2 generic-video attempts succeed
         video_count = [0]
 
         def mock_try_video(query, target_dur):
             video_count[0] += 1
             if video_count[0] <= 2:
-                return _make_video_result()
+                return _make_video_result(path=f"/tmp/vid_{video_count[0]}.mp4")
             return None
 
         fetcher._try_video_providers = MagicMock(side_effect=mock_try_video)
-        # Also mock _try_all_video_providers for the fetch loop
-        fetcher._try_all_video_providers = MagicMock(return_value=None)
 
-        # Mock image fallback for non-video scenes
-        def mock_try_image(query, skip_urls=None):
-            return _make_image_result()
-
-        fetcher._try_image_unsplash = MagicMock(side_effect=mock_try_image)
-        fetcher._try_image_pexels = MagicMock(return_value=None)
+        # Image-fallback scene expansion is out of scope for this test
+        fetcher._reconcile_actual_image_fallbacks = (
+            lambda scenes, results, fn: (scenes, results)
+        )
 
         results = fetcher.fetch_for_script(
             bloques=[{"texto": "test", "tipo": "desarrollo"} for _ in range(5)],
@@ -307,7 +311,7 @@ class TestVideoForcing:
     """Test that hook and climax scenes are forced to video."""
 
     def test_hook_and_climax_always_get_video(self):
-        """Hook and climax scenes assigned video regardless of LLM tag."""
+        """Hook and climax scenes are always classified as video-priority."""
         from pipeline.media_fetcher import MediaFetcher
 
         config = _make_config(target_video_pct=40)
@@ -325,23 +329,30 @@ class TestVideoForcing:
             _make_scene_range(tipo="desarrollo", duration=7, media_tipo="imagen", asset_idx=4),
         ]
 
-        bloques = [
-            {"texto": "h"}, {"texto": "d1"}, {"texto": "c"}, {"texto": "r"}, {"texto": "d2"}
-        ]
+        video_scenes, _stock, _types = mf._classify_scenes(scenes)
+        assert 0 in video_scenes, "hook must be video-priority"
+        assert 2 in video_scenes, "climax must be video-priority"
 
-        # Mock _try_video_providers and _try_image_pexels/unplash to return None
-        with patch.object(mf, '_try_video_providers', return_value=None):
-            with patch.object(mf, '_try_image_pexels',
-                            return_value={"path": "/tmp/img.jpg", "type": "image", "source": "pexels"}):
-                with patch.object(mf, '_try_image_unsplash', return_value=None):
-                    result = mf.fetch_for_script(
-                        bloques=bloques, scene_ranges=scenes,
-                    )
+        # v2 fetch path with a distinct image per scene (dedup-safe)
+        def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
+                             target_dur, ctx, ai_used, ai_max, ai_enabled,
+                             force_images=False, is_stock_image_priority=False):
+            return (_make_image_result(path=f"/tmp/img_{scene_idx}.jpg"), 0, {})
+
+        mf._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
+        mf._reconcile_actual_image_fallbacks = (
+            lambda scenes, results, fn: (scenes, results)
+        )
+
+        result = mf.fetch_for_script(
+            bloques=[{"texto": "h"}, {"texto": "d1"}, {"texto": "c"},
+                     {"texto": "r"}, {"texto": "d2"}],
+            scene_ranges=scenes,
+        )
 
         # All scenes should have a result (image fallback)
         assert len(result) == 5
-        # Hook (idx 0) and climax (idx 2) should have tried video first
-        assert True  # basic structure test passes
+        assert all(r.get("path") for r in result)
 
 
 class TestVideoValidation:
