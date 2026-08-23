@@ -101,12 +101,33 @@ def test_parse_utc_datetime():
 
 # ── _verify_published_status_bg ───────────────────────────────
 
+class _FakeConn:
+    """Context-manager connection stub that records executed SQL."""
+    def __init__(self, log):
+        self._log = log
+
+    def execute(self, sql, params=()):
+        self._log.append((sql, params))
+        return self
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 class _FakeVerifyDB:
     """Minimal DB stub for the verify function's direct calls."""
-    def __init__(self, video=None, channel=None):
+    def __init__(self, video=None, channel=None, system_state=None):
         self._video = video or {}
         self._channel = channel or {}
+        self._system_state = system_state or {}
         self.updated = []
+        self.sql_log = []
 
     def get_video(self, video_id):
         return self._video
@@ -116,6 +137,12 @@ class _FakeVerifyDB:
 
     def update_video(self, video_id, **kwargs):
         self.updated.append((video_id, kwargs))
+
+    def get_system_state(self, key):
+        return self._system_state.get(key)
+
+    def _connect(self):
+        return _FakeConn(self.sql_log)
 
 
 def _patch_db(fake_db):
@@ -209,3 +236,73 @@ def test_verify_retries_when_no_channel_id():
 
     fetch.assert_not_called()
     sched.assert_called_once_with(1, de._PUBLISH_RETRY_MINUTES)
+
+
+def test_verify_skips_when_held():
+    """Hold de emergencia: vídeo retenido → no verificar, no alertar (antiban)."""
+    from database import db_extended as de
+
+    fake_db = _FakeVerifyDB(
+        video={"id": 1, "target_public_at": "2026-08-15T00:14:00+00:00"},
+        channel={"yt_channel_id": "UCxxx"},
+        system_state={"publish_hold_done_vid123": "2026-08-23T21:27:44+00:00"},
+    )
+
+    with _patch_db(fake_db), \
+         patch("pipeline.youtube_wall_scraper.fetch_channel_public_video_ids") as fetch, \
+         patch("database.db_extended._schedule_publish_retry") as sched, \
+         patch("database.db_extended._raise_publish_not_detected_alert") as alert:
+        de._verify_published_status_bg(1, "canal2", "vid123")
+
+    fetch.assert_not_called()
+    sched.assert_not_called()
+    alert.assert_not_called()
+
+
+def test_verify_not_skipped_without_hold_marker():
+    """Sin marcador de hold → el flujo normal sigue (no se rompe)."""
+    from database import db_extended as de
+
+    now = datetime.now(timezone.utc)
+    ref = (now - timedelta(minutes=10)).isoformat()
+
+    fake_db = _FakeVerifyDB(
+        video={"id": 1, "target_public_at": ref},
+        channel={"yt_channel_id": "UCxxx"},
+    )
+
+    with _patch_db(fake_db), \
+         patch("pipeline.youtube_wall_scraper.fetch_channel_public_video_ids",
+               return_value={"other": "..."}), \
+         patch("database.db_extended._get_retry_count", return_value=0), \
+         patch("database.db_extended._schedule_publish_retry") as sched, \
+         patch("database.db_extended._raise_publish_not_detected_alert") as alert:
+        de._verify_published_status_bg(1, "canal2", "vid123")
+
+    sched.assert_called_once_with(1, de._PUBLISH_RETRY_MINUTES)
+    alert.assert_not_called()
+
+
+def test_desist_sets_cooldown_retry_at():
+    """Desistencia: al tope de reintentos se fija published_retry_at a futuro
+    para detener el re-disparo del bucle de 5 min (antiban)."""
+    from database import db_extended as de
+
+    fake_db = _FakeVerifyDB(
+        video={"id": 1, "channel_id": 3, "yt_video_id": "vid123",
+               "canal": "canal2", "target_public_at": "2026-08-15T00:14:00+00:00"},
+    )
+
+    with _patch_db(fake_db), \
+         patch("database.db_extended._get_retry_count", return_value=3), \
+         patch("database.db_extended._ytdlp_confirm_public", return_value=False), \
+         patch("api.services.lifecycle_monitor.create_alert", return_value=None):
+        de._schedule_publish_retry(1, de._PUBLISH_RETRY_MINUTES)
+
+    # El cooldown debe haber escrito published_retry_at en el futuro
+    updates = [p for sql, p in fake_db.sql_log
+               if "published_retry_at" in sql and sql.strip().upper().startswith("UPDATE")]
+    assert updates, "no se escribió published_retry_at en la desistencia"
+    retry_at_str = updates[-1][0]
+    retry_dt = datetime.fromisoformat(str(retry_at_str).replace("Z", "+00:00"))
+    assert retry_dt > datetime.now(timezone.utc) + timedelta(minutes=de._PUBLISH_DESIST_COOLDOWN_MINUTES - 5)
