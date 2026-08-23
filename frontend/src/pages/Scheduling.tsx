@@ -183,16 +183,16 @@ function TodayStatus() {
               <span className="text-gray-400">Videos:</span>
               <div className="flex gap-1 ml-auto">
                 {ch.videos.completed > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-green-400/15 text-green-400 text-[10px]">{ch.videos.completed}✓</span>
+                  <span title={`${ch.videos.completed} videos completados hoy`} className="px-1.5 py-0.5 rounded bg-green-400/15 text-green-400 text-[10px]">{ch.videos.completed}✓</span>
                 )}
                 {ch.videos.running > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-neon-cyan/15 text-neon-cyan text-[10px]">{ch.videos.running}▸</span>
+                  <span title={`${ch.videos.running} videos generándose ahora`} className="px-1.5 py-0.5 rounded bg-neon-cyan/15 text-neon-cyan text-[10px]">{ch.videos.running}▸</span>
                 )}
                 {ch.videos.pending > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-400 text-[10px]">{ch.videos.pending}⏳</span>
+                  <span title={`${ch.videos.pending} videos pendientes de generar`} className="px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-400 text-[10px]">{ch.videos.pending}⏳</span>
                 )}
                 {ch.videos.cancelled > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-red-400/15 text-red-400 text-[10px]">{ch.videos.cancelled}✕</span>
+                  <span title={`${ch.videos.cancelled} videos cancelados`} className="px-1.5 py-0.5 rounded bg-red-400/15 text-red-400 text-[10px]">{ch.videos.cancelled}✕</span>
                 )}
                 {ch.videos.completed === 0 && ch.videos.running === 0 && ch.videos.pending === 0 && ch.videos.cancelled === 0 && (
                   <span className="text-gray-600 text-[10px]">—</span>
@@ -206,13 +206,13 @@ function TodayStatus() {
               <span className="text-gray-400">Shorts:</span>
               <div className="flex gap-1 ml-auto">
                 {ch.shorts.completed > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-green-400/15 text-green-400 text-[10px]">{ch.shorts.completed}✓</span>
+                  <span title={`${ch.shorts.completed} shorts completados hoy`} className="px-1.5 py-0.5 rounded bg-green-400/15 text-green-400 text-[10px]">{ch.shorts.completed}✓</span>
                 )}
                 {ch.shorts.running > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-neon-cyan/15 text-neon-cyan text-[10px]">{ch.shorts.running}▸</span>
+                  <span title={`${ch.shorts.running} shorts generándose ahora`} className="px-1.5 py-0.5 rounded bg-neon-cyan/15 text-neon-cyan text-[10px]">{ch.shorts.running}▸</span>
                 )}
                 {ch.shorts.pending > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-purple-400/10 text-purple-400 text-[10px]">{ch.shorts.pending}⏳</span>
+                  <span title={`${ch.shorts.pending} shorts pendientes de generar`} className="px-1.5 py-0.5 rounded bg-purple-400/10 text-purple-400 text-[10px]">{ch.shorts.pending}⏳</span>
                 )}
                 {ch.shorts.completed === 0 && ch.shorts.running === 0 && ch.shorts.pending === 0 && (
                   <span className="text-gray-600 text-[10px]">—</span>
