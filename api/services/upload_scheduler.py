@@ -444,7 +444,7 @@ def _recover_inconsistent_upload_times(db) -> int:
         with db._connect() as conn:
             rows = conn.execute(
                 """SELECT v.id, v.channel_id, v.scheduled_upload_at, v.target_public_at,
-                          c.slug, c.config_json
+                          v.publish_mode, c.slug, c.config_json
                    FROM videos v
                    JOIN channels c ON c.id = v.channel_id
                    WHERE v.status = 'awaiting_upload'
