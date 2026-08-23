@@ -25,6 +25,35 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
+
+def _alert_shorts_dispatch_exhausted(detail: str, max_retries: int = 3) -> None:
+    """Alerta (deduplicada) cuando el dispatcher de shorts se rinde.
+
+    Anti-bucle (antiban, ago 2026): ninguna acción contra YouTube se rinde en
+    silencio. Al agotar el presupuesto de reintentos se alerta al operador.
+    create_alert deduplica por (entity_type, entity_id, alert_type), así que
+    hay UNA sola alerta sin resolver por este tipo, sin spam en cada tick.
+    """
+    try:
+        from api.services.lifecycle_monitor import create_alert
+        from database.db_extended import ExtendedDatabase
+        create_alert(
+            ExtendedDatabase(),
+            entity_type="system", entity_id=None, channel_id=None,
+            alert_type="shorts_dispatch_exhausted",
+            severity="warning",
+            title="Shorts: presupuesto de reintentos agotado — sin slot despachable",
+            message=(
+                f"El dispatcher de shorts agotó sus {max_retries} reintentos sin "
+                f"encontrar un slot válido. {detail} Los slots afectados quedaron "
+                f"pendientes/cancelados. Revisa el log 'Shorts dispatch' para "
+                f"identificar la causa."
+            ),
+            metadata={"max_retries": max_retries, "detail": detail},
+        )
+    except Exception as _alert_exc:
+        logger.warning("shorts dispatch alert failed: %s", _alert_exc)
+
 # ── Module-level state for clip source dedup across scheduler invocations ──
 # Tracks source videos confirmed to have no usable script text.
 # Cleared each calendar day at first invocation.
@@ -2008,6 +2037,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             "(bypass=%s)",
                             _force_retry, _force_bypass_guards,
                         )
+                        _alert_shorts_dispatch_exhausted(
+                            f"Force dispatch sin slots viables tras {_force_retry} intentos "
+                            f"(bypass={_force_bypass_guards})."
+                        )
                         return None
 
                     slot_id = force_slot["id"]
@@ -2189,6 +2222,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
                 logger.warning("Force dispatch: exhausted %d attempts", _MAX_CLIP_RETRIES)
                 _LAST_ALL_EXHAUSTED_AT = time.time()
+                _alert_shorts_dispatch_exhausted(
+                    f"Force dispatch agotó sus {_MAX_CLIP_RETRIES} intentos (todos los "
+                    f"slots bloqueados por guards o sin fuente)."
+                )
                 return None
             else:
                 # Check if there are any pending slots at all (even outside window)
@@ -2488,27 +2525,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     # Exhausted all retries (e.g. all pending clip slots have no source)
     logger.warning("Shorts dispatch: exhausted %d clip retries — no dispatchable slot", _MAX_CLIP_RETRIES)
     # Anti-bucle (antiban, ago 2026): al agotar el presupuesto de reintentos se
-    # alerta al operador en vez de rendirse en silencio. create_alert deduplica
-    # (1 alerta sin resolver por tipo), así que no spamea en cada tick.
-    try:
-        from api.services.lifecycle_monitor import create_alert
-        from database.db_extended import ExtendedDatabase
-        create_alert(
-            ExtendedDatabase(),
-            entity_type="system", entity_id=None, channel_id=None,
-            alert_type="shorts_dispatch_exhausted",
-            severity="warning",
-            title="Shorts: presupuesto de reintentos agotado — sin slot despachable",
-            message=(
-                f"El dispatcher de shorts agotó sus {_MAX_CLIP_RETRIES} reintentos sin "
-                f"encontrar un slot válido (p. ej. clips sin vídeo fuente, cooldowns o "
-                f"cap diario). Los slots afectados quedaron pendientes/cancelados. "
-                f"Revisa el log 'Shorts dispatch' para identificar la causa."
-            ),
-            metadata={"max_retries": _MAX_CLIP_RETRIES},
-        )
-    except Exception as _alert_exc:
-        logger.warning("shorts dispatch alert failed: %s", _alert_exc)
+    # alerta al operador en vez de rendirse en silencio (dedup global por tipo).
+    _alert_shorts_dispatch_exhausted(
+        "Dispatch principal sin slot despachable (p. ej. clips sin vídeo fuente)."
+    )
     return None
 
 
