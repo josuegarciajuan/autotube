@@ -510,7 +510,41 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
-        content_item = content_items[0]
+        # ── Anti-strike: filtro de seguridad de contenido ─────────────
+        # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
+        # gráfica, desinformación sanitaria) antes de guionar. Itera sobre los
+        # candidatos: si un topic se marca, se descarta (mark_content_used) y se
+        # prueba con el siguiente, evitando long-forms sobre temas que YouTube
+        # elimina.
+        for content_item in content_items:
+            _ct = content_item.get("text", "")
+            _ct_title = content_item.get("title", "")
+            try:
+                from pipeline.content_safety import classify_topic_safety
+                _verdict = classify_topic_safety(
+                    topic=_ct_title, title=_ct_title,
+                    script_texts=[_ct],
+                    config=getattr(self, "config", None),
+                    use_llm=False,  # determinista: barato para filtrar candidatos
+                )
+            except Exception as _cs_exc:
+                logger.warning(f"[{self.canal}] Content-safety check error (fail-open): {_cs_exc}")
+                _verdict = None
+            if _verdict is not None and not _verdict.safe:
+                logger.warning(
+                    "[%s] Contenido rechazado por seguridad: '%s' — %s (probando siguiente)",
+                    self.canal, (_ct_title or _ct)[:80], _verdict.reason,
+                )
+                try:
+                    self.db.mark_content_used(content_item.get("id"))
+                except Exception as _mcu:
+                    logger.warning(f"[{self.canal}] mark_content_used failed: {_mcu}")
+                continue
+            # Tema seguro → generar guion con este item.
+            break
+        else:
+            logger.warning(f"[{self.canal}] Todos los contenidos candidatos rechazados por seguridad")
+            return None
 
         # ── Extract visual theme BEFORE script generation (Bug fix: ThemeExtractor was dead code) ──
         content_text = content_item.get("text", "")
@@ -519,6 +553,33 @@ class PipelineOrchestrator:
 
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_item)
+
+        # ── Anti-strike: verificación post-guion (el LLM puede enmarcar un
+        # tema neutro de forma sensible) ──
+        if result:
+            try:
+                from pipeline.content_safety import classify_topic_safety
+                _tit = (result.get("titulo")
+                        or (result.get("titulo_options") or [None])[0]
+                        or "")
+                _guion = result.get("guion", "") or ""
+                _post = classify_topic_safety(
+                    topic=_tit, title=_tit, script_texts=[_guion],
+                    config=getattr(self, "config", None),
+                )
+                if not _post.safe:
+                    logger.warning(
+                        "[%s] Guion rechazado por seguridad (post-guion): '%s' — %s",
+                        self.canal, _tit[:80], _post.reason,
+                    )
+                    try:
+                        self.db.mark_content_used(content_item.get("id"))
+                    except Exception as _mcu2:
+                        logger.warning(f"[{self.canal}] mark_content_used failed: {_mcu2}")
+                    return None
+            except Exception as _pc_exc:
+                logger.warning(f"[{self.canal}] Post-guion safety check error (fail-open): {_pc_exc}")
+
         duration_ms = int((time.time() - start) * 1000)
 
         self._timing["phases"]["script"] = duration_ms

@@ -42,8 +42,8 @@ SCOPES = [
 ]
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2  # seconds
-POST_UPLOAD_VERIFY_RETRIES = 3
-POST_UPLOAD_VERIFY_DELAY = 5  # seconds — YouTube processing may take a few secs
+POST_UPLOAD_VERIFY_RETRIES = 4
+POST_UPLOAD_VERIFY_DELAY = 10  # seconds — YouTube processing may take a few secs
 
 
 class QuotaExhaustedError(RuntimeError):
@@ -679,6 +679,13 @@ class YouTubeUploader:
 
         service = self._get_service()
 
+        # ── Anti-strike: espaciado global de subidas entre canales ──
+        # YouTube elimina subidas en ráfagas cruzadas (varios canales a la vez
+        # desde la misma IP). Antes de emitir la subida, espera el hueco mínimo
+        # desde la última subida de OTRO canal (por canal lo gobierna el cooldown
+        # existente). Se espera en bucle (chunked) sin bloquear el event loop.
+        self._wait_global_upload_spacing()
+
         # ── SEO-friendly temp copies ────────────────────────────
         # YouTube's processing pipeline uses the uploaded file name as
         # a ranking signal.  We copy the originals to temp files with
@@ -802,6 +809,13 @@ class YouTubeUploader:
                         yt_id=video_id, caller="YouTubeUploader.upload")
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
             logger.info("Upload complete: %s", youtube_url)
+
+            # ── Anti-strike: registrar la subida para el espaciado global ──
+            try:
+                from api.services.upload_spacing import record_upload
+                record_upload(self.channel_slug or self.account_name)
+            except Exception as _sp_exc:
+                logger.debug("record_upload failed: %s", _sp_exc)
 
             # ── Post-upload verification: confirm video exists on YouTube ──
             self._verify_upload_exists(service, video_id)
@@ -1123,6 +1137,76 @@ class YouTubeUploader:
         except Exception as _e:
             logger.warning("[%s] spam-strike record failed: %s", self.channel_slug, _e)
 
+    def _wait_global_upload_spacing(self, timeout_sec: int = 3600) -> None:
+        """Anti-strike: espera el hueco mínimo entre subidas de CANALES DISTINTOS.
+
+        Duerme en tramos (30 s) hasta que pase el espaciado global desde la
+        última subida de otro canal, o hasta agotar ``timeout_sec`` (seguridad,
+        nunca bloquear indefinidamente). Si el último upload fue del MISMO
+        canal no espera (lo gobierna el cooldown por canal).
+        """
+        try:
+            from api.services.upload_spacing import remaining_spacing_seconds
+            channel = self.channel_slug or self.account_name
+            waited = 0
+            while waited < timeout_sec:
+                remaining = remaining_spacing_seconds(channel)
+                if remaining <= 0:
+                    return
+                sleep_for = min(30, remaining)
+                logger.info(
+                    "[%s] Global upload spacing: esperando %ds (restan ~%ds de %s)",
+                    channel, sleep_for, remaining,
+                    "otra subida reciente de otro canal",
+                )
+                time.sleep(sleep_for)
+                waited += sleep_for
+        except Exception as _exc:
+            logger.debug("[%s] upload spacing wait skipped: %s", self.channel_slug, _exc)
+
+    def _watch_page_status(self, video_id: str) -> str:
+        """Clasifica el estado público del vídeo sin gastar cuota de API.
+
+        Devuelve:
+          - "removed"   : la watch page reporta no disponible/eliminado.
+          - "private"   : existe pero no es público (LOGIN_REQUIRED / privado).
+          - "available" : público y visible (status OK).
+          - "unknown"   : no se pudo determinar (red, parseo, etc.).
+
+        Usado como fallback en `_verify_upload_exists` para NO registrar un
+        strike por un lag de indexado de la API: si la API devuelve vacío pero
+        la watch page dice "private"/"available", el vídeo NO fue eliminado.
+        """
+        import urllib.request
+        try:
+            url = f"https://www.youtube.com/watch?v={video_id}&hl=es"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept-Language": "es-ES,es;q=0.9",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read(250_000).decode("utf-8", "ignore")
+        except Exception as exc:
+            logger.debug("[%s] watch-page check failed for %s: %s", self.channel_slug, video_id, exc)
+            return "unknown"
+
+        if '"status":"OK"' in html or '"status":"LIVE_STREAM_OFFLINE"' in html:
+            return "available"
+        if '"status":"LOGIN_REQUIRED"' in html:
+            return "private"
+        # Marcadores claros de eliminación / no disponible.
+        for marker in (
+            "Este vídeo no está disponible",
+            "Este video no está disponible",
+            "El vídeo no está disponible",
+            "This video isn't available anymore",
+            "Video unavailable",
+            "This video has been removed",
+        ):
+            if marker in html:
+                return "removed"
+        return "unknown"
+
     def _verify_upload_exists(self, service: Any, video_id: str) -> None:
         """Post-upload verification: confirm the video actually exists on YouTube.
         
@@ -1160,10 +1244,20 @@ class YouTubeUploader:
                         )
                         time.sleep(POST_UPLOAD_VERIFY_DELAY)
                         continue
-                    # Hard spam filter: video was removed by YouTube. Raised as
-                    # SpamRemovalError so the shorts dispatcher CANCELS the slot
-                    # (no retry) and blocks the channel — never uploads another
-                    # short into an active spam flag.
+                    # ── Anti-strike: confirmar con la watch page antes de
+                    # declarar strike. La API puede devolver vacío por lag de
+                    # indexado de un vídeo recién subido (o private programado).
+                    # Si la página dice private/available, NO es una eliminación.
+                    _wp = self._watch_page_status(video_id)
+                    if _wp in ("private", "available"):
+                        logger.warning(
+                            "Post-upload verification: API vacía para %s pero watch "
+                            "page=%s (lag de indexado / private programado) — NO se "
+                            "registra strike; se tratará como pendiente.",
+                            video_id, _wp,
+                        )
+                        return
+                    # Real (o inconcluso → fail-closed): registrar strike.
                     self._record_spam_strike_if_needed(
                         video_id=video_id,
                         reason="video no aparece en YouTube tras la subida (eliminado por spam/IA)",
@@ -1185,6 +1279,15 @@ class YouTubeUploader:
                 
                 # Detect silently deleted videos
                 if title == "Deleted video" or (not title and not snippet.get("description")):
+                    # ── Anti-strike: confirmar con la watch page (lag/falso positivo) ──
+                    _wp2 = self._watch_page_status(video_id)
+                    if _wp2 in ("private", "available"):
+                        logger.warning(
+                            "Post-upload verification: título 'Deleted video' para %s "
+                            "pero watch page=%s — NO se registra strike (falso positivo).",
+                            video_id, _wp2,
+                        )
+                        return
                     self._record_spam_strike_if_needed(
                         video_id=video_id,
                         reason="Deleted video — YouTube marcó la subida como 'Deleted video' (spam/IA/política)",
