@@ -601,6 +601,15 @@ def _check_video_failed_unalerted(db) -> int:
                 error_msg = row["error_msg"] or "Unknown error"
                 error_lower = error_msg.lower()
 
+                # ── Transitorio por reinicio: job con error_msg vacío y vídeo
+                # marcado 'interrupted' por el startup-recovery. Antes generaba
+                # alertas críticas espurias "Unknown error" (fix ago 2026: el
+                # worker muerto por SIGTERM/SIGKILL no siempre escribe el
+                # error_msg del job; el recovery marca el vídeo 'interrupted').
+                # Coherente con TRANSIENT_SKIP_PATTERNS ("server restarted").
+                if not row["error_msg"] and (row["progress_phase"] or "") == "interrupted":
+                    continue
+
                 # Skip transient/intentional failures (no alert).
                 if any(p in error_lower for p in TRANSIENT_SKIP_PATTERNS):
                     continue
