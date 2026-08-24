@@ -22,6 +22,7 @@ from api.services.lifecycle_monitor import (
     _check_upload_retry_loop,
     _check_stats_collection_failed,
     _check_short_ready_stuck,
+    _check_video_failed_unalerted,
     _check_content_safety_starvation,
     _check_platform_publish_failed,
     emit_alert,
@@ -133,6 +134,61 @@ def _insert_video(db, *, vid=1, status='awaiting_upload', channel_id=1, canal='c
             (vid, channel_id, canal, status, finished, scheduled, err),
         )
         conn.commit()
+
+
+def _insert_failed_video(db, vid=1, error_msg='Real pipeline crash'):
+    """Vídeo terminal en 'error' con su último generation_job fallido."""
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO videos (id, channel_id, canal, video_path, status, progress_phase,
+               error_message, created_at)
+               VALUES (?, 1, 'canal1', '/tmp/dummy.mp4', 'error', 'video',
+                       ?, datetime('now', '-6 days'))""",
+            (vid, error_msg),
+        )
+        conn.execute(
+            """INSERT INTO generation_jobs (channel_id, video_id, action, status, error_msg)
+               VALUES (1, ?, 'generate_only', 'failed', ?)""",
+            (vid, error_msg),
+        )
+        conn.commit()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Check 3: video failed (no re-alert de fallos terminales ya reportados)
+# ═══════════════════════════════════════════════════════════════
+
+def test_video_failed_creates_alert_once(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_failed_video(db, vid=1)
+    assert _check_video_failed_unalerted(db) == 1
+    # El fallo terminal ya se reportó → resolver la alerta NO debe
+    # re-crearla en el siguiente ciclo (bucle de fatiga 1/24h).
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE pipeline_alerts SET resolved = 1, resolved_at = datetime('now') "
+            "WHERE entity_type='video' AND entity_id=1 AND alert_type='failed'"
+        )
+        conn.commit()
+    assert _check_video_failed_unalerted(db) == 0
+
+
+def test_video_failed_interrupted_not_alerted(tmp_path):
+    db = _build_db(tmp_path)
+    # Job con error_msg vacío + vídeo 'interrupted' (reinicio) → transitorio.
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO videos (id, channel_id, canal, video_path, status, progress_phase,
+               created_at)
+               VALUES (1, 1, 'canal1', '/tmp/dummy.mp4', 'error', 'interrupted',
+                       datetime('now', '-6 days'))"""
+        )
+        conn.execute(
+            """INSERT INTO generation_jobs (channel_id, video_id, action, status, error_msg)
+               VALUES (1, 1, 'generate_only', 'failed', NULL)"""
+        )
+        conn.commit()
+    assert _check_video_failed_unalerted(db) == 0
 
 
 # ═══════════════════════════════════════════════════════════════
