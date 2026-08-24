@@ -455,8 +455,30 @@ LIFECYCLE_DEFAULT_TIMELINE = [
 ]
 
 # ── Comment reply ──────────────────────────────────────────────
-COMMENT_REPLY_MAX_PER_VIDEO = int(os.getenv("COMMENT_REPLY_MAX_PER_VIDEO", "5"))
+# Motor de respuestas:
+#   "browser" → YouTube Studio/watch page vía Playwright (0 cuota de Data API,
+#               sin scope force-ssl, apariencia humana). RECOMENDADO (ago 2026).
+#   "api"     → YouTube Data API (requiere scope youtube.force-ssl en el token;
+#               los tokens actuales NO lo tienen → 403 en cada intento).
+COMMENT_REPLY_ENGINE = os.getenv("COMMENT_REPLY_ENGINE", "browser")
+COMMENT_REPLY_MAX_PER_VIDEO = int(os.getenv("COMMENT_REPLY_MAX_PER_VIDEO", "3"))
 COMMENT_REPLY_ENABLED = os.getenv("COMMENT_REPLY_ENABLED", "false").lower() == "true"
+
+# Cap diario de respuestas por cuenta Google (anti-spam, ago 2026).
+# Se cuenta desde comment_log (unión videos → channels.google_account).
+COMMENT_REPLY_DAILY_CAP_PER_ACCOUNT = int(
+    os.getenv("COMMENT_REPLY_DAILY_CAP_PER_ACCOUNT", "15")
+)
+
+# ── Lifecycle: solo respuestas de comentarios ─────────────────
+# Cuando es true, el procesador automático de lifecycle SOLO ejecuta
+# comment_reply_1/comment_reply_2; el resto de acciones vencidas
+# (ctr_check, metadata_reoptimize, playlist_add, first_comment, go_public)
+# se marcan como "skipped" sin ejecutar. Evita que activar el lifecycle
+# dispare acciones viejas que consumen cuota o son indeseadas.
+LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES = (
+    os.getenv("LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES", "true").lower() == "true"
+)
 
 # ── Metadata reoptimization ────────────────────────────────────
 METADATA_OPTIMIZE_ENABLED = os.getenv("METADATA_OPTIMIZE_ENABLED", "false").lower() == "true"

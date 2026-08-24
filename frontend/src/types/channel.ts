@@ -297,8 +297,8 @@ export type LifecycleActionType =
 export const LIFECYCLE_ACTION_LABELS: Record<LifecycleActionType, string> = {
   playlist_add: 'Añadir a playlists',
   first_comment: 'Primer comentario',
-  comment_reply_1: 'Responder comentarios (12h)',
-  comment_reply_2: 'Responder comentarios (24h)',
+  comment_reply_1: 'Responder comentarios (8-18h)',
+  comment_reply_2: 'Responder comentarios (26-48h)',
   ctr_check: 'Análisis de CTR',
   metadata_reoptimize: 'Reoptimizar metadata',
   social_clip_tiktok: 'Publicar clip en TikTok',

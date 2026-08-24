@@ -22,6 +22,7 @@ pipeline. The scheduler in api/main.py processes pending actions every 15 min.
 import asyncio
 import json
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -30,6 +31,7 @@ from api.utils import db_now
 from config.settings import (
     LIFECYCLE_DEFAULT_TIMELINE,
     LIFECYCLE_ENABLED,
+    LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES,
     COMMENT_REPLY_MAX_PER_VIDEO,
     METADATA_OPTIMIZE_ENABLED,
     METADATA_OPTIMIZE_CTR_THRESHOLD,
@@ -78,6 +80,30 @@ class VideoLifecycleManager:
             from database.db_extended import ExtendedDatabase
             self._db = ExtendedDatabase()
         return self._db
+
+    def _get_comment_reply_windows(self, action_type: str) -> tuple[float, float]:
+        """Ventana aleatoria (horas) para la ronda de respuesta a comentarios.
+
+        Lee del config del canal (bridge: defaults.py + override por canal);
+        fallback a valores prudentes si algo falla.
+        """
+        lo, hi = 8.0, 18.0
+        if action_type == "comment_reply_2":
+            lo, hi = 26.0, 48.0
+        try:
+            from config.config_bridge import get_channel_config
+            config = get_channel_config(self.slug)
+            if action_type == "comment_reply_1":
+                lo = float(getattr(config, "COMMENT_REPLY_1_DELAY_MIN_H", lo))
+                hi = float(getattr(config, "COMMENT_REPLY_1_DELAY_MAX_H", hi))
+            else:
+                lo = float(getattr(config, "COMMENT_REPLY_2_DELAY_MIN_H", lo))
+                hi = float(getattr(config, "COMMENT_REPLY_2_DELAY_MAX_H", hi))
+        except Exception:
+            pass
+        if hi < lo:
+            hi = lo
+        return lo, hi
 
     # ════════════════════════════════════════════════════════════
     # Scheduling: called immediately after upload
@@ -131,6 +157,13 @@ class VideoLifecycleManager:
             
             offset_minutes = action_def.get("offset_minutes", 0)
             offset_hours = action_def.get("offset_hours", 0)
+            # Ventana ALEATORIA para las respuestas de comentarios (anti-bot,
+            # ago 2026): en vez de horario fijo, un punto aleatorio dentro de
+            # la ventana configurada por canal.
+            if action_type in ("comment_reply_1", "comment_reply_2"):
+                lo, hi = self._get_comment_reply_windows(action_type)
+                offset_hours = random.uniform(lo, hi)
+                offset_minutes = 0
             total_offset = timedelta(minutes=offset_minutes, hours=offset_hours)
             scheduled_for = (now + total_offset).isoformat()
 
@@ -230,8 +263,10 @@ class VideoLifecycleManager:
             )
             scheduled_count += 1
 
-        # ── 4-5. Comment replies at 12h and 24h after public ──
-        reply1_at = (target_dt + _td(hours=12)).isoformat()
+        # ── 4-5. Comment replies at random windows after public ──
+        reply1_lo, reply1_hi = self._get_comment_reply_windows("comment_reply_1")
+        reply1_delay = random.uniform(reply1_lo, reply1_hi)
+        reply1_at = (target_dt + _td(hours=reply1_delay)).isoformat()
         self.db.create_lifecycle_action(
             video_id=db_video_id,
             action_type="comment_reply_1",
@@ -241,7 +276,9 @@ class VideoLifecycleManager:
         )
         scheduled_count += 1
 
-        reply2_at = (target_dt + _td(hours=24)).isoformat()
+        reply2_lo, reply2_hi = self._get_comment_reply_windows("comment_reply_2")
+        reply2_delay = random.uniform(reply2_lo, reply2_hi)
+        reply2_at = (target_dt + _td(hours=reply2_delay)).isoformat()
         self.db.create_lifecycle_action(
             video_id=db_video_id,
             action_type="comment_reply_2",
@@ -357,6 +394,35 @@ class VideoLifecycleManager:
         all_due = self.db.get_due_lifecycle_actions()
         due_actions = [a for a in all_due if a["channel_id"] == channel_id]
 
+        # ── GATE: solo respuestas de comentarios (anti-cuota, ago 2026) ──
+        # Cuando LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES=true, las acciones vencidas
+        # de OTRO tipo (ctr_check, metadata_reoptimize, playlist_add,
+        # first_comment, go_public...) se marcan skipped SIN ejecutarse. Así
+        # activar el lifecycle no dispara acciones viejas que consumen cuota
+        # o son indeseadas. Se revisa en cada ciclo: idempotente.
+        if LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES:
+            auto_types = {"comment_reply_1", "comment_reply_2"}
+            for a in list(due_actions):
+                if a["action_type"] not in auto_types:
+                    try:
+                        self.db.update_lifecycle_action_status(
+                            a["id"], "skipped",
+                            result_json=json.dumps({
+                                "skipped": True,
+                                "reason": "LIFECYCLE_AUTO_ONLY_COMMENT_REPLIES: "
+                                          "solo respuestas de comentarios automáticas",
+                            }),
+                        )
+                        logger.info(
+                            "[%s] Auto-action %s (#%d) marcada skipped "
+                            "(solo comment_reply automático)",
+                            self.slug, a["action_type"], a["id"],
+                        )
+                    except Exception as exc:
+                        logger.warning("[%s] Gate skip falló para #%d: %s",
+                                       self.slug, a["id"], exc)
+            due_actions = [a for a in due_actions if a["action_type"] in auto_types]
+
         if not due_actions:
             return {"processed": 0, "succeeded": 0, "failed": 0}
 
@@ -376,7 +442,6 @@ class VideoLifecycleManager:
             # Any pending go_public actions are from old videos uploaded before
             # this migration. We skip them gracefully.
             if action_type == "go_public":
-                import json
                 self.db.update_lifecycle_action_status(
                     action_id, "skipped",
                     result_json=json.dumps({
@@ -803,13 +868,29 @@ class VideoLifecycleManager:
 
     def _handle_comment_reply(self, yt_video_id: str, db_video_id: int,
                                _action: dict) -> bool:
-        """Reply to viewer comments."""
-        from config.settings import COMMENT_REPLY_ENABLED
+        """Reply to viewer comments.
+
+        Motor por defecto (ago 2026): "browser" — watch page vía Playwright,
+        0 cuota de Data API, sin scope force-ssl, apariencia humana.
+        Fallback legacy: "api" — Data API (requiere youtube.force-ssl).
+        """
+        from config.settings import COMMENT_REPLY_ENABLED, COMMENT_REPLY_ENGINE
         if not COMMENT_REPLY_ENABLED:
             self.db.update_lifecycle_action_status(_action["id"], "skipped",
                                                     error_message="comment_reply disabled")
             return True
 
+        if COMMENT_REPLY_ENGINE == "browser":
+            from pipeline.comment_reply_browser import reply_to_video_comments
+            result = reply_to_video_comments(self.slug, yt_video_id, db_video_id)
+            import json
+            self.db.update_lifecycle_action_status(
+                _action["id"], "executed",
+                result_json=json.dumps(result, ensure_ascii=False),
+            )
+            return True
+
+        # ── Legacy: Data API ──
         from pipeline.youtube_comments import YouTubeCommentManager
 
         mgr = YouTubeCommentManager(self.slug)
@@ -817,10 +898,6 @@ class VideoLifecycleManager:
             return False
 
         result = mgr.reply_to_comments(yt_video_id, COMMENT_REPLY_MAX_PER_VIDEO, db_video_id)
-
-        # Log each reply
-        # Note: we don't have individual comment IDs from the batch reply method
-        # For now, just record the action result
 
         import json
         self.db.update_lifecycle_action_status(

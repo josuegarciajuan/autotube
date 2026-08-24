@@ -736,3 +736,16 @@ STATS_SCRAPE_MAX_AGE_DAYS = 45
 # Shorts age window is much smaller: shorts flood daily and their stats
 # freeze after the initial burst, so scraping old shorts is pure waste.
 STATS_SCRAPE_SHORTS_MAX_AGE_DAYS = 7
+
+# ═══════════════════════════════════════════════════════════════════
+# COMMENT REPLY — ventanas de respuesta (por canal, override opcional)
+# ═══════════════════════════════════════════════════════════════════
+# La respuesta automática a comentarios (motor browser, 0 cuota) se
+# programa en una ventana ALEATORIA tras la publicación del video para
+# parecer humana. Ronda 1: entre MIN y MAX horas; Ronda 2: idem.
+# Se leen vía get_channel_config(); si el canal no las define, se usan
+# estos valores.
+COMMENT_REPLY_1_DELAY_MIN_H = 8
+COMMENT_REPLY_1_DELAY_MAX_H = 18
+COMMENT_REPLY_2_DELAY_MIN_H = 26
+COMMENT_REPLY_2_DELAY_MAX_H = 48
