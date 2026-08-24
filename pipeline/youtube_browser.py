@@ -422,6 +422,252 @@ class YouTubeBrowser:
                        len(_MOSTRAR_MAS_FALLBACKS))
         return False
 
+    # ── Comment reading / replying (watch page, 0 quota API) ────────────
+    # Superficie: https://www.youtube.com/watch?v={id} (ytd-comment-*).
+    # DOM validado 2026-08-24 contra videos reales. Cero cuota de Data API.
+
+    def _wait_rotate_cookies(self, page, timeout_s: int = 60) -> bool:
+        """Espera a que YouTube termine la rotación de cookies de sesión.
+
+        Tras lanzar el navegador, YouTube a veces muestra un frame
+        accounts.youtube.com/RotateCookiesPage que bloquea la sección de
+        comentarios hasta que termina. Devuelve True cuando no queda ninguno.
+        """
+        for _ in range(max(1, timeout_s // 5)):
+            try:
+                if not any("RotateCookies" in f.url for f in page.frames):
+                    return True
+            except Exception:
+                return True
+            logger.debug("Esperando rotación de cookies...")
+            time.sleep(5)
+        logger.warning("Rotación de cookies no terminó en %ds", timeout_s)
+        return False
+
+    def _goto_watch_comments(self, page, video_id: str):
+        """Navega a la watch page y hace scroll hasta la sección de comentarios."""
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        self._wait_rotate_cookies(page)
+        human_delay(4.0, 6.0, "watch load")
+        try:
+            page.evaluate(
+                '() => document.getElementById("comments")?.scrollIntoView('
+                '{behavior: "instant", block: "start"})'
+            )
+        except Exception:
+            pass
+        human_delay(2.0, 4.0, "comments scroll")
+        try:
+            page.mouse.wheel(0, 800)
+        except Exception:
+            pass
+        human_delay(1.5, 3.0, "wheel settle")
+        return page
+
+    def _parse_comment_threads(self, page, max_comments: int = 50) -> list[dict]:
+        """Extrae los hilos de comentarios visibles de la watch page.
+
+        Returns [{index, author, text, reply_authors, has_reply_button, likes}].
+        index = posición del hilo en el DOM (para targetear la respuesta).
+        """
+        try:
+            data = page.evaluate("""(maxN) => {
+                const threads = document.querySelectorAll('ytd-comment-thread-renderer');
+                const out = [];
+                for (let i = 0; i < threads.length && out.length < maxN; i++) {
+                    const t = threads[i];
+                    const author = (t.querySelector('#author-text')?.textContent || '')
+                        .trim().replace(/^@/, '');
+                    const content = (t.querySelector('#content-text')?.textContent || '')
+                        .trim();
+                    if (!content) continue;
+                    const replyAuthors = Array.from(
+                        t.querySelectorAll('ytd-comment-renderer #author-text')
+                    ).map(e => (e.textContent || '').trim().replace(/^@/, ''));
+                    const hasReplyBtn = !!(
+                        t.querySelector('#reply-button-end') ||
+                        t.querySelector('#reply-button') ||
+                        t.querySelector('[aria-label*="Responder"]') ||
+                        t.querySelector('[aria-label*="Reply"]')
+                    );
+                    const likes = (t.querySelector('#vote-count-middle')?.textContent || '')
+                        .trim();
+                    out.push({
+                        index: i,
+                        author,
+                        text: content,
+                        reply_authors: replyAuthors,
+                        has_reply_button: hasReplyBtn,
+                        likes,
+                    });
+                }
+                return out;
+            }""", max_comments)
+            return data or []
+        except Exception as exc:
+            logger.warning("Could not parse comment threads: %s", exc)
+            return []
+
+    def list_video_comments(self, video_id: str, max_comments: int = 50) -> list[dict]:
+        """Lee los comentarios públicos de un video vía watch page (0 cuota).
+
+        Devuelve lista de dicts: {index, author, text, reply_authors,
+        has_reply_button, likes}. Vacía si no hay comentarios o no carga.
+        """
+        with self._lock:
+            self._ensure_browser()
+            page = self._context.new_page()
+            try:
+                self._goto_watch_comments(page, video_id)
+                comments = self._parse_comment_threads(page, max_comments)
+                logger.info("Comments read for %s: %d hilos", video_id, len(comments))
+                return comments
+            except Exception as exc:
+                logger.error("list_video_comments failed for %s: %s", video_id, exc)
+                return []
+            finally:
+                page.close()
+
+    def post_comment_reply(self, video_id: str, comment_index: int, text: str,
+                           expected_text: str = None) -> bool:
+        """Responde a un comentario vía watch page (0 cuota).
+
+        Abre el cajón de respuesta del hilo `comment_index`, escribe `text`
+        carácter a carácter (typing humano) y pulsa Comentar.
+
+        Si `expected_text` se pasa, verifica antes de publicar que el hilo
+        objetivo sigue conteniendo ese texto (evita responder al comentario
+        equivocado si el orden del DOM cambió entre la lectura y el envío).
+        """
+        with self._lock:
+            self._ensure_browser()
+            page = self._context.new_page()
+            try:
+                self._goto_watch_comments(page, video_id)
+                return self._do_post_comment_reply(
+                    page, comment_index, text, expected_text
+                )
+            except Exception as exc:
+                logger.error("post_comment_reply failed for %s idx %s: %s",
+                             video_id, comment_index, exc)
+                return False
+            finally:
+                page.close()
+
+    def _do_post_comment_reply(self, page, comment_index: int, text: str,
+                               expected_text: str = None) -> bool:
+        # ── 1. Localizar el hilo objetivo y abrir "Responder" ──
+        try:
+            state = page.evaluate("""(idx) => {
+                const ts = document.querySelectorAll('ytd-comment-thread-renderer');
+                const t = ts[idx];
+                if (!t) return 'no-thread';
+                const content = (t.querySelector('#content-text')?.textContent || '')
+                    .trim().slice(0, 60);
+                try { t.scrollIntoView({block: 'center'}); } catch (_) {}
+                const btn = t.querySelector('#reply-button-end') ||
+                    t.querySelector('#reply-button') ||
+                    t.querySelector('[aria-label*="Responder"]') ||
+                    t.querySelector('[aria-label*="Reply"]');
+                if (!btn) return 'no-reply-btn';
+                btn.click();
+                return content;
+            }""", comment_index)
+        except Exception as exc:
+            logger.error("Reply open error: %s", exc)
+            return False
+
+        if state == "no-thread" or state == "no-reply-btn":
+            logger.warning("Cannot open reply for idx %s: %s", comment_index, state)
+            return False
+
+        # Verificación anti-comentario-equivocado
+        if expected_text:
+            norm_expected = expected_text.strip().lower()[:60]
+            norm_state = (state or "").strip().lower()
+            if not norm_state or norm_expected[:30] not in norm_state:
+                logger.warning(
+                    "Thread idx %s no coincide con el comentario esperado "
+                    "(DOM cambió) — abortando sin publicar", comment_index
+                )
+                return False
+
+        human_delay(2.0, 4.0, "reply simplebox")
+
+        # ── 2. Abrir el diálogo de respuesta ──
+        try:
+            page.evaluate(
+                "() => document.querySelector("
+                "'ytd-comment-simplebox-renderer #placeholder-area')?.click()"
+            )
+        except Exception:
+            pass
+        human_delay(1.5, 3.0, "reply dialog")
+
+        # ── 3. Localizar el input contenteditable ──
+        ce = page.locator(
+            "ytd-comment-simplebox-renderer #contenteditable-root"
+        ).first
+        if ce.count() == 0:
+            ce = page.locator("#comment-dialog #contenteditable-root").first
+        if ce.count() == 0:
+            logger.warning("Reply contenteditable not found (idx %s)", comment_index)
+            return False
+
+        ce.click()
+        human_delay(0.5, 1.2, "focus reply")
+
+        # ── 4. Escribir carácter a carácter (typing humano) ──
+        for ch in text:
+            try:
+                page.keyboard.type(ch)
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.04, 0.13) + (0.06 if ch in ".,!?¿" else 0))
+        human_delay(1.0, 2.2, "typed")
+
+        # ── 5. Pulsar "Comentar" (solo si quedó habilitado) ──
+        try:
+            result = page.evaluate("""() => {
+                const cd = document.querySelector(
+                    'ytd-comment-simplebox-renderer #comment-dialog, #comment-dialog');
+                if (!cd) return 'no-dialog';
+                const btn = Array.from(cd.querySelectorAll('button')).find(b =>
+                    (b.textContent || '').trim() === 'Comentar' ||
+                    (b.textContent || '').trim() === 'Comment' ||
+                    b.getAttribute('aria-label') === 'Comentar' ||
+                    b.getAttribute('aria-label') === 'Comment');
+                if (!btn) return 'no-btn';
+                if (btn.disabled) return 'disabled';
+                btn.click();
+                return 'posted';
+            }""")
+        except Exception as exc:
+            logger.error("Reply button error: %s", exc)
+            return False
+
+        if result != "posted":
+            logger.warning("Reply not posted for idx %s: %s", comment_index, result)
+            return False
+
+        human_delay(2.0, 4.0, "post settle")
+
+        # ── 6. Verificación: el simplebox debe haberse cerrado ──
+        try:
+            gone = page.evaluate(
+                "() => { const sb = document.querySelector("
+                "'ytd-comment-simplebox-renderer'); "
+                "return !sb || !sb.offsetParent; }"
+            )
+        except Exception:
+            gone = True
+        if not gone:
+            logger.warning("Reply box still open after posting — revisar")
+        logger.info("✅ Reply posted for %s (idx %s): %s...", video_id,
+                    comment_index, text[:50])
+        return True
+
     def close(self):
         with self._lock:
             try:
