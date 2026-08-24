@@ -115,6 +115,8 @@ class ChannelUpdate(BaseModel):
     yt_channel_url: Optional[str] = None
     google_account: Optional[str] = None
     yt_studio_url: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
 
 
 class ChannelResponse(BaseModel):
@@ -130,6 +132,8 @@ class ChannelResponse(BaseModel):
     yt_channel_url: Optional[str] = None
     google_account: Optional[str] = None
     yt_studio_url: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -143,6 +147,8 @@ class ChannelConfigUpdate(BaseModel):
     yt_channel_url: Optional[str] = None
     google_account: Optional[str] = None
     yt_studio_url: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
 
 
 # ── Video ────────────────────────────────────────────────────
