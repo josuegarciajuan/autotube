@@ -28,6 +28,18 @@ import pytest
 # dentro del cuerpo, así que parchear datetime.datetime (atributo del módulo)
 # hace que el import local resuelva a la clase congelada. ──
 
+@pytest.fixture(autouse=True)
+def _reset_pacing_cache():
+    """Evita polución entre tests: el caché TTL de _publish_cap_per_day persiste
+    5 min y, al correr la suite en orden alfabético, test_publish_coverage.py
+    va antes que test_quota_aware_planning.py → un cap=2 cacheado rompería los
+    tests de planificación con cuota."""
+    import api.services.planning_service as _ps
+    _ps._PUBLISH_CAP_CACHE.update(ts=0.0, value=1)
+    yield
+    _ps._PUBLISH_CAP_CACHE.update(ts=0.0, value=1)
+
+
 class FixedDateTime(datetime):
     _fixed = None
 
