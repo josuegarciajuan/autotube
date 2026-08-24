@@ -6953,6 +6953,10 @@ class ExtendedDatabase(Database):
             "slug": ch.get("slug", ""),
             "videos_per_day": config.get("videos_per_day", 1),
             "planning_enabled": config.get("planning_enabled", True),
+            # ── Generación long-form/día (ago 2026): desacoplado de subida/
+            # publicación. La generación no consume cuota; >1 encola backlog que
+            # la válvula (1/día) drena. None → fallback legacy (1/día).
+            "longform_generation_per_day": config.get("longform_generation_per_day"),
             # ── Scheduled publishing config ──
             "publish_mode": config.get("PUBLISH_MODE", "immediate"),
             "publish_target_hour": config.get("PUBLISH_TARGET_HOUR"),
@@ -6996,7 +7000,8 @@ class ExtendedDatabase(Database):
                                         upload_windows: list = None,
                                         publish_window_spread_min: int = None,
                                         videos_day_boost_weight: float = None,
-                                        viral_day_boost_weight: float = None) -> bool:
+                                        viral_day_boost_weight: float = None,
+                                        longform_generation_per_day: int = None) -> bool:
         """Update planning fields in channel config_json.
 
         Pass alternate_pattern=None (the Python value) to explicitly clear it.
@@ -7011,6 +7016,8 @@ class ExtendedDatabase(Database):
             config = {}
         if videos_per_day is not None:
             config["videos_per_day"] = max(0, min(10, videos_per_day))
+        if longform_generation_per_day is not None:
+            config["longform_generation_per_day"] = max(0, min(10, longform_generation_per_day))
         if planning_enabled is not None:
             config["planning_enabled"] = planning_enabled
         if alternate_pattern is not self._UNSET:
