@@ -483,7 +483,10 @@ class YouTubeBrowser:
                         .trim();
                     if (!content) continue;
                     const replyAuthors = Array.from(
-                        t.querySelectorAll('ytd-comment-renderer #author-text')
+                        t.querySelectorAll(
+                            'ytd-comment-renderer #author-text, ' +
+                            'ytd-comment-view-model #author-text'
+                        )
                     ).map(e => (e.textContent || '').trim().replace(/^@/, ''));
                     const hasReplyBtn = !!(
                         t.querySelector('#reply-button-end') ||
@@ -558,59 +561,73 @@ class YouTubeBrowser:
     def _do_post_comment_reply(self, page, comment_index: int, text: str,
                                expected_text: str = None) -> bool:
         # ── 1. Localizar el hilo objetivo y abrir "Responder" ──
+        thread_loc = page.locator("ytd-comment-thread-renderer").nth(comment_index)
+        if thread_loc.count() == 0:
+            logger.warning("Cannot find thread idx %s", comment_index)
+            return False
         try:
-            state = page.evaluate("""(idx) => {
-                const ts = document.querySelectorAll('ytd-comment-thread-renderer');
-                const t = ts[idx];
-                if (!t) return 'no-thread';
-                const content = (t.querySelector('#content-text')?.textContent || '')
-                    .trim().slice(0, 60);
-                try { t.scrollIntoView({block: 'center'}); } catch (_) {}
-                const btn = t.querySelector('#reply-button-end') ||
-                    t.querySelector('#reply-button') ||
-                    t.querySelector('[aria-label*="Responder"]') ||
-                    t.querySelector('[aria-label*="Reply"]');
-                if (!btn) return 'no-reply-btn';
-                btn.click();
-                return content;
-            }""", comment_index)
-        except Exception as exc:
-            logger.error("Reply open error: %s", exc)
-            return False
-
-        if state == "no-thread" or state == "no-reply-btn":
-            logger.warning("Cannot open reply for idx %s: %s", comment_index, state)
-            return False
-
+            thread_loc.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        human_delay(0.5, 1.0, "scroll thread")
         # Verificación anti-comentario-equivocado
         if expected_text:
+            try:
+                content = (thread_loc.locator("#content-text").first.inner_text() or "").strip()
+            except Exception:
+                content = ""
             norm_expected = expected_text.strip().lower()[:60]
-            norm_state = (state or "").strip().lower()
-            if not norm_state or norm_expected[:30] not in norm_state:
+            if not content or norm_expected[:30] not in content.strip().lower():
                 logger.warning(
                     "Thread idx %s no coincide con el comentario esperado "
                     "(DOM cambió) — abortando sin publicar", comment_index
                 )
                 return False
 
+        reply_btn = thread_loc.locator(
+            "#reply-button-end, #reply-button, [aria-label*='Responder'], "
+            "[aria-label*='Reply']"
+        ).first
+        if reply_btn.count() == 0:
+            logger.warning("Reply button not found (idx %s)", comment_index)
+            return False
+        try:
+            reply_btn.click()
+        except Exception:
+            # Fallback: JS click sobre el botón del hilo (mismo índice)
+            try:
+                page.evaluate("""(idx) => {
+                    const ts = document.querySelectorAll(
+                        'ytd-comment-thread-renderer');
+                    const t = ts[idx];
+                    if (!t) return false;
+                    const btn = t.querySelector('#reply-button-end') ||
+                        t.querySelector('#reply-button');
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }""", comment_index)
+            except Exception:
+                pass
+
         human_delay(2.0, 4.0, "reply simplebox")
 
-        # ── 2. Abrir el diálogo de respuesta ──
-        try:
-            page.evaluate(
-                "() => document.querySelector("
-                "'ytd-comment-simplebox-renderer #placeholder-area')?.click()"
-            )
-        except Exception:
-            pass
-        human_delay(1.5, 3.0, "reply dialog")
-
-        # ── 3. Localizar el input contenteditable ──
-        ce = page.locator(
-            "ytd-comment-simplebox-renderer #contenteditable-root"
+        # ── 2. Localizar el cajón de respuesta (replybox) ──
+        # Estructura real (validada 2026-08-24): al pulsar "Responder" se abre
+        # ytd-comment-reply-dialog-renderer#replybox (NO un simplebox) con un
+        # ytd-commentbox dentro, cuyo input es #contenteditable-root.
+        rb = page.locator(
+            "ytd-comment-reply-dialog-renderer, #replybox"
         ).first
-        if ce.count() == 0:
-            ce = page.locator("#comment-dialog #contenteditable-root").first
+        if rb.count() == 0:
+            logger.warning("Reply box (replybox) not found (idx %s)", comment_index)
+            return False
+
+        # ── 3. Localizar el input contenteditable dentro del replybox ──
+        ce = page.locator(
+            "ytd-comment-reply-dialog-renderer #contenteditable-root, "
+            "#replybox #contenteditable-root"
+        ).first
         if ce.count() == 0:
             logger.warning("Reply contenteditable not found (idx %s)", comment_index)
             return False
@@ -630,14 +647,17 @@ class YouTubeBrowser:
         # ── 5. Pulsar "Comentar" (solo si quedó habilitado) ──
         try:
             result = page.evaluate("""() => {
-                const cd = document.querySelector(
-                    'ytd-comment-simplebox-renderer #comment-dialog, #comment-dialog');
-                if (!cd) return 'no-dialog';
-                const btn = Array.from(cd.querySelectorAll('button')).find(b =>
-                    (b.textContent || '').trim() === 'Comentar' ||
-                    (b.textContent || '').trim() === 'Comment' ||
-                    b.getAttribute('aria-label') === 'Comentar' ||
-                    b.getAttribute('aria-label') === 'Comment');
+                const rb = document.querySelector(
+                    'ytd-comment-reply-dialog-renderer, #replybox');
+                if (!rb) return 'no-replybox';
+                const btn = Array.from(rb.querySelectorAll('button')).find(b => {
+                    const t = (b.textContent || '').trim();
+                    const a = b.getAttribute('aria-label') || '';
+                    return t === 'Comentar' || t === 'Comment' ||
+                           t === 'Responder' || t === 'Reply' ||
+                           a === 'Comentar' || a === 'Comment' ||
+                           a === 'Responder' || a === 'Reply';
+                });
                 if (!btn) return 'no-btn';
                 if (btn.disabled) return 'disabled';
                 btn.click();
@@ -653,19 +673,18 @@ class YouTubeBrowser:
 
         human_delay(2.0, 4.0, "post settle")
 
-        # ── 6. Verificación: el simplebox debe haberse cerrado ──
+        # ── 6. Verificación: el replybox debe haberse cerrado ──
         try:
-            gone = page.evaluate(
-                "() => { const sb = document.querySelector("
-                "'ytd-comment-simplebox-renderer'); "
-                "return !sb || !sb.offsetParent; }"
-            )
+            gone = page.evaluate("""() => {
+                const rb = document.querySelector(
+                    'ytd-comment-reply-dialog-renderer, #replybox');
+                return !rb || !rb.offsetParent;
+            }""")
         except Exception:
             gone = True
         if not gone:
             logger.warning("Reply box still open after posting — revisar")
-        logger.info("✅ Reply posted for %s (idx %s): %s...", video_id,
-                    comment_index, text[:50])
+        logger.info("✅ Reply posted for idx %s: %s...", comment_index, text[:50])
         return True
 
     def close(self):
