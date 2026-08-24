@@ -1997,7 +1997,10 @@ def run_job(
         # SystemExit (a BaseException, NOT Exception), so the `except Exception`
         # block below never ran and the video stayed stuck in 'generating' forever.
         # Reset it now to 'error/interrupted' so it's retryable instead of orphaned.
-        error_msg = "interrupted: SIGTERM (server restart)"
+        # "server restarted" (con 'ed') coincide con TRANSIENT_SKIP_PATTERNS
+        # del health-check: sin esto, cada reinicio creaba una crítica espuria
+        # "Unknown error"/"SIGTERM" que no se reconocía como transitoria.
+        error_msg = "interrupted: server restarted (SIGTERM)"
         logger.warning(
             "Worker interrupted by signal (code=%s) — resetting video #%d to error",
             getattr(_sigexit, "code", "?"), video_id,
