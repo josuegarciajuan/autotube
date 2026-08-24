@@ -94,3 +94,62 @@ def test_documental_neutro_permite():
 def test_marcador_real_seguro_permite():
     # 'REAL' es neutro en los datos (0.9-1.7x); solo se bloquea vía tema.
     assert _verdict("¿Qué civilización construyó un santuario 7.000 años (REAL)?")
+
+
+# ── Falsos positivos corregidos (ago 2026): el filtro determinista era
+# demasiado amplio e inanicionaba canales legítimos (médico/histórico).
+# Estos casos deben pasar el pre-filtro; el LLM evalúa los matices. ──
+def test_historia_asesinato_no_sensacionalista_permite():
+    # Título con 'muerte' + guion con 'asesinado' sin marcador criminal
+    # (guerrilla/cartel/víctima): documental histórico, NO true-crime spam.
+    assert classify_topic_safety(
+        topic="La trágica muerte de Daniel Tupý: un eco nacional en Eslovaquia",
+        title="La trágica muerte de Daniel Tupý",
+        script_texts=[
+            "Daniel Tupý fue asesinado en 2005 en un incidente que conmocionó a "
+            "Eslovaquia. La investigación histórica..."
+        ],
+        use_llm=False,
+    ).safe
+
+
+def test_medico_congenito_recien_nacido_permite():
+    # Documental médico de síndromes congénitos (nicho legítimo de canal5).
+    assert classify_topic_safety(
+        topic="El síndrome Allan–Herndon–Dudley: un misterio médico sin resolver",
+        title="El síndrome Allan–Herndon–Dudley",
+        script_texts=[
+            "Este síndrome congénito afecta a niños recién nacidos y causa "
+            "problemas de desarrollo..."
+        ],
+        use_llm=False,
+    ).safe
+
+
+def test_medico_sindromes_raros_permite():
+    assert _verdict("Los síndromes raros: misterios que desafían la medicina moderna")
+
+
+def test_historia_reina_tragica_permite():
+    assert _verdict("El legado oculto de un monarca y su reina trágica")
+
+
+def test_religion_ciencia_y_biblia_permite():
+    assert _verdict("La Ciencia y la Biblia: Revelando la Historia Oculta de la Creación")
+
+
+def test_culturas_tierra_madre_permite():
+    assert _verdict("América como Tierra Madre: Misterios y Conexiones Esenciales")
+
+
+# ── El contexto adverso SÍ bloquea (no se debilitó la protección) ──
+def test_menor_asesinado_contexto_bloquea():
+    assert not _verdict("La niña asesinada por el cartel")
+
+
+def test_menor_violado_contexto_bloquea():
+    assert not _verdict("La niña víctima de abuso en el orfanato")
+
+
+def test_bebe_desaparecido_contexto_bloquea():
+    assert not _verdict("El bebé desapareció de la guardería y nadie lo encontró")
