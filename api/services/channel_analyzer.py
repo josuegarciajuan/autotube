@@ -79,6 +79,8 @@ _CONFIG_KEYS = [
     "title_formulas", "title_power_words",
     # Visual
     "image_style_modifiers", "thumbnail_style",
+    # Social redistribution / cross-platform
+    "SOCIAL_REDISTRIBUTION", "CROSS_PLATFORM_UPLOAD", "CROSS_PLATFORM",
 ]
 
 # ── Phase prompts ────────────────────────────────────────────────────
@@ -127,6 +129,18 @@ Categories to explore exhaustively:
 7. Niche positioning and competitive differentiation: what unique angle could increase CTR and loyalty?
 8. Growth trends (subs, views) and inflection points: what triggered past growth spikes or drops?
 9. Revenue patterns (CPM correlation with topic/duration)
+10. Cross-platform / social media performance (Rumble, Dailymotion, Facebook,
+    Bluesky, Mastodon): which platforms over/underperform, which video topics
+    travel best on each network, whether redistribution pacing (daily_cap,
+    enabled_platforms) matches observed results, and whether any network is
+    driving meaningful referral views back to YouTube.
+
+SOCIAL DATA HONESTY RULE:
+  The <channel_data> may contain a "social_stats" section. If it is null,
+  empty, or has zero published videos, the channel has NOT started using
+  social redistribution yet. In that case DO NOT invent social findings —
+  state that social data is absent and skip social patterns. If data exists,
+  use exact numbers (views/likes/comments per platform).
 
 DO NOT look for bugs, pipeline errors, or technical failures. Focus exclusively on
 marketing, content strategy, audience growth, and revenue optimization.
@@ -233,6 +247,23 @@ RULES:
   new evidence that changes the analysis. If a prior recommendation is still valid,
   mention it in the summary instead of repeating it as a new recommendation.
 
+SOCIAL MEDIA RULES:
+- Cross-platform performance (social_stats) is a first-class input. Use it to recommend
+  concrete changes: enable/disable platforms in SOCIAL_REDISTRIBUTION.enabled_platforms,
+  adjust daily_cap per platform, change backlog_direction, or propose CROSS_PLATFORM_UPLOAD
+  toggles. Always map to the exact config keys available in <available_config_keys>.
+- If a platform is clearly overperforming (e.g. Rumble drives the most views), recommend
+  increasing its daily_cap or prioritizing it. If a platform has near-zero traction after
+  several published videos, recommend lowering its cap or disabling it.
+- SOCIAL HONESTY: if social_stats is null/empty (redistribution not started), you may still
+  recommend SETTING UP redistribution as an untapped growth channel, but do NOT invent
+  per-platform results. Phrase it as an opportunity, not a finding.
+- When proposing a change to a nested config key (SOCIAL_REDISTRIBUTION, CROSS_PLATFORM_UPLOAD,
+  CROSS_PLATFORM), ALWAYS provide the COMPLETE dictionary with all subkeys, never a partial
+  replacement, so the apply step does not lose existing values.
+- Social recommendations belong to the existing categories (contenido/keywords/hora_publicacion)
+  — there is no separate social category. Use data_cited with per-platform numbers.
+
 Return ONLY valid JSON. No markdown."""
 
 _UNIFIED_USER = """\
@@ -337,6 +368,11 @@ IMPORTANT for key_metrics: provide 4-6 marketing metrics. Prefer these when data
   - Suscripciones por video (average new subs per published video)
   - Ingresos estimados (estimated revenue, if monetized)
   - Subs 30d (subscriber growth in last 30 days)
+  - Vistas totales en redes sociales (sum of social_stats views across platforms)
+  - Red social líder (platform with most views, e.g. "Rumble: 12,400")
+  - Ratio redes/YouTube (social views as % of YouTube views)
+Only include social metrics when social_stats has real data. If social redistribution
+is not started, you may include "Redes sociales" with value "Sin datos".
 Each sparkline must be an array of 7 integers representing the last 7 data points.
 </task>"""
 
@@ -575,6 +611,60 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         }
     except Exception:
         data["audience_demographics"] = None
+
+    # ── Social media (cross-platform) stats — v21.2 ──────────
+    # Stats de las redes (Rumble, Dailymotion, Facebook, Bluesky, Mastodon).
+    # Se recolectan con APIs gratuitas (0 cuota YouTube) y pueden estar
+    # vacías si aún no hay cuentas configuradas ni vídeos publicados.
+    # El LLM debe usarlas SOLO si hay datos reales, sin inventar.
+    try:
+        social_stats = db.get_channel_social_stats(channel_id)
+        data["social_stats"] = social_stats if social_stats else None
+    except Exception:
+        data["social_stats"] = None
+
+    try:
+        # Per-video per-platform (compacto: solo publicados con stats)
+        social_per_video = db.get_channel_videos_social_stats(channel_id)
+        compact = {}
+        for video_id, rows in social_per_video.items():
+            published = [r for r in rows if r.get("status") == "published"]
+            if not published:
+                continue
+            compact[str(video_id)] = [
+                {
+                    "platform": r.get("platform"),
+                    "views": r.get("views") or 0,
+                    "likes": r.get("likes") or 0,
+                    "comments": r.get("comments") or 0,
+                    "reposts": r.get("reposts") or 0,
+                }
+                for r in published
+            ]
+        data["social_stats_per_video"] = compact or None
+    except Exception:
+        data["social_stats_per_video"] = None
+
+    try:
+        # Plataformas habilitadas (sin secretos)
+        accounts = db.get_enabled_social_accounts(channel_id)
+        data["social_accounts"] = [
+            {"platform": a.get("platform")} for a in accounts
+        ] or None
+    except Exception:
+        data["social_accounts"] = None
+
+    # Config de redistribución social actual (para que el LLM proponga cambios)
+    try:
+        rd = data.get("current_config", {}).get("SOCIAL_REDISTRIBUTION")
+        if isinstance(rd, dict):
+            data["social_redistribution_config"] = {
+                k: v for k, v in rd.items() if k != "stats_auto_collect"
+            }
+        else:
+            data["social_redistribution_config"] = None
+    except Exception:
+        data["social_redistribution_config"] = None
 
     return data
 
