@@ -252,7 +252,10 @@ MEDIA_STRATEGY = {
     # Model override for Pollinations (None = use Pollinations default: flux).
     "ai_pollinations_model": None,
     # Local SD generation steps (fewer = faster, lower quality).
-    "ai_local_sd_steps": 20,
+    # ago 2026: 20 → 8. El fallback local_sd tardaba ~15 min/imagen a 20
+    # steps, provocando timeouts de la fase media y OOM por RAM sostenida.
+    # 8 steps ≈ 4-6 min, calidad aceptable para b-roll documental.
+    "ai_local_sd_steps": 8,
 
     # ── Video Scene Control (Phase 2) ──────────────────────────
     # Minimum % of scenes that should try stock video.
