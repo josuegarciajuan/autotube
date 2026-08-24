@@ -64,6 +64,12 @@ export default function SocialDistributionTab({ channelId }: Props) {
   const [revealed, setRevealed] = useState<Revealed | null>(null)
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
 
+  // Identidad del canal (email + teléfono usados en el registro de las redes)
+  const [identity, setIdentity] = useState<{ contact_email: string; contact_phone: string }>({ contact_email: '', contact_phone: '' })
+  const [editingIdentity, setEditingIdentity] = useState(false)
+  const [identityForm, setIdentityForm] = useState<{ contact_email: string; contact_phone: string }>({ contact_email: '', contact_phone: '' })
+  const [savingIdentity, setSavingIdentity] = useState(false)
+
   // Stats por red
   const [stats, setStats] = useState<any[]>([])
   const [collecting, setCollecting] = useState(false)
@@ -71,8 +77,51 @@ export default function SocialDistributionTab({ channelId }: Props) {
   useEffect(() => {
     loadAccounts()
     loadStats()
+    loadIdentity()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId])
+
+  async function loadIdentity() {
+    try {
+      const ch = await api.getChannel(channelId)
+      setIdentity({
+        contact_email: ch?.contact_email || '',
+        contact_phone: ch?.contact_phone || '',
+      })
+    } catch (e: any) {
+      console.error('Failed to load channel identity:', e)
+    }
+  }
+
+  function startEditIdentity() {
+    setIdentityForm({ ...identity })
+    setEditingIdentity(true)
+  }
+
+  function cancelEditIdentity() {
+    setEditingIdentity(false)
+    setIdentityForm({ ...identity })
+  }
+
+  async function handleSaveIdentity() {
+    setSavingIdentity(true)
+    setResult(null)
+    try {
+      await api.updateChannelProfile(channelId, {
+        contact_email: identityForm.contact_email.trim() || undefined,
+        contact_phone: identityForm.contact_phone.trim() || undefined,
+      })
+      setIdentity({
+        contact_email: identityForm.contact_email.trim(),
+        contact_phone: identityForm.contact_phone.trim(),
+      })
+      setEditingIdentity(false)
+      setResult({ ok: true, message: 'Identidad del canal guardada' })
+    } catch (e: any) {
+      setResult({ ok: false, message: `Error guardando identidad: ${e.message}` })
+    }
+    setSavingIdentity(false)
+  }
 
   async function loadAccounts() {
     setLoading(true)
@@ -218,6 +267,68 @@ export default function SocialDistributionTab({ channelId }: Props) {
 
   return (
     <div className="space-y-5 animate-fade-in">
+      {/* ── Identidad del canal (email + teléfono de registro) ────── */}
+      <div className="glass rounded-xl p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+            📇 Identidad del canal
+          </h3>
+          {!editingIdentity && (
+            <button onClick={startEditIdentity}
+              className="px-2.5 py-1 bg-dark-600 text-gray-300 rounded text-xs hover:bg-dark-500">
+              Editar
+            </button>
+          )}
+        </div>
+        <p className="text-[11px] text-gray-500 mb-3">
+          Correo creado para este canal y teléfono usado en su registro. Se usa al crear cada red social.
+        </p>
+
+        {editingIdentity ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] text-gray-500 block mb-0.5">Correo del canal</label>
+              <input type="text" value={identityForm.contact_email}
+                onChange={e => setIdentityForm(p => ({ ...p, contact_email: e.target.value }))}
+                placeholder="canal@yahoo.com"
+                className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full" />
+            </div>
+            <div>
+              <label className="text-[10px] text-gray-500 block mb-0.5">Teléfono de registro</label>
+              <input type="text" value={identityForm.contact_phone}
+                onChange={e => setIdentityForm(p => ({ ...p, contact_phone: e.target.value }))}
+                placeholder="600000000"
+                className="bg-dark-900 border border-surface-border text-white text-xs rounded px-2 py-1.5 w-full" />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button onClick={handleSaveIdentity} disabled={savingIdentity}
+                className="px-3 py-1 bg-neon-gold text-dark-900 rounded text-xs font-bold hover:bg-neon-gold/80 disabled:opacity-50">
+                {savingIdentity ? '...' : 'Guardar'}
+              </button>
+              <button onClick={cancelEditIdentity}
+                className="px-3 py-1 bg-dark-600 text-gray-300 rounded text-xs hover:bg-dark-500">Cancelar</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-4">
+            <div className="flex items-center gap-2 bg-dark-700/50 rounded-lg px-3 py-2">
+              <span className="text-base">📧</span>
+              <div>
+                <div className="text-[10px] text-gray-500 uppercase tracking-wide">Correo del canal</div>
+                <div className="text-sm text-white font-mono">{identity.contact_email || <span className="text-gray-600">No definido</span>}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 bg-dark-700/50 rounded-lg px-3 py-2">
+              <span className="text-base">📱</span>
+              <div>
+                <div className="text-[10px] text-gray-500 uppercase tracking-wide">Teléfono de registro</div>
+                <div className="text-sm text-white font-mono">{identity.contact_phone || <span className="text-gray-600">No definido</span>}</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── Identidad y credenciales ─────────────────────────────── */}
       <div className="glass rounded-xl p-5">
         <div className="flex items-center justify-between mb-4">

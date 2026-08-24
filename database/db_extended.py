@@ -1354,6 +1354,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v46: social account identity fields (email, login password, notes) ──
     _migrate_v46(conn, logger)
+
+    # ── v47: channel contact identity (signup email + phone) ──
+    _migrate_v47(conn, logger)
     
     conn.commit()
     conn.close()
@@ -3095,6 +3098,30 @@ def _migrate_v46(conn, logger):
                 logger.warning("Migration v46: failed to add channel_social_accounts.%s: %s", col, exc)
     conn.commit()
     logger.info("Migration v46: social account identity fields ensured")
+
+
+def _migrate_v47(conn, logger):
+    """Idempotent v47: channel-level signup identity (contact email + phone).
+
+    Each channel carries the email account created for it (used to register
+    its social media accounts) and the phone number used to create that email.
+    Stored at channel level (not per-platform) so the Redes tab can show the
+    identity used during signup. Values are plain (non-secret) contact data;
+    platform credentials keep living in channel_social_accounts (encrypted).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('channels')").fetchall()}
+    for col, col_type in [
+        ("contact_email", "TEXT"),
+        ("contact_phone", "TEXT"),
+    ]:
+        if col not in cols:
+            try:
+                conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {col_type}")
+                logger.info("Migration v47: added channels.%s", col)
+            except Exception as exc:
+                logger.warning("Migration v47: failed to add channels.%s: %s", col, exc)
+    conn.commit()
+    logger.info("Migration v47: channel contact identity fields ensured")
 
 
 def _migrate_v10(conn, logger):
