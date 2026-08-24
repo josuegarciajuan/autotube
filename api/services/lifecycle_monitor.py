@@ -1596,19 +1596,27 @@ def _check_stats_collection_failed(db) -> int:
 def _check_short_ready_stuck(db) -> int:
     """Alert when a rendered short sits in 'ready' past its schedule.
 
-    Un short listo para subir con fecha programada ya pasada (o sin fecha)
-    indica que el scheduler de shorts no lo despacha.
+    Cola unificada (ago 2026): los clips terminan 'ready' EN COLA, sin subir;
+    la válvula de goteo (_upload_queued_shorts) los sube gradualmente
+    respetando topes (1/día en perfil strike), cooldowns y cuota. Un short
+    'ready' con archivo válido NO está atascado: está esperando su turno.
+
+    Solo se alerta al HUÉRFANO real: status 'ready' pero SIN archivo en disco
+    (render fallido/borrado) o con slot cancelado — el scheduler no puede
+    subirlo y nadie más lo va a hacer.
     """
     created = 0
     try:
         with db._connect() as conn:
             rows = conn.execute(
-                """SELECT s.id, s.channel_id, s.title, s.scheduled_date, s.created_at
+                """SELECT s.id, s.channel_id, s.title, s.scheduled_date, s.created_at,
+                          s.file_path
                    FROM shorts s
                    WHERE s.status = 'ready'
                      AND s.created_at < datetime('now', ?)
                      AND (s.scheduled_date IS NULL
                           OR s.scheduled_date <= date('now'))
+                     AND (s.file_path IS NULL OR s.file_path = '')
                      AND s.id NOT IN (
                          SELECT entity_id FROM pipeline_alerts
                          WHERE entity_type = 'short' AND resolved = 0
@@ -1623,10 +1631,10 @@ def _check_short_ready_stuck(db) -> int:
                 created += _maybe_create_alert(
                     db, conn, "short", row["id"], row["channel_id"],
                     "short_ready_stuck", "warning",
-                    f"Short '{title[:60]}' renderizado sin subir",
+                    f"Short '{title[:60]}' huérfano (sin archivo renderizado)",
                     (f"Short en 'ready' desde hace >{SHORT_READY_STUCK_HOURS}h con fecha "
-                     f"programada {row['scheduled_date'] or 'sin fecha'} ya pasada. "
-                     "El scheduler de shorts no lo sube — revisar dispatch."),
+                     f"programada {row['scheduled_date'] or 'sin fecha'} ya pasada y "
+                     "SIN archivo en disco — no puede subirse. Revisar render."),
                     {"scheduled_date": row["scheduled_date"], "created_at": row["created_at"]},
                 )
     except Exception as exc:

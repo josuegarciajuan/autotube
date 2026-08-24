@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS shorts (
     status          TEXT NOT NULL DEFAULT 'pending',
     scheduled_date  TEXT,
     created_at      TEXT DEFAULT (datetime('now')),
-    error_message   TEXT
+    error_message   TEXT,
+    file_path       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS platform_videos (
@@ -278,6 +279,19 @@ def test_short_ready_stuck_creates_alert(tmp_path):
         )
         conn.commit()
     assert _check_short_ready_stuck(db) == 1
+
+
+def test_short_ready_with_file_not_alerted(tmp_path):
+    # Cola unificada (ago 2026): 'ready' con archivo válido está EN COLA,
+    # esperando la válvula de goteo (topes 1/día + cuota) — NO es huérfano.
+    db = _build_db(tmp_path)
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO shorts (id, channel_id, title, status, scheduled_date, created_at, file_path)
+               VALUES (1, 1, 'Short A', 'ready', NULL, datetime('now', '-2 days'), '/tmp/short_a.mp4')"""
+        )
+        conn.commit()
+    assert _check_short_ready_stuck(db) == 0
 
 
 def test_short_ready_future_date_not_alerted(tmp_path):
