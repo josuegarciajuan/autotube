@@ -372,6 +372,15 @@ MAX_LONGFORM_PUBLISH_PER_DAY = 1
 # Uniforme: se aplica a todos los canales por igual, sin excepciones.
 LONGFORM_DAILY_HARD_CAP = 1
 
+# ── Tope de GENERACIÓN long-form por canal/día (ago 2026) ─────────
+# Desacoplado de subida/publicación: la generación NO consume cuota de YouTube
+# (generate_only, sin llamadas API), así que puede superar el tope de 1/día de
+# subida/publicación. Los vídeos generados de más se encolan en awaiting_upload
+# y la válvula (upload_scheduler 1/día + publish_scheduler 1/día) los despacha
+# a tiempo. Sobrescribible por canal vía config_json (longform_generation_per_day).
+# 0 = sin generación planificada (equivalente a canal pausado para long-form).
+LONGFORM_GENERATION_PER_DAY = 1
+
 # ── Upload spacing (backlog drain) ─────────────────────────────
 # Mínimo de horas entre subidas long-form del MISMO canal. Evita que
 # un backlog de vídeos pasados se despache en ráfagas ("en fila") cuando

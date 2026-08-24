@@ -19,6 +19,9 @@ class PlanningConfigUpdate(BaseModel):
     videos_per_day: Optional[int] = None
     planning_enabled: Optional[bool] = None
     viral_per_day: Optional[int] = None
+    # ── Generación long-form/día (ago 2026): desacoplado de subida/publicación.
+    # >1 encola backlog en awaiting_upload; la válvula publica 1/día.
+    longform_generation_per_day: Optional[int] = None
     # ── Random daily boost weights (v13) ──
     videos_day_boost_weight: Optional[float] = None   # 0.0-1.0, prob of +1 video/day
     viral_day_boost_weight: Optional[float] = None     # 0.0-1.0, prob of +1 viral/day
@@ -76,6 +79,7 @@ def update_planning_config(channel_id: int, data: PlanningConfigUpdate):
         viral_day_boost_weight=data.viral_day_boost_weight,
         upload_windows=data.upload_windows,
         publish_window_spread_min=data.publish_window_spread_min,
+        longform_generation_per_day=data.longform_generation_per_day,
     )
     if not ok:
         raise HTTPException(500, "Failed to update")

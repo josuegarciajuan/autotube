@@ -457,6 +457,26 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     return min(base, cap)
 
 
+def _resolve_generation_per_day(ch: dict, date_str: str) -> int:
+    """Nº de long-forms a GENERAR por día para un canal (desacoplado de subida).
+
+    ago 2026: la generación (generate_only) no consume cuota de YouTube, por lo
+    que puede superar el tope de 1/día de subida/publicación (LONGFORM_DAILY_HARD_CAP).
+    Si el canal define ``longform_generation_per_day`` (>0), ESE valor manda y se
+    ignora el throttle legacy de generación (``alternate_pattern`` de Fase 1 y
+    ``videos_per_day``): los vídeos de más se encolan en awaiting_upload y la
+    válvula de publicación los despacha a 1/día. Si no está definido, fallback al
+    comportamiento legacy (``_resolve_videos_per_day``, techo 1/día).
+    """
+    raw = ch.get("longform_generation_per_day")
+    if raw is not None and str(raw).strip() not in ("", "none", "None"):
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return _resolve_videos_per_day(ch, date_str)
+
+
 # ── Quota-aware planning (ago 2026) ────────────────────────────
 # Cada subida (long o short) consume UPLOAD_UNITS (1.600 ud) de videos.insert.
 # El presupuesto automático de un proyecto GCP se deriva en runtime de
@@ -655,13 +675,15 @@ def compute_daily_upload_allocation(db, date_str: str) -> dict:
 
 
 def _resolve_long_cap(alloc: dict, slug: str, default_n: int) -> int:
-    """Cap de longs para un canal según la asignación quota-aware."""
-    try:
-        for proj, data in alloc.items():
-            if slug in data.get("channels", {}):
-                return min(default_n, int(data["channels"][slug].get("long", default_n)))
-    except Exception:
-        pass
+    """Cap de GENERACIÓN long-form para un canal.
+
+    ago 2026: la generación NO consume cuota de YouTube (generate_only), así que
+    NO se capa por el presupuesto de subida del proyecto GCP. Antes capaba por
+    ``alloc...long``, lo que bloqueaba la generación de un canal cuyo proyecto
+    tenía la cuota agotada (el cuello de botella real de subida/publicación ya
+    lo aplican upload_scheduler y publish_scheduler). El tope real es
+    ``longform_generation_per_day`` (ya resuelto en ``_resolve_generation_per_day``).
+    """
     return default_n
 
 
@@ -941,7 +963,20 @@ def _distribute_slots(
     # ── v10.1: Enforce minimum spread between same-channel publish times ──
     # After sorting, ensure no two adjacent slots are closer than 
     # MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS. Push later slots forward if needed.
-    if len(slots) >= 2:
+    # ago 2026: cuando el canal genera >1/día (longform_generation_per_day>1),
+    # el espaciado de 24h degeneraba slots duplicados (todos a 23:xx del mismo
+    # día). Se salta: los slots se reparten por las ventanas del día y el
+    # espaciado real de publicación lo aplica la válvula (publish_scheduler
+    # same_channel_publish_gap_h + _avoid_channel_collision + repack 1/día).
+    _skip_publish_spread = False
+    if scheduled_cfg:
+        try:
+            _gen_raw = scheduled_cfg.get("longform_generation_per_day")
+            if _gen_raw is not None and str(_gen_raw).strip() not in ("", "0"):
+                _skip_publish_spread = int(_gen_raw) > 1
+        except (TypeError, ValueError):
+            _skip_publish_spread = False
+    if len(slots) >= 2 and not _skip_publish_spread:
         min_gap_minutes = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
         spread_slots = [slots[0]]
         for i in range(1, len(slots)):
@@ -1009,7 +1044,7 @@ def compute_daily_slots(
     for ch in channel_configs:
         if not ch.get("planning_enabled", True):
             continue
-        n = _resolve_videos_per_day(ch, date_str)
+        n = _resolve_generation_per_day(ch, date_str)
         if db is not None:
             n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
         if n <= 0:
@@ -1434,7 +1469,7 @@ def compute_horizon_slots(
         for ch in channel_configs:
             if not ch.get("planning_enabled", True):
                 continue
-            n = _resolve_videos_per_day(ch, date_str)
+            n = _resolve_generation_per_day(ch, date_str)
             if db is not None:
                 n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
             if n <= 0:
@@ -2238,7 +2273,7 @@ def sync_midday(db=None) -> dict:
     for ch in channels:
         cfg = db.get_channel_planning_config(ch["id"])
         ch_id = ch["id"]
-        target = _resolve_videos_per_day(cfg, today) if cfg.get("planning_enabled", True) else 0
+        target = _resolve_generation_per_day(cfg, today) if cfg.get("planning_enabled", True) else 0
         # Cap de cuota: nunca planificar más longs de los que el proyecto admite
         target = _resolve_long_cap(alloc, ch.get("slug", ""), target)
         
@@ -2296,6 +2331,7 @@ def sync_midday(db=None) -> dict:
                 "slug": ch["slug"],
                 "name": ch["name"],
                 "videos_per_day": target,
+                "longform_generation_per_day": cfg.get("longform_generation_per_day"),
                 "planning_enabled": True,
                 "publish_mode": cfg.get("publish_mode", "immediate"),
                 "publish_target_hour": cfg.get("publish_target_hour"),
@@ -2626,7 +2662,7 @@ def smart_replan(db=None) -> dict:
         except (_json.JSONDecodeError, TypeError):
             cfg = {}
         
-        vpd = _resolve_videos_per_day({**cfg, "channel_id": ch_id}, today)
+        vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, today)
         planning_enabled = cfg.get("planning_enabled", True)
         
         # ── v26: skip channels paused by the circuit breaker ──
@@ -2693,11 +2729,11 @@ def smart_replan(db=None) -> dict:
                     (ch_id, tomorrow_str),
                 ).fetchone()
                 tcnt = tomorrow_cnt["cnt"] if tomorrow_cnt else 0
-            if tcnt > 0 and tcnt != _resolve_videos_per_day({**cfg, "channel_id": ch_id}, tomorrow_str):
+            if tcnt > 0 and tcnt != _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str):
                 logger.warning(
                     "Config mismatch for %s: tomorrow has %d slots but resolved_vpd=%d. "
                     "Triggering horizon replan.",
-                    slug, tcnt, _resolve_videos_per_day({**cfg, "channel_id": ch_id}, tomorrow_str),
+                    slug, tcnt, _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str),
                 )
                 if not horizon_replanned:
                     result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
@@ -2808,7 +2844,7 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     try:
         generated_today = db.count_videos_generated_today(ch_id)
         if generated_today == 0:
-            vpd = _resolve_videos_per_day({**cfg_json, "channel_id": ch_id}, today_str)
+            vpd = _resolve_generation_per_day({**cfg_json, "channel_id": ch_id}, today_str)
             if vpd > 0:
                 score += 30  # channel needs content today
     except Exception:
@@ -4718,7 +4754,7 @@ def full_replan(db=None) -> dict:
             "name": ch["name"],
             "videos_committed": videos_committed,
             "shorts_committed": shorts_committed,
-            "videos_per_day": _resolve_videos_per_day(cfg, today.isoformat()),
+            "videos_per_day": _resolve_generation_per_day(cfg, today.isoformat()),
         }
 
     # ═══════════════════════════════════════════════════════════
@@ -4819,11 +4855,7 @@ def full_replan(db=None) -> dict:
                 state = channel_states.get(ch_id, {"videos_committed": 0, "videos_per_day": 2})
                 vpd = max(0, state["videos_per_day"] - state["videos_committed"])
             else:
-                vpd = _resolve_videos_per_day(
-                    {"channel_id": ch_id, "videos_per_day": cfg.get("videos_per_day", 2),
-                     "videos_day_boost_weight": cfg.get("videos_day_boost_weight", 0.7)},
-                    day_str,
-                )
+                vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, day_str)
             daily_quotas[(ch_id, day_str)] = vpd
 
     # Build interleaved slot queue: one round = one slot per channel that still has quota
