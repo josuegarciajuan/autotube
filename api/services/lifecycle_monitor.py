@@ -587,14 +587,19 @@ def _check_video_failed_unalerted(db) -> int:
                          SELECT MAX(g2.id) FROM generation_jobs g2
                          WHERE g2.video_id = v.id AND g2.status = 'failed'
                      )
-                   WHERE v.status = 'error'
-                     AND v.id NOT IN (
-                         SELECT entity_id FROM pipeline_alerts
-                         WHERE entity_type = 'video' AND resolved = 0
-                         AND alert_type = 'failed'
-                     )
-                     AND v.created_at > datetime('now', '-7 days')
-                   ORDER BY v.id DESC LIMIT 20"""
+                    WHERE v.status = 'error'
+                      AND v.id NOT IN (
+                          -- Cualquier alerta 'failed' previa (resuelta O no):
+                          -- un fallo terminal ya reportado al operador no debe
+                          -- re-alertarse cada 24h (bucle de fatiga). Sin esto,
+                          -- los vídeos en 'error' permanente (sin reintento)
+                          -- re-creaban la alerta tras el cooldown de 24h.
+                          SELECT entity_id FROM pipeline_alerts
+                          WHERE entity_type = 'video'
+                          AND alert_type = 'failed'
+                      )
+                      AND v.created_at > datetime('now', '-7 days')
+                    ORDER BY v.id DESC LIMIT 20"""
             ).fetchall()
 
             for row in rows:
