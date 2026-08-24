@@ -1776,6 +1776,12 @@ async def _process_shorts_slots():
                 "Shorts slot dispatched: slot=%d channel=%s type=%s",
                 result["slot_id"], result["channel_slug"], result["short_type"],
             )
+        # ── Cobertura diaria de shorts (auditoría 1/día, alerta si canal seco) ──
+        try:
+            from api.services.shorts_scheduler import check_shorts_daily_coverage
+            await asyncio.to_thread(check_shorts_daily_coverage, _db)
+        except Exception as _cov_exc:
+            logger.debug("Shorts coverage check skip: %s", _cov_exc)
     except Exception as e:
         logger.error("Shorts dispatch error: %s", e)
 
