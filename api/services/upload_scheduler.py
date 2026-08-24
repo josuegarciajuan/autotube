@@ -580,9 +580,13 @@ def _channels_need_repack(db, now) -> list[int]:
 
     Detecta dos síntomas en vídeos pending (uploaded_private / warming /
     scheduled / awaiting_upload / ready) del mismo canal:
-      1. publishAt a más de FAR_FUTURE_PUBLISH_HOURS + tolerancia vista.
-      2. Colisión < SAME_CHANNEL_PUBLISH_GAP_HOURS entre publicaciones
-         consecutivas (vídeos que saldrán a la misma hora o muy juntos).
+       1. publishAt a más de FAR_FUTURE_PUBLISH_HOURS + tolerancia vista.
+       2. Colisión < SAME_CHANNEL_PUBLISH_GAP_HOURS entre publicaciones
+          consecutivas (vídeos que saldrán a la misma hora o muy juntos).
+       4. (ago 2026) Vídeo pending SIN target_public_at (NULL): un vídeo listo
+          sin fecha programada jamás se publicaría; el canal debe entrar al
+          repack para asignarle el siguiente pico (se incluyen los NULL en la
+          selección).
 
     Returns: lista de channel_id ordenada por gravedad (lejano primero).
     """
@@ -596,7 +600,6 @@ def _channels_need_repack(db, now) -> list[int]:
                    WHERE v.status IN ('uploaded_private','warming','scheduled',
                                       'awaiting_upload','ready')
                      AND v.publish_mode = 'scheduled'
-                     AND v.target_public_at IS NOT NULL
                    ORDER BY v.channel_id, v.target_public_at
                 """
             ).fetchall()
@@ -612,9 +615,14 @@ def _channels_need_repack(db, now) -> list[int]:
     last: dict[int, object] = {}
     for row in rows:
         ch_id = row["channel_id"]
+        # Síntoma 4: target NULL → el vídeo nunca publicaría sin el repack
+        if not row["target_public_at"]:
+            score[ch_id] = max(score.get(ch_id, 0), 10)
+            continue
         parsed = _parse_target_public_at(str(row["target_public_at"]),
                                          "Europe/Madrid")
         if parsed is None:
+            score[ch_id] = max(score.get(ch_id, 0), 10)
             continue
         # Síntoma 1: lejano (>24h + tolerancia) — gravedad alta
         if parsed > threshold:
