@@ -43,6 +43,25 @@ def _format_insight(row: dict) -> dict:
     return dict(row)
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge ``overlay`` into ``base``.
+
+    Nested dict values (e.g. SOCIAL_REDISTRIBUTION) are merged key-by-key so a
+    partial recommendation never wipes out subkeys the LLM did not mention.
+    Non-dict values in ``overlay`` replace the base value entirely.
+    """
+    result = dict(base)
+    for key, value in overlay.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(result.get(key), dict)
+        ):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @router.post("/{channel_id}/analyze")
@@ -256,7 +275,7 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
     else:
         current_config = dict(current_config_raw) if current_config_raw else {}
 
-    current_config.update(changes)
+    current_config = _deep_merge(current_config, changes)
 
     # Save
     db.update_channel(channel_id, config=current_config)
