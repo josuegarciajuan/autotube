@@ -317,6 +317,14 @@ function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo
 function WarmingCard({ video }: { video: WarmingVideo }) {
   const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
 
+  // (ago 2026) Retenido: vídeo privado SIN programación (hold por cuota agotada).
+  // Su target_public_at puede quedar vencido en DB; la UI NO debe mostrar
+  // "Publicando..." (alarma falsa) sino el estado real: privado hasta que el
+  // repack lo re-programe tras el reset de cuota.
+  const held = !!video.held
+  const countdown = formatCountdown(video.target_public_at)
+  const isDue = !held && countdown === 'Ahora'
+
   // Calculate warmup progress
   const warmupPct = (() => {
     try {
@@ -328,8 +336,6 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
       return Math.min(100, Math.max(0, Math.round(pct)))
     } catch { return 50 }
   })()
-  const countdown = formatCountdown(video.target_public_at)
-  const isDue = countdown === 'Ahora'
 
   return (
     <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} ${isDue ? 'animate-pulse border-neon-cyan/60' : ''} animate-fade-in`}>
@@ -340,25 +346,27 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
           {getChannelShort({ channel_id: video.channel_id, channel_slug: video.channel_slug, channel_name: video.channel_name })} #{video.video_id}
         </span>
         <ContentTypeBadge type="video" />
-        <span className="text-[10px] text-amber-400 font-mono ml-auto flex items-center gap-1">
-          <Lock size={10} />
-          Calentando
+        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 ${held ? 'text-slate-400' : 'text-amber-400'}`}>
+          {held ? <Lock size={10} /> : <Clock size={10} />}
+          {held ? 'Privado (retenido)' : 'Calentando'}
         </span>
       </div>
 
-      {/* Warmup progress bar */}
-      <div className="mb-3">
-        <div className="flex justify-between text-[10px] mb-1">
-          <span className="text-gray-400">Warmup</span>
-          <span className="text-white font-mono">{warmupPct}%</span>
+      {/* Warmup progress bar — solo cuando no está retenido */}
+      {!held && (
+        <div className="mb-3">
+          <div className="flex justify-between text-[10px] mb-1">
+            <span className="text-gray-400">Warmup</span>
+            <span className="text-white font-mono">{warmupPct}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
+            <div
+              className="h-full rounded-full warming-progress-bar"
+              style={{ width: `${warmupPct}%` }}
+            />
+          </div>
         </div>
-        <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
-          <div
-            className="h-full rounded-full warming-progress-bar"
-            style={{ width: `${warmupPct}%` }}
-          />
-        </div>
-      </div>
+      )}
 
       {/* Timeline */}
       <div className="grid grid-cols-2 gap-2 text-[10px] mb-3">
@@ -368,18 +376,29 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
         </div>
         <div>
           <span className="text-gray-500">Publico:</span><br />
-          <span className={`font-mono ${isDue ? 'text-neon-cyan' : 'text-gray-300'}`}>
-            {toLocalTime(video.target_public_at)} {toLocalDate(video.target_public_at)}
+          <span className={`font-mono ${isDue ? 'text-neon-cyan' : held ? 'text-slate-400' : 'text-gray-300'}`}>
+            {held ? '— (sin programar)' : `${toLocalTime(video.target_public_at)} ${toLocalDate(video.target_public_at)}`}
           </span>
         </div>
       </div>
 
-      {/* Countdown */}
+      {/* Countdown / estado */}
       <div className="flex items-center gap-1.5 pt-2 border-t border-white/5">
-        <Clock size={11} className={isDue ? 'text-neon-cyan' : 'text-amber-400'} />
-        <span className={`text-[10px] font-mono ${isDue ? 'text-neon-cyan' : 'text-amber-400'}`}>
-          {isDue ? 'Publicando...' : `En ${countdown}`}
-        </span>
+        {held ? (
+          <>
+            <Lock size={11} className="text-slate-400" />
+            <span className="text-[10px] font-mono text-slate-400">
+              Retenido — se reprograma al resetear la cuota
+            </span>
+          </>
+        ) : (
+          <>
+            <Clock size={11} className={isDue ? 'text-neon-cyan' : 'text-amber-400'} />
+            <span className={`text-[10px] font-mono ${isDue ? 'text-neon-cyan' : 'text-amber-400'}`}>
+              {isDue ? 'Sin confirmar publicación' : `En ${countdown}`}
+            </span>
+          </>
+        )}
       </div>
     </div>
   )

@@ -639,6 +639,7 @@ export interface WarmingVideo {
   auto_playlist_name: string | null;
   channel_name: string;
   channel_slug: string;
+  held?: boolean;
 }
 
 export interface ShortsPipelineSlot {

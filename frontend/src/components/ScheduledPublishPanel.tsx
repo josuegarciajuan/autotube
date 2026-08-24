@@ -102,7 +102,7 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
         )}
 
         {/* Warmup / waiting */}
-        {isScheduled && video.target_public_at && (
+        {isScheduled && video.target_public_at && !video.held && (
           <>
             <div className="flex items-center gap-2 text-amber-300">
               <span className={`w-2 h-2 rounded-full ${video.status === 'warming' ? 'animate-pulse' : ''}`} />
@@ -120,6 +120,16 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
               </div>
             )}
           </>
+        )}
+
+        {/* Retenido (hold por cuota agotada) — privado sin programar */}
+        {video.held && (
+          <div className="flex items-center gap-2 text-slate-400">
+            <span className="w-2 h-2 rounded-full bg-slate-500" />
+            <span>
+              Privado (retenido) — se reprograma al resetear la cuota
+            </span>
+          </div>
         )}
 
         {/* Target time details */}

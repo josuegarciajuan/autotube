@@ -461,6 +461,30 @@ def _maybe_trigger_publish_verification(video: dict):
     
     if not target_str or not yt_video_id or not video_id:
         return  # can't verify without these
+
+    # ── Vídeos retenidos (hold a Privado por cuota agotada): NO verificar ──
+    # (ago 2026) Cuando el repack no puede reprogramar (cuota agotada) el hold
+    # pone el vídeo en Privado sin programar (marcador publish_hold_done_{yt_id}).
+    # Su target_public_at puede quedar vencido en DB, pero el vídeo está PRIVADO
+    # a propósito: verificar generaría alertas publish_not_detected falsas y
+    # martillearía el wall-scrape sin sentido. Se reanuda solo tras el repack
+    # (el repack re-programa el target y el vídeo vuelve a 'calentando' real).
+    try:
+        db = ExtendedDatabase()
+        with db._connect() as _vconn:
+            _held = _vconn.execute(
+                "SELECT 1 FROM system_state WHERE key = ?",
+                (f"publish_hold_done_{yt_video_id}",),
+            ).fetchone()
+        if _held:
+            vlog = logger.getChild("publish_verify")
+            vlog.debug(
+                "Video #%d (yt=%s): retenido (hold a Privado) — verificación omitida",
+                video_id, yt_video_id,
+            )
+            return
+    except Exception:
+        pass
     
     # Parse target_public_at
     try:
@@ -8534,6 +8558,25 @@ class ExtendedDatabase(Database):
                    ORDER BY v.target_public_at ASC""",
             ).fetchall()
             result["warming"] = [dict(r) for r in warming]
+
+            # ── Marcar vídeos RETENIDOS (hold a Privado por cuota agotada) ──
+            # (ago 2026) Tras un hold (scripts/hold_pending_publishes.py) el vídeo
+            # está privado SIN programación en YouTube, pero su target_public_at
+            # puede quedar vencido en DB. La UI debe mostrarlo como "Privado
+            # (retenido)" y NO como "Publicando..." (que es una alarma falsa).
+            try:
+                with self._connect() as _wconn:
+                    _held_rows = _wconn.execute(
+                        "SELECT key FROM system_state WHERE key LIKE 'publish_hold_done_%'"
+                    ).fetchall()
+                _held_ids = {
+                    str(r[0]).replace("publish_hold_done_", "")
+                    for r in _held_rows if r and r[0]
+                }
+            except Exception:
+                _held_ids = set()
+            for _w in result["warming"]:
+                _w["held"] = bool(_w.get("yt_video_id") and _w["yt_video_id"] in _held_ids)
 
             # ── Verification disabled in get_pipeline_status() ──
             # _publish_verify_loop() in api/main.py handles this as a background task
