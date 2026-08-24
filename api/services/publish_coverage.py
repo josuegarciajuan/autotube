@@ -184,6 +184,16 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             except Exception:
                 tz = timezone.utc
 
+            # Pico del canal (para no auditar "hoy" si el pico ya pasó: un día
+            # cuyo pico ha pasado NO es rellenable y no debe disparar repack).
+            peak_hour = None
+            try:
+                from pipeline.publish_scheduler import get_channel_peak_info
+                _info = get_channel_peak_info(cfg)
+                peak_hour = int(_info.get("peak_hour", 0) or 0)
+            except Exception:
+                pass
+
             pending = _channel_pending(db, ch_id)
             coverage = _channel_coverage_by_day(pending, tz)
 
@@ -191,6 +201,9 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             days = []
             for i in range(horizon_days):
                 d = today_local + timedelta(days=i)
+                if (i == 0 and peak_hour is not None
+                        and now_utc.astimezone(tz).hour >= peak_hour):
+                    continue  # pico de hoy ya pasado → no rellenable
                 days.append((d, coverage.get(d, 0)))
 
             deficit_days = [str(d) for d, c in days if c < n]
