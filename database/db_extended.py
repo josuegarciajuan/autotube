@@ -6170,6 +6170,8 @@ class ExtendedDatabase(Database):
             "today_actions": self._get_today_actions(conn, channel_id, ch_params),
             # ── SEO / CTR summary (batched — avoids N×2 client requests) ──
             "seo_summary": self._build_seo_summary(conn, channels_data),
+            # ── Social networks summary (batched — views brought by each network) ──
+            "social_summary": self._build_social_summary(conn, channel_id),
         }
 
     def _get_today_actions(self, conn, channel_id=None, ch_params=()):
@@ -6331,6 +6333,82 @@ class ExtendedDatabase(Database):
                 "retention_video_count": ret_r["cnt"] if ret_r else 0,
             }
         return result
+
+    def _build_social_summary(self, conn, channel_id: int = None) -> dict:
+        """Aggregate per-channel × per-platform social stats + global totals.
+
+        Single batched query on ``platform_videos`` (Rumble, Dailymotion,
+        Facebook, Bluesky, Mastodon). Returns:
+          {
+            "per_channel": {channel_id: {platform: {...}, "totals": {...}}},
+            "by_platform": {platform: {published, views, likes, comments, reposts}},
+            "totals": {published, views, likes, comments, reposts},
+            "views_share": {platform: pct},   # % of total social views per platform
+            "top_platform": "rumble" | None,
+          }
+        """
+        where = "WHERE status = 'published'"
+        params: tuple = ()
+        if channel_id:
+            where = "WHERE status = 'published' AND channel_id = ?"
+            params = (channel_id,)
+
+        rows = conn.execute(
+            f"""SELECT channel_id, platform,
+                       COUNT(*) as published,
+                       COALESCE(SUM(views), 0) as views,
+                       COALESCE(SUM(likes), 0) as likes,
+                       COALESCE(SUM(comments), 0) as comments,
+                       COALESCE(SUM(reposts), 0) as reposts
+                FROM platform_videos
+                {where}
+                GROUP BY channel_id, platform
+                ORDER BY channel_id, platform""",
+            params,
+        ).fetchall()
+
+        per_channel: dict = {}
+        by_platform: dict = {}
+        totals = {"published": 0, "views": 0, "likes": 0, "comments": 0, "reposts": 0}
+
+        for r in rows:
+            row = dict(r)
+            ch_id = row["channel_id"]
+            platform = row["platform"]
+            entry = {
+                "published": row["published"],
+                "views": row["views"],
+                "likes": row["likes"],
+                "comments": row["comments"],
+                "reposts": row["reposts"],
+            }
+            per_channel.setdefault(ch_id, {})[platform] = entry
+            ch_totals = per_channel.setdefault(ch_id, {}).setdefault("totals", {})
+            for k in entry:
+                ch_totals[k] = ch_totals.get(k, 0) + entry[k]
+
+            bp = by_platform.setdefault(
+                platform, {"published": 0, "views": 0, "likes": 0, "comments": 0, "reposts": 0}
+            )
+            for k in entry:
+                bp[k] += entry[k]
+            for k in totals:
+                totals[k] += entry[k]
+
+        views_share = {}
+        total_views = totals["views"] or 0
+        for platform, bp in by_platform.items():
+            views_share[platform] = round((bp["views"] / total_views * 100), 1) if total_views else 0
+
+        top_platform = max(by_platform, key=lambda p: by_platform[p]["views"]) if by_platform else None
+
+        return {
+            "per_channel": per_channel,
+            "by_platform": by_platform,
+            "totals": totals,
+            "views_share": views_share,
+            "top_platform": top_platform,
+        }
 
     # ── Channel Templates ─────────────────────────────────────
 

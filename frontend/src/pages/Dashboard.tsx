@@ -22,6 +22,7 @@ import DeepDivePanel from '../components/DeepDivePanel'
 
 import UpcomingPublications from '../components/UpcomingPublications'
 import ViewGapPanel from '../components/monitor/ViewGapPanel'
+import SocialOverview from '../components/SocialOverview'
 import type { StabilizeResult } from '../components/StabilizeProgress'
 import QuotaWidget from '../components/QuotaWidget'
 
@@ -676,6 +677,11 @@ export default function Dashboard() {
       {/* ═══════ NIVEL 1: View Gap Monitor ═══════ */}
       <CollapsibleSection title="View Gap Monitor" icon="🔍" defaultOpen={false}>
         <ViewGapPanel />
+      </CollapsibleSection>
+
+      {/* ═══════ Redes Sociales: visitas traídas por cada red ═══════ */}
+      <CollapsibleSection title="Redes Sociales" icon="🌐" defaultOpen={false}>
+        <SocialOverview channels={channels} socialSummary={data?.social_summary} />
       </CollapsibleSection>
  
       {/* ═══════ NIVEL 2: Pipeline Activo ═══════ */}
