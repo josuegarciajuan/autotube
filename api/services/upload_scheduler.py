@@ -621,6 +621,37 @@ def _channels_need_repack(db, now) -> list[int]:
                 score[ch_id] = max(score.get(ch_id, 0), 5)
         last[ch_id] = parsed
 
+    # ── Síntoma 3 (ago 2026): vídeos RETENIDOS a Privado pendientes de re-programar ──
+    # Tras un hold por cuota agotada, el vídeo está privado sin programar y su
+    # target_public_at puede ser NULL (higiene de datos) o estar vencido. En
+    # cualquier caso el canal DEBE volver al repack cuando la cuota se libere,
+    # para re-programar esos vídeos 1/día. Sin este síntoma, con target NULL el
+    # canal no se detectaría y los vídeos retenidos quedarían privados para siempre.
+    try:
+        with db._connect() as _held_conn:
+            _held_rows = _held_conn.execute(
+                """SELECT DISTINCT v.channel_id
+                   FROM videos v
+                   JOIN system_state ss
+                     ON ss.key = 'publish_hold_done_' || v.yt_video_id
+                   WHERE v.status IN ('uploaded_private','warming','scheduled')
+                     AND v.publish_mode = 'scheduled'
+                """
+            ).fetchall()
+        for _hr in _held_rows:
+            try:
+                _cid = int(_hr["channel_id"])
+            except (TypeError, ValueError):
+                continue
+            score[_cid] = max(score.get(_cid, 0), 10)
+            logger.info(
+                "repack detection: canal %d tiene vídeo(s) retenidos (hold) — "
+                "pendiente de re-programar tras reset de cuota",
+                _cid,
+            )
+    except Exception as exc:
+        logger.debug("repack held-scan skipped: %s", exc)
+
     # Excluir canales bloqueados por spam: sus publicaciones pendientes ya fueron
     # retenidas (hold) hasta tras el bloqueo; el repack no debe moverlas.
     try:

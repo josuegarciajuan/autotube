@@ -66,6 +66,14 @@ def get_video(video_id: int):
     # Include embeddable status from latest YouTube stats
     latest_stats = db.get_video_latest_stats(video_id)
     v["embeddable"] = bool(latest_stats.get("embeddable", 1)) if latest_stats else True
+    # (ago 2026) Retenido: vídeo privado SIN programación (hold por cuota agotada,
+    # scripts/hold_pending_publishes.py). La UI lo muestra como "Privado
+    # (retenido)" y NO como countdown vencido / "Publicando...".
+    try:
+        _yt = v.get("yt_video_id")
+        v["held"] = bool(_yt and db.get_system_state(f"publish_hold_done_{_yt}"))
+    except Exception:
+        v["held"] = False
     return v
 
 
