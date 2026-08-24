@@ -623,11 +623,15 @@ class MediaFetcher:
 
         # ── Phase timeout guard ───────────────────────────────────
         _cb_phase_start = time.time()
-        # Scale timeout: 30s per stock scene + 180s per AI scene (Local SD fallback)
-        # + 600s base overhead.  This prevents false timeouts when the free AI
-        # providers are slow (Pollinations rate-limited → Local SD ~160s each).
+        # Scale timeout: 30s per stock scene + per-AI-scene seconds + 600s base
+        # overhead. The per-AI-scene budget scales with the Local SD step count
+        # (the slowest provider in the chain): ~25s/step + 45s overhead.
+        # ago 2026: the fixed 180s/image assumed Local SD ~3 min, but at 20
+        # steps it really takes ~15 min → false timeouts on long videos.
         n_ai = n_scenes - len(video_scenes)
-        _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * 180)
+        _sd_steps = int(self._media_strategy.get("ai_local_sd_steps", 8) or 8)
+        _ai_scene_secs = max(180, 45 + _sd_steps * 25)  # 8 steps → 245s; 20 → 545s
+        _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * _ai_scene_secs)
 
         # ── Reset video provider circuit breaker for this job ──
         self._vp_hard_fail.clear()

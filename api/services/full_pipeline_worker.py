@@ -2011,6 +2011,14 @@ def run_job(
                 logger.warning("Video #%d reset: generating → error/interrupted", video_id)
         except Exception:
             pass
+        # ── Escribir SIEMPRE el error_msg del job (fix ago 2026). Antes solo
+        # se actualizaba el vídeo y el `finally` podía dejar error_msg=NULL en
+        # generation_jobs → el health-check lo reportaba como "Unknown error"
+        # (crítica espuria) en vez de transitorio por reinicio.
+        try:
+            db.update_job(job_id, status="failed", error_msg=error_msg[:500])
+        except Exception:
+            pass
         raise  # conserva el exit code (143 para SIGTERM)
 
     except Exception as exc:

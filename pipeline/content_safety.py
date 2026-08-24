@@ -50,18 +50,25 @@ class SafetyVerdict:
 
 # ── Pre-filtro determinista (español) ──────────────────────────────
 # Bloques por categoría; cada patrón se busca sin distinción de acentos.
+#
+# Dos tieres:
+#   - _BLOCK_PATTERNS: bloqueo DURO (sin contexto adicional). Solo patrones
+#     inequívocamente peligrosos.
+#   - _CONTEXT_REQUIRED_PATTERNS: solo bloquean si co-ocurre un marcador de
+#     contexto adverso (_RISK_CONTEXT_MARKERS). Evita falsos positivos que
+#     inaniciónan canales legítimos (médico/histórico): "síndrome raro que
+#     afecta a recién nacidos" es un documental médico; "menor asesinado"
+#     es child-safety. El LLM evalúa después los casos matizados.
 _BLOCK_PATTERNS: dict[str, list[str]] = {
     "menores": [
-        "niño", "niña", "niños", "niñas", "bebé", "bebe", "bebés", "menor de",
-        "adolescente", "recién nacido", "recien nacido", "de 8 años", "de 9 años",
-        "de 10 años", "de 11 años", "de 12 años", "de 13 años", "de 14 años",
-        "de 15 años", "de 16 años", "de 17 años", "de 5 años", "de 6 años",
-        "de 7 años", "menores de edad", "infante", "pequeño de", "pequeña de",
-        "niño que", "niña que", "niño de", "niña de",
-        # Nacimiento / condiciones congénitas (suelen implicar a un bebé/menor)
-        "nació con", "nacio con", "al nacer", "de nacimiento", "congénito",
-        "congenito", "recién nacid", "recien nacid", "dos cabezas", "dos caras",
-        "siames", "gemelos unidos", "bebé nació", "bebe nacio", "recién parido",
+        # Duro: edades explícitas y marcadores de menores de edad inequívocos.
+        "menores de edad", "menor de", "de 5 años", "de 6 años",
+        "de 7 años", "de 8 años", "de 9 años", "de 10 años", "de 11 años",
+        "de 12 años", "de 13 años", "de 14 años", "de 15 años", "de 16 años",
+        "de 17 años", "adolescente", "infante",
+        # Congénito con marcas físicas extremas (patrón real de los 2 vídeos
+        # eliminados por YouTube: "Nació con 2 cabezas"/"2 caras").
+        "dos cabezas", "siames", "gemelos unidos", "recién parido",
     ],
     "autolesion": [
         "autolesión", "autolesion", "suicid", "cortarse las venas", "ahorcó",
@@ -91,7 +98,9 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         # Datos ago 2026: canal4/canal5 eliminaron "guerrilla asesinó",
         # "129 hombres desaparecieron", "5 perdidos y NUNCA regresaron",
         # "lo hallaron en el granero". Este nicho alimenta el flag de spam.
-        "asesin", "desapareci", "sin rastro", "hallaron", "secuestr",
+        # "asesin" se movió a _CONTEXT_REQUIRED_PATTERNS: en contextos
+        # históricos/documentales ("asesinato de Daniel Tupý") no es spam.
+        "desapareci", "sin rastro", "hallaron", "secuestr",
         "nunca regres", "cadaver", "encontrado muerto", "encontrado sin vida",
         "homicid", "estrangul", "enterrado vivo", "tortura",
     ],
@@ -113,6 +122,38 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
+# ── Marcadores de contexto adverso ─────────────────────────────────
+# Co-ocurrencia exigida por _CONTEXT_REQUIRED_PATTERNS para bloquear.
+# Normalizados (sin acentos, minúsculas).
+# NOTA: NO incluyen términos genéricos de muerte ("muert", "muri",
+# "fallec") — aparecen en cualquier documental histórico ("la trágica
+# muerte de...") y volverían a producir falsos positivos. Solo marcadores
+# inequívocamente criminales/sexuales/exploitativo. "asesin" tampoco está:
+# si lo estuviera, el patrón "asesin" se auto-satisfaría y sería un
+# bloqueo duro; exige co-ocurrencia con crimen organizado o víctima.
+_RISK_CONTEXT_MARKERS: tuple[str, ...] = (
+    "viol", "abus", "secuestr", "desaparicion", "desapareci", "pornogr",
+    "trata de menores", "tortura", "homicid", "victima",
+    "agresion sexual", "corrupcion de menores", "arma", "guerrilla",
+    "cartel", "mafia", "narcotraf", "banda criminal",
+)
+
+# ── Patrones que SOLO bloquean con contexto adverso ────────────────
+# Sustantivos neutros del nicho médico/histórico (p. ej. "recién nacido"
+# en un documental de síndromes raros) NO deben inanicionar el canal.
+# El LLM (_llm_check) evalúa después los casos matizados.
+_CONTEXT_REQUIRED_PATTERNS: dict[str, list[str]] = {
+    "menores": [
+        "niño", "niña", "niños", "niñas", "bebe", "bebes", "bebé", "bebés",
+        "recien nacido", "recién nacido", "recien nacid", "recién nacid",
+        "congenito", "congénito", "nacio con", "nació con", "al nacer",
+        "de nacimiento", "dos caras", "infante",
+    ],
+    "true_crime": [
+        "asesin",
+    ],
+}
+
 
 def _normalize(text: str) -> str:
     """Strip accents + lowercase so 'niño' matches 'nino'."""
@@ -129,7 +170,13 @@ def _normalize(text: str) -> str:
 
 
 def _deterministic_check(texts: list[str]) -> SafetyVerdict | None:
-    """Return a FLAGGED verdict on first deterministic match, else None."""
+    """Return a FLAGGED verdict on first deterministic match, else None.
+
+    Two-tier check:
+      1. Hard patterns (_BLOCK_PATTERNS): always block.
+      2. Context-required patterns (_CONTEXT_REQUIRED_PATTERNS): only block
+         if a _RISK_CONTEXT_MARKERS term co-occurs in the same text.
+    """
     joined = _normalize(" ".join(t for t in texts if t))
     if not joined:
         return None
@@ -142,6 +189,20 @@ def _deterministic_check(texts: list[str]) -> SafetyVerdict | None:
                     categories=[category],
                     source="deterministic",
                 )
+    # ── Tier 2: contexto-requerido ──
+    if any(_normalize(m) in joined for m in _RISK_CONTEXT_MARKERS):
+        for category, patterns in _CONTEXT_REQUIRED_PATTERNS.items():
+            for pat in patterns:
+                if _normalize(pat) in joined:
+                    return SafetyVerdict(
+                        safe=False,
+                        reason=(
+                            f"tema bloqueado por categoría '{category}' "
+                            f"(patrón: '{pat}' en contexto de riesgo)"
+                        ),
+                        categories=[category],
+                        source="deterministic",
+                    )
     return None
 
 
@@ -169,10 +230,19 @@ def _llm_check(topic: str, title: str, script_texts: list[str]) -> SafetyVerdict
                     '"categories": ["menores","autolesion","claims_medicos",'
                     '"violencia_grafica","desinformacion_sanitaria"]}.\n'
                     "Reglas: NO es seguro (safe=false) si trata de menores en "
-                    "contexto médico/criminal, autolesión/suicidio/métodos, "
+                    "contexto criminal/sexual/exploitativo (abusos, pornografía, "
+                    "secuestro, asesinato de menores), autolesión/suicidio/métodos, "
                     "claims médicos de cura/tratamiento, detalle gráfico de "
-                    "muertes o desinformación sanitaria. Es seguro (safe=true) "
-                    "para historia/documental general.\n"
+                    "muertes o desinformación sanitaria.\n"
+                    "ES seguro (safe=true) para: documental médico legítimo "
+                    "sobre una condición o síndrome (aunque afecte a niños), "
+                    "historia/documental general, hechos históricos con víctimas "
+                    "tratados de forma sobria y no sensacionalista, cultura, "
+                    "ciencia, mitología.\n"
+                    "Distinción clave: mencionar 'niño'/'recién nacido'/'síndrome' "
+                    "en un contexto médico o histórico NO es child-safety; "
+                    "presentar el sufrimiento o la explotación de un menor de "
+                    "forma sensacionalista SÍ lo es.\n"
                     f"Contenido: {sample}"
                 ),
             }],

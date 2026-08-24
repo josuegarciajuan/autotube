@@ -3020,6 +3020,38 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     _reason = (_row["error_message"] if _row and _row["error_message"] else "")
                 except Exception:
                     _reason = ""
+                # ── Fix ago 2026: fallos de PACING/CUOTA no son definitivos ──
+                # Si el dispatch devolvió None sin motivo registrado, re-comprobar
+                # si un tope/cuota está bloqueando AHORA (cap duro diario, cap
+                # global, spam-block, cuota del proyecto). En ese caso el slot NO
+                # se cancela: se difiere (pending +6h) con el motivo real, para
+                # que la válvula de goteo lo reintente cuando el bloqueo expire.
+                # Antes se cancelaba con "Motivo: desconocido" y se perdía el
+                # short renderizado.
+                _defer_reason = _defer_slot_pacing_reason(slot_id, channel_id)
+                if _defer_reason and not _reason:
+                    _reason = _defer_reason
+                if _defer_reason:
+                    conn.execute(
+                        "UPDATE shorts_planned_slots SET status = 'pending', "
+                        "retry_count = 0, job_id = NULL, "
+                        "error_message = ?, "
+                        "scheduled_at = datetime('now', '+6 hours'), "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (_defer_reason + " — reintento diferido", slot_id),
+                    )
+                    conn.execute(
+                        "UPDATE generation_jobs SET status = 'failed', "
+                        "error_msg = ? WHERE id = ?",
+                        (_defer_reason, job_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    logger.info(
+                        "Shorts slot #%d deferred (no cancel): %s",
+                        slot_id, _defer_reason,
+                    )
+                    return
                 conn.execute(
                     "UPDATE shorts_planned_slots SET status = 'cancelled', "
                     "error_message = COALESCE(error_message, 'Exhausted retries (2/2)'), "
@@ -3272,6 +3304,45 @@ def _alert_short_dispatch_failed(slot_id: int, channel_id: int, reason: str) -> 
         )
     except Exception as _alert_exc:
         logger.warning("short dispatch failed alert error: %s", _alert_exc)
+
+
+def _defer_slot_pacing_reason(slot_id: int, channel_id: int) -> str:
+    """Devuelve el motivo de PACING/CUOTA si el slot está bloqueado AHORA.
+
+    (fix ago 2026) Un dispatch de short que devuelve None sin motivo registrado
+    suele estar bloqueado por un tope transitorio (cap duro 1/día en perfil
+    strike, cap global, spam-block o cuota del proyecto agotada). En ese caso
+    el slot NO debe cancelarse: la válvula de goteo lo reintentará cuando el
+    bloqueo expire. Devuelve "" si no hay bloqueo de pacing (fallo real).
+
+    Orden de precedencia: spam-block > cap duro diario > cap global > cuota.
+    """
+    try:
+        from database.db_extended import ExtendedDatabase
+        _db_e = ExtendedDatabase()
+        if _channel_shorts_spam_blocked(channel_id, _db_e):
+            return "bloqueo de spam activo"
+        if _channel_hard_daily_short_cap_reached(channel_id, _db_e):
+            return "tope duro diario de shorts alcanzado"
+        if _global_shorts_daily_cap_reached(_db_e):
+            return "tope global diario de shorts alcanzado"
+        # Cuota del proyecto del canal (0 cuota, devuelve False sin excepción)
+        try:
+            slug = ""
+            try:
+                rows = _db_e._connect().execute(
+                    "SELECT slug FROM channels WHERE id = ?", (channel_id,),
+                ).fetchone()
+                slug = rows["slug"] if rows else ""
+            except Exception:
+                slug = ""
+            if slug and _youtube_quota_blocked(channel_slug=slug):
+                return "cuota de YouTube agotada"
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return ""
 
 
 # ── Standalone short generation ──────────────────────────────────
