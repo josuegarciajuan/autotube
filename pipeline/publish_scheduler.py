@@ -1430,7 +1430,18 @@ def repack_channel_publish_times(
 
     # ── 3. Walk ──
     now_utc = _dt.now(_tz.utc)
-    floor = now_utc + _td(minutes=warmup)
+    # Primer slot: siguiente pico HH:00 (>= floor). El warmup NO debe retrasar el
+    # slot de hoy cuando el primer candidato YA está subido (uploaded_private /
+    # warming / scheduled): esos vídeos no necesitan margen de subida, y aplicar
+    # `now + warmup` hacía que un repack ejecutado dentro de la ventana de warmup
+    # (now+warmup cruzando el pico por segundos) empujara TODA la cola a mañana,
+    # perdiendo el hueco de publicación de hoy. Para candidatos que aún hay que
+    # subir (awaiting_upload / ready), el margen lo garantiza el check per-vídeo
+    # min_public (más abajo) y el ajuste de scheduled_upload_at.
+    first_is_uploaded = bool(rows) and rows[0]["status"] in (
+        "uploaded_private", "warming", "scheduled",
+    )
+    floor = now_utc if first_is_uploaded else now_utc + _td(minutes=warmup)
     try:
         tz = pytz.timezone(tz_str)
     except pytz.UnknownTimeZoneError:
@@ -1462,6 +1473,8 @@ def repack_channel_publish_times(
         video_id = row["id"]
         status = row["status"]
         yt_id = row["yt_video_id"] or ""
+        old_target = str(row["target_public_at"]) if row["target_public_at"] else ""
+        old_dt = _parse_target_public_at(old_target, tz_str) if old_target else None
 
         # ── Tope diario: si el día local del cursor ya está lleno, avanzar al
         # siguiente día con hueco (a la hora pico). Así el repack NUNCA vuelve a
@@ -1492,6 +1505,24 @@ def repack_channel_publish_times(
                 if candidate_up > now_utc and (up_dt is None or candidate_up < up_dt):
                     adjusted_upload_at = candidate_up.strftime("%Y-%m-%d %H:%M:%S")
 
+        # ── Idempotencia (ago 2026): preservar targets ya correctos ──
+        # Si el target existente es futuro y cae en el MISMO día local que el que
+        # le toca al vídeo (el día del cursor), se conserva tal cual en vez de
+        # re-snappear: evita el churn del repack (que movía cada minuto un target
+        # bueno de hoy a mañana) y, a la vez, los targets de días lejanos (puestos
+        # por el planning) se comprimen al día que les corresponde en la cola.
+        preserved = False
+        if (old_dt is not None and old_dt > now_utc
+                and old_dt.astimezone(tz).date() == slot.astimezone(tz).date()):
+            min_public_ok = True
+            if status in ("awaiting_upload", "ready") and up_raw:
+                up_dt2 = _parse_target_public_at(str(up_raw), tz_str)
+                if up_dt2 is not None and old_dt < up_dt2 + _td(minutes=warmup + 60):
+                    min_public_ok = False
+            if min_public_ok:
+                slot = old_dt
+                preserved = True
+
         if slot > safety_limit:
             logger.warning(
                 "[%s] repack: safety bound %dh alcanzado para #%d — se recorta",
@@ -1499,7 +1530,6 @@ def repack_channel_publish_times(
             )
             slot = safety_limit
 
-        old_target = str(row["target_public_at"]) if row["target_public_at"] else ""
         requires_yt = status in ("uploaded_private", "warming", "scheduled") and bool(yt_id)
 
         plan.append({
@@ -1508,14 +1538,17 @@ def repack_channel_publish_times(
             "yt_video_id": yt_id,
             "old_target": old_target,
             "new_target": slot.isoformat(),
-            "requires_yt_update": requires_yt,
+            "requires_yt_update": requires_yt and not preserved,
             "adjusted_upload_at": adjusted_upload_at,
+            "preserved": preserved,
         })
         day_used[slot.astimezone(tz).date()] = day_used.get(slot.astimezone(tz).date(), 0) + 1
         cursor_utc = slot + _td(hours=gap_hours)
 
     logger.info(
-        "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s, máx %d/día)",
+        "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s, máx %d/día, "
+        "%d preservados)",
         slug, len(plan), gap_hours, peak_hour, tz_str, max_per_day,
+        sum(1 for p in plan if p.get("preserved")),
     )
     return plan

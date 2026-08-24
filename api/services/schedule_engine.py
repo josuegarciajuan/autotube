@@ -16,6 +16,27 @@ from typing import Optional
 
 logger = logging.getLogger("autotube.schedule_engine")
 
+# ── (ago 2026) Planners legacy DESACTIVADOS ─────────────────────
+# La planificación la gobiernan: planning_service (horizonte), el repack
+# (upload_scheduler/publish_repack) y publish_coverage (enforcer de cobertura).
+# Estas funciones legacy (compute_daily_schedule, persist_daily_schedule,
+# generate_upcoming, ensure_today_scheduled) escribían planned_slots con otro
+# criterio ("6 slots/día") y podían pisar el plan del horizonte. Ya no se
+# invocan desde ningún sitio; se dejan como no-op deprecado por si algún script
+# legacy las importa. Se conserva dispatch_next_due_slot (wrapper deprecated).
+_LEGACY_SCHEDULE_DISABLED = True
+
+
+def _legacy_disabled(name: str) -> bool:
+    if _LEGACY_SCHEDULE_DISABLED:
+        logger.warning(
+            "schedule_engine.%s está DEPRECADO y desactivado (ago 2026): la "
+            "planificación la gobiernan planning_service + repack + "
+            "publish_coverage. No-op.", name,
+        )
+        return True
+    return False
+
 # ── Dispatch lock (serializes all generation dispatches) ────────
 from api.services.generation_service import _DISPATCH_LOCK
 
@@ -362,6 +383,8 @@ def compute_daily_schedule(date_str: str, db=None) -> list[dict]:
       channel_id, date_key, scheduled_at, target_upload_at, slot_position,
       channel_name, channel_slug.
     """
+    if _legacy_disabled("compute_daily_schedule"):
+        return []
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -497,6 +520,8 @@ def persist_daily_schedule(date_str: str, slots: list[dict], db=None) -> int:
     Deletes existing pending slots for this date first.
     Returns count of stored slots.
     """
+    if _legacy_disabled("persist_daily_schedule"):
+        return 0
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -522,6 +547,8 @@ def generate_upcoming(days: int = 7, db=None) -> dict:
 
     Returns summary dict: {date_str: "N slots" | "ERROR: ..."}.
     """
+    if _legacy_disabled("generate_upcoming"):
+        return {}
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
@@ -554,6 +581,8 @@ def ensure_today_scheduled(db=None) -> bool:
     """Check if today has planned slots. If not, generate them.
     Returns True if slots exist (existing or newly generated).
     """
+    if _legacy_disabled("ensure_today_scheduled"):
+        return False
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()

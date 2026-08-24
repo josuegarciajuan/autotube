@@ -407,6 +407,11 @@ async def lifespan(app: FastAPI):
     # Launch social redistribution loop (backfill espejo progresivo)
     redistribution_task = asyncio.create_task(_redistribution_loop())
 
+    # ── Cobertura de publicación (ago 2026): enforcer de la programación ──
+    # Audita cada canal libre y dispara el repack si algún día próximo queda sin
+    # cubrir (garantiza que "lo planeado se cumpla"). Loop independiente de 10 min.
+    publish_coverage_task = asyncio.create_task(_publish_coverage_loop())
+
     yield
     
     # Shutdown
@@ -986,6 +991,52 @@ async def _redistribution_loop():
                     _logger.debug("Redistribution tick: %s", result)
         except Exception as _exc:
             _logger.warning("Redistribution tick failed (no crítico): %s", _exc)
+        await _asyncio.sleep(600)  # cada 10 minutos
+
+
+async def _publish_coverage_loop():
+    """Background loop: garantiza la cobertura diaria de publicación.
+
+    Cada 10 min audita que cada canal libre tenga su cuota de publicaciones
+    programadas en los próximos días y dispara el repack del canal si hay huecos
+    (ver api.services.publish_coverage.ensure_daily_publish_coverage). No consume
+    cuota salvo los videos.update del repack (acotados por quota_gate).
+    """
+    import asyncio as _asyncio
+
+    _logger = logging.getLogger("autotube.publish_coverage_loop")
+
+    await _asyncio.sleep(120)  # Let API stabilize first
+
+    _logger.info("Publish coverage loop started (cada 10 min)")
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("publish_coverage")
+            from database.db_extended import ExtendedDatabase
+            from api.services.publish_coverage import ensure_daily_publish_coverage
+            _db = ExtendedDatabase()
+
+            def _coverage_once():
+                return ensure_daily_publish_coverage(_db)
+
+            result = await _asyncio.wait_for(
+                _asyncio.to_thread(_coverage_once),
+                timeout=600,
+            )
+            if result.get("repacked"):
+                _logger.info(
+                    "Publish coverage: %d canal(es) repackeados — %s",
+                    result["repacked"],
+                    ", ".join(
+                        f"{slug}={r['reason']}"
+                        for slug, r in (result.get("channels") or {}).items()
+                        if r.get("triggered")
+                    ),
+                )
+        except Exception as _exc:
+            _logger.warning("Publish coverage tick failed (no crítico): %s", _exc)
         await _asyncio.sleep(600)  # cada 10 minutos
 
 
@@ -1725,6 +1776,12 @@ async def _process_shorts_slots():
                 "Shorts slot dispatched: slot=%d channel=%s type=%s",
                 result["slot_id"], result["channel_slug"], result["short_type"],
             )
+        # ── Cobertura diaria de shorts (auditoría 1/día, alerta si canal seco) ──
+        try:
+            from api.services.shorts_scheduler import check_shorts_daily_coverage
+            await asyncio.to_thread(check_shorts_daily_coverage, _db)
+        except Exception as _cov_exc:
+            logger.debug("Shorts coverage check skip: %s", _cov_exc)
     except Exception as e:
         logger.error("Shorts dispatch error: %s", e)
 

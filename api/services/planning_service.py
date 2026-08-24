@@ -406,6 +406,30 @@ CHANNEL_BREAKER_ACTIONS = ("generate_only", "generate_and_upload")
 
 # ── Alternate pattern resolution ─────────────────────────────────
 
+def _publish_cap_per_day() -> int:
+    """Techo diario de publicación por canal (fuente ÚNICA = perfil de pacing).
+
+    Lee ``max_longform_publish_day`` del perfil central (strike/recovery/normal).
+    Al cambiar de perfil, planning + repack + subida se reajustan al mismo número
+    (es el interruptor con el que se escala la cadencia tras los strikes). Cache
+    TTL corto para no abrir conexiones de DB por llamada (get_pacing_value crea
+    una por invocación y aquí se llama por canal×día en cada replan).
+    """
+    import time as _t
+    _now = _t.time()
+    if _now - _PUBLISH_CAP_CACHE["ts"] > 300:
+        try:
+            from api.services.pacing_profile import get_pacing_value
+            _value = int(get_pacing_value("max_longform_publish_day", default=1) or 1)
+        except Exception:
+            _value = 1
+        _PUBLISH_CAP_CACHE.update(ts=_now, value=max(1, _value))
+    return max(1, _PUBLISH_CAP_CACHE["value"])
+
+
+_PUBLISH_CAP_CACHE: dict = {"ts": 0.0, "value": 1}
+
+
 def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     """Resolve effective videos_per_day for a channel on a specific date.
 
@@ -416,15 +440,12 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     2. Alternate pattern (legacy): if 'alternate_pattern' is set, it takes
        precedence over the random boost.
 
-    Techo antiban (ago 2026): el resultado NUNCA supera
-    LONGFORM_DAILY_HARD_CAP (1/día) — la causa raíz de los strikes fue la
-    frecuencia de 2 long-forms/día. El cap es uniforme y permanente.
+    Techo antiban (ago 2026): el resultado NUNCA supera el tope del perfil de
+    pacing (``max_longform_publish_day``; 1/día en strike — la frecuencia de 2
+    long-forms/día fue la causa raíz de los strikes). El techo es uniforme y
+    sigue al perfil: al relajarlo (recovery/normal) la planificación sube sola.
     """
-    try:
-        from config.defaults import LONGFORM_DAILY_HARD_CAP
-        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
-    except Exception:
-        cap = 1
+    cap = _publish_cap_per_day()
 
     # Legacy alternate pattern takes precedence if explicitly set
     pattern = ch.get("alternate_pattern")

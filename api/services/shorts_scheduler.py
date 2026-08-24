@@ -2114,6 +2114,116 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
             "short_type": "native", "fill": True}
 
 
+def check_shorts_daily_coverage(db=None) -> dict:
+    """Audita la cobertura diaria de shorts por canal (ago 2026).
+
+    Invariante espejo de publish_coverage pero para shorts: cada canal libre
+    debe publicar ``shorts_per_channel_day`` shorts/día. Aquí solo se AUDITA y
+    se alerta (1/día por canal) cuando un canal libre tiene 0 shorts publicados
+    hoy y NO tiene nada en cola (ni ready/generated ni slot pendiente) — señal
+    de que la cobertura de GENERACIÓN de shorts falló (no hay contenido que
+    subir). No cambia la semántica del dispatch (los topes y la válvula de
+    subida ya garantizan 1/día cuando hay contenido).
+
+    Returns:
+        dict {alerted: [slugs], checked: int}.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+
+    today = date.today().isoformat()
+    result: dict = {"checked": 0, "alerted": []}
+
+    # Throttle global 1/día (no spam de escaneo).
+    try:
+        if db.get_system_state("shorts_coverage_last_check") == today:
+            return result
+        db.set_system_state("shorts_coverage_last_check", today)
+    except Exception:
+        pass
+
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return result
+
+    for ch in channels:
+        ch_id = int(ch["id"])
+        slug = ch.get("slug", f"canal{ch_id}")
+        if slug == "test":
+            continue
+        try:
+            if db.is_channel_spam_blocked(ch_id):
+                continue
+        except Exception:
+            pass
+
+        result["checked"] += 1
+        try:
+            with db._connect() as conn:
+                published_today = conn.execute(
+                    """SELECT COUNT(*) AS n FROM shorts
+                       WHERE channel_id = ? AND status = 'published'
+                         AND date(published_at) = date('now', 'localtime')""",
+                    (ch_id,),
+                ).fetchone()
+                queued = conn.execute(
+                    """SELECT COUNT(*) AS n FROM shorts
+                       WHERE channel_id = ? AND status IN ('ready','generated')""",
+                    (ch_id,),
+                ).fetchone()
+                slots_today = conn.execute(
+                    """SELECT COUNT(*) AS n FROM shorts_planned_slots
+                       WHERE channel_id = ? AND date_key = ?
+                         AND status IN ('pending','running')""",
+                    (ch_id, today),
+                ).fetchone()
+            pub = int(published_today["n"] or 0) if published_today else 0
+            q = int(queued["n"] or 0) if queued else 0
+            st = int(slots_today["n"] or 0) if slots_today else 0
+        except Exception:
+            continue
+
+        if pub > 0:
+            continue  # cobertura cumplida
+
+        if q > 0 or st > 0:
+            # Hay contenido/plan: la válvula lo subirá dentro de los topes (1/día).
+            logger.debug(
+                "[%s] Shorts coverage: 0 hoy, pero %d en cola + %d slots — ok (topes)",
+                slug, q, st,
+            )
+            continue
+
+        # Canal libre sin short publicado hoy y SIN nada en cola → cobertura seca.
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(
+                db,
+                entity_type="channel", entity_id=ch_id, channel_id=ch_id,
+                alert_type="shorts_coverage_dry",
+                severity="warning",
+                title=f"[{slug}] Cobertura de shorts: canal seco hoy",
+                message=(
+                    f"[{slug}] 0 shorts publicados hoy y sin shorts en cola ni "
+                    f"slots planificados. Revisar la generación de shorts "
+                    f"(shorts_planning / recovery) — no hay contenido que subir."
+                ),
+                metadata={"slug": slug, "queued": q, "slots_today": st},
+            )
+        except Exception as exc:
+            logger.debug("[%s] shorts coverage alert skip: %s", slug, exc)
+        result["alerted"].append(slug)
+
+    if result["alerted"]:
+        logger.warning(
+            "Shorts coverage: %d canal(es) secos hoy: %s",
+            len(result["alerted"]), ", ".join(result["alerted"]),
+        )
+    return result
+
+
 def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
