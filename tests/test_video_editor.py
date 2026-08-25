@@ -232,6 +232,72 @@ class TestKenBurnsPan:
             path.unlink(missing_ok=True)
 
 
+class TestDynamicKenBurnsProfiles:
+    """Image scenes select varied, gentle motion profiles per image."""
+
+    def test_profile_selection_avoids_immediate_repetition(self):
+        from pipeline.video_editor import VideoEditor
+
+        ve = VideoEditor(_make_mock_config())
+        ve._last_ken_burns_profile = "horizontal_in"
+
+        with patch("pipeline.video_editor.random.random", return_value=0.5), \
+             patch("pipeline.video_editor.random.choice", side_effect=lambda values: values[0]):
+            profile = ve._select_ken_burns_profile()
+
+        assert profile["name"] != "horizontal_in"
+
+    def test_static_profile_is_configurable(self):
+        from pipeline.video_editor import VideoEditor
+
+        config = _make_mock_config()
+        config["KEN_BURNS_STATIC_PROBABILITY"] = 1.0
+        ve = VideoEditor(config)
+
+        assert ve._select_ken_burns_profile()["name"] == "static"
+
+    def test_motion_uses_ease_in_out(self):
+        from pipeline.video_editor import VideoEditor
+
+        ve = VideoEditor(_make_mock_config())
+        assert ve._ease_in_out(0.0) == 0.0
+        assert ve._ease_in_out(1.0) == 1.0
+        assert ve._ease_in_out(0.25) < 0.25
+        assert ve._ease_in_out(0.75) > 0.75
+
+    def test_static_framing_preserves_aspect_ratio(self):
+        from pipeline.video_editor import VideoEditor
+        from PIL import Image
+        import tempfile
+        import numpy as np
+
+        ve = VideoEditor(_make_mock_config())
+        # A portrait image must be center-cropped, not stretched to 16:9.
+        img = Image.new("RGB", (500, 1000), (20, 30, 40))
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            img.save(f.name)
+            path = Path(f.name)
+
+        try:
+            clip = ve._single_ken_burns_clip(path, 2.0, 0, profile={"name": "static"})
+            frame = clip.get_frame(0)
+            assert frame.shape[:2] == (ve.video_size[1], ve.video_size[0])
+            assert np.array_equal(frame[0, 0], frame[-1, 0])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_channel_config_overrides_motion_defaults(self):
+        from pipeline.video_editor import VideoEditor
+
+        config = _make_mock_config()
+        config["KEN_BURNS_MOTION_FACTOR"] = 0.2
+        config["KEN_BURNS_ZOOM_FACTOR"] = 0.3
+        ve = VideoEditor(config)
+
+        assert ve._ken_burns_motion_factor() == 0.2
+        assert ve._ken_burns_zoom_factor() == 0.3
+
+
 class TestVideoClipFallbackOnCorrupt:
     """When VideoFileClip fails (corrupt file), return None so caller
     can fall through to image / extend-previous-clip logic."""

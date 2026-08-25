@@ -37,6 +37,9 @@ from config.defaults import (
     FILM_GRAIN_OPACITY,
     KEN_BURNS_ZOOM_MIN,
     KEN_BURNS_ZOOM_MAX,
+    KEN_BURNS_STATIC_PROBABILITY,
+    KEN_BURNS_MOTION_FACTOR,
+    KEN_BURNS_ZOOM_FACTOR,
 )
 
 try:
@@ -257,6 +260,7 @@ class VideoEditor:
         self._current_clip_idx: int = 0
         # When reusing an image, vary Ken Burns focus to avoid visual repetition
         self._image_reuse_count: dict[str, int] = {}  # path → how many times reused
+        self._last_ken_burns_profile: str | None = None
         # On-demand image fetcher callback (set by orchestrator before build_video)
         self._on_demand_fetcher: Optional[callable] = None
 
@@ -338,6 +342,7 @@ class VideoEditor:
         self._image_last_clip_idx.clear()
         self._current_clip_idx = 0
         self._image_reuse_count.clear()
+        self._last_ken_burns_profile = None
 
         # ── Compute block time ranges ──────────────────────────
         if scene_ranges:
@@ -1842,7 +1847,7 @@ class VideoEditor:
             return None
 
     def _image_clip_for_block(self, image_path: Path, block_dur: float,
-                               reuse_count: int = 0) -> VideoClip:
+                              reuse_count: int = 0) -> VideoClip:
         """Create a Ken Burns image clip for the given duration.
 
         When *reuse_count* > 0 (same image used again after LRU gap),
@@ -1852,6 +1857,10 @@ class VideoEditor:
         """
         zoom_min = self.canal.get("KEN_BURNS_ZOOM_MIN", KEN_BURNS_ZOOM_MIN)
         zoom_max = self.canal.get("KEN_BURNS_ZOOM_MAX", KEN_BURNS_ZOOM_MAX)
+
+        profile = self._select_ken_burns_profile()
+        if profile["name"] == "static":
+            return self._single_ken_burns_clip(image_path, block_dur, 0, profile=profile)
 
         if reuse_count > 0:
             # Shift the zoom range to explore different image regions
@@ -1871,7 +1880,10 @@ class VideoEditor:
         else:
             zoom = random.uniform(zoom_min, zoom_max)
 
-        return self._single_ken_burns_clip(image_path, block_dur, zoom)
+        zoom *= self._ken_burns_zoom_factor()
+        if profile["zoom_direction"] < 0:
+            zoom = -zoom
+        return self._single_ken_burns_clip(image_path, block_dur, zoom, profile=profile)
 
     def _placeholder_clip_with_text(self, block_range: dict, block_dur: float) -> VideoClip:
         """Solid color placeholder with the first sentence of the block text overlaid."""
@@ -1949,7 +1961,8 @@ class VideoEditor:
         return timestamps
 
     def _single_ken_burns_clip(
-        self, image_path: Path, duration: float, zoom_percent: float
+        self, image_path: Path, duration: float, zoom_percent: float,
+        profile: dict | None = None,
     ) -> VideoClip:
         """Create one ImageClip with Ken Burns zoom/pan baked in via a custom
         ``make_frame`` function.
@@ -1957,17 +1970,8 @@ class VideoEditor:
         The frame function progressively zooms into the image over the clip
         lifetime and applies a gentle pan chosen at random.
 
-        FAST PATH: when zoom_percent == 0, returns a simple ImageClip
-        without per-frame recalculations (used in fast-test mode).
+        A zero zoom percentage produces an aspect-ratio-safe static frame.
         """
-        # ── Fast path: no zoom → simple ImageClip ────────────
-        if zoom_percent == 0:
-            try:
-                return ImageClip(str(image_path), duration=duration).resized(self.video_size)
-            except Exception:
-                self.logger.exception("Failed to open %s for static clip", image_path)
-                return self._placeholder_clip(duration)
-
         try:
             pil_img = Image.open(image_path).convert("RGB")
         except Exception:
@@ -2001,19 +2005,34 @@ class VideoEditor:
             pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
             src_w, src_h = new_w, new_h
 
-        zoom_factor = 1.0 + zoom_percent / 100.0
+        # A negative percentage means pull back (zoom-out), while the legacy
+        # positive value remains zoom-in.  Never scale below the source frame.
+        zoom_factor = max(1.0, 1.0 + abs(zoom_percent) / 100.0)
+        static = zoom_percent == 0 or (profile and profile.get("name") == "static")
 
         # Pick the axis with more available panning room (pixels).
         # Portrait/square images pan vertically; landscape horizontally.
         # Guarantees at least one axis is non-zero.
-        if (src_h - target_h) > (src_w - target_w):
-            pan_dir_x, pan_dir_y = 0, random.choice([-1, 1])
+        if static:
+            pan_dir_x, pan_dir_y = 0, 0
         else:
-            pan_dir_x, pan_dir_y = random.choice([-1, 1]), 0
+            pan_dir_x = (profile or {}).get("pan_x", 0)
+            pan_dir_y = (profile or {}).get("pan_y", 0)
+            if not pan_dir_x and not pan_dir_y:
+                if (src_h - target_h) > (src_w - target_w):
+                    pan_dir_y = random.choice([-1, 1])
+                else:
+                    pan_dir_x = random.choice([-1, 1])
 
         def make_frame(t: float) -> np.ndarray:
-            progress = t / duration if duration > 0 else 0
-            z = 1.0 + (zoom_factor - 1.0) * progress
+            progress = max(0.0, min(1.0, t / duration if duration > 0 else 0))
+            eased = self._ease_in_out(progress)
+            if static:
+                z = 1.0
+            elif zoom_percent < 0:
+                z = zoom_factor - (zoom_factor - 1.0) * eased
+            else:
+                z = 1.0 + (zoom_factor - 1.0) * eased
 
             new_w = int(src_w * z)
             new_h = int(src_h * z)
@@ -2024,8 +2043,9 @@ class VideoEditor:
 
             # Start centered, pan out to one edge.
             # Clamp (below) is a safety net — with this formula it is never hit.
-            ox = max_ox * pan_dir_x * progress
-            oy = max_oy * pan_dir_y * progress
+            motion_factor = self._ken_burns_motion_factor()
+            ox = max_ox * pan_dir_x * motion_factor * eased
+            oy = max_oy * pan_dir_y * motion_factor * eased
 
             left = int((new_w - target_w) / 2 + ox)
             top = int((new_h - target_h) / 2 + oy)
@@ -2036,6 +2056,49 @@ class VideoEditor:
             return np.array(cropped)
 
         return VideoClip(make_frame, duration=duration)
+
+    def _ken_burns_motion_factor(self) -> float:
+        """Return the per-channel pan intensity, clamped for safe framing."""
+        return max(0.0, min(1.0, float(self.canal.get(
+            "KEN_BURNS_MOTION_FACTOR", KEN_BURNS_MOTION_FACTOR))))
+
+    def _ken_burns_zoom_factor(self) -> float:
+        """Return the per-channel zoom intensity, clamped for gentle motion."""
+        return max(0.0, min(1.0, float(self.canal.get(
+            "KEN_BURNS_ZOOM_FACTOR", KEN_BURNS_ZOOM_FACTOR))))
+
+    @staticmethod
+    def _ease_in_out(progress: float) -> float:
+        """Smoothstep easing avoids abrupt starts and stops."""
+        progress = max(0.0, min(1.0, progress))
+        return progress * progress * (3.0 - 2.0 * progress)
+
+    def _select_ken_burns_profile(self) -> dict:
+        """Choose varied motion for one image, avoiding adjacent repeats."""
+        static_probability = max(0.0, min(1.0, float(self.canal.get(
+            "KEN_BURNS_STATIC_PROBABILITY", KEN_BURNS_STATIC_PROBABILITY))))
+        if random.random() < static_probability and self._last_ken_burns_profile != "static":
+            name = "static"
+        else:
+            names = [
+                "horizontal_in", "horizontal_out", "vertical_in", "vertical_out",
+                "diagonal_in", "diagonal_out",
+            ]
+            if self._last_ken_burns_profile in names and len(names) > 1:
+                names.remove(self._last_ken_burns_profile)
+            name = random.choice(names)
+
+        self._last_ken_burns_profile = name
+        direction = -1 if name.endswith("_out") else 1
+        if name == "horizontal_in" or name == "horizontal_out":
+            pan_x, pan_y = random.choice([-1, 1]), 0
+        elif name == "vertical_in" or name == "vertical_out":
+            pan_x, pan_y = 0, random.choice([-1, 1])
+        elif name == "static":
+            pan_x, pan_y = 0, 0
+        else:
+            pan_x, pan_y = random.choice([-1, 1]), random.choice([-1, 1])
+        return {"name": name, "zoom_direction": direction, "pan_x": pan_x, "pan_y": pan_y}
 
     def _placeholder_clip(self, duration: float) -> VideoClip:
         """Return a gradient background clip for missing images.
