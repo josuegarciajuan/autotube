@@ -1194,6 +1194,29 @@ def _maybe_create_alert(db, conn, entity_type, entity_id, channel_id,
 # Check 9: LLM credits low/exhausted
 # ═══════════════════════════════════════════════════════════════
 
+def _resolve_credit_alerts(db, conn, provider: str, alert_types) -> int:
+    """Resolve unresolved credit alerts for a provider (e.g. after balance recovers)."""
+    resolved = 0
+    try:
+        ph = ",".join("?" * len(alert_types))
+        rows = conn.execute(
+            f"""SELECT id FROM pipeline_alerts
+                WHERE entity_type = 'system'
+                  AND alert_type IN ({ph})
+                  AND title LIKE ? AND resolved = 0""",
+            (*alert_types, f"%{provider}%"),
+        ).fetchall()
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE pipeline_alerts SET resolved = 1, resolved_at = datetime('now') WHERE id = ?",
+                (r["id"],),
+            )
+            resolved += cur.rowcount
+    except Exception as exc:
+        logger.warning("Credit alert auto-resolve failed for %s: %s", provider, exc)
+    return resolved
+
+
 def _check_llm_credits(db) -> int:
     """Check DeepSeek balance and OpenAI quota errors every 12h.
     
@@ -1265,6 +1288,12 @@ def _check_llm_credits(db) -> int:
                             ),
                             metadata={"provider": "deepseek", "balance_usd": balance},
                         )
+                elif ds_status == "healthy":
+                    # Saldo recuperado → auto-resolver alertas de crédito abiertas
+                    created += _resolve_credit_alerts(
+                        db, conn, provider="DeepSeek",
+                        alert_types=("llm_credit_low", "llm_credit_exhausted"),
+                    )
 
             # ── OpenAI ──
             oa = status.get("openai")
@@ -1296,6 +1325,12 @@ def _check_llm_credits(db) -> int:
                             ),
                             metadata={"provider": "openai", "error_count_7d": err_count},
                         )
+                elif oa_status == "healthy":
+                    # Cuota recuperada → auto-resolver alertas de crédito abiertas
+                    created += _resolve_credit_alerts(
+                        db, conn, provider="OpenAI",
+                        alert_types=("llm_credit_low", "llm_credit_exhausted"),
+                    )
 
             conn.commit()
     except Exception as exc:
