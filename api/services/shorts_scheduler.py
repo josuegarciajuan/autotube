@@ -408,7 +408,7 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
                      AND date(published_at) = date('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()
-        return (row[0] if row else 0) >= _hard_daily_cap()
+        return (row[0] if row else 0) >= _hard_daily_cap(channel_id, db)
     except Exception:
         return False
 
@@ -841,9 +841,16 @@ def _pacing_int(key: str, default: int) -> int:
         return default
 
 
-def _hard_daily_cap() -> int:
-    """Cap duro de shorts por canal y día (total native+clip)."""
-    return _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
+def _hard_daily_cap(channel_id: int | None = None, db=None) -> int:
+    """Cap diario por canal, con entitlement específico de fase post-strike."""
+    base = _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
+    if channel_id is None:
+        return base
+    try:
+        from api.services.gradual_resume import effective_native_shorts_per_day
+        return max(base, effective_native_shorts_per_day(channel_id, db))
+    except Exception:
+        return base
 
 
 def _global_shorts_daily_cap() -> int:
@@ -1601,14 +1608,17 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         native_count = sc.get("shorts_native_per_day", 3)
         clips_per_long = sc.get("shorts_clips_per_long", 3)
 
-        # ── v2: Use adaptive distribution if enabled ──
+        # The per-channel post-strike policy is authoritative. Adaptive
+        # distribution remains analytical while clip shorts are disabled and
+        # must not reduce phase-2 channels below two native slots.
         try:
-            v2_native, v2_clips = get_shorts_distribution(ch_id, db, date_str)
-            native_count = v2_native
-            # clips_per_long stays for _build_shorts_slots_for_channel compat,
-            # but actual clip slots are generated ad-hoc (v26)
-        except Exception as e:
-            logger.warning("[%s] Adaptive distribution failed, using static config: %s", slug, e)
+            from api.services.gradual_resume import effective_native_shorts_per_day
+            native_count = effective_native_shorts_per_day(
+                ch_id, db, datetime.strptime(date_str, "%Y-%m-%d").date(),
+            )
+        except Exception:
+            native_count = int(native_count or 0)
+        clips_per_long = 0
 
         # ── Quota-aware: recortar nativos al cupo del proyecto ──
         cap = native_caps.get(ch_id)
@@ -3561,7 +3571,7 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
         if not generate_only and _channel_hard_daily_short_cap_reached(channel_id, _db_s):
             logger.info(
                 "[standalone] %s: tope duro diario (%d/día) alcanzado — skip",
-                channel_slug, _hard_daily_cap(),
+                channel_slug, _hard_daily_cap(channel_id, _db_s),
             )
             return None
 
@@ -4421,7 +4431,7 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     if _channel_hard_daily_short_cap_reached(channel_id, db):
         logger.info(
             "[%s] Queued short #%d skipped: tope duro diario (%d/día) — se mantiene en cola",
-            slug, short_id, _hard_daily_cap(),
+            slug, short_id, _hard_daily_cap(channel_id, db),
         )
         return False
 

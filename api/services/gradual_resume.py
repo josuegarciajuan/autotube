@@ -30,7 +30,8 @@ logger = logging.getLogger("autotube.gradual_resume")
 # ── Constantes del plan (antiban) ────────────────────────────────
 PHASE1_DAYS = 5            # duración de "1 long cada 2 días"
 SIBLING_BUFFER_DAYS = 3    # hermano sin strike: +3 días de estabilidad del hermano
-SHORTS_NATIVE_PER_DAY = 1  # techo shorts nativos
+PHASE1_SHORTS_NATIVE_PER_DAY = 1
+PHASE2_SHORTS_NATIVE_PER_DAY = 2
 SHORTS_CLIPS_PER_LONG = 0  # clips desactivados
 VIDEOS_PER_DAY_MAX = 1     # techo long-form
 
@@ -142,6 +143,23 @@ def _phase_for(entry: dict, today: date) -> int:
     if days <= PHASE1_DAYS:
         return 1
     return 2
+
+
+def effective_native_shorts_per_day(channel_id: int, db, today: date | None = None) -> int:
+    """Return the approved native-short cap for one channel's resume phase."""
+    today = today or datetime.now(timezone.utc).date()
+    try:
+        raw = db.get_system_state(_PLAN_KEY.format(channel_id=channel_id))
+        entry = json.loads(raw) if raw else None
+        if not isinstance(entry, dict):
+            return PHASE1_SHORTS_NATIVE_PER_DAY
+        return (
+            PHASE2_SHORTS_NATIVE_PER_DAY
+            if _phase_for(entry, today) >= 2
+            else PHASE1_SHORTS_NATIVE_PER_DAY
+        )
+    except Exception:
+        return PHASE1_SHORTS_NATIVE_PER_DAY
 
 
 def _spread_phase1_pending(db, cid: int, slug: str, start_dt: datetime) -> int:
@@ -411,13 +429,17 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             alt_pattern = None
             alt_offset = 0
 
-        # Shorts: asegurar techo (native=1, clips=0)
+        # Fase 1 conserva 1 native/día; fase 2 habilita 2. Los clips continúan
+        # desactivados tras los strikes.
+        native_per_day = (
+            PHASE2_SHORTS_NATIVE_PER_DAY if phase >= 2 else PHASE1_SHORTS_NATIVE_PER_DAY
+        )
         shorts_changed = False
         sc_list = db.get_shorts_planning_config(channel_id=cid) or []
         sc = sc_list[0] if sc_list else {}
-        cur_native = int(sc.get("shorts_native_per_day", SHORTS_NATIVE_PER_DAY) or SHORTS_NATIVE_PER_DAY)
+        cur_native = int(sc.get("shorts_native_per_day", native_per_day) or native_per_day)
         cur_clips = int(sc.get("shorts_clips_per_long", SHORTS_CLIPS_PER_LONG) or SHORTS_CLIPS_PER_LONG)
-        if cur_native != SHORTS_NATIVE_PER_DAY or cur_clips != SHORTS_CLIPS_PER_LONG:
+        if cur_native != native_per_day or cur_clips != SHORTS_CLIPS_PER_LONG:
             shorts_changed = True
 
         cfg = db.get_channel_planning_config(cid) or {}
@@ -445,7 +467,7 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             applied.append({
                 "slug": slug, "phase": phase,
                 "action": f"DRY: vpd={vpd} alt={alt_pattern} "
-                          f"shorts_native={SHORTS_NATIVE_PER_DAY} clips={SHORTS_CLIPS_PER_LONG}",
+                           f"shorts_native={native_per_day} clips={SHORTS_CLIPS_PER_LONG}",
             })
             changed = True
             continue
@@ -461,12 +483,12 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             if shorts_changed:
                 db.update_shorts_planning_config(
                     cid,
-                    {"shorts_native_per_day": SHORTS_NATIVE_PER_DAY,
+                    {"shorts_native_per_day": native_per_day,
                      "shorts_clips_per_long": SHORTS_CLIPS_PER_LONG},
                 )
             db.set_system_state(_PHASE_KEY.format(channel_id=cid), str(phase))
             action = (f"vpd={vpd} alt={alt_pattern} "
-                      f"shorts_native={SHORTS_NATIVE_PER_DAY} clips={SHORTS_CLIPS_PER_LONG}")
+                       f"shorts_native={native_per_day} clips={SHORTS_CLIPS_PER_LONG}")
             # Fase 1: esparcir publicaciones pendientes (máx 1/día de publicación)
             if phase == 1 and entry.get("source") == "unblock":
                 try:
