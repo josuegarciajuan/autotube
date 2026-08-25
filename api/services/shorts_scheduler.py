@@ -399,12 +399,23 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
     try:
         import sqlite3 as _sql_pc
         from config.settings import DATABASE_PATH as _DBP_PC
+        # Con política explícita el cupo aprobado es de NATIVOS: los clips están
+        # desactivados permanentemente y una subida legacy de clip no debe
+        # consumir el hueco nativo del canal (fix ago 2026).
+        _native_only = False
+        try:
+            from api.services.gradual_resume import get_explicit_delivery_policy
+            _native_only = get_explicit_delivery_policy(channel_id, db) is not None
+        except Exception:
+            pass
+        _type_clause = "AND type IN ('native','standalone')" if _native_only else ""
         with _sql_pc.connect(str(_DBP_PC), timeout=10) as _conn_pc:
             row = _conn_pc.execute(
-                """SELECT COUNT(*) FROM shorts
+                f"""SELECT COUNT(*) FROM shorts
                    WHERE channel_id = ?
                      AND youtube_id IS NOT NULL
                      AND youtube_id != ''
+                     {_type_clause}
                      AND date(published_at) = date('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()
