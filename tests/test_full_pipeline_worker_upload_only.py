@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -157,3 +159,29 @@ def test_upload_only_transient_failure_is_deferred_without_upload_loop(
         db_extended.ExtendedDatabase = original
     assert db.videos[10]["status"] == "awaiting_upload"
     assert db.videos[10]["scheduled_upload_at"]
+
+
+def test_worker_cli_upload_only_test_mode_dispatches_expected_flags(monkeypatch):
+    from api.services import full_pipeline_worker as worker
+
+    captured = {}
+    monkeypatch.setattr(worker, "_setup_worker_logging", lambda job_id: logging.getLogger("test-worker"))
+    monkeypatch.setattr(worker, "run_job", lambda **kwargs: captured.update(kwargs) or True)
+    monkeypatch.setattr(sys, "argv", [
+        "full_pipeline_worker.py", "--job-id", "1", "--channel-id", "1",
+        "--video-id", "10", "--action", "upload_only", "--test-mode",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        worker.main()
+
+    assert exc_info.value.code == 0
+    assert captured == {
+        "job_id": 1,
+        "channel_id": 1,
+        "video_id": 10,
+        "action": "upload_only",
+        "test_mode": True,
+        "upload": True,
+        "source_mode": "original",
+        "viral_candidate_id": None,
+    }
