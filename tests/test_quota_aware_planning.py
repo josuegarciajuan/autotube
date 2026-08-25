@@ -311,7 +311,8 @@ class TestHorizonSlotsCap:
 class TestShortsCap:
     def test_native_shorts_capped_by_project(self, quota_env, quota_db, monkeypatch):
         from api.services import shorts_scheduler
-        # vpd=1 → 2 longs + 2 clips → quedan 2 nativos (1 por canal)
+        # Clips desactivados permanentemente → por proyecto (cupo 6) quedan
+        # 2 longs + 4 nativos = 2 nativos por canal. El cupo NO permite más.
         with quota_db._connect() as conn:
             for ch_id, _n, _s, _p, _a in CHANNELS:
                 conn.execute(
@@ -329,7 +330,7 @@ class TestShortsCap:
         for s in slots:
             per_channel[s["channel_id"]] = per_channel.get(s["channel_id"], 0) + 1
         for ch_id in (3, 4, 5, 7):
-            assert per_channel.get(ch_id, 0) <= 1, f"ch{ch_id}: natives > cap"
+            assert per_channel.get(ch_id, 0) <= 2, f"ch{ch_id}: natives > cupo del proyecto"
 
     def test_native_shorts_zero_when_cupo_agotado(self, quota_env, quota_db, monkeypatch):
         """Cupo del proyecto agotado por longs+clips → 0 nativos planificados."""
@@ -348,7 +349,7 @@ class TestShortsCap:
 
     def test_native_cap_fail_closed_when_allocation_raises(self, quota_env, quota_db, monkeypatch):
         """Si la asignación de cupo falla, no se asume techo ilimitado: los nativos
-        quedan limitados a 1/canal (mínimo seguro) en vez de sobre-planificar."""
+        quedan limitados al suelo MIN_DAILY_SHORTS (2) en vez del entitlement alto (3)."""
         from api.services import shorts_scheduler
         from api.services import planning_service
         from api.services import gradual_resume
@@ -361,9 +362,12 @@ class TestShortsCap:
         per_channel = {}
         for s in slots:
             per_channel[s["channel_id"]] = per_channel.get(s["channel_id"], 0) + 1
-        # Fail-closed: cada canal con nativos no puede pasar de 1.
+        # Fail-closed: sin allocation no se planifica el entitlement completo (3);
+        # se queda en el suelo MIN_DAILY_SHORTS (2) en vez de sobre-planificar.
         for ch_id in per_channel:
-            assert per_channel[ch_id] <= 1, f"ch{ch_id}: natives {per_channel[ch_id]} > fallback 1"
+            assert per_channel[ch_id] <= 2, (
+                f"ch{ch_id}: natives {per_channel[ch_id]} > fallback 2"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════
