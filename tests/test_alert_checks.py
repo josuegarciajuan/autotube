@@ -28,6 +28,7 @@ from api.services.lifecycle_monitor import (
     emit_alert,
     touch_task_heartbeat,
     TASK_TIMEOUTS,
+    _auto_resolve_completed,
 )
 
 # ── DDL base: init_db crea schema.sql (videos básica). Aquí añadimos las
@@ -248,6 +249,36 @@ def test_awaiting_upload_with_future_schedule_not_alerted(tmp_path):
     _insert_video(db, vid=1, status='awaiting_upload', finished='2026-01-01 00:00:00',
                   scheduled='2099-01-01 00:00:00')
     assert _check_awaiting_upload_stuck(db) == 0
+
+
+def test_awaiting_upload_spam_blocked_channel_not_alerted(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=1, status='awaiting_upload', finished='2026-01-01 00:00:00')
+    db.is_channel_spam_blocked = lambda channel_id: True
+
+    assert _check_awaiting_upload_stuck(db) == 0
+
+
+def test_awaiting_upload_stuck_alert_auto_resolves_after_video_leaves_active_states(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=1, status='awaiting_upload', finished='2026-01-01 00:00:00')
+    assert _check_awaiting_upload_stuck(db) == 1
+
+    with db._connect() as conn:
+        conn.execute("UPDATE videos SET status = 'ready' WHERE id = 1")
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+    with db._connect() as conn:
+        resolved = conn.execute(
+            "SELECT resolved FROM pipeline_alerts "
+            "WHERE alert_type = 'awaiting_upload_stuck' AND entity_id = 1"
+        ).fetchone()
+    assert resolved["resolved"] == 1
+
+
+def test_quota_recovery_timeout_covers_sleep_interval():
+    assert TASK_TIMEOUTS["quota_recovery"] == 2400
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -1482,6 +1482,9 @@ def run_job(
         except ImportError:
             ENABLE_AB_TESTING = False
         
+        # Default must exist for both the generation-only and real-upload paths.
+        # The completion handler reads it after either branch finishes.
+        _upload_retryable_fail = False
         skip_upload = not upload or test_mode or action == "generate_only"
 
         # Fase 1.3: upload_only NO genera variantes A/B (la miniatura ya existe en F1).
@@ -1619,7 +1622,6 @@ def run_job(
             # siguiente día PT. Hace que el job se marque 'failed' (cuenta en
             # el presupuesto de reintentos) y que el scheduler no re-despache
             # el vídeo cada minuto.
-            _upload_retryable_fail = False
             if action == "generate_only":
                 vp = video_data.get("video_path", "") if video_data else ""
                 if vp and Path(vp).exists():
