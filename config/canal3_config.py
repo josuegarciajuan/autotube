@@ -585,7 +585,7 @@ SEASON1_EPISODES = [
 # MARATHON & VIRAL — channel-specific
 # ═══════════════════════════════════════════════════════════════════
 MARATHON_ENABLED = False  # Bloqueado por la política anti-spam vigente.
-MARATHON_COOLDOWN_HOURS = 24
+MARATHON_COOLDOWN_HOURS = 48
 MARATHON_NARRATIVE_FORMAT = "historical_collapse"
 
 MARATHON_TITLE_FORMULAS = [

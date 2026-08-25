@@ -549,7 +549,7 @@ MARATHON_BACKLOG_PER_CHANNEL = 4
 # Cooldown entre marathons del MISMO canal (horas). Un canal recién maratoneado
 # no vuelve a ser elegible hasta que pasen estas horas. Se lee del config_json
 # del canal (MARATHON_COOLDOWN_HOURS) con fallback a este default.
-MARATHON_COOLDOWN_HOURS = 24
+MARATHON_COOLDOWN_HOURS = 48
 
 # ── MARATHON TITLE STRATEGY ──
 
