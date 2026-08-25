@@ -1549,6 +1549,10 @@ def run_job(
         # ═══════════════════════════════════════════════════════
         # Phase 6: Upload
         # ═══════════════════════════════════════════════════════
+        # Keep this guard initialized for every path.  upload_only success and
+        # test-mode skip_upload both reach the common completion block without
+        # entering the transient-failure branches below.
+        _upload_retryable_fail = False
         if skip_upload:
             skip_reason = "Test mode" if test_mode else ("Phase 1 only (generate_only)" if action == "generate_only" else "Upload disabled")
             logger.info("Phase 7/7: %s — skipping upload (video stays local)", skip_reason)
