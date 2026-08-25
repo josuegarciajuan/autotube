@@ -141,3 +141,36 @@ def test_explicit_zero_policy_blocks_upload_even_without_spam_block(monkeypatch,
     with db._connect() as conn:
         row = conn.execute("SELECT status FROM shorts WHERE channel_id = 1").fetchone()
         assert row["status"] == "generated"
+
+
+def test_policy_cap_counts_only_native_shorts_not_disabled_clips(monkeypatch, tmp_path):
+    """Disabled legacy clips must not consume the approved native-short quota."""
+    import sqlite3
+    from pathlib import Path
+    from tests.test_shorts_queue_unified import _db
+    import config.settings as settings
+
+    db, path = _db(tmp_path)
+    monkeypatch.setattr(settings, "DATABASE_PATH", __import__("pathlib").Path(path))
+    monkeypatch.setattr(
+        gradual_resume, "get_explicit_delivery_policy",
+        lambda *a, **kw: {"mode": "explicit", "longs_per_day": 1,
+                          "native_shorts_per_day": 2, "shorts_enabled": True,
+                          "clips_enabled": False},
+    )
+    # Un clip subido hoy + un nativo subido hoy → el clip NO cuenta, queda 1
+    # hueco nativo libre de los 2 aprobados.
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO shorts (channel_id, type, title, status, file_path,
+                                   youtube_id, published_at)
+               VALUES (1, 'clip', 'legacy-clip', 'published', '/tmp/y.mp4', 'ytc', datetime('now','localtime'))""",
+        )
+        conn.execute(
+            """INSERT INTO shorts (channel_id, type, title, status, file_path,
+                                   youtube_id, published_at)
+               VALUES (1, 'native', 'nat-1', 'published', '/tmp/y.mp4', 'ytn1', datetime('now','localtime'))""",
+        )
+        conn.commit()
+
+    assert shorts_scheduler._channel_hard_daily_short_cap_reached(1, db) is False
