@@ -133,6 +133,28 @@ def _set_published(db, channel_id: int, n: int, hours_ago: float = 0,
         conn.commit()
 
 
+def test_clip_shorts_are_globally_disabled():
+    assert ss.CLIP_SHORTS_ENABLED is False
+    assert ss.short_type_allowed("native") is True
+    assert ss.short_type_allowed("standalone") is True
+    assert ss.short_type_allowed("clip") is False
+
+
+def test_zero_clip_config_value_is_preserved():
+    assert ss.configured_clip_count({"shorts_clips_per_long": 0}) == 0
+    assert ss.configured_clip_count({"shorts_clips_per_long": 2}) == 2
+
+
+def test_clip_shorts_are_not_returned_from_upload_queue(tmp_path):
+    db, _ = _db(tmp_path)
+    _seed_queued(db, 1, 1, short_type="clip", status="ready")
+    _seed_queued(db, 1, 1, short_type="native", status="generated")
+
+    queued = db.get_queued_shorts(1, limit=10)
+
+    assert [row["type"] for row in queued] == ["native"]
+
+
 @pytest.fixture
 def patch_database_path(tmp_path, monkeypatch):
     """Crea un DB de test y apunta config.settings.DATABASE_PATH a él (las
@@ -204,16 +226,16 @@ def test_hard_cap_zero_when_no_uploads(patch_database_path):
 
 # ── 2. get_queued_shorts unificado ───────────────────────────────
 
-def test_queued_shorts_returns_all_types(tmp_path):
+def test_queued_shorts_returns_only_allowed_types(tmp_path):
     db, _ = _db(tmp_path)
     _seed_queued(db, 1, 1, short_type="native", status="generated")
     _seed_queued(db, 1, 1, short_type="standalone", status="generated")
     _seed_queued(db, 1, 1, short_type="clip", status="ready")
     queued = db.get_queued_shorts(1, limit=10)
     types = {q["type"] for q in queued}
-    assert types == {"native", "standalone", "clip"}
-    # La variante antigua (compat) delega en la unificada (todos los tipos)
-    assert len(db.get_queued_native_shorts(1, limit=10)) == 3
+    assert types == {"native", "standalone"}
+    # La variante antigua (compat) delega en la unificada.
+    assert len(db.get_queued_native_shorts(1, limit=10)) == 2
 
 
 def test_queued_shorts_excludes_published(tmp_path):
@@ -348,7 +370,7 @@ def test_native_slot_dispatches_generate_only(tmp_path, monkeypatch):
 
 # ── 7. Clip pre-renderizado NO se sube al despacharse ────────────
 
-def test_pre_rendered_clip_stays_in_queue(tmp_path, monkeypatch):
+def test_clip_generation_is_rejected_even_for_pre_rendered_input(tmp_path, monkeypatch):
     from pathlib import Path
     import config.settings as settings
     db, path = _db(tmp_path)
@@ -367,8 +389,8 @@ def test_pre_rendered_clip_stays_in_queue(tmp_path, monkeypatch):
     result = ss._dispatch_clip_short(
         1, "canal2", source_video_id=99, pre_rendered_short_id=short_id,
     )
-    assert result == short_id
+    assert result is None
     with db._connect() as conn:
         row = conn.execute("SELECT status, youtube_id FROM shorts WHERE id = ?", (short_id,)).fetchone()
-        assert row["status"] == "ready", "el clip pre-renderizado NO se sube, queda en cola"
+        assert row["status"] == "ready", "el clip no debe procesarse"
         assert row["youtube_id"] is None

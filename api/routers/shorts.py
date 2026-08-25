@@ -82,9 +82,13 @@ async def extract_clips(video_id: int, background_tasks: BackgroundTasks):
     high-impact moments, and schedules clips for staggered publication.
     """
     import sqlite3
+    from api.services.shorts_scheduler import CLIP_SHORTS_ENABLED
     from config.settings import DATABASE_PATH
     from pipeline.shorts_extractor import ShortsExtractor
     from pipeline.shorts_scheduler import ShortsScheduler
+
+    if not CLIP_SHORTS_ENABLED:
+        raise HTTPException(503, "Clip shorts are globally disabled")
 
     # Get video info
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
@@ -580,12 +584,16 @@ async def extract_and_publish(video_id: int):
     import subprocess
     import tempfile
     from pathlib import Path
+    from api.services.shorts_scheduler import CLIP_SHORTS_ENABLED
     from config.settings import DATABASE_PATH
     from pipeline.shorts_extractor import ShortsExtractor
     from pipeline.shorts_renderer import ShortsRenderer
     from pipeline.shorts_scheduler import ShortsScheduler
     from pipeline.youtube_uploader import YouTubeUploader
     from config.config_bridge import get_channel_config
+
+    if not CLIP_SHORTS_ENABLED:
+        raise HTTPException(503, "Clip shorts are globally disabled")
 
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     conn.row_factory = sqlite3.Row

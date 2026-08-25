@@ -8308,6 +8308,7 @@ class ExtendedDatabase(Database):
                        FROM shorts_planned_slots sps
                        JOIN channels c ON sps.channel_id = c.id
                        WHERE sps.status = 'pending'
+                            AND sps.short_type IN ('native', 'standalone')
                             AND c.active = 1
                             AND sps.scheduled_at >= datetime('now','-24 hours')
                             AND sps.scheduled_at <= datetime('now','+10 minutes')"""
@@ -8422,8 +8423,8 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 """SELECT COUNT(*) AS cnt FROM shorts
                    WHERE channel_id = ?
-                     AND ((type IN ('native','standalone') AND status = 'generated')
-                       OR (type = 'clip' AND status = 'ready'))
+                      AND type IN ('native', 'standalone')
+                      AND status = 'generated'
                      AND file_path IS NOT NULL AND file_path != ''
                      AND (youtube_id IS NULL OR youtube_id = '')""",
                 (channel_id,),
@@ -8454,9 +8455,9 @@ class ExtendedDatabase(Database):
                 """SELECT id, channel_id, type, title, hook_title, hook_text, topic,
                           source_video_id, file_path, status, created_at
                    FROM shorts
-                   WHERE channel_id = ?
-                     AND ((type IN ('native','standalone') AND status = 'generated')
-                       OR (type = 'clip' AND status = 'ready'))
+                    WHERE channel_id = ?
+                      AND type IN ('native', 'standalone')
+                      AND status = 'generated'
                      AND file_path IS NOT NULL AND file_path != ''
                      AND (youtube_id IS NULL OR youtube_id = '')
                    ORDER BY id ASC LIMIT ?""",
