@@ -1344,10 +1344,11 @@ class MediaFetcher:
         # Ground literal labels and abstract metaphors in observable staging
         # before handing the concept to an image model.  The scene marker and
         # existing coherence/dedup layers remain unchanged.
-        from pipeline.cinematic_staging import build_scene_brief
+        from pipeline.cinematic_staging import build_scene_brief, sanitize_person_query
         grounded = build_scene_brief(scene.get("texto", ""), concept, self._theme_context)
         if grounded and grounded != concept.lower():
             concept = f"{concept}, {grounded}"
+        concept = sanitize_person_query(concept)
 
         # Ensure uniqueness: EVERY scene prompt carries a stable scene marker.
         # Even when a visual bible concept exists, two scenes can receive the
@@ -2471,7 +2472,13 @@ class MediaFetcher:
 
         Returns deduplicated list of non-empty queries (~11-13 variants).
         """
-        base = scene.get("search_query_en", "")
+        from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
+        base = enrich_scene_query(
+            scene.get("search_query_en", ""),
+            ctx,
+            scene.get("texto", ""),
+        )
+        base = sanitize_person_query(base)
 
         pool = []
 
@@ -2611,7 +2618,12 @@ class MediaFetcher:
     def _scene_narrative_keywords(self, scene: dict, ctx) -> list[str]:
         """Narrative keywords of a scene: search_query_en minus style words
         and theme keywords (same vocabulary as _extract_narrative_keywords)."""
-        query = scene.get("search_query_en", "") or ""
+        query = " ".join(
+            part for part in (
+                scene.get("search_query_en", "") or "",
+                scene.get("texto", "") or "",
+            ) if part
+        )
         if not query:
             return []
         theme_words = MediaFetcher._theme_word_set(ctx)
@@ -2765,6 +2777,20 @@ class MediaFetcher:
         Defensive by design: candidates without metadata score 0 and are
         still downloadable (conservative fallback — never blocks a page).
         """
+        # Use the actual narration as a first-pass ordering signal.  The
+        # existing relevance score, historical rejection, deduplication and
+        # optional LLM reranking remain authoritative below; this ordering
+        # only prevents a generic label match from winning a more observable
+        # action match when both candidates otherwise tie.
+        from pipeline.cinematic_staging import rank_candidates
+        ranked_candidates = rank_candidates(
+            asset_candidates,
+            scene.get("texto", "") or scene.get("search_query_en", ""),
+            ctx,
+        )
+        if ranked_candidates:
+            asset_candidates = ranked_candidates
+
         scored: list[tuple[float, dict]] = []
         for candidate in asset_candidates:
             if self._is_asset_duplicate(candidate):

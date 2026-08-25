@@ -147,6 +147,7 @@ def _build_portrait_query(
     style_modifiers: str = "",
     theme_ctx = None,  # v8: full ThemeContext for richer anchoring
     max_len: int = 100,
+    scene_text: str = "",
 ) -> str:
     """Build a short-focused search query fusing scene narrative with theme context.
 
@@ -163,7 +164,7 @@ def _build_portrait_query(
     # Ground literal labels in observable actions/objects while retaining the
     # original query for provider relevance scoring.
     from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
-    search_query_en = enrich_scene_query(search_query_en, theme_ctx)
+    search_query_en = enrich_scene_query(search_query_en, theme_ctx, scene_text)
     search_query_en = sanitize_person_query(search_query_en)
 
     # 1. Strip style fluff from the LLM query
@@ -381,6 +382,7 @@ def _build_query_pool(
     if search_en and search_en.strip():
         primary = _build_portrait_query(
             search_en, theme_keywords, style_modifiers, theme_ctx=theme_ctx,
+            scene_text=block.get("texto", ""),
         )
         if primary.strip():
             pool.append(primary.strip()[:100])
@@ -436,8 +438,8 @@ def _build_query_pool(
 
     # 7. Themed fallback (v8): built dynamically from ThemeContext
     if theme_ctx and theme_ctx.primary_subject:
-        from pipeline.cinematic_staging import build_contextual_fallback
-        contextual_fb = build_contextual_fallback(block_type, theme_ctx, portrait=True)
+        from pipeline.cinematic_staging import build_contextual_fallback, fit_query
+        contextual_fb = fit_query(build_contextual_fallback(block_type, theme_ctx, portrait=True))
         if contextual_fb and contextual_fb not in pool:
             pool.append(contextual_fb)
         themed_fb = _build_themed_short_fallback(block_type, theme_ctx)

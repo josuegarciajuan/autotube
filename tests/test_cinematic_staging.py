@@ -4,6 +4,7 @@ from pipeline.cinematic_staging import (
     build_contextual_fallback,
     build_scene_brief,
     rank_candidates,
+    fit_query,
     sanitize_person_query,
     sanitize_shot_direction,
 )
@@ -67,6 +68,13 @@ def test_contextual_fallback_preserves_era_and_subject():
     assert "cinematic" not in fallback.lower() or len(fallback.split()) > 2
 
 
+def test_contextual_fallback_respects_stock_provider_limit():
+    query = fit_query("ancient Egyptian civilization " + "historical archive " * 20)
+
+    assert len(query) <= 100
+    assert not query.endswith(" ")
+
+
 def test_rank_candidates_rejects_anachronism_and_prefers_period_match():
     ctx = _ctx(era="16th century", era_decade="16th century")
     candidates = [
@@ -78,3 +86,56 @@ def test_rank_candidates_rejects_anachronism_and_prefers_period_match():
 
     assert ranked[0]["title"] == "wooden caravel at sea"
     assert all("modern cruise" not in c["title"] for c in ranked)
+
+
+def test_long_form_query_pool_uses_scene_narration_for_staging():
+    from pipeline.media_fetcher import MediaFetcher
+
+    fetcher = MediaFetcher.__new__(MediaFetcher)
+    fetcher._media_strategy = {"era_anchor_enabled": True}
+    scene = {
+        "search_query_en": "money",
+        "texto": "Merchants exchange grain using weighing scales in ancient Egypt.",
+        "tipo": "desarrollo",
+    }
+
+    pool = fetcher._build_query_pool(scene, _ctx())
+
+    assert any("exchange" in query or "barter" in query for query in pool)
+
+
+def test_shorts_query_pool_uses_block_narration_for_staging():
+    from pipeline.shorts_media import _build_query_pool
+
+    block = {
+        "search_query_en": "money",
+        "texto": "Merchants exchange grain using weighing scales in ancient Egypt.",
+        "tipo": "desarrollo1",
+    }
+
+    pool = _build_query_pool(block, theme_ctx=_ctx())
+
+    assert any("exchange" in query or "barter" in query for query in pool)
+
+
+def test_exhaustive_candidate_selection_uses_narration_to_rank_matches():
+    from pipeline.media_fetcher import MediaFetcher
+
+    fetcher = MediaFetcher.__new__(MediaFetcher)
+    fetcher._media_strategy = {"relevance_min_overlap": 1, "llm_relevance_filter": False}
+    fetcher._is_asset_duplicate = lambda candidate: False
+    fetcher._download_candidate = lambda provider, candidate: {"path": candidate["title"]}
+    fetcher._record_asset_used = lambda candidate: None
+    fetcher._record_asset_for_history = lambda downloaded: None
+    scene = {
+        "search_query_en": "archive",
+        "texto": "An archivist examines documents and turns pages during an investigation.",
+    }
+    candidates = [
+        {"title": "archive building exterior", "tags": ["archive"]},
+        {"title": "archivist examining documents", "tags": ["archivist", "documents"]},
+    ]
+
+    result = fetcher._try_download_best_candidate(candidates, object(), scene, ThemeContext())
+
+    assert result["path"] == "archivist examining documents"

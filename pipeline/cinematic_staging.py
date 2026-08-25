@@ -58,6 +58,14 @@ def sanitize_person_query(query: str) -> str:
     return f"{clean}, medium shot" if clean else "medium shot, person integrated in environment"
 
 
+def fit_query(query: str, max_len: int = 100) -> str:
+    """Fit a provider query at a complete-word boundary."""
+    query = re.sub(r"\s+", " ", (query or "").strip())
+    if len(query) <= max_len:
+        return query
+    return query[:max_len].rsplit(" ", 1)[0].rstrip(" ,")
+
+
 def build_scene_brief(scene_text: str = "", base_query: str = "", theme_ctx: Any = None) -> str:
     """Return a concrete staged brief without erasing the source subject.
 
