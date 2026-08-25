@@ -32,7 +32,7 @@ TASK_TIMEOUTS = {
     "schedule_checker": 900,        # loop principal (cada 60s) — timeout 15 min
     "publish_verify": 900,          # verificación de publicación (5 min)
     "upload_health_checker": 900,   # monitor de procesamiento YT
-    "quota_recovery": 1200,         # recuperación de cuota (6h)
+    "quota_recovery": 2400,         # recuperación de cuota (loop duerme 1800s)
     "resume_phase": 6 * 3600,       # avance de fases post-strike (6h)
     "redistribution": 3600,         # backfill espejo social
     "queue_consumer": 1200,         # consumidor de cola de jobs
@@ -776,7 +776,7 @@ def _auto_resolve_completed(db) -> int:
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                     WHERE pa.resolved = 0
                       AND v.status NOT IN ('error', 'generating', 'draft')
-                      AND pa.alert_type IN ('stuck', 'timeout')"""
+                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck')"""
             ).fetchall()
 
             for alert in alerts:
@@ -1477,6 +1477,11 @@ def _check_awaiting_upload_stuck(db) -> int:
             ).fetchall()
 
             for row in rows:
+                try:
+                    if db.is_channel_spam_blocked(row["channel_id"]):
+                        continue  # canal bloqueado por spam: la espera es esperada
+                except Exception:
+                    pass  # fail-open: un fallo del guard no silencia el health-check
                 try:
                     if db.is_quota_exhausted_for_channel(row["canal"]):
                         continue  # cuota agotada: esperar es lo esperado
