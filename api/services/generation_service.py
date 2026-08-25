@@ -508,6 +508,30 @@ def _kill_orphaned_workers(logger) -> int:
     return killed
 
 
+def _probe_worker_process(job_id: int, worker_pid: int | None = None) -> tuple[int | None, bool]:
+    """Find a worker without treating an inconclusive probe as a dead worker."""
+    if worker_pid:
+        try:
+            os.kill(int(worker_pid), 0)
+            return int(worker_pid), False
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return int(worker_pid), False
+        except (TypeError, ValueError, OSError):
+            pass
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        pids = [p for p in result.stdout.strip().split() if p.isdigit()]
+        return (int(pids[0]), False) if pids else (None, False)
+    except Exception as exc:
+        logger.warning("Worker probe inconclusive for job #%d: %s", job_id, exc)
+        return None, True
+
+
 def _get_ffmpeg_pids() -> set[int]:
     """Return PIDs of all running ffmpeg processes right now.
     
@@ -3270,28 +3294,33 @@ async def auto_recover_on_startup():
     # running jobs: only mark as failed if the worker process is DEAD.
     # If the subprocess survived the API restart, leave it running so
     # reconnect_active_workers() can pick it up.
-    running_rows = conn.execute(
-        "SELECT id, video_id FROM generation_jobs WHERE status='running'"
-    ).fetchall()
+    try:
+        running_rows = conn.execute(
+            "SELECT id, video_id, worker_pid FROM generation_jobs WHERE status='running'"
+        ).fetchall()
+    except Exception:
+        # Older test/legacy schemas predate worker_pid; process-table probing
+        # remains the compatibility fallback.
+        running_rows = conn.execute(
+            "SELECT id, video_id FROM generation_jobs WHERE status='running'"
+        ).fetchall()
     running_killed = 0
     running_alive = 0
     for rrow in running_rows:
         job_id = rrow["id"]
-        worker_alive = False
-        try:
-            import subprocess as _sp
-            result = _sp.run(
-                ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.stdout.strip():
-                worker_alive = True
-        except Exception:
-            pass  # can't determine → conservatively mark failed
-        if worker_alive:
+        worker_pid, probe_failed = _probe_worker_process(job_id, rrow["worker_pid"] if "worker_pid" in rrow.keys() else None)
+        if worker_pid is not None:
             running_alive += 1
             log.info("Job #%d: worker alive (PID %s) — keeping as running",
-                     job_id, result.stdout.strip().split()[0])
+                     job_id, worker_pid)
+        elif probe_failed:
+            # Never fail a job merely because the process table was
+            # temporarily unavailable during a restart.
+            running_alive += 1
+            log.warning(
+                "Job #%d: worker liveness probe inconclusive — preserving running state",
+                job_id,
+            )
         else:
             conn.execute(
                 "UPDATE generation_jobs SET status='failed', "
@@ -4073,13 +4102,9 @@ async def reconnect_active_workers():
 
             # Look for a running worker process associated with this job
             worker_found = False
+            worker_pid, probe_failed = _probe_worker_process(job_id, job.get("worker_pid"))
             try:
-                result = subprocess.run(
-                    ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if result.stdout.strip():
-                    worker_pid = int(result.stdout.strip().split()[0])
+                if worker_pid is not None:
                     worker_found = True
                     logger.info(
                         "Reconnecting to worker: job=%d pid=%d (survived API restart)",
@@ -4126,8 +4151,14 @@ async def reconnect_active_workers():
 
             except Exception as exc:
                 logger.debug("Worker reconnection check for job %d: %s", job_id, exc)
+                probe_failed = True
 
-            if not worker_found:
+            if not worker_found and probe_failed:
+                logger.warning(
+                    "Worker probe inconclusive for job #%d — preserving running state",
+                    job_id,
+                )
+            elif not worker_found:
                 # Job says "running" but no worker process exists
                 # Worker might have crashed — mark as failed
                 logger.warning(

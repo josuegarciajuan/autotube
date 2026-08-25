@@ -381,16 +381,26 @@ async def lifespan(app: FastAPI):
     
     # Launch schedule checker in background
     import asyncio
-    schedule_task = asyncio.create_task(_schedule_checker_loop())
+    def _supervised_loop(_name, _factory):
+        from api.services.task_watchdog import supervise_loop
+        return asyncio.create_task(supervise_loop(_name, _factory))
+
+    schedule_task = _supervised_loop("schedule_checker", _schedule_checker_loop)
     
     # Launch health monitor checker in background
-    health_monitor_task = asyncio.create_task(_health_monitor_loop())
+    health_monitor_task = _supervised_loop("health_monitor", _health_monitor_loop)
     
     # Launch publish verification checker in background
-    publish_verify_task = asyncio.create_task(_publish_verify_loop())
+    publish_verify_task = _supervised_loop("publish_verify", _publish_verify_loop)
     
     # Launch upload health checker in background (processing status monitoring)
-    health_checker_task = asyncio.create_task(_upload_health_checker_loop())
+    # This loop intentionally exits when the feature flag is disabled; do not
+    # turn that expected no-op into a bounded restart sequence.
+    health_checker_task = (
+        _supervised_loop("upload_health_checker", _upload_health_checker_loop)
+        if UPLOAD_HEALTH_CHECKER_ENABLED
+        else asyncio.create_task(_upload_health_checker_loop())
+    )
     
     # ── Shorts backfill PERMANENTLY DISABLED (see AGENTS.md invariant) ──
     # New shorts already include long-form links via build_short_description() at upload time.
@@ -399,18 +409,18 @@ async def lifespan(app: FastAPI):
     shorts_backfill_task = None
     
     # Launch quota recovery loop (auto-resume scheduler after 6h)
-    quota_recovery_task = asyncio.create_task(_quota_recovery_loop())
+    quota_recovery_task = _supervised_loop("quota_recovery", _quota_recovery_loop)
 
     # Launch gradual resume phase loop (avance autónomo de fases post-strike)
-    resume_phase_task = asyncio.create_task(_resume_phase_loop())
+    resume_phase_task = _supervised_loop("resume_phase", _resume_phase_loop)
 
     # Launch social redistribution loop (backfill espejo progresivo)
-    redistribution_task = asyncio.create_task(_redistribution_loop())
+    redistribution_task = _supervised_loop("redistribution", _redistribution_loop)
 
     # ── Cobertura de publicación (ago 2026): enforcer de la programación ──
     # Audita cada canal libre y dispara el repack si algún día próximo queda sin
     # cubrir (garantiza que "lo planeado se cumpla"). Loop independiente de 10 min.
-    publish_coverage_task = asyncio.create_task(_publish_coverage_loop())
+    publish_coverage_task = _supervised_loop("publish_coverage", _publish_coverage_loop)
 
     yield
     
@@ -426,6 +436,7 @@ async def lifespan(app: FastAPI):
         schedule_task, health_monitor_task, publish_verify_task,
         health_checker_task, quota_recovery_task, resume_phase_task,
         redistribution_task,
+        publish_coverage_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
