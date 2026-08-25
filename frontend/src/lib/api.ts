@@ -747,6 +747,8 @@ export function statusBadge(status: string): string {
     unlisted: 'badge-uploaded_private',
     private_quality_issue: 'badge-error',
     held: 'badge-error',
+    retrying: 'badge-generating',
+    deferred: 'badge-awaiting',
   };
   return map[status] || 'badge-draft';
 }
@@ -772,6 +774,8 @@ export function statusLabel(status: string): string {
     unlisted: 'No listado',
     private_quality_issue: 'Error calidad',
     held: 'Retenido (revisar)',
+    retrying: 'Reintentando',
+    deferred: 'Diferido (pacing/cuota)',
   };
   return map[status] || status;
 }

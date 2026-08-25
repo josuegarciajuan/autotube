@@ -16,6 +16,7 @@ Key v12 changes:
 
 import hashlib
 import logging
+import os
 import random
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -88,6 +89,37 @@ TITLE_SIMILARITY_LOOKBACK_LIMIT = 30
 # escenas con asset visual real cae por debajo de este umbral, se rechaza el
 # render y el slot reintenta (re-genera) con más RAM/assets, en vez de subir.
 SHORTS_MIN_VALID_ASSET_RATIO = 0.5
+
+
+def should_defer_shorts_for_longform_load(
+    longform_active: bool, load1: float, cpu_count: int | None = None
+) -> bool:
+    """Gate shorts only when long-form work coincides with high system load."""
+    if not longform_active:
+        return False
+    cpus = max(int(cpu_count or 1), 1)
+    return float(load1) >= cpus * 0.85
+
+
+def short_job_status_for_outcome(outcome: str) -> str:
+    """Map a short outcome to a health-aware generation-job status."""
+    if outcome == "retry":
+        return "retrying"
+    if outcome in {"pacing", "quota"}:
+        return "deferred"
+    return "failed"
+
+
+def select_safe_standalone_topic(topics, classify, on_reject=None):
+    """Select the first safe topic, preserving safety while avoiding starvation."""
+    for topic in topics or []:
+        verdict = classify(topic)
+        if verdict is not None and not verdict.safe:
+            if on_reject:
+                on_reject(verdict.reason)
+            continue
+        return topic
+    return None
 # Cap duro de shorts por canal y día (total native+clip), independiente de la
 # config de planning y NO saltable por el force-dispatch/catch-up. El usuario
 # pidió explícitamente "1 short al día por canal" tras los strikes.
@@ -2335,6 +2367,17 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.warning("Low memory — delaying shorts slot dispatch")
         return None
 
+    try:
+        if should_defer_shorts_for_longform_load(
+            db.count_active_longform_jobs(),
+            os.getloadavg()[0],
+            os.cpu_count(),
+        ):
+            logger.info("Shorts dispatch deferred: long-form worker plus high load")
+            return None
+    except (AttributeError, OSError, TypeError):
+        pass
+
     # 5. Global concurrency guard: only ONE short at a time globally.
     #    Shorts rendering runs in thread pool threads (via asyncio.to_thread),
     #    each consuming significant CPU/RAM (ffmpeg, Kokoro TTS, LLM).
@@ -3108,7 +3151,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     (retries + 1, retries + 1, slot_id),
                 )
                 conn.execute(
-                    "UPDATE generation_jobs SET status = 'failed', "
+                    "UPDATE generation_jobs SET status = 'retrying', "
                     "error_msg = 'No short_id returned (retry ' || ? || '/2)' WHERE id = ?",
                     (retries + 1, job_id),
                 )
@@ -3151,7 +3194,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                         (_defer_reason + " — reintento diferido", slot_id),
                     )
                     conn.execute(
-                        "UPDATE generation_jobs SET status = 'failed', "
+                        "UPDATE generation_jobs SET status = 'deferred', "
                         "error_msg = ? WHERE id = ?",
                         (_defer_reason, job_id),
                     )
@@ -3217,7 +3260,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 (slot_id,),
             )
             conn.execute(
-                "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                "UPDATE generation_jobs SET status = 'deferred', error_msg = ? WHERE id = ?",
                 (f"Quota exhausted: {str(e)[:300]}", job_id),
             )
             conn.commit()
@@ -3247,7 +3290,7 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     (retries + 1, f"Auto-retry after error (attempt {retries+1}/2): {str(e)[:200]}", slot_id),
                 )
                 conn.execute(
-                    "UPDATE generation_jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                "UPDATE generation_jobs SET status = 'retrying', error_msg = ? WHERE id = ?",
                     (f"Exception (retry {retries+1}/2): {str(e)[:300]}", job_id),
                 )
                 conn.commit()
@@ -3495,25 +3538,27 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
             logger.warning("[standalone] No topics found for %s", channel_slug)
             return None
 
-        topic = topics[0]  # Best topic first
-        logger.info("[standalone] %s: running for topic '%s'", channel_slug, topic.get("title", "?"))
-
-        # Content-safety pre-filter (anti-strike): rechazar temas sensibles.
-        try:
+        def _classify_topic(candidate):
             from pipeline.content_safety import classify_topic_safety
-            _safety = classify_topic_safety(
-                topic=topic.get("title", "") or topic.get("tema", ""),
-                title=topic.get("title", ""),
-                script_texts=[topic.get("description", ""), topic.get("hook", "")],
+            return classify_topic_safety(
+                topic=candidate.get("title", "") or candidate.get("tema", ""),
+                title=candidate.get("title", ""),
+                script_texts=[candidate.get("description", ""), candidate.get("hook", "")],
             )
-            if not _safety.safe:
-                logger.warning(
-                    "[standalone] %s: tema rechazado por seguridad — %s",
-                    channel_slug, _safety.reason,
-                )
-                return None
-        except Exception as _cs_exc:
-            logger.warning("[standalone] %s: safety check error (fail-open): %s", channel_slug, _cs_exc)
+
+        rejected_reasons = []
+        topic = select_safe_standalone_topic(
+            topics, classify=_classify_topic, on_reject=rejected_reasons.append
+        )
+        if rejected_reasons:
+            logger.warning(
+                "[standalone] %s: skipped %d unsafe topic(s): %s",
+                channel_slug, len(rejected_reasons), "; ".join(rejected_reasons[:3]),
+            )
+        if topic is None:
+            logger.warning("[standalone] No safe topics found for %s", channel_slug)
+            return None
+        logger.info("[standalone] %s: running for topic '%s'", channel_slug, topic.get("title", "?"))
 
         short_id = run_standalone_short(
             channel_slug=channel_slug,
@@ -3669,7 +3714,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     #    con feedback del conflicto ANTES de rendirse.
     from config.llm_client import create_llm_client
     from config.llm_helpers import llm_json_call
-    from pipeline.shorts_tts import validate_short_script, MAX_WORD_COUNT as _MAX_WORDS, MIN_WORD_COUNT as _MIN_WORDS
+    from pipeline.shorts_tts import (
+        validate_short_script, MAX_WORD_COUNT as _MAX_WORDS,
+        MIN_WORD_COUNT as _MIN_WORDS, voice_aware_word_budget,
+    )
     client = create_llm_client(enable_thinking=False)
 
     MAX_SCRIPT_ATTEMPTS = 3
@@ -3874,7 +3922,12 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         # ── Word budget guard: skip CTA if script is already long ──
         current_words = sum(len(b.get("texto", "").split()) for b in bloques)
         cta_words = len(cta_text.split())
-        if current_words + cta_words > 85:  # 85 words ≈ 42s safe under 58s max (aligned with MAX_WORD_COUNT=105)
+        _base_rate = (getattr(ch_config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+        _cta_budget = voice_aware_word_budget(
+            getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
+            rate=_base_rate, block_count=len(bloques) + 1,
+        )
+        if current_words + cta_words > _cta_budget:
             logger.info(
                 "[%s] Skipping subscribe CTA — script already %d words (+%d CTA would overflow)",
                 channel_slug, current_words, cta_words,
@@ -3892,10 +3945,17 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     # Avoid wasting TTS time on scripts that will definitely fail
     # the audio length check. Worst-case voice speed: 0.50 s/word.
     pre_tts_words = sum(len(b.get("texto", "").split()) for b in bloques)
-    pre_tts_est = pre_tts_words * 0.50  # worst case for slow voices
-    if pre_tts_est > 53.0:  # 5s margin under 58s SHORTS_MAX_DURATION_SEC
+    _base_rate = (getattr(ch_config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+    _tts_budget = voice_aware_word_budget(
+        getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
+        rate=_base_rate, block_count=len(bloques),
+    )
+    pre_tts_est = pre_tts_words / max(
+        voice_aware_word_budget(58.0, rate=_base_rate, block_count=1) / 53.0, 0.1
+    )
+    if pre_tts_words > _tts_budget:
         # Re-trim aggressively to ~90 words (safe under 45s)
-        target_words = 90
+        target_words = _tts_budget
         words_to_remove = pre_tts_words - target_words
         logger.warning(
             "[%s] Pre-TTS: estimated %.1fs from %d words (> 53s) — "
@@ -3987,6 +4047,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     #    50-60% video mix, cross-short dedup, query pool with variations
     from pipeline.shorts_media import (
         fetch_short_assets_exhaustive, render_short_hybrid,
+        has_sufficient_visual_assets,
         flush_short_asset_history,
     )
     theme_kw = script.get("theme_keywords_en", [])
@@ -4039,10 +4100,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     # para que el slot reintente con otra ventana de RAM/assets.
     _valid_assets_total = sum(1 for a in asset_items if a is not None)
     _asset_positions = len(asset_items) if asset_items else 0
-    _degraded = (
-        _valid_assets_total == 0
-        or (_asset_positions > 0 and (_valid_assets_total / _asset_positions) < SHORTS_MIN_VALID_ASSET_RATIO)
-    )
+    _degraded = not has_sufficient_visual_assets(asset_items, SHORTS_MIN_VALID_ASSET_RATIO)
     if _degraded:
         logger.warning(
             "[%s] Short render DEGRADADO (%d/%d assets reales) — rechazado para no "

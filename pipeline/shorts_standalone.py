@@ -232,6 +232,9 @@ def run_standalone_short(
             scene_ranges = None
 
         # ── Render ─────────────────────────────────────────
+        from pipeline.shorts_media import has_sufficient_visual_assets
+        if not has_sufficient_visual_assets(assets, 0.5):
+            raise RuntimeError("degraded render rejected: insufficient visual assets")
         render_path = output_dir / "render.mp4"
         render_short_hybrid(
             asset_items=assets,

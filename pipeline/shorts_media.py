@@ -1172,6 +1172,8 @@ def render_short_hybrid(
     """
     from config import settings
 
+    render_timeout = render_timeout_seconds(audio_duration, len(asset_items))
+
     # ── Audio duration ────────────────────────────────────────
     if audio_duration is None and audio_path.exists():
         dur_out = subprocess.run(
@@ -1212,28 +1214,16 @@ def render_short_hybrid(
     ]
     has_any_valid = any(asset_valid_flags)
 
-    # ── No renderable assets → solid colour background fallback ──
+    # ── No renderable assets is a hard rejection ─────────────────
     if not has_any_valid:
-        filter_str = _build_solid_bg_filter(bg_color_hex, srt_path)
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i",
-            f"color=c=0x{bg_color_hex}:s=1080x1920:d={audio_duration}:r=30",
-            "-i", str(audio_path) if audio_path.exists() else "-f", "lavfi",
-        ]
-        if not audio_path.exists():
-            cmd.extend(["-i", f"anullsrc=r=44100:cl=stereo:d={audio_duration}"])
-        cmd.extend([
-            "-filter_complex", filter_str,
-            "-map", "[v]", "-map", f"{'1' if audio_path.exists() else '2'}:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-pix_fmt", "yuv420p", "-r", "30",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest", "-movflags", "+faststart",
-            str(output_path),
-        ])
-        subprocess.run(cmd, capture_output=True, timeout=180)
-        return output_path
+        raise RuntimeError("degraded render rejected: no valid visual assets")
+
+
+def has_sufficient_visual_assets(asset_items, min_ratio: float = 0.5) -> bool:
+    """Reject solid-bg or mostly-filler renders before ffmpeg/upload."""
+    positions = len(asset_items or [])
+    valid = sum(1 for asset in (asset_items or []) if asset is not None)
+    return positions > 0 and valid > 0 and (valid / positions) >= float(min_ratio)
 
     # ── Hybrid render: mixed video + image scenes ─────────────
     n_assets = len(asset_items)  # total positions including None fillers
@@ -1379,22 +1369,24 @@ def render_short_hybrid(
     if progress_cb is not None:
         progress_cb(65, "render", "Renderizando short (ffmpeg xfade + subtitulos)...")
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if result.returncode != 0:
-        err = result.stderr[-600:] if result.stderr else "(no stderr)"
-        logger.error("FFmpeg hybrid render failed: %s", err)
-        # Fallback: solid background render
-        logger.warning("Falling back to solid-colour background render")
-        return render_slideshow_with_images(
-            image_paths=[],
-            audio_path=audio_path,
-            hook_text="",
-            output_path=output_path,
-            audio_duration=audio_duration,
-            bg_color_hex=bg_color_hex,
-            crossfade_dur=fade,
-            srt_path=srt_path,
-        )
+    last_error = ""
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=render_timeout
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_error = f"timeout after {render_timeout}s"
+            logger.warning("FFmpeg hybrid render timeout (attempt %d/2)", attempt + 1)
+            if attempt == 1:
+                raise RuntimeError(last_error) from exc
+            continue
+        if result.returncode == 0:
+            break
+        last_error = result.stderr[-600:] if result.stderr else "(no stderr)"
+        logger.warning("FFmpeg hybrid render failed (attempt %d/2): %s", attempt + 1, last_error)
+        if attempt == 1:
+            raise RuntimeError(f"ffmpeg failed: {last_error}")
 
     # ── v3: progress — render complete ──
     if progress_cb is not None:
@@ -1403,6 +1395,13 @@ def render_short_hybrid(
     logger.info("Hybrid short rendered: %s (%.1f MB)",
                 output_path, output_path.stat().st_size / 1024 / 1024)
     return output_path
+
+
+def render_timeout_seconds(audio_duration: float | None, asset_count: int) -> int:
+    """Return a bounded timeout scaled to the actual short render workload."""
+    duration = max(float(audio_duration or 20.0), 1.0)
+    assets = max(int(asset_count or 1), 1)
+    return min(900, max(180, int(120 + duration * 7 + assets * 12)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

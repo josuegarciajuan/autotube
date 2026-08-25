@@ -481,20 +481,8 @@ NADA MAS fuera del JSON."""
             )
             return output_path
         except Exception as e:
-            logger.error("Native Short hybrid render failed: %s", e)
-            # Fallback to solid bg
-            try:
-                render_short_hybrid(
-                    asset_items=[],
-                    audio_path=audio_path,
-                    output_path=output_path,
-                    audio_duration=audio_duration,
-                    bg_color_hex=bg_color,
-                )
-                return output_path
-            except Exception as e2:
-                logger.error("Native Short solid-bg render also failed: %s", e2)
-                return None
+            logger.error("Native Short hybrid render rejected: %s", e)
+            return None
 
     def _phase_upload_short(self, script: dict, video_path: Path) -> Optional[dict]:
         """Upload the short to YouTube."""
