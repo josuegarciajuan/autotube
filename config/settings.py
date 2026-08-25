@@ -151,7 +151,7 @@ VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
 
 # ── LLM Credit Monitoring ──────────────────────────────────────
 # How often to check DeepSeek balance / OpenAI quota errors (hours)
-LLM_CREDIT_CHECK_INTERVAL_HOURS = int(os.getenv("LLM_CREDIT_CHECK_INTERVAL_HOURS", "12"))
+LLM_CREDIT_CHECK_INTERVAL_HOURS = int(os.getenv("LLM_CREDIT_CHECK_INTERVAL_HOURS", "4"))
 # DeepSeek balance below this threshold triggers a "low" warning
 LLM_CREDIT_LOW_THRESHOLD_USD = float(os.getenv("LLM_CREDIT_LOW_THRESHOLD_USD", "2.00"))
 
