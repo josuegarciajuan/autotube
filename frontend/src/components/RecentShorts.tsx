@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { Clock, ExternalLink, Smartphone, Scissors, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
-import { formatDate } from '../lib/api'
+import { formatDate, formatDateTime } from '../lib/api'
 import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface RecentShort {
@@ -116,6 +116,12 @@ export default function RecentShorts({ shorts }: RecentShortsProps) {
                   <span className="text-[10px] text-gray-500 flex items-center gap-1 shrink-0">
                     <Clock size={10} />
                     {timeAgo(s.published_at)}
+                    {s.published_at && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <time dateTime={s.published_at}>{formatDateTime(s.published_at)}</time>
+                      </>
+                    )}
                   </span>
                   {statusBadge(s.status) && (
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium border flex items-center gap-1 shrink-0 ${statusBadge(s.status)!.cls}`}>
