@@ -57,6 +57,29 @@ SHORTS_MAX_DURATION_SEC = 58.0    # YouTube Shorts max = 60 s; leave 2 s buffer
 MIN_WORD_COUNT = 45               # minimum words for a coherent Short (raised from 35 for more visual variety)
 MAX_WORD_COUNT = 105              # hard cap for audio safety: 105 words × 0.50 s/word worst-case = 52.5 s < 58 s
 BLOCK_PAUSE_MS = 350              # silence between narrative blocks (human rhythm)
+TTS_SAFETY_MARGIN_SEC = 5.0
+
+
+def voice_aware_word_budget(
+    max_duration_sec: float,
+    rate: str | None = None,
+    block_count: int = 1,
+    safety_margin_sec: float = TTS_SAFETY_MARGIN_SEC,
+) -> int:
+    """Estimate a conservative word budget for the selected speaking rate.
+
+    The budget reserves both end padding and inter-block pauses; it is only a
+    pre-TTS gate. The hard duration check after synthesis remains authoritative.
+    """
+    import re
+
+    usable = max(float(max_duration_sec) - float(safety_margin_sec), 1.0)
+    match = re.search(r"([+-]?\d+(?:\.\d+)?)%", str(rate or "0%"))
+    rate_pct = float(match.group(1)) if match else 0.0
+    words_per_second = 2.15 * (1.0 + rate_pct / 100.0)
+    pauses = max(int(block_count) - 1, 0) * (BLOCK_PAUSE_MS / 1000.0)
+    budget = int(max(1, (usable - pauses) * words_per_second))
+    return min(MAX_WORD_COUNT, budget)
 
 
 def trim_blocks_to_word_budget(
