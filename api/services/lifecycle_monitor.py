@@ -17,6 +17,7 @@ Usage:
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -37,7 +38,22 @@ TASK_TIMEOUTS = {
     "redistribution": 3600,         # backfill espejo social
     "queue_consumer": 1200,         # consumidor de cola de jobs
     "health_monitor": 1200,         # este mismo health-check (90s)
+    "publish_coverage": 1200,        # cobertura de publicación (10 min)
 }
+
+_TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}
+
+
+def get_task_heartbeat_age(task_name: str) -> float | None:
+    """Return seconds since the last in-process heartbeat, if known."""
+    timestamp = _TASK_HEARTBEATS_MONOTONIC.get(task_name)
+    return None if timestamp is None else max(0.0, time.monotonic() - timestamp)
+
+
+def task_is_stale(task_name: str) -> bool:
+    """Return whether a known task heartbeat exceeded its configured timeout."""
+    age = get_task_heartbeat_age(task_name)
+    return age is not None and age > TASK_TIMEOUTS.get(task_name, float("inf"))
 
 # entity_id estable por task: hash() está randomizado entre procesos, así que
 # un mapeo literal garantiza dedup (entity_type+entity_id+alert_type) estable
@@ -250,6 +266,7 @@ def touch_task_heartbeat(task_name: str) -> None:
     if task_name not in TASK_TIMEOUTS:
         logger.debug("Unknown task heartbeat '%s' — ignored", task_name)
         return
+    _TASK_HEARTBEATS_MONOTONIC[task_name] = time.monotonic()
     try:
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
