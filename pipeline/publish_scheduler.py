@@ -1342,6 +1342,14 @@ def _recalc_clamped_target(
     return new_target
 
 
+def _counts_toward_normal_daily_cap(row: dict) -> bool:
+    """Marathons are separate from the daily cap for normal long-forms."""
+    try:
+        return not bool(row["is_marathon"])
+    except (KeyError, TypeError):
+        return True
+
+
 def repack_channel_publish_times(
     db,
     channel_id: int,
@@ -1453,7 +1461,9 @@ def repack_channel_publish_times(
         cursor_local += _td(days=1)
     cursor_utc = cursor_local.astimezone(_tz.utc)
 
-    # Tope diario (antiban, ago 2026): máx publicaciones por día natural local.
+    # Tope diario (antiban, ago 2026): máx publicaciones normales por día
+    # natural local. Los maratones tienen su propia cadencia y no consumen este
+    # presupuesto, aunque siguen respetando el espaciado del canal.
     # Fuente: perfil central de pacing (``max_longform_publish_day``). El perfil
     # GANA sobre config_json por canal — relajar los strikes = cambiar perfil.
     max_per_day = 1
@@ -1476,13 +1486,28 @@ def repack_channel_publish_times(
         old_target = str(row["target_public_at"]) if row["target_public_at"] else ""
         old_dt = _parse_target_public_at(old_target, tz_str) if old_target else None
 
-        # ── Tope diario: si el día local del cursor ya está lleno, avanzar al
-        # siguiente día con hueco (a la hora pico). Así el repack NUNCA vuelve a
-        # apilar N vídeos del mismo canal el mismo día aunque gap_hours sea
-        # pequeño (p. ej. repacks legacy con gap de 3h). ──
+        # ── Tope diario de normales: si el día local del cursor ya está lleno,
+        # avanzar al siguiente día con hueco (a la hora pico). ──
+        try:
+            is_marathon = bool(row["is_marathon"])
+        except (IndexError, KeyError):
+            # Keep compatibility with lightweight/test schemas created before
+            # the marathon flag existed; real schema has the column.
+            try:
+                marathon_row = db._connect().execute(
+                    "SELECT is_marathon FROM videos WHERE id = ?", (video_id,)
+                ).fetchone()
+                is_marathon = bool(marathon_row["is_marathon"]) if marathon_row else False
+            except Exception:
+                is_marathon = False
+        counts_toward_cap = _counts_toward_normal_daily_cap({"is_marathon": is_marathon})
         guard = 0
         cursor_local_now = cursor_utc.astimezone(tz)
-        while day_used.get(cursor_local_now.date(), 0) >= max_per_day and guard < 14:
+        while (
+            counts_toward_cap
+            and day_used.get(cursor_local_now.date(), 0) >= max_per_day
+            and guard < 14
+        ):
             cursor_local_now = cursor_local_now.replace(
                 hour=peak_hour, minute=0, second=0, microsecond=0,
             ) + _td(days=1)
@@ -1542,7 +1567,10 @@ def repack_channel_publish_times(
             "adjusted_upload_at": adjusted_upload_at,
             "preserved": preserved,
         })
-        day_used[slot.astimezone(tz).date()] = day_used.get(slot.astimezone(tz).date(), 0) + 1
+        if counts_toward_cap:
+            day_used[slot.astimezone(tz).date()] = (
+                day_used.get(slot.astimezone(tz).date(), 0) + 1
+            )
         cursor_utc = slot + _td(hours=gap_hours)
 
     logger.info(

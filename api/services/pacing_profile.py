@@ -88,6 +88,11 @@ DEFAULT_PROFILE = "strike"
 _STATE_KEY = "pacing_profile"
 _OVERRIDE_PREFIX = "pacing_"
 
+# Anti-spam guard that must remain active regardless of the selected profile.
+# It is persisted using the same central override mechanism as every other
+# pacing kill-switch, rather than being copied into channel configuration.
+_PERMANENT_OVERRIDES = {"max_longform_publish_day": 1}
+
 
 # ── DB lazy ────────────────────────────────────────────────────
 
@@ -132,6 +137,13 @@ def get_pacing(db=None) -> dict:
             raw = None
         if raw is not None and raw != "":
             resolved[key] = _coerce(key, raw)
+    for key, value in _PERMANENT_OVERRIDES.items():
+        resolved[key] = value
+        try:
+            if db.get_system_state(f"{_OVERRIDE_PREFIX}{key}") != str(value):
+                db.set_system_state(f"{_OVERRIDE_PREFIX}{key}", str(value))
+        except Exception:
+            pass
     return resolved
 
 

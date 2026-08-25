@@ -79,6 +79,31 @@ def _marathon_backlog_per_channel(db=None) -> int:
         return int(MARATHON_BACKLOG_PER_CHANNEL or 4)
 
 
+def _marathon_publish_target(slug: str, channel_id: int, cfg: dict, db=None) -> str | None:
+    """Return a future publishAt for a scheduled marathon.
+
+    Marathons have no planned_slot, so they must seed their own target before
+    the queued ``generate_and_upload`` worker reaches the upload phase.
+    """
+    if str(cfg.get("PUBLISH_MODE", "immediate")).lower() != "scheduled":
+        return None
+    from pipeline.publish_scheduler import ensure_future_target_public_at
+
+    target_hour = cfg.get("PUBLISH_TARGET_HOUR")
+    return ensure_future_target_public_at(
+        None,
+        slug=slug,
+        timezone_str=cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid"),
+        primary_keyword=cfg.get("SEO_PRIMARY_KEYWORD", ""),
+        secondary_keywords=cfg.get("SEO_SECONDARY_KEYWORDS", []),
+        target_hour=int(target_hour) if target_hour is not None else None,
+        jitter_min=int(cfg.get("PUBLISH_JITTER_MIN", 0) or 0),
+        warmup_min=int(cfg.get("PUBLISH_WARMUP_MIN", 60) or 60),
+        db=db,
+        channel_id=channel_id,
+    )
+
+
 def marathon_backlog_deep(db=None, active_channels: int | None = None) -> bool:
     """True si el backlog acumulado supera el umbral del perfil de pacing.
 
@@ -340,13 +365,17 @@ def check_and_dispatch_marathon(db) -> dict | None:
     # 6. Create video record (no planned_slot — marathon is outside the planning system)
     # Use PUBLISH_MODE from channel config (defaults to scheduled as in MARATHON_PUBLISH_MODE)
     marathon_publish_mode = cfg.get("PUBLISH_MODE", cfg.get("MARATHON_PUBLISH_MODE", "scheduled"))
+    marathon_target_public_at = _marathon_publish_target(
+        slug, channel_id, cfg, db=db
+    )
     with db._connect() as conn:
         cursor = conn.execute(
             """INSERT INTO videos 
                (canal, channel_id, video_path, status, progress, publish_mode,
-                is_marathon, marathon_config, created_at)
-               VALUES (?, ?, '', 'generating', 0, ?, 1, ?, CURRENT_TIMESTAMP)""",
-            (slug, channel_id, marathon_publish_mode, json.dumps(marathon_cfg)),
+                target_public_at, is_marathon, marathon_config, created_at)
+               VALUES (?, ?, '', 'generating', 0, ?, ?, 1, ?, CURRENT_TIMESTAMP)""",
+            (slug, channel_id, marathon_publish_mode, marathon_target_public_at,
+             json.dumps(marathon_cfg)),
         )
         conn.commit()
         video_id = cursor.lastrowid
