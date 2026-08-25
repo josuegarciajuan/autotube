@@ -617,7 +617,7 @@ universo visual, paleta de colores y atmosfera.
 
 REGLAS:
 
-    1. ESCENIFICACION CINEMATOGRAFICA OBSERVABLE, NO ILUSTRACION LITERAL NI
+    1. ESCENIFICACION CINEMATOGRAFICA OBSERVABLE (cinematic staging; not a literal illustration), NO ILUSTRACION LITERAL NI
        METAFORA DESCONECTADA. Cada concepto debe partir del fragmento narrado
        de su escena final y proponer una puesta en escena que una camara pueda
        registrar: sujeto, accion, objetos, espacio, composicion, luz y
