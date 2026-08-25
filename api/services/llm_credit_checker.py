@@ -62,32 +62,56 @@ def _upsert_credit_status(db, provider: str, status: str, balance_usd=None,
 # DeepSeek Balance Check
 # ═══════════════════════════════════════════════════════════════
 
+# Conversión aproximada a USD para saldos no-USD (DeepSeek devuelve la
+# moneda del saldo; si se recarga en EUR y aún hay USD, usamos el USD exacto).
+_DEEPSEEK_USD_RATE = {"CNY": 0.14, "EUR": 1.09}
+
+
 def _parse_deepseek_balance(data: dict) -> dict:
-    """Parse DeepSeek /user/balance response into a normalized dict."""
+    """Parse DeepSeek /user/balance response into a normalized dict.
+
+    DeepSeek devuelve el saldo por moneda (``balance_infos``). Preferimos el
+    saldo USD exacto; si no hay USD, usamos la moneda con mayor equivalencia
+    USD (EUR, CNY) para que una recarga en EUR nunca se lea como saldo 0.
+    """
     is_available = data.get("is_available", False)
     balance_infos = data.get("balance_infos", [])
     usd_balance = 0.0
-    cny_balance = None
     currency = "USD"
+    cny_balance = None
+    eur_balance = None
 
+    # 1) Preferir saldo USD exacto si existe
     for bi in balance_infos:
-        cur = bi.get("currency", "")
-        total = float(bi.get("total_balance", "0"))
-        if cur == "USD":
-            usd_balance = total
+        if bi.get("currency", "").upper() == "USD":
+            usd_balance = float(bi.get("total_balance", "0"))
             currency = "USD"
-        elif cur == "CNY":
+            break
+
+    # 2) Registrar las demás monedas; sin USD, usar la mayor equivalente a USD
+    best = 0.0
+    for bi in balance_infos:
+        cur = bi.get("currency", "").upper()
+        total = float(bi.get("total_balance", "0"))
+        if cur == "CNY":
             cny_balance = total
-            if usd_balance == 0.0:
-                # Rough approximation if only CNY available
-                usd_balance = round(total * 0.14, 2)
-                currency = "CNY"
+        elif cur == "EUR":
+            eur_balance = total
+        if cur in _DEEPSEEK_USD_RATE and cur != "USD" and usd_balance == 0.0:
+            equiv = round(total * _DEEPSEEK_USD_RATE[cur], 2)
+            if equiv > best:
+                best = equiv
+                currency = cur
+
+    if usd_balance == 0.0 and best > 0.0:
+        usd_balance = best
 
     return {
         "is_available": is_available,
         "balance_usd": usd_balance,
         "currency": currency,
         "cny_balance": cny_balance,
+        "eur_balance": eur_balance,
     }
 
 
