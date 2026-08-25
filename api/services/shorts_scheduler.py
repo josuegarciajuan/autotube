@@ -1604,6 +1604,7 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     # ── Quota-aware (ago 2026): cupo de shorts nativos por proyecto GCP ──
     # El reparto del presupuesto automático (6 subidas/día/proyecto) prioriza
     # longs y clips; los nativos se recortan si el proyecto no tiene cupo.
+    allocation_ok = False
     native_caps: dict[int, int] = {}
     try:
         from api.services.planning_service import compute_daily_upload_allocation
@@ -1614,8 +1615,15 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
                     if ch.get("slug") == slug:
                         native_caps[int(ch["id"])] = int(caps.get("native", 0))
                         break
+        allocation_ok = True
     except Exception as exc:
-        logger.debug("Shorts planning: quota allocation skipped (%s)", exc)
+        # Fail-closed conservador: si no podemos verificar el cupo del proyecto,
+        # NO asumimos techo ilimitado (evita sobre-planificar nativos por encima
+        # del tope antiban). Cada canal queda limitado a un mínimo seguro en el loop.
+        logger.warning(
+            "Shorts planning: quota allocation unavailable (%s) — nativos "
+            "limitados conservadoramente a 1/canal", exc,
+        )
 
     all_slots = []
     global_pos = 0
@@ -1657,6 +1665,14 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
                     slug, date_str, native_count, cap,
                 )
                 native_count = cap
+        elif not allocation_ok and native_count > 1:
+            # Fail-closed: sin información de cupo del proyecto, no asumimos
+            # techo ilimitado — limitamos los nativos a un mínimo seguro.
+            logger.warning(
+                "[%s] %s: allocation de cupo no disponible — nativos %d → 1 (conservador)",
+                slug, date_str, native_count,
+            )
+            native_count = 1
 
         if native_count == 0 and clips_per_long == 0:
             continue

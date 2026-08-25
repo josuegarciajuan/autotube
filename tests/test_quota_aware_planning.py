@@ -346,6 +346,25 @@ class TestShortsCap:
         slots = shorts_scheduler.compute_daily_shorts_slots(_day(2), db=quota_db)
         assert slots == []
 
+    def test_native_cap_fail_closed_when_allocation_raises(self, quota_env, quota_db, monkeypatch):
+        """Si la asignación de cupo falla, no se asume techo ilimitado: los nativos
+        quedan limitados a 1/canal (mínimo seguro) en vez de sobre-planificar."""
+        from api.services import shorts_scheduler
+        from api.services import planning_service
+        from api.services import gradual_resume
+        # Reparto por canal alto (3) pero la asignación de cupo falla.
+        monkeypatch.setattr(planning_service, "compute_daily_upload_allocation",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(gradual_resume, "effective_native_shorts_per_day",
+                            lambda *a, **kw: 3)
+        slots = shorts_scheduler.compute_daily_shorts_slots(_day(2), db=quota_db)
+        per_channel = {}
+        for s in slots:
+            per_channel[s["channel_id"]] = per_channel.get(s["channel_id"], 0) + 1
+        # Fail-closed: cada canal con nativos no puede pasar de 1.
+        for ch_id in per_channel:
+            assert per_channel[ch_id] <= 1, f"ch{ch_id}: natives {per_channel[ch_id]} > fallback 1"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 5. Cupo restante de hoy descuenta reservas

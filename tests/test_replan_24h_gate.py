@@ -257,15 +257,18 @@ class TestMarathonCooldown:
         """Marathon de hace > MARATHON_COOLDOWN_HOURS → canal elegible de nuevo."""
         from api.services.marathon_service import select_marathon_channel
 
-        # Aislar: solo canal2 tiene marathon habilitado (los demás, no)
+        # Aislar: solo el canal 3 (id 3) tiene marathon habilitado (los demás, no).
+        # Fijamos MARATHON_COOLDOWN_HOURS=24 explícito para que el record de 25h
+        # (> 24h) quede fuera de cooldown, sin depender del default del módulo.
         with db._connect() as conn:
             for ch_id, _n, _s, _p, _a in CHANNELS:
-                if ch_id != 3:
-                    conn.execute(
-                        "UPDATE channels SET config_json = ? WHERE id = ?",
-                        (json.dumps({"videos_per_day": 1, "planning_enabled": True,
-                                     "MARATHON_ENABLED": False}), ch_id),
-                    )
+                cfg = {"videos_per_day": 1, "planning_enabled": True}
+                cfg["MARATHON_ENABLED"] = (ch_id == 3)
+                cfg["MARATHON_COOLDOWN_HOURS"] = 24
+                conn.execute(
+                    "UPDATE channels SET config_json = ? WHERE id = ?",
+                    (json.dumps(cfg), ch_id),
+                )
             conn.commit()
 
         # Forjar un record viejo (hace 25h > 24h de cooldown)

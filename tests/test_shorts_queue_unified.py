@@ -296,8 +296,9 @@ def test_valve_cooldown_blocks_after_recent_upload(patch_database_path, fake_upl
 
 def test_valve_cooldown_passes_after_gap(patch_database_path, fake_uploader):
     db, path = patch_database_path
-    # Última subida hace 4h (> 180 min) → la válvula sube.
-    _set_published(db, 1, 1, hours_ago=4)
+    # Última subida hace 26h: pasa el cooldown (> 180 min) Y es de ayer, por lo que
+    # NO consume el tope duro de 1 subida/día → la válvula puede subir hoy.
+    _set_published(db, 1, 1, hours_ago=26)
     _seed_queued(db, 1, 1)
     uploaded = ss._upload_queued_shorts(db, max_per_pass=10)
     assert uploaded == 1
