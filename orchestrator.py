@@ -199,10 +199,17 @@ class PipelineOrchestrator:
 
         try:
             n_scenes = len(scene_ranges) if scene_ranges else len(bloques)
-            # Build script text from all blocks
-            script_text = "\n\n".join(
-                b.get("texto", "") for b in bloques if b.get("texto")
-            )
+            # The final timestamp-derived ranges are the bible's scene units.
+            if scene_ranges:
+                script_text = "\n\n".join(
+                    f"ESCENA_FINAL {i} [{r.get('start', 0):.3f}-{r.get('end', 0):.3f}s]: "
+                    f"{r.get('fragment_text') or r.get('texto', '')}"
+                    for i, r in enumerate(scene_ranges)
+                )
+            else:
+                script_text = "\n\n".join(
+                    b.get("texto", "") for b in bloques if b.get("texto")
+                )
             if not script_text or n_scenes == 0:
                 logger.warning("[%s] Visual bible: empty script — skipping", self.canal)
                 return

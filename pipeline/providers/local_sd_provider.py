@@ -42,7 +42,7 @@ DEFAULT_STEPS = 20            # CPU-optimized (fewer steps = faster, still decen
 # el AIImageUpscaler (ESPCN_x2 + unsharp mask) hasta la resolución mínima
 # objetivo.
 DEFAULT_WIDTH = 768
-DEFAULT_HEIGHT = 768
+DEFAULT_HEIGHT = 432
 REQUEST_TIMEOUT = 600         # 10 minutes for CPU generation
 
 
@@ -53,13 +53,16 @@ class LocalSDProvider:
     memory usage when this provider is never called.
     """
 
+    DEFAULT_WIDTH = DEFAULT_WIDTH
+    DEFAULT_HEIGHT = DEFAULT_HEIGHT
+
     METADATA = AIProviderMetadata(
         provider="local_sd",
         display_name="Stable Diffusion 1.5 (Local CPU)",
         auth_required=False,
         model=MODEL_ID,
-        default_resolution=(768, 768),
-        max_resolution=(768, 768),
+        default_resolution=(768, 432),
+        max_resolution=(768, 432),
         avg_latency_seconds=180.0,    # ~3 min on this Xeon
         rate_limit_per_minute=2,      # 2 workers in parallel
         rate_limit_per_day=None,      # unlimited

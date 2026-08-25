@@ -125,3 +125,25 @@ class TestSceneDurations:
         assert all(scene["duration"] <= 7.0 for scene in result if scene["media_tipo"] == "imagen")
         assert all(scene["duration"] <= 10.0 for scene in result if scene["media_tipo"] == "video")
         assert len({scene["media_request_id"] for scene in result}) == len(result)
+
+    def test_long_scene_splits_at_sentence_boundaries_and_preserves_fragment_text(self):
+        editor = self._make_editor()
+        scene = self._make_scene(0, 12, asset_idx=2)
+        scene["texto"] = "Primera idea completa. Segunda idea completa. Tercera idea completa."
+        scene["word_timestamps"] = [
+            {"word": word, "start": i * 1.5, "end": (i + 1) * 1.5}
+            for i, word in enumerate(scene["texto"].split())
+        ]
+        editor.canal = {"IMAGE_SCENE_DURATION_MIN": 3.0, "IMAGE_SCENE_DURATION_MAX": 5.0}
+
+        result = editor._enforce_scene_durations([scene])
+
+        assert [part["texto"] for part in result] == [
+            "Primera idea completa.",
+            "Segunda idea completa.",
+            "Tercera idea completa.",
+        ]
+        assert [(part["start"], part["end"]) for part in result] == [
+            (0.0, 4.5), (4.5, 9.0), (9.0, 12.0)
+        ]
+        assert all(part["word_timestamps"] for part in result)

@@ -261,6 +261,7 @@ MEDIA_STRATEGY = {
     # steps, provocando timeouts de la fase media y OOM por RAM sostenida.
     # 8 steps ≈ 4-6 min, calidad aceptable para b-roll documental.
     "ai_local_sd_steps": 8,
+    "AI_IMAGE_PROMPT_EXCEPTIONS": {"positive": [], "negative": []},
 
     # ── Video Scene Control (Phase 2) ──────────────────────────
     # Minimum % of scenes that should try stock video.

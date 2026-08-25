@@ -98,3 +98,9 @@ def test_actual_image_fallback_rejects_a_duplicate_replacement():
     )
 
     assert assets[1]["type"] == "placeholder"
+
+
+def test_local_sd_defaults_to_native_widescreen_resolution():
+    from pipeline.providers.local_sd_provider import LocalSDProvider
+
+    assert (LocalSDProvider.DEFAULT_WIDTH, LocalSDProvider.DEFAULT_HEIGHT) == (768, 432)
