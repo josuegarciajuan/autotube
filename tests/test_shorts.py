@@ -84,7 +84,7 @@ class TestShortsScheduler:
     """Tests for ShortsScheduler: schedule, CRUD, stats."""
 
     def test_schedule_clips_basic(self, scheduler):
-        """Scheduling clips creates DB entries with correct staggered dates."""
+        """Clip shorts are disabled globally → schedule_clips returns no IDs."""
         clips = [
             {"start_time": 10, "end_time": 60, "hook_title": "Clip 1", "hook_text": "Hook 1", "ranking": 1},
             {"start_time": 70, "end_time": 120, "hook_title": "Clip 2", "hook_text": "Hook 2", "ranking": 2},
@@ -93,32 +93,16 @@ class TestShortsScheduler:
 
         ids = scheduler.schedule_clips(1, "test_channel", clips)
 
-        assert len(ids) == 3
-        assert all(isinstance(i, int) and i > 0 for i in ids)
+        assert ids == []
 
     def test_schedule_clips_staggered_dates(self, scheduler):
-        """Clip scheduling respects the offset_days stagger pattern."""
+        """Clip shorts disabled globally → no staggered dates are created."""
         clips = [{"start_time": 10, "end_time": 60, "hook_title": f"Clip {i}", "hook_text": f"Hook {i}", "ranking": i} for i in range(1, 6)]
 
         ids = scheduler.schedule_clips(1, "test_channel", clips)
 
-        today = date.today()
-        shorts = scheduler.get_shorts()
-        dates = []
-
-        for s in shorts:
-            if s["id"] in ids and s["scheduled_date"]:
-                dates.append(s["scheduled_date"])
-
-        # With DEFAULT_CLIP_SCHEDULE: +1d, +2d, +3d → 3 batches of 1 each
-        assert len(dates) == 3  # Only 3 scheduled (max 5 clips but schedule has 3 slots)
-
-        expected_dates = [
-            (today + timedelta(days=b["offset_days"])).isoformat()
-            for b in DEFAULT_CLIP_SCHEDULE
-        ]
-        for d in expected_dates:
-            assert d in dates
+        assert ids == []
+        assert scheduler.get_shorts() == []
 
     def test_schedule_clips_empty(self, scheduler):
         """Empty clips list returns no IDs."""
@@ -505,33 +489,11 @@ class TestShortsIntegration:
     """End-to-end tests using the scheduler + DB together."""
 
     def test_full_lifecycle(self, scheduler):
-        """Complete short lifecycle: schedule → render → publish."""
+        """Clip shorts are disabled globally → lifecycle cannot start at scheduling."""
         # Schedule
         clips = [{"start_time": 5, "end_time": 55, "hook_title": "Lifecycle Test", "hook_text": "Testing lifecycle", "ranking": 1}]
         ids = scheduler.schedule_clips(1, "test_channel", clips)
-        assert len(ids) == 1
-        short_id = ids[0]
-
-        # Verify initial state
-        s = scheduler.get_short(short_id)
-        assert s["status"] == "pending"
-        assert s["scheduled_date"] is not None
-
-        # Render
-        scheduler.mark_rendering(short_id)
-        assert scheduler.get_short(short_id)["status"] == "rendering"
-
-        scheduler.mark_ready(short_id, "/tmp/test_lifecycle.mp4")
-        s = scheduler.get_short(short_id)
-        assert s["status"] == "ready"
-        assert s["file_path"] == "/tmp/test_lifecycle.mp4"
-
-        # Publish
-        scheduler.mark_published(short_id, "yt_lifecycle", "https://youtube.com/watch?v=yt_lifecycle", "/tmp/test_lifecycle.mp4")
-        s = scheduler.get_short(short_id)
-        assert s["status"] == "published"
-        assert s["youtube_id"] == "yt_lifecycle"
-        assert s["published_at"] is not None
+        assert ids == []
 
     def test_multiple_clips_same_video(self, scheduler):
         """Multiple clips from same video get sequential rankings."""
