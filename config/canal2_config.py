@@ -354,6 +354,8 @@ KOKORO_PAUSE_BETWEEN_BLOCKS = 0.9
 # MARATHON CONFIG
 # ═══════════════════════════════════════════════════════════════════
 
+MARATHON_ENABLED = True
+MARATHON_COOLDOWN_HOURS = 24
 MARATHON_NARRATIVE_FORMAT = "miracles_and_coincidences"
 
 MARATHON_TITLE_FORMULAS = [

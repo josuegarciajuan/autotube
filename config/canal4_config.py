@@ -484,6 +484,8 @@ NICHE_KEYWORDS_ENG = [
     "deadliest expeditions", "survival against all odds", "mysterious disappearances documentary",
 ]
 
+MARATHON_ENABLED = True
+MARATHON_COOLDOWN_HOURS = 24
 MARATHON_NARRATIVE_FORMAT = "tragic_expeditions"
 
 MARATHON_TITLE_FORMULAS = [

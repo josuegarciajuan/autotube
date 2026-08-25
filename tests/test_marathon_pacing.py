@@ -47,3 +47,40 @@ def test_backlog_threshold_follows_profile(tmp_path):
 def test_backlog_deep_with_no_channels_is_false(tmp_path):
     db = _db(tmp_path)
     assert ms.marathon_backlog_deep(db, active_channels=0) is False
+
+
+def test_channel_configs_enable_marathons_only_for_approved_channels(monkeypatch):
+    from config import config_bridge
+
+    monkeypatch.setattr(config_bridge, "_load_db_config", lambda slug: None)
+    config_bridge._config_cache.clear()
+
+    assert config_bridge.get_channel_config("canal2", force_reload=True).MARATHON_ENABLED is True
+    assert config_bridge.get_channel_config("canal3", force_reload=True).MARATHON_ENABLED is False
+    assert config_bridge.get_channel_config("canal4", force_reload=True).MARATHON_ENABLED is True
+    assert config_bridge.get_channel_config("canal5", force_reload=True).MARATHON_ENABLED is True
+
+
+def test_longform_cap_is_persisted_as_central_safety_override(tmp_path):
+    from api.services import pacing_profile
+
+    db = _db(tmp_path)
+    assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 1
+    assert db.get_system_state("pacing_max_longform_publish_day") == "1"
+
+
+def test_scheduled_marathon_gets_a_publish_target():
+    target = ms._marathon_publish_target(
+        "canal4",
+        4,
+        {"PUBLISH_MODE": "scheduled", "PUBLISH_TIMEZONE": "Europe/Madrid"},
+        db=None,
+    )
+    assert target
+
+
+def test_marathons_do_not_consume_normal_daily_publish_cap():
+    from pipeline.publish_scheduler import _counts_toward_normal_daily_cap
+
+    assert _counts_toward_normal_daily_cap({"is_marathon": 0}) is True
+    assert _counts_toward_normal_daily_cap({"is_marathon": 1}) is False

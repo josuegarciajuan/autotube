@@ -482,6 +482,8 @@ NICHE_KEYWORDS_ENG = [
     "undiagnosed diseases documentary", "medical documentary rare cases",
 ]
 
+MARATHON_ENABLED = True
+MARATHON_COOLDOWN_HOURS = 24
 MARATHON_NARRATIVE_FORMAT = "top_cases"
 
 MARATHON_TITLE_FORMULAS = [
