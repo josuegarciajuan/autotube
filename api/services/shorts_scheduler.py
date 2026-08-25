@@ -842,10 +842,21 @@ def _pacing_int(key: str, default: int) -> int:
 
 
 def _hard_daily_cap(channel_id: int | None = None, db=None) -> int:
-    """Cap diario por canal, con entitlement específico de fase post-strike."""
+    """Cap diario por canal, con la política explícita como fuente exacta.
+
+    Precedencia: política explícita (valor EXACTO, sin diluir con el perfil
+    global) > entitlement de fase post-strike > perfil global.
+    """
     base = _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
     if channel_id is None:
         return base
+    try:
+        from api.services.gradual_resume import get_explicit_delivery_policy
+        policy = get_explicit_delivery_policy(channel_id, db)
+        if policy is not None:
+            return policy["native_shorts_per_day"]
+    except Exception:
+        pass
     try:
         from api.services.gradual_resume import effective_native_shorts_per_day
         return max(base, effective_native_shorts_per_day(channel_id, db))
@@ -2100,6 +2111,17 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
             sc = {}
         if not sc.get("shorts_enabled", True):
             continue
+        # Política explícita de entrega: un canal con cupo nativo 0 no debe
+        # acumular más shorts en cola (p. ej. canal3 en strike, 0/día).
+        try:
+            from api.services.gradual_resume import get_explicit_delivery_policy
+            _pol = get_explicit_delivery_policy(cid, db)
+            if _pol is not None and (
+                not _pol["shorts_enabled"] or _pol["native_shorts_per_day"] <= 0
+            ):
+                continue
+        except Exception:
+            pass
         # Canales spam-bloqueados ya rellenan su cola por su propia ruta
         # (generate_only durante el bloqueo) — no duplicar aquí.
         if _channel_shorts_spam_blocked(cid, db):
@@ -4606,6 +4628,16 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
         slug = ch.get("slug", "")
         if not cid:
             continue
+        # ── Política explícita: un canal con shorts 0/día no sube nada ──
+        try:
+            from api.services.gradual_resume import get_explicit_delivery_policy
+            _pol = get_explicit_delivery_policy(cid, db)
+            if _pol is not None and (
+                not _pol["shorts_enabled"] or _pol["native_shorts_per_day"] <= 0
+            ):
+                continue
+        except Exception:
+            pass
         # ── Gate robusto: no subir NADA durante el ban (bloqueo + colchón) ──
         if _channel_shorts_spam_blocked(cid, db):
             continue

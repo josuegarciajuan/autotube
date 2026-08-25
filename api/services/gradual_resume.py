@@ -37,6 +37,40 @@ VIDEOS_PER_DAY_MAX = 1     # techo long-form
 
 _PLAN_KEY = "resume_plan_{channel_id}"
 _PHASE_KEY = "resume_phase_{channel_id}"
+_POLICY_KEY = "channel_delivery_policy_{channel_id}"
+
+
+def get_explicit_delivery_policy(channel_id: int, db) -> dict | None:
+    """Política explícita de entrega por canal (aprobada por el operador).
+
+    Formato:
+        {"mode": "explicit", "longs_per_day": 1, "native_shorts_per_day": 2,
+         "shorts_enabled": true, "clips_enabled": false}
+
+    Es la fuente autoritativa: gana sobre las fases automáticas derivadas de
+    fechas (gradual_resume). Devuelve None si no hay política explícita.
+    """
+    try:
+        raw = db.get_system_state(_POLICY_KEY.format(channel_id=channel_id))
+        if not raw:
+            return None
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(data, dict) or data.get("mode") != "explicit":
+            return None
+        return {
+            "mode": "explicit",
+            "longs_per_day": max(0, int(data.get("longs_per_day", 1) or 0)),
+            "native_shorts_per_day": max(0, int(data.get("native_shorts_per_day", 1) or 0)),
+            "shorts_enabled": bool(data.get("shorts_enabled", True)),
+            "clips_enabled": bool(data.get("clips_enabled", False)),
+        }
+    except Exception:
+        return None
+
+
+def effective_delivery_policy(channel_id: int, db) -> dict | None:
+    """Política efectiva de entrega: la explícita si existe, si no None."""
+    return get_explicit_delivery_policy(channel_id, db)
 
 
 def _iso_utc(ts: float) -> str:
@@ -146,7 +180,13 @@ def _phase_for(entry: dict, today: date) -> int:
 
 
 def effective_native_shorts_per_day(channel_id: int, db, today: date | None = None) -> int:
-    """Return the approved native-short cap for one channel's resume phase."""
+    """Cap de shorts nativos/día aprobado para un canal.
+
+    Precedencia: política explícita > fase automática de reanudación.
+    """
+    policy = get_explicit_delivery_policy(channel_id, db)
+    if policy is not None:
+        return policy["native_shorts_per_day"]
     today = today or datetime.now(timezone.utc).date()
     try:
         raw = db.get_system_state(_PLAN_KEY.format(channel_id=channel_id))
@@ -384,6 +424,39 @@ def spread_pending_publishes(
     return moved
 
 
+def _apply_explicit_policy(db, cid: int, slug: str, policy: dict, dry_run: bool = False) -> str:
+    """Materializa la política explícita en las configs de planning y shorts.
+
+    Idempotente. Devuelve la acción registrada (para el informe del endpoint).
+    """
+    longs = policy["longs_per_day"]
+    natives = policy["native_shorts_per_day"]
+    shorts_on = policy["shorts_enabled"]
+    action = (f"explicit: vpd={longs} gen={longs} alt=None "
+              f"shorts_native={natives} shorts_on={int(shorts_on)} clips=0")
+    if dry_run:
+        return "DRY " + action
+    db.update_channel_planning_config(
+        cid,
+        videos_per_day=longs,
+        longform_generation_per_day=longs,
+        alternate_pattern=None,
+        alternate_offset=0,
+        videos_day_boost_weight=0.0,
+    )
+    db.update_shorts_planning_config(
+        cid,
+        {
+            "shorts_enabled": shorts_on,
+            "shorts_native_per_day": natives,
+            "shorts_clip_per_day": 0,
+            "shorts_clips_per_long": 0,
+        },
+    )
+    logger.warning("⚠️ Gradual resume [%s]: política explícita aplicada (%s)", slug, action)
+    return action
+
+
 def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> dict:
     """Aplica la fase vigente de cada canal (config de planning + shorts).
 
@@ -411,6 +484,17 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
         if not ch:
             continue
         slug = ch.get("slug", "")
+
+        # ── Política explícita (aprobada por el operador): gana sobre fases ──
+        # Los canales con política explícita se materializan y se saltan las
+        # fases derivadas de fechas (la rampa automática queda inerte para ellos).
+        policy = get_explicit_delivery_policy(cid, db)
+        if policy is not None:
+            _action = _apply_explicit_policy(db, cid, slug, policy, dry_run=dry_run)
+            applied.append({"slug": slug, "phase": None, "action": _action})
+            changed = True
+            continue
+
         phase = _phase_for(entry, today)
         if phase == 0:
             applied.append({"slug": slug, "phase": 0, "action": "skip (bloqueado/no iniciado)"})
