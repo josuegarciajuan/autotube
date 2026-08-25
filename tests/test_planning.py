@@ -82,8 +82,12 @@ def seeded_db(test_db_path):
         (3, "Expediciones sin retorno", "canal4", json.dumps({"videos_per_day": 1, "planning_enabled": True})),
     ]
     for ch_id, name, slug, cfg in channels:
+        # INSERT OR REPLACE: el fixture debe ser idempotente aunque otro test
+        # haya sembrado canales con los mismos ids (evita UNIQUE constraint
+        # por contaminación de estado global entre archivos de test).
         conn.execute(
-            "INSERT INTO channels (id, name, slug, config_json) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO channels (id, name, slug, config_json) "
+            "VALUES (?, ?, ?, ?)",
             (ch_id, name, slug, cfg),
         )
     conn.commit()
