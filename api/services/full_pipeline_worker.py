@@ -994,7 +994,10 @@ def run_job(
                 script = orch.phase_generate_script()
             
             if not script:
-                error_msg = "No se pudo generar el guion (sin contenido disponible)"
+                error_msg = (
+                    "No se pudo generar el guion (sin contenido disponible; "
+                    "fuentes vacías o candidatos rechazados por seguridad)"
+                )
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="script",

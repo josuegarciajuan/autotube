@@ -1557,7 +1557,8 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             
             if not script:
                 await _broadcast_progress(job_id, 20, "script",
-                    "Error: No se pudo generar el guion (sin contenido disponible)",
+                    "Error: No se pudo generar el guion (sin contenido disponible; "
+                    "fuentes vacías o candidatos rechazados por seguridad)",
                     "failed", video_id)
                 db.update_video(video_id, status="error", progress_phase="script",
                                 timing_data=orch.collect_timing_json())

@@ -576,7 +576,11 @@ class PipelineOrchestrator:
                         self.db.mark_content_used(content_item.get("id"))
                     except Exception as _mcu2:
                         logger.warning(f"[{self.canal}] mark_content_used failed: {_mcu2}")
-                    return None
+                    # A safe source may still become unsafe after the LLM
+                    # reframes it. Consume that candidate and continue with
+                    # the next source instead of turning one rejection into
+                    # channel-wide starvation.
+                    return self.phase_generate_script()
             except Exception as _pc_exc:
                 logger.warning(f"[{self.canal}] Post-guion safety check error (fail-open): {_pc_exc}")
 
