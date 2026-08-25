@@ -25,6 +25,22 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
+# Clip shorts are globally disabled during anti-spam remediation. This is a
+# code-level gate, so stale rows or per-channel config cannot re-enable them.
+CLIP_SHORTS_ENABLED = False
+ALLOWED_SHORT_TYPES = frozenset(("native", "standalone"))
+
+
+def short_type_allowed(short_type: str) -> bool:
+    """Return whether a short type may be generated or uploaded."""
+    return CLIP_SHORTS_ENABLED or short_type in ALLOWED_SHORT_TYPES
+
+
+def configured_clip_count(config_row, default: int = 3) -> int:
+    """Read a clip count without treating an explicit zero as missing."""
+    value = config_row.get("shorts_clips_per_long") if config_row else None
+    return default if value is None else int(value)
+
 
 def _alert_shorts_dispatch_exhausted(detail: str, max_retries: int = 3) -> None:
     """Alerta (deduplicada) cuando el dispatcher de shorts se rinde.
@@ -3009,6 +3025,25 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
     from pathlib import Path
     from config.settings import DATABASE_PATH
 
+    if not short_type_allowed(short_type):
+        logger.warning(
+            "Shorts slot #%d: type=%s is disabled — cancelling without generation/upload",
+            slot_id, short_type,
+        )
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+        conn.execute(
+            "UPDATE shorts_planned_slots SET status='cancelled', "
+            "error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (f"short type disabled: {short_type}", slot_id),
+        )
+        conn.execute(
+            "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id=?",
+            (f"short type disabled: {short_type}", job_id),
+        )
+        conn.commit()
+        conn.close()
+        return
+
     try:
         if short_type == "native":
             short_id = await asyncio.to_thread(
@@ -4258,6 +4293,22 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     short_id = int(short_record["id"])
     channel_id = int(short_record["channel_id"])
     short_type = short_record.get("type", "native")
+    if not short_type_allowed(short_type):
+        logger.warning(
+            "Queued short #%d: type=%s is disabled — refusing upload",
+            short_id, short_type,
+        )
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE shorts SET status='cancelled', "
+                    "error_message=? WHERE id=?",
+                    (f"short type disabled: {short_type}", short_id),
+                )
+                conn.commit()
+        except Exception:
+            pass
+        return False
     ch = db.get_channel(channel_id)
     if not ch:
         logger.error("Queued short #%d: canal %d no encontrado", short_id, channel_id)
@@ -4566,6 +4617,13 @@ def _dispatch_clip_short(channel_id: int, channel_slug: str,
 
     Returns short_id or None on failure.
     """
+    if not CLIP_SHORTS_ENABLED:
+        logger.info(
+            "Clip generation disabled globally: channel=%s source_video=%s",
+            channel_slug, source_video_id,
+        )
+        return None
+
     import sqlite3
     import json as _json
     import subprocess
@@ -5147,6 +5205,10 @@ def pre_render_clip_shorts_for_video(
 
     Returns list of short_ids created, or empty list on failure.
     """
+    if not CLIP_SHORTS_ENABLED:
+        logger.info("Clip pre-render disabled globally: video #%d", video_id)
+        return []
+
     import sqlite3
     import json as _json
     import time
@@ -5197,8 +5259,8 @@ def pre_render_clip_shorts_for_video(
                 "SELECT shorts_clips_per_long FROM shorts_planning_config WHERE channel_id = ?",
                 (channel_id,),
             ).fetchone()
-            if sc_row and sc_row["shorts_clips_per_long"]:
-                max_clips = int(sc_row["shorts_clips_per_long"])
+            if sc_row:
+                max_clips = configured_clip_count(dict(sc_row), default=max_clips)
         except Exception:
             pass
 

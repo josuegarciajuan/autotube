@@ -23,6 +23,8 @@ DEFAULT_CLIP_SCHEDULE = [
     {"offset_days": 3, "count": 1},
 ]
 DEFAULT_MAX_CLIPS_PER_VIDEO = 5
+# Kept as a hard gate for this legacy scheduler as well as the API scheduler.
+CLIP_SHORTS_ENABLED = False
 
 # Default native shorts schedule
 DEFAULT_NATIVE_SCHEDULE = [
@@ -60,6 +62,9 @@ class ShortsScheduler:
         Returns:
             List of created shorts DB IDs.
         """
+        if not CLIP_SHORTS_ENABLED:
+            logger.info("Clip scheduling disabled globally: video #%d", video_id)
+            return []
         if not clips:
             logger.info("No clips to schedule for video #%d", video_id)
             return []
