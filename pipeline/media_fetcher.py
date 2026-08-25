@@ -1341,6 +1341,14 @@ class MediaFetcher:
             }
             concept = type_hints.get(scene.get("tipo", ""), "cinematic atmospheric scene")
 
+        # Ground literal labels and abstract metaphors in observable staging
+        # before handing the concept to an image model.  The scene marker and
+        # existing coherence/dedup layers remain unchanged.
+        from pipeline.cinematic_staging import build_scene_brief
+        grounded = build_scene_brief(scene.get("texto", ""), concept, self._theme_context)
+        if grounded and grounded != concept.lower():
+            concept = f"{concept}, {grounded}"
+
         # Ensure uniqueness: EVERY scene prompt carries a stable scene marker.
         # Even when a visual bible concept exists, two scenes can receive the
         # same concept (LLM repetition / padded entries / empty search_query),
@@ -2504,9 +2512,11 @@ class MediaFetcher:
         # 3. Base + directional variations (reduced to 3 from 5 — keep the
         #    most distinct ones; wide/close/distant have most visual variety)
         if base:
+            from pipeline.cinematic_staging import has_person_reference, sanitize_shot_direction
+            has_person = has_person_reference(base)
             for suffix in [
                 "wide shot establishing",
-                "close-up detail",
+                sanitize_shot_direction("close-up detail", has_person=has_person),
                 "distant view atmospheric",
             ]:
                 v = f"{base} {suffix}"
@@ -2535,6 +2545,10 @@ class MediaFetcher:
         #    Topic-aware and moved BEFORE the generic type fallback so the
         #    video stays anchored to its actual subject.
         if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
+            from pipeline.cinematic_staging import build_contextual_fallback
+            contextual_fb = build_contextual_fallback(scene_tipo, ctx)
+            if contextual_fb and contextual_fb not in pool:
+                pool.append(contextual_fb)
             themed_fb = self._build_themed_fallback(scene_tipo, ctx)
             if themed_fb and themed_fb not in pool:
                 pool.append(themed_fb)
@@ -3580,6 +3594,12 @@ class MediaFetcher:
         The scene narrative content always leads the query so stock APIs weight it
         higher. Theme context fields serve as contextual anchors.
         """
+        # Ground recurring labels (money, expedition, archive investigation)
+        # in actions/period objects before allocating the strict stock budget.
+        from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
+        query = enrich_scene_query(query, theme_ctx)
+        query = sanitize_person_query(query)
+
         # 1. Extract scene topic keywords (strip style words, keep content nouns)
         words = query.split()
         scene_keywords = [w for w in words if w.lower() not in MediaFetcher._STYLE_WORDS]

@@ -160,6 +160,12 @@ def _build_portrait_query(
 
     This mirrors ``MediaFetcher._build_search_query()`` adapted for portrait shorts.
     """
+    # Ground literal labels in observable actions/objects while retaining the
+    # original query for provider relevance scoring.
+    from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
+    search_query_en = enrich_scene_query(search_query_en, theme_ctx)
+    search_query_en = sanitize_person_query(search_query_en)
+
     # 1. Strip style fluff from the LLM query
     words = search_query_en.split()
     scene_keywords = [w for w in words if w.lower() not in _STYLE_WORDS]
@@ -392,9 +398,11 @@ def _build_query_pool(
                 pool.append(nh_str[:100])
 
     # 3. Directional variations — reduced to 3 from 5 (most distinct angles)
+    from pipeline.cinematic_staging import has_person_reference, sanitize_shot_direction
+    has_person = has_person_reference(search_en)
     directional_modifiers = [
         "wide shot establishing",
-        "close-up detail",
+        sanitize_shot_direction("close-up detail", has_person=has_person),
         "distant view atmospheric",
     ]
     if search_en and search_en.strip():
@@ -428,6 +436,10 @@ def _build_query_pool(
 
     # 7. Themed fallback (v8): built dynamically from ThemeContext
     if theme_ctx and theme_ctx.primary_subject:
+        from pipeline.cinematic_staging import build_contextual_fallback
+        contextual_fb = build_contextual_fallback(block_type, theme_ctx, portrait=True)
+        if contextual_fb and contextual_fb not in pool:
+            pool.append(contextual_fb)
         themed_fb = _build_themed_short_fallback(block_type, theme_ctx)
         if themed_fb and themed_fb not in pool:
             pool.append(themed_fb[:100])
