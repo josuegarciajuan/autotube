@@ -617,13 +617,16 @@ universo visual, paleta de colores y atmosfera.
 
 REGLAS:
 
-    1. ESCENIFICACION CINEMATOGRAFICA RELACIONADA, NO ILUSTRACION LITERAL NI
-       METAFORA DESCONECTADA (not a literal illustration). Cada concepto usa cinematic staging y parte del
-       fragmento narrado de su
-       escena final y propone puesta en escena, composicion, luz, accion y
-       profundidad espacial cinematograficas. Debe relacionarse con lo que se
-       oye sin representar cada palabra ni inventar un simbolo ajeno. JAMAS
-       muestres texto en la imagen.
+    1. ESCENIFICACION CINEMATOGRAFICA OBSERVABLE, NO ILUSTRACION LITERAL NI
+       METAFORA DESCONECTADA. Cada concepto debe partir del fragmento narrado
+       de su escena final y proponer una puesta en escena que una camara pueda
+       registrar: sujeto, accion, objetos, espacio, composicion, luz y
+       profundidad. Debe relacionarse con lo que se oye sin representar cada
+       palabra ni inventar un simbolo ajeno. Si el guion dice "dinero" en
+       Egipto antiguo, muestra intercambio de bienes, pesas y mercaderes en un
+       mercado antiguo; no billetes, tarjetas ni una ilustracion literal de la
+       palabra. Conserva siempre epoca, cultura y tecnologia disponibles.
+       JAMAS muestres texto en la imagen.
 
 2. ENTIDAD CENTRAL. Si el guion tiene un protagonista humano o una entidad
    central recurrente (persona, criatura, lugar emblematico, objeto magico),
@@ -662,7 +665,8 @@ REGLAS:
      NUNCA primer plano del rostro de una persona.
    - mood: atmosfera pura, luz, sombras, emocion sin accion.
    - action: movimiento, tension, dinamismo.
-   - symbolic: concepto abstracto, metafora visual pura.
+   - symbolic: simbolismo anclado en objetos y acciones reales; nunca una forma
+     abstracta sin contexto historico o cultural.
 
 5b. PERSONAS A DISTANCIA. Si una escena incluye personas (protagonista o
     figurantes), muestralas en plano medio o general: nunca primer plano del
@@ -692,7 +696,7 @@ REGLAS:
     "appears_in_scenes": [0, 3, 7],
     "variation_by_scene": {{
       "0": "medium shot, walking through colonnade, backlit",
-      "3": "close-up hands writing, candlelight"
+     "3": "medium shot of hands writing, candlelight"
     }}
   }},
   "recurring_elements": ["elemento1", "elemento2", "..."],
@@ -700,7 +704,7 @@ REGLAS:
     {{
       "scene": 0,
       "shot_type": "establishing|detail|mood|action|symbolic",
-      "visual_concept": "descripcion visual de QUE mostrar (metafora, no literal)",
+     "visual_concept": "descripcion visual de una accion/objeto/espacio observable",
       "mood": "emocion que transmite la imagen",
       "has_protagonist": true|false,
       "bridge_from_prev": null,

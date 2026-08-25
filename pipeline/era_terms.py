@@ -91,8 +91,8 @@ ERA_STOCK_TERMS: dict[str, str] = {
     # Early modern / age of sail
     "17th century": "17th century wooden sailing ship",
     "seventeenth": "17th century wooden sailing ship",
-    "16th century": "16th century historical",
-    "sixteenth": "16th century historical",
+    "16th century": "16th century wooden caravel sailing vessel",
+    "sixteenth": "16th century wooden caravel sailing vessel",
     "18th century": "18th century historical",
     "eighteenth": "18th century historical",
     "19th century": "19th century historical",
