@@ -157,6 +157,11 @@ FILM_GRAIN_OPACITY = 5
 FILM_GRAIN_FRAMES = 8
 KEN_BURNS_ZOOM_MIN = 4
 KEN_BURNS_ZOOM_MAX = 12
+# Ken Burns motion is deliberately restrained: profiles vary per image while
+# keeping a small static share to give the eye regular resting points.
+KEN_BURNS_STATIC_PROBABILITY = 0.10
+KEN_BURNS_MOTION_FACTOR = 0.55
+KEN_BURNS_ZOOM_FACTOR = 0.65
 
 # ═══════════════════════════════════════════════════════════════════
 # AI IMAGE UPSCALING (shared across all channels)
