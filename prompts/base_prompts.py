@@ -617,11 +617,13 @@ universo visual, paleta de colores y atmosfera.
 
 REGLAS:
 
-1. METAFORA VISUAL, NO LITERAL. NO describas lo que dice la escena al pie
-   de la letra. Crea una IMAGEN que transmita la misma emocion e idea sin
-   palabras. Ejemplo: si la escena habla de "la caida del imperio", muestra
-   "estatua de emperador derrumbandose en camara lenta, monedas de oro
-   esparcidas en el barro". JAMAS muestres texto en la imagen.
+    1. ESCENIFICACION CINEMATOGRAFICA RELACIONADA, NO ILUSTRACION LITERAL NI
+       METAFORA DESCONECTADA (not a literal illustration). Cada concepto usa cinematic staging y parte del
+       fragmento narrado de su
+       escena final y propone puesta en escena, composicion, luz, accion y
+       profundidad espacial cinematograficas. Debe relacionarse con lo que se
+       oye sin representar cada palabra ni inventar un simbolo ajeno. JAMAS
+       muestres texto en la imagen.
 
 2. ENTIDAD CENTRAL. Si el guion tiene un protagonista humano o una entidad
    central recurrente (persona, criatura, lugar emblematico, objeto magico),
@@ -643,11 +645,16 @@ REGLAS:
    multiples escenas como hilo conductor (ej. "columnas de marmol agrietadas",
    "humo de incienso", "pergaminos antiguos").
 
-4. PUENTES VISUALES. Cada escena (excepto la primera) debe tener un
+    4. TIMESTAMPS Y ESCENAS FINALES. El texto recibido incluye los limites de
+       tiempo derivados de timestamps TTS. Genera exactamente una entrada por
+       subescena final, conserva su indice y usa su fragmento como ancla. No
+       agrupes ni vuelvas a dividir esas subescenas.
+
+    5. PUENTES VISUALES. Cada escena (excepto la primera) debe tener un
    bridge_from_prev: un elemento visual compartido con la escena anterior
    (misma luz, mismo objeto, misma textura, mismo color dominante).
 
-5. TIPOS DE TOMA. Distribuye los shot_type aproximadamente asi:
+    6. TIPOS DE TOMA. Distribuye los shot_type aproximadamente asi:
    establishing={establishing_pct}%, detail={detail_pct}%, mood={mood_pct}%,
    action={action_pct}%, symbolic={symbolic_pct}%.
    - establishing: gran angular, situa al espectador.

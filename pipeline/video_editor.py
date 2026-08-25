@@ -1363,6 +1363,7 @@ class VideoEditor:
                     "media_duracion": bloque.get("media_duracion", 5),
                     "search_query_en": bloque.get("search_query_en", ""),
                     "asset_idx": i,  # track original asset index for sub-scene reuse
+                    "word_timestamps": timestamps[word_idx:word_idx + n_words],
                 })
                 word_idx += n_words
 
@@ -1392,6 +1393,7 @@ class VideoEditor:
                 "media_duracion": bloque.get("media_duracion", 5),
                 "search_query_en": bloque.get("search_query_en", ""),
                 "asset_idx": i,
+                "word_timestamps": [],
             })
             cumulative += dur
 
@@ -1437,6 +1439,10 @@ class VideoEditor:
                     br["end"] = nxt["end"]
                     br["duration"] = br["end"] - br["start"]
                     br["texto"] = br.get("texto", "") + " " + nxt.get("texto", "")
+                    br["word_timestamps"] = list(br.get("word_timestamps") or []) + list(nxt.get("word_timestamps") or [])
+                    br["search_query_en"] = ", ".join(
+                        value for value in (br.get("search_query_en", ""), nxt.get("search_query_en", "")) if value
+                    )
                     self.logger.info(
                         "Merged short scene (%.1fs < %.1fs) with next → %.1fs",
                         merged[i]["duration"], min_dur, br["duration"],
@@ -1468,6 +1474,10 @@ class VideoEditor:
             prev["end"] = last["end"]
             prev["duration"] = prev["end"] - prev["start"]
             prev["texto"] = prev.get("texto", "") + " " + last.get("texto", "")
+            prev["word_timestamps"] = list(prev.get("word_timestamps") or []) + list(last.get("word_timestamps") or [])
+            prev["search_query_en"] = ", ".join(
+                value for value in (prev.get("search_query_en", ""), last.get("search_query_en", "")) if value
+            )
             self.logger.info(
                 "Merged last short scene (%.1fs) backward into previous → %.1fs",
                 last["duration"], prev["duration"],
@@ -1478,17 +1488,24 @@ class VideoEditor:
         for br in merged:
             _, max_dur = self._scene_duration_limits(br)
             if br["duration"] > max_dur:
-                num_subscenes = int(br["duration"] / max_dur) + 1
-                sub_dur = br["duration"] / num_subscenes
+                sub_ranges = self._semantic_subscene_ranges(br, max_dur)
                 self.logger.info(
-                    "Splitting long scene (%.1fs > %.1fs) into %d sub-scenes of %.1fs each",
-                    br["duration"], max_dur, num_subscenes, sub_dur,
+                    "Splitting long scene (%.1fs > %.1fs) into %d semantic sub-scenes",
+                    br["duration"], max_dur, len(sub_ranges),
                 )
-                for j in range(num_subscenes):
+                for j, (start, end, fragment_text, fragment_words) in enumerate(sub_ranges):
                     sub = dict(br)
-                    sub["start"] = br["start"] + j * sub_dur
-                    sub["end"] = br["start"] + (j + 1) * sub_dur
+                    sub["start"] = start
+                    sub["end"] = end
                     sub["duration"] = sub["end"] - sub["start"]
+                    sub["texto"] = fragment_text
+                    sub["fragment_text"] = fragment_text
+                    sub["word_timestamps"] = fragment_words
+                    fragment_hint = " ".join(fragment_text.split()[:8])
+                    if fragment_hint:
+                        sub["search_query_en"] = ", ".join(
+                            value for value in (br.get("search_query_en", ""), fragment_hint) if value
+                        )
                     sub["is_subscene"] = True
                     sub["parent_tipo"] = br["tipo"]
                     # MediaFetcher receives one request per subscene.  Keep the
@@ -1502,6 +1519,55 @@ class VideoEditor:
                 new_ranges.append(br)
 
         return new_ranges
+
+    def _semantic_subscene_ranges(self, scene: dict, max_dur: float) -> list[tuple[float, float, str, list[dict]]]:
+        """Split long narration at sentence boundaries when TTS words exist."""
+        start, end = float(scene["start"]), float(scene["end"])
+        duration = end - start
+        words = list(scene.get("word_timestamps") or [])
+        count = max(2, int(duration / max_dur) + 1)
+        target = duration / count
+        if not words:
+            text = scene.get("texto", "")
+            fragments = [part.strip() for part in re.split(r"(?<=[.!?;:])\s+", text) if part.strip()]
+            if len(fragments) < count:
+                fragments = [text[i * len(text) // count:(i + 1) * len(text) // count].strip()
+                             for i in range(count)]
+            elif len(fragments) > count:
+                fragments = fragments[:count - 1] + [" ".join(fragments[count - 1:])]
+            return [(start + i * target, start + (i + 1) * target, fragment, [])
+                    for i, fragment in enumerate(fragments[:count])]
+        boundaries = [i + 1 for i, word in enumerate(words)
+                      if re.search(r"[.!?;:]$", str(word.get("word", "")))]
+        cuts, previous = [], 0
+        for part in range(1, count):
+            desired = start + target * part
+            candidates = [i for i in boundaries if previous < i < len(words) - (count - part - 1)]
+            if candidates:
+                cut = min(candidates, key=lambda i: abs(float(words[i - 1].get("end", desired)) - desired))
+            else:
+                cut = min(len(words) - (count - part - 1), max(previous + 1,
+                    int(round((desired - start) / duration * len(words)))))
+            cuts.append(cut)
+            previous = cut
+        indexes = [0, *cuts, len(words)]
+        result = []
+        for left, right in zip(indexes, indexes[1:]):
+            part_words = words[left:right]
+            part_start = start if left == 0 else float(part_words[0].get("start", start))
+            part_end = end if right == len(words) else float(part_words[-1].get("end", end))
+            result.append((part_start, part_end, self._preserve_word_fragment(scene.get("texto", ""), left, right, part_words), part_words))
+        return result
+
+    @staticmethod
+    def _preserve_word_fragment(text: str, left: int, right: int, words: list[dict]) -> str:
+        """Return the source substring covered by timestamped words."""
+        if not text or not words:
+            return ""
+        matches = list(re.finditer(r"\S+", text))
+        if len(matches) < len(words):
+            return " ".join(str(word.get("word", "")) for word in words).strip()
+        return text[matches[left].start():matches[right - 1].end()]
 
     def _scene_duration_limits(self, scene: dict) -> tuple[float, float]:
         """Return limits for a scene, retaining legacy config fallback."""

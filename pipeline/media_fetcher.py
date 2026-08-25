@@ -238,7 +238,7 @@ class MediaFetcher:
             self._local_sd = LocalSDProvider(
                 num_inference_steps=sd_steps,
                 width=768,
-                height=768,
+                height=432,
                 upscale_min=upscale_min if upscale_min else None,
                 upscale_model=upscale_model if upscale_min else None,
                 upscale_sharpen=upscale_sharpen if upscale_min else False,
@@ -1169,7 +1169,7 @@ class MediaFetcher:
         # Negative prompt: global terms + forbidden_elements (anacronismos) del
         # theme extractor, que hoy solo se filtraban en queries de stock. La IA
         # necesita verlos como negative para no generar elementos fuera de época.
-        negative = VisualCoherenceEngine.build_negative_prompt()
+        negative = self._coherence_engine.build_negative_prompt_for_config(self._config)
         tc = self._theme_context
         if tc is not None and getattr(tc, "forbidden_elements", None):
             forbidden = [f for f in tc.forbidden_elements if f]
@@ -1357,12 +1357,15 @@ class MediaFetcher:
             pps = palabras / duracion
             density = VisualCoherenceEngine.get_visual_density(pps)
         tech = VisualCoherenceEngine.build_tech_suffix(density)
+        positive_exceptions = self._coherence_engine.build_positive_exceptions()
 
         # ── Assemble ─────────────────────────────────────────
         # Concept-first: the scene's subject leads the prompt so the
         # generated image tracks the narration. Style and visual context
         # are supporting layers appended AFTER the subject.
         parts = [concept]
+        if positive_exceptions:
+            parts.append(positive_exceptions)
         if context:
             parts.append(context)
         parts.append(style)

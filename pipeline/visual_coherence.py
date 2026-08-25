@@ -121,6 +121,18 @@ class VisualCoherenceEngine:
         """Global negative prompt shared by all AI generations."""
         return NEGATIVE_PROMPT
 
+    def build_positive_exceptions(self) -> str:
+        exceptions = getattr(self._config, "AI_IMAGE_PROMPT_EXCEPTIONS", {}) or {}
+        values = exceptions.get("positive", []) if isinstance(exceptions, dict) else []
+        return ", ".join(str(value).strip() for value in values if str(value).strip())
+
+    def build_negative_prompt_for_config(self, config: Any = None) -> str:
+        cfg = config or self._config
+        exceptions = getattr(cfg, "AI_IMAGE_PROMPT_EXCEPTIONS", {}) or {}
+        values = exceptions.get("negative", []) if isinstance(exceptions, dict) else []
+        extra = ", ".join(str(value).strip() for value in values if str(value).strip())
+        return f"{NEGATIVE_PROMPT}, {extra}" if extra else NEGATIVE_PROMPT
+
     @staticmethod
     def get_visual_density(palabras_por_segundo: float) -> str:
         """Map narration density to visual complexity.
@@ -151,7 +163,8 @@ class VisualCoherenceEngine:
             ``"rich"`` → deep DoF, detailed textures.
         """
         base = (
-            "16:9 aspect ratio, no text, no watermark, crisp in-focus subject, "
+            "16:9 aspect ratio, real photograph, photorealistic documentary photo, "
+            "bright clear sharp image, controlled exposure, no text, no watermark, crisp in-focus subject, "
             "8K, high resolution, intricate detail, ultra sharp, "
             "high contrast, vibrant saturated colour, dramatic cinematic lighting"
         )

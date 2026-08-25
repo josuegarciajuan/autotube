@@ -193,6 +193,24 @@ def test_negative_prompt_rejects_dark_and_flat_renders():
     assert "soft focus" in negative
 
 
+def test_ai_prompt_requires_real_photo_exposure_and_sharpness():
+    suffix = VisualCoherenceEngine.build_tech_suffix("balanced")
+    assert "photorealistic" in suffix
+    assert "real photograph" in suffix
+    assert "controlled exposure" in suffix
+    assert "bright clear sharp image" in suffix
+
+
+def test_channel_prompt_exceptions_are_added_without_slug_logic():
+    cfg = _config(AI_IMAGE_PROMPT_EXCEPTIONS={
+        "positive": ["medical textbook accuracy"],
+        "negative": ["modern clothing"],
+    })
+    engine = VisualCoherenceEngine(cfg)
+    assert "medical textbook accuracy" in engine.build_positive_exceptions()
+    assert "modern clothing" in engine.build_negative_prompt_for_config(cfg)
+
+
 def test_palette_hint_never_says_dark_moody_or_muted():
     hint = VisualCoherenceEngine._palette_to_hint(
         {"primary": (15, 40, 65)}   # el primary más oscuro de producción (canal4)
@@ -214,6 +232,15 @@ def test_defaults_impact_style_carries_bokeh_high_contrast_vivid():
     assert "vivid" in impact
     assert "luminous" in grading
     assert "contrast" in grading
+
+
+def test_visual_bible_prompt_requests_final_timestamp_scene_staging():
+    from prompts.base_prompts import build_visual_bible_prompt
+
+    prompt = build_visual_bible_prompt(_config(), 3)
+    assert "timestamp" in prompt.lower()
+    assert "cinematic staging" in prompt.lower()
+    assert "not a literal illustration" in prompt.lower()
 
 
 def test_pollo_fallback_receives_same_coherent_prompt(tmp_path: Path):
