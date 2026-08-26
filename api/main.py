@@ -73,25 +73,40 @@ async def lifespan(app: FastAPI):
     # If running under systemd with WatchdogSec set, send periodic
     # pings so systemd knows the process is alive. Without this,
     # WatchdogSec would kill the service after 90s even if healthy.
-    _watchdog_task = None
+    #
+    # ago 2026: los pings se mandan desde un HILO daemon dedicado, no desde el
+    # event loop. Bajo saturación de CPU (load alto, servicio con Nice=10) el
+    # event loop puede congelarse durante minutos; una task asyncio dejaría de
+    # pingear y systemd mataría el proceso con SIGABRT → ventanas de 503 en el
+    # panel (Apache → proxy → backend). Un hilo con time.sleep/Event.wait(30)
+    # necesita microsegundos por wake y sobrevive a la inanición de CPU.
+    _watchdog_thread = None
+    _watchdog_stop = None
     _sd = None  # exposed at lifespan scope for inline pings during sync startup
     try:
         from systemd import daemon as _sd
-        import asyncio as _asyncio_wd
+        import threading as _threading_wd
         if _sd.booted():
             _sd.notify("READY=1")
             _wlogger = logging.getLogger("autotube.watchdog")
-            _wlogger.info("systemd watchdog initialized (interval=30s, WatchdogSec=600s)")
-            
-            async def _watchdog_ping():
-                while True:
-                    await _asyncio_wd.sleep(30)
+            _wlogger.info("systemd watchdog initialized (thread interval=30s, WatchdogSec=600s)")
+
+            def _watchdog_ping_loop(stop_event):
+                while not stop_event.is_set():
                     try:
                         _sd.notify("WATCHDOG=1")
                     except Exception:
                         pass
-            
-            _watchdog_task = _asyncio_wd.create_task(_watchdog_ping())
+                    stop_event.wait(30)
+
+            _watchdog_stop = _threading_wd.Event()
+            _watchdog_thread = _threading_wd.Thread(
+                target=_watchdog_ping_loop,
+                args=(_watchdog_stop,),
+                name="systemd-watchdog-ping",
+                daemon=True,
+            )
+            _watchdog_thread.start()
     except ImportError:
         pass  # not running under systemd or python3-systemd not installed
     
@@ -430,8 +445,8 @@ async def lifespan(app: FastAPI):
     # que `await task` podía colgarse >60s y systemd mataba el servicio con
     # SIGKILL ("Failed with result 'timeout'"). Se cancela todo y se espera con
     # timeout acotado — el proceso sale en <10s.
-    if _watchdog_task is not None:
-        _watchdog_task.cancel()
+    if _watchdog_stop is not None:
+        _watchdog_stop.set()  # detiene el hilo daemon del watchdog
     _shutdown_tasks = [
         schedule_task, health_monitor_task, publish_verify_task,
         health_checker_task, quota_recovery_task, resume_phase_task,
