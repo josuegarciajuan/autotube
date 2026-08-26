@@ -337,8 +337,23 @@ class ShortsRenderer:
             )
 
             if result.returncode != 0:
-                logger.error("FFmpeg stderr:\n%s", result.stderr[-1000:])
-                raise RuntimeError(f"FFmpeg exited with code {result.returncode}")
+                stderr = (result.stderr or "")[-2000:]
+                logger.error("FFmpeg failed (exit=%s), stderr:\n%s", result.returncode, stderr)
+                raise RuntimeError(
+                    f"FFmpeg exited with code {result.returncode}: {stderr[-500:]}"
+                )
+
+            if not output_path.exists() or output_path.stat().st_size <= 0:
+                stderr = (result.stderr or "")[-2000:]
+                logger.error(
+                    "FFmpeg reported success but produced no valid output file "
+                    "(path=%s, exit=%s), stderr:\n%s",
+                    output_path, result.returncode, stderr,
+                )
+                raise RuntimeError(
+                    f"FFmpeg produced no output file (exit={result.returncode}): "
+                    f"{stderr[-500:]}"
+                )
 
             logger.info("Short rendered successfully: %s", output_path)
 
