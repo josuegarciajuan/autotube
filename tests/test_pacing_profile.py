@@ -46,7 +46,10 @@ def test_default_profile_is_strike_with_antiban_values(tmp_path):
     pacing = pacing_profile.get_pacing(db)
     # Valores antiban actuales (ago 2026) — NO deben cambiar el comportamiento.
     assert pacing["shorts_per_channel_day"] == 1
-    assert pacing["max_longform_publish_day"] == 1
+    # Techo de longs (ago 2026): relajado a 2 tras levantar los strikes. Sigue
+    # siendo un tope DURA independiente del perfil (permanent override), pero
+    # ahora permite 2 longs/día para los canales con política explícita de 2.
+    assert pacing["max_longform_publish_day"] == 2
     assert pacing["same_channel_publish_gap_h"] == 24
     assert pacing["same_channel_upload_gap_h"] == 6
     assert pacing["global_upload_spacing_min"] == 45
@@ -61,7 +64,7 @@ def test_set_profile_persists_and_resolves(tmp_path):
     resolved = pacing_profile.set_pacing_profile("normal", db)
     assert pacing_profile.get_active_profile_name(db) == "normal"
     assert resolved["shorts_per_channel_day"] == 3
-    assert resolved["max_longform_publish_day"] == 1
+    assert resolved["max_longform_publish_day"] == 2
     assert resolved["same_channel_publish_gap_h"] == 6
     assert resolved["global_upload_spacing_min"] == 20
     assert resolved["account_daily_upload_cap"] == 8
@@ -76,9 +79,9 @@ def test_profile_relaxes_all_keys_at_once(tmp_path):
     strike = pacing_profile.get_pacing(db)
     pacing_profile.set_pacing_profile("normal", db)
     normal = pacing_profile.get_pacing(db)
-    # El máximo de long-form normal permanece fijado por anti-spam.
+    # El máximo de long-form normal (2) coincide con el techo DURA relajado (2).
     assert normal["shorts_per_channel_day"] > strike["shorts_per_channel_day"]
-    assert normal["max_longform_publish_day"] == strike["max_longform_publish_day"] == 1
+    assert normal["max_longform_publish_day"] == strike["max_longform_publish_day"] == 2
     for key in ("same_channel_publish_gap_h", "same_channel_upload_gap_h",
                 "global_upload_spacing_min", "shorts_cooldown_min",
                 "shorts_same_type_gap_min"):
@@ -93,7 +96,7 @@ def test_manual_override_wins_over_profile(tmp_path):
     db.set_system_state("pacing_shorts_per_channel_day", "1")
     assert pacing_profile.get_pacing_value("shorts_per_channel_day", db=db) == 1
     # El resto del perfil normal sigue aplicando
-    assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 1
+    assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 2
 
 
 def test_unknown_profile_raises(tmp_path):
