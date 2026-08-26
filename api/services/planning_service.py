@@ -3046,8 +3046,15 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         c["_priority_score"] = _score_priority_slot(c, db, today_str)
     candidates.sort(key=lambda c: c["_priority_score"], reverse=True)
     
-    # Pick the next slot using round-robin across channels
-    next_slot = _pick_round_robin(candidates, db)
+    # Do not let a busy channel win the round-robin and make the whole tick
+    # look idle.  The global active-job guard below still enforces one
+    # long-form job at a time; this filter only makes selection deterministic
+    # when stale/parallel candidates exist.
+    dispatchable_candidates = [
+        c for c in candidates
+        if not db.get_active_job_for_channel(c["channel_id"])
+    ]
+    next_slot = _pick_round_robin(dispatchable_candidates, db)
     if next_slot is None:
         logger.info("Round-robin dispatch: no channel has ready candidates")
         return None
@@ -3216,6 +3223,7 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
                 
                 adjusted = _avoid_channel_collision(
                     channel_id, proposed, db=db, slug=slug,
+                    exclude_slot_id=slot_id,
                 )
                 if adjusted != proposed:
                     logger.info(

@@ -165,9 +165,11 @@ def load_plan(db) -> dict:
 
 
 def _phase_for(entry: dict, today: date) -> int:
+    if not isinstance(entry, dict) or not isinstance(today, date):
+        return 0
     try:
         start = datetime.fromisoformat(entry["start_iso"]).date()
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, OverflowError):
         return 0
     days = (today - start).days
     if days < 0:
@@ -479,7 +481,10 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
     applied: list[dict] = []
     changed = False
 
-    for cid, entry in sorted(plan.items(), key=lambda kv: kv[1].get("slug", "")):
+    for cid, entry in sorted(
+        plan.items(),
+        key=lambda kv: kv[1].get("slug", "") if isinstance(kv[1], dict) else "",
+    ):
         ch = db.get_channel(cid)
         if not ch:
             continue
@@ -504,7 +509,7 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             try:
                 start = datetime.fromisoformat(entry["start_iso"]).date()
                 alt_offset = (-start.toordinal()) % 2  # día 1 = día de publicación
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, KeyError, OverflowError):
                 alt_offset = 0
             vpd = VIDEOS_PER_DAY_MAX
             alt_pattern = [1, 0]

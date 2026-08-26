@@ -132,6 +132,10 @@ MAX_PUBLISH_AT_AHEAD_HOURS = 24
 # (5 días), aunque la resolución de colisiones haya empujado más allá. No es un
 # objetivo: el espaciado real lo garantiza la resolución de colisiones / repack.
 MAX_PUBLISH_AHEAD_SAFETY_HOURS = 120
+# Collision resolution must remain bounded even when stale rows form a long
+# chain.  The caller may replan the remaining collision separately; never
+# manufacture an effectively unreachable publish date here.
+MAX_COLLISION_SHIFT_HOURS = MAX_PUBLISH_AHEAD_SAFETY_HOURS
 
 
 def detect_niche(keywords: list[str]) -> str:
@@ -266,6 +270,7 @@ def _avoid_channel_collision(
     db=None,
     slug: str = "",
     cross_channel: bool = False,
+    exclude_slot_id: int | None = None,
 ) -> datetime:
     """Check and resolve same-channel publish time collisions.
 
@@ -402,7 +407,9 @@ def _avoid_channel_collision(
                     for row in planned_rows:
                         dict_row = dict(row)
                         # Skip if video_id is already set (covered by video check)
-                        if dict_row.get("video_id"):
+                        if dict_row.get("video_id") or (
+                            exclude_slot_id is not None and dict_row.get("id") == exclude_slot_id
+                        ):
                             continue
                         planned_collisions.append({
                             "source": "planned_slot",
@@ -570,6 +577,14 @@ def _avoid_channel_collision(
                     latest_collision = {"id": "?", "label": "?"}
 
                 adjusted = latest_dt + min_gap
+
+                max_allowed = proposed_utc + _timedelta(hours=MAX_COLLISION_SHIFT_HOURS)
+                if adjusted > max_allowed:
+                    logger.warning(
+                        "[%s] Collision chain exceeded %dh; capping target at %s",
+                        slug, MAX_COLLISION_SHIFT_HOURS, max_allowed.isoformat(),
+                    )
+                    return max_allowed
 
                 logger.info(
                     "[%s] Collision detected [%s]: proposed %s conflicts with "

@@ -828,7 +828,7 @@ async def _resume_phase_loop():
                 _asyncio.to_thread(_apply_once),
                 timeout=90,
             )
-            changed = [a for a in (result or {}).get("applied", []) if a.get("phase", 0) > 0]
+            changed = [a for a in (result or {}).get("applied", []) if _resume_phase_is_active(a)]
             if changed:
                 _logger.warning(
                     "Resume-phase tick: %d canal(es) con fase activa (%s)",
@@ -838,6 +838,18 @@ async def _resume_phase_loop():
         except Exception as exc:
             _logger.warning("Resume-phase tick failed (no crítico): %s", exc)
         await _asyncio.sleep(6 * 3600)
+
+
+def _resume_phase_is_active(entry: dict) -> bool:
+    """Return whether a resume result represents an active numeric phase.
+
+    Explicit delivery policies intentionally report ``phase=None``.  Treating
+    that value as an integer caused the supervised loop to crash on ``None > 0``.
+    """
+    if not isinstance(entry, dict):
+        return False
+    phase = entry.get("phase")
+    return isinstance(phase, (int, float)) and not isinstance(phase, bool) and phase > 0
 
 
 async def _quota_recovery_loop():
