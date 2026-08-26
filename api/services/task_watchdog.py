@@ -16,6 +16,13 @@ from api.services.lifecycle_monitor import get_task_heartbeat_age
 
 logger = logging.getLogger("autotube.task_watchdog")
 
+# Gracia para loops que nunca llegan a emitir su primer heartbeat in-process.
+# Algunos loops supervisados duermen ANTES de su primer touch (el máximo es
+# resume_phase: 300s en api/main.py). Debe superar ese máximo con margen para
+# no matar un loop sano en su arranque legítimo. Un loop que sigue sin latir
+# tras este umbral está bloqueado antes de su primer heartbeat y debe reiniciarse.
+NEVER_HEARTBEAT_GRACE = 600.0
+
 
 async def supervise_loop(
     task_name: str,
@@ -41,35 +48,51 @@ async def supervise_loop(
     try:
         while True:
             child = asyncio.create_task(factory(), name=f"loop:{task_name}")
+            # Reinicia la bandera por encarnación: si el loop nunca llega a
+            # emitir su heartbeat in-process (bloqueado en su setup), la
+            # detección de staleness lo captura igualmente (age is None).
+            seen_heartbeat = False
+            logger.info("Background loop '%s' (re)started", task_name)
             try:
                 while not child.done():
                     await asyncio.sleep(monitor_interval)
                     age = get_task_heartbeat_age(task_name)
-                    if (
+                    if age is not None:
+                        seen_heartbeat = True
+                    elapsed_since_start = time.monotonic() - started_at
+                    from api.services.lifecycle_monitor import task_is_stale
+                    # 1) Heartbeat conocido pero superado su timeout (loop
+                    #    colgado a mitad de iteración).
+                    stale_timeout = (
                         age is not None
-                        and time.monotonic() - started_at >= startup_grace
-                        and age > 0
-                    ):
-                        # The DB heartbeat contains wall-clock age; use the
-                        # caller's timeout policy in lifecycle_monitor.
-                        from api.services.lifecycle_monitor import task_is_stale
-                        if task_is_stale(task_name):
-                            logger.error(
-                                "Background loop '%s' heartbeat is stale; cancelling safely",
+                        and elapsed_since_start >= startup_grace
+                        and task_is_stale(task_name)
+                    )
+                    # 2) Loop que nunca emitió heartbeat in-process: bloqueado
+                    #    antes de latir. NEVER_HEARTBEAT_GRACE > max sleep
+                    #    inicial (300s) para no matar arranques legítimos.
+                    never_heartbeat = (
+                        elapsed_since_start >= NEVER_HEARTBEAT_GRACE
+                        and not seen_heartbeat
+                    )
+                    if stale_timeout or never_heartbeat:
+                        logger.error(
+                            "Background loop '%s' heartbeat is stale%s; cancelling safely",
+                            task_name,
+                            " (never touched)" if never_heartbeat else "",
+                        )
+                        child.cancel()
+                        try:
+                            await asyncio.wait_for(child, timeout=cancel_grace)
+                        except asyncio.CancelledError:
+                            pass
+                        except asyncio.TimeoutError:
+                            logger.critical(
+                                "Background loop '%s' did not cancel; no restart to avoid duplicate work",
                                 task_name,
                             )
-                            child.cancel()
-                            try:
-                                await asyncio.wait_for(child, timeout=cancel_grace)
-                            except asyncio.CancelledError:
-                                pass
-                            except asyncio.TimeoutError:
-                                logger.critical(
-                                    "Background loop '%s' did not cancel; no restart to avoid duplicate work",
-                                    task_name,
-                                )
-                                return
-                            break
+                            return
+                        break
 
                 if child.cancelled():
                     return
