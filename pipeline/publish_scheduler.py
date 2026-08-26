@@ -1491,6 +1491,22 @@ def repack_channel_publish_times(
         max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
     max_per_day = max(1, max_per_day)
 
+    # ── Política explícita por canal (ago 2026) ──────────────────────────
+    # El techo del perfil es global (max_longform_publish_day). Si el canal
+    # tiene una política explícita de entrega (longs_per_day) más restrictiva,
+    # se respeta: el repack de publicaciones pendientes NO debe reprogramar un
+    # canal de 1 long/día a 2/día solo porque el perfil lo permita. Es el mismo
+    # criterio que `_hard_daily_cap` de shorts_scheduler (política explícita
+    # gana sobre el perfil). Se capa al mínimo (el perfil manda, la política
+    # puede bajar el número pero nunca subirlo por encima del perfil).
+    try:
+        from api.services.gradual_resume import get_explicit_delivery_policy
+        _policy = get_explicit_delivery_policy(channel_id, db)
+        if _policy is not None and int(_policy.get("longs_per_day", 0) or 0) > 0:
+            max_per_day = min(max_per_day, int(_policy["longs_per_day"]))
+    except Exception:
+        pass
+
     safety_limit = now_utc + _td(hours=safety_ahead_hours)
     plan = []
     day_used: dict = {}  # local date -> nº de vídeos asignados ese día
