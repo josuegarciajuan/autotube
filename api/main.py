@@ -94,6 +94,17 @@ async def lifespan(app: FastAPI):
             def _watchdog_ping_loop(stop_event):
                 while not stop_event.is_set():
                     try:
+                        # Do not report the service healthy if the critical
+                        # scheduler has stopped heartbeating.
+                        from api.services.lifecycle_monitor import (
+                            get_task_heartbeat_age, TASK_TIMEOUTS,
+                        )
+                        _age = get_task_heartbeat_age("schedule_checker")
+                        if _age is not None and _age > TASK_TIMEOUTS["schedule_checker"]:
+                            _wlogger.critical(
+                                "systemd watchdog withheld: schedule_checker heartbeat stale"
+                            )
+                            return
                         _sd.notify("WATCHDOG=1")
                     except Exception:
                         pass
@@ -398,7 +409,23 @@ async def lifespan(app: FastAPI):
     import asyncio
     def _supervised_loop(_name, _factory):
         from api.services.task_watchdog import supervise_loop
-        return asyncio.create_task(supervise_loop(_name, _factory))
+        _on_stale = None
+        if _name == "schedule_checker":
+            # A stale scheduler may still have a synchronous to_thread
+            # operation running. Restarting only that asyncio task could
+            # duplicate uploads/dispatches, so recover at process level.
+            def _restart_api_after_stale(task_name):
+                logging.getLogger("autotube.task_watchdog").critical(
+                    "Critical loop '%s' stale; requesting controlled API restart",
+                    task_name,
+                )
+                import os as _os
+                import signal as _signal
+                _os.kill(_os.getpid(), _signal.SIGTERM)
+            _on_stale = _restart_api_after_stale
+        return asyncio.create_task(
+            supervise_loop(_name, _factory, on_stale=_on_stale)
+        )
 
     schedule_task = _supervised_loop("schedule_checker", _schedule_checker_loop)
     

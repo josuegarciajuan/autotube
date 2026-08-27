@@ -58,3 +58,34 @@ async def test_supervisor_does_not_restart_after_restart_budget_is_exhausted():
         timeout=1,
     )
     assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_supervisor_calls_stale_recovery_without_restarting_task(monkeypatch):
+    import api.services.lifecycle_monitor as lifecycle_monitor
+    import api.services.task_watchdog as watchdog
+
+    recovery = []
+    started = asyncio.Event()
+
+    monkeypatch.setattr(watchdog, "get_task_heartbeat_age", lambda _: 999.0)
+    monkeypatch.setattr(lifecycle_monitor, "task_is_stale", lambda _: True)
+
+    async def loop_factory():
+        started.set()
+        await asyncio.Event().wait()
+
+    await asyncio.wait_for(
+        watchdog.supervise_loop(
+            "stale_loop",
+            loop_factory,
+            monitor_interval=0.001,
+            startup_grace=0,
+            cancel_grace=0.1,
+            on_stale=lambda name: recovery.append(name),
+        ),
+        timeout=1,
+    )
+
+    assert started.is_set()
+    assert recovery == ["stale_loop"]
