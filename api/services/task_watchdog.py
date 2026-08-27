@@ -34,12 +34,14 @@ async def supervise_loop(
     monitor_interval: float = 30.0,
     startup_grace: float = 300.0,
     cancel_grace: float = 5.0,
+    on_stale: Callable[[str], None] | None = None,
 ) -> None:
     """Run and cautiously restart one background loop.
 
     ``max_restarts`` is a rolling budget, preventing a broken loop from
-    becoming a hot restart loop.  Cancellation is bounded; if the child does
-    not stop, supervision stops rather than starting a duplicate scheduler.
+    becoming a hot restart loop. A stale task may invoke ``on_stale`` for
+    process-level recovery; it must not be restarted in-process because a
+    cancelled task waiting on ``asyncio.to_thread`` can leave its thread alive.
     """
     restart_times: list[float] = []
     child: asyncio.Task[None] | None = None
@@ -92,6 +94,14 @@ async def supervise_loop(
                                 task_name,
                             )
                             return
+                        if on_stale is not None:
+                            try:
+                                on_stale(task_name)
+                            except Exception:
+                                logger.exception(
+                                    "Background loop '%s' stale recovery callback failed",
+                                    task_name,
+                                )
                         break
 
                 if child.cancelled():
