@@ -23,6 +23,7 @@ Stuck detection: a short that is still 'private' after its publish_at has passed
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -217,3 +218,98 @@ def reconcile_recent_shorts(db=None) -> dict:
                     logger.warning("Reconciler: stuck alert failed for short #%d: %s", short_id, exc)
 
     return summary
+
+
+# ── Escaneo de YouTube Studio (on-demand, lee restricciones reales del canal) ──
+# yt-dlp solo ve señales públicas (removed / age_restricted / private). Las
+# sanciones A NIVEL DE CANAL (strikes, avisos de políticas, estado de
+# monetización) solo se ven en YouTube Studio con sesión iniciada. Este helper
+# abre Studio con el perfil del account del canal y guarda los hallazgos en
+# system_state['studio_scan_<slug>'] para que la barra los muestre.
+
+STUDIO_SCAN_KEY = "studio_scan_{slug}"
+STUDIO_ALERT_PATTERNS = [
+    "strike", "aviso por", "advertencia", "restricci", "monetizaci", "desmonetiza",
+    "suspendida", "suspensión", "violaci", "reclamaci", "derechos de autor",
+    "recurrente", "no cumple", "sintético", "sintetico", "engañosa",
+    "restricción de edad", "visible para mayores",
+]
+STUDIO_NAV_NOISE = [
+    "términos de uso", "política de privacidad", "políticas y seguridad",
+    "política de cookies", "comunidad", "términos y condiciones", "normas",
+    "términos del servicio",
+]
+
+
+def scan_studio_for_channel(db, channel_id: int, account: str = "", timeout_s: int = 90) -> dict:
+    """Best-effort Studio scan for a channel. Stores results in system_state.
+
+    Returns a summary. If the browser profile is locked/in use it skips
+    gracefully (status='in_use') instead of interfering with running uploads.
+    """
+    result = {"status": "skipped", "reason": "no account"}
+    try:
+        if not account:
+            with db._connect() as conn:
+                ch = conn.execute(
+                    "SELECT slug, google_account, yt_channel_id FROM channels WHERE id=?",
+                    (channel_id,),
+                ).fetchone()
+            if not ch:
+                return {"status": "skipped", "reason": "canal no encontrado"}
+            slug = ch["slug"]
+            account = ch["google_account"] or ""
+            uc = ch["yt_channel_id"] or ""
+        else:
+            with db._connect() as conn:
+                ch = conn.execute(
+                    "SELECT slug, yt_channel_id FROM channels WHERE id=?", (channel_id,),
+                ).fetchone()
+            slug = ch["slug"] if ch else f"ch{channel_id}"
+            uc = ch["yt_channel_id"] if ch else ""
+
+        if not account:
+            return {"status": "skipped", "reason": "sin google_account"}
+
+        import os
+        os.environ.setdefault("DISPLAY", ":99")
+
+        # ── Respect profile lock: don't fight a running browser ──
+        from pathlib import Path
+        from pipeline.youtube_browser import TOKENS_DIR
+        lock_file = Path(TOKENS_DIR) / f"{account}_browser_profile" / "SingletonLock"
+        if lock_file.exists():
+            return {"status": "in_use", "reason": f"perfil {account} en uso por otro proceso"}
+
+        from pipeline.youtube_browser import get_browser, close_all_browsers
+        browser = get_browser(account)
+        browser._ensure_browser()
+        page = browser._context.new_page()
+        page.goto(f"https://studio.youtube.com/channel/{uc}", wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        page.wait_for_timeout(10000)
+        body = page.evaluate("() => document.body ? document.body.innerText : ''")
+        page.screenshot(path=f"/tmp/studio_scan_{slug}.png", full_page=True)
+        close_all_browsers()
+
+        lines = [l.strip() for l in body.splitlines() if l.strip() and len(l.strip()) > 3]
+        findings = [
+            l[:220] for l in lines
+            if any(p in l.lower() for p in STUDIO_ALERT_PATTERNS)
+            and not any(n in l.lower() for n in STUDIO_NAV_NOISE)
+        ]
+        # El dashboard muestra el canal seleccionado; confirmamos identidad.
+        scanned_channel = slug
+        for cand in ("Expediciones sin retorno", "Anomalias Medicas", "Sincronías",
+                     "Civilizaciones Olvidadas", "Anomalías Médicas"):
+            if cand in body:
+                scanned_channel = cand
+
+        result = {
+            "status": "ok", "account": account, "channel": scanned_channel,
+            "findings": findings, "scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+        db.set_system_state(STUDIO_SCAN_KEY.format(slug=slug), json.dumps(result, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("Studio scan failed for channel #%s: %s", channel_id, exc)
+        result = {"status": "error", "reason": str(exc)[:200]}
+    return result
