@@ -550,10 +550,20 @@ def channel_restrictions():
                     youtube["age_restricted"].append(entry)
                 if vis in ("removed", "unavailable"):
                     youtube["removed"].append(entry)
-                # Discrepancia: BD dice publicado (status='published') pero YT lo tiene
-                # programado/privado, o está eliminado. (No se exige publish_at: los
-                # shorts históricos no lo guardan, pero la discrepancia sigue siendo real.)
-                if s["status"] == "published":
+                # Discrepancia de verdad externa. Con v48, status='published' solo
+                # debería darse cuando YouTube confirma público, y 'scheduled' es el
+                # estado esperado de un short subido private+publishAt aún no publicado.
+                # Por eso: removed/unavailable SIEMPRE es discrepancia (BD lo daba por
+                # publicado o programado pero YT lo eliminó); y published→scheduled/
+                # private solo si el reconciliador aún no degradó (retraso puntual).
+                if s["status"] == "scheduled":
+                    if vis in ("removed", "unavailable"):
+                        youtube["discrepancies"].append({
+                            "type": "bd_scheduled_yt_removed",
+                            "youtube_id": s["youtube_id"], "title": entry["title"],
+                            "publish_at": s["publish_at"],
+                        })
+                elif s["status"] == "published":
                     if vis in ("scheduled", "private"):
                         youtube["discrepancies"].append({
                             "type": "bd_published_yt_scheduled",

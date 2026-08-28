@@ -94,7 +94,14 @@ def _parse_iso(value) -> Optional[datetime]:
 
 
 def _recent_shorts(db, lookback_hours: int = RECONCILE_LOOKBACK_HOURS) -> list[dict]:
-    """Shorts recently uploaded that still need external verification."""
+    """Shorts recently uploaded that still need external verification.
+
+    Includes BOTH status='published' (maybe optimistically marked) and
+    status='scheduled' (waiting for a future publishAt). This lets the
+    reconciler both confirm scheduled→published and downgrade published→scheduled
+    when YouTube still has the short private/scheduled (backfill of shorts that
+    were optimistically written as 'published' before v48).
+    """
     since = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
     with db._connect() as conn:
         rows = conn.execute(
@@ -102,7 +109,7 @@ def _recent_shorts(db, lookback_hours: int = RECONCILE_LOOKBACK_HOURS) -> list[d
                       yt_visibility, yt_checked_at
                FROM shorts
                WHERE youtube_id IS NOT NULL AND youtube_id != ''
-                 AND status = 'published'
+                 AND status IN ('published', 'scheduled')
                  AND (COALESCE(published_at, created_at, publish_at) >= ?)
                ORDER BY COALESCE(published_at, created_at) DESC
                LIMIT ?""",
@@ -170,18 +177,37 @@ def reconcile_recent_shorts(db=None) -> dict:
                 and (now - publish_at).total_seconds() > STUCK_GRACE_MIN * 60
             )
 
+            # ── Canonical status (v48): 'published' SOLO si YouTube lo confirma
+            # público. Los shorts subidos privados con publishAt futuro se escriben
+            # como 'scheduled' y aquí se flipean a 'published' al confirmar; los que
+            # fueron escritos optimistamente como 'published' (pre-v48) se degradan
+            # a 'scheduled' si YT aún los tiene programados/privados.
+            if vis == "public":
+                new_status = "published"
+                new_actual_published = now.isoformat()  # solo se aplica si NULL (COALESCE abajo)
+            elif s.get("status") == "published":
+                # BD decía published pero YT aún no: degradar a scheduled.
+                new_status = "scheduled"
+                new_actual_published = None
+            else:
+                new_status = s.get("status", "scheduled")
+                new_actual_published = None
+
+            # published_at nunca se toca aquí: SIEMPRE es la hora de subida (caps).
+            # Solo si un short pre-v48 lo tenía NULL por error, lo rellenamos.
             new_published_at = s.get("published_at")
-            if vis == "public" and not new_published_at:
+            if not new_published_at and vis == "public":
                 new_published_at = now.isoformat()
 
             try:
                 db._execute_write(
-                    """UPDATE shorts SET yt_visibility=?, yt_checked_at=?,
-                       yt_checked_source=?, published_at=COALESCE(?, published_at)
+                    """UPDATE shorts SET status=?, yt_visibility=?, yt_checked_at=?,
+                       yt_checked_source=?, published_at=COALESCE(?, published_at),
+                       actual_published_at=COALESCE(actual_published_at, ?)
                        WHERE id=?""",
-                    (vis, now.isoformat(),
+                    (new_status, vis, now.isoformat(),
                      'rss' if yt_id in feed else 'ytdlp',
-                     new_published_at, short_id),
+                     new_published_at, new_actual_published, short_id),
                 )
                 summary["updated"] += 1
             except Exception as exc:

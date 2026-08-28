@@ -39,6 +39,7 @@ TASK_TIMEOUTS = {
     "queue_consumer": 1200,         # consumidor de cola de jobs
     "health_monitor": 1200,         # este mismo health-check (90s)
     "publish_coverage": 1200,        # cobertura de publicación (10 min)
+    "yt_state_reconcile": 900,       # verdad externa de publicación de shorts (5 min)
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

@@ -478,6 +478,21 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 - **Auto-marcado IA + pantallas finales:** tras cada subida, un daemon thread ejecuta automáticamente `pipeline/youtube_browser.py::mark_altered_content()` (marca "contenido alterado/IA" en YouTube Studio vía Playwright) y `add_end_screens()` (configura Suscribirse + Vídeo recomendado), controlado por `AUTO_MARK_ALTERED_CONTENT` y `AUTO_END_SCREENS` en la config del canal (activado en todos los canales).
 - **Playlist inteligente:** cada vídeo se asigna automáticamente a la playlist que mejor encaja con su contenido (clasificador LLM en `pipeline/youtube_playlists.py`).
 
+### 🎬 Estado real de publicación de shorts (v48, ago 2026)
+Un short subido con `privacy=private` + `publishAt` futuro (hora pico) **NO se marca `published` al subir**: se guarda con `status='scheduled'` hasta que un reconciliador externo confirma que YouTube realmente lo hizo público.
+
+- **`published_at` SIEMPRE = fecha/hora de SUBIDA** (los caps anti-spam cuentan subidas por `date(published_at)`; jamás debe quedar NULL para un short con `youtube_id`).
+- **`actual_published_at`** = cuando el reconciliador confirmó la publicación real (NULL mientras scheduled/privado).
+- **`publish_at`** = el `publishAt` real enviado a YouTube (hora pico).
+- **`yt_visibility` / `yt_checked_at` / `yt_checked_source`** = verdad externa cacheada (0 cuota): `public | scheduled | private | age_restricted | removed | unavailable | unknown | error`.
+- **Reconciliador** (`api/services/yt_state_reconciler.py` + loop `yt_state_reconcile` en `api/main.py`, cada 5 min, 0 cuota vía RSS + yt-dlp):
+  - `scheduled` → `published` cuando detecta que ya es público.
+  - Degrada `published` → `scheduled` si BD decía publicado pero YouTube aún lo tiene programado/privado (backfill natural de shorts pre-v48).
+  - Alerta `short_publish_stuck` si sigue privado pasada la ventana de gracia (`STUCK_GRACE_MIN`).
+- **Caps anti-spam:** cuentan por `youtube_id IS NOT NULL` (no por `status='published'`), así los shorts `scheduled` siguen consumiendo el tope de subidas del día.
+- **Panel:** la columna "Publicado hoy" y los badges solo muestran `status='published'`; los `scheduled` aparecen con badge "Programado" + hora programada.
+- Endpoints útiles: `GET /api/system/channel-restrictions` (verdad externa por canal) y `POST /api/system/studio-scan` (escaneo Studio on-demand).
+
 ## Stats collection
 - **⛔ INVARIANTE: STATS_AUTO_COLLECT NUNCA se activa.** La recolección automática cada 6h consume quota de YouTube API innecesariamente.
 - La recolección de stats **SOLO se activa manualmente** desde el botón "Recolectar stats" del dashboard (`POST /api/stats/collect`).
