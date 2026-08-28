@@ -463,6 +463,157 @@ def resume_status(channel_id: int = None):
     return {"ok": True, "channels": channels}
 
 
+@router.get("/system/channel-restrictions")
+def channel_restrictions():
+    """Estado consolidado de restricciones por canal, para la barra unificada.
+
+    Por cada canal ACTIVO devuelve dos bloques claramente separados:
+      - internal : protección interna de Autotube (bloqueo, strikes, frecuencia
+                   rebajada, fase de reanudación). Es un TEMPORIZADOR interno,
+                   NO una sanción confirmada por YouTube.
+      - youtube  : verdad externa cacheada (yt_visibility de shorts recientes,
+                   estado de vídeos, vídeos removed/age-restricted, y
+                   discrepancias BD↔YouTube). Proviene del reconciliador (0 cuota).
+
+    Lectura ligera (0 cuota de YouTube API). Excluye canales inactivos/test.
+    """
+    from database.db_extended import ExtendedDatabase
+    from api.services.spam_mitigation import build_spam_situation
+    from api.services.gradual_resume import resume_status_detailed
+
+    db = ExtendedDatabase()
+    channels = db.get_channels(active_only=True) or []
+    resume_map = {}
+    try:
+        for r in resume_status_detailed():
+            resume_map[int(r.get("channel_id", 0))] = r
+    except Exception:
+        pass
+
+    now_utc = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    out = []
+    for ch in channels:
+        cid = int(ch["id"])
+        slug = ch.get("slug", "")
+        internal = {}
+        try:
+            sit = build_spam_situation(cid, db) or {}
+            internal = {
+                "blocked": bool(sit.get("blocked", False)),
+                "blocked_until": sit.get("blocked_until"),
+                "restan_h": sit.get("restan_h", 0.0),
+                "strikes": sit.get("strikes", 0),
+                "scope": sit.get("scope", "none"),
+                "why": sit.get("why", ""),
+                "freq_reduced": bool(sit.get("freq_reduced", False)),
+                "current_freq": sit.get("current_freq"),
+                "original_freq": sit.get("original_freq"),
+                "pending_publish_total": (sit.get("pending_publish") or {}).get("total", 0),
+            }
+        except Exception:
+            pass
+        res = resume_map.get(cid) or {}
+        internal["phase"] = res.get("phase_today", 0)
+        internal["phase_label"] = res.get("phase_label", "")
+        internal["phase_days_remaining"] = res.get("days_remaining_in_phase")
+        internal["next_transition_iso"] = res.get("next_transition_iso")
+
+        # ── Verdad externa cacheada (reconciliador) ──
+        youtube = {"shorts": [], "videos": [], "age_restricted": [], "removed": [],
+                   "discrepancies": [], "checked_at": None}
+        try:
+            with db._connect() as conn:
+                shorts = conn.execute(
+                    """SELECT id, youtube_id, title, status, published_at, publish_at,
+                              yt_visibility, yt_checked_at
+                       FROM shorts
+                       WHERE channel_id=? AND youtube_id IS NOT NULL AND youtube_id != ''
+                       ORDER BY id DESC LIMIT 8""",
+                    (cid,),
+                ).fetchall()
+                videos = conn.execute(
+                    """SELECT yt_video_id, titulo_final, status, uploaded_at
+                       FROM videos
+                       WHERE channel_id=? AND yt_video_id IS NOT NULL AND yt_video_id != ''
+                       ORDER BY id DESC LIMIT 6""",
+                    (cid,),
+                ).fetchall()
+            for s in shorts:
+                vis = s["yt_visibility"] or "unknown"
+                entry = {
+                    "id": s["id"], "youtube_id": s["youtube_id"],
+                    "title": (s["title"] or "")[:60], "visibility": vis,
+                    "published_at": s["published_at"], "publish_at": s["publish_at"],
+                }
+                youtube["shorts"].append(entry)
+                if vis in ("age_restricted",):
+                    youtube["age_restricted"].append(entry)
+                if vis in ("removed", "unavailable"):
+                    youtube["removed"].append(entry)
+                # Discrepancia: BD dice publicado (status='published') pero YT lo tiene
+                # programado/privado, o está eliminado. (No se exige publish_at: los
+                # shorts históricos no lo guardan, pero la discrepancia sigue siendo real.)
+                if s["status"] == "published":
+                    if vis in ("scheduled", "private"):
+                        youtube["discrepancies"].append({
+                            "type": "bd_published_yt_scheduled",
+                            "youtube_id": s["youtube_id"], "title": entry["title"],
+                            "publish_at": s["publish_at"],
+                        })
+                    elif vis in ("removed", "unavailable"):
+                        youtube["discrepancies"].append({
+                            "type": "bd_published_yt_removed",
+                            "youtube_id": s["youtube_id"], "title": entry["title"],
+                        })
+            youtube["videos"] = [dict(v) for v in videos]
+            checked = [s["yt_checked_at"] for s in shorts if s["yt_checked_at"]]
+            youtube["checked_at"] = max(checked) if checked else None
+        except Exception:
+            pass
+
+        out.append({
+            "channel_id": cid, "slug": slug, "name": ch.get("name", ""),
+            "internal": internal, "youtube": youtube,
+        })
+
+    return {"ok": True, "generated_at": now_utc.isoformat(), "channels": out}
+
+
+@router.post("/system/studio-scan")
+async def studio_scan(channel_id: int):
+    """Escaneo on-demand de YouTube Studio para un canal.
+
+    Ejecuta en paralelo:
+      1. Reconciliación pasiva inmediata (yt-dlp + RSS, 0 cuota) del estado real
+         de los shorts del canal.
+      2. Un escaneo de Studio con el perfil del account (lee avisos de políticas,
+         strikes, restricciones de edad a nivel de canal) si el perfil está libre.
+
+    Devuelve el resultado del escaneo (o 'in_use'/'skipped' si el perfil está
+    ocupado). Los hallazgos de Studio quedan en system_state['studio_scan_<slug>'].
+    """
+    import asyncio
+    from database.db_extended import ExtendedDatabase
+    from api.services.yt_state_reconciler import (
+        reconcile_recent_shorts, scan_studio_for_channel,
+    )
+
+    db = ExtendedDatabase()
+
+    # 1. Reconciliación pasiva inmediata (0 cuota).
+    passive = await asyncio.to_thread(reconcile_recent_shorts, db)
+
+    # 2. Escaneo Studio on-demand (solo si el perfil está libre).
+    studio = await asyncio.to_thread(scan_studio_for_channel, db, channel_id)
+
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "passive_reconcile": passive,
+        "studio_scan": studio,
+    }
+
+
 @router.post("/system/resume/apply")
 def resume_apply():
     """Re-aplica las fases de reanudación hoy (+ replan del horizonte de 7 días).
