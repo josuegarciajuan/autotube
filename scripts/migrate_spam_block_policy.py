@@ -88,8 +88,7 @@ def _audit(db, channel_id: int, message: str, metadata: dict) -> None:
         logger.warning("audit failed for channel %s: %s", channel_id, exc)
 
 
-def _apply_schedule(db, video: dict, new_dt: datetime, slug: str,
-                    google_account: str = "") -> None:
+def _apply_schedule(db, video: dict, new_dt: datetime, slug: str) -> None:
     iso = new_dt.isoformat()
     with db._connect() as conn:
         conn.execute("UPDATE videos SET target_public_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -111,8 +110,9 @@ def _apply_schedule(db, video: dict, new_dt: datetime, slug: str,
     if video.get("yt_video_id"):
         try:
             from pipeline.youtube_uploader import YouTubeUploader
-            YouTubeUploader(account_name=google_account or slug,
-                            channel_slug=slug, db=db).set_publish_at(
+            # OAuth tokens are stored per channel slug (tokens/{slug}.pickle);
+            # google_account is only the shared account/project identity.
+            YouTubeUploader(account_name=slug, channel_slug=slug, db=db).set_publish_at(
                 video["yt_video_id"], iso
             )
         except Exception as exc:
@@ -161,7 +161,7 @@ def migrate_spam_state(db, *, apply: bool = False, now: float | None = None) -> 
             for video, ts in zip(pending, plan):
                 _apply_schedule(
                     db, video, datetime.fromtimestamp(ts, timezone.utc),
-                    ch.get("slug", str(cid)), ch.get("google_account", ""),
+                    ch.get("slug", str(cid)),
                 )
             _audit(db, cid, "Spam block migrated to balanced policy", {
                 "old_until": old_until, "new_until": new_until,
