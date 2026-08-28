@@ -1287,13 +1287,13 @@ def _spam_block_force_generate_only(db, channel_id: int, action: str) -> str:
 
     Gate robusto de subida durante el ban: ningún dispatch de long-form debe
     intentar subir para un canal bloqueado. El vídeo se genera y queda en
-    `awaiting_upload`; el upload_scheduler lo subirá al expirar bloqueo+colchón.
+    `awaiting_upload`; el upload_scheduler lo subirá al expirar el bloqueo.
     """
     try:
         if action == "generate_and_upload" and db.is_channel_spam_blocked(channel_id):
             logger.warning(
                 "Canal #%d bloqueado por spam — forzando generate_only "
-                "(subida aplazada hasta el fin del bloqueo + colchón)",
+                "(subida aplazada hasta el fin del bloqueo)",
                 channel_id,
             )
             return "generate_only"

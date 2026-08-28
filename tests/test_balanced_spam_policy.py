@@ -1,0 +1,97 @@
+"""Tests for the balanced anti-spam block policy and runtime migration."""
+
+import sqlite3
+import time
+from datetime import datetime, timezone
+
+
+def test_spam_block_duration_is_12h_then_24h():
+    from api.services.spam_mitigation import resolve_spam_block_duration_hours
+
+    assert resolve_spam_block_duration_hours(1) == 12
+    assert resolve_spam_block_duration_hours(2) == 24
+    assert resolve_spam_block_duration_hours(99) == 24
+
+
+def test_new_strikes_use_total_duration_without_legacy_buffer(tmp_path):
+    from api.services import shorts_scheduler as ss
+
+    db_path = tmp_path / "spam.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT,
+                                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, name TEXT,
+                               active INTEGER DEFAULT 1,
+                               created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    """)
+    conn.execute("INSERT INTO channels(id, slug, name, active) VALUES (5, 'canal4', 'Canal 4', 1)")
+    conn.commit()
+    conn.close()
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase(str(db_path))
+
+    ss._record_short_spam_strike(5, "canal4", db=db)
+    remaining = float(db.get_system_state("shorts_spam_blocked_until_5")) - time.time()
+    assert 11.9 * 3600 < remaining <= 12 * 3600 + 2
+
+
+def test_runtime_migration_is_dry_run_then_idempotent_and_replans(tmp_path):
+    from scripts.migrate_spam_block_policy import migrate_spam_state
+
+    db_path = tmp_path / "runtime.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT,
+                                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, name TEXT,
+                               active INTEGER DEFAULT 1,
+                               created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE videos (
+            id INTEGER PRIMARY KEY, channel_id INTEGER, yt_video_id TEXT,
+            published_at TEXT, status TEXT, target_public_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE lifecycle_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT,
+            entity_id INTEGER, channel_id INTEGER, event TEXT, phase TEXT,
+            status TEXT, message TEXT, metadata_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    now = time.time()
+    conn.execute("INSERT INTO channels(id, slug, name, active) VALUES (5, 'canal4', 'Canal 4', 1)")
+    conn.execute("INSERT INTO system_state(key, value) VALUES (?, ?)",
+                 ("shorts_spam_strikes_5", "1"))
+    conn.execute("INSERT INTO system_state(key, value) VALUES (?, ?)",
+                 ("shorts_spam_blocked_until_5", str(now + 80 * 3600)))
+    conn.execute("INSERT INTO system_state(key, value) VALUES (?, ?)",
+                 ("shorts_spam_blocked_until_77", str(now - 60)))
+    conn.execute("INSERT INTO videos VALUES (1, 5, 'yt1', NULL, 'uploaded_private', ?, NULL)",
+                 (datetime.fromtimestamp(now + 2 * 3600, timezone.utc).isoformat(),))
+    conn.commit()
+    conn.close()
+
+    from database.db_extended import ExtendedDatabase
+    db = ExtendedDatabase(str(db_path))
+    preview = migrate_spam_state(db, apply=False, now=now)
+    assert preview["changed_blocks"] == 1
+    assert preview["expired"] == 1
+    assert float(db.get_system_state("shorts_spam_blocked_until_5")) > now + 79 * 3600
+    with db._connect() as check:
+        assert check.execute("SELECT target_public_at FROM videos WHERE id=1").fetchone()[0].startswith("20")
+        assert check.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()[0] == 0
+
+    applied = migrate_spam_state(db, apply=True, now=now)
+    assert applied["changed_blocks"] == 1
+    until = float(db.get_system_state("shorts_spam_blocked_until_5"))
+    assert now + 11.9 * 3600 < until <= now + 12 * 3600 + 1
+    with db._connect() as check:
+        target = check.execute("SELECT target_public_at FROM videos WHERE id=1").fetchone()[0]
+        audit_count = check.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()[0]
+    assert datetime.fromisoformat(target).timestamp() >= now + 13 * 3600
+    assert audit_count >= 1
+
+    again = migrate_spam_state(db, apply=True, now=now + 60)
+    assert again["changed_blocks"] == 0
+    assert float(db.get_system_state("shorts_spam_blocked_until_77")) == now - 60

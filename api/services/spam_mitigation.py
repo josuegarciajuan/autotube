@@ -34,15 +34,22 @@ SPAM_FREQ_SHORTS_NATIVE_MIN = 1
 _RESTORE_KEY = "spam_freq_restore_{channel_id}"
 
 # ── Retención de publicaciones ya programadas durante el bloqueo ──
-# Un canal bloqueado no debe publicar NADA hasta expirar el bloqueo + colchón.
+# Un canal bloqueado no debe publicar NADA hasta expirar el bloqueo.
 # Los vídeos ya subidos como 'private' con publishAt nativo se reprograman para
 # caer DESPUÉS del fin del bloqueo, conservando un margen y gaps entre vídeos.
 SPAM_HOLD_PUBLISH_MARGIN_MIN = 60   # primera publicación >=1h tras el desbloqueo
 # ago 2026 (antiban): 3h → 24h. Tras un bloqueo, las publicaciones retenidas se
 # liberan a 1/día (techo antiban), no en ráfaga de 3h que reincidiría el flag.
 SPAM_HOLD_PUBLISH_GAP_HOURS = 24    # conservar 1 publicación/día tras el desbloqueo
-# Diferencia de colchón a añadir a bloques grabados antes del colchón de 6h.
-SPAM_BLOCK_BUFFER_DELTA_HOURS = 2
+
+
+def resolve_spam_block_duration_hours(event_count: int) -> int:
+    """Return total block hours: 12 for the first event, 24 thereafter."""
+    try:
+        count = int(event_count)
+    except (TypeError, ValueError):
+        count = 1
+    return 12 if count <= 1 else 24
 
 
 def _floor_half(value) -> int:
@@ -350,49 +357,6 @@ def restore_publication_frequency(channel_id: int, db=None) -> bool:
     return True
 
 
-# ── Colchón + retención de publicaciones programadas ─────────────
-
-def apply_spam_block_buffer_backfill(db=None) -> int:
-    """Extiende los bloques activos grabados antes del colchón de 6h (idempotente).
-
-    Los bloques previos al despliegue del colchón de 6h se grabaron con 4h.
-    Añade las 2h de diferencia UNA sola vez por canal (marcador en system_state).
-    Devuelve el número de canales extendidos.
-    """
-    if db is None:
-        from database.db_extended import ExtendedDatabase
-        db = ExtendedDatabase()
-
-    now = time.time()
-    extended = 0
-    for ch in (db.get_channels(active_only=False) or []):
-        cid = int(ch.get("id", 0) or 0)
-        if not cid:
-            continue
-        raw = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
-        if not raw:
-            continue
-        try:
-            until = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if until <= now:
-            continue  # ya expirado
-        if db.get_system_state(f"spam_block_buffer6h_{cid}"):
-            continue  # ya extendido
-        db.set_system_state(
-            f"shorts_spam_blocked_until_{cid}",
-            str(until + SPAM_BLOCK_BUFFER_DELTA_HOURS * 3600),
-        )
-        db.set_system_state(f"spam_block_buffer6h_{cid}", "1")
-        logger.warning(
-            "Spam block buffer backfill: canal #%s extendido +%dh (colchón 6h)",
-            cid, SPAM_BLOCK_BUFFER_DELTA_HOURS,
-        )
-        extended += 1
-    return extended
-
-
 def _pending_publish_videos(channel_id: int, blocked_until: float, db) -> list[dict]:
     """Vídeos programados (private) de un canal cuyo publishAt cae antes del fin del bloqueo."""
     import sqlite3
@@ -486,16 +450,19 @@ def hold_pending_publishes_for_block(channel_id: int, slug: str,
 
 
 def ensure_spam_holds(db=None) -> dict:
-    """Backfill de colchón + retención de publicaciones de canales bloqueados.
+    """Retención de publicaciones de canales bloqueados.
 
-    Idempotente (marcador de backfill; la retención solo toca vídeos con
-    publishAt anterior al fin del bloqueo). Se llama al arranque de la API.
+    La retención solo toca vídeos con publishAt anterior al fin del bloqueo.
+    Se llama al arranque de la API; la migración histórica es explícita mediante
+    ``scripts/migrate_spam_block_policy.py``.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    extended = apply_spam_block_buffer_backfill(db)
+    # Legacy 6h-buffer backfill removed: runtime migration is explicit and
+    # auditable (scripts/migrate_spam_block_policy.py).
+    extended = 0
     held_total = 0
     channels_held: list[str] = []
 

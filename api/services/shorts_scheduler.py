@@ -84,14 +84,11 @@ _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
 # YouTube removed shorts of this project as spam (post-upload verification
 # confirmed missing / "Deleted video"). Retrying only feeds more spam
 # signals, so: slot CANCELED, channel shorts BLOCKED for a cooling period.
-# Second strike escalates to a longer block; shorts stay off until manual
-# review of the channel content.
-SHORTS_SPAM_BLOCK_HOURS = 72             # 1st strike: 3 days
-SHORTS_SPAM_BLOCK_HOURS_ESCALATED = 168  # 2nd strike: 7 days
+# Second and later events use a 24-hour total block; all other anti-strike
+# controls remain enforced while the block is active.
+SHORTS_SPAM_BLOCK_HOURS = 12
+SHORTS_SPAM_BLOCK_HOURS_ESCALATED = 24
 SHORTS_SPAM_MAX_STRIKES = 2
-# Colchón extra de reactivación: el bloque se mantiene (hours + buffer) antes
-# de desbloquear el canal automáticamente. Ej: 72h → se reactiva a las 78h.
-SHORTS_SPAM_BLOCK_BUFFER_HOURS = 6
 # Title similarity guard: reject a native short whose title is too similar
 # to a recent one (token-overlap ≥ threshold). Near-duplicate titles are a
 # classic spam signal.
@@ -209,8 +206,8 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
                               video_id: str = None, reason: str = None) -> int:
     """Record a YouTube spam removal for a channel and BLOCK its uploads.
 
-    Returns the new strike count. After SHORTS_SPAM_MAX_STRIKES the block
-    escalates. The block key is stored in system_state so it survives
+    Returns the new event count. The first event blocks for 12h; subsequent
+    events block for 24h. The block key is stored in system_state so it survives
     API restarts (apply_changes.sh).
 
     ``video_id`` / ``reason`` se guardan (``shorts_spam_last_removal_{id}``)
@@ -230,9 +227,8 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
         except (TypeError, ValueError):
             strikes = 1
         db.set_system_state(strikes_key, str(strikes))
-        hours = SHORTS_SPAM_BLOCK_HOURS_ESCALATED if strikes >= SHORTS_SPAM_MAX_STRIKES \
-            else SHORTS_SPAM_BLOCK_HOURS
-        total_hours = hours + SHORTS_SPAM_BLOCK_BUFFER_HOURS
+        from api.services.spam_mitigation import resolve_spam_block_duration_hours
+        total_hours = resolve_spam_block_duration_hours(strikes)
         block_until = time.time() + total_hours * 3600
         db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
 
@@ -319,7 +315,7 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
             )
         # ── Retener publicaciones ya programadas del canal bloqueado ──
         # Los vídeos subidos como private con publishAt nativo caerían durante
-        # el bloqueo; se reprograman para después del fin del bloqueo + colchón.
+        # el bloqueo; se reprograman para después del fin del bloqueo.
         try:
             from api.services.spam_mitigation import hold_pending_publishes_for_block
             hold_pending_publishes_for_block(channel_id, channel_slug, block_until, db=db)
@@ -2779,7 +2775,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
         # ── Hard spam filter: channel blocked by a spam strike ──
         # Durante el ban NO se sube nada, pero los NATIVOS se GENERAN y quedan
-        # en cola (status='generated') para despacharlos al expirar bloqueo+colchón.
+        # en cola (status='generated') para despacharlos al expirar el bloqueo.
         # Los CLIPS se cancelan (necesitan long-form publicado reciente).
         #
         # Cola unificada (ago 2026): los natives se generan SIEMPRE a cola
@@ -3692,7 +3688,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     vX (spam block): si ``generate_only=True`` se genera y renderiza el short
     pero NO se sube: queda con status='generated' (en cola) para despacharlo
-    gradualmente cuando expire el bloqueo + colchón.
+    gradualmente cuando expire el bloqueo.
 
     Returns short_id or None on failure.
     """
@@ -4256,7 +4252,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     # ── vX: generate_only — dejar el short en cola (sin subir) ──
     # Durante un bloqueo por spam se genera el native y queda status='generated';
-    # la subida la hará _upload_queued_native_shorts al expirar bloqueo+colchón.
+    # la subida la hará _upload_queued_native_shorts al expirar el bloqueo.
     if generate_only:
         try:
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
@@ -4704,7 +4700,7 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
                 continue
         except Exception:
             pass
-        # ── Gate robusto: no subir NADA durante el ban (bloqueo + colchón) ──
+        # ── Gate robusto: no subir NADA durante el bloqueo ──
         if _channel_shorts_spam_blocked(cid, db):
             continue
         # Cooldown entre SUBIDAS del mismo canal (tiempo desde la última subida,
