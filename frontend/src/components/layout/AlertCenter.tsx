@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import {
-  AlertTriangle,
   ShieldAlert,
+  Shield,
   Clock,
   FileText,
   ChevronDown,
@@ -9,65 +9,47 @@ import {
   RefreshCw,
   ExternalLink,
   Wrench,
+  AlertTriangle,
   CheckCircle2,
   TrendingUp,
-  ListOrdered,
+  Ban,
+  Radio,
 } from 'lucide-react'
 import { api } from '../../lib/api'
-import { useQuotaStatus, useResumeStatus } from '../../hooks/useQueries'
+import { useQuotaStatus, useChannelRestrictions } from '../../hooks/useQueries'
 
-// Persistencia del plegado: guardamos el CONJUNTO DE IDENTIDADES de los
-// avisos presentes cuando el usuario colapsó la tira (array JSON, no una
-// firma hash). La auto-expansión SOLO se dispara si aparece una identidad
-// que NO estaba en ese conjunto (aviso realmente nuevo: strike/bloqueo/
-// cuota/sesión). Durante la carga asíncrona de datos tras un refresco el
-// conjunto actual es un SUBCONJUNTO del colapsado, así que la tira respeta
-// el estado manual del usuario (plegado o desplegado).
-const LS_KEY = 'alertcenter_collapsed_ids_v3'
-// Estado manual plegado/desplegado (persistido para sobrevivir a refrescos).
-const EXPANDED_KEY = 'alertcenter_expanded_v1'
+// Persistencia del plegado (igual que antes): guardamos el CONJUNTO de identidades
+// de los avisos presentes cuando el usuario colapsó la tira. La auto-expansión solo
+// se dispara si aparece una identidad que NO estaba (aviso realmente nuevo).
+const LS_KEY = 'alertcenter_collapsed_ids_v4'
+const EXPANDED_KEY = 'alertcenter_expanded_v2'
 
-interface SpamBlock {
+interface ChannelRestriction {
   channel_id: number
   slug: string
   name: string
-  strikes: number
-  blocked: boolean
-  blocked_until: number | null
-  restan_h: number
-  freq_reduced: boolean
-  scope: string
-  why: string
-  last_removal: { video_id?: string; reason?: string; detected_at?: string; strike_count?: number } | null
-  current_freq?: { videos_per_day?: number; shorts_native_per_day?: number; shorts_clips_per_long?: number }
-  original_freq?: { videos_per_day?: number; shorts_native_per_day?: number; shorts_clips_per_long?: number }
-  pending_publish?: { total?: number; within_block?: any[] }
-}
-
-// Estado de reanudación post-strike (endpoint /system/resume-status)
-interface ResumeEntry {
-  channel_id: number
-  slug: string
-  name: string
-  source: string
-  sibling_of?: string
-  start_iso: string
-  phase_today: number
-  phase_label: string
-  days_elapsed?: number
-  days_remaining_in_phase?: number | null
-  next_transition_iso?: string | null
-  freq?: {
-    videos_per_day?: number
-    alternate_pattern?: number[] | null
-    shorts_native_per_day?: number
-    shorts_clips_per_long?: number
+  internal: {
+    blocked: boolean
+    blocked_until: number | null
+    restan_h: number
+    strikes: number
+    scope: string
+    why: string
+    freq_reduced: boolean
+    phase: number
+    phase_label: string
+    phase_days_remaining: number | null
+    next_transition_iso: string | null
+    pending_publish_total: number
   }
-  strikes?: number
-  blocked?: boolean
-  restan_h?: number
-  freq_reduced?: boolean
-  pending_publish?: { total?: number; upcoming?: { video_id?: string; target_public_at?: string }[] }
+  youtube: {
+    checked_at: string | null
+    shorts: { youtube_id: string; title: string; visibility: string; published_at: string | null; publish_at: string | null }[]
+    videos: any[]
+    age_restricted: any[]
+    removed: any[]
+    discrepancies: { type: string; youtube_id: string; title: string; publish_at?: string }[]
+  }
 }
 
 interface QuotaProject {
@@ -81,19 +63,7 @@ interface QuotaProject {
 }
 
 interface AlertCenterProps {
-  onOpenReport: (channel: SpamBlock) => void
-}
-
-// Identidad estable de cada aviso (sin contadores temporales: restan_h,
-// remaining_hours). Dos avisos con la misma identidad = el MISMO aviso.
-function spamId(c: SpamBlock): string {
-  return `spam:${c.channel_id}:${c.strikes}:${c.blocked ? 1 : 0}:${c.freq_reduced ? 1 : 0}`
-}
-function quotaId(p: QuotaProject): string {
-  return `quota:${p.project_id || 'x'}:${p.account || 'x'}`
-}
-function sessionId(s: { account: string; channels: string[] }): string {
-  return `session:${s.account}`
+  onOpenReport: (channel: any) => void
 }
 
 function fmtRestan(restan_h: number): string {
@@ -106,31 +76,35 @@ function fmtRestan(restan_h: number): string {
   return `~${restan_h.toFixed(1)}h`
 }
 
-function fmtFreq(block: SpamBlock): string {
-  const cur = block.current_freq || {}
-  const orig = block.original_freq || {}
-  const parts: string[] = []
-  if (orig.videos_per_day != null && cur.videos_per_day != null) {
-    parts.push(`long ${orig.videos_per_day}→${cur.videos_per_day}`)
-  } else if (cur.videos_per_day != null) {
-    parts.push(`long ${cur.videos_per_day}/d`)
+function fmtDate(iso: string | number | null | undefined): string {
+  if (!iso) return ''
+  try {
+    const d = typeof iso === 'number' ? new Date(iso * 1000) : new Date(iso)
+    return d.toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return ''
   }
-  if (orig.shorts_native_per_day != null && cur.shorts_native_per_day != null) {
-    parts.push(`shorts ${orig.shorts_native_per_day}→${cur.shorts_native_per_day}`)
-  } else if (cur.shorts_native_per_day != null) {
-    parts.push(`shorts ${cur.shorts_native_per_day}/d`)
-  }
-  if (orig.shorts_clips_per_long != null && cur.shorts_clips_per_long != null) {
-    parts.push(`clips ${orig.shorts_clips_per_long}→${cur.shorts_clips_per_long}`)
-  } else if (cur.shorts_clips_per_long != null) {
-    parts.push(`clips ${cur.shorts_clips_per_long}`)
-  }
-  return parts.join(' · ') || '—'
+}
+
+const VIS_LABEL: Record<string, { text: string; cls: string }> = {
+  public: { text: 'Público', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  scheduled: { text: 'Programado', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' },
+  private: { text: 'Privado', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  age_restricted: { text: 'Restricción edad', cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+  removed: { text: 'Eliminado', cls: 'bg-red-500/20 text-red-200 border-red-500/40' },
+  unavailable: { text: 'No disponible', cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+}
+
+// Estado "primario" por canal: el de mayor severidad que aplica.
+function primaryState(c: ChannelRestriction): { label: string; tone: 'yt' | 'block' | 'freq' | 'phase' } {
+  if (c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0) return { label: 'Restricción en YouTube', tone: 'yt' }
+  if (c.internal.blocked) return { label: 'Bloqueo interno (Autotube)', tone: 'block' }
+  if (c.internal.freq_reduced) return { label: 'Frecuencia reducida', tone: 'freq' }
+  if (c.internal.phase > 0) return { label: `Reanudación (${c.internal.phase_label || 'Fase'})`, tone: 'phase' }
+  return { label: 'OK', tone: 'phase' }
 }
 
 export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
-  const [spamBlocks, setSpamBlocks] = useState<SpamBlock[]>([])
-  const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
   const [expanded, setExpanded] = useState<boolean>(() => localStorage.getItem(EXPANDED_KEY) !== '0')
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => {
     try {
@@ -140,56 +114,25 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   })
   const [busy, setBusy] = useState<number | null>(null)
   const [applyingAll, setApplyingAll] = useState(false)
+  const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
+  const { data: restrictions } = useChannelRestrictions()
   const { data: quotaStatus } = useQuotaStatus()
-  const { data: resumeData } = useResumeStatus()
 
-  // Índice channel_id → estado de reanudación (para enriquecer las tarjetas)
-  const resumeMap: Record<number, ResumeEntry> = useMemo(() => {
-    const m: Record<number, ResumeEntry> = {}
-    if (resumeData?.ok && Array.isArray(resumeData.channels)) {
-      for (const c of resumeData.channels as ResumeEntry[]) {
-        m[Number(c.channel_id)] = c
-      }
-    }
-    return m
-  }, [resumeData])
-
-  const resumeChannels = useMemo(
-    () => Object.values(resumeMap).filter(c => c.phase_today > 0 || c.blocked),
-    [resumeMap],
+  const channels: ChannelRestriction[] = useMemo(
+    () => (restrictions?.channels as ChannelRestriction[]) || [],
+    [restrictions],
   )
 
-  const loadSpamBlocks = useCallback(async () => {
-    try {
-      const res = await api.getSpamBlocks()
-      if (res?.ok && Array.isArray(res.channels)) {
-        setSpamBlocks(res.channels.filter((c: any) => c.blocked || c.freq_reduced))
-      } else {
-        setSpamBlocks([])
-      }
-    } catch { /* banner opcional, no crítico */ }
-  }, [])
-
-  useEffect(() => {
-    loadSpamBlocks()
-    const iv = setInterval(loadSpamBlocks, 5 * 60 * 1000)
-    return () => clearInterval(iv)
-  }, [loadSpamBlocks])
-
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const data = await api.getBrowserSessionStatus()
-        const expired = (data.accounts || [])
-          .filter((a: any) => a.status === 'expired')
-          .map((a: any) => ({ account: a.account, channels: a.channels }))
-        setSessionWarnings(expired)
-      } catch { /* servidor reiniciándose */ }
-    }
-    check()
-    const iv = setInterval(check, 5 * 60 * 1000)
-    return () => clearInterval(iv)
-  }, [])
+  // Canales que requieren atención (protección interna o restricción YouTube).
+  const attentionChannels = useMemo(
+    () => channels.filter(c => c.internal.blocked || c.internal.freq_reduced || c.internal.phase > 0
+      || c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0),
+    [channels],
+  )
+  const ytRestricted = useMemo(() => channels.filter(c => c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0), [channels])
+  const blocked = useMemo(() => channels.filter(c => c.internal.blocked), [channels])
+  const freqReduced = useMemo(() => channels.filter(c => c.internal.freq_reduced), [channels])
+  const resuming = useMemo(() => channels.filter(c => c.internal.phase > 0), [channels])
 
   const quotaProjects: QuotaProject[] = useMemo(() => {
     const list: QuotaProject[] = Array.isArray((quotaStatus as any)?.projects)
@@ -207,23 +150,32 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     return []
   }, [quotaStatus])
 
-  const totalAvisos = spamBlocks.length + quotaProjects.length + sessionWarnings.length
-  const hasBlocked = spamBlocks.some(c => c.blocked)
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const data = await api.getBrowserSessionStatus()
+        const expired = (data.accounts || [])
+          .filter((a: any) => a.status === 'expired')
+          .map((a: any) => ({ account: a.account, channels: a.channels }))
+        setSessionWarnings(expired)
+      } catch { /* servidor reiniciándose */ }
+    }
+    check()
+    const iv = setInterval(check, 5 * 60 * 1000)
+    return () => clearInterval(iv)
+  }, [])
 
-  // Identidades de los avisos ACTUALES (ordenadas para determinismo).
+  const totalAvisos = attentionChannels.length + quotaProjects.length + sessionWarnings.length
+
+  // Identidades de los avisos actuales (para auto-expansión).
   const currentIds = useMemo(() => {
     const ids = new Set<string>()
-    for (const c of spamBlocks) ids.add(spamId(c))
-    for (const p of quotaProjects) ids.add(quotaId(p))
-    for (const s of sessionWarnings) ids.add(sessionId(s))
+    for (const c of attentionChannels) ids.add(`ch:${c.channel_id}:${c.internal.blocked ? 1 : 0}:${c.internal.freq_reduced ? 1 : 0}:${c.internal.phase}:${c.youtube.age_restricted.length}:${c.youtube.removed.length}`)
+    for (const p of quotaProjects) ids.add(`quota:${p.project_id || 'x'}:${p.account || 'x'}`)
+    for (const s of sessionWarnings) ids.add(`session:${s.account}`)
     return [...ids].sort()
-  }, [spamBlocks, quotaProjects, sessionWarnings])
+  }, [attentionChannels, quotaProjects, sessionWarnings])
 
-  // Auto-expansión SOLO ante avisos realmente nuevos: si el usuario colapsó
-  // (collapsedIds no vacío) y aparece una identidad que NO estaba en el
-  // conjunto colapsado, se re-abre. Durante la carga asíncrona de datos el
-  // conjunto actual es un subconjunto del colapsado (monótono creciente),
-  // por lo que NUNCA se re-expande por datos parciales. Nunca fuerza colapso.
   useEffect(() => {
     if (collapsedIds.size === 0) return
     if (currentIds.some(id => !collapsedIds.has(id))) {
@@ -247,83 +199,79 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     })
   }
 
-  async function handleRestore(c: SpamBlock) {
-    setBusy(c.channel_id)
-    try {
-      await api.restoreSpamFrequency(c.channel_id)
-      await loadSpamBlocks()
-    } catch { /* noop */ }
+  async function handleRefresh() {
+    setBusy(0)
+    try { await api.getChannelRestrictions() } catch { /* noop */ }
     setBusy(null)
   }
 
-  async function handleUnblock(c: SpamBlock) {
+  async function handleRestore(c: ChannelRestriction) {
+    setBusy(c.channel_id)
+    try { await api.restoreSpamFrequency(c.channel_id); await handleRefresh() } catch { /* noop */ }
+    setBusy(null)
+  }
+
+  async function handleUnblock(c: ChannelRestriction) {
     if (!window.confirm(`¿Desbloquear ${c.name || c.slug}? Solo si verificaste en YouTube Studio que la penalización cesó.`)) return
     setBusy(c.channel_id)
-    try {
-      await api.unblockSpamChannel(c.channel_id)
-      await loadSpamBlocks()
-    } catch { /* noop */ }
+    try { await api.unblockSpamChannel(c.channel_id); await handleRefresh() } catch { /* noop */ }
     setBusy(null)
   }
 
   async function handleApplyAll() {
     if (applyingAll) return
     setApplyingAll(true)
-    try {
-      await api.applyResumePhases()
-      await loadSpamBlocks()
-    } catch { /* noop */ }
+    try { await api.applyResumePhases(); await handleRefresh() } catch { /* noop */ }
     setApplyingAll(false)
   }
 
-  function phaseBadge(phase: number): { label: string; cls: string } {
-    if (phase === 1) return { label: 'Fase 1 · 1 long/2 días', cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' }
-    if (phase === 2) return { label: 'Fase 2 · 1 long/día', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
-    return { label: 'No iniciado', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30' }
-  }
-
-  function phaseCountdown(r: ResumeEntry): string {
-    if (r.phase_today === 1 && typeof r.days_remaining_in_phase === 'number') {
-      const n = r.days_remaining_in_phase
-      return n <= 0 ? 'pasa a Fase 2 hoy' : `quedan ${n} día${n !== 1 ? 's' : ''} · pasa a Fase 2`
-    }
-    if (r.phase_today === 0 && r.blocked && typeof r.restan_h === 'number' && r.restan_h > 0) {
-      return `bloqueado ~${r.restan_h.toFixed(1)}h`
-    }
-    if (r.next_transition_iso) {
-      return `desde ${new Date(r.start_iso).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}`
-    }
-    return ''
+  async function handleStudioScan(c: ChannelRestriction) {
+    if (!window.confirm(`¿Escanear YouTube Studio de ${c.name || c.slug}? Abrirá Studio con el perfil de la cuenta para leer restricciones reales.`)) return
+    setBusy(c.channel_id)
+    try { await api.studioScan(c.channel_id); await handleRefresh() } catch { /* noop */ }
+    setBusy(null)
   }
 
   if (totalAvisos === 0) return null
 
-  const barTone = hasBlocked
+  const barTone = ytRestricted.length > 0
     ? 'from-red-500/15 via-red-500/5 to-transparent border-red-500/25'
-    : 'from-amber-500/15 via-amber-500/5 to-transparent border-amber-500/25'
+    : blocked.length > 0
+      ? 'from-red-500/15 via-red-500/5 to-transparent border-red-500/25'
+      : 'from-amber-500/15 via-amber-500/5 to-transparent border-amber-500/25'
 
   return (
     <div className={`flex-shrink-0 border-b bg-gradient-to-r ${barTone} animate-fade-in`}>
-      {/* ── Fila de resumen (siempre visible) ── */}
+      {/* ── Fila de resumen ── */}
       <button
         onClick={handleToggle}
         className="w-full flex items-center gap-2.5 px-4 py-1.5 text-xs hover:bg-white/[0.03] transition-colors text-left"
         aria-expanded={expanded}
       >
-        <ShieldAlert size={15} className={hasBlocked ? 'text-neon-red flex-shrink-0' : 'text-amber-400 flex-shrink-0'} />
+        <ShieldAlert size={15} className={blocked.length > 0 || ytRestricted.length > 0 ? 'text-neon-red flex-shrink-0' : 'text-amber-400 flex-shrink-0'} />
         <span className="font-semibold text-gray-200 whitespace-nowrap">
           {totalAvisos} aviso{totalAvisos !== 1 ? 's' : ''} de restricción
         </span>
 
         <span className="flex items-center gap-1.5 flex-wrap min-w-0">
-          {spamBlocks.filter(c => c.blocked).length > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30 font-medium whitespace-nowrap">
-              {spamBlocks.filter(c => c.blocked).length} bloqueado{spamBlocks.filter(c => c.blocked).length > 1 ? 's' : ''}
+          {ytRestricted.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/40 font-medium whitespace-nowrap">
+              {ytRestricted.length} restricción en YT
             </span>
           )}
-          {spamBlocks.filter(c => !c.blocked && c.freq_reduced).length > 0 && (
+          {blocked.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30 font-medium whitespace-nowrap">
+              {blocked.length} bloqueo interno
+            </span>
+          )}
+          {freqReduced.length > 0 && (
             <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-medium whitespace-nowrap">
-              {spamBlocks.filter(c => !c.blocked && c.freq_reduced).length} freq rebajada
+              {freqReduced.length} frecuencia reducida
+            </span>
+          )}
+          {resuming.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-medium whitespace-nowrap">
+              {resuming.length} en reanudación
             </span>
           )}
           {quotaProjects.length > 0 && (
@@ -338,7 +286,19 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
           )}
         </span>
 
-        <span className="ml-auto flex items-center gap-1 text-gray-400 whitespace-nowrap flex-shrink-0">
+        <span className="ml-auto flex items-center gap-1.5 text-gray-400 whitespace-nowrap flex-shrink-0">
+          {restrictions?.generated_at && (
+            <span className="hidden md:inline text-[10px] text-gray-500">
+              verific. {fmtDate(restrictions.generated_at)}
+            </span>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); handleRefresh() }}
+            title="Refrescar estado real (0 cuota)"
+            className="p-1 rounded hover:bg-white/10 text-gray-400"
+          >
+            <RefreshCw size={13} className={busy === 0 ? 'animate-spin' : ''} />
+          </button>
           {expanded ? 'Ver menos' : 'Ver detalle'}
           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </span>
@@ -346,224 +306,241 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
 
       {/* ── Panel expandido ── */}
       {expanded && (
-        <div className="px-4 pb-3 pt-1 space-y-2.5 max-h-[55vh] overflow-y-auto animate-fade-in">
-          {/* ── Reanudación post-strike (fases) ── */}
-          {resumeChannels.length > 0 && (
-            <div className="rounded-lg border border-cyan-500/25 px-3 py-2 bg-dark-800/60">
+        <div className="px-4 pb-3 pt-1 space-y-3 max-h-[60vh] overflow-y-auto animate-fade-in">
+
+          {/* 1. Restricciones reales de YouTube */}
+          {ytRestricted.length > 0 && (
+            <div className="rounded-lg border border-red-500/30 px-3 py-2 bg-dark-800/60">
               <div className="flex items-center gap-2 flex-wrap">
-                <TrendingUp size={14} className="text-cyan-300 flex-shrink-0" />
-                <span className="font-semibold text-sm text-cyan-200">Reanudación post-strike</span>
-                <span className="text-[10px] text-gray-500">
-                  {resumeChannels.filter(c => c.phase_today === 1).length} en Fase 1 · {resumeChannels.filter(c => c.phase_today === 2).length} en Fase 2
-                </span>
-                <button
-                  onClick={handleApplyAll}
-                  disabled={applyingAll}
-                  className="ml-auto flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 rounded-md hover:bg-cyan-500 hover:text-dark-900 transition-all disabled:opacity-50"
-                >
-                  {applyingAll ? <RefreshCw size={12} className="animate-spin" /> : <TrendingUp size={12} />}
-                  {applyingAll ? 'Aplicando...' : 'Re-aplicar fases'}
-                </button>
+                <Ban size={14} className="text-red-400 flex-shrink-0" />
+                <span className="font-semibold text-sm text-red-200">Restricciones reales en YouTube</span>
+                <span className="text-[10px] text-gray-500">evidencia externa (yt-dlp / Studio)</span>
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {resumeChannels.map(r => {
-                  const b = phaseBadge(r.phase_today)
-                  const cd = phaseCountdown(r)
+              {ytRestricted.map(c => {
+                const age = c.youtube.age_restricted
+                const rem = c.youtube.removed
+                return (
+                  <div key={c.channel_id} className="mt-2 text-xs">
+                    <span className="font-semibold text-red-300">{c.name || c.slug}</span>
+                    {age.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        {age.map(s => (
+                          <span key={s.youtube_id} className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30">
+                            Restricción de edad · {s.title}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {rem.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        {rem.map(s => (
+                          <span key={s.youtube_id} className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-200 border border-red-500/40">
+                            Eliminado · {s.title}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* 2. Protección interna de Autotube (bloqueo / frecuencia / fases) */}
+          {attentionChannels.length > 0 && (
+            <div className="rounded-lg border border-amber-500/25 px-3 py-2 bg-dark-800/60">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Shield size={14} className="text-amber-300 flex-shrink-0" />
+                <span className="font-semibold text-sm text-amber-200">Protección interna de Autotube</span>
+                <span className="text-[10px] text-gray-500">
+                  {blocked.length} bloqueo · {freqReduced.length} frecuencia reducida · {resuming.length} en reanudación
+                </span>
+                {resuming.length > 0 && (
+                  <button
+                    onClick={handleApplyAll}
+                    disabled={applyingAll}
+                    className="ml-auto flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 rounded-md hover:bg-cyan-500 hover:text-dark-900 transition-all disabled:opacity-50"
+                  >
+                    {applyingAll ? <RefreshCw size={12} className="animate-spin" /> : <TrendingUp size={12} />}
+                    Re-aplicar fases
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-2 space-y-2">
+                {attentionChannels.map(c => {
+                  const st = primaryState(c)
+                  const tone = st.tone
+                  const border = tone === 'yt' ? 'border-red-500/40' : tone === 'block' ? 'border-red-500/30' : tone === 'freq' ? 'border-amber-500/30' : 'border-cyan-500/30'
                   return (
-                    <span key={r.channel_id} className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${b.cls}`}>
-                      {r.name || r.slug} · {b.label}
-                      {cd && <span className="opacity-80"> · {cd}</span>}
-                    </span>
+                    <div key={c.channel_id} className={`rounded-md border ${border} px-3 py-2 bg-dark-900/40`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-sm text-gray-100">{c.name || c.slug}</span>
+                        <code className="text-[10px] text-gray-500 bg-dark-700 px-1 py-0.5 rounded">{c.slug}</code>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                          tone === 'yt' ? 'bg-red-500/20 text-red-200 border-red-500/40'
+                          : tone === 'block' ? 'bg-neon-red/20 text-neon-red border-neon-red/40'
+                          : tone === 'freq' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                        }`}>
+                          {st.label}
+                        </span>
+                        {c.internal.strikes > 0 && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-300 border border-red-500/30">
+                            {c.internal.strikes} strike{c.internal.strikes > 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Impacto en lenguaje humano */}
+                      <div className="mt-1.5 text-xs text-gray-300">
+                        {c.internal.blocked ? (
+                          <span className="flex items-center gap-1.5">
+                            <Clock size={12} className="text-red-300" />
+                            No publicará contenido hasta <b>{fmtDate(c.internal.blocked_until)}</b> (~{fmtRestan(c.internal.restan_h)}).
+                            Es una protección interna de Autotube, no una sanción confirmada por YouTube.
+                          </span>
+                        ) : c.internal.freq_reduced ? (
+                          <span className="flex items-center gap-1.5 text-amber-200">
+                            <AlertTriangle size={12} />
+                            Frecuencia de publicación reducida respecto a la original, pendiente de restaurar manualmente cuando verifiques en Studio que la penalización cesó.
+                          </span>
+                        ) : c.internal.phase > 0 ? (
+                          <span className="flex items-center gap-1.5 text-cyan-200">
+                            <TrendingUp size={12} />
+                            En reanudación gradual ({c.internal.phase_label}).{c.internal.phase_days_remaining != null ? ` Quedan ${c.internal.phase_days_remaining} día(s) de esta fase.` : ''}
+                          </span>
+                        ) : null}
+                        {c.internal.why && <div className="mt-0.5 text-gray-500">⚠️ {c.internal.why}</div>}
+                      </div>
+
+                      {/* Discrepancias BD vs YouTube */}
+                      {c.youtube.discrepancies.length > 0 && (
+                        <div className="mt-1.5 text-[11px] text-gray-400 flex flex-wrap gap-1.5">
+                          <span className="font-medium text-amber-300/80">Discrepancias BD↔YouTube:</span>
+                          {c.youtube.discrepancies.map((d, i) => (
+                            <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
+                              {d.type === 'bd_published_yt_removed' ? '⚠ BD dice publicado pero está ELIMINADO' : 'BD dice publicado pero YouTube lo tiene programado/privado'}
+                              {d.publish_at ? ` · ${fmtDate(d.publish_at)}` : ''}
+                              {' '}· {d.title}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Estado real de los shorts recientes */}
+                      {c.youtube.shorts.length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1 text-[10px]">
+                          {c.youtube.shorts.slice(0, 8).map(s => {
+                            const vl = VIS_LABEL[s.visibility] || { text: s.visibility || '?', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30' }
+                            return (
+                              <span key={s.youtube_id} className={`px-1 py-0.5 rounded border ${vl.cls}`} title={s.title}>
+                                {vl.text}
+                              </span>
+                            )
+                          })}
+                          {c.youtube.checked_at && (
+                            <span className="text-gray-500 px-1">verific. {fmtDate(c.youtube.checked_at)}</span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Acciones */}
+                      <div className="mt-2 flex items-center gap-2 flex-wrap">
+                        <button
+                          onClick={() => onOpenReport(c)}
+                          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 text-red-200 border border-red-500/30 rounded-md hover:bg-red-500 hover:text-white transition-all"
+                        >
+                          <FileText size={12} /> Informe
+                        </button>
+                        <button
+                          onClick={() => handleStudioScan(c)}
+                          disabled={busy === c.channel_id}
+                          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
+                        >
+                          <Radio size={12} /> Escanear Studio
+                        </button>
+                        {c.internal.freq_reduced && (
+                          <button
+                            onClick={() => handleRestore(c)}
+                            disabled={busy === c.channel_id}
+                            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-amber-500/15 text-amber-200 border border-amber-500/30 rounded-md hover:bg-amber-500 hover:text-dark-900 transition-all disabled:opacity-50"
+                          >
+                            {busy === c.channel_id ? <RefreshCw size={12} className="animate-spin" /> : <Wrench size={12} />}
+                            Restaurar frecuencia
+                          </button>
+                        )}
+                        {c.internal.blocked && (
+                          <button
+                            onClick={() => handleUnblock(c)}
+                            disabled={busy === c.channel_id}
+                            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
+                          >
+                            Desbloquear (verificado)
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   )
                 })}
               </div>
             </div>
           )}
 
-          {/* Strikes / spam */}
-          {spamBlocks.map(c => {
-            const isBlocked = c.blocked
-            const res = resumeMap[c.channel_id]
-            const durTotal = (c.strikes >= 2 ? 168 : 72) + 6
-            const pct = isBlocked && c.restan_h > 0
-              ? Math.max(0, Math.min(100, 100 * (1 - c.restan_h / durTotal)))
-              : 100
-            const removal = c.last_removal
-            const scopeLabel = c.scope === 'todo' ? 'todo (shorts + vídeos)' : c.scope
-            return (
-              <div
-                key={c.channel_id}
-                className={`rounded-lg border px-3 py-2.5 bg-dark-800/60 ${
-                  isBlocked ? 'border-red-500/30' : 'border-amber-500/30'
-                }`}
-              >
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`font-semibold text-sm ${isBlocked ? 'text-red-300' : 'text-amber-300'}`}>
-                    {c.name || c.slug}
-                  </span>
-                  <code className="text-[10px] text-gray-500 bg-dark-700 px-1 py-0.5 rounded">{c.slug}</code>
-                  {c.strikes > 0 && (
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                      c.strikes >= 2 ? 'bg-neon-red/20 text-neon-red' : 'bg-red-500/15 text-red-300'
-                    } border border-red-500/30`}>
-                      {c.strikes} strike{c.strikes > 1 ? 's' : ''}
-                    </span>
-                  )}
-                  {isBlocked && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-neon-red/20 text-neon-red border border-neon-red/40">
-                      BLOQUEADO
-                    </span>
-                  )}
-                  {c.freq_reduced && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                      frecuencia rebajada
-                    </span>
-                  )}
-                  <span className="text-[10px] text-gray-500">{scopeLabel}</span>
-                  {res && res.phase_today > 0 && (
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${phaseBadge(res.phase_today).cls}`}>
-                      {phaseBadge(res.phase_today).label}
-                    </span>
-                  )}
-                  {res && phaseCountdown(res) && (
-                    <span className="text-[10px] text-cyan-300/80 flex items-center gap-1">
-                      <Clock size={10} /> {phaseCountdown(res)}
-                    </span>
-                  )}
-                </div>
-
-                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                  {isBlocked ? (
-                    <span className="flex items-center gap-1.5 text-red-300">
-                      <Clock size={12} />
-                      <b>Restan {fmtRestan(c.restan_h)}</b>
-                      {c.blocked_until && (
-                        <span className="text-gray-500">
-                          (hasta {new Date(c.blocked_until * 1000).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })})
-                        </span>
-                      )}
-                    </span>
-                  ) : c.strikes > 0 ? (
-                    <span className="text-emerald-400 flex items-center gap-1.5">
-                      <CheckCircle2 size={12} /> Bloqueo expirado
-                    </span>
-                  ) : null}
-                  <span className="text-gray-400">Frecuencia: <b className="text-gray-200">{fmtFreq(c)}</b></span>
-                </div>
-
-                {/* Barra de progreso del bloqueo */}
-                {isBlocked && c.restan_h > 0 && (
-                  <div className="mt-2 h-1 rounded-full bg-dark-600 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-neon-red to-red-400 transition-all"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                )}
-
-                {c.why && <p className="mt-2 text-xs text-gray-400 leading-relaxed">⚠️ {c.why}</p>}
-                {removal && (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
-                    <span>Vídeo: <code className="text-gray-300 bg-dark-700 px-1 py-0.5 rounded">{removal.video_id || 'desconocido'}</code></span>
-                    {removal.detected_at && (
-                      <span>Detectado: {new Date(removal.detected_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
-                    )}
-                    {removal.reason && <span className="italic">“{removal.reason}”</span>}
-                  </div>
-                )}
-
-                {/* Próximas publicaciones (esparcido Fase 1) */}
-                {res && (res.pending_publish?.upcoming?.length ?? 0) > 0 && (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
-                    <span className="flex items-center gap-1 text-gray-400">
-                      <ListOrdered size={11} />
-                      Publicaciones ({res.pending_publish?.total}):
-                    </span>
-                    {(res.pending_publish?.upcoming ?? []).slice(0, 6).map((p, i) => (
-                      <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
-                        {p.target_public_at
-                          ? new Date(p.target_public_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
-                          : p.video_id || '?'}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={() => onOpenReport(c)}
-                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 text-red-200 border border-red-500/30 rounded-md hover:bg-red-500 hover:text-white transition-all"
-                  >
-                    <FileText size={12} /> Informe
-                  </button>
-                  {c.freq_reduced && (
-                    <button
-                      onClick={() => handleRestore(c)}
-                      disabled={busy === c.channel_id}
-                      className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-amber-500/15 text-amber-200 border border-amber-500/30 rounded-md hover:bg-amber-500 hover:text-dark-900 transition-all disabled:opacity-50"
-                    >
-                      {busy === c.channel_id ? <RefreshCw size={12} className="animate-spin" /> : <Wrench size={12} />}
-                      Restaurar frecuencia
-                    </button>
-                  )}
-                  {isBlocked && (
-                    <button
-                      onClick={() => handleUnblock(c)}
-                      disabled={busy === c.channel_id}
-                      className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
-                    >
-                      Desbloquear (verificado)
-                    </button>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-
-          {/* Cuota agotada */}
-          {quotaProjects.map(p => {
-            const label = p.account || p.project_id || 'cuenta'
-            const pReset = p.reset_at_utc
-              ? new Date(p.reset_at_utc).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
-              : null
-            return (
-              <div key={p.project_id || label} className="rounded-lg border border-blue-500/30 px-3 py-2.5 bg-dark-800/60">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <AlertTriangle size={14} className="text-blue-300 flex-shrink-0" />
-                  <span className="font-semibold text-sm text-blue-300">Cuota YouTube API agotada</span>
-                  <code className="text-[10px] text-gray-400 bg-dark-700 px-1 py-0.5 rounded">{label}</code>
-                  {p.channels.length > 0 && (
-                    <span className="text-[11px] text-gray-500">({p.channels.join(', ')})</span>
-                  )}
-                  <span className="ml-auto flex items-center gap-1 text-xs text-blue-300">
-                    <Clock size={12} />
-                    {pReset ? `Recarga a las ${pReset}` : 'Recarga a medianoche PT'}
-                    {p.remaining_hours != null && p.remaining_hours > 0 && (
-                      <span className="text-blue-200/70">(~{p.remaining_hours.toFixed(1)}h)</span>
-                    )}
-                  </span>
-                </div>
-              </div>
-            )
-          })}
-
-          {/* Sesiones caducadas */}
-          {sessionWarnings.map(w => (
-            <div key={w.account} className="rounded-lg border border-amber-500/30 px-3 py-2.5 bg-dark-800/60">
+          {/* 3. Cuota y sesiones */}
+          {(quotaProjects.length > 0 || sessionWarnings.length > 0) && (
+            <div className="rounded-lg border border-blue-500/25 px-3 py-2 bg-dark-800/60">
               <div className="flex items-center gap-2 flex-wrap">
-                <AlertTriangle size={14} className="text-amber-400 flex-shrink-0" />
-                <span className="font-semibold text-sm text-amber-300">Sesión de navegador caducada</span>
-                <code className="text-[10px] text-gray-400 bg-dark-700 px-1 py-0.5 rounded">{w.account}</code>
-                {w.channels.length > 0 && <span className="text-[11px] text-gray-500">({w.channels.join(', ')})</span>}
-                <span className="ml-auto text-[11px] text-gray-400 flex items-center gap-1.5">
-                  <ExternalLink size={11} />
-                  <code className="bg-dark-700 px-1.5 py-0.5 rounded text-amber-200">
-                    python3 scripts/yt_browser_login.py --account {w.account}
-                  </code>
-                </span>
+                <Shield size={14} className="text-blue-300 flex-shrink-0" />
+                <span className="font-semibold text-sm text-blue-200">Cuota y sesiones (no es restricción de contenido)</span>
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {quotaProjects.map(p => {
+                  const label = p.account || p.project_id || 'cuenta'
+                  const pReset = p.reset_at_utc
+                    ? new Date(p.reset_at_utc).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+                    : null
+                  return (
+                    <div key={p.project_id || label} className="flex items-center gap-2 flex-wrap text-xs">
+                      <AlertTriangle size={12} className="text-blue-300" />
+                      <span className="text-blue-200 font-medium">Cuota YouTube API agotada</span>
+                      <code className="text-[10px] text-gray-400 bg-dark-700 px-1 py-0.5 rounded">{label}</code>
+                      {p.channels.length > 0 && <span className="text-[11px] text-gray-500">({p.channels.join(', ')})</span>}
+                      <span className="ml-auto flex items-center gap-1 text-blue-300">
+                        <Clock size={12} />
+                        {pReset ? `Recarga a las ${pReset}` : 'Recarga a medianoche PT'}
+                        {p.remaining_hours != null && p.remaining_hours > 0 && (
+                          <span className="text-blue-200/70">(~{p.remaining_hours.toFixed(1)}h)</span>
+                        )}
+                      </span>
+                    </div>
+                  )
+                })}
+                {sessionWarnings.map(w => (
+                  <div key={w.account} className="flex items-center gap-2 flex-wrap text-xs">
+                    <AlertTriangle size={12} className="text-amber-400" />
+                    <span className="text-amber-200 font-medium">Sesión de navegador caducada</span>
+                    <code className="text-[10px] text-gray-400 bg-dark-700 px-1 py-0.5 rounded">{w.account}</code>
+                    {w.channels.length > 0 && <span className="text-[11px] text-gray-500">({w.channels.join(', ')})</span>}
+                    <span className="ml-auto flex items-center gap-1.5 text-[11px] text-gray-400">
+                      <ExternalLink size={11} />
+                      <code className="bg-dark-700 px-1.5 py-0.5 rounded text-amber-200">
+                        python3 scripts/yt_browser_login.py --account {w.account}
+                      </code>
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
-          ))}
+          )}
+
+          {/* Leyenda */}
+          <div className="text-[10px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1 px-1">
+            <span className="flex items-center gap-1"><CheckCircle2 size={11} className="text-emerald-400" /> Público</span>
+            <span className="flex items-center gap-1"><Clock size={11} className="text-sky-300" /> Programado</span>
+            <span className="flex items-center gap-1"><AlertTriangle size={11} className="text-amber-300" /> Privado/desconocido</span>
+            <span className="flex items-center gap-1"><Ban size={11} className="text-red-300" /> Eliminado / restricción edad</span>
+          </div>
         </div>
       )}
     </div>

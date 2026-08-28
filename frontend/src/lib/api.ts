@@ -503,6 +503,9 @@ export const api = {
     const qs = channelId ? `?channel_id=${channelId}` : ''
     return request<any>(`/system/resume-status${qs}`)
   },
+  getChannelRestrictions: () => request<any>('/system/channel-restrictions'),
+  studioScan: (channelId: number) =>
+    request<any>(`/system/studio-scan?channel_id=${channelId}`, { method: 'POST' }),
   applyResumePhases: () =>
     request<any>('/system/resume/apply', { method: 'POST' }),
   getLLMCredits: () => request<any>('/monitor/llm-credits'),

@@ -44,6 +44,17 @@ export function useResumeStatus(channelId?: number) {
   })
 }
 
+// ── Estado consolidado de restricciones por canal (barra unificada) ──
+export function useChannelRestrictions() {
+  return useQuery({
+    queryKey: ['channel-restrictions'],
+    queryFn: () => api.getChannelRestrictions(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
 // ── Monitor page ──
 export function useMonitorDashboard() {
   return useQuery({
