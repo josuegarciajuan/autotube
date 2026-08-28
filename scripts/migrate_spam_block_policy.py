@@ -23,7 +23,15 @@ GAP_HOURS = 24
 MARGIN_HOURS = 1
 
 
-def _pending(db, channel_id: int, until: float) -> list[dict]:
+def _pending(db, channel_id: int, new_until: float, old_until: float) -> list[dict]:
+    """Select affected pending videos, including the previous retention chain.
+
+    Old deployments moved blocked videos to ``old_until + 1h`` and then in
+    24-hour steps.  Those rows are after ``old_until`` and therefore cannot be
+    found by a simple ``target < new_until`` query.  We only accept a chain
+    anchored at that known retention boundary (±5 minutes), avoiding unrelated
+    future videos from being moved.
+    """
     import sqlite3
     try:
         with db._connect() as conn:
@@ -38,16 +46,30 @@ def _pending(db, channel_id: int, until: float) -> list[dict]:
     except Exception:
         return []
     result = []
+    parsed = []
     for row in rows:
         try:
             dt = datetime.fromisoformat(str(row["target_public_at"]).replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if dt.timestamp() < until:
-                result.append(dict(row))
+            parsed.append((dt.timestamp(), dict(row)))
         except (TypeError, ValueError):
             continue
-    return result
+    parsed.sort(key=lambda item: item[0])
+    selected = {row["id"]: row for ts, row in parsed if ts < new_until}
+
+    # The old hold schedule starts one hour after old_until and repeats daily.
+    anchor = old_until + MARGIN_HOURS * 3600
+    previous = None
+    for ts, row in parsed:
+        if previous is None:
+            if abs(ts - anchor) <= 5 * 60:
+                selected[row["id"]] = row
+                previous = ts
+        elif abs(ts - (previous + GAP_HOURS * 3600)) <= 5 * 60:
+            selected[row["id"]] = row
+            previous = ts
+    return [row for _, row in parsed if row["id"] in selected]
 
 
 def _audit(db, channel_id: int, message: str, metadata: dict) -> None:
@@ -60,7 +82,8 @@ def _audit(db, channel_id: int, message: str, metadata: dict) -> None:
         logger.warning("audit failed for channel %s: %s", channel_id, exc)
 
 
-def _apply_schedule(db, video: dict, new_dt: datetime, slug: str) -> None:
+def _apply_schedule(db, video: dict, new_dt: datetime, slug: str,
+                    google_account: str = "") -> None:
     iso = new_dt.isoformat()
     with db._connect() as conn:
         conn.execute("UPDATE videos SET target_public_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -70,11 +93,20 @@ def _apply_schedule(db, video: dict, new_dt: datetime, slug: str) -> None:
                          (iso, video["id"]))
         except Exception:
             pass
+        try:
+            conn.execute(
+                """UPDATE video_lifecycle_actions SET scheduled_for=?
+                   WHERE video_id=? AND action_type='go_public' AND status='pending'""",
+                (iso, video["id"]),
+            )
+        except Exception:
+            pass
         conn.commit()
     if video.get("yt_video_id"):
         try:
             from pipeline.youtube_uploader import YouTubeUploader
-            YouTubeUploader(account_name=slug, channel_slug=slug).set_publish_at(
+            YouTubeUploader(account_name=google_account or slug,
+                            channel_slug=slug, db=db).set_publish_at(
                 video["yt_video_id"], iso
             )
         except Exception as exc:
@@ -115,14 +147,16 @@ def migrate_spam_state(db, *, apply: bool = False, now: float | None = None) -> 
         if old_until <= new_until:
             continue
         ch = channels.get(cid, {"slug": str(cid)})
-        pending = _pending(db, cid, new_until)
+        pending = _pending(db, cid, new_until, old_until)
         plan = [new_until + MARGIN_HOURS * 3600 + i * GAP_HOURS * 3600
                 for i in range(len(pending))]
         if apply:
             db.set_system_state(key, str(new_until))
             for video, ts in zip(pending, plan):
-                _apply_schedule(db, video, datetime.fromtimestamp(ts, timezone.utc),
-                                 ch.get("slug", str(cid)))
+                _apply_schedule(
+                    db, video, datetime.fromtimestamp(ts, timezone.utc),
+                    ch.get("slug", str(cid)), ch.get("google_account", ""),
+                )
             _audit(db, cid, "Spam block migrated to balanced policy", {
                 "old_until": old_until, "new_until": new_until,
                 "events": events, "duration_hours": duration,
