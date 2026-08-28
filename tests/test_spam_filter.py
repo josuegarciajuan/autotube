@@ -108,17 +108,17 @@ def test_spam_strike_blocks_channel(tmp_path):
     # No strike yet → not blocked
     assert ss._channel_shorts_spam_blocked(77, db=db) is False
 
-    # First strike → blocked 72h
+    # First event → blocked 12h total
     n = ss._record_short_spam_strike(77, "testchan", db=db)
     assert n == 1
     assert ss._channel_shorts_spam_blocked(77, db=db) is True
 
-    # Second strike → escalated (still blocked; longer window)
+    # Second event → escalated to 24h total
     n2 = ss._record_short_spam_strike(77, "testchan", db=db)
     assert n2 == 2
     raw = db.get_system_state("shorts_spam_blocked_until_77")
     remaining = float(raw) - time.time()
-    assert remaining > 72 * 3600  # escalated beyond 72h
+    assert 23.9 * 3600 < remaining <= 24 * 3600 + 2
 
 
 def test_spam_strike_survives_restart(tmp_path):

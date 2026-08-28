@@ -314,19 +314,18 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 _logger.warning("Worker reconnection skipped: %s", exc)
 
-            # ── Spam-block holds: colchón 6h + retener publicaciones programadas ──
+            # ── Spam-block holds: retener publicaciones programadas ──
             # Asegura que los canales bloqueados por spam no publiquen nada hasta
-            # expirar el bloqueo + colchón (reprograma publishAt ya agendados).
+            # expirar el bloqueo (reprograma publishAt ya agendados).
             try:
                 from api.services.spam_mitigation import ensure_spam_holds
                 from database.db_extended import ExtendedDatabase as _SpamDB
                 _holds = await _loop.run_in_executor(
                     None, lambda: ensure_spam_holds(_SpamDB())
                 )
-                if _holds.get("buffer_extended") or _holds.get("held"):
+                if _holds.get("held"):
                     _logger.warning(
-                        "Spam holds: colchón extendido en %d canal(es), %d publicaciones retenidas (%s)",
-                        _holds.get("buffer_extended", 0),
+                        "Spam holds: %d publicaciones retenidas (%s)",
                         _holds.get("held", 0),
                         ", ".join(_holds.get("channels", [])),
                     )
