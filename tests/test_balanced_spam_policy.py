@@ -162,7 +162,7 @@ def test_migration_replans_retained_chain_after_old_block_and_uses_google_accoun
     result = migrate_spam_state(db, apply=True, now=now)
     assert result["replanned"] == 3
     assert [call[0] for call in calls if call[0] != "init"] == ["yt1", "yt2", "yt3"]
-    assert calls[0][1]["account_name"] == "burrianacasa2026"
+    assert calls[0][1]["account_name"] == "canal4"
     assert calls[0][1]["channel_slug"] == "canal4"
     with db._connect() as check:
         targets = [r[0] for r in check.execute(
