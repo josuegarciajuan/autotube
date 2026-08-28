@@ -464,6 +464,12 @@ async def lifespan(app: FastAPI):
     # cubrir (garantiza que "lo planeado se cumpla"). Loop independiente de 10 min.
     publish_coverage_task = _supervised_loop("publish_coverage", _publish_coverage_loop)
 
+    # ── Estado real de publicación de shorts (ago 2026) ──
+    # Reconcilia la verdad externa (yt-dlp + RSS, 0 cuota) de los shorts recientes
+    # en las columnas derivadas (yt_visibility / yt_checked_at). La barra y los
+    # endpoints leen esa verdad, no el status optimista que se marcaba al subir.
+    yt_state_task = _supervised_loop("yt_state_reconcile", _yt_state_reconcile_loop)
+
     yield
     
     # Shutdown
@@ -479,6 +485,7 @@ async def lifespan(app: FastAPI):
         health_checker_task, quota_recovery_task, resume_phase_task,
         redistribution_task,
         publish_coverage_task,
+        yt_state_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -686,6 +693,41 @@ async def _publish_verify_loop():
         except Exception as exc:
             logger.warning("Publish verify error: %s", exc)
         
+        await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _yt_state_reconcile_loop():
+    """Background loop: reconcile the REAL publication state of recent shorts.
+
+    Runs every 5 minutes (0 YouTube Data API quota — uses yt-dlp + public RSS).
+    Updates derived columns (yt_visibility / yt_checked_at / published_at) so the
+    UI/endpoints can distinguish "programado" from "publicado" and surface
+    silently-removed or stuck-private shorts instead of trusting the optimistic
+    status written at upload time.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.yt_state_reconcile")
+
+    await asyncio.sleep(90)  # Let API + other loops stabilize first
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("yt_state_reconcile")
+            from api.services.yt_state_reconciler import reconcile_recent_shorts
+            from database.db_extended import ExtendedDatabase
+            summary = await asyncio.to_thread(reconcile_recent_shorts, ExtendedDatabase())
+            if summary.get("checked", 0) > 0:
+                logger.info(
+                    "YT state reconcile: checked=%d updated=%d (pub=%d priv=%d age=%d removed=%d stuck=%d err=%d)",
+                    summary.get("checked", 0), summary.get("updated", 0),
+                    summary.get("public", 0), summary.get("private", 0),
+                    summary.get("age_restricted", 0), summary.get("removed", 0),
+                    summary.get("stuck", 0), summary.get("errors", 0),
+                )
+        except Exception as exc:
+            logger.warning("YT state reconcile error: %s", exc)
+
         await asyncio.sleep(300)  # Every 5 minutes
 
 

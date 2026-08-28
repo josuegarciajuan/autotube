@@ -4335,16 +4335,29 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         return None
 
     # 6. Register in DB
+    # Estado de publicación real (v48): si la subida fue PRIVADA con publishAt
+    # futuro, el short AÚN no está público. Se guarda publish_at y se deja
+    # published_at NULL hasta que el reconciliador confirme la publicación real
+    # (0 cuota, RSS/yt-dlp). Solo las subidas inmediatas (public) se marcan
+    # publicadas aquí. El status canónico se mantiene 'published' (no rompe
+    # queries); yt_visibility es la fuente de verdad para la UI.
+    sched_iso = publish_at  # str ISO o None
+    published_at_sql = 'NULL' if sched_iso else "datetime('now','localtime')"
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     cursor = conn.execute(
-        """INSERT INTO shorts
+        f"""INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text, topic,
-            status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta,
+            status, file_path, youtube_id, youtube_url, published_at,
+            publish_at, yt_visibility, yt_checked_at, has_subscribe_cta,
             longform_linked, longform_linked_at)
-           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?,
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?,
+                   {published_at_sql}, ?, ?, datetime('now','localtime'), ?,
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
          str(video_path), yt_id, result.get("url", ""),
+         sched_iso,
+         'scheduled' if sched_iso else 'public',
+         'upload',
          int(has_subscribe_cta)),
     )
     short_id = cursor.lastrowid
@@ -4545,14 +4558,29 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
 
     try:
         with db._connect() as conn:
+            # Estado de publicación real (v48): si se subió PRIVADO con publishAt
+            # futuro (privacy='private' y publish_at set), el short aún no está
+            # público. Guardamos publish_at y dejamos published_at NULL hasta que
+            # el reconciliador confirme la publicación real (0 cuota). El status
+            # canónico se mantiene 'published'; yt_visibility es la verdad para la UI.
+            sched_iso = publish_at if (privacy == "private" and publish_at) else None
+            published_at_sql = 'NULL' if sched_iso else "datetime('now','localtime')"
+            yt_vis = 'scheduled' if sched_iso else 'public'
             conn.execute(
-                """UPDATE shorts SET status='published', youtube_id=?, youtube_url=?,
-                   published_at=datetime('now','localtime'), error_message='',
+                f"""UPDATE shorts SET status='published', youtube_id=?, youtube_url=?,
+                   published_at={published_at_sql},
+                   publish_at=COALESCE(?, publish_at),
+                   yt_visibility=CASE WHEN ? IS NOT NULL THEN ? ELSE yt_visibility END,
+                   yt_checked_at=datetime('now','localtime'),
+                   yt_checked_source='upload',
+                   error_message='',
                    longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
                    longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')
                                              ELSE longform_linked_at END
                    WHERE id=?""",
-                (yt_id, result.get("url", ""), short_type, short_type, short_id),
+                (yt_id, result.get("url", ""),
+                 sched_iso, sched_iso, yt_vis,
+                 short_type, short_type, short_id),
             )
             # Slot en cola → completado (ahora sí está publicado; fix ago 2026:
             # el estado 'generated' lo mantenía visible en Programación).
