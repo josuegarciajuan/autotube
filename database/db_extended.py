@@ -1357,7 +1357,15 @@ def migrate_v2(db_path: str = None):
 
     # ── v47: channel contact identity (signup email + phone) ──
     _migrate_v47(conn, logger)
-    
+
+    # ── v48: shorts real-publication visibility (publish_at + yt_visibility) ──
+    # Verdad sobre el estado real de publicación de los shorts. Hasta ahora se
+    # marcaba status='published' + published_at=now al SUBIR (aunque la subida
+    # fuese privada con publishAt futuro), y nunca se verificaba que el short
+    # realmente se publicara. Estas columnas cachean la verdad externa (y la
+    # hora programada) para que la UI distinga "programado" de "publicado".
+    _migrate_v48(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3122,6 +3130,39 @@ def _migrate_v47(conn, logger):
                 logger.warning("Migration v47: failed to add channels.%s: %s", col, exc)
     conn.commit()
     logger.info("Migration v47: channel contact identity fields ensured")
+
+
+def _migrate_v48(conn, logger):
+    """Idempotent v48: shorts real-publication visibility fields.
+
+    Adds columns to cache the EXTERNAL publication truth of each short:
+      - publish_at      : scheduled publish time (ISO). Set at upload when the
+                          short is uploaded private + publishAt. NULL if immediate.
+      - yt_visibility   : last known real status on YouTube
+                          ('public' | 'scheduled' | 'private' | 'age_restricted'
+                           | 'removed' | 'unavailable' | '').
+      - yt_checked_at   : ISO timestamp of the last external reconciliation.
+      - yt_checked_source : how it was verified ('rss' | 'ytdlp' | 'data_api' | 'studio').
+
+    These are DERIVED columns: they do not change the canonical status
+    ('published'), so all existing queries/dashboards keep working. The UI
+    reads yt_visibility as the source of truth for "real" publication state.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('shorts')").fetchall()}
+    for col, col_type in [
+        ("publish_at", "TEXT"),
+        ("yt_visibility", "TEXT DEFAULT ''"),
+        ("yt_checked_at", "TEXT"),
+        ("yt_checked_source", "TEXT DEFAULT ''"),
+    ]:
+        if col not in cols:
+            try:
+                conn.execute(f"ALTER TABLE shorts ADD COLUMN {col} {col_type}")
+                logger.info("Migration v48: added shorts.%s", col)
+            except Exception as exc:
+                logger.warning("Migration v48: failed to add shorts.%s: %s", col, exc)
+    conn.commit()
+    logger.info("Migration v48: shorts real-publication visibility fields ensured")
 
 
 def _migrate_v10(conn, logger):
