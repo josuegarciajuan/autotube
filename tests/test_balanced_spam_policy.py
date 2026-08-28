@@ -1,8 +1,11 @@
 """Tests for the balanced anti-spam block policy and runtime migration."""
 
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def test_spam_block_duration_is_12h_then_24h():
@@ -172,3 +175,27 @@ def test_migration_replans_retained_chain_after_old_block_and_uses_google_accoun
     assert datetime.fromisoformat(targets[3]).timestamp() == old_until + 5 * 3600
     assert datetime.fromisoformat(targets[0]).timestamp() == now + 13 * 3600
     assert datetime.fromisoformat(targets[1]).timestamp() - datetime.fromisoformat(targets[0]).timestamp() == 86400
+
+
+def test_migration_script_runs_as_documented(tmp_path):
+    db_path = tmp_path / "cli.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT,
+                                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, name TEXT,
+                               active INTEGER DEFAULT 1,
+                               created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    """)
+    conn.commit()
+    conn.close()
+
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "scripts/migrate_spam_block_policy.py", "--dry-run"],
+        cwd=project_root,
+        env={**__import__("os").environ, "DATABASE_PATH": str(db_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
