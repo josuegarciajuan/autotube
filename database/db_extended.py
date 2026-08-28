@@ -3135,7 +3135,7 @@ def _migrate_v47(conn, logger):
 def _migrate_v48(conn, logger):
     """Idempotent v48: shorts real-publication visibility fields.
 
-    Adds columns to cache the EXTERNAL publication truth of each short:
+    Adds columns to track the REAL publication truth of each short:
       - publish_at      : scheduled publish time (ISO). Set at upload when the
                           short is uploaded private + publishAt. NULL if immediate.
       - yt_visibility   : last known real status on YouTube
@@ -3143,10 +3143,15 @@ def _migrate_v48(conn, logger):
                            | 'removed' | 'unavailable' | '').
       - yt_checked_at   : ISO timestamp of the last external reconciliation.
       - yt_checked_source : how it was verified ('rss' | 'ytdlp' | 'data_api' | 'studio').
+      - actual_published_at : when the reconciliador confirmed the short is really
+                          public on YouTube (ISO). NULL while scheduled/private.
 
-    These are DERIVED columns: they do not change the canonical status
-    ('published'), so all existing queries/dashboards keep working. The UI
-    reads yt_visibility as the source of truth for "real" publication state.
+    Status semantics (ago 2026): a short uploaded PRIVATE with a future publishAt
+    is written with status='scheduled' (NOT 'published'); the reconciliador flips
+    it to 'published' only once the external truth confirms it is public (0 cuota,
+    RSS/yt-dlp). published_at always keeps the UPLOAD timestamp (the anti-spam caps
+    count subidas by date(published_at), so it must never be NULLed for a short
+    that has a youtube_id).
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info('shorts')").fetchall()}
     for col, col_type in [
@@ -3154,6 +3159,7 @@ def _migrate_v48(conn, logger):
         ("yt_visibility", "TEXT DEFAULT ''"),
         ("yt_checked_at", "TEXT"),
         ("yt_checked_source", "TEXT DEFAULT ''"),
+        ("actual_published_at", "TEXT"),
     ]:
         if col not in cols:
             try:
@@ -6073,7 +6079,8 @@ class ExtendedDatabase(Database):
             recs_where = "AND s.channel_id = ?" if channel_id else ""
             recent_shorts = conn.execute(
                 f"""SELECT s.id, s.title, s.youtube_id, s.youtube_url, s.duration, s.published_at,
-                           s.status, c.name as channel_name, c.slug as channel_slug
+                           s.status, s.publish_at, s.yt_visibility,
+                           c.name as channel_name, c.slug as channel_slug
                     FROM shorts s
                     JOIN channels c ON s.channel_id = c.id
                     WHERE 1=1 {recs_where}
@@ -6313,9 +6320,11 @@ class ExtendedDatabase(Database):
 
             UNION ALL
 
-            -- Shorts published today (always public)
+            -- Shorts uploaded today (published OR scheduled; published_at = subida)
             SELECT s.id, 'short',
-                   'published',
+                   CASE WHEN s.status = 'published' THEN 'published'
+                        WHEN s.status = 'scheduled' THEN 'scheduled'
+                        ELSE 'uploaded' END,
                    s.published_at,
                    s.title, s.status,
                    c.name, c.slug,
@@ -8373,16 +8382,18 @@ class ExtendedDatabase(Database):
         return row["cnt"] if row else 0
 
     def get_shorts_published_today(self, channel_id: int) -> int:
-        """Count shorts successfully published today for a channel.
+        """Count shorts uploaded today for a channel (published OR scheduled).
 
-        Used by the shorts recovery planner to determine how many of
-        today's target shorts have already been published.
+        Used by the shorts recovery planner to determine how many of today's
+        target shorts have already been dispatched/subidos. v48: un short subido
+        como private+publishAt tiene status='scheduled' hasta que el reconciliador
+        confirma la publicación, pero YA consume el hueco de subida de hoy.
 
         Returns count of shorts where:
         - channel_id matches
         - youtube_id IS NOT NULL (successfully uploaded to YouTube)
-        - status = 'published'
-        - published_at is today (local time)
+        - status IN ('published', 'scheduled')
+        - published_at is today (local time, = fecha de subida)
         """
         with self._connect() as conn:
             conn.execute("PRAGMA busy_timeout=30000")
@@ -8390,7 +8401,7 @@ class ExtendedDatabase(Database):
                 """SELECT COUNT(*) as cnt FROM shorts
                    WHERE channel_id = ?
                      AND youtube_id IS NOT NULL
-                     AND status = 'published'
+                     AND status IN ('published', 'scheduled')
                      AND DATE(published_at) = DATE('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()
@@ -8425,16 +8436,18 @@ class ExtendedDatabase(Database):
         return row["updated_at"] if row and row["updated_at"] else None
 
     def count_native_shorts_published_today(self, channel_id: int) -> int:
-        """Count native shorts actually published today (by published_at, not date_key).
-        
-        Used by the dispatch cap to prevent exceeding shorts_native_per_day.
+        """Count native shorts UPLOADED today (by published_at=subida, not date_key).
+
+        v48: incluye status='scheduled' (private+publishAt aún no público) porque
+        ya consume el hueco de subida del día (anti-spam). Usado por el cap de
+        dispatch para no exceder shorts_native_per_day.
         """
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM shorts
                    WHERE channel_id = ?
                      AND type = 'native'
-                     AND status = 'published'
+                     AND status IN ('published', 'scheduled')
                      AND DATE(published_at) = DATE('now', 'localtime')""",
                 (channel_id,),
             ).fetchone()

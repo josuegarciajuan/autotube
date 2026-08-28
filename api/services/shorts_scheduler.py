@@ -366,14 +366,20 @@ GLOBAL_SHORTS_PER_DAY_CAP = 6
 
 
 def _global_shorts_daily_cap_reached(db=None) -> bool:
-    """True si ya se publicaron >= GLOBAL_SHORTS_PER_DAY_CAP shorts hoy (global)."""
+    """True si ya se subieron >= GLOBAL_SHORTS_PER_DAY_CAP shorts hoy (global).
+
+    v48: cuenta por youtube_id (cualquier status publicado o programado), porque
+    un short subido como private+publishAt tiene status='scheduled' hasta que el
+    reconciliador confirme la publicación. El tope anti-spam mide SUBIDAS, no
+    publicaciones.
+    """
     try:
         import sqlite3 as _sql_cap
         from config.settings import DATABASE_PATH as _DBP_CAP
         with _sql_cap.connect(str(_DBP_CAP), timeout=10) as _conn_cap:
             row = _conn_cap.execute(
                 """SELECT COUNT(*) FROM shorts
-                   WHERE status = 'published'
+                   WHERE youtube_id IS NOT NULL AND youtube_id != ''
                      AND date(published_at) = date('now', 'localtime')"""
             ).fetchone()
         return (row[0] if row else 0) >= _global_shorts_daily_cap()
@@ -4336,28 +4342,30 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     # 6. Register in DB
     # Estado de publicación real (v48): si la subida fue PRIVADA con publishAt
-    # futuro, el short AÚN no está público. Se guarda publish_at y se deja
-    # published_at NULL hasta que el reconciliador confirme la publicación real
-    # (0 cuota, RSS/yt-dlp). Solo las subidas inmediatas (public) se marcan
-    # publicadas aquí. El status canónico se mantiene 'published' (no rompe
-    # queries); yt_visibility es la fuente de verdad para la UI.
+    # futuro, el short AÚN no está público → status='scheduled'. El reconciliador
+    # (0 cuota, RSS/yt-dlp) lo flipeará a 'published' cuando confirme que YouTube
+    # lo hizo público. published_at SIEMPRE = hora de subida (los caps anti-spam
+    # cuentan subidas por date(published_at); nunca debe quedar NULL si hay
+    # youtube_id). actual_published_at se fija cuando el reconciliador confirma.
     sched_iso = publish_at  # str ISO o None
-    published_at_sql = 'NULL' if sched_iso else "datetime('now','localtime')"
+    canonical_status = 'scheduled' if sched_iso else 'published'
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     cursor = conn.execute(
-        f"""INSERT INTO shorts
+        """INSERT INTO shorts
            (channel_id, type, title, hook_title, hook_text, topic,
             status, file_path, youtube_id, youtube_url, published_at,
-            publish_at, yt_visibility, yt_checked_at, has_subscribe_cta,
+            publish_at, yt_visibility, yt_checked_at, yt_checked_source,
+            actual_published_at, has_subscribe_cta,
             longform_linked, longform_linked_at)
-           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?,
-                   {published_at_sql}, ?, ?, datetime('now','localtime'), ?,
+           VALUES (?, 'native', ?, ?, ?, ?, ?, ?, ?, ?,
+                   datetime('now','localtime'), ?, ?, datetime('now','localtime'), 'upload',
+                   ?, ?,
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
-         str(video_path), yt_id, result.get("url", ""),
+         canonical_status, str(video_path), yt_id, result.get("url", ""),
          sched_iso,
          'scheduled' if sched_iso else 'public',
-         'upload',
+         None,  # actual_published_at: NULL until reconciliador confirma
          int(has_subscribe_cta)),
     )
     short_id = cursor.lastrowid
@@ -4559,31 +4567,34 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     try:
         with db._connect() as conn:
             # Estado de publicación real (v48): si se subió PRIVADO con publishAt
-            # futuro (privacy='private' y publish_at set), el short aún no está
-            # público. Guardamos publish_at y dejamos published_at NULL hasta que
-            # el reconciliador confirme la publicación real (0 cuota). El status
-            # canónico se mantiene 'published'; yt_visibility es la verdad para la UI.
+            # futuro, el short aún no está público → status='scheduled'. El
+            # reconciliador (0 cuota) lo flipeará a 'published' cuando confirme la
+            # publicación real. published_at SIEMPRE = hora de subida (los caps
+            # anti-spam cuentan subidas por date(published_at); NUNCA NULL si hay
+            # youtube_id). actual_published_at se fija cuando el reconciliador confirma.
             sched_iso = publish_at if (privacy == "private" and publish_at) else None
-            published_at_sql = 'NULL' if sched_iso else "datetime('now','localtime')"
+            canonical_status = 'scheduled' if sched_iso else 'published'
             yt_vis = 'scheduled' if sched_iso else 'public'
             conn.execute(
-                f"""UPDATE shorts SET status='published', youtube_id=?, youtube_url=?,
-                   published_at={published_at_sql},
+                """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
+                   published_at=COALESCE(published_at, datetime('now','localtime')),
                    publish_at=COALESCE(?, publish_at),
                    yt_visibility=CASE WHEN ? IS NOT NULL THEN ? ELSE yt_visibility END,
                    yt_checked_at=datetime('now','localtime'),
                    yt_checked_source='upload',
+                   actual_published_at=CASE WHEN ? IS NULL THEN actual_published_at ELSE NULL END,
                    error_message='',
                    longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
                    longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')
                                              ELSE longform_linked_at END
                    WHERE id=?""",
-                (yt_id, result.get("url", ""),
+                (canonical_status, yt_id, result.get("url", ""),
                  sched_iso, sched_iso, yt_vis,
+                 sched_iso,
                  short_type, short_type, short_id),
             )
-            # Slot en cola → completado (ahora sí está publicado; fix ago 2026:
-            # el estado 'generated' lo mantenía visible en Programación).
+            # Slot en cola → completado (fix ago 2026: el estado 'generated'
+            # lo mantenía visible en Programación).
             if slot_row:
                 conn.execute(
                     """UPDATE shorts_planned_slots

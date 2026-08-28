@@ -11,6 +11,8 @@ interface RecentShort {
   duration: number | null
   published_at: string | null
   status: string | null
+  publish_at: string | null
+  yt_visibility: string | null
   channel_name: string
   channel_slug: string
 }
@@ -53,6 +55,9 @@ function statusBadge(status: string | null) {
   }
   if (st === 'published') {
     return { icon: <CheckCircle size={11} />, label: 'Publicado', cls: 'bg-emerald-400/15 text-emerald-400 border-emerald-400/30' }
+  }
+  if (st === 'scheduled') {
+    return { icon: <Clock size={11} />, label: 'Programado', cls: 'bg-amber-400/15 text-amber-400 border-amber-400/30' }
   }
   if (st === 'ready') {
     return { icon: <CheckCircle size={11} />, label: 'Ready', cls: 'bg-blue-400/15 text-blue-400 border-blue-400/30' }
@@ -115,8 +120,10 @@ export default function RecentShorts({ shorts }: RecentShortsProps) {
                   </span>
                   <span className="text-[10px] text-gray-500 flex items-center gap-1 shrink-0">
                     <Clock size={10} />
-                    {timeAgo(s.published_at)}
-                    {s.published_at && (
+                    {s.status === 'scheduled'
+                      ? (s.publish_at ? `pub. ${formatDateTime(s.publish_at)}` : 'programado')
+                      : timeAgo(s.published_at)}
+                    {s.status !== 'scheduled' && s.published_at && (
                       <>
                         <span aria-hidden="true">·</span>
                         <time dateTime={s.published_at}>{formatDateTime(s.published_at)}</time>

@@ -307,6 +307,8 @@ export default function Dashboard() {
   const topVideos = data?.top_videos || []
   const recentVideos = data?.recent_videos || []
   const recentShorts = data?.recent_shorts || []
+  const publishedShorts = recentShorts.filter((s: any) => (s.status || '').toLowerCase() === 'published')
+  const scheduledShorts = recentShorts.filter((s: any) => (s.status || '').toLowerCase() === 'scheduled')
   const todayVideos = data?.today_videos || []
   const heatmapData = data?.heatmap_data || []
   const todayActions = data?.today_actions || []
@@ -692,7 +694,7 @@ export default function Dashboard() {
       )}
 
       {/* ═══════ NIVEL 1: Publicado Hoy ═══════ */}
-      <CollapsibleSection title={`Publicado Hoy (${todayVideos.length} videos · ${recentShorts.length} shorts)`} icon="📺" defaultOpen={true}>
+      <CollapsibleSection title={`Publicado Hoy (${todayVideos.length} videos · ${publishedShorts.length} shorts${scheduledShorts.length ? ` · ${scheduledShorts.length} programados` : ''})`} icon="📺" defaultOpen={true}>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
           <RecentVideos videos={todayVideos.slice(0, 10)} />
           <RecentShorts shorts={recentShorts.slice(0, 10)} />

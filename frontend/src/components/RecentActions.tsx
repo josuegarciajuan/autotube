@@ -5,7 +5,7 @@ import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 interface TodayAction {
   entity_id: number
   entity_type: 'video' | 'short'
-  action: 'generated' | 'uploaded' | 'published'
+  action: 'generated' | 'uploaded' | 'published' | 'scheduled'
   action_at: string
   title: string | null
   status: string | null
@@ -47,6 +47,13 @@ function actionBadge(action: string, entityType: string) {
       icon: <CheckCircle size={11} />,
       label: 'Publicado',
       cls: 'bg-emerald-400/15 text-emerald-400 border-emerald-400/30',
+    }
+  }
+  if (action === 'scheduled') {
+    return {
+      icon: <Clock size={11} />,
+      label: 'Programado',
+      cls: 'bg-amber-400/15 text-amber-400 border-amber-400/30',
     }
   }
   return { icon: null, label: action, cls: 'bg-gray-400/15 text-gray-400 border-gray-400/30' }

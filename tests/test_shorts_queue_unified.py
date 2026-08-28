@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 from database.db import init_db
-from database.db_extended import ExtendedDatabase
+from database.db_extended import ExtendedDatabase, _migrate_v48
 from api.services import shorts_scheduler as ss
 from pipeline import shorts_cross_promote as scp
 
@@ -97,6 +97,11 @@ def _db(tmp_path):
                 "INSERT OR REPLACE INTO channels (id, name, slug, config_json) VALUES (?, ?, ?, ?)",
                 (ch_id, slug, slug, json.dumps({"videos_per_day": 1})),
             )
+    # v48: añade columnas de estado real de publicación (scheduled / publish_at /
+    # yt_visibility / actual_published_at). La válvula las escribe al subir.
+    import logging as _logging
+    with sqlite3.connect(str(path)) as conn:
+        _migrate_v48(conn, _logging.getLogger("test"))
     return ExtendedDatabase(str(path)), str(path)
 
 

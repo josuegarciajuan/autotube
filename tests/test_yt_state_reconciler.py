@@ -114,29 +114,62 @@ class _Rows:
         return self._rows[0] if self._rows else None
 
 
-def _short(short_id, channel_id, yt_id, visibility="", publish_at=None, published_at=None, checked_at=None):
+def _short(short_id, channel_id, yt_id, visibility="", publish_at=None, published_at=None, checked_at=None, status="published"):
     return {
         "id": short_id, "channel_id": channel_id, "youtube_id": yt_id,
-        "status": "published", "publish_at": publish_at, "published_at": published_at,
+        "status": status, "publish_at": publish_at, "published_at": published_at,
         "yt_visibility": visibility, "yt_checked_at": checked_at,
     }
 
 
 def test_reconcile_public_sets_published_at(monkeypatch):
     now = datetime.now(timezone.utc)
-    shorts = [_short(1, 5, "AAA", visibility="scheduled", publish_at=now.isoformat())]
+    shorts = [_short(1, 5, "AAA", visibility="scheduled", publish_at=now.isoformat(), status="scheduled")]
     db = FakeDB(shorts=shorts, channels=[{"id": 5, "yt_channel_id": "UCx"}], feed_map={5: {"AAA": now.isoformat()}})
     monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "public")
     monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {"AAA": now.isoformat()})
     summary = rec.reconcile_recent_shorts(db)
     assert summary["public"] == 1
-    any_write = any("yt_visibility" in w[0] and w[1][0] == "public" for w in db.writes)
-    assert any_write, "expected an update writing yt_visibility='public'"
+    # scheduled → published + actual_published_at set
+    write = [w for w in db.writes if "actual_published_at" in w[0]]
+    assert write, "expected status/actual_published_at update"
+    params = write[-1][1]
+    assert params[0] == "published", "scheduled short confirmed public should flip to published"
+    assert params[5] is not None, "actual_published_at should be set when public"
+
+
+def test_reconcile_downgrades_published_to_scheduled_when_private(monkeypatch):
+    """BD decía published pero YT aún lo tiene privado → degradar a scheduled."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    shorts = [_short(4, 5, "DDD", visibility="", publish_at=future, status="published")]
+    db = FakeDB(shorts=shorts, channels=[{"id": 5, "yt_channel_id": "UCx"}], feed_map={})
+    monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "private")
+    monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {})
+    rec.reconcile_recent_shorts(db)
+    write = [w for w in db.writes if "actual_published_at" in w[0]]
+    assert write, "expected a status update"
+    params = write[-1][1]
+    assert params[0] == "scheduled", "published-but-still-private short should degrade to scheduled"
+    assert params[5] is None, "actual_published_at stays NULL while not public"
+
+
+def test_reconcile_keeps_scheduled_while_future_publish(monkeypatch):
+    """PublishAt futuro y YT privado → se mantiene scheduled (no published, no alerta)."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    shorts = [_short(5, 5, "EEE", visibility="", publish_at=future, status="scheduled")]
+    db = FakeDB(shorts=shorts, channels=[{"id": 5, "yt_channel_id": "UCx", "slug": "canal4"}], feed_map={})
+    monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "private")
+    monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {})
+    summary = rec.reconcile_recent_shorts(db)
+    write = [w for w in db.writes if "actual_published_at" in w[0]]
+    assert write, "expected a status update"
+    assert write[-1][1][0] == "scheduled"
+    assert summary["stuck"] == 0, "future publish_at must not trigger stuck alert"
 
 
 def test_reconcile_stuck_private_alerts(monkeypatch):
     past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    shorts = [_short(2, 5, "BBB", visibility="scheduled", publish_at=past)]
+    shorts = [_short(2, 5, "BBB", visibility="scheduled", publish_at=past, status="scheduled")]
     db = FakeDB(shorts=shorts, channels=[{"id": 5, "yt_channel_id": "UCx", "slug": "canal4"}], feed_map={})
     monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "private")
     monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {})
