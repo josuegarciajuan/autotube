@@ -551,9 +551,10 @@ def channel_restrictions():
                 if vis in ("removed", "unavailable"):
                     youtube["removed"].append(entry)
                 # Discrepancia: BD dice publicado (status='published') pero YT lo tiene
-                # programado/privado, o está eliminado.
+                # programado/privado, o está eliminado. (No se exige publish_at: los
+                # shorts históricos no lo guardan, pero la discrepancia sigue siendo real.)
                 if s["status"] == "published":
-                    if vis in ("scheduled", "private") and s["publish_at"]:
+                    if vis in ("scheduled", "private"):
                         youtube["discrepancies"].append({
                             "type": "bd_published_yt_scheduled",
                             "youtube_id": s["youtube_id"], "title": entry["title"],
