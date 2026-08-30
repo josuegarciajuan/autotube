@@ -586,6 +586,7 @@ export interface PlannedSlot {
   date_key?: string;
   slot_position: number;
   source_mode: string;
+  planned_at?: string;        // fecha de lanzamiento de la programación (ps.created_at)
   channel_name: string;
   channel_slug: string;
 }
@@ -600,6 +601,11 @@ export interface GeneratingVideo {
   publish_mode: string;
   created_at: string;
   generation_started_at: string | null;
+  generation_finished_at?: string | null;
+  plan_start?: string | null;         // inicio creación planificado (slot)
+  plan_upload?: string | null;        // subida prevista (slot)
+  planned_at?: string | null;         // lanzamiento programación
+  source_mode?: string;
   job_id: number | null;
   job_status: string | null;
   job_progress: number | null;
@@ -622,6 +628,10 @@ export interface AwaitingUploadVideo {
   progress_phase: string | null;
   created_at: string;
   generation_finished_at: string | null;
+  generation_started_at?: string | null;
+  plan_start?: string | null;
+  planned_at?: string | null;
+  source_mode?: string;
   channel_name: string;
   channel_slug: string;
   is_marathon?: number | boolean;
@@ -643,6 +653,14 @@ export interface WarmingVideo {
   channel_name: string;
   channel_slug: string;
   held?: boolean;
+  created_at?: string;
+  generation_started_at?: string | null;
+  generation_finished_at?: string | null;
+  plan_start?: string | null;
+  plan_upload?: string | null;
+  planned_at?: string | null;
+  source_mode?: string;
+  is_marathon?: number | boolean;
 }
 
 export interface ShortsPipelineSlot {
@@ -661,6 +679,11 @@ export interface ShortsPipelineSlot {
   job_progress: number | null;
   job_phase: string | null;
   actual_completed_at: string | null;  // Real publish time (from shorts table)
+  planned_at?: string;                 // lanzamiento programación (sps.created_at)
+  source_mode?: string;
+  real_start?: string | null;          // inicio real (shorts.created_at aprox)
+  real_publish?: string | null;        // publicación real (shorts.published_at)
+  plan_upload?: string | null;         // subida prevista (s.publish_at en completed)
   short_id?: number | null;           // v25: for pre-rendered clips
   title?: string | null;              // v25: short title (for ready clips)
   file_path?: string | null;          // v25: local MP4 path (for ready clips)
@@ -678,6 +701,14 @@ export interface PublishedItem {
   youtube_id: string | null;
   published_at: string;
   content_type: 'video' | 'native' | 'clip';
+  planned_at?: string | null;
+  plan_start?: string | null;
+  plan_upload?: string | null;
+  plan_publish?: string | null;
+  real_start?: string | null;
+  real_upload?: string | null;
+  source_mode?: string;
+  is_marathon?: number | boolean;
 }
 
 /** Format seconds to mm:ss */
