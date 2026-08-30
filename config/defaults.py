@@ -37,10 +37,11 @@ LOGO_PATH = ""
 # Packaging guardrails.  Channels may override these through their Python
 # profile or DB config_json; pipelines must read them through config_bridge.
 TITLE_MIN_CHARS = 28
-TITLE_REQUIRED_SPECIFICITY = ["year"]
+TITLE_REQUIRED_SPECIFICITY = []
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras"]
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
+RECOVERY_CHECKPOINTS_ENABLED = False
 
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE

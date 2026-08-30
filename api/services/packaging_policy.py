@@ -65,3 +65,15 @@ def validate_thumbnail_file(path, min_width: int = 640, min_height: int = 360) -
     except (OSError, ValueError):
         reasons.append("invalid_image")
     return ValidationResult(not reasons, tuple(reasons))
+
+
+def validate_video_packaging(video: dict, config) -> ValidationResult:
+    """Final upload gate for title, overlay, and rendered thumbnail."""
+    results = [validate_title(video.get("titulo_final", ""), config)]
+    results.append(validate_thumbnail_overlay(
+        video.get("thumbnail_text", ""),
+        int(getattr(config, "THUMBNAIL_MAX_OVERLAY_CHARS", 32)),
+    ))
+    results.append(validate_thumbnail_file(video.get("thumbnail_path", "")))
+    reasons = tuple(dict.fromkeys(r for result in results for r in result.reasons))
+    return ValidationResult(not reasons, reasons)

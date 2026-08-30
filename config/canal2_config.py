@@ -166,6 +166,7 @@ TITLE_MIN_CHARS = 28
 TITLE_REQUIRED_SPECIFICITY = ["year", "place_or_person"]
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras", "desafía toda lógica"]
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
+RECOVERY_CHECKPOINTS_ENABLED = True
 
 # ═══════════════════════════════════════════════════════════════════
 # SCRIPT STRUCTURE — "Espiral de Asombro" method

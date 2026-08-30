@@ -1,8 +1,14 @@
 """Quota-free publication checkpoints for the conservative recovery experiment."""
 from datetime import datetime, timezone
 from typing import Optional
+import math
 
 CHECKPOINT_HOURS = (48, 96, 168, 336)
+
+
+def should_run_checkpoint_review(scheduler_paused: bool) -> bool:
+    """Manual scheduler pause is authoritative for all scheduler work."""
+    return not bool(scheduler_paused)
 
 
 def classify_checkpoint(stats: Optional[dict]) -> str:
@@ -11,7 +17,12 @@ def classify_checkpoint(stats: Optional[dict]) -> str:
     impressions = stats.get("impressions")
     ctr = stats.get("ctr", stats.get("impressionsClickThroughRate"))
     retention = stats.get("average_view_percentage", stats.get("averageViewPercentage"))
-    if impressions is None or ctr is None:
+    try:
+        impressions = float(impressions)
+        ctr = float(ctr)
+        if not math.isfinite(impressions) or not math.isfinite(ctr) or impressions < 0 or ctr < 0:
+            return "metrics_unavailable"
+    except (TypeError, ValueError):
         return "metrics_unavailable"
     if impressions < 100:
         return "low_impressions"
@@ -20,7 +31,12 @@ def classify_checkpoint(stats: Optional[dict]) -> str:
     if float(ctr) < ctr_threshold:
         return "low_ctr"
     if retention is not None:
-        retention = float(retention)
+        try:
+            retention = float(retention)
+            if not math.isfinite(retention) or retention < 0:
+                return "metrics_unavailable"
+        except (TypeError, ValueError):
+            return "metrics_unavailable"
         retention_threshold = 20.0 if retention > 1 else 0.20
     if retention is not None and retention < retention_threshold:
         return "early_retention_drop"
@@ -41,11 +57,20 @@ def run_due_checkpoints(db, now=None) -> int:
     """Emit at most one durable alert per video/checkpoint and never call YT."""
     now = now or datetime.now(timezone.utc)
     created = 0
-    try:
-        videos = db.get_videos(status="published", limit=500)
-    except TypeError:
-        videos = db.get_videos()
+    videos = []
+    offset = 0
+    while True:
+        try:
+            page = db.get_videos(status="published", limit=500, offset=offset)
+        except TypeError:
+            page = db.get_videos(status="published", limit=500)
+        videos.extend(page or [])
+        if len(page or []) < 500:
+            break
+        offset += 500
     for video in videos or []:
+        if not db.is_recovery_enabled(video.get("channel_id"), video.get("canal", "")):
+            continue
         published = _parse(video.get("published_at"))
         if not published:
             continue
@@ -73,7 +98,10 @@ def run_due_checkpoints(db, now=None) -> int:
             metadata = {
                 "checkpoint_hours": hours,
                 "execution_time": now.isoformat(),
-                "metrics_available": bool(stats),
+                "metrics_available": classification != "metrics_unavailable",
+                "retention_available": bool(stats and (
+                    "average_view_percentage" in stats or "averageViewPercentage" in stats
+                )),
                 "metrics": stats or {},
                 "classification": classification,
                 "recommendation": recommendation,

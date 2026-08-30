@@ -1312,7 +1312,8 @@ async def _schedule_checker_loop():
             # stats or call YouTube here. The checkpoint ledger makes this
             # restart-safe and idempotent; quota exhaustion must not suppress
             # diagnostic alerts.
-            if now - last_recovery_checkpoint_check >= 900:
+            from api.services.recovery_checkpoints import should_run_checkpoint_review
+            if should_run_checkpoint_review(_paused_manual) and now - last_recovery_checkpoint_check >= 900:
                 try:
                     from api.services.recovery_checkpoints import run_due_checkpoints
                     checkpoint_count = await asyncio.to_thread(

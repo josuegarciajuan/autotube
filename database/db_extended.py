@@ -3174,6 +3174,14 @@ def _migrate_v48(conn, logger):
     logger.info("Migration v48: shorts real-publication visibility fields ensured")
 
 
+def _migrate_v49(conn, logger):
+    """Idempotent v49: durable recovery checkpoint ledger."""
+    schema = Path(__file__).parent / "schema_v49.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        logger.info("Migration v49: recovery checkpoints table ensured")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -5235,6 +5243,14 @@ class ExtendedDatabase(Database):
                 (video_id, checkpoint_hours),
             ).fetchone()
         return row is not None
+
+    def is_recovery_enabled(self, channel_id: int | None, slug: str) -> bool:
+        """Resolve recovery opt-in through the channel bridge, never slug maps."""
+        try:
+            from config.config_bridge import get_channel_config
+            return bool(getattr(get_channel_config(slug), "RECOVERY_CHECKPOINTS_ENABLED", False))
+        except Exception:
+            return False
 
     def create_recovery_alert(self, **kwargs) -> int | None:
         """Claim a checkpoint and emit its visible alert atomically."""
