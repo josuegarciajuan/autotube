@@ -1365,6 +1365,47 @@ def _counts_toward_normal_daily_cap(row: dict) -> bool:
         return True
 
 
+def _channel_peak_hours(db, channel_id: int, cfg: dict, peak_hour: int) -> list[int]:
+    """Franjas pico del canal en orden de rank (para repartir N/día en N franjas).
+
+    Prioridad:
+      1. data-driven ``optimal_publish_slots`` (content_type='long'), ordenadas
+         por slot_rank → [rank1_hour, rank2_hour, rank3_hour].
+      2. Fallback: heurística ``get_channel_peak_info`` → [peak] + secondary_peaks.
+
+    Devuelve horas LOCALES (Europe/Madrid por defecto). Se usa en el repack
+    para distribuir hasta ``max_per_day`` publicaciones del MISMO día en
+    franjas distintas (rank1, rank2, ...) en lugar de apilarlas en un único
+    pico que, al avanzar ``cursor + gap_hours``, cruzaba la medianoche y
+    dejaba solo 1 publicación visible por día.
+    """
+    hours: list[int] = []
+    try:
+        slots = db.get_optimal_slots(channel_id, "long")
+        if slots:
+            ranked = sorted(slots, key=lambda s: int(s.get("slot_rank") or 99))
+            hours = [int(s.get("target_hour") or -1) for s in ranked]
+            hours = [h for h in hours if 0 <= h <= 23]
+    except Exception:
+        hours = []
+    if not hours:
+        # Fallback heurística
+        try:
+            info = get_channel_peak_info(cfg or {"SEO_PRIMARY_KEYWORD": ""})
+            hours = [int(info["peak_hour"])]
+            for sh in (info.get("secondary_peaks") or []):
+                if int(sh) not in hours:
+                    hours.append(int(sh))
+        except Exception:
+            hours = [peak_hour]
+    # Asegurar que el pico principal esté primero (consistencia con max_per_day=1)
+    if peak_hour in hours:
+        hours = [peak_hour] + [h for h in hours if h != peak_hour]
+    if not hours:
+        hours = [peak_hour]
+    return hours[:3]
+
+
 def repack_channel_publish_times(
     db,
     channel_id: int,
@@ -1450,6 +1491,9 @@ def repack_channel_publish_times(
         {k: v for k, v in cfg.items()} if cfg else {"SEO_PRIMARY_KEYWORD": ""}
     )
     peak_hour = int(target_hour) if target_hour is not None else peak_info["peak_hour"]
+
+    # ── v-fix 2longs: franjas rank del canal para repartir N/día en N franjas ──
+    peak_hours = _channel_peak_hours(db, channel_id, cfg, peak_hour)
 
     # ── 3. Walk ──
     now_utc = _dt.now(_tz.utc)
@@ -1540,9 +1584,36 @@ def repack_channel_publish_times(
             and guard < 14
         ):
             cursor_local_now = cursor_local_now.replace(
-                hour=peak_hour, minute=0, second=0, microsecond=0,
+                hour=peak_hours[0], minute=0, second=0, microsecond=0,
             ) + _td(days=1)
             guard += 1
+
+        # ── v-fix 2longs: repartir N/día en N franjas del MISMO día local ──
+        # En vez de un único peak_hour + cursor+gap (que cruzaba medianoche y
+        # dejaba solo 1 publicación/día), el slot de hoy usa la franja rank
+        # correspondiente al nº ya asignado ese día (rank1, rank2, rank3...).
+        used_today = day_used.get(cursor_local_now.date(), 0)
+        peak_idx = min(used_today, len(peak_hours) - 1)
+        chosen_hour = peak_hours[peak_idx]
+        cursor_local_now = cursor_local_now.replace(
+            hour=chosen_hour, minute=0, second=0, microsecond=0,
+        )
+        # Nunca en el pasado: si la franja rank ya pasó HOY (p. ej. se corre el
+        # repack a las 23h y rank1=9h), subimos al siguiente rank futuro de hoy
+        # o, si todos pasaron, al rank1 del día siguiente.
+        if cursor_local_now < now_utc.astimezone(tz):
+            advanced = False
+            for extra in range(peak_idx + 1, len(peak_hours)):
+                cand = cursor_local_now.replace(hour=peak_hours[extra], minute=0,
+                                                second=0, microsecond=0)
+                if cand >= now_utc.astimezone(tz):
+                    cursor_local_now = cand
+                    advanced = True
+                    break
+            if not advanced:
+                cursor_local_now = cursor_local_now.replace(
+                    hour=peak_hours[0], minute=0, second=0, microsecond=0,
+                ) + _td(days=1)
         cursor_utc = cursor_local_now.astimezone(_tz.utc)
         slot = cursor_utc
 
@@ -1602,7 +1673,22 @@ def repack_channel_publish_times(
             day_used[slot.astimezone(tz).date()] = (
                 day_used.get(slot.astimezone(tz).date(), 0) + 1
             )
-        cursor_utc = slot + _td(hours=gap_hours)
+        # ── v-fix 2longs: avanzar cursor sin cruzar la medianoche ──
+        # Si el día local aún tiene hueco (< max_per_day), el siguiente slot usa
+        # la siguiente franja rank del MISMO día (el walk ya lo elige por
+        # day_used). Si el día está lleno, saltamos al rank1 del día siguiente.
+        # El viejo `slot + gap_hours` cruzaba la medianoche (pico tarde + gap)
+        # y dejaba solo 1 publicación visible por día.
+        if counts_toward_cap and day_used.get(slot.astimezone(tz).date(), 0) >= max_per_day:
+            cursor_utc = (
+                slot.astimezone(tz).replace(
+                    hour=peak_hours[0], minute=0, second=0, microsecond=0,
+                ) + _td(days=1)
+            ).astimezone(_tz.utc)
+        else:
+            # aún queda hueco hoy: mantener cursor en el mismo día (el walk
+            # incrementará day_used y elegirá la siguiente franja)
+            cursor_utc = slot.astimezone(tz).astimezone(_tz.utc)
 
     logger.info(
         "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s, máx %d/día, "
