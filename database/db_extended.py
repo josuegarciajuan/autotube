@@ -8615,6 +8615,7 @@ class ExtendedDatabase(Database):
                     ps.upload_window_end,
                     ps.slot_position,
                     ps.source_mode,
+                    ps.created_at as planned_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM planned_slots ps
@@ -8638,16 +8639,22 @@ class ExtendedDatabase(Database):
                     v.publish_mode,
                     v.created_at,
                     v.generation_started_at,
+                    v.generation_finished_at,
+                    v.source_mode,
+                    v.is_marathon,
+                    ps.scheduled_at as plan_start,
+                    ps.target_upload_at as plan_upload,
+                    ps.created_at as planned_at,
                     gj.id as job_id,
                     gj.status as job_status,
                     gj.progress as job_progress,
                     gj.phase as job_phase,
-                    v.is_marathon,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
                    LEFT JOIN generation_jobs gj ON gj.video_id = v.id AND gj.status = 'running'
+                   LEFT JOIN planned_slots ps ON ps.video_id = v.id
                     WHERE v.status = 'generating' OR gj.id IS NOT NULL
                    ORDER BY v.created_at ASC""",
             ).fetchall()
@@ -8667,10 +8674,14 @@ class ExtendedDatabase(Database):
                     v.progress,
                     v.progress_phase,
                     v.created_at,
+                    v.generation_started_at,
                     v.generation_finished_at,
+                    v.source_mode,
                     v.is_marathon,
                     ch.name as channel_name,
                     ch.slug as channel_slug,
+                    ps.scheduled_at as plan_start,
+                    ps.created_at as planned_at,
                     ps.target_upload_at as slot_target_upload_at
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
@@ -8716,10 +8727,19 @@ class ExtendedDatabase(Database):
                     v.published_verified_at,
                     v.published_retry_at,
                     v.published_at,
+                    v.created_at,
+                    v.generation_started_at,
+                    v.generation_finished_at,
+                    v.source_mode,
+                    v.is_marathon,
+                    ps.scheduled_at as plan_start,
+                    ps.target_upload_at as plan_upload,
+                    ps.created_at as planned_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM videos v
                    JOIN channels ch ON ch.id = v.channel_id
+                   LEFT JOIN planned_slots ps ON ps.video_id = v.id
                    WHERE v.status = 'uploaded_private'
                      AND v.published_at IS NULL
                    ORDER BY v.target_public_at ASC""",
@@ -8787,6 +8807,8 @@ class ExtendedDatabase(Database):
                     sps.long_slot_position,
                     sps.source_video_id,
                     sps.status,
+                    sps.source_mode,
+                    sps.created_at as planned_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM shorts_planned_slots sps
@@ -8813,6 +8835,9 @@ class ExtendedDatabase(Database):
                     sps.source_video_id,
                     sps.status,
                     sps.job_id,
+                    sps.source_mode,
+                    sps.created_at as planned_at,
+                    s.created_at as real_start,
                     gj.status as job_status,
                     gj.progress as job_progress,
                     gj.phase as job_phase,
@@ -8821,6 +8846,7 @@ class ExtendedDatabase(Database):
                    FROM shorts_planned_slots sps
                    JOIN channels ch ON ch.id = sps.channel_id
                    LEFT JOIN generation_jobs gj ON gj.id = sps.job_id
+                   LEFT JOIN shorts s ON s.id = sps.short_id
                    WHERE sps.status = 'running'
                    ORDER BY sps.scheduled_at ASC""",
             ).fetchall()
@@ -8840,7 +8866,12 @@ class ExtendedDatabase(Database):
                     sps.source_video_id,
                     sps.status,
                     sps.short_id,
-                    s.published_at as actual_completed_at,
+                    sps.source_mode,
+                    sps.created_at as planned_at,
+                    s.created_at as real_start,
+                    s.published_at as real_publish,
+                    s.publish_at as plan_upload,
+                    s.actual_published_at,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM shorts_planned_slots sps
@@ -8869,9 +8900,12 @@ class ExtendedDatabase(Database):
                     sps.source_video_id,
                     sps.status,
                     sps.short_id,
+                    sps.source_mode,
+                    sps.created_at as planned_at,
                     s.title,
                     s.file_path,
                     s.status as short_status,
+                    s.created_at as real_start,
                     ch.name as channel_name,
                     ch.slug as channel_slug
                    FROM shorts_planned_slots sps
@@ -8887,15 +8921,30 @@ class ExtendedDatabase(Database):
             # ── 7. Published in last 24h (both long-form videos & shorts) ──
             published = conn.execute(
                 """SELECT id, channel_id, channel_name, channel_slug,
-                          title, youtube_id, published_at, content_type
+                          title, youtube_id, published_at, content_type,
+                          created_at, planned_at, plan_start, plan_upload, plan_publish,
+                          real_start, real_end, real_upload, real_publish,
+                          source_mode, is_marathon
                    FROM (
                        -- Long-form videos
                        SELECT v.id, v.channel_id,
                               ch.name AS channel_name, ch.slug AS channel_slug,
                               v.titulo_final AS title, v.yt_video_id AS youtube_id,
-                              v.published_at, 'video' AS content_type
+                              v.published_at, 'video' AS content_type,
+                              v.created_at AS created_at,
+                              v.generation_started_at AS real_start,
+                              v.generation_finished_at AS real_end,
+                              v.uploaded_at AS real_upload,
+                              v.published_at AS real_publish,
+                              v.target_public_at AS plan_publish,
+                              v.source_mode,
+                              v.is_marathon,
+                              ps.scheduled_at AS plan_start,
+                              ps.target_upload_at AS plan_upload,
+                              ps.created_at AS planned_at
                          FROM videos v
                          JOIN channels ch ON ch.id = v.channel_id
+                         LEFT JOIN planned_slots ps ON ps.video_id = v.id
                         WHERE v.privacy_status = 'public'
                           AND v.published_at IS NOT NULL
                           AND v.published_at >= datetime('now', 'localtime', '-1 day')
@@ -8904,12 +8953,24 @@ class ExtendedDatabase(Database):
 
                        -- Shorts
                        SELECT s.id, s.channel_id,
-                              ch2.name, ch2.slug,
-                              s.title, s.youtube_id,
+                              ch2.name AS channel_name, ch2.slug AS channel_slug,
+                              s.title AS title, s.youtube_id AS youtube_id,
                               s.published_at,
-                              CASE s.type WHEN 'native' THEN 'native' ELSE 'clip' END
+                              CASE s.type WHEN 'native' THEN 'native' ELSE 'clip' END AS content_type,
+                              s.created_at AS created_at,
+                              s.created_at AS real_start,
+                              NULL AS real_end,
+                              s.published_at AS real_upload,
+                              s.published_at AS real_publish,
+                              COALESCE(sps.target_upload_at, s.publish_at) AS plan_publish,
+                              COALESCE(sps.source_mode, 'original') AS source_mode,
+                              0 AS is_marathon,
+                              sps.scheduled_at AS plan_start,
+                              sps.target_upload_at AS plan_upload,
+                              sps.created_at AS planned_at
                          FROM shorts s
                          JOIN channels ch2 ON ch2.id = s.channel_id
+                         LEFT JOIN shorts_planned_slots sps ON sps.short_id = s.id
                         WHERE s.status = 'published'
                           AND s.published_at IS NOT NULL
                           AND s.published_at >= datetime('now', 'localtime', '-1 day')
