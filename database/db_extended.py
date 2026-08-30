@@ -1366,6 +1366,9 @@ def migrate_v2(db_path: str = None):
     # hora programada) para que la UI distinga "programado" de "publicado".
     _migrate_v48(conn, logger)
 
+    # ── v49: durable recovery experiment checkpoints ──
+    _migrate_v49(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -5224,6 +5227,41 @@ class ExtendedDatabase(Database):
                 (video_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def has_recovery_checkpoint(self, video_id: int, checkpoint_hours: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM recovery_checkpoints WHERE video_id=? AND checkpoint_hours=?",
+                (video_id, checkpoint_hours),
+            ).fetchone()
+        return row is not None
+
+    def create_recovery_alert(self, **kwargs) -> int | None:
+        """Claim a checkpoint and emit its visible alert atomically."""
+        import json
+        metadata = kwargs.get("metadata", {})
+        with self._connect() as conn:
+            try:
+                # Unavailable metrics are deliberately not marked complete:
+                # the next scheduler tick may retry after a local stats sync.
+                if metadata.get("classification") != "metrics_unavailable":
+                    conn.execute(
+                        "INSERT INTO recovery_checkpoints(video_id, channel_id, checkpoint_hours) VALUES (?, ?, ?)",
+                        (kwargs["entity_id"], kwargs.get("channel_id"), metadata["checkpoint_hours"]),
+                    )
+                cur = conn.execute(
+                    """INSERT INTO pipeline_alerts
+                       (entity_type, entity_id, channel_id, alert_type, severity, title, message, metadata_json)
+                       VALUES ('video', ?, ?, ?, ?, ?, ?, ?)""",
+                    (kwargs["entity_id"], kwargs.get("channel_id"), kwargs["alert_type"],
+                     kwargs.get("severity", "info"), kwargs["title"], kwargs.get("message"),
+                     json.dumps(metadata, ensure_ascii=False)),
+                )
+                conn.commit()
+                return cur.lastrowid
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return None
     
     def get_all_channels_latest_stats(self) -> list[dict]:
         """Get the most recent stats snapshot for every channel (one row per channel)."""
