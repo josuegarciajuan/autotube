@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react'
+import { useMemo } from 'react'
 import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
-import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, RefreshCw } from 'lucide-react'
+import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, Flame, RefreshCw, Check } from 'lucide-react'
 import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -42,8 +42,6 @@ function toLocalTime(ts: string): string {
 
 /**
  * Parse a datetime string and return the local date in Spanish locale.
- * Handles both ISO8601 UTC and naive local formats.
- * Uses the browser's Intl API for correct timezone conversion.
  */
 function toLocalDate(ts: string): string {
   if (!ts) return ''
@@ -51,14 +49,11 @@ function toLocalDate(ts: string): string {
     let dt: Date
     const raw = ts.trim()
 
-    // ISO8601 with explicit timezone → let JS handle conversion
     if (raw.match(/[+-]\d{2}:\d{2}$/) || raw.endsWith('Z')) {
       dt = new Date(raw)
     } else if (raw.includes('T') && raw.length >= 16) {
-      // ISO without TZ → treat as UTC
       dt = new Date(raw + '+00:00')
     } else {
-      // Naive local "YYYY-MM-DD HH:MM:SS" → parse date part
       const m = raw.match(/(\d{4})-(\d{2})-(\d{2})/)
       if (m) dt = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
       else return ''
@@ -69,6 +64,51 @@ function toLocalDate(ts: string): string {
   } catch {
     return ''
   }
+}
+
+/** Full date-time for tooltips: "lun 31 ago 02:13" */
+function fmtFull(ts?: string | null): string {
+  if (!ts) return ''
+  const d = toLocalDate(ts)
+  const t = toLocalTime(ts)
+  return d && t !== '--:--' ? `${d} ${t}` : d || t || ts
+}
+
+/**
+ * Compact "DD/MM HH:MM" formatter for both naive local and ISO8601 UTC.
+ * Falls back to HH:MM when only time is available.
+ */
+function fmtCompact(ts?: string | null): string {
+  if (!ts) return '—'
+  const raw = ts.trim()
+  // Naive local "YYYY-MM-DD HH:MM[:SS]"
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})/)
+  if (m) return `${m[3]}/${m[2]} ${m[4]}:${m[5]}`
+  // ISO with timezone → convert to local
+  try {
+    const dt = new Date(raw)
+    if (!isNaN(dt.getTime())) {
+      const d = `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}`
+      const t = dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
+      return `${d} ${t}`
+    }
+  } catch { /* fallthrough */ }
+  return raw.slice(0, 16)
+}
+
+/**
+ * Numeric timestamp for sorting. Naive local strings are treated as UTC so all
+ * items in a column share the same axis. Missing → -Infinity (sink to bottom).
+ */
+function tsNum(ts?: string | null): number {
+  if (!ts) return -Infinity
+  const raw = ts.trim()
+  if (raw.includes('T') || raw.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(raw)) {
+    const n = new Date(raw).getTime()
+    return isNaN(n) ? -Infinity : n
+  }
+  const n = new Date(raw.replace(' ', 'T') + 'Z').getTime()
+  return isNaN(n) ? -Infinity : n
 }
 
 function phaseLabel(phase: string): string {
@@ -85,12 +125,13 @@ function phaseLabel(phase: string): string {
   return map[phase] || phase || '...'
 }
 
-// ── Badge: content type (reusable) ──────────────────────────
+// ── Badges ───────────────────────────────────────────────────
+
 function ContentTypeBadge({ type }: { type: 'video' | 'native' | 'clip' }) {
   if (type === 'video') {
     return (
-      <span className="text-[10px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-400/10 text-purple-400 border border-purple-400/30">
-        <Film size={10} />
+      <span className="text-[9px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-400/10 text-purple-400 border border-purple-400/30">
+        <Film size={9} />
         Video
       </span>
     )
@@ -102,301 +143,363 @@ function ContentTypeBadge({ type }: { type: 'video' | 'native' | 'clip' }) {
   const TypeIcon = isNative ? Smartphone : Scissors
   const typeLabel = isNative ? 'Short · Nativo' : 'Short · Clip'
   return (
-    <span className={`text-[10px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor} border ${typeBorder}`}>
-      <TypeIcon size={10} />
+    <span className={`text-[9px] font-mono flex items-center gap-1 px-1.5 py-0.5 rounded-full ${typeBg} ${typeColor} border ${typeBorder}`}>
+      <TypeIcon size={9} />
       {typeLabel}
     </span>
   )
 }
 
-// ── Card: Planned slot (3-phase) ─────────────────────────────
-function PlannedCard({ slot }: { slot: PlannedSlot }) {
-  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
-  const hasUpload = slot.target_upload_at && slot.target_upload_at !== slot.target_public_at
+/** Marathon / Viral tag, shown in EVERY column. */
+function TagBadge({ tone }: { tone: 'marathon' | 'viral' }) {
+  if (tone === 'marathon') {
+    return (
+      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
+        <Trophy size={9} />
+        MARATÓN
+      </span>
+    )
+  }
   return (
-    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} animate-fade-in`}>
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: slot.channel_id, channel_slug: slot.channel_slug, channel_name: slot.channel_name })} #{slot.slot_position}
-        </span>
-        <ContentTypeBadge type="video" />
-        <span className="text-[10px] text-gray-500 font-mono ml-auto">
-          {slot.source_mode === 'viral' ? ' Viral' : 'Original'}
-        </span>
-      </div>
-
-      {/* 3-Phase timeline */}
-      <div className="space-y-1">
-        <div className="flex items-center gap-2 text-xs">
-          <Play size={11} className="text-purple-400" />
-          <span className="text-gray-400">Gen:</span>
-          <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
-          {slot.scheduled_at && slot.scheduled_at.slice(0, 10) !== new Date().toISOString().slice(0, 10) && (
-            <span className="text-[9px] text-purple-400/70 ml-1">{toLocalDate(slot.scheduled_at)}</span>
-          )}
-        </div>
-        {hasUpload && (
-          <div className="flex items-center gap-2 text-xs">
-            <Upload size={11} className="text-blue-400" />
-            <span className="text-gray-400">Subir:</span>
-            <span className="text-white font-mono">{toLocalTime(slot.target_upload_at!)}</span>
-          </div>
-        )}
-        {slot.target_public_at && (
-          <div className="flex items-center gap-2 text-xs">
-            <ArrowRight size={11} className="text-green-400" />
-            <span className="text-gray-400">Publico:</span>
-            <span className="text-white font-mono">{toLocalTime(slot.target_public_at)}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Countdown */}
-      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
-        <Clock size={11} className="text-amber-400" />
-        <span className="text-[10px] text-amber-400 font-mono">
-          Gen en {formatCountdown(slot.scheduled_at)}
-        </span>
-      </div>
-    </div>
+    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-pink-500/40 bg-pink-500/15 text-pink-400 flex items-center gap-1" title="Viral (contenido adaptado de fuente viral)">
+        <Flame size={9} />
+        VIRAL
+    </span>
   )
 }
 
-// ── Card: Generating ─────────────────────────────────────────
-function GeneratingCard({ video }: { video: GeneratingVideo }) {
-  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
-  const pct = video.progress || video.job_progress || 0
-  const phase = video.progress_phase || video.job_phase || 'inicio'
+// ── Unified timeline model ───────────────────────────────────
 
+type StageKey = 'plan' | 'create' | 'upload' | 'publish'
+type ItemState = 'planned' | 'generating' | 'awaiting' | 'ready' | 'warming' | 'published'
+
+interface TimelineDates {
+  plannedAt?: string    // fecha de lanzamiento de la programación
+  planStart?: string    // inicio creación planificado
+  realStart?: string    // inicio creación real
+  realEnd?: string      // fin creación real
+  planUpload?: string   // subida prevista
+  realUpload?: string   // subida real
+  planPublish?: string  // publicación prevista
+  realPublish?: string  // publicación real
+}
+
+interface TaggedItem {
+  key: string
+  kind: 'video' | 'native' | 'clip'
+  channelId: number
+  channelSlug: string
+  channelName: string
+  title?: string
+  isMarathon: boolean
+  isViral: boolean
+  dates: TimelineDates
+  state: ItemState
+  // render extras
+  progress?: number
+  phase?: string
+  warmupPct?: number
+  held?: boolean
+  videoId?: number
+  youtubeId?: string
+  targetPublish?: string
+  countdownText?: string
+  countdownUrgent?: boolean
+}
+
+const isViral = (mode?: string) => mode === 'viral'
+
+function calcWarmup(v: WarmingVideo): number {
+  try {
+    const uploaded = new Date(v.uploaded_at.replace(' ', 'T')).getTime()
+    const target = new Date(v.target_public_at.replace(' ', 'T')).getTime()
+    const now = Date.now()
+    if (target <= uploaded) return 100
+    return Math.min(100, Math.max(0, Math.round(((now - uploaded) / (target - uploaded)) * 100)))
+  } catch { return 50 }
+}
+
+// ── Normalizers: every pipeline shape → TaggedItem ────────────
+
+function normPlannedVideo(s: PlannedSlot): TaggedItem {
+  return {
+    key: `pv-${s.slot_id}`, kind: 'video', channelId: s.channel_id, channelSlug: s.channel_slug, channelName: s.channel_name,
+    isMarathon: false, isViral: isViral(s.source_mode), state: 'planned',
+    dates: { plannedAt: s.planned_at, planStart: s.scheduled_at, planUpload: s.target_upload_at, planPublish: s.target_public_at },
+    countdownText: s.scheduled_at ? formatCountdown(s.scheduled_at) : undefined,
+    countdownUrgent: !!s.scheduled_at && formatCountdown(s.scheduled_at) === 'Ahora',
+  }
+}
+
+function normGeneratingVideo(v: GeneratingVideo): TaggedItem {
+  return {
+    key: `gv-${v.video_id}`, kind: 'video', channelId: v.channel_id, channelSlug: v.channel_slug, channelName: v.channel_name,
+    isMarathon: !!v.is_marathon, isViral: isViral(v.source_mode), state: 'generating',
+    dates: {
+      plannedAt: v.planned_at || v.created_at, planStart: v.plan_start || undefined,
+      realStart: v.generation_started_at || undefined, realEnd: v.generation_finished_at || undefined,
+      planUpload: v.plan_upload || undefined, planPublish: v.target_public_at || undefined,
+    },
+    progress: v.progress || v.job_progress || 0, phase: v.progress_phase || v.job_phase || 'inicio',
+    videoId: v.video_id, targetPublish: v.target_public_at || undefined,
+  }
+}
+
+function normAwaitingVideo(v: AwaitingUploadVideo): TaggedItem {
+  const cd = v.target_upload_at ? formatCountdown(v.target_upload_at) : (v.target_public_at ? formatCountdown(v.target_public_at) : '?')
+  return {
+    key: `av-${v.video_id}`, kind: 'video', channelId: v.channel_id, channelSlug: v.channel_slug, channelName: v.channel_name,
+    isMarathon: !!v.is_marathon, isViral: isViral(v.source_mode), state: 'awaiting',
+    dates: {
+      plannedAt: v.planned_at || v.created_at, planStart: v.plan_start || undefined,
+      realStart: v.generation_started_at || undefined, realEnd: v.generation_finished_at || undefined,
+      planUpload: v.target_upload_at || undefined, planPublish: v.target_public_at || undefined,
+    },
+    title: v.titulo_final || undefined, videoId: v.video_id,
+    countdownText: cd, countdownUrgent: cd === 'Ahora',
+  }
+}
+
+function normWarmingVideo(v: WarmingVideo): TaggedItem {
+  const held = !!v.held
+  const cd = v.target_public_at ? formatCountdown(v.target_public_at) : '?'
+  return {
+    key: `wv-${v.video_id}`, kind: 'video', channelId: v.channel_id, channelSlug: v.channel_slug, channelName: v.channel_name,
+    isMarathon: !!v.is_marathon, isViral: isViral(v.source_mode), state: 'warming',
+    dates: {
+      plannedAt: v.planned_at || v.created_at, planStart: v.plan_start || undefined,
+      realStart: v.generation_started_at || undefined, realEnd: v.generation_finished_at || undefined,
+      planUpload: v.plan_upload || undefined, realUpload: v.uploaded_at || undefined,
+      planPublish: v.target_public_at || undefined,
+    },
+    title: v.titulo_final || undefined, videoId: v.video_id, warmupPct: held ? undefined : calcWarmup(v), held,
+    countdownText: held ? undefined : cd, countdownUrgent: !held && cd === 'Ahora',
+  }
+}
+
+function normShort(slot: ShortsPipelineSlot, sub: 'planned' | 'generating' | 'ready'): TaggedItem {
+  const kind: 'native' | 'clip' = slot.short_type === 'native' ? 'native' : 'clip'
+  const cd = (sub === 'planned' || sub === 'ready') ? formatCountdown(slot.target_upload_at || slot.scheduled_at) : undefined
+  return {
+    key: `sh-${slot.slot_id}-${sub}`, kind, channelId: slot.channel_id, channelSlug: slot.channel_slug, channelName: slot.channel_name,
+    isMarathon: false, isViral: isViral(slot.source_mode), state: sub,
+    dates: {
+      plannedAt: slot.planned_at, planStart: slot.scheduled_at, realStart: slot.real_start || undefined,
+      planUpload: slot.plan_upload || slot.target_upload_at || undefined,
+      planPublish: slot.target_upload_at || slot.plan_upload || undefined,
+      realPublish: slot.real_publish || slot.actual_completed_at || undefined,
+    },
+    title: slot.title || undefined, progress: sub === 'generating' ? (slot.job_progress || 0) : undefined,
+    phase: sub === 'generating' ? (slot.job_phase || 'inicio') : undefined,
+    countdownText: cd, countdownUrgent: cd === 'Ahora',
+  }
+}
+
+function normPublished(item: PublishedItem): TaggedItem {
+  return {
+    key: `pub-${item.content_type}-${item.id}`, kind: item.content_type, channelId: item.channel_id,
+    channelSlug: item.channel_slug, channelName: item.channel_name,
+    isMarathon: !!item.is_marathon, isViral: isViral(item.source_mode), state: 'published',
+    dates: {
+      plannedAt: item.planned_at || undefined, planStart: item.plan_start || undefined,
+      planUpload: item.plan_upload || undefined, planPublish: item.plan_publish || undefined,
+      realStart: item.real_start || undefined, realUpload: item.real_upload || undefined,
+      realPublish: item.published_at || undefined,
+    },
+    title: item.title || undefined, youtubeId: item.youtube_id || undefined,
+  }
+}
+
+function stageForState(state: ItemState): StageKey {
+  switch (state) {
+    case 'planned': return 'plan'
+    case 'generating': return 'create'
+    case 'awaiting':
+    case 'ready': return 'upload'
+    case 'warming':
+    case 'published': return 'publish'
+  }
+}
+
+// ── Timeline strip (4-stage stepper) ──────────────────────────
+
+const STAGE_ROWS = [
+  { key: 'plan' as StageKey, label: 'Prog' },
+  { key: 'create' as StageKey, label: 'Crea' },
+  { key: 'upload' as StageKey, label: 'Subir' },
+  { key: 'publish' as StageKey, label: 'Publ' },
+]
+
+function TimelineStrip({ dates, current }: { dates: TimelineDates; current: StageKey }) {
+  const rows = [
+    { key: 'plan' as StageKey, planned: dates.plannedAt, real: undefined, fin: undefined },
+    { key: 'create' as StageKey, planned: dates.planStart, real: dates.realStart, fin: dates.realEnd },
+    { key: 'upload' as StageKey, planned: dates.planUpload, real: dates.realUpload, fin: undefined },
+    { key: 'publish' as StageKey, planned: dates.planPublish, real: dates.realPublish, fin: undefined },
+  ]
   return (
-    <div className={`pipeline-card rounded-xl p-4 border ${colors.border} bg-dark-800/80 animate-fade-in`}>
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot} animate-pulse`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: video.channel_id, channel_slug: video.channel_slug, channel_name: video.channel_name })} #{video.video_id}
-        </span>
-        {video.is_marathon && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
-            <Trophy size={10} />
-            MARATÓN
-          </span>
-        )}
-        <ContentTypeBadge type="video" />
-        <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
-          Generando
-        </span>
-      </div>
-
-      {/* Generation start time */}
-      {video.generation_started_at && (
-        <div className="flex items-center gap-2 mb-2 text-[10px]">
-          <Play size={11} className="text-purple-400" />
-          <span className="text-gray-400">Inicio:</span>
-          <span className="text-white font-mono">
-            {toLocalTime(video.generation_started_at)} {toLocalDate(video.generation_started_at)}
-          </span>
-        </div>
-      )}
-
-      {/* Progress bar */}
-      <div className="mb-2">
-        <div className="flex justify-between text-[10px] mb-1">
-          <span className="text-gray-400">{phaseLabel(phase)}</span>
-          <span className="text-white font-mono">{pct}%</span>
-        </div>
-        <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
+    <div className="mt-1.5 space-y-0.5">
+      {rows.map((r) => {
+        const done = r.key === 'plan' ? !!r.planned : !!r.real
+        const cur = r.key === current
+        const hasPlan = !!r.planned
+        const hasReal = !!r.real
+        return (
           <div
-            className="h-full rounded-full pipeline-progress-bar"
-            style={{ width: `${Math.max(pct, 3)}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Target publication */}
-      {video.target_public_at && (
-        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-white/5">
-          <Clock size={11} className="text-gray-500" />
-          <span className="text-[10px] text-gray-500">
-            Publicacion estimada: <span className="text-gray-300 font-mono">{toLocalTime(video.target_public_at)}</span>
-          </span>
-        </div>
-      )}
+            key={r.key}
+            className={`flex items-center gap-1 text-[9px] leading-tight px-1 py-px rounded ${cur ? 'bg-white/5 ring-1 ring-white/10' : ''}`}
+          >
+            {done ? (
+              <Check size={8} className="text-green-400 shrink-0" />
+            ) : cur ? (
+              <span className="w-1 h-1 rounded-full bg-neon-cyan animate-pulse shrink-0" />
+            ) : (
+              <span className="w-1 h-1 rounded-full bg-gray-600 shrink-0" />
+            )}
+            <span className={`w-7 shrink-0 font-semibold ${done ? 'text-gray-300' : cur ? 'text-neon-cyan' : 'text-gray-500'}`}>
+              {STAGE_ROWS.find(s => s.key === r.key)!.label}
+            </span>
+            {hasPlan && (
+              <span title={fmtFull(r.planned)} className={`font-mono ${done ? 'text-gray-500 line-through decoration-gray-700' : cur ? 'text-white' : 'text-gray-500'}`}>
+                {fmtCompact(r.planned)}
+              </span>
+            )}
+            {hasPlan && hasReal && <ArrowRight size={7} className="text-gray-600 shrink-0" />}
+            {hasReal && (
+              <span title={fmtFull(r.real)} className="font-mono text-green-300">
+                {fmtCompact(r.real)}
+              </span>
+            )}
+            {r.fin && (
+              <span title={fmtFull(r.fin)} className="text-gray-500 font-mono shrink-0 ml-auto">
+                fin {fmtCompact(r.fin)}
+              </span>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-// ── Card: Awaiting Upload (F1 done, waiting for F2 upload window) ──
-function AwaitingUploadCard({ video, onUploadNow }: { video: AwaitingUploadVideo; onUploadNow: (videoId: number) => void }) {
-  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
-  const countdown = video.target_upload_at ? formatCountdown(video.target_upload_at) : (video.target_public_at ? formatCountdown(video.target_public_at) : '?')
+// ── Unified card ─────────────────────────────────────────────
+
+function PipelineCard({ item, onUploadNow }: { item: TaggedItem; onUploadNow?: (videoId: number) => void }) {
+  const colors = getChannelStyles({ channel_id: item.channelId, channel_slug: item.channelSlug, channel_name: item.channelName })
+  const short = getChannelShort({ channel_id: item.channelId, channel_slug: item.channelSlug, channel_name: item.channelName })
+  const idLabel = (item.state === 'planned' || item.state === 'generating' || item.state === 'awaiting') && item.videoId != null
+    ? `${short} #${item.videoId}` : short
+  const current = stageForState(item.state)
 
   return (
-    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} border-l-2 border-l-blue-400/50 animate-fade-in`}>
+    <div className={`pipeline-card rounded-xl p-3 border ${colors.border} ${item.state === 'warming' || item.state === 'planned' ? colors.bg : 'bg-dark-800/80'} ${item.state === 'awaiting' ? 'border-l-2 border-l-blue-400/50' : ''} ${item.state === 'ready' ? 'border-l-2 border-l-green-500/40' : ''} animate-fade-in`}>
       {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: video.channel_id, channel_slug: video.channel_slug, channel_name: video.channel_name })} #{video.video_id}
-        </span>
-        {video.is_marathon && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-500/40 bg-amber-500/15 text-amber-400 flex items-center gap-1" title="Maratón ~1h">
-            <Trophy size={10} />
-            MARATÓN
-          </span>
-        )}
-        <ContentTypeBadge type="video" />
-        <span className="text-[10px] text-blue-400 font-mono ml-auto flex items-center gap-1">
-          <HardDrive size={10} />
-          Pendiente subida
+      <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+        <span className={`w-2 h-2 rounded-full ${colors.dot} ${item.state === 'generating' ? 'animate-pulse' : ''}`} />
+        <span className={`text-[11px] font-semibold ${colors.text}`}>{idLabel}</span>
+        <ContentTypeBadge type={item.kind} />
+        {item.isMarathon && <TagBadge tone="marathon" />}
+        {item.isViral && <TagBadge tone="viral" />}
+        <span className="ml-auto flex items-center gap-1 text-[9px] text-gray-400 font-mono">
+          {statusIndicator(item)}
         </span>
       </div>
 
-      {/* Title */}
-      {video.titulo_final && (
-        <p className="text-[10px] text-gray-400 truncate mb-3">{video.titulo_final}</p>
+      {item.title && <p className="text-[10px] text-gray-400 truncate mb-1.5" title={item.title}>{item.title}</p>}
+
+      {/* Progress (generating) */}
+      {item.state === 'generating' && item.progress != null && (
+        <div className="mb-1.5">
+          <div className="flex justify-between text-[9px] mb-0.5">
+            <span className="text-gray-400">{phaseLabel(item.phase || '')}</span>
+            <span className="text-white font-mono">{item.progress}%</span>
+          </div>
+          <div className="h-1 rounded-full bg-dark-600 overflow-hidden">
+            <div className="h-full pipeline-progress-bar" style={{ width: `${Math.max(item.progress, 3)}%` }} />
+          </div>
+        </div>
       )}
 
-      {/* Timeline: 3 lines */}
-      <div className="space-y-1 mb-3">
-        {video.generation_finished_at && (
-          <div className="flex items-center gap-2 text-[10px]">
-            <CheckCircle2 size={11} className="text-green-400" />
-            <span className="text-gray-400">Fin gen:</span>
-            <span className="text-white font-mono">
-              {toLocalTime(video.generation_finished_at)} {toLocalDate(video.generation_finished_at)}
-            </span>
-          </div>
-        )}
-        {video.target_upload_at && (
-          <div className="flex items-center gap-2 text-[10px]">
-            <Upload size={11} className="text-blue-400" />
-            <span className="text-gray-400">Subir:</span>
-            <span className="text-white font-mono">
-              {toLocalTime(video.target_upload_at)} {toLocalDate(video.target_upload_at)}
-            </span>
-          </div>
-        )}
-        {video.target_public_at && (
-          <div className="flex items-center gap-2 text-[10px]">
-            <ArrowRight size={11} className="text-green-400" />
-            <span className="text-gray-400">Público:</span>
-            <span className="text-white font-mono">
-              {toLocalTime(video.target_public_at)} {toLocalDate(video.target_public_at)}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* Countdown */}
-      <div className="flex items-center gap-1.5 mb-3 pt-2 border-t border-white/5">
-        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'} />
-        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
-          {countdown === 'Ahora' ? 'Puede subir' : `${countdown}`}
-        </span>
-      </div>
-
-      {/* Upload Now button */}
-      <button
-        onClick={() => onUploadNow(video.video_id)}
-        className="w-full flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 rounded-md
-                   bg-blue-400/10 text-blue-400 border border-blue-400/20
-                   hover:bg-blue-400/20 transition-colors"
-      >
-        <Upload size={10} />
-        Subir ahora
-      </button>
-    </div>
-  )
-}
-
-// ── Card: Warming (uploaded unlisted) ────────────────────────
-function WarmingCard({ video }: { video: WarmingVideo }) {
-  const colors = getChannelStyles({ channel_id: video.channel_id, channel_slug: video.channel_slug })
-
-  // (ago 2026) Retenido: vídeo privado SIN programación (hold por cuota agotada).
-  // Su target_public_at puede quedar vencido en DB; la UI NO debe mostrar
-  // "Publicando..." (alarma falsa) sino el estado real: privado hasta que el
-  // repack lo re-programe tras el reset de cuota.
-  const held = !!video.held
-  const countdown = formatCountdown(video.target_public_at)
-  const isDue = !held && countdown === 'Ahora'
-
-  // Calculate warmup progress
-  const warmupPct = (() => {
-    try {
-      const uploaded = new Date(video.uploaded_at.replace(' ', 'T')).getTime()
-      const target = new Date(video.target_public_at.replace(' ', 'T')).getTime()
-      const now = Date.now()
-      if (target <= uploaded) return 100
-      const pct = ((now - uploaded) / (target - uploaded)) * 100
-      return Math.min(100, Math.max(0, Math.round(pct)))
-    } catch { return 50 }
-  })()
-
-  return (
-    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} ${isDue ? 'animate-pulse border-neon-cyan/60' : ''} animate-fade-in`}>
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: video.channel_id, channel_slug: video.channel_slug, channel_name: video.channel_name })} #{video.video_id}
-        </span>
-        <ContentTypeBadge type="video" />
-        <span className={`text-[10px] font-mono ml-auto flex items-center gap-1 ${held ? 'text-slate-400' : 'text-amber-400'}`}>
-          {held ? <Lock size={10} /> : <Clock size={10} />}
-          {held ? 'Privado (retenido)' : 'Calentando'}
-        </span>
-      </div>
-
-      {/* Warmup progress bar — solo cuando no está retenido */}
-      {!held && (
-        <div className="mb-3">
-          <div className="flex justify-between text-[10px] mb-1">
+      {/* Warmup (warming) */}
+      {item.state === 'warming' && !item.held && item.warmupPct != null && (
+        <div className="mb-1.5">
+          <div className="flex justify-between text-[9px] mb-0.5">
             <span className="text-gray-400">Warmup</span>
-            <span className="text-white font-mono">{warmupPct}%</span>
+            <span className="text-white font-mono">{item.warmupPct}%</span>
           </div>
-          <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
-            <div
-              className="h-full rounded-full warming-progress-bar"
-              style={{ width: `${warmupPct}%` }}
-            />
+          <div className="h-1 rounded-full bg-dark-600 overflow-hidden">
+            <div className="h-full warming-progress-bar" style={{ width: `${item.warmupPct}%` }} />
           </div>
         </div>
       )}
 
-      {/* Timeline */}
-      <div className="grid grid-cols-2 gap-2 text-[10px] mb-3">
-        <div>
-          <span className="text-gray-500">Subido:</span><br />
-          <span className="text-gray-300 font-mono">{toLocalTime(video.uploaded_at)} {toLocalDate(video.uploaded_at)}</span>
-        </div>
-        <div>
-          <span className="text-gray-500">Publico:</span><br />
-          <span className={`font-mono ${isDue ? 'text-neon-cyan' : held ? 'text-slate-400' : 'text-gray-300'}`}>
-            {held ? '— (sin programar)' : `${toLocalTime(video.target_public_at)} ${toLocalDate(video.target_public_at)}`}
-          </span>
-        </div>
-      </div>
+      <TimelineStrip dates={item.dates} current={current} />
 
-      {/* Countdown / estado */}
-      <div className="flex items-center gap-1.5 pt-2 border-t border-white/5">
-        {held ? (
+      {/* Footer */}
+      <div className="flex items-center gap-1.5 mt-1.5 pt-1.5 border-t border-white/5">
+        {item.state === 'planned' && (
           <>
-            <Lock size={11} className="text-slate-400" />
-            <span className="text-[10px] font-mono text-slate-400">
-              Retenido — se reprograma al resetear la cuota
+            <Clock size={10} className={item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'} />
+            <span className={`text-[9px] font-mono ${item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'}`}>
+              Gen en {item.countdownText}
             </span>
           </>
-        ) : (
+        )}
+        {item.state === 'generating' && item.targetPublish && (
           <>
-            <Clock size={11} className={isDue ? 'text-neon-cyan' : 'text-amber-400'} />
-            <span className={`text-[10px] font-mono ${isDue ? 'text-neon-cyan' : 'text-amber-400'}`}>
-              {isDue ? 'Sin confirmar publicación' : `En ${countdown}`}
+            <Clock size={10} className="text-gray-500" />
+            <span className="text-[9px] text-gray-500">Publ: <span className="text-gray-300 font-mono">{fmtCompact(item.targetPublish)}</span></span>
+          </>
+        )}
+        {item.state === 'awaiting' && (
+          <>
+            <Clock size={10} className={item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'} />
+            <span className={`text-[9px] font-mono ${item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'}`}>
+              {item.countdownUrgent ? 'Puede subir' : item.countdownText}
             </span>
+            {onUploadNow && item.videoId != null && (
+              <button
+                onClick={() => onUploadNow(item.videoId!)}
+                className="ml-auto flex items-center gap-1 text-[9px] px-2 py-1 rounded-md bg-blue-400/10 text-blue-400 border border-blue-400/20 hover:bg-blue-400/20 transition-colors"
+              >
+                <Upload size={9} /> Subir
+              </button>
+            )}
+          </>
+        )}
+        {item.state === 'ready' && (
+          <>
+            <Clock size={10} className={item.countdownUrgent ? 'text-neon-cyan' : 'text-blue-400'} />
+            <span className={`text-[9px] font-mono ${item.countdownUrgent ? 'text-neon-cyan' : 'text-blue-400'}`}>
+              {item.countdownUrgent ? 'Inminente' : `Subida en ${item.countdownText}`}
+            </span>
+          </>
+        )}
+        {item.state === 'warming' && (
+          item.held ? (
+            <>
+              <Lock size={10} className="text-slate-400" />
+              <span className="text-[9px] font-mono text-slate-400">Retenido — se reprograma al resetear cuota</span>
+            </>
+          ) : (
+            <>
+              <Clock size={10} className={item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'} />
+              <span className={`text-[9px] font-mono ${item.countdownUrgent ? 'text-neon-cyan' : 'text-amber-400'}`}>
+                {item.countdownUrgent ? 'Sin confirmar publicación' : `En ${item.countdownText}`}
+              </span>
+            </>
+          )
+        )}
+        {item.state === 'published' && (
+          <>
+            <CheckCircle2 size={10} className="text-green-400" />
+            <span className="text-[9px] text-gray-500">Publicado: <span className="text-white font-mono">{fmtCompact(item.dates.realPublish)}</span></span>
+            {item.youtubeId && (
+              <a href={`https://youtube.com/watch?v=${item.youtubeId}`} target="_blank" rel="noopener noreferrer"
+                 className="ml-auto flex items-center gap-1 text-[9px] text-green-400 hover:text-green-300 font-mono">
+                <ExternalLink size={9} /> Ver
+              </a>
+            )}
           </>
         )}
       </div>
@@ -404,196 +507,27 @@ function WarmingCard({ video }: { video: WarmingVideo }) {
   )
 }
 
-// ── Card: Shorts planned (pending slot) ─────────────────────
-function ShortsPlannedCard({ slot }: { slot: ShortsPipelineSlot }) {
-  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
-  const isNative = slot.short_type === 'native'
-  const typeBorder = isNative ? 'border-emerald-400/30' : 'border-orange-400/30'
-  const countdown = formatCountdown(slot.scheduled_at)
-
-  return (
-    <div className={`pipeline-card rounded-xl p-4 border ${colors.bg} ${colors.border} border-l-2 ${typeBorder} animate-fade-in`}>
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: slot.channel_id, channel_slug: slot.channel_slug, channel_name: slot.channel_name })}
-        </span>
-        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
-      </div>
-
-      {/* Timeline */}
-      <div className="flex items-center gap-2 text-xs">
-        <Smartphone size={11} className="text-gray-500" />
-        <span className="text-gray-400">Inicio:</span>
-        <span className="text-white font-mono">{toLocalTime(slot.scheduled_at)}</span>
-      </div>
-      {slot.target_upload_at && (
-        <div className="flex items-center gap-2 text-xs mt-1">
-          <ArrowRight size={11} className="text-gray-500" />
-          <span className="text-gray-400">Publicacion:</span>
-          <span className="text-white font-mono">{toLocalTime(slot.target_upload_at)}</span>
-        </div>
-      )}
-
-      {/* Countdown */}
-      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
-        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'} />
-        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-amber-400'}`}>
-          {countdown === 'Ahora' ? 'Inminente' : `En ${countdown}`}
-        </span>
-      </div>
-    </div>
-  )
+function statusIndicator(item: TaggedItem): React.ReactNode {
+  switch (item.state) {
+    case 'generating':
+      return (<><span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />Generando</>)
+    case 'awaiting':
+      return (<><HardDrive size={9} className="text-blue-400" />Pend. subida</>)
+    case 'ready':
+      return (<><span className="w-1.5 h-1.5 rounded-full bg-green-400" />Listo</>)
+    case 'warming':
+      return item.held
+        ? (<><Lock size={9} className="text-slate-400" />Privado</>)
+        : (<><Clock size={9} className="text-amber-400" />Calentando</>)
+    case 'published':
+      return (<><CheckCircle2 size={9} className="text-green-400" />Publicado</>)
+    default:
+      return (<><Clock size={9} className="text-amber-400" />Planificado</>)
+  }
 }
 
-// ── Card: Shorts generating (running slot with progress) ────
-function ShortsGeneratingCard({ slot }: { slot: ShortsPipelineSlot }) {
-  const colors = getChannelStyles({ channel_id: slot.channel_id, channel_slug: slot.channel_slug })
-  const isNative = slot.short_type === 'native'
-  const pct = slot.job_progress || 0
-  const phase = slot.job_phase || 'inicio'
+// ── Main component ───────────────────────────────────────────
 
-  return (
-    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/80 border-l-2 border-emerald-400/30 animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot} animate-pulse`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: slot.channel_id, channel_slug: slot.channel_slug, channel_name: slot.channel_name })}
-        </span>
-        <ContentTypeBadge type={isNative ? 'native' : 'clip'} />
-        <span className="text-[10px] text-neon-cyan font-mono ml-auto flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
-          Generando
-        </span>
-      </div>
-
-      {/* Progress bar */}
-      <div className="mb-2">
-        <div className="flex justify-between text-[10px] mb-1">
-          <span className="text-gray-400">{phaseLabel(phase)}</span>
-          <span className="text-white font-mono">{pct}%</span>
-        </div>
-        <div className="h-1.5 rounded-full bg-dark-600 overflow-hidden">
-          <div
-            className="h-full rounded-full pipeline-progress-bar"
-            style={{ width: `${Math.max(pct, 3)}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Target upload */}
-      {slot.target_upload_at && (
-        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-white/5">
-          <Clock size={11} className="text-gray-500" />
-          <span className="text-[10px] text-gray-500">
-            Publicacion estimada: <span className="text-gray-300 font-mono">{toLocalTime(slot.target_upload_at)}</span>
-          </span>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Card: Shorts ready to upload (pre-rendered clip, v25) ───
-function ShortsReadyUploadCard({ short }: { short: ShortsPipelineSlot }) {
-  const colors = getChannelStyles({ channel_id: short.channel_id, channel_slug: short.channel_slug })
-  const countdown = formatCountdown(short.target_upload_at || short.scheduled_at)
-
-  return (
-    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/80 border-l-2 border-green-500/40 animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: short.channel_id, channel_slug: short.channel_slug, channel_name: short.channel_name })}
-        </span>
-        <ContentTypeBadge type="clip" />
-        <span className="text-[10px] text-green-400 font-mono ml-auto flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-          Listo para subir
-        </span>
-      </div>
-
-      {/* Timeline */}
-      {short.target_upload_at && (
-        <div className="flex items-center gap-2 text-xs">
-          <Upload size={11} className="text-gray-500" />
-          <span className="text-gray-400">Subida:</span>
-          <span className="text-white font-mono">{toLocalTime(short.target_upload_at)}</span>
-        </div>
-      )}
-      <div className="flex items-center gap-2 text-xs mt-1">
-        <Smartphone size={11} className="text-gray-500" />
-        <span className="text-gray-400">Clip pre-renderizado</span>
-      </div>
-
-      {/* Countdown */}
-      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-white/5">
-        <Clock size={11} className={countdown === 'Ahora' ? 'text-neon-cyan' : 'text-blue-400'} />
-        <span className={`text-[10px] font-mono ${countdown === 'Ahora' ? 'text-neon-cyan' : 'text-blue-400'}`}>
-          {countdown === 'Ahora' ? 'Inminente' : `Subida en ${countdown}`}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// ── Card: Published in last 24h ──────────────────────────────
-function PublishedCard({ item }: { item: PublishedItem }) {
-  const colors = getChannelStyles({ channel_id: item.channel_id, channel_slug: item.channel_slug })
-  const ytUrl = item.youtube_id ? `https://youtube.com/watch?v=${item.youtube_id}` : null
-
-  return (
-    <div className="pipeline-card rounded-xl p-4 border bg-dark-800/40 border-l-2 border-l-green-500/30 hover:opacity-80 transition-opacity animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-2">
-        <span className={`w-2.5 h-2.5 rounded-full ${colors.dot}`} />
-        <span className={`text-xs font-semibold ${colors.text}`}>
-          {getChannelShort({ channel_id: item.channel_id, channel_slug: item.channel_slug, channel_name: item.channel_name })}
-        </span>
-        <ContentTypeBadge type={item.content_type} />
-        {ytUrl && (
-          <a href={ytUrl} target="_blank" rel="noopener noreferrer"
-             className="text-[10px] text-green-400 hover:text-green-300 font-mono ml-auto flex items-center gap-1">
-            <ExternalLink size={10} />
-            Ver
-          </a>
-        )}
-      </div>
-
-      {/* Title */}
-      {item.title && (
-        <p className="text-[10px] text-gray-400 truncate mb-2">{item.title}</p>
-      )}
-
-      {/* Published time */}
-      <div className="flex items-center gap-2 text-[10px]">
-        <CheckCircle2 size={11} className="text-green-400" />
-        <span className="text-gray-400">Publicado:</span>
-        <span className="text-white font-mono">
-          {toLocalTime(item.published_at)} {toLocalDate(item.published_at)}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// ── Merged slot types for interleaved pipeline columns ────────
-type PlannedItem =
-  | { _type: 'video'; data: PlannedSlot }
-  | { _type: 'shorts-pending'; data: ShortsPipelineSlot }
-
-type GeneratingItem =
-  | { _type: 'video'; data: GeneratingVideo }
-  | { _type: 'shorts'; data: ShortsPipelineSlot }
-
-type AwaitingUploadItem =
-  | { _type: 'video'; data: AwaitingUploadVideo }
-  | { _type: 'shorts-ready'; data: ShortsPipelineSlot }
-
-// ── Column header ────────────────────────────────────────────
 function ColumnHeader({ icon: Icon, title, count, colorClass }: {
   icon: any; title: string; count: number; colorClass: string
 }) {
@@ -606,71 +540,44 @@ function ColumnHeader({ icon: Icon, title, count, colorClass }: {
   )
 }
 
-// ── Main component ───────────────────────────────────────────
 export default function PipelineView() {
   const { data, isLoading: loading, error: queryError, refetch } = usePipelineStatus()
   const error = queryError ? String(queryError) : null
 
-  // Use memo to compute derived state from the cached query result
   const {
-    planned, generating, awaitingUpload, warming, published24h,
-    shortsPending, shortsGenerating, shortsCompleted, shortsReady,
-    mergedPlanned, mergedGenerating, mergedAwaitingUpload,
+    mergedPlanned, mergedGenerating, mergedAwaiting, warming, published,
   } = useMemo(() => {
     if (!data) {
-      return {
-        planned: [] as PlannedSlot[], generating: [] as GeneratingVideo[],
-        awaitingUpload: [] as AwaitingUploadVideo[], warming: [] as WarmingVideo[],
-        published24h: [] as PublishedItem[],
-        shortsPending: [] as ShortsPipelineSlot[], shortsGenerating: [] as ShortsPipelineSlot[],
-        shortsCompleted: [] as ShortsPipelineSlot[],
-        shortsReady: [] as ShortsPipelineSlot[],
-        mergedPlanned: [] as PlannedItem[],
-        mergedGenerating: [] as GeneratingItem[],
-        mergedAwaitingUpload: [] as AwaitingUploadItem[],
-      }
+      return { mergedPlanned: [] as TaggedItem[], mergedGenerating: [] as TaggedItem[], mergedAwaiting: [] as TaggedItem[], warming: [] as TaggedItem[], published: [] as TaggedItem[] }
     }
-    const p: PlannedSlot[] = data.planned || []
-    const g: GeneratingVideo[] = data.generating || []
-    const a: AwaitingUploadVideo[] = data.awaiting_upload || []
-    const w: WarmingVideo[] = data.warming || []
-    const pub: PublishedItem[] = data.published_24h || []
-    const sp: ShortsPipelineSlot[] = data.shorts?.pending || []
-    const sg: ShortsPipelineSlot[] = data.shorts?.generating || []
-    const sc: ShortsPipelineSlot[] = data.shorts?.completed || []
-    const sr: ShortsPipelineSlot[] = data.shorts?.ready_to_upload || []
+    const plannedVideos: TaggedItem[] = (data.planned || []).map(normPlannedVideo)
+    const shortsPending: TaggedItem[] = (data.shorts?.pending || []).map(s => normShort(s, 'planned'))
+    const generatingVideos: TaggedItem[] = (data.generating || []).map(normGeneratingVideo)
+    const shortsGenerating: TaggedItem[] = (data.shorts?.generating || []).map(s => normShort(s, 'generating'))
+    const awaitingVideos: TaggedItem[] = (data.awaiting_upload || []).map(normAwaitingVideo)
+    const shortsReady: TaggedItem[] = (data.shorts?.ready_to_upload || []).map(s => normShort(s, 'ready'))
+    const warmingItems: TaggedItem[] = (data.warming || []).map(normWarmingVideo)
+    const publishedItems: TaggedItem[] = (data.published_24h || []).map(normPublished)
 
-    // Merge and sort by scheduled_at / timestamp (most recent first)
-    const mergedPlannedVal: PlannedItem[] = [
-      ...p.map(s => ({ _type: 'video' as const, data: s })),
-      ...sp.map(s => ({ _type: 'shorts-pending' as const, data: s })),
-    ].sort((a, b) => new Date(a.data.scheduled_at).getTime() - new Date(b.data.scheduled_at).getTime())
-
-    const mergedGeneratingVal: GeneratingItem[] = [
-      ...g.map(v => ({ _type: 'video' as const, data: v })),
-      ...sg.map(s => ({ _type: 'shorts' as const, data: s })),
-    ].sort((a, b) => {
-      const at = a._type === 'video' ? (a.data as GeneratingVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
-      const bt = b._type === 'video' ? (b.data as GeneratingVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
-      return new Date(at).getTime() - new Date(bt).getTime()
-    })
-
-    const mergedAwaitingUploadVal: AwaitingUploadItem[] = [
-      ...a.map(v => ({ _type: 'video' as const, data: v })),
-      ...sr.map(s => ({ _type: 'shorts-ready' as const, data: s })),
-    ].sort((a, b) => {
-      const at = a._type === 'video' ? (a.data as AwaitingUploadVideo).created_at : (a.data as ShortsPipelineSlot).scheduled_at
-      const bt = b._type === 'video' ? (b.data as AwaitingUploadVideo).created_at : (b.data as ShortsPipelineSlot).scheduled_at
-      return new Date(at).getTime() - new Date(bt).getTime()
-    })
-
-    return {
-      planned: p, generating: g, awaitingUpload: a, warming: w, published24h: pub,
-      shortsPending: sp, shortsGenerating: sg, shortsCompleted: sc, shortsReady: sr,
-      mergedPlanned: mergedPlannedVal,
-      mergedGenerating: mergedGeneratingVal,
-      mergedAwaitingUpload: mergedAwaitingUploadVal,
+    // Sort DESC (most recent first) by per-column key.
+    const byKey = (a: TaggedItem, b: TaggedItem, keys: (k: TimelineDates) => (string | undefined)[]) => {
+      const av = Math.max(...keys(a.dates).map(tsNum).filter(n => n !== -Infinity), -Infinity)
+      const bv = Math.max(...keys(b.dates).map(tsNum).filter(n => n !== -Infinity), -Infinity)
+      return bv - av
     }
+
+    const mergedPlannedVal = [...plannedVideos, ...shortsPending].sort((a, b) =>
+      byKey(a, b, d => [d.planStart]))
+    const mergedGeneratingVal = [...generatingVideos, ...shortsGenerating].sort((a, b) =>
+      byKey(a, b, d => [d.realStart, d.planStart, d.plannedAt]))
+    const mergedAwaitingVal = [...awaitingVideos, ...shortsReady].sort((a, b) =>
+      byKey(a, b, d => [d.planUpload, d.planPublish]))
+    const warmingVal = [...warmingItems].sort((a, b) =>
+      byKey(a, b, d => [d.planPublish]))
+    const publishedVal = [...publishedItems].sort((a, b) =>
+      byKey(a, b, d => [d.realPublish]))
+
+    return { mergedPlanned: mergedPlannedVal, mergedGenerating: mergedGeneratingVal, mergedAwaiting: mergedAwaitingVal, warming: warmingVal, published: publishedVal }
   }, [data])
 
   async function handleUploadNow(videoId: number) {
@@ -682,9 +589,7 @@ export default function PipelineView() {
     }
   }
 
-  const totalItems = planned.length + generating.length + awaitingUpload.length + warming.length
-    + published24h.length + shortsPending.length + shortsGenerating.length + shortsCompleted.length
-    + shortsReady.length
+  const totalItems = mergedPlanned.length + mergedGenerating.length + mergedAwaiting.length + warming.length + published.length
 
   if (loading) {
     return (
@@ -724,88 +629,48 @@ export default function PipelineView() {
 
   return (
     <div className="pipeline-grid">
-      {/* ── Column 1: Planned ─────────────────────────────── */}
       <div className="pipeline-column">
         <ColumnHeader icon={Clock} title="Planificado" count={mergedPlanned.length} colorClass="text-amber-400" />
         {mergedPlanned.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay pendientes</p>
         ) : (
-          <div className="space-y-3">
-            {mergedPlanned.map((item) => {
-              switch (item._type) {
-                case 'video':
-                  return <PlannedCard key={`vid-${item.data.slot_id}`} slot={item.data as PlannedSlot} />
-                case 'shorts-pending':
-                  return <ShortsPlannedCard key={`short-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
-              }
-            })}
-          </div>
+          <div className="space-y-3">{mergedPlanned.map(i => <PipelineCard key={i.key} item={i} />)}</div>
         )}
       </div>
 
-      {/* ── Column 2: Generating ──────────────────────────── */}
       <div className="pipeline-column">
         <ColumnHeader icon={Loader2} title="Generando" count={mergedGenerating.length} colorClass="text-neon-cyan animate-spin" />
         {mergedGenerating.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay generaciones activas</p>
         ) : (
-          <div className="space-y-3">
-            {mergedGenerating.map((item) => {
-              switch (item._type) {
-                case 'video':
-                  return <GeneratingCard key={`vid-${(item.data as GeneratingVideo).video_id}`} video={item.data as GeneratingVideo} />
-                case 'shorts':
-                  return <ShortsGeneratingCard key={`short-${item.data.slot_id}`} slot={item.data as ShortsPipelineSlot} />
-              }
-            })}
-          </div>
+          <div className="space-y-3">{mergedGenerating.map(i => <PipelineCard key={i.key} item={i} />)}</div>
         )}
       </div>
 
-      {/* ── Column 3: Awaiting Upload ─────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={mergedAwaitingUpload.length} colorClass="text-blue-400" />
-        {mergedAwaitingUpload.length === 0 ? (
+        <ColumnHeader icon={HardDrive} title="Pendiente subida" count={mergedAwaiting.length} colorClass="text-blue-400" />
+        {mergedAwaiting.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos esperando subida</p>
         ) : (
-          <div className="space-y-3">
-            {mergedAwaitingUpload.map((item) => {
-              switch (item._type) {
-                case 'video':
-                  return <AwaitingUploadCard key={`await-${(item.data as AwaitingUploadVideo).video_id}`} video={item.data as AwaitingUploadVideo} onUploadNow={handleUploadNow} />
-                case 'shorts-ready':
-                  return <ShortsReadyUploadCard key={`ready-${item.data.slot_id}`} short={item.data as ShortsPipelineSlot} />
-              }
-            })}
-          </div>
+          <div className="space-y-3">{mergedAwaiting.map(i => <PipelineCard key={i.key} item={i} onUploadNow={handleUploadNow} />)}</div>
         )}
       </div>
 
-      {/* ── Column 4: Warming ─────────────────────────────── */}
       <div className="pipeline-column">
         <ColumnHeader icon={Lock} title="No listado (calentando)" count={warming.length} colorClass="text-amber-400" />
         {warming.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos en calentamiento</p>
         ) : (
-          <div className="space-y-3">
-            {warming.map((video) => (
-              <WarmingCard key={video.video_id} video={video} />
-            ))}
-          </div>
+          <div className="space-y-3">{warming.map(i => <PipelineCard key={i.key} item={i} />)}</div>
         )}
       </div>
 
-      {/* ── Column 5: Published 24h ──────────────────────────── */}
       <div className="pipeline-column">
-        <ColumnHeader icon={CheckCircle2} title="Publicados (24h)" count={published24h.length} colorClass="text-green-400" />
-        {published24h.length === 0 ? (
+        <ColumnHeader icon={CheckCircle2} title="Publicados (24h)" count={published.length} colorClass="text-green-400" />
+        {published.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay publicados recientes</p>
         ) : (
-          <div className="space-y-3">
-            {published24h.map((item, idx) => (
-              <PublishedCard key={`pub-${item.content_type}-${item.id}-${idx}`} item={item} />
-            ))}
-          </div>
+          <div className="space-y-3">{published.map(i => <PipelineCard key={i.key} item={i} />)}</div>
         )}
       </div>
     </div>
