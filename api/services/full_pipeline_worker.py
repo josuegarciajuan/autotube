@@ -1370,6 +1370,8 @@ def run_job(
                     description=metadata.get("description", ""),
                     tags_json=json.dumps(metadata.get("tags", []), ensure_ascii=False),
                     title_options=json.dumps(metadata.get("titles", []), ensure_ascii=False),
+                    thumbnail_text=metadata.get("thumbnail_text", ""),
+                    thumbnail_badge_text=metadata.get("badge_text", ""),
                     thumbnail_path=video_data.get("thumbnail_path", ""),
                     status="ready",
                 )

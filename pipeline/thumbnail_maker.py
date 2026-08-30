@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 from config.settings import THUMBNAILS_DIR
+from api.services.packaging_policy import validate_thumbnail_overlay
 
 # ── Default thumbnail dimensions (overridable per channel via config_bridge) ──
 THUMBNAIL_WIDTH = 1280
@@ -349,6 +350,13 @@ class ThumbnailMaker:
 
         # Use provided overlay_text or the one from brainstorming
         final_overlay = overlay_text.strip() if overlay_text else brief.text_overlay
+        overlay_check = validate_thumbnail_overlay(
+            final_overlay,
+            int(getattr(self._channel_cfg, "THUMBNAIL_MAX_OVERLAY_CHARS", 32)),
+        )
+        if not overlay_check.valid:
+            logger.warning("Thumbnail overlay rejected: %s", ", ".join(overlay_check.reasons))
+            final_overlay = ""
         
         # ── v2: extract multi-text fields from brief ────────────
         text_gancho = brief.text_gancho if hasattr(brief, 'text_gancho') and brief.text_gancho else ""

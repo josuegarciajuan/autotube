@@ -1250,6 +1250,13 @@ async def _schedule_checker_loop():
     last_standalone_dispatch = 0  # standalone shorts auto-dispatch
     last_collab_run = 0  # daily collaboration engine
     last_ab_test_check = 0  # v31: A/B test sequential optimization
+    last_recovery_checkpoint_check = 0
+    try:
+        stored = _sched_db.get_system_state("last_recovery_checkpoint_check")
+        if stored:
+            last_recovery_checkpoint_check = float(stored)
+    except Exception:
+        pass
     first_run = True
 
     # Restore last_view_gap_check from DB
@@ -1300,6 +1307,24 @@ async def _schedule_checker_loop():
                 pass
 
             now = time.time()
+
+            # Recovery experiment reviews are local-DB only: never collect
+            # stats or call YouTube here. The checkpoint ledger makes this
+            # restart-safe and idempotent; quota exhaustion must not suppress
+            # diagnostic alerts.
+            from api.services.recovery_checkpoints import should_run_checkpoint_review
+            if should_run_checkpoint_review(_paused_manual) and now - last_recovery_checkpoint_check >= 900:
+                try:
+                    from api.services.recovery_checkpoints import run_due_checkpoints
+                    checkpoint_count = await asyncio.to_thread(
+                        run_due_checkpoints, _sched_db
+                    )
+                    if checkpoint_count:
+                        logger.info("Recovery checkpoints: %d alert(s) emitted", checkpoint_count)
+                    _sched_db.set_system_state("last_recovery_checkpoint_check", str(now))
+                except Exception as exc:
+                    logger.warning("Recovery checkpoint review failed: %s", exc)
+                last_recovery_checkpoint_check = now
 
             if not _paused_manual:
                 local_hour = time.localtime().tm_hour

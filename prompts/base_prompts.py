@@ -58,6 +58,18 @@ def _niche_substance_rule(cfg) -> str:
     return "La credibilidad es lo mas importante."
 
 
+def packaging_rules(cfg) -> str:
+    """Shared evidence-first rules for scripts and metadata prompts."""
+    formulas = ", ".join(getattr(cfg, "TITLE_FORMULAS", [])[:6])
+    return f"""REGLAS DE PACKAGING EVIDENCE-FIRST:
+- El título debe identificar un caso concreto (persona/lugar y fecha o año cuando existan), no una promesa genérica.
+- Separa siempre HECHO documentado, INTERPRETACIÓN propuesta y DESCONOCIDO; no presentes hipótesis como hechos.
+- Evita fórmulas repetitivas de shock, "oculto", "real", "prohibido" y superlativos vacíos.
+- Usa una sola idea visual legible en la miniatura y texto corto; no uses sellos de credibilidad como sustituto de evidencia.
+- Fórmulas configuradas para este canal: {formulas}
+"""
+
+
 def _build_block_rules(cfg, theme_context=None, word_target=None) -> str:
     """Build the bloque structure rules for the prompt.
 

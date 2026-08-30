@@ -31,6 +31,8 @@ from pipeline.title_enricher import (
     build_power_words_prompt_section,
 )
 from pipeline.seo_researcher import SEOResearcher, _format_seconds
+from prompts.base_prompts import packaging_rules
+from api.services.packaging_policy import validate_title
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +546,8 @@ INSTRUCCIONES:
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
+        user_prompt += "\n\n" + packaging_rules(self.config)
+
         # ── Inject channel power words into system prompt ──────────
         power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
         pw_section = build_power_words_prompt_section(power_words)
@@ -590,6 +594,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             # ── Antiban (ago 2026): quitar sufijos de credibilidad clickbait
             # tipo (REAL)/(CASO REAL) por si el LLM los incluyó igualmente.
             title = _strip_clickbait_suffix(title)
+            title_check = validate_title(title, self.config)
 
             description = result.get("description", "")
             # Truncate description to 5000 bytes
@@ -643,6 +648,8 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 "category_id": self.yt_category_id,
                 "token_count": token_count,
                 "cost_estimate": cost_estimate,
+                "packaging_validation": {"valid": title_check.valid,
+                                         "reasons": list(title_check.reasons)},
             }
             
         except json.JSONDecodeError as e:

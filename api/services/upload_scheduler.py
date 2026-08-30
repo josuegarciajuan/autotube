@@ -41,6 +41,12 @@ MAX_UPLOAD_RETRY_PER_VIDEO = 3  # Max upload attempts before marking video as he
 _windows_rr: dict[tuple[int, str], int] = {}
 
 
+def validate_upload_packaging(video: dict, config):
+    """Return packaging validation result for the final upload choke point."""
+    from api.services.packaging_policy import validate_video_packaging
+    return validate_video_packaging(video, config)
+
+
 def _parse_upload_windows(ch_cfg: dict) -> list[dict]:
     """Parse upload windows from channel config with backward compat.
 
@@ -989,7 +995,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     with db._connect() as conn:
         rows = conn.execute(
             """SELECT v.id, v.channel_id, v.canal, v.video_path, v.thumbnail_path,
-                       v.titulo_final, v.description, v.tags_json, v.target_public_at,
+                       v.titulo_final, v.thumbnail_text, v.thumbnail_badge_text,
+                       v.description, v.tags_json, v.target_public_at,
                        v.scheduled_upload_at, v.publish_mode, c.slug as channel_slug, c.config_json
                FROM videos v
                JOIN channels c ON v.channel_id = c.id
@@ -1349,6 +1356,26 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 )
     except Exception as exc:
         logger.debug("Freshness refresh skipped (%s): %s", slug, exc)
+
+    # Final fail-closed packaging gate immediately before upload dispatch.
+    try:
+        from config.config_bridge import get_channel_config
+        packaging = validate_upload_packaging(video, get_channel_config(slug))
+        if not packaging.valid:
+            logger.error("[%s] Video #%d held: unsafe packaging (%s)",
+                         slug, video_id, ", ".join(packaging.reasons))
+            db.update_video(video_id, status="validation_failed", progress_phase="upload")
+            from api.services.lifecycle_monitor import emit_alert
+            emit_alert(db, entity_type="video", entity_id=video_id,
+                       channel_id=channel_id, alert_type="packaging_invalid",
+                       severity="warning", title=f"Packaging inválido — {slug}",
+                       message="Upload held at final packaging gate",
+                       metadata={"reasons": list(packaging.reasons)})
+            return None
+    except Exception as exc:
+        logger.error("[%s] Packaging gate failed closed for video #%d: %s", slug, video_id, exc)
+        db.update_video(video_id, status="validation_failed", progress_phase="upload")
+        return None
 
     logger.info(
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",

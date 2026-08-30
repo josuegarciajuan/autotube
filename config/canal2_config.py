@@ -123,20 +123,12 @@ TARGET_AUDIENCE_PSYCHOGRAPHIC = {
 # ═══════════════════════════════════════════════════════════════════
 
 TITLE_FORMULAS = [
-    "La Casualidad que {action} y Nadie Puede Explicar",
-    "El Milagro de {name}: {shocking_fact}",
-    "Predijo {event} Años Antes de que Ocurriera",
-    "¿{question}? La Respuesta Desafía Toda Lógica",
-    "Cuando el Universo Conspiró: La Increíble Historia de {name}",
-    "{number} Segundos que Desafiaron las Leyes de la Física",
-    "La Sincronía Más Increíble de la Historia te Dejará Sin Palabras",
-    # ago 2026: formulas de payoff/story (outliers de retencion 30-55% y
-    # titulos que si rinden: pregunta + misterio + dato concreto)
-    "¿Por qué {fenomeno} sigue sin explicación {anios} después?",
-    "El día que {evento} cambió {todo} para siempre",
-    "La verdad sobre {misterio}: {dato} que nadie esperaba",
-    "{protagonista}: la historia de {desenlace} y nadie lo vio venir",
-    "Lo que {lugar} ocultó durante {anios}: {revelacion}",
+    "{year}: {person_or_place} y la coincidencia que cambió el caso",
+    "{number} minutos en {place}: qué ocurrió realmente en {year}",
+    "{person}: la predicción de {year} que volvió a aparecer",
+    "¿Qué pasó en {place} en {year}? Hechos, hipótesis y dudas",
+    "El caso de {year} que aún divide a los investigadores",
+    "{place}, {year}: la cadena de casualidades paso a paso",
 ]
 
 TITLE_POWER_WORDS = [
@@ -170,6 +162,11 @@ TITLE_POWER_WORDS = [
 ]
 
 TITLE_MAX_CHARS = 65
+TITLE_MIN_CHARS = 28
+TITLE_REQUIRED_SPECIFICITY = ["year", "place_or_person"]
+TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras", "desafía toda lógica"]
+THUMBNAIL_MAX_OVERLAY_CHARS = 32
+RECOVERY_CHECKPOINTS_ENABLED = True
 
 # ═══════════════════════════════════════════════════════════════════
 # SCRIPT STRUCTURE — "Espiral de Asombro" method

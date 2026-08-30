@@ -4,6 +4,7 @@ Uses the v2 4-phase pipeline: Style Engine → Brainstorming → Pollo AI + QC �
 """
 
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from database.db_extended import ExtendedDatabase
 from config.settings import OUTPUT_DIR
+from api.services.packaging_policy import validate_thumbnail_file
+
+logger = logging.getLogger("autotube.thumbnail_service")
 
 
 async def regenerate_thumbnail_for_video(video_id: int):
@@ -57,6 +61,11 @@ async def regenerate_thumbnail_for_video(video_id: int):
             channel_theme=getattr(cfg, "CANAL_TAGLINE", ""),
             video_id=video_id,
         )
+        check = validate_thumbnail_file(thumbnail_path)
+        if not check.valid:
+            logger.warning("Thumbnail validation rejected video %d: %s", video_id,
+                           ", ".join(check.reasons))
+            return None
 
         db.update_video(video_id, thumbnail_path=str(thumbnail_path),
                         updated_at=datetime.utcnow().isoformat())
