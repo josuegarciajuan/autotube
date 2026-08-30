@@ -3179,6 +3179,12 @@ def _migrate_v49(conn, logger):
     schema = Path(__file__).parent / "schema_v49.sql"
     if schema.exists():
         conn.executescript(schema.read_text(encoding="utf-8"))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+    for column in ("thumbnail_text", "thumbnail_badge_text"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column} TEXT DEFAULT ''")
+    conn.commit()
+    if schema.exists():
         logger.info("Migration v49: recovery checkpoints table ensured")
 
 

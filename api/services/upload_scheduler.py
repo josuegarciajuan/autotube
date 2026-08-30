@@ -995,7 +995,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     with db._connect() as conn:
         rows = conn.execute(
             """SELECT v.id, v.channel_id, v.canal, v.video_path, v.thumbnail_path,
-                       v.titulo_final, v.description, v.tags_json, v.target_public_at,
+                       v.titulo_final, v.thumbnail_text, v.thumbnail_badge_text,
+                       v.description, v.tags_json, v.target_public_at,
                        v.scheduled_upload_at, v.publish_mode, c.slug as channel_slug, c.config_json
                FROM videos v
                JOIN channels c ON v.channel_id = c.id

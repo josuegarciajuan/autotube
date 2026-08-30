@@ -47,8 +47,8 @@ def test_checkpoint_is_due_and_idempotent_without_quota():
 def test_checkpoint_classification_uses_available_metrics():
     assert classify_checkpoint({"impressions": 1000, "ctr": 0.01,
                                 "average_view_percentage": 0.5}) == "low_ctr"
-    assert classify_checkpoint({"impressions": 1000, "ctr": 0.06,
-                                "average_view_percentage": 0.12}) == "early_retention_drop"
+    assert classify_checkpoint({"impressions": 1000, "ctr": 6.0,
+                                "average_view_percentage": 12.0}) == "early_retention_drop"
 
 
 def test_malformed_metrics_are_unavailable_and_exact_thresholds_are_healthy():
@@ -56,6 +56,13 @@ def test_malformed_metrics_are_unavailable_and_exact_thresholds_are_healthy():
                                 "averageViewPercentage": "oops"}) == "metrics_unavailable"
     assert classify_checkpoint({"impressions": 100, "ctr": 2.0,
                                 "averageViewPercentage": 20.0}) == "diagnostic_ok"
+    assert classify_checkpoint({"impressions": 1000, "ctr": 1.0}) == "low_ctr"
+    assert classify_checkpoint({"impressions": 1000,
+                                "impressionsClickThroughRate": 0.01,
+                                "ctr_unit": "fraction"}) == "low_ctr"
+    assert classify_checkpoint({"impressions": 1000,
+                                "impressionsClickThroughRate": 0.03,
+                                "ctr_unit": "fraction"}) == "diagnostic_ok"
 
 
 def test_recovery_is_scoped_by_channel_config():
@@ -94,6 +101,35 @@ def test_v49_migration_smoke_is_idempotent(tmp_path):
     migrate_v2(str(path))
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='recovery_checkpoints'").fetchone()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+        assert {"thumbnail_text", "thumbnail_badge_text"} <= columns
+
+
+def test_effective_overlay_is_validated_at_upload_boundary(tmp_path):
+    cfg = type("Cfg", (), {"TITLE_MAX_CHARS": 65, "TITLE_MIN_CHARS": 1,
+                            "TITLE_REQUIRED_SPECIFICITY": [], "TITLE_BANNED_PATTERNS": [],
+                            "THUMBNAIL_MAX_OVERLAY_CHARS": 32})
+    result = validate_upload_packaging(
+        {"titulo_final": "Caso concreto", "thumbnail_text": "OCULTO | REAL | PROHIBIDO",
+         "thumbnail_path": str(tmp_path / "missing.jpg")}, cfg
+    )
+    assert "repetitive_claims" in result.reasons
+
+
+def test_valid_effective_overlay_passes_upload_boundary(tmp_path):
+    from PIL import Image
+    path = tmp_path / "thumb.jpg"
+    image = Image.new("RGB", (1280, 720), (30, 50, 80))
+    image.paste((180, 120, 40), (640, 0, 1280, 720))
+    image.save(path)
+    cfg = type("Cfg", (), {"TITLE_MAX_CHARS": 65, "TITLE_MIN_CHARS": 1,
+                            "TITLE_REQUIRED_SPECIFICITY": [], "TITLE_BANNED_PATTERNS": [],
+                            "THUMBNAIL_MAX_OVERLAY_CHARS": 32})
+    result = validate_upload_packaging(
+        {"titulo_final": "Caso concreto", "thumbnail_text": "1971 MADRID",
+         "thumbnail_path": str(path)}, cfg
+    )
+    assert result.valid
 
 
 def test_all_standard_checkpoints_are_scheduled_once():

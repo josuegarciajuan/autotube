@@ -11,35 +11,45 @@ def should_run_checkpoint_review(scheduler_paused: bool) -> bool:
     return not bool(scheduler_paused)
 
 
+def normalize_rate(value, unit: str) -> Optional[float]:
+    """Normalize an explicitly-unit-tagged rate to percentage points."""
+    if unit not in {"fraction", "percent"}:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number * 100.0 if unit == "fraction" else number
+
+
 def classify_checkpoint(stats: Optional[dict]) -> str:
     if not stats:
         return "metrics_unavailable"
     impressions = stats.get("impressions")
-    ctr = stats.get("ctr", stats.get("impressionsClickThroughRate"))
+    if "ctr" in stats:
+        ctr = normalize_rate(stats.get("ctr"), stats.get("ctr_unit", "percent"))
+    elif "impressionsClickThroughRate" in stats:
+        ctr = normalize_rate(stats.get("impressionsClickThroughRate"), stats.get("ctr_unit"))
+    else:
+        ctr = None
     retention = stats.get("average_view_percentage", stats.get("averageViewPercentage"))
+    retention_unit = stats.get("retention_unit", "percent")
+    retention = normalize_rate(retention, retention_unit) if retention is not None else None
     try:
         impressions = float(impressions)
-        ctr = float(ctr)
-        if not math.isfinite(impressions) or not math.isfinite(ctr) or impressions < 0 or ctr < 0:
+        if not math.isfinite(impressions) or impressions < 0 or ctr is None:
             return "metrics_unavailable"
     except (TypeError, ValueError):
         return "metrics_unavailable"
     if impressions < 100:
         return "low_impressions"
-    # DB stores CTR as percentage; API-shaped fixtures may provide a fraction.
-    ctr_threshold = 2.0 if float(ctr) > 1 else 0.02
-    if float(ctr) < ctr_threshold:
+    if ctr < 2.0:
         return "low_ctr"
     if retention is not None:
-        try:
-            retention = float(retention)
-            if not math.isfinite(retention) or retention < 0:
-                return "metrics_unavailable"
-        except (TypeError, ValueError):
-            return "metrics_unavailable"
-        retention_threshold = 20.0 if retention > 1 else 0.20
-    if retention is not None and retention < retention_threshold:
-        return "early_retention_drop"
+        if retention < 20.0:
+            return "early_retention_drop"
     return "diagnostic_ok"
 
 
