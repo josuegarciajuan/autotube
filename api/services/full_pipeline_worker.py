@@ -1706,7 +1706,30 @@ def run_job(
                     except Exception as stale_exc:
                         logger.debug("[%s] Pre-upload stale check skipped: %s", canal, stale_exc)
                     logger.info("📅 Publicación programada para: %s UTC", planned_public_at)
-            
+
+            # ── Robustez upload_only: si el checkpoint no persistió 'video',
+            # reconstruir video_data desde la DB antes de phase_upload (el
+            # orchestrator también lo hace, pero aquí además curamos el
+            # checkpoint para que reintentos posteriores no vuelvan a fallar).
+            if not video_data or not isinstance(video_data, dict) or not video_data.get("video_path"):
+                try:
+                    vrow = db.get_video(video_id)
+                    vp = (vrow.get("video_path") or "") if vrow else ""
+                    if vp and __import__("pathlib").Path(vp).exists():
+                        rebuilt = {
+                            "video_path": str(vp),
+                            "thumbnail_path": str(vrow.get("thumbnail_path") or ""),
+                            "titulo": str(vrow.get("titulo_final") or ""),
+                        }
+                        video_data = rebuilt
+                        _save_checkpoint(video_id, "video", rebuilt, db)
+                        logger.info(
+                            "[%s] Checkpoint 'video' inyectado desde DB para video #%d (upload_only)",
+                            canal, video_id,
+                        )
+                except Exception as _vd_exc:
+                    logger.debug("[%s] Checkpoint video injection skipped: %s", canal, _vd_exc)
+
             yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,
                                               planned_public_at=planned_public_at,
                                               skip_lifecycle_scheduling=True)
