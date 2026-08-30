@@ -1583,6 +1583,44 @@ class PipelineOrchestrator:
         except Exception:
             return None
 
+    def _rebuild_video_data_from_db(self, fallback: dict | None = None) -> dict | None:
+        """Reconstruct video_data from the DB when the checkpoint lacks 'video'.
+
+        upload_only workers skip the render phase, so video_data normally comes
+        from checkpoint_data['video']. If that entry is missing (legacy videos
+        rendered before the checkpoint was introduced), rebuild it from the
+        videos table columns so the upload does not crash with a NoneType.
+
+        Returns a dict with video_path/thumbnail_path/titulo, or None if the
+        video record cannot be found.
+        """
+        if self.db is None or self.db_video_id is None:
+            return None
+        try:
+            row = self.db.get_video(self.db_video_id)
+            if not row:
+                return None
+            vp = row.get("video_path") or ""
+            if not vp or not __import__("pathlib").Path(vp).exists():
+                return None
+            rebuilt = {
+                "video_path": str(vp),
+                "thumbnail_path": str(row.get("thumbnail_path") or ""),
+                "titulo": str(row.get("titulo_final") or ""),
+            }
+            if fallback and isinstance(fallback, dict):
+                for k in ("thumbnail_path", "titulo"):
+                    if not rebuilt.get(k) and fallback.get(k):
+                        rebuilt[k] = fallback[k]
+            logger.info(
+                "[%s] Reconstruido video_data desde DB para video #%s (path=%s)",
+                self.canal, self.db_video_id, rebuilt["video_path"],
+            )
+            return rebuilt
+        except Exception as exc:
+            logger.warning("[%s] _rebuild_video_data_from_db failed: %s", self.canal, exc)
+            return None
+
     # ═══════════════════════════════════════════════════════════════════
     # Phase 1.5: Pre-validation (after script, before TTS)
     # ═══════════════════════════════════════════════════════════════════
@@ -1910,6 +1948,21 @@ class PipelineOrchestrator:
         )
 
         try:
+            # ── Robustez upload_only: reconstruir video_data si el checkpoint
+            # no persistió la entrada 'video' (vídeos renderizados por una
+            # versión anterior del pipeline). Sin esto, video_data=None crashea
+            # con 'NoneType' object has no attribute 'get' en la subida.
+            if not video_data or not isinstance(video_data, dict):
+                video_data = self._rebuild_video_data_from_db()
+            elif not video_data.get("video_path"):
+                video_data = self._rebuild_video_data_from_db(video_data)
+            if not video_data or not video_data.get("video_path"):
+                logger.error(
+                    "[%s] No se pudo reconstruir video_data para upload (db_video_id=%s) — abortando",
+                    self.canal, self.db_video_id,
+                )
+                return None
+
             # Authenticate with YouTube
             self._emit_progress(83, "upload", "Autenticando con YouTube...")
             if not self.uploader.authenticate():
