@@ -559,11 +559,11 @@ export default function PipelineView() {
     const warmingItems: TaggedItem[] = (data.warming || []).map(normWarmingVideo)
     const publishedItems: TaggedItem[] = (data.published_24h || []).map(normPublished)
 
-    // Sort DESC (most recent first) by per-column key.
-    const byKey = (a: TaggedItem, b: TaggedItem, keys: (k: TimelineDates) => (string | undefined)[]) => {
+    // Sort by per-column key. Default DESC (most recent first); pass desc=false for ASC.
+    const byKey = (a: TaggedItem, b: TaggedItem, keys: (k: TimelineDates) => (string | undefined)[], desc = true) => {
       const av = Math.max(...keys(a.dates).map(tsNum).filter(n => n !== -Infinity), -Infinity)
       const bv = Math.max(...keys(b.dates).map(tsNum).filter(n => n !== -Infinity), -Infinity)
-      return bv - av
+      return desc ? bv - av : av - bv
     }
 
     const mergedPlannedVal = [...plannedVideos, ...shortsPending].sort((a, b) =>
@@ -572,8 +572,9 @@ export default function PipelineView() {
       byKey(a, b, d => [d.realStart, d.planStart, d.plannedAt]))
     const mergedAwaitingVal = [...awaitingVideos, ...shortsReady].sort((a, b) =>
       byKey(a, b, d => [d.planUpload, d.planPublish]))
+    // Calentando: de más próxima a más lejana (publicación prevista ASC).
     const warmingVal = [...warmingItems].sort((a, b) =>
-      byKey(a, b, d => [d.planPublish]))
+      byKey(a, b, d => [d.planPublish], false))
     const publishedVal = [...publishedItems].sort((a, b) =>
       byKey(a, b, d => [d.realPublish]))
 
