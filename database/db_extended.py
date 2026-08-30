@@ -5249,6 +5249,17 @@ class ExtendedDatabase(Database):
                         "INSERT INTO recovery_checkpoints(video_id, channel_id, checkpoint_hours) VALUES (?, ?, ?)",
                         (kwargs["entity_id"], kwargs.get("channel_id"), metadata["checkpoint_hours"]),
                     )
+                existing = conn.execute(
+                    "SELECT id FROM pipeline_alerts WHERE entity_type='video' AND entity_id=? AND alert_type=? AND resolved=0",
+                    (kwargs["entity_id"], kwargs["alert_type"]),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE pipeline_alerts SET message=?, metadata_json=? WHERE id=?",
+                        (kwargs.get("message"), json.dumps(metadata, ensure_ascii=False), existing["id"]),
+                    )
+                    conn.commit()
+                    return existing["id"] if metadata.get("classification") != "metrics_unavailable" else None
                 cur = conn.execute(
                     """INSERT INTO pipeline_alerts
                        (entity_type, entity_id, channel_id, alert_type, severity, title, message, metadata_json)
