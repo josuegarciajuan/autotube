@@ -1369,6 +1369,9 @@ def migrate_v2(db_path: str = None):
     # ── v49: durable recovery experiment checkpoints ──
     _migrate_v49(conn, logger)
 
+    # ── v50: review governance ledger + long-form external visibility ──
+    _migrate_v50(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3186,6 +3189,24 @@ def _migrate_v49(conn, logger):
     conn.commit()
     if schema.exists():
         logger.info("Migration v49: recovery checkpoints table ensured")
+
+
+def _migrate_v50(conn, logger):
+    """Idempotent review ledger and derived long-form visibility fields."""
+    schema = Path(__file__).parent / "schema_v50.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+    for column, definition in (
+        ("yt_visibility", "TEXT DEFAULT ''"),
+        ("yt_checked_at", "TEXT"),
+        ("yt_checked_source", "TEXT DEFAULT ''"),
+        ("actual_published_at", "TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column} {definition}")
+    conn.commit()
+    logger.info("Migration v50: review tasks and long-form visibility ensured")
 
 
 def _migrate_v10(conn, logger):
@@ -5229,7 +5250,11 @@ class ExtendedDatabase(Database):
                    ORDER BY fetched_at DESC LIMIT 1""",
                 (channel_id,),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result["metrics_available"] = any(result.get(k) is not None for k in ("subscribers", "total_views", "video_count"))
+        return result
 
     def get_video_latest_stats(self, video_id: int) -> dict | None:
         """Get the most recent stats snapshot for a single video."""
@@ -5240,7 +5265,11 @@ class ExtendedDatabase(Database):
                    ORDER BY fetched_at DESC LIMIT 1""",
                 (video_id,),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result["metrics_available"] = any(result.get(k) is not None for k in ("views", "likes", "comments", "estimated_minutes_watched"))
+        return result
 
     def has_recovery_checkpoint(self, video_id: int, checkpoint_hours: int) -> bool:
         with self._connect() as conn:

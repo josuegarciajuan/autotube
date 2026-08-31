@@ -43,6 +43,15 @@ THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
 RECOVERY_CHECKPOINTS_ENABLED = False
 
+# Review governance is opt-in in DB config_json/system_state. Defaults are
+# deliberately inert so existing channels and already-created videos are not
+# changed by the feature.
+REVIEW_GOVERNANCE_ENABLED = False
+REVIEW_GOVERNANCE_ACTIVATION_KEY = "review_governance_activation_at"
+REVIEW_GOVERNANCE_NICHE_GUARD_ENABLED = False
+REVIEW_GOVERNANCE_NICHE_KEYWORDS = []
+REVIEW_GOVERNANCE_AMBIGUOUS_REVIEW = True
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
