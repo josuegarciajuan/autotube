@@ -279,12 +279,13 @@ def test_failed_alert_resolves_when_intentional_reassemble_retry_is_queued(tmp_p
     db = _build_db(tmp_path)
     _insert_failed_video(
         db, vid=22,
-        error_msg="Killed by operator para liberar gate; se reintentará",
+        error_msg="interrupted: server restarted (SIGTERM)",
     )
     with db._connect() as conn:
         conn.execute(
-            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
-            "VALUES ('video', 22, 1, 'failed', 'critical', 'failed')"
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title, message) "
+            "VALUES ('video', 22, 1, 'failed', 'critical', "
+            "'failed', 'Killed by operator; se reintentará')"
         )
         conn.execute(
             "INSERT INTO generation_jobs(channel_id, video_id, action, status) "

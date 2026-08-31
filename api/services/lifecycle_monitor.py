@@ -797,8 +797,10 @@ def _auto_resolve_completed(db) -> int:
                    FROM pipeline_alerts pa
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                    WHERE pa.resolved = 0 AND pa.alert_type = 'failed'
-                     AND v.error_message LIKE '%operator%'
-                     AND v.error_message LIKE '%reintent%'
+                     AND (v.error_message LIKE '%operator%'
+                          OR pa.message LIKE '%operator%')
+                     AND (v.error_message LIKE '%reintent%'
+                          OR pa.message LIKE '%reintent%')
                      AND EXISTS (
                          SELECT 1 FROM generation_jobs gj
                          WHERE gj.video_id = v.id
