@@ -144,8 +144,14 @@ class EgressAgent:
     def ping(self) -> dict:
         return self._get("/ping")
 
+    def healthz(self) -> dict:
+        return self._get("/healthz")
+
     def egress_check(self) -> dict:
         return self._get("/egress-check")
+
+    def egress_check_browser(self) -> dict:
+        return self._get("/egress-check-browser")
 
     def browser_action(self, action: str, account: str = "", params: dict | None = None) -> dict:
         return self._post("/browser/action", {
