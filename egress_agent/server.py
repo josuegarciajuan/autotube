@@ -21,6 +21,10 @@ from egress_agent import youtube_api, scraper
 logger = logging.getLogger("egress_agent.server")
 
 
+class EgressGuardError(Exception):
+    """Fallo de verificación de egress (IP residencial no esperada/indeterminada)."""
+
+
 class AgentApp:
     def __init__(self, cfg: AgentConfig):
         self.cfg = cfg
@@ -33,6 +37,48 @@ class AgentApp:
             return  # dev mode: token vacío → se permite
         if x_agent_token != self.cfg.auth_token:
             raise HTTPException(status_code=401, detail="token de agente inválido")
+
+    # ── Guardia de egress por operación (cierra la ventana del monitor) ──
+    _egress_verify_cache = {"ts": 0.0, "ok": False}
+    _EGRESS_VERIFY_TTL = 20  # segundos
+
+    def _probe_egress_ip(self) -> str:
+        """IP real de salida del agente, consultada A TRAVÉS del proxy residencial."""
+        import requests as _req
+        for url in ("https://api.ipify.org?format=json", "https://ipwho.is/"):
+            try:
+                r = _req.get(url, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict) and data.get("ip"):
+                        return str(data["ip"])
+            except Exception:  # noqa: BLE001
+                continue
+        return ""
+
+    def _require_egress(self) -> None:
+        """Fail-closed: antes de tocar YT, confirma que la salida es la IP esperada.
+
+        Si la IP cambió/caducó (o no se puede verificar), rechaza la operación:
+        jamás se toca YouTube desde una IP distinta a la residencial esperada.
+        """
+        expected = (self.cfg.expected_ip or "").strip()
+        if not expected:
+            return  # no verificación configurada
+        now = time.time()
+        cache = AgentApp._egress_verify_cache
+        if now - cache["ts"] < AgentApp._EGRESS_VERIFY_TTL and cache["ok"]:
+            return
+        ip = self._probe_egress_ip()
+        ok = bool(ip) and ip == expected
+        cache["ts"] = now
+        cache["ok"] = ok
+        if not ok:
+            raise EgressGuardError(
+                f"egress IP no verificada (actual={ip or 'desconocida'}, "
+                f"esperada={expected}) — IP caducada, renovar en Geonix. "
+                f"Operación bloqueada (fail-closed)."
+            )
 
     # ── Modelos ────────────────────────────────────────────────
     class PingModel(BaseModel):
@@ -65,6 +111,11 @@ class AgentApp:
     def _register_routes(self):
         app = self.app
 
+        @app.exception_handler(EgressGuardError)
+        async def _egress_guard_handler(_req, exc):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=200, content={"ok": False, "error": str(exc)})
+
         @app.get("/ping")
         def ping(x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
@@ -80,30 +131,35 @@ class AgentApp:
         def browser_action(body: AgentApp.BrowserActionModel,
                            x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             return browser_mod.run_browser_action(self.cfg, body.action, body.params)
 
         @app.post("/api/call")
         def api_call(body: AgentApp.ApiOpModel,
                      x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             return youtube_api.run_api_operation(self.cfg, body.op, body.params)
 
         @app.post("/ytdlp")
         def ytdlp(body: AgentApp.YtdlpModel,
                   x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             return scraper.run_ytdlp(self.cfg, body.op, body.params)
 
         @app.post("/fetch")
         def fetch(body: AgentApp.FetchModel,
                   x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             return scraper.fetch(self.cfg, body.url, body.timeout)
 
         @app.post("/auth/oauth-url")
         def oauth_url(body: AgentApp.OAuthUrlModel,
                       x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             from pipeline.youtube_uploader import YouTubeUploader
             uploader = YouTubeUploader(account_name=self.cfg.slug, channel_slug=self.cfg.slug)
             url = uploader.get_auth_url()
@@ -115,6 +171,7 @@ class AgentApp:
         def auth_exchange(body: AgentApp.OAuthCodeModel,
                           x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             from pipeline.youtube_uploader import YouTubeUploader
             uploader = YouTubeUploader(account_name=self.cfg.slug, channel_slug=self.cfg.slug)
             ok = uploader.complete_auth_with_code(body.code)
@@ -133,6 +190,7 @@ class AgentApp:
             envíe después a /upload (transferencia previa de generación→VPS).
             """
             self._check_token(x_agent_token)
+            self._require_egress()
             paths = self._save_upload(video, thumbnail, ref)
             return {"ok": True, **paths}
 
@@ -143,6 +201,7 @@ class AgentApp:
                          thumbnail: Optional[UploadFile] = File(None),
                          x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
+            self._require_egress()
             import json as _json
             try:
                 meta_dict = _json.loads(meta)

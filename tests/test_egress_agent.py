@@ -146,3 +146,24 @@ def test_upload_with_staged_path_graceful(tmp_path):
     assert r.status_code == 200
     assert r.json()["ok"] is False  # sin credenciales reales → error controlado
 
+
+def test_egress_guard_blocks_on_ip_mismatch(tmp_path):
+    """Guardia por-operación: IP no verificada/equivocada → 503 fail-closed."""
+    app = create_app(_cfg(tmp_path, expected_ip="58.68.169.25"))
+    c = TestClient(app)
+    # En el entorno de test la IP real (o indeterminada) no es 58.68.169.25 → bloquea.
+    r = c.post("/browser/action", json={"action": "accion_inexistente", "params": {}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is False
+    assert "IP" in str(body.get("error", "")) or "egress" in str(body.get("error", "")).lower()
+
+
+def test_egress_guard_skipped_when_no_expected_ip(tmp_path):
+    """Sin expected_ip configurado, la guardia no se aplica (operación normal)."""
+    app = create_app(_cfg(tmp_path))  # expected_ip por defecto = ""
+    c = TestClient(app)
+    r = c.post("/browser/action", json={"action": "accion_inexistente", "params": {}})
+    assert r.status_code == 200  # no guard → pasa al dispatcher
+    assert r.json()["ok"] is False  # acción desconocida
+

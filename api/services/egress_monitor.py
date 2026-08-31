@@ -19,7 +19,7 @@ logger = logging.getLogger("autotube.egress_monitor")
 
 EGRESS_DOWN_PREFIX = "egress_down_"
 EGRESS_ALERT = "egress_ip_down"
-CHECK_INTERVAL_SEC = 300  # cada 5 min
+CHECK_INTERVAL_SEC = 60  # cada 60 s (cinturón adicional a la guardia por-op del agente)
 
 
 def _entity_id(slug: str) -> int:

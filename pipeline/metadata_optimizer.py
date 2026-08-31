@@ -195,6 +195,20 @@ Genera NUEVOS metadatos que mejoren el rendimiento."""
 
         Returns {updated: True, yt_video_id}.
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            _r = _egress.api_call("update_video_metadata", {"kwargs": {
+                "video_id": yt_video_id, "title": new_title,
+                "description": new_description, "tags": new_tags or [],
+                "category_id": category_id or getattr(self.config, "YT_CATEGORY_ID", "22"),
+            }})
+            if not _r.get("ok"):
+                raise RuntimeError(_r.get("error", "update_video_metadata vía agente falló"))
+            logger.info("[%s] Metadata (egress) updated for video %s", self.slug, yt_video_id)
+            return {"updated": True, "yt_video_id": yt_video_id}
+
         self._ensure_auth()
 
         snippet = {"title": new_title[:100]}

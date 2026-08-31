@@ -724,7 +724,7 @@ async def _egress_monitor_loop():
                 logger.debug("[egress_monitor] %s ok=%s ip=%s", slug, st["ok"], st.get("ip", ""))
         except Exception as exc:
             logger.warning("egress monitor loop error: %s", exc)
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)
 
 
 async def _yt_state_reconcile_loop():
