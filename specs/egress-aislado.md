@@ -64,3 +64,68 @@ Un canal listado en `config/egress_agents.json` NUNCA cae al egress local: si el
 agente no responde, la operación lanza `EgressAgentUnavailableError` (nunca filtra
 la IP del server). Los caminos aún no delegados (stats/playlists/comments-API/
 metadata) están bloqueados con `fail_closed_if_managed` hasta delegarse.
+
+## Endurecimiento (ago 2026)
+Además del monitor y la guardia por-operación, el mecanismo incluye:
+
+- **`expected_ip` OBLIGATORIO** (`egress_agent/server.py::_require_egress`): un
+  agente sin `expected_ip` configurado BLOQUEA todas las operaciones (fail-closed
+  por misconfig). Ya no existe el skip silencioso. Para desarrollo/test hay un
+  opt-out explícito `egress_verify: false` en `agent_config.json` o env
+  `AGENT_EGRESS_VERIFY=false` — **NUNCA** en producción.
+- **`/healthz`** (agente): una sola llamada devuelve `{ok, slug, token_valid,
+  expected_ip, egress_ip, egress_ok}` para monitorización/CI.
+- **`/egress-check-browser`** (agente): verifica el egress REAL del navegador.
+  Lanza una página headless vía Playwright POR el proxy residencial y devuelve
+  `{browser_ip, expected_ip, match, webrtc_disabled}`. Detecta fugas de
+  capa-browser (WebRTC/IP) que el probe curl no ve. On-demand (no cada 60 s).
+- **`scripts/verify_egress.py`** (server): gate end-to-end. Para cada canal
+  gestionado comprueba alcanzabilidad (`/healthz`) + IP curl (`/egress-check`) +
+  egress del navegador (`/egress-check-browser`). Exit 0 si todo en verde, 1 si
+  hay fuga/IP caída/expected_ip ausente. Uso: `python3 scripts/verify_egress.py`
+  (`--skip-browser` omite la prueba costosa; `--slug canal6` limita a uno).
+- **Test estructural anti-contaminación** (`tests/test_egress_structure.py`):
+  impide que `tokens/<slug>.pickle` o `client_secret_<slug>.json` de un canal
+  gestionado existan en el server principal, y que `egress_agents.json` (con el
+  token) se versionara.
+
+## Alta posterior a crear la cuenta (H7 — checklist operativo)
+Tras crear la cuenta Google/YouTube desde el entorno visual (ver
+`onboarding-canal-egress.md`), completar en orden:
+
+1. **Proyecto GCP + OAuth client** bajo la cuenta Google NUEVA (no tracatrack ni
+   burrianacasa). API: YouTube Data API v3 + Analytics API habilitadas. Descargar
+   el JSON del client → `client_secret_canal6.json`.
+2. **Desplegar el client_secret en el VPS**:
+   `scp client_secret_canal6.json root@194.233.67.64:/opt/autotube/config/`
+   (el agente lo resuelve vía `client_secret_path`).
+3. **Setear `google_account`** en `/opt/agent_config.json` (la cuenta creada) y
+   verificar que `expected_ip: "58.68.169.25"` sigue presente. Reiniciar:
+   `systemctl restart egress-agent`.
+4. **OAuth vía agente** (IP residencial): en el panel o API, `auth-start` →
+   abrir la URL en el navegador del VPS → `auth-code`. El token queda SOLO en el
+   VPS (`tokens/canal6.pickle`).
+5. **Gate de egress en verde**:
+   `python3 scripts/verify_egress.py --slug canal6` → debe imprimir `PASS`.
+   También `GET /api/channels/{id}/check-egress` en el panel (managed=true,
+   agent_ip=58.68.169.25).
+6. **Activar el canal** (planificación normal, nunca en ráfaga).
+
+> Verificación de fuga: `curl -s https://api.ipify.org` DENTRO del Chromium del
+> VPS (`/opt/navegador_canal6.sh`) debe mostrar `58.68.169.25`, nunca la IP del
+> VPS ni la del server.
+
+## Notas operativas (H8)
+- **La IP residencial (Geonix) expira.** Si cae/caduca, el monitor marca
+  `egress_down_canal6=1` + alerta `egress_ip_down`, y TODA operación del canal se
+  bloquea (fail-closed) hasta renovarla en Geonix. El agente también rechaza por
+  sí solo cada operación si su IP de salida no es la esperada.
+- **Carga del VPS:** mantener un ojo en la carga (históricamente alta ~25-30 en
+  194.233.67.64). Una carga sostenida puede degradar subidas largas.
+- **ISP de la IP:** la IP residencial geolocaliza en Madrid pero reporta ISP
+  "M247 Europe SRL" (proveedor de hosting, no un ISP residencial clásico). Es una
+  consideración de fingerprint (Google podría verla como IP de datacenter). No
+  bloquea, pero tenerlo presente.
+- **Cada subida de un canal gestionado pasa por `/stage` + `/upload`** del agente:
+  el server transfiere el mp4 al VPS y el VPS sube a YouTube desde la IP
+  residencial con la programación del server.
