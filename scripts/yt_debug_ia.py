@@ -3,16 +3,20 @@
 
 import json
 import sys
+import argparse
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOKENS_DIR = PROJECT_ROOT / "tokens"
-SESSION = "tracatrack"
-VIDEO_ID = "qKpbl0-aK8M"
-
 def main():
-    session_file = TOKENS_DIR / f"{SESSION}_browser_session.json"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session", required=True, help="Browser session name")
+    parser.add_argument("--video-id", required=True, help="YouTube video ID")
+    args = parser.parse_args()
+    session = args.session
+    video_id = args.video_id
+    session_file = TOKENS_DIR / f"{session}_browser_session.json"
     if not session_file.exists():
         print(f"Session not found: {session_file}")
         sys.exit(1)
@@ -30,7 +34,7 @@ def main():
         page = ctx.new_page()
 
         # Navigate to editor
-        edit_url = f"https://studio.youtube.com/video/{VIDEO_ID}/edit"
+        edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
         print(f"Opening: {edit_url}")
         page.goto(edit_url, wait_until="commit", timeout=60000)
         page.wait_for_timeout(6000)

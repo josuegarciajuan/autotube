@@ -62,7 +62,7 @@ def _safe_log_error(db, canal: str, phase: str, error_msg: str):
 class PipelineOrchestrator:
     """Master orchestrator for the Autotube content pipeline."""
 
-    def __init__(self, canal: str = "canal1", db_path: str = None, db_video_id: Optional[int] = None,
+    def __init__(self, canal: str, db_path: str = None, db_video_id: Optional[int] = None,
                  progress_callback: Optional[callable] = None,
                  source_mode: str = "original", viral_candidate_id: Optional[int] = None,
                  is_marathon: bool = False, marathon_config: dict = None):
@@ -2872,7 +2872,7 @@ def setup_logging():
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 
-def run_single(canal: str = "canal1", skip_upload: bool = False):
+def run_single(canal: str, skip_upload: bool = False):
     """Run a single pipeline execution for one channel."""
     setup_logging()
     orch = PipelineOrchestrator(canal=canal)
@@ -2880,7 +2880,7 @@ def run_single(canal: str = "canal1", skip_upload: bool = False):
     return 0 if success else 1
 
 
-def run_scheduled(canal: str = "canal1"):
+def run_scheduled(canal: str):
     """Run the pipeline in scheduled mode (continuous)."""
     setup_logging()
     orch = PipelineOrchestrator(canal=canal)

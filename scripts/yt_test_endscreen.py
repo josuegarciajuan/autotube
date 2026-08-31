@@ -11,8 +11,8 @@ import os, sys, time, json
 from pathlib import Path
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from config.settings import PROJECT_ROOT
 
-PROJECT_ROOT = Path("/root/autotube")
 SCREENSHOTS_DIR = PROJECT_ROOT / "logs" / "endscreen_debug"
 os.environ["DISPLAY"] = ":99"
 

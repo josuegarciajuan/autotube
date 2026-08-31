@@ -32,7 +32,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("fix_far_future_publish")
 
-DB_PATH = "/root/autotube/autotube.db"
+from config.settings import DATABASE_PATH
+DB_PATH = DATABASE_PATH
 
 
 def main():

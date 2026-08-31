@@ -31,6 +31,7 @@ from database.db_extended import ExtendedDatabase
 from pipeline.youtube_uploader import YouTubeUploader
 from pipeline.publish_scheduler import calculate_target_public_time
 from config.config_bridge import get_channel_config
+from config.settings import PROJECT_ROOT
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,7 +107,7 @@ def upload_single_video(
     # Validate video file exists
     vp = Path(video_path)
     if not vp.is_absolute():
-        vp = Path("/root/autotube") / video_path
+        vp = PROJECT_ROOT / video_path
     if not vp.exists():
         logger.error("[%s] Video #%d: file not found: %s", slug, video_id, vp)
         return False

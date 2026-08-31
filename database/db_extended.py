@@ -1094,11 +1094,12 @@ def migrate_v2(db_path: str = None):
         except sqlite3.OperationalError:
             pass
 
-    # ── v26: seed google_account from legacy CHANNEL_ACCOUNT_MAP (ONE-TIME) ──
-    _legacy_accounts = {
-        "canal2": "tracatrack", "canal3": "tracatrack",
-        "canal4": "burrianacasa2026", "canal5": "burrianacasa2026",
-    }
+    # ── v26: seed google_account from operator-supplied migration data ──
+    # The old slug→account map was intentionally removed. Existing installs
+    # may provide LEGACY_CHANNEL_GOOGLE_ACCOUNTS as JSON for this idempotent
+    # migration; new channels are configured directly in the DB.
+    from config.settings import LEGACY_CHANNEL_GOOGLE_ACCOUNTS
+    _legacy_accounts = LEGACY_CHANNEL_GOOGLE_ACCOUNTS
     for slug, account in _legacy_accounts.items():
         conn.execute(
             "UPDATE channels SET google_account = ? WHERE slug = ? AND google_account IS NULL",

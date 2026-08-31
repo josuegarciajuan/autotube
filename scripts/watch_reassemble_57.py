@@ -9,11 +9,19 @@ import sqlite3
 import time
 import re
 import os
+import argparse
+from pathlib import Path
 
-LOG_FILE = "/root/autotube/logs/reassemble_57.log"
-DB_FILE = "/root/autotube/autotube.db"
-VIDEO_ID = 57
+from config.settings import DATABASE_PATH, LOGS_DIR
+
+LOG_FILE = LOGS_DIR / "reassemble.log"
+DB_FILE = DATABASE_PATH
 JOB_ID = None  # created on first run
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--video-id", type=int, required=True)
+args = parser.parse_args()
+VIDEO_ID = args.video_id
 
 conn = sqlite3.connect(DB_FILE)
 
@@ -29,7 +37,9 @@ if existing:
 else:
     # Get channel_id from video
     ch = conn.execute("SELECT channel_id, canal FROM videos WHERE id=?", (VIDEO_ID,)).fetchone()
-    channel_id = ch[0] if ch and ch[0] else 3
+    if not ch or not ch[0]:
+        raise RuntimeError(f"Video #{VIDEO_ID} no tiene channel_id; no se puede crear el job")
+    channel_id = ch[0]
     conn.execute(
         "INSERT INTO generation_jobs (channel_id, video_id, action, status, progress, phase) VALUES (?,?,?,?,?,?)",
         (channel_id, VIDEO_ID, "reassemble", "running", 78, "video"),

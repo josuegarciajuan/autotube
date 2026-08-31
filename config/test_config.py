@@ -1,11 +1,11 @@
-"""Test channel config — inherits from canal2 (Sincronías) for algorithm testing.
+"""Test channel config — inherits shared defaults for algorithm testing.
 
 This channel is used exclusively by --fast-test mode to validate pipeline changes
 without affecting production channels. Videos are NOT uploaded to YouTube.
 """
 
-# Inherit everything from canal2 config (the most complete config)
-from config.canal2_config import *
+# Keep tests independent from a production channel profile.
+from config.defaults import *
 
 # Override channel identity
 CANAL_NAME = "test"

@@ -14,13 +14,18 @@ This script:
 import sqlite3
 import sys
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("fix_collisions")
 
-DB_PATH = "/root/autotube/autotube.db"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from config.settings import DATABASE_PATH
+
+DB_PATH = DATABASE_PATH
 
 
 def spread_videos_for_channel(conn, channel_id: int, video_ids: list[int],

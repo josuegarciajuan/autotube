@@ -47,6 +47,21 @@ GOOGLE_CLIENT_SECRET_PATH = os.getenv(
 )
 
 # ── Channels ───────────────────────────────────────────────────
+def _load_legacy_channel_accounts() -> dict[str, str]:
+    """Load one-time account migration values without embedding channel data."""
+    raw = os.getenv("LEGACY_CHANNEL_GOOGLE_ACCOUNTS", "")
+    if not raw:
+        return {}
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return {str(slug): str(account) for slug, account in values.items() if slug and account}
+
+
+LEGACY_CHANNEL_GOOGLE_ACCOUNTS = _load_legacy_channel_accounts()
+
+
 def _load_active_channels() -> list[str]:
     """Load active channels from DB, falling back to env var or empty list."""
     env_override = os.getenv("ACTIVE_CHANNELS", "")

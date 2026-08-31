@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fase final — Gate de hardcodes operativos
+- Parametrizados los últimos mapas/defaults operativos: la migración legacy de
+  cuentas usa `LEGACY_CHANNEL_GOOGLE_ACCOUNTS`, `test_config` hereda defaults
+  compartidos y el orquestador exige el canal explícito.
+- Diagnósticos y scripts auxiliares resuelven rutas desde `config.settings`;
+  `diagnose_all_channels.py` conserva selección dinámica desde DB/runtime.
+- Añadido `scripts/check_operational_hardcodes.py` y el test de contrato que
+  rechazan nuevos slugs/IDs, imports de configs de producción, mapas de cuenta
+  o proyecto, defaults de canal y rutas de despliegue. La whitelist requiere
+  una anotación explícita para migraciones/fixtures.
+- Se mantienen intactos fixtures, documentación histórica y el backfill de
+  links de shorts permanentemente desactivado.
+
 ### Fix — YouTube quota circuit breaker para schedulers
 - Conectado el governor de cuota (10.000 ud/proyecto) al dispatch de subidas long-form y shorts; si supera el 85% marca `quota_exhausted_at` y deja backlog en espera.
 - `quotaExceeded` ahora dispara el circuit breaker desde uploads, verificación post-upload, thumbnails, cambios de privacidad/descripción y health checks.
