@@ -4,7 +4,7 @@ import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, for
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import { useResumeStatus } from '../hooks/useQueries'
-import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2, CheckCircle } from 'lucide-react'
+import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2, CheckCircle, ShieldCheck } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
 import PublicationModeToggle from '../components/PublicationModeToggle'
@@ -228,6 +228,8 @@ export default function ChannelDetail() {
   const [showConfigModal, setShowConfigModal] = useState(false)
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [checkingEgress, setCheckingEgress] = useState(false)
+  const [egressResult, setEgressResult] = useState<any>(null)
   const [refreshingStats, setRefreshingStats] = useState(false)
   const [statsRefreshMsg, setStatsRefreshMsg] = useState<string | null>(null)
   const [repacking, setRepacking] = useState(false)
@@ -832,6 +834,16 @@ export default function ChannelDetail() {
       setChannel(ch)
     } catch (e: any) { alert('Error al sincronizar config: ' + e.message) }
     setSyncing(false)
+  }
+
+  async function handleCheckEgress() {
+    setCheckingEgress(true)
+    setEgressResult(null)
+    try {
+      const r = await api.checkChannelEgress(channelId)
+      setEgressResult(r)
+    } catch (e: any) { setEgressResult({ ok: false, message: 'Error: ' + e.message }) }
+    setCheckingEgress(false)
   }
 
   async function handleRegenerateTemplate(segment: string) {
@@ -2325,6 +2337,20 @@ export default function ChannelDetail() {
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-neon-cyan text-dark-900 rounded-lg text-xs font-bold hover:bg-neon-cyan/80 disabled:opacity-50">
                       <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} /> {syncing ? 'Sync...' : 'Sync Python'}
                     </button>
+                    <button onClick={handleCheckEgress} disabled={checkingEgress}
+                      title="Verifica la IP real de salida del agente egress de este canal (aislamiento de la IP del server)"
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-neon-purple/15 border border-neon-purple/40 text-neon-purple rounded-lg text-xs font-bold hover:bg-neon-purple/25 disabled:opacity-50">
+                      <ShieldCheck size={12} /> {checkingEgress ? 'Verificando...' : 'Verificar egress'}
+                    </button>
+                    {egressResult && (
+                      <div className="px-3 py-1.5 text-xs rounded bg-dark-700/60 border border-surface-border max-w-xs">
+                        {egressResult.managed === false
+                          ? 'Canal sin agente egress (egress local).'
+                          : egressResult.leak_detected
+                            ? <span className="text-red-400">⚠️ FUGA: IP del agente = IP del server ({egressResult.agent_ip})</span>
+                            : <span className="text-emerald-400">IP aislada: {egressResult.agent_ip}</span>}
+                      </div>
+                    )}
                   </>
                 )}
                 <button onClick={() => { setShowConfigModal(false); setEditingConfig(false); }}

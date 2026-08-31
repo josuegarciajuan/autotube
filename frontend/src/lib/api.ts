@@ -51,6 +51,7 @@ export const api = {
   syncYoutube: (id: number) => request<any>(`/channels/${id}/sync-youtube`, { method: 'POST' }),
   collectChannelStats: (id: number) => request<any>(`/channels/${id}/collect-stats`, { method: 'POST' }),
   syncChannelConfig: (id: number) => request<any>(`/channels/${id}/sync-config`, { method: 'POST' }),
+  checkChannelEgress: (id: number) => request<any>(`/channels/${id}/check-egress`, { method: 'POST' }),
   deleteChannel: (id: number) => request<any>(`/channels/${id}`, { method: 'DELETE' }),
   getChannelVideos: (id: number, status?: string, playlistId?: number, sourceMode?: string, limit?: number, offset?: number) => {
     const params = new URLSearchParams();
