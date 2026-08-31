@@ -67,3 +67,40 @@ def test_fetch_requires_url(tmp_path):
     r = c.post("/fetch", json={"url": "http://127.0.0.1:1/nope"})
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+def test_watch_status_op_no_network(tmp_path):
+    """watch_status con red caída devuelve status 'unknown' (no 500, no cuelga)."""
+    from egress_agent import scraper
+    cfg = _cfg(tmp_path)
+    r = scraper.run_ytdlp(cfg, "watch_status", {"yt_id": "dQw4w9WgXcQ"})
+    assert r["ok"] is True
+    assert r["result"]["status"] == "unknown"
+
+
+def test_collab_adapter_delegates(tmp_path):
+    """El adaptador de collaboration delega al agente."""
+    from pipeline import collaboration_engine as ce
+
+    calls = []
+
+    class FakeEgress:
+        base_url = "http://agent"
+
+        def browser_action(self, action, account="", params=None):
+            calls.append((action, params))
+            if action == "collab_search":
+                return {"ok": True, "result": [{"url": "https://www.youtube.com/@x", "name": "X"}]}
+            if action == "collab_channel_videos":
+                return {"ok": True, "result": [{"yt_video_id": "abc"}]}
+            return {"ok": False}
+
+    fake = FakeEgress()
+    adapter = ce._EgressBrowserAdapter(fake, "acct")
+    res = adapter.search_channels("documental", max_results=5)
+    assert res and res[0]["url"].startswith("https://www.youtube.com/")
+    assert calls[-1][0] == "collab_search"
+
+    res2 = adapter.get_channel_videos("https://www.youtube.com/@x", limit=3)
+    assert res2 and res2[0]["yt_video_id"] == "abc"
+    assert calls[-1][0] == "collab_channel_videos"

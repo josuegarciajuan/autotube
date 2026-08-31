@@ -79,6 +79,28 @@ def fetch(cfg: AgentConfig, url: str, timeout: int = 30) -> dict:
         return {"ok": False, "error": str(exc)[:1000]}
 
 
+def watch_status(cfg: AgentConfig, yt_id: str) -> dict:
+    """Clasifica el estado público de un vídeo vía su watch page (0 cuota).
+
+    Espejo de scripts/check_video_removals.watch_page_status, pero ejecutado
+    desde la IP del agente para que el server nunca consulte YouTube.
+    """
+    url = f"https://www.youtube.com/watch?v={yt_id}&hl=es"
+    _r = fetch(cfg, url, timeout=15)
+    if not _r.get("ok"):
+        return {"ok": True, "result": {"status": "unknown"}}
+    html = _r.get("result", {}).get("text", "")
+    if '"status":"OK"' in html or '"status":"LIVE_STREAM_OFFLINE"' in html:
+        status = "available"
+    elif '"status":"LOGIN_REQUIRED"' in html:
+        status = "login_required"
+    elif "This video isn't available anymore" in html or "This video has been removed" in html:
+        status = "removed"
+    else:
+        status = "unknown"
+    return {"ok": True, "result": {"status": status}}
+
+
 def egress_check(cfg: AgentConfig) -> dict:
     """Devuelve la IP pública y geolocalización reales de salida de la VPS.
 
@@ -123,6 +145,7 @@ _YTDLP_OPS = {
     "stats": ytdlp_stats,
     "channel_stats": ytdlp_channel_stats,
     "rss": rss_feed,
+    "watch_status": watch_status,
 }
 
 
