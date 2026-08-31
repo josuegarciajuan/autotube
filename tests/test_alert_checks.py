@@ -13,6 +13,7 @@ Cubre:
 
 import json
 import sqlite3
+from datetime import datetime
 
 from database.db import init_db
 from database.db_extended import ExtendedDatabase
@@ -29,6 +30,7 @@ from api.services.lifecycle_monitor import (
     touch_task_heartbeat,
     TASK_TIMEOUTS,
     _auto_resolve_completed,
+    check_all_health,
 )
 
 # ── DDL base: init_db crea schema.sql (videos básica). Aquí añadimos las
@@ -226,6 +228,100 @@ def test_tasks_alive_fresh_heartbeat_no_alert(tmp_path):
     db = _build_db(tmp_path)
     touch_task_heartbeat("schedule_checker")  # heartbeat now → fresco
     assert _check_tasks_alive(db) == 0
+
+
+def test_tasks_alive_resolves_stalled_alert_after_fresh_heartbeat(tmp_path):
+    db = _build_db(tmp_path)
+    task = "queue_consumer"
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO system_state(key, value) VALUES (?, ?)",
+            (f"task_heartbeat_{task}", "2020-01-01T00:00:00"),
+        )
+        conn.commit()
+    assert _check_tasks_alive(db) == 1
+
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE system_state SET value = ? WHERE key = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), f"task_heartbeat_{task}"),
+        )
+        conn.commit()
+
+    assert _check_tasks_alive(db) == 0
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved, message FROM pipeline_alerts "
+            "WHERE alert_type='task_stalled' AND entity_id=7"
+        ).fetchone()
+    assert row["resolved"] == 1
+    assert "heartbeat recuperado" in row["message"]
+
+
+def test_stalled_alert_is_not_resolved_without_valid_heartbeat(tmp_path):
+    db = _build_db(tmp_path)
+    task = "queue_consumer"
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title) "
+            "VALUES ('system', 7, 'task_stalled', 'critical', 'stalled')"
+        )
+        conn.commit()
+    assert _check_tasks_alive(db) == 0
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='task_stalled'"
+        ).fetchone()
+    assert row["resolved"] == 0
+
+
+def test_failed_alert_resolves_when_intentional_reassemble_retry_is_queued(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_failed_video(
+        db, vid=22,
+        error_msg="Killed by operator para liberar gate; se reintentará",
+    )
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('video', 22, 1, 'failed', 'critical', 'failed')"
+        )
+        conn.execute(
+            "INSERT INTO generation_jobs(channel_id, video_id, action, status) "
+            "VALUES (1, 22, 'reassemble', 'queued')"
+        )
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved, message FROM pipeline_alerts "
+            "WHERE entity_type='video' AND entity_id=22 AND alert_type='failed'"
+        ).fetchone()
+    assert row["resolved"] == 1
+    assert "reintento" in row["message"]
+
+
+def test_spam_false_positive_verification_resolves_active_alert(tmp_path):
+    db = _build_db(tmp_path)
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('channel', 1, 1, 'spam_strike', 'critical', 'strike')"
+        )
+        conn.execute(
+            "INSERT INTO system_state(key, value) VALUES (?, ?)",
+            ("spam_block_verification_1", json.dumps({"status": "cleared_false_positive"})),
+        )
+        conn.commit()
+
+    assert check_all_health(db)["alerts_resolved"] == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved, message FROM pipeline_alerts WHERE alert_type='spam_strike'"
+        ).fetchone()
+    assert row["resolved"] == 1
+    assert "falso positivo" in row["message"]
 
 
 # ═══════════════════════════════════════════════════════════════
