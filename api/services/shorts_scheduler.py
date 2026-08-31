@@ -105,14 +105,51 @@ TITLE_SIMILARITY_LOOKBACK_LIMIT = 30
 SHORTS_MIN_VALID_ASSET_RATIO = 0.5
 
 
+def _autotube_render_process_count() -> int:
+    """Count autotube-owned CPU-heavy render processes (ffmpeg + pipeline workers).
+
+    Uses the imageio_ffmpeg binary path (bundled with autotube's moviepy deps)
+    and full_pipeline_worker to identify ONLY autotube's render work. The
+    system ffmpeg (/usr/bin/ffmpeg) used by other projects (e.g. the CCTV
+    stack) is deliberately NOT counted.
+
+    This replaces the global loadavg signal in the shorts defer gate: an
+    unrelated project saturating the machine should not starve shorts
+    dispatch, while autotube's own heavy renders still gate correctly.
+    """
+    count = 0
+    try:
+        import psutil
+        for proc in psutil.process_iter(["cmdline"]):
+            try:
+                cmd = " ".join(proc.info.get("cmdline") or [])
+                if not cmd:
+                    continue
+                if "imageio_ffmpeg" in cmd or "full_pipeline_worker" in cmd:
+                    count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError):
+                continue
+    except Exception:
+        # Fallback: cannot measure autotube's own load — do not block shorts.
+        return 0
+    return count
+
+
 def should_defer_shorts_for_longform_load(
-    longform_active: bool, load1: float, cpu_count: int | None = None
+    longform_active: bool, autotube_render_load: int, cpu_count: int | None = None
 ) -> bool:
-    """Gate shorts only when long-form work coincides with high system load."""
+    """Gate shorts only when AUTOTUBE's own render load is high.
+
+    Uses the count of autotube-owned ffmpeg/worker render processes instead of
+    the global loadavg, so an unrelated project (e.g. CCTV) saturating the
+    machine does not starve shorts dispatch. The memory gate and the global
+    concurrency guard still protect against OOM/CPU contention.
+    """
     if not longform_active:
         return False
     cpus = max(int(cpu_count or 1), 1)
-    return float(load1) >= cpus * 0.85
+    threshold = max(1, int(cpus * 0.85))
+    return autotube_render_load >= threshold
 
 
 def short_job_status_for_outcome(outcome: str) -> str:
@@ -2461,10 +2498,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     try:
         if should_defer_shorts_for_longform_load(
             db.count_active_longform_jobs(),
-            os.getloadavg()[0],
+            _autotube_render_process_count(),
             os.cpu_count(),
         ):
-            logger.info("Shorts dispatch deferred: long-form worker plus high load")
+            logger.info("Shorts dispatch deferred: long-form worker plus high autotube render load")
             return None
     except (AttributeError, OSError, TypeError):
         pass
