@@ -327,6 +327,7 @@ def check_all_health(db) -> dict:
 
     # ── Check 11: Background loops alive (task-liveness watchdog) ──
     created += _check_tasks_alive(db)
+    resolved += _auto_resolve_spam_false_positives(db)
 
     # ── Check 12: Videos finished but stuck in awaiting_upload ──
     created += _check_awaiting_upload_stuck(db)
@@ -788,6 +789,35 @@ def _auto_resolve_completed(db) -> int:
     resolved = 0
     try:
         with db._connect() as conn:
+            # A deliberate reassemble cancellation leaves the video in error
+            # while a replacement job is queued.  It is operationally being
+            # retried, not a new terminal failure.
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                   WHERE pa.resolved = 0 AND pa.alert_type = 'failed'
+                     AND v.error_message LIKE '%operator%'
+                     AND v.error_message LIKE '%reintent%'
+                     AND EXISTS (
+                         SELECT 1 FROM generation_jobs gj
+                         WHERE gj.video_id = v.id
+                           AND gj.action = 'reassemble'
+                           AND gj.status IN ('queued', 'running')
+                     )"""
+            ).fetchall()
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: reintento de reassemble en cola]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
             # Resolve alerts for videos that are now uploaded/published
             alerts = conn.execute(
                 """SELECT pa.id, pa.entity_id, pa.alert_type
@@ -1469,6 +1499,7 @@ def _check_tasks_alive(db) -> int:
     created = 0
     try:
         with db._connect() as conn:
+            _resolve_recovered_task_alerts(db, conn)
             for task_name, timeout_s in TASK_TIMEOUTS.items():
                 row = conn.execute(
                     "SELECT value FROM system_state WHERE key = ?",
@@ -1495,6 +1526,72 @@ def _check_tasks_alive(db) -> int:
     except Exception as exc:
         logger.warning("Task-liveness check failed: %s", exc)
     return created
+
+
+def _resolve_recovered_task_alerts(db, conn) -> int:
+    """Resolve liveness alerts once a valid, fresh heartbeat is observed."""
+    resolved = 0
+    for task_name, timeout_s in TASK_TIMEOUTS.items():
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?",
+            (f"task_heartbeat_{task_name}",),
+        ).fetchone()
+        if not row or not row["value"]:
+            continue
+        try:
+            heartbeat = datetime.fromisoformat(row["value"])
+            age_s = (_utcnow() - heartbeat).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if age_s < 0 or age_s > timeout_s:
+            continue
+        cur = conn.execute(
+            """UPDATE pipeline_alerts
+               SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                   message = COALESCE(message, '') ||
+                     ' [Auto-resuelto: heartbeat recuperado]'
+               WHERE entity_type = 'system' AND entity_id = ?
+                 AND alert_type = 'task_stalled' AND resolved = 0""",
+            (_TASK_ENTITY_IDS[task_name],),
+        )
+        resolved += cur.rowcount
+    if resolved:
+        conn.commit()
+    return resolved
+
+
+def _auto_resolve_spam_false_positives(db) -> int:
+    """Close strike alerts explicitly invalidated by post-upload verification."""
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT key, value FROM system_state
+                   WHERE key LIKE 'spam_block_verification_%'"""
+            ).fetchall()
+            for row in rows:
+                try:
+                    channel_id = int(row["key"].rsplit("_", 1)[1])
+                    verification = json.loads(row["value"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if verification.get("status") != "cleared_false_positive":
+                    continue
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: verificación confirmó falso positivo]'
+                       WHERE entity_type = 'channel' AND entity_id = ?
+                         AND alert_type = 'spam_strike' AND resolved = 0""",
+                    (channel_id,),
+                )
+                resolved += cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Spam false-positive auto-resolve failed: %s", exc)
+    return resolved
 
 
 # ═══════════════════════════════════════════════════════════════
