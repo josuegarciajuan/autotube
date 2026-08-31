@@ -311,6 +311,20 @@ class YouTubePlaylistManager:
 
         Returns {yt_playlist_item_id, was_already_present}.
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            _r = _egress.api_call("add_video_to_playlist", {
+                "kwargs": {"playlist_id": yt_playlist_id, "video_id": yt_video_id},
+            })
+            if not _r.get("ok"):
+                if "already" in str(_r.get("error", "")).lower() or "409" in str(_r.get("error", "")):
+                    return {"was_already_present": True}
+                raise RuntimeError(_r.get("error", "add_video_to_playlist vía agente falló"))
+            return {"yt_playlist_item_id": _r.get("result", {}).get("added", True),
+                    "was_already_present": False}
+
         self._ensure_auth()
 
         # Check if already in playlist

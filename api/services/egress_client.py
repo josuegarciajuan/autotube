@@ -82,9 +82,25 @@ class EgressAgent:
             h["X-Agent-Token"] = self.token
         return h
 
+    def _check_egress_health(self) -> None:
+        """Fail-closed: si el monitor marcó egress_down_<slug>, bloquea la op."""
+        try:
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            if _db.get_system_state(f"egress_down_{self.slug}") == "1":
+                raise EgressAgentUnavailableError(
+                    f"IP residencial de {self.slug} caída/inactiva (egress_down) — "
+                    f"renovar en Geonix. Operación bloqueada (fail-closed)."
+                )
+        except EgressAgentUnavailableError:
+            raise
+        except Exception:
+            pass  # si no se puede leer el flag, no bloquear por esto
+
     def _post(self, path: str, payload: Optional[dict] = None,
               files: Optional[dict] = None, timeout: Optional[int] = None,
               stream: bool = False) -> dict:
+        self._check_egress_health()
         url = f"{self.base_url}{path}"
         try:
             if files:
@@ -109,6 +125,7 @@ class EgressAgent:
         return data
 
     def _get(self, path: str) -> dict:
+        self._check_egress_health()
         try:
             resp = requests.get(f"{self.base_url}{path}", headers=self._headers(),
                                 timeout=self.timeout)
@@ -145,16 +162,53 @@ class EgressAgent:
         return self._post("/fetch", {"url": url, "timeout": timeout})
 
     def upload(self, video_path: str, meta: dict,
-               thumbnail_path: Optional[str] = None) -> dict:
-        files = {
-            "video": (Path(video_path).name, open(video_path, "rb"), "video/*"),
-            "meta": (None, json.dumps(meta)),
-        }
+               thumbnail_path: Optional[str] = None,
+               staged_path: Optional[str] = None) -> dict:
+        """Sube un vídeo al agente.
+
+        Si ``staged_path`` se da, el agente ya tiene el archivo (transferencia
+        previa vía ``stage``) → se envía solo la orden (sin el fichero).
+        Si no, se envía el fichero en multipart (carga directa).
+        """
+        files = {"meta": (None, json.dumps(meta))}
+        if staged_path:
+            files["staged_path"] = (None, staged_path)
+            if thumbnail_path:
+                meta["thumbnail_path"] = thumbnail_path
+            try:
+                return self._post("/upload", files=files, timeout=max(self.timeout, 1800))
+            finally:
+                pass
+        files["video"] = (Path(video_path).name, open(video_path, "rb"), "video/*")
         if thumbnail_path and Path(thumbnail_path).exists():
             files["thumbnail"] = (Path(thumbnail_path).name,
                                   open(thumbnail_path, "rb"), "image/jpeg")
         try:
             return self._post("/upload", files=files, timeout=max(self.timeout, 1800))
+        finally:
+            for key in ("video", "thumbnail"):
+                fobj = files.get(key)
+                if isinstance(fobj, tuple) and len(fobj) > 1:
+                    try:
+                        fobj[1].close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def stage(self, video_path: str, ref: str,
+              thumbnail_path: Optional[str] = None) -> dict:
+        """Transfiere el vídeo (+thumb) al VPS SIN subir (estado intermedio).
+
+        Devuelve {ok, staged_path, thumbnail_path} para pasarlos a ``upload``.
+        """
+        files = {
+            "video": (Path(video_path).name, open(video_path, "rb"), "video/*"),
+            "ref": (None, ref),
+        }
+        if thumbnail_path and Path(thumbnail_path).exists():
+            files["thumbnail"] = (Path(thumbnail_path).name,
+                                  open(thumbnail_path, "rb"), "image/jpeg")
+        try:
+            return self._post("/stage", files=files, timeout=max(self.timeout, 1800))
         finally:
             for key in ("video", "thumbnail"):
                 fobj = files.get(key)

@@ -122,9 +122,24 @@ class AgentApp:
                 raise HTTPException(400, "intercambio OAuth falló")
             return {"ok": True}
 
+        @app.post("/stage")
+        async def stage(video: UploadFile = File(...),
+                        ref: str = Form(""),
+                        thumbnail: Optional[UploadFile] = File(None),
+                        x_agent_token: Optional[str] = Header(None)):
+            """Guarda el vídeo + thumb en el VPS SIN subir (estado intermedio).
+
+            Devuelve {ok, staged_path, thumbnail_path} para que el server lo
+            envíe después a /upload (transferencia previa de generación→VPS).
+            """
+            self._check_token(x_agent_token)
+            paths = self._save_upload(video, thumbnail, ref)
+            return {"ok": True, **paths}
+
         @app.post("/upload")
-        async def upload(video: UploadFile = File(...),
+        async def upload(video: Optional[UploadFile] = File(None),
                          meta: str = Form("{}"),
+                         staged_path: str = Form(""),
                          thumbnail: Optional[UploadFile] = File(None),
                          x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
@@ -133,35 +148,55 @@ class AgentApp:
                 meta_dict = _json.loads(meta)
             except _json.JSONDecodeError:
                 meta_dict = {}
-
-            upload_dir = Path(self.cfg.project_root) / "output" / "agent_uploads"
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            ts = time.strftime("%Y%m%d%H%M%S")
-            run_id = uuid.uuid4().hex[:8]
-
-            video_path = upload_dir / f"{ts}_{run_id}_{Path(video.filename or 'video').name}"
-            with open(video_path, "wb") as out:
-                while chunk := await video.read(1024 * 1024):
-                    out.write(chunk)
-
-            thumb_path = None
-            if thumbnail:
-                ext = Path(thumbnail.filename or "thumb.jpg").suffix or ".jpg"
-                thumb_path = upload_dir / f"{ts}_{run_id}_thumb{ext}"
-                with open(thumb_path, "wb") as out:
-                    while chunk := await thumbnail.read(1024 * 1024):
-                        out.write(chunk)
-                meta_dict["thumbnail_path"] = str(thumb_path)
-
+            # Subida desde un archivo ya stageado (transferencia previa).
+            if staged_path:
+                thumb_path = meta_dict.pop("thumbnail_path", None)
+                meta_dict["thumbnail_path"] = thumb_path
+                try:
+                    return youtube_api.upload_video(self.cfg, staged_path, meta_dict)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("upload (staged) failed")
+                    return {"ok": False, "error": str(exc)[:1000]}
+            if video is None:
+                raise HTTPException(400, "falta video o staged_path")
+            paths = self._save_upload(video, thumbnail, ref=meta_dict.get("ref", ""))
             try:
-                return youtube_api.upload_video(self.cfg, str(video_path), meta_dict)
+                meta_dict["thumbnail_path"] = paths.get("thumbnail_path")
+                return youtube_api.upload_video(self.cfg, paths["staged_path"], meta_dict)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("upload (fresh) failed")
+                return {"ok": False, "error": str(exc)[:1000]}
             finally:
                 try:
-                    video_path.unlink(missing_ok=True)
-                    if thumb_path:
-                        thumb_path.unlink(missing_ok=True)
+                    Path(paths["staged_path"]).unlink(missing_ok=True)
+                    if paths.get("thumbnail_path"):
+                        Path(paths["thumbnail_path"]).unlink(missing_ok=True)
                 except Exception:  # noqa: BLE001
                     pass
+
+    def _save_upload(self, video: UploadFile, thumbnail: Optional[UploadFile],
+                     ref: str = "") -> dict:
+        """Guarda el vídeo (y thumb) en el staging del VPS y devuelve sus rutas."""
+        staging_root = Path(self.cfg.project_root) / "output" / "vps_staging"
+        ref = ref or uuid.uuid4().hex[:8]
+        safe_ref = "".join(c for c in ref if c.isalnum() or c in "-_")[:64]
+        d = staging_root / safe_ref
+        d.mkdir(parents=True, exist_ok=True)
+
+        video_path = d / "video.mp4"
+        with open(video_path, "wb") as out:
+            while chunk := video.file.read(1024 * 1024):
+                out.write(chunk)
+
+        thumb_path = None
+        if thumbnail:
+            ext = Path(thumbnail.filename or "thumb.jpg").suffix or ".jpg"
+            thumb_path = d / f"thumb{ext}"
+            with open(thumb_path, "wb") as out:
+                while chunk := thumbnail.file.read(1024 * 1024):
+                    out.write(chunk)
+        return {"staged_path": str(video_path),
+                "thumbnail_path": str(thumb_path) if thumb_path else None}
 
 
 def create_app(cfg: AgentConfig):

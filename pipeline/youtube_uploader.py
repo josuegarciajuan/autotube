@@ -403,6 +403,33 @@ class YouTubeUploader:
             self.channel_slug, PROXY_TYPE, PROXY_HOST, PROXY_PORT,
         )
 
+    def _update_egress_transfer_state(self, video_path, state: str,
+                                      vps_staged_path: str = None) -> None:
+        """Registra el estado intermedio de transferencia al VPS (best-effort).
+
+        ``state`` ∈ transferring | staged | done. ``vps_staged_path`` se guarda
+        cuando el archivo ya está en el VPS. Fail-open: nunca rompe la subida.
+        """
+        try:
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            with _db._connect() as _conn:
+                _row = _conn.execute(
+                    "SELECT id FROM videos WHERE video_path=? LIMIT 1",
+                    (str(video_path),),
+                ).fetchone()
+            if not _row:
+                return
+            _vid = _row["id"]
+            if vps_staged_path is not None:
+                _db.update_video(_vid, egress_transfer_state=state,
+                                 vps_staged_path=vps_staged_path)
+            else:
+                _db.update_video(_vid, egress_transfer_state=state)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] egress transfer state update skipped: %s",
+                         self.channel_slug, exc)
+
     # ── Authentication ──────────────────────────────────────────
 
     def authenticate(self) -> bool:
@@ -855,29 +882,41 @@ class YouTubeUploader:
                 )
 
             if _egress_client is not None:
-                # ── Subida delegada al agente egress (IP aislada) ──
-                # El agente hace el videos.insert + thumbnail + verificación
-                # post-subida desde su red. El server conserva el bookkeeping
-                # de DB (track_quota, record_upload, logs) con el resultado.
-                logger.info("[%s] delegando subida al agente egress (%s)", self.channel_slug, _egress_client.base_url)
-                agent_res = _egress_client.upload(
-                    str(video_path),
-                    meta={
-                        "title": body["snippet"]["title"],
-                        "description": body["snippet"]["description"],
-                        "tags": body["snippet"].get("tags", []),
-                        "category_id": body["snippet"]["categoryId"],
-                        "language": body["snippet"].get("defaultLanguage", "es"),
-                        "privacy": privacy,
-                        "publish_at": publish_at,
-                        "self_declared_made_for_kids": body["status"].get("selfDeclaredMadeForKids", False),
-                        "embeddable": body["status"].get("embeddable", True),
-                        "public_stats_viewable": body["status"].get("publicStatsViewable", True),
-                    },
-                    thumbnail_path=str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).exists() else None,
-                )
+                # ── Subida delegada al agente egress (IP aislada), 2 pasos ──
+                # 1) /stage: el server transfiere el mp4(+thumb) al VPS y guarda
+                #    el estado intermedio (transferring → staged/awaiting_vps_upload).
+                # 2) /upload: el VPS sube a YouTube desde su IP residencial con la
+                #    programación del server (título, desc, tags, publishAt...).
+                # El server conserva el bookkeeping de DB con el resultado.
+                _meta = {
+                    "title": body["snippet"]["title"],
+                    "description": body["snippet"]["description"],
+                    "tags": body["snippet"].get("tags", []),
+                    "category_id": body["snippet"]["categoryId"],
+                    "language": body["snippet"].get("defaultLanguage", "es"),
+                    "privacy": privacy,
+                    "publish_at": publish_at,
+                    "self_declared_made_for_kids": body["status"].get("selfDeclaredMadeForKids", False),
+                    "embeddable": body["status"].get("embeddable", True),
+                    "public_stats_viewable": body["status"].get("publicStatsViewable", True),
+                }
+                _thumb = str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).exists() else None
+                self._update_egress_transfer_state(video_path, "transferring")
+                logger.info("[%s] etapa 1/2: transfiriendo vídeo al VPS (%s)", self.channel_slug, _egress_client.base_url)
+                _stage = _egress_client.stage(str(video_path), ref=str(original_video_path),
+                                              thumbnail_path=_thumb)
+                if not _stage.get("ok"):
+                    raise RuntimeError(_stage.get("error", "stage vía agente falló"))
+                _staged_path = _stage.get("staged_path", "")
+                self._update_egress_transfer_state(video_path, "staged",
+                                                   vps_staged_path=_staged_path)
+                if _thumb:
+                    _meta["thumbnail_path"] = _thumb
+                logger.info("[%s] etapa 2/2: subiendo desde el VPS (staged=%s)", self.channel_slug, _staged_path)
+                agent_res = _egress_client.upload(_staged_path, _meta)
                 if not agent_res.get("ok"):
                     raise RuntimeError(agent_res.get("error", "subida vía agente falló"))
+                self._update_egress_transfer_state(video_path, "done")
                 response = {
                     "id": agent_res["video_id"],
                     "status": {"uploadStatus": "processed",

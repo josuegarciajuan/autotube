@@ -188,12 +188,178 @@ def update_description(cfg: AgentConfig, video_id: str, description: str) -> dic
     return {"ok": True, "result": {"updated": True}}
 
 
+def _iso_duration_to_sec(dur: str) -> int:
+    """Convierte ISO 8601 (PT#H#M#S) a segundos."""
+    import re
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", dur or "")
+    if not m:
+        return 0
+    h, mn, s = (int(x) if x else 0 for x in m.groups())
+    return h * 3600 + mn * 60 + s
+
+
+# ── Playlists ──────────────────────────────────────────────────
+def create_playlist(cfg: AgentConfig, title: str, description: str = "") -> dict:
+    svc = _service(cfg)
+    body = {
+        "snippet": {"title": str(title)[:150], "description": str(description)[:500]},
+        "status": {"privacyStatus": "private"},
+    }
+    resp = svc.playlists().insert(part="snippet,status", body=body).execute()
+    return {"ok": True, "result": {"playlist_id": resp.get("id"),
+                                   "title": resp.get("snippet", {}).get("title", "")}}
+
+
+def add_video_to_playlist(cfg: AgentConfig, playlist_id: str, video_id: str) -> dict:
+    svc = _service(cfg)
+    body = {"snippet": {"playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id}}}
+    svc.playlistItems().insert(part="snippet", body=body).execute()
+    return {"ok": True, "result": {"added": True}}
+
+
+def list_playlists(cfg: AgentConfig) -> dict:
+    svc = _service(cfg)
+    resp = svc.playlists().list(part="snippet,contentDetails", mine=True, maxResults=50).execute()
+    items = [{"id": i["id"], "title": i.get("snippet", {}).get("title", ""),
+              "item_count": i.get("contentDetails", {}).get("itemCount", 0)}
+             for i in resp.get("items", [])]
+    return {"ok": True, "result": items}
+
+
+# ── Comentarios (Data API) ─────────────────────────────────────
+def post_comment(cfg: AgentConfig, video_id: str, text: str) -> dict:
+    svc = _service(cfg)
+    body = {"snippet": {"videoId": video_id,
+                        "topLevelComment": {"snippet": {"textOriginal": str(text)[:5000]}}}}
+    resp = svc.commentThreads().insert(part="snippet", body=body).execute()
+    return {"ok": True, "result": {"comment_id": resp.get("id")}}
+
+
+def reply_comment(cfg: AgentConfig, parent_id: str, text: str) -> dict:
+    svc = _service(cfg)
+    body = {"snippet": {"parentId": parent_id, "textOriginal": str(text)[:5000]}}
+    resp = svc.comments().insert(part="snippet", body=body).execute()
+    return {"ok": True, "result": {"comment_id": resp.get("id")}}
+
+
+def list_comments(cfg: AgentConfig, video_id: str) -> dict:
+    svc = _service(cfg)
+    resp = svc.commentThreads().list(part="snippet", videoId=video_id, maxResults=50).execute()
+    items = [{"id": i["id"],
+              "text": i["snippet"]["topLevelComment"]["snippet"].get("textOriginal", ""),
+              "author": i["snippet"]["topLevelComment"]["snippet"].get("authorDisplayName", "")}
+             for i in resp.get("items", [])]
+    return {"ok": True, "result": items}
+
+
+# ── Metadata (videos.update) ───────────────────────────────────
+def update_video_metadata(cfg: AgentConfig, video_id: str, title: str = None,
+                          description: str = None, tags: list = None,
+                          category_id: str = None) -> dict:
+    svc = _service(cfg)
+    item = svc.videos().list(part="snippet", id=video_id).execute().get("items", [])
+    if not item:
+        return {"ok": False, "error": f"video {video_id} no encontrado"}
+    sn = item[0]["snippet"]
+    new = {"id": video_id, "snippet": {
+        "title": (str(title) if title is not None else sn.get("title", ""))[:100],
+        "description": (str(description) if description is not None else sn.get("description", ""))[:5000],
+        "categoryId": str(category_id if category_id is not None else sn.get("categoryId", "22")),
+    }}
+    if tags is not None:
+        new["snippet"]["tags"] = [str(t)[:30] for t in tags][:60]
+    svc.videos().update(part="snippet", body=new).execute()
+    return {"ok": True, "result": {"updated": True}}
+
+
+# ── Channel metadata (channels.update) ─────────────────────────
+def update_channel_metadata(cfg: AgentConfig, description: str = None,
+                            keywords: list = None, country: str = None,
+                            language: str = None) -> dict:
+    svc = _service(cfg)
+    item = svc.channels().list(part="snippet,brandingSettings", mine=True).execute().get("items", [])
+    if not item:
+        return {"ok": False, "error": "no channel para el token"}
+    ch = item[0]
+    sn = dict(ch.get("snippet", {}))
+    if description is not None:
+        sn["description"] = str(description)[:5000]
+    if keywords is not None:
+        sn["tags"] = list(keywords)[:500]
+    if country is not None or language is not None:
+        sn["country"] = str(country) if country is not None else sn.get("country", "")
+        sn["defaultLanguage"] = str(language) if language is not None else sn.get("defaultLanguage", "")
+    svc.channels().update(part="snippet", body={"id": ch["id"], "snippet": sn}).execute()
+    return {"ok": True, "result": {"updated": True}}
+
+
+# ── collect_stats (fetch crudo, sin DB) ────────────────────────
+def collect_stats(cfg: AgentConfig, video_ids: list = None) -> dict:
+    """Recolecta stats crudas desde la IP del agente (videos + canal + watch-time).
+
+    NO escribe en ninguna DB: devuelve el payload para que el server principal
+    lo almacene en su DB. Cubre el 'Recolectar stats' de un canal gestionado.
+    """
+    svc = _service(cfg)
+    result = {"videos": {}, "channel": {}, "watch_time_min": None}
+    if video_ids:
+        for i in range(0, len(video_ids), 50):
+            batch = video_ids[i:i + 50]
+            try:
+                resp = svc.videos().list(part="statistics,contentDetails",
+                                         id=",".join(batch)).execute()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("collect_stats videos batch failed: %s", exc)
+                continue
+            for it in resp.get("items", []):
+                st = it.get("statistics", {})
+                cd = it.get("contentDetails", {})
+                result["videos"][it["id"]] = {
+                    "views": int(st.get("viewCount", 0) or 0),
+                    "likes": int(st.get("likeCount", 0) or 0),
+                    "comments": int(st.get("commentCount", 0) or 0),
+                    "duration_sec": _iso_duration_to_sec(cd.get("duration", "")),
+                }
+    try:
+        cresp = svc.channels().list(part="statistics,snippet", mine=True).execute()
+        c = cresp["items"][0]
+        cs = c.get("statistics", {})
+        result["channel"] = {
+            "subscribers": int(cs.get("subscriberCount", 0) or 0),
+            "total_views": int(cs.get("viewCount", 0) or 0),
+            "video_count": int(cs.get("videoCount", 0) or 0),
+            "title": c.get("snippet", {}).get("title", ""),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("collect_stats channel failed: %s", exc)
+    try:
+        asvc = _service(cfg, "youtubeAnalytics", "v2")
+        r = asvc.reports().query(ids="channel==MINE", startDate="2020-01-01",
+                                 endDate="today", metrics="viewsEstimatedMinutes").execute()
+        rows = r.get("rows", [])
+        if rows:
+            result["watch_time_min"] = rows[0][0]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("collect_stats analytics failed: %s", exc)
+    return {"ok": True, "result": result}
+
+
 # ── Registro de operaciones genéricas para /api/call ────────────
 _OP_REGISTRY = {
     "get_channel_info": get_channel_info,
     "set_publish_at": set_publish_at,
     "set_privacy": set_privacy,
     "update_description": update_description,
+    "create_playlist": create_playlist,
+    "add_video_to_playlist": add_video_to_playlist,
+    "list_playlists": list_playlists,
+    "post_comment": post_comment,
+    "reply_comment": reply_comment,
+    "list_comments": list_comments,
+    "update_video_metadata": update_video_metadata,
+    "update_channel_metadata": update_channel_metadata,
+    "collect_stats": collect_stats,
 }
 
 

@@ -3,6 +3,7 @@
   "canal6": {
     "url": "http://VPS_A_IP:9101",
     "token": "<AQUI_TU_TOKEN>",
+    "expected_ip": "58.68.169.25",
     "egress_label": "IP1"
   },
   "canal7": {
