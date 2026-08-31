@@ -20,6 +20,8 @@ class ImageProcessor:
     def __init__(self, style_config=None) -> None:
         if style_config is None:
             from config.config_bridge import get_channel_config
+            if not settings.ACTIVE_CHANNELS:
+                raise ValueError("No active channel is available for ImageProcessor")
             style_config = get_channel_config(settings.ACTIVE_CHANNELS[0])
         self.config = style_config
         logger.info("ImageProcessor initialized with palette=%s", self.config.COLOR_PALETTE)

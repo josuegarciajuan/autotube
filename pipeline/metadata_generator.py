@@ -29,6 +29,7 @@ from config.llm_helpers import llm_json_call, _derive_hook_from_title
 from pipeline.title_enricher import (
     enforce_power_words,
     build_power_words_prompt_section,
+    resolve_title_max_chars,
 )
 from pipeline.seo_researcher import SEOResearcher, _format_seconds
 from prompts.base_prompts import packaging_rules
@@ -416,6 +417,7 @@ class MetadataGenerator:
         self.channel_name = getattr(canal_config, "CANAL_DISPLAY_NAME", "Canal de Historias")
         self.channel_tone = getattr(canal_config, "CANAL_TONE", "misterioso y cautivador")
         self.yt_category_id = getattr(canal_config, "YT_CATEGORY_ID", "27")
+        self.title_max_chars = resolve_title_max_chars(canal_config)
         
         # Build channel context for the prompt
         self._channel_context = f"""CANAL: {self.channel_name}
@@ -581,15 +583,15 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             title_suffix_norm = _normalize_title_suffix(result.get("title_suffix", ""))
             
             # Ensure title ≤ 100 chars (trim suffix if needed)
-            if len(title) > 100:
+            if len(title) > self.title_max_chars:
                 # Try to fit by trimming suffix first, then title
                 suffix_formatted = f" ({title_suffix_norm})" if title_suffix_norm else ""
-                max_title_body = 100 - len(suffix_formatted)
+                max_title_body = self.title_max_chars - len(suffix_formatted)
                 title = title[:max_title_body].rstrip() + suffix_formatted
-                title = title[:100]  # final safety
+                title = title[:self.title_max_chars]  # final safety
 
             # ── Safety net: enforce at least one power word ────────
-            title = enforce_power_words(title, power_words)
+            title = enforce_power_words(title, power_words, max_chars=self.title_max_chars)
 
             # ── Antiban (ago 2026): quitar sufijos de credibilidad clickbait
             # tipo (REAL)/(CASO REAL) por si el LLM los incluyó igualmente.
@@ -662,11 +664,14 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
 
     def _validate_tags(self, tags: list[str]) -> list[str]:
         """Validate tags fit within YouTube's 500-char limit."""
+        prohibited_generic = {"misterio", "historia", "documental", "real", "2025", "video viral"}
         valid = []
         total_chars = 0
         for tag in tags:
             tag_str = str(tag).strip().lower()
             if not tag_str or len(tag_str) < 2:
+                continue
+            if tag_str in prohibited_generic:
                 continue
             # Each tag costs its length + 2 for quoting if contains space + 1 for comma
             tag_cost = len(tag_str) + (4 if " " in tag_str else 0) + 1
@@ -688,7 +693,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             titles = titulo_raw or []
         
         if titles and isinstance(titles, list) and len(titles) > 0:
-            return [str(titles[0])[:100]]
+            return [str(titles[0])[:self.title_max_chars]]
         
         # Ultimate fallback
         keywords = script.get("keywords", [])
@@ -710,7 +715,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
 
         # ── Safety net: enforce at least one power word ────────────
         power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
-        title = enforce_power_words(title, power_words)
+        title = enforce_power_words(title, power_words, max_chars=self.title_max_chars)
 
         # ── Antiban: quitar sufijos clickbait (REAL) también en fallback ──
         title = _strip_clickbait_suffix(title)
@@ -726,7 +731,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             max_kw=10,
         )
         if not tags:
-            # Ultimate last resort: script-generated keywords or hardcoded fallback
+            # Last resort: use only script-provided, content-specific keywords.
             keywords_raw = script.get("keywords") or script.get("keywords_json", "[]")
             if isinstance(keywords_raw, str):
                 try:
@@ -735,7 +740,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                     keywords = []
             else:
                 keywords = keywords_raw or []
-            tags = keywords[:10] if keywords else ["historias", "impactante", "documental"]
+            tags = keywords[:10] if keywords else []
         
         # Build basic description from template
         channel_desc = getattr(self.config, "DESCRIPTION_TEMPLATE", "")
@@ -864,7 +869,9 @@ Mantén MISMA longitud. NO uses las mismas power words."""
                 alt_title = result.get("alternative_title", "") or result.get("title", "") or ""
                 if alt_title and len(alt_title) >= 20:
                     # Enforce power words on the new title
-                    alt_title = enforce_power_words(alt_title, power_words) if power_words else alt_title
+                    alt_title = enforce_power_words(
+                        alt_title, power_words, max_chars=self.title_max_chars
+                    ) if power_words else alt_title[:self.title_max_chars]
                     elapsed = time.time() - start
                     logger.info(
                         "Alternative title generated in %.1fs: '%s' → '%s' (CTR %.1f%%)",

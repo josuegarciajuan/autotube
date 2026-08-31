@@ -7389,7 +7389,10 @@ class ExtendedDatabase(Database):
             # ── Generación long-form/día (ago 2026): desacoplado de subida/
             # publicación. La generación no consume cuota; >1 encola backlog que
             # la válvula (1/día) drena. None → fallback legacy (1/día).
-            "longform_generation_per_day": config.get("longform_generation_per_day"),
+            "longform_generation_per_day": config.get(
+                "longform_generation_per_day",
+                config.get("LONGFORM_GENERATION_PER_DAY"),
+            ),
             # ── Scheduled publishing config ──
             "publish_mode": config.get("PUBLISH_MODE", "immediate"),
             "publish_target_hour": config.get("PUBLISH_TARGET_HOUR"),

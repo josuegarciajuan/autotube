@@ -62,13 +62,9 @@ def watch_page_status(video_id: str) -> str:
     if '"status":"OK"' in html or '"status":"LIVE_STREAM_OFFLINE"' in html:
         return "available"
     if '"status":"LOGIN_REQUIRED"' in html:
-        return "private"
+        return "login_required"
     for marker in (
-        "Este vídeo no está disponible",
-        "Este video no está disponible",
-        "El vídeo no está disponible",
         "This video isn't available anymore",
-        "Video unavailable",
         "This video has been removed",
     ):
         if marker in html:
@@ -139,7 +135,13 @@ def main():
             continue
         total += 1
         st = watch_page_status(yt_id)
+        # A single watch-page response is insufficient evidence: transient
+        # CDN/auth errors must never become silent_removal or spam_strike.
+        confirmations = 1
         if st == "removed":
+            confirmations += int(watch_page_status(yt_id) == "removed")
+        from api.services.channel_policy import should_create_removal_alert
+        if should_create_removal_alert(st, confirmations):
             removed += 1
             title = row["titulo_final"] if "titulo_final" in row.keys() else row["title"]
             channel_id = row["channel_id"]
