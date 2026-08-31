@@ -178,12 +178,10 @@ def browser_egress_probe(cfg: AgentConfig) -> dict:
     (``webrtc_disabled``). Si la IP del navegador no coincide con la esperada,
     hay una fuga de capa-browser que el probe curl no detectaría.
     """
-    try:
-        browser, _close_all = _get_browser(cfg, cfg.google_account or cfg.slug)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"no se pudo lanzar el navegador: {exc}"}
     page = None
     try:
+        browser, _close_all = _get_browser(cfg, cfg.google_account or cfg.slug)
+        browser._ensure_browser()  # inicializa el contexto persistente
         page = browser._context.new_page()
         page.goto("https://api.ipify.org?format=json",
                   wait_until="domcontentloaded", timeout=60000)
