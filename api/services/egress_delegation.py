@@ -12,7 +12,12 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from api.services.egress_client import get_egress_client, EgressAgent
+from api.services.egress_client import (
+    EgressAgent,
+    EgressAgentUnavailableError,
+    get_egress_client,
+    is_egress_managed,
+)
 
 logger = logging.getLogger(__name__)
 
