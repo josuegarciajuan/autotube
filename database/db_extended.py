@@ -720,6 +720,9 @@ def migrate_v2(db_path: str = None):
         # ── Marathon mode (v1.0) ──
         ("is_marathon", "INTEGER DEFAULT 0"),
         ("marathon_config", "TEXT"),
+        # ── Egress aislado (transferencia al VPS) ──
+        ("egress_transfer_state", "TEXT"),       # transferring | staged | done
+        ("vps_staged_path", "TEXT"),             # ruta del archivo en el VPS
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
