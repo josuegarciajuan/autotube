@@ -61,12 +61,44 @@ def _project_has_free_capacity(channel_slug: str) -> bool:
 
 
 def _get_browser_for_channel(channel_slug: str):
-    """Instancia de navegador para el account del canal (0 cuota API)."""
-    from pipeline.youtube_browser import get_account_for_channel, get_browser
+    """Instancia de navegador para el account del canal (0 cuota API).
+
+    Para canales gestionados por agente egress devuelve un adaptador que
+    delega search/get_channel_videos al agente (la IP de salida es la del
+    agente, no la del server).
+    """
+    from pipeline.youtube_browser import get_account_for_channel
     account = get_account_for_channel(channel_slug)
     if not account:
         return None
+    from api.services.egress_delegation import egress_client_for
+    _egress = egress_client_for(channel_slug)
+    if _egress is not None:
+        return _EgressBrowserAdapter(_egress, account)
+    from pipeline.youtube_browser import get_browser
     return get_browser(account)
+
+
+class _EgressBrowserAdapter:
+    """Adaptador que delega operaciones de navegador al agente egress."""
+
+    def __init__(self, egress, account: str):
+        self._egress = egress
+        self._account = account
+
+    def search_channels(self, keyword: str, max_results: int = 5) -> list[dict]:
+        _r = self._egress.browser_action(
+            "collab_search", account=self._account,
+            params={"keyword": keyword, "max_results": max_results},
+        )
+        return _r.get("result", []) if _r.get("ok") else []
+
+    def get_channel_videos(self, channel_url: str, limit: int = 3) -> list[dict]:
+        _r = self._egress.browser_action(
+            "collab_channel_videos", account=self._account,
+            params={"channel_url": channel_url, "limit": limit},
+        )
+        return _r.get("result", []) if _r.get("ok") else []
 
 
 def discover_niche_channels(

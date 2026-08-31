@@ -179,14 +179,6 @@ def main():
     by_account = {}
     for item in pending:
         context = next((c for c in channels if c.slug == item["canal"]), None)
-        # Fail-closed: canales gestionados por agente egress NO se procesan con
-        # el navegador del server (filtraría la IP del server). El hold de esos
-        # canales debe hacerse vía agente (browser_action hold_private) o manual.
-        from api.services.egress_delegation import is_egress_managed
-        if item["canal"] and is_egress_managed(item["canal"]):
-            logger.warning("Skipping managed channel %s in hold script (fail-closed) — usar agente/manual",
-                           item["canal"])
-            continue
         account = context.google_account if context else None
         if not account:
             logger.warning("No google_account in DB for %s — skipping #%s",
@@ -200,7 +192,9 @@ def main():
 
     for account, items in by_account.items():
         logger.info("Processing %d videos for account: %s", len(items), account)
-        browser = get_browser(account)
+        from api.services.egress_delegation import egress_client_for
+        browser = None if any(egress_client_for(i["canal"]) is not None for i in items) \
+            else get_browser(account)
         consecutive_failures = 0
         for i, item in enumerate(items, 1):
             yt_id = item["yt_video_id"]
@@ -209,9 +203,22 @@ def main():
                 total_skipped += 1
                 continue
 
-            logger.info("[%d/%d] HOLD %s:%s (tgt=%s)", i, len(items),
-                        item["canal"], yt_id, item["target_iso"] or "?")
-            success = browser.set_video_private_unschedule(yt_id)
+            _egress = egress_client_for(item["canal"])
+            if _egress is not None:
+                logger.info("[%d/%d] HOLD(egress) %s:%s (tgt=%s)", i, len(items),
+                            item["canal"], yt_id, item["target_iso"] or "?")
+                try:
+                    _r = _egress.browser_action("hold_private", account=account,
+                                                params={"video_id": yt_id})
+                    success = bool(_r.get("ok"))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%d/%d] HOLD(egress) ERROR %s:%s: %s", i, len(items),
+                                   item["canal"], yt_id, exc)
+                    success = False
+            else:
+                logger.info("[%d/%d] HOLD %s:%s (tgt=%s)", i, len(items),
+                            item["canal"], yt_id, item["target_iso"] or "?")
+                success = browser.set_video_private_unschedule(yt_id)
             if success:
                 consecutive_failures = 0
                 mark_held(db_path, yt_id)
@@ -221,7 +228,7 @@ def main():
                 total_failed += 1
                 logger.warning("[%d/%d] FAILED %s:%s", i, len(items), item["canal"], yt_id)
                 consecutive_failures += 1
-                if consecutive_failures >= 2:
+                if consecutive_failures >= 2 and browser is not None:
                     logger.warning("Browser session appears broken — recreating for %s", account)
                     try:
                         browser.close()

@@ -133,22 +133,34 @@ def main():
         yt_id = (row["yt_video_id"] if "yt_video_id" in row.keys() else row["youtube_id"])
         if not yt_id:
             continue
-        # Fail-closed: los canales gestionados por agente egress NO se barren
-        # desde el server (la watch page filtraría la IP del server). El sweep
-        # de esos canales debe hacerse vía agente (pendiente de delegación).
+        # Canales gestionados por agente egress: la watch page se consulta vía
+        # el agente (IP aislada), nunca desde el server.
         _cid = row["channel_id"]
         _slug = row["canal"] if "canal" in row.keys() else (db.get_channel(_cid) or {}).get("slug", f"ch{_cid}")
-        from api.services.egress_delegation import is_egress_managed
-        if is_egress_managed(_slug):
-            logger.debug("Skipping managed channel %s in server sweep (fail-closed)", _slug)
-            continue
+        from api.services.egress_delegation import egress_client_for
+        _egress = egress_client_for(_slug)
         total += 1
-        st = watch_page_status(yt_id)
+        if _egress is not None:
+            try:
+                _r = _egress.ytdlp("watch_status", {"yt_id": yt_id})
+                st = _r.get("result", {}).get("status", "unknown") if _r.get("ok") else "unknown"
+            except Exception:
+                st = "unknown"
+        else:
+            st = watch_page_status(yt_id)
         # A single watch-page response is insufficient evidence: transient
         # CDN/auth errors must never become silent_removal or spam_strike.
         confirmations = 1
         if st == "removed":
-            confirmations += int(watch_page_status(yt_id) == "removed")
+            if _egress is not None:
+                try:
+                    _r2 = _egress.ytdlp("watch_status", {"yt_id": yt_id})
+                    _st2 = _r2.get("result", {}).get("status", "unknown") if _r2.get("ok") else "unknown"
+                except Exception:
+                    _st2 = "unknown"
+            else:
+                _st2 = watch_page_status(yt_id)
+            confirmations += int(_st2 == "removed")
         from api.services.channel_policy import should_create_removal_alert
         if should_create_removal_alert(st, confirmations):
             removed += 1

@@ -95,6 +95,10 @@ def reply_to_video_comments(channel_slug: str, yt_video_id: str,
     account = get_account_for_channel(channel_slug) or channel_slug
     channel_name = (ch.get("name") or "").strip()
 
+    # ── Delegación al agente egress (canal gestionado) ──
+    from api.services.egress_delegation import egress_client_for
+    _egress = egress_client_for(channel_slug)
+
     # ── Cap diario por cuenta ──
     used_today = count_replies_today_for_account(db, account)
     remaining_daily = max(0, COMMENT_REPLY_DAILY_CAP_PER_ACCOUNT - used_today)
@@ -107,8 +111,13 @@ def reply_to_video_comments(channel_slug: str, yt_video_id: str,
     cap = max(1, min(int(cap), remaining_daily))
 
     # ── Leer comentarios ──
-    browser = get_browser(account)
-    comments = browser.list_video_comments(yt_video_id, max_comments=60)
+    if _egress is not None:
+        _r = _egress.browser_action("comments", account=account,
+                                    params={"video_id": yt_video_id, "max_comments": 60})
+        comments = _r.get("result", []) if _r.get("ok") else []
+    else:
+        browser = get_browser(account)
+        comments = browser.list_video_comments(yt_video_id, max_comments=60)
     if not comments:
         logger.info("[%s] Sin comentarios visibles en %s", channel_slug, yt_video_id)
         return {"posted": 0, "skipped": 0, "failed": 0, "no_comments": True}
@@ -162,9 +171,17 @@ def reply_to_video_comments(channel_slug: str, yt_video_id: str,
             failed += 1
             continue
 
-        ok = browser.post_comment_reply(
-            yt_video_id, c["index"], reply_text, expected_text=c["text"]
-        )
+        if _egress is not None:
+            _r2 = _egress.browser_action(
+                "reply_comment", account=account,
+                params={"video_id": yt_video_id, "comment_index": c["index"],
+                        "text": reply_text, "expected_text": c["text"]},
+            )
+            ok = bool(_r2.get("ok"))
+        else:
+            ok = browser.post_comment_reply(
+                yt_video_id, c["index"], reply_text, expected_text=c["text"]
+            )
         if ok:
             try:
                 db.log_comment(
