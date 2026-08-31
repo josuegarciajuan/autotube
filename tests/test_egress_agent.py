@@ -14,6 +14,7 @@ def _cfg(tmp_path, **overrides) -> AgentConfig:
         google_account="testacct",
         egress_label="TEST-IP",
         auth_token="",
+        egress_verify=False,  # por defecto en tests: guardia desactivada (aislamiento)
         project_root=str(tmp_path),
     )
     base.update(overrides)
@@ -149,7 +150,7 @@ def test_upload_with_staged_path_graceful(tmp_path):
 
 def test_egress_guard_blocks_on_ip_mismatch(tmp_path):
     """Guardia por-operación: IP no verificada/equivocada → 503 fail-closed."""
-    app = create_app(_cfg(tmp_path, expected_ip="58.68.169.25"))
+    app = create_app(_cfg(tmp_path, expected_ip="58.68.169.25", egress_verify=True))
     c = TestClient(app)
     # En el entorno de test la IP real (o indeterminada) no es 58.68.169.25 → bloquea.
     r = c.post("/browser/action", json={"action": "accion_inexistente", "params": {}})
@@ -160,10 +161,47 @@ def test_egress_guard_blocks_on_ip_mismatch(tmp_path):
 
 
 def test_egress_guard_skipped_when_no_expected_ip(tmp_path):
-    """Sin expected_ip configurado, la guardia no se aplica (operación normal)."""
-    app = create_app(_cfg(tmp_path))  # expected_ip por defecto = ""
+    """H1: sin expected_ip configurado, la guardia BLOQUEA (fail-closed)."""
+    app = create_app(_cfg(tmp_path, egress_verify=True))  # expected_ip por defecto = ""
     c = TestClient(app)
     r = c.post("/browser/action", json={"action": "accion_inexistente", "params": {}})
-    assert r.status_code == 200  # no guard → pasa al dispatcher
-    assert r.json()["ok"] is False  # acción desconocida
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is False
+    # Sin expected_ip ya NO se hace skip silencioso: se bloquea por misconfig.
+    assert "expected_ip" in str(body.get("error", "")).lower()
+
+
+def test_egress_verify_opt_out_allows_ops(tmp_path):
+    """Con egress_verify=False (dev/test) las operaciones NO se bloquean."""
+    app = create_app(_cfg(tmp_path))  # egress_verify=False por defecto
+    c = TestClient(app)
+    r = c.post("/browser/action", json={"action": "accion_inexistente", "params": {}})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False  # acción desconocida, NO guardia
+
+
+def test_healthz_reports_egress(tmp_path):
+    """H2: /healthz devuelve estado de egress en una sola llamada."""
+    app = create_app(_cfg(tmp_path, expected_ip="58.68.169.25", egress_verify=True))
+    c = TestClient(app)
+    r = c.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["slug"] == "testcanal"
+    assert body["token_valid"] is True
+    assert "egress_ok" in body
+    assert body["expected_ip"] == "58.68.169.25"
+
+
+def test_egress_check_browser_endpoint(tmp_path):
+    """H3: /egress-check-browser responde (en test sin red → error controlado)."""
+    app = create_app(_cfg(tmp_path, expected_ip="58.68.169.25"))
+    c = TestClient(app)
+    r = c.get("/egress-check-browser")
+    assert r.status_code == 200
+    body = r.json()
+    # En CI/sin Playwright puede fallar el lanzamiento, pero nunca 500.
+    assert "ok" in body
 

@@ -26,6 +26,7 @@ class AgentConfig:
     egress_label: str = ""             # etiqueta UI (p. ej. "IP1-ES")
     auth_token: str = ""               # token secreto que valida el server principal
     expected_ip: str = ""              # IP residencial esperada (58.68.169.25)
+    egress_verify: bool = True         # verificación de egress por operación (fail-closed)
 
     # ── Paths (relativos a la raíz del repo o absolutos) ────────
     project_root: str = ""             # raíz del repo autotube en la VPS
@@ -100,6 +101,7 @@ class AgentConfig:
             google_account=_g("AGENT_GOOGLE_ACCOUNT"),
             egress_label=_g("AGENT_EGRESS_LABEL"),
             auth_token=_g("AGENT_AUTH_TOKEN"),
+            egress_verify=_g("AGENT_EGRESS_VERIFY", "true").lower() in ("1", "true", "yes"),
             project_root=_g("AGENT_PROJECT_ROOT"),
             client_secret_path=_g("AGENT_CLIENT_SECRET_PATH"),
             token_pickle_path=_g("AGENT_TOKEN_PICKLE_PATH"),
