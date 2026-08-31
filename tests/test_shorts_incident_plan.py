@@ -11,22 +11,23 @@ def test_render_timeout_scales_with_duration_and_assets():
 
     assert short >= 180
     assert long > short
-    assert long <= 900
+    assert long <= 1500
     assert has_sufficient_visual_assets([{"path": "a"}, None], 0.5) is True
     assert has_sufficient_visual_assets([None, None], 0.5) is False
 
 
-def test_load_gate_blocks_shorts_only_when_longform_is_active_and_load_is_high():
+def test_load_gate_blocks_shorts_only_when_longform_is_active_and_autotube_load_is_high():
     from api.services.shorts_scheduler import should_defer_shorts_for_longform_load
 
+    # cpu_count=8 -> threshold = max(1, int(8*0.85)) = 6 autotube render procs
     assert should_defer_shorts_for_longform_load(
-        longform_active=True, load1=8.0, cpu_count=8
+        longform_active=True, autotube_render_load=8, cpu_count=8
     ) is True
     assert should_defer_shorts_for_longform_load(
-        longform_active=True, load1=2.0, cpu_count=8
+        longform_active=True, autotube_render_load=2, cpu_count=8
     ) is False
     assert should_defer_shorts_for_longform_load(
-        longform_active=False, load1=20.0, cpu_count=8
+        longform_active=False, autotube_render_load=20, cpu_count=8
     ) is False
 
 

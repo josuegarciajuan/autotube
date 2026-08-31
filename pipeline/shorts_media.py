@@ -1412,10 +1412,16 @@ def has_sufficient_visual_assets(asset_items, min_ratio: float = 0.5) -> bool:
 
 
 def render_timeout_seconds(audio_duration: float | None, asset_count: int) -> int:
-    """Return a bounded timeout scaled to the actual short render workload."""
+    """Return a bounded timeout scaled to the actual short render workload.
+
+    Cap raised from 900s to 1500s (2026-08-31): under concurrent system load
+    (other projects sharing the machine), ffmpeg renders can legitimately take
+    longer than 15 min; the previous cap caused avoidable "render produced no
+    output file" failures and slot retries.
+    """
     duration = max(float(audio_duration or 20.0), 1.0)
     assets = max(int(asset_count or 1), 1)
-    return min(900, max(180, int(120 + duration * 7 + assets * 12)))
+    return min(1500, max(180, int(120 + duration * 7 + assets * 12)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
