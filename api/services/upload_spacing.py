@@ -43,14 +43,7 @@ def _get_db():
 
 
 def _spacing_min_minutes(db) -> int:
-    # 1) Kill-switch manual (back-compat con el override documentado).
-    try:
-        raw = db.get_system_state(_MIN_KEY)
-        if raw:
-            return int(float(raw))
-    except (TypeError, ValueError):
-        pass
-    # 2) Perfil central de pacing (strike/recovery/normal).
+    # La precedencia (override legacy > perfil) se resuelve centralmente.
     try:
         from api.services.pacing_profile import get_pacing_value
         value = get_pacing_value(
@@ -58,7 +51,7 @@ def _spacing_min_minutes(db) -> int:
             default=GLOBAL_UPLOAD_SPACING_MIN,
             db=db,
         )
-        return int(float(value))
+        return max(0, int(float(value)))
     except Exception:
         pass
     return GLOBAL_UPLOAD_SPACING_MIN

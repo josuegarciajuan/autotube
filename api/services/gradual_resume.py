@@ -50,22 +50,9 @@ def get_explicit_delivery_policy(channel_id: int, db) -> dict | None:
     Es la fuente autoritativa: gana sobre las fases automáticas derivadas de
     fechas (gradual_resume). Devuelve None si no hay política explícita.
     """
-    try:
-        raw = db.get_system_state(_POLICY_KEY.format(channel_id=channel_id))
-        if not raw:
-            return None
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(data, dict) or data.get("mode") != "explicit":
-            return None
-        return {
-            "mode": "explicit",
-            "longs_per_day": max(0, int(data.get("longs_per_day", 1) or 0)),
-            "native_shorts_per_day": max(0, int(data.get("native_shorts_per_day", 1) or 0)),
-            "shorts_enabled": bool(data.get("shorts_enabled", True)),
-            "clips_enabled": bool(data.get("clips_enabled", False)),
-        }
-    except Exception:
-        return None
+    # Deprecated compatibility wrapper: the resolver owns precedence/coercion.
+    from api.services.channel_policy import get_channel_delivery_policy
+    return get_channel_delivery_policy(channel_id, db)
 
 
 def effective_delivery_policy(channel_id: int, db) -> dict | None:
@@ -78,13 +65,9 @@ def _iso_utc(ts: float) -> str:
 
 
 def _get_blocked_until(db, cid: int):
-    raw = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+    """Deprecated compatibility wrapper around channel_policy."""
+    from api.services.channel_policy import get_channel_strike_state
+    return get_channel_strike_state(cid, db)["blocked_until"]
 
 
 def _sibling_blocked(db, ch: dict, now_ts: float):
