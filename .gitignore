@@ -5,6 +5,10 @@ tokens/*
 !tokens/.gitkeep
 # Credenciales OAuth por canal (se dejaron de trackear: viven solo en disco)
 config/client_secret*.json
+# Mapa secreto slug -> {url, token} de los agentes egress (contiene tokens)
+config/egress_agents.json
+# Subidas temporales del agente egress
+output/agent_uploads/
 
 # Backups locales (nunca en git)
 *.bak

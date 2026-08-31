@@ -35,6 +35,25 @@ def auth_start(channel_id: int):
 
     slug = ch["slug"]
 
+    # ── Delegación al agente egress (canal gestionado) ──
+    from api.services.egress_delegation import egress_client_for
+    _client = egress_client_for(slug)
+    if _client is not None:
+        try:
+            auth_url = _client.oauth_url()
+        except Exception as exc:
+            raise HTTPException(503, f"Agente egress no accesible para {slug}: {exc}")
+        if not auth_url:
+            raise HTTPException(500, "Could not generate auth URL — check client_secret")
+        return {
+            "auth_url": auth_url,
+            "message": (
+                "Canal gestionado por agente egress: abre esta URL en un navegador "
+                "que salga por la IP del canal, autoriza, y pega el 'code'. "
+                "El intercambio del código lo hace el agente (IP aislada)."
+            ),
+        }
+
     from pipeline.youtube_uploader import YouTubeUploader
 
     uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
@@ -65,6 +84,18 @@ def auth_code(channel_id: int, data: AuthCodeRequest):
         raise HTTPException(404, "Channel not found")
 
     slug = ch["slug"]
+
+    # ── Delegación al agente egress (canal gestionado) ──
+    from api.services.egress_delegation import egress_client_for
+    _client = egress_client_for(slug)
+    if _client is not None:
+        try:
+            ok = _client.auth_exchange(data.code)
+        except Exception as exc:
+            raise HTTPException(503, f"Agente egress no accesible para {slug}: {exc}")
+        if not ok:
+            raise HTTPException(400, "Auth failed. Check that the code is valid and not expired.")
+        return {"ok": True, "message": "✅ Autorizado vía agente egress (IP aislada)"}
 
     from pipeline.youtube_uploader import YouTubeUploader
 

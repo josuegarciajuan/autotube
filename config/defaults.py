@@ -34,6 +34,13 @@ LANGUAGE = "es"                # narración: "es", "en", etc.
 LOGO_SIZE = 140
 LOGO_PATH = ""
 
+# ── Egress aislado (agente por cuenta) ───────────────────────────
+# Si este canal es gestionado por un agente egress, la URL del agente se
+# muestra aquí (transparencia en el panel). La FUENTE DE VERDAD del par
+# url/token es config/egress_agents.json (gitignored). Vacío/None = el canal
+# se comporta como hoy (egress local directo por la IP del server).
+EGRESS_AGENT_URL = None
+
 # Packaging guardrails.  Channels may override these through their Python
 # profile or DB config_json; pipelines must read them through config_bridge.
 TITLE_MIN_CHARS = 28

@@ -333,6 +333,64 @@ def delete_channel(channel_id: int):
     return {"ok": True}
 
 
+@router.post("/{channel_id}/check-egress")
+def check_channel_egress(channel_id: int):
+    """Verifica la IP real de salida del agente egress de un canal gestionado.
+
+    Devuelve la IP/geo que YouTube vería para ese canal (la del agente) y avisa
+    si coincide con la IP pública del server (fuga: el agente no está aislado).
+    Para canales NO gestionados devuelve un mensaje informativo (egress local).
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    slug = ch["slug"]
+
+    from api.services.egress_delegation import egress_client_for
+    from api.services import egress_client as _ec
+    client = egress_client_for(slug)
+    if client is None:
+        return {
+            "ok": True,
+            "managed": False,
+            "message": "Canal sin agente egress — se comporta con egress local (IP del server).",
+        }
+
+    try:
+        data = client.egress_check()
+    except Exception as exc:
+        raise HTTPException(503, f"Agente egress no accesible para {slug}: {exc}")
+
+    agent_ip = data.get("result", {}).get("ip", "unknown")
+    geo = data.get("result", {}).get("geo", {})
+
+    # IP pública del server (cacheada) para detectar fugas.
+    server_ip = db.get_system_state("server_public_ip")
+    if not server_ip:
+        try:
+            import requests as _r
+            server_ip = _r.get("https://api.ipify.org?format=json", timeout=15).json().get("ip", "")
+            if server_ip:
+                db.set_system_state("server_public_ip", server_ip)
+        except Exception:
+            server_ip = "unknown"
+
+    leak = bool(server_ip and agent_ip and server_ip == agent_ip)
+    return {
+        "ok": True,
+        "managed": True,
+        "agent_ip": agent_ip,
+        "geo": geo,
+        "server_ip": server_ip,
+        "leak_detected": leak,
+        "message": (
+            "⚠️ FUGA: la IP del agente coincide con la del server" if leak
+            else "IP de salida aislada (distinta del server)."
+        ),
+    }
+
+
 @router.get("/{channel_id}/videos")
 def list_channel_videos(channel_id: int, status: str = None, limit: int = 50, offset: int = 0,
                         playlist_id: int = None, source_mode: str = None):

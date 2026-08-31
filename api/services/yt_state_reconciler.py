@@ -118,17 +118,56 @@ def _recent_shorts(db, lookback_hours: int = RECONCILE_LOOKBACK_HOURS) -> list[d
     return [dict(r) for r in rows]
 
 
+def _classify_for_channel(yt_id: str, slug: str | None = None) -> str:
+    """Clasifica la visibilidad delegando al agente egress si el canal es gestionado.
+
+    Mantiene la firma de ``classify_video_visibility(yt_id)`` intacta para no
+    romper sus mocks; aquí se decide el camino (agente vs local).
+    """
+    if slug:
+        from api.services.egress_delegation import egress_client_for
+        client = egress_client_for(slug)
+        if client is not None:
+            try:
+                data = client.ytdlp("classify", {"yt_id": yt_id})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] agent classify unreachable (%s) — fail-closed", slug, exc)
+                return "error"
+            if data.get("ok"):
+                return data.get("result", {}).get("visibility", "unknown")
+            return "error"
+    return classify_video_visibility(yt_id)
+
+
 def _feed_public_ids(db, channel_id: int) -> dict:
-    """Public IDs of a channel via its RSS feed (0 quota), cached in-process."""
+    """Public IDs of a channel via its RSS feed (0 quota), cached in-process.
+
+    Para canales gestionados, delega el fetch RSS al agente egress para que el
+    server nunca contacte con YouTube por esos canales.
+    """
     if channel_id in _FEED_CACHE and time.time() - _FEED_CACHE[channel_id][0] < RECONCILE_FEED_CACHE_SEC:
         return _FEED_CACHE[channel_id][1]
     ids = {}
     try:
-        from pipeline.youtube_wall_scraper import fetch_channel_public_video_ids
         with db._connect() as conn:
-            ch = conn.execute("SELECT yt_channel_id FROM channels WHERE id=?", (channel_id,)).fetchone()
-        if ch and ch["yt_channel_id"]:
-            ids = fetch_channel_public_video_ids(ch["yt_channel_id"]) or {}
+            ch = conn.execute("SELECT slug, yt_channel_id FROM channels WHERE id=?", (channel_id,)).fetchone()
+        slug = ch["slug"] if ch else None
+        yt_channel_id = ch["yt_channel_id"] if ch else None
+
+        from api.services.egress_delegation import egress_client_for
+        client = egress_client_for(slug) if slug else None
+        if client is not None and yt_channel_id:
+            try:
+                data = client.ytdlp("rss", {"channel_id": yt_channel_id})
+                if data.get("ok"):
+                    ids = data.get("result", {}) or {}
+                else:
+                    logger.debug("agent RSS failed for %s: %s", slug, data.get("error"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] agent RSS unreachable (%s) — fail-closed", slug, exc)
+        elif yt_channel_id:
+            from pipeline.youtube_wall_scraper import fetch_channel_public_video_ids
+            ids = fetch_channel_public_video_ids(yt_channel_id) or {}
     except Exception as exc:
         logger.debug("RSS feed fetch failed for channel #%s: %s", channel_id, exc)
     _FEED_CACHE[channel_id] = (time.time(), ids)
@@ -156,6 +195,13 @@ def reconcile_recent_shorts(db=None) -> dict:
 
     for channel_id, items in by_channel.items():
         feed = _feed_public_ids(db, channel_id)
+        slug = None
+        try:
+            with db._connect() as conn:
+                _row = conn.execute("SELECT slug FROM channels WHERE id=?", (channel_id,)).fetchone()
+            slug = _row["slug"] if _row else None
+        except Exception:
+            slug = None
         for s in items[:RECONCILE_MAX_PER_CHANNEL]:
             short_id = int(s["id"])
             yt_id = s["youtube_id"]
@@ -163,14 +209,14 @@ def reconcile_recent_shorts(db=None) -> dict:
             if checked_at and (now - checked_at).total_seconds() < RECONCILE_SHORT_COOLDOWN_SEC:
                 continue  # recent check, respect cooldown
 
-            vis = classify_video_visibility(yt_id)
+            vis = _classify_for_channel(yt_id, slug=slug)
             summary["checked"] += 1
 
             # A transient extractor response is not proof of removal. Require
             # an immediate second explicit signal before caching ``removed``.
             if vis == "removed":
                 from api.services.channel_policy import removal_is_confirmed
-                second_vis = classify_video_visibility(yt_id)
+                second_vis = _classify_for_channel(yt_id, slug=slug)
                 if not removal_is_confirmed(vis, int(second_vis == "removed")):
                     vis = second_vis if second_vis != "removed" else "unknown"
 
@@ -301,6 +347,29 @@ def scan_studio_for_channel(db, channel_id: int, account: str = "", timeout_s: i
                 ).fetchone()
             slug = ch["slug"] if ch else f"ch{channel_id}"
             uc = ch["yt_channel_id"] if ch else ""
+
+        if not uc:
+            uc = ch["yt_channel_id"] if ch else ""
+
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for
+        _client = egress_client_for(slug)
+        if _client is not None and uc:
+            try:
+                _data = _client.browser_action("studio_scan", account=account,
+                                               params={"yt_channel_id": uc})
+                if _data.get("ok"):
+                    findings = _data.get("result", {}).get("findings", [])
+                    result = {
+                        "status": "ok", "account": account, "channel": slug,
+                        "findings": findings,
+                        "scanned_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    db.set_system_state(STUDIO_SCAN_KEY.format(slug=slug),
+                                        json.dumps(result, ensure_ascii=False))
+                    return result
+            except Exception as exc:
+                logger.warning("[%s] agent studio scan failed: %s", slug, exc)
 
         if not account:
             return {"status": "skipped", "reason": "sin google_account"}
