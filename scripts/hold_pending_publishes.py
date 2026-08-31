@@ -11,11 +11,11 @@ vídeos en riesgo, de modo que NO puedan publicarse hasta que se re-programen
 después (repack con cuota libre).
 
 Usage:
-    python3 scripts/hold_pending_publishes.py --dry-run
-    python3 scripts/hold_pending_publishes.py --canal canal2
-    python3 scripts/hold_pending_publishes.py --canal canal2 --ids 2123,2183,2124
-    DATABASE_PATH=/root/autotube/autotube.db YT_BROWSER_TOKENS_DIR=/root/autotube/tokens \
-        python3 scripts/hold_pending_publishes.py --canal canal2
+    python3 scripts/hold_pending_publishes.py --slug canal2 --dry-run
+    python3 scripts/hold_pending_publishes.py --slug canal2
+    python3 scripts/hold_pending_publishes.py --slug canal2 --ids 2123,2183,2124
+    DATABASE_PATH=/path/to/autotube.db YT_BROWSER_TOKENS_DIR=/path/to/tokens \
+        python3 scripts/hold_pending_publishes.py --slug canal2
 
 Reglas de selección (solo publish_mode='scheduled' con yt_video_id):
   - --past-only (default): target_public_at < now + --buffer-hours (vencidos/inminentes)
@@ -47,9 +47,8 @@ logger = logging.getLogger("hold_publishes")
 
 
 def _db_path() -> Path:
-    env = Path(__file__).resolve().parent.parent / "autotube.db"
-    import os
-    return Path(os.getenv("DATABASE_PATH", str(env)))
+    from config.settings import DATABASE_PATH
+    return Path(DATABASE_PATH)
 
 
 def _parse_utc(ts) -> Optional[datetime]:
@@ -124,11 +123,12 @@ def mark_held(db_path: Path, yt_id: str):
 
 
 def main():
+    from scripts.runtime_context import add_channel_selector_arguments, resolve_channels, SelectorError
     parser = argparse.ArgumentParser(description="Hold pending publishes to Private (0 quota)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    parser.add_argument("--canal", help="Only process this channel (slug)")
+    add_channel_selector_arguments(parser)
     parser.add_argument("--ids", help="Comma-separated video DB ids to force-process")
-    parser.add_argument("--all", action="store_true",
+    parser.add_argument("--all-pending", action="store_true",
                         help="Process ALL pending scheduled videos (not only past-due)")
     parser.add_argument("--buffer-hours", type=float, default=0.0,
                         help="Hold videos whose target is within this many hours (past-only mode)")
@@ -139,17 +139,24 @@ def main():
     args = parser.parse_args()
 
     db_path = _db_path()
+    try:
+        channels = resolve_channels(
+            db_path=db_path, channel_id=args.channel_id, slug=args.slug,
+            project=args.project, all_channels=args.all_channels, yes=args.yes,
+        )
+    except SelectorError as exc:
+        parser.error(str(exc))
     if not db_path.exists():
         logger.error("DB not found: %s — set DATABASE_PATH to the production DB", db_path)
         sys.exit(1)
 
     ids = [int(x) for x in args.ids.split(",")] if args.ids else None
-    pending = get_pending(
-        db_path, canal=args.canal,
-        past_only=not args.all,
-        buffer_hours=args.buffer_hours,
-        ids=ids,
-    )
+    pending = []
+    for channel in channels:
+        pending.extend(get_pending(
+            db_path, canal=channel.slug, past_only=not args.all_pending,
+            buffer_hours=args.buffer_hours, ids=ids,
+        ))
 
     if not pending:
         print("No scheduled videos in risk. Nothing to hold.")
@@ -157,7 +164,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Vídeos a retener (Privado): {len(pending)}"
-          + (" (vencidos/inminentes)" if not args.all else " (todos los pendientes)"))
+          + (" (vencidos/inminentes)" if not args.all_pending else " (todos los pendientes)"))
     for p in pending:
         print(f"  [{p['canal']}] #{p['id']} yt={p['yt_video_id']} tgt={p['target_iso'] or '?'} "
               f"status={p['status']} held={'SI' if already_held(db_path, p['yt_video_id']) else 'no'}")
@@ -168,14 +175,13 @@ def main():
         return
 
     # Group by account for efficient browser usage
-    from pipeline.youtube_browser import (
-        get_browser, close_all_browsers, get_account_for_channel,
-    )
+    from pipeline.youtube_browser import get_browser, close_all_browsers
     by_account = {}
     for item in pending:
-        account = get_account_for_channel(item["canal"])
+        context = next((c for c in channels if c.slug == item["canal"]), None)
+        account = context.google_account if context else None
         if not account:
-            logger.warning("No account mapped for %s — skipping #%s",
+            logger.warning("No google_account in DB for %s — skipping #%s",
                            item["canal"], item["yt_video_id"])
             continue
         by_account.setdefault(account, []).append(item)

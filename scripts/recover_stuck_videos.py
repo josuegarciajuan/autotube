@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Recover stuck videos 304 and 305 that were left in 'ready' state after reassembly.
+"""Recover explicitly selected videos left in ``ready`` after reassembly.
 
 Generates thumbnails, populates metadata, and triggers upload to YouTube.
 """
 import json
 import logging
 import sqlite3
+import argparse
 from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import settings
+from scripts.runtime_context import add_channel_selector_arguments, resolve_channels, SelectorError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("recovery")
 
-DB_PATH = Path("/root/autotube/autotube.db")
-PROJECT_ROOT = Path("/root/autotube")
-
-STUCK_VIDEOS = [304, 305]
-
-CHANNEL_MAP = {}  # dynamically populated from DB if needed
-
+DB_PATH = Path(settings.DATABASE_PATH)
+PROJECT_ROOT = settings.PROJECT_ROOT
 
 def get_video(db, video_id):
     return db.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
@@ -44,10 +48,25 @@ def generate_thumbnail(video_path, canal, video_id):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_channel_selector_arguments(parser)
+    parser.add_argument("--video-id", action="append", type=int, required=True,
+                        help="ID de vídeo a recuperar (repetible; obligatorio)")
+    parser.add_argument("--dry-run", action="store_true", help="mostrar alcance sin modificar DB ni archivos")
+    args = parser.parse_args()
+    try:
+        contexts = resolve_channels(
+            db_path=DB_PATH, channel_id=args.channel_id, slug=args.slug,
+            project=args.project, all_channels=args.all_channels, yes=args.yes,
+        )
+    except SelectorError as exc:
+        parser.error(str(exc))
+    selected_slugs = {context.slug for context in contexts}
+    candidate_ids = set(args.video_id)
     db_conn = sqlite3.connect(str(DB_PATH))
     db_conn.row_factory = sqlite3.Row
 
-    for video_id in STUCK_VIDEOS:
+    for video_id in sorted(candidate_ids):
         log.info("=== Processing video %d ===", video_id)
         video = get_video(db_conn, video_id)
         if not video:
@@ -56,6 +75,8 @@ def main():
 
         video = dict(video)
         canal = video.get("canal", "")
+        if canal not in selected_slugs:
+            continue
         video_path = video.get("video_path", "")
 
         if not video_path or not Path(video_path).exists():
@@ -109,11 +130,17 @@ def main():
         log.info("Title: %s", titulo)
         log.info("Keywords: %s", keywords)
 
+        if args.dry_run:
+            log.info("DRY RUN: video %d listo para recuperar en %s", video_id, canal)
+            continue
+
         # Generate thumbnail
         thumb_path = generate_thumbnail(video_path, canal, video_id)
 
         # Update video in database
-        channel_id = video.get("channel_id") or CHANNEL_MAP.get(canal, 3)
+        channel_id = video.get("channel_id")
+        if not channel_id:
+            channel_id = next(c.id for c in contexts if c.slug == canal)
         db_conn.execute(
             """UPDATE videos SET
                titulo_final = ?,

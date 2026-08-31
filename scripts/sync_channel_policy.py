@@ -8,26 +8,11 @@ database and preserves the four existing channel policies exactly as stored.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def clear_false_positive_block(db, channel_id: int, evidence: dict) -> None:
-    """Clear only the operational block; preserve strike history and evidence."""
-    db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", "")
-    db.set_system_state(
-        f"spam_block_verification_{channel_id}",
-        json.dumps({
-            "status": "cleared_false_positive",
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-            "evidence": evidence,
-        }, ensure_ascii=False),
-    )
 
 
 def main() -> int:
