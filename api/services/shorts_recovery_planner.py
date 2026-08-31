@@ -139,13 +139,8 @@ def _local_hm_to_utc(date_str: str, hour: int, minute: int,
 
 def _channel_shorts_spam_blocked(channel_id: int, db) -> bool:
     """Return True if the channel's shorts are blocked by a spam strike."""
-    try:
-        raw = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
-        if not raw:
-            return False
-        return time.time() < float(raw)
-    except Exception:
-        return False
+    from api.services.channel_policy import get_channel_strike_state
+    return get_channel_strike_state(channel_id, db)["strike_active"]
 
 
 def _count_clip_coverage(db, channel_id: int, long_ids: list[int],

@@ -9457,15 +9457,10 @@ class ExtendedDatabase(Database):
         if not channel_id:
             return False
         try:
-            import time as _time
-            raw = self.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
-            if not raw:
-                return False
-            return _time.time() < float(raw)
-        except (TypeError, ValueError):
-            return False
+            from api.services.channel_policy import get_channel_strike_state
+            return get_channel_strike_state(channel_id, self)["strike_active"]
         except Exception:
-            return False  # fail-open ante error transitorio de DB (mismo criterio que el resto)
+            return False  # fail-open ante error transitorio de DB
 
     # ── Quota exhaustion helpers ────────────────────────────────
 

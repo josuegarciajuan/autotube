@@ -9,6 +9,22 @@ from __future__ import annotations
 
 import time
 import json
+from collections import Counter
+from threading import Lock
+
+_telemetry = Counter()
+_telemetry_lock = Lock()
+
+
+def _count(event: str) -> None:
+    with _telemetry_lock:
+        _telemetry[event] += 1
+
+
+def get_policy_telemetry() -> dict[str, int]:
+    """Process-local legacy diagnostics, avoiding frequent DB writes."""
+    with _telemetry_lock:
+        return dict(_telemetry)
 
 REMOVAL_VISIBILITY = "removed"
 NON_REMOVAL_VISIBILITIES = frozenset({
@@ -47,6 +63,61 @@ def _channel_config(channel_id: int, db) -> dict:
     return config
 
 
+def get_channel_delivery_policy(channel_id: int, db) -> dict | None:
+    """Read the explicit delivery policy once, preserving an explicit zero."""
+    try:
+        raw = db.get_system_state(f"channel_delivery_policy_{channel_id}")
+        if not raw:
+            return None
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(data, dict) or data.get("mode") != "explicit":
+            return None
+        def nonnegative_int(key: str, default: int) -> int:
+            value = data.get(key, default)
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                _count("invalid_values")
+                return default
+        def boolean(key: str, default: bool) -> bool:
+            value = data.get(key, default)
+            if isinstance(value, bool):
+                return value
+            normalized = str(value).strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+            _count("invalid_values")
+            return default
+        return {
+            "mode": "explicit",
+            "longs_per_day": nonnegative_int("longs_per_day", 1),
+            "native_shorts_per_day": nonnegative_int("native_shorts_per_day", 1),
+            "shorts_enabled": boolean("shorts_enabled", True),
+            "clips_enabled": boolean("clips_enabled", False),
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        _count("invalid_values")
+        return None
+
+
+def get_channel_strike_state(channel_id: int, db, now: float | None = None) -> dict:
+    """Return strike history separately from whether the block is active."""
+    now = time.time() if now is None else float(now)
+    blocked_until = _float_state(db, f"shorts_spam_blocked_until_{channel_id}")
+    return {
+        "historical_strikes": _int_state(db, f"shorts_spam_strikes_{channel_id}"),
+        "blocked_until": blocked_until,
+        "strike_active": blocked_until is not None and blocked_until > now,
+    }
+
+
+def get_historical_strikes(channel_id: int, db) -> int:
+    """Central accessor for the durable strike counter."""
+    return _int_state(db, f"shorts_spam_strikes_{channel_id}")
+
+
 def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None = None) -> dict:
     """Resolve channel pacing while making the global profile a safety ceiling.
 
@@ -61,42 +132,47 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     if config:
         cfg.update(config)
     pacing = _pacing(db)
-    def number(*keys, default=None):
-        for key in keys:
+    def number(canonical, *legacy, default=None):
+        if cfg.get(canonical) not in (None, ""):
+            try:
+                return int(float(cfg[canonical]))
+            except (TypeError, ValueError):
+                _count("invalid_values")
+                return default
+        for key in legacy:
             if cfg.get(key) not in (None, ""):
+                _count("legacy_fallbacks")
                 try:
                     return int(float(cfg[key]))
                 except (TypeError, ValueError):
-                    continue
+                    _count("invalid_values")
+                    return default
         return default
 
-    global_cap = max(1, int(pacing.get("max_longform_publish_day", 1) or 1))
+    global_cap = max(0, int(pacing.get("max_longform_publish_day", 1) or 0))
     # La política explícita vive en system_state y tiene prioridad sobre los
     # campos de planificación legacy. El perfil continúa siendo el techo de
     # seguridad; un contador histórico de strikes no modifica este valor.
-    explicit_cap = None
-    try:
-        raw_policy = db.get_system_state(f"channel_delivery_policy_{channel_id}")
-        data = json.loads(raw_policy) if isinstance(raw_policy, str) else raw_policy
-        if isinstance(data, dict) and data.get("mode") == "explicit":
-            explicit_cap = int(data.get("longs_per_day", 0) or 0)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        explicit_cap = None
-    channel_cap = explicit_cap if explicit_cap is not None else number(
-        "longs_per_day", "MAX_LONGFORM_PUBLISH_PER_DAY",
-        "max_longform_publish_day", default=global_cap)
-    publish_gap = number("MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS",
-                         "same_channel_publish_gap_h",
+    explicit = get_channel_delivery_policy(channel_id, db)
+    if explicit is not None:
+        channel_cap = explicit["longs_per_day"]
+    elif cfg.get("longs_per_day") not in (None, ""):
+        channel_cap = number("longs_per_day", default=global_cap)
+    else:
+        channel_cap = number("max_longform_publish_day", "MAX_LONGFORM_PUBLISH_PER_DAY",
+                             default=global_cap)
+    publish_gap = number("same_channel_publish_gap_h",
+                         "MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS",
                          default=int(pacing.get("same_channel_publish_gap_h", 24)))
-    upload_gap = number("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS",
-                        "same_channel_upload_gap_h",
+    upload_gap = number("same_channel_upload_gap_h",
+                        "MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS",
                         default=int(pacing.get("same_channel_upload_gap_h", 6)))
-    spread = number("PUBLISH_WINDOW_SPREAD_MIN", "publish_window_spread_min",
+    spread = number("publish_window_spread_min", "PUBLISH_WINDOW_SPREAD_MIN",
                     "PUBLISH_JITTER_MIN", "publish_jitter_min", default=0)
-    target = number("PUBLISH_TARGET_HOUR", "publish_target_hour", default=None)
+    target = number("publish_target_hour", "PUBLISH_TARGET_HOUR", default=None)
     return {
         "channel_id": int(channel_id),
-        "longform_publish_cap": max(0, min(channel_cap, global_cap)),
+        "longform_publish_cap": max(0, min(channel_cap, global_cap)) if channel_cap is not None else global_cap,
         "same_channel_publish_gap_h": max(publish_gap, int(pacing.get("same_channel_publish_gap_h", 24))),
         "same_channel_upload_gap_h": max(upload_gap, int(pacing.get("same_channel_upload_gap_h", 6))),
         "publish_target_hour": target,
@@ -110,6 +186,7 @@ def _int_state(db, key: str) -> int:
     try:
         return max(0, int(db.get_system_state(key) or 0))
     except (TypeError, ValueError):
+        _count("invalid_values")
         return 0
 
 
@@ -118,6 +195,7 @@ def _float_state(db, key: str):
         value = db.get_system_state(key)
         return float(value) if value not in (None, "") else None
     except (TypeError, ValueError):
+        _count("invalid_values")
         return None
 
 
@@ -127,12 +205,12 @@ def resolve_channel_policy(channel_id: int, db=None, now: float | None = None) -
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
     now = time.time() if now is None else float(now)
-    blocked_until = _float_state(db, f"shorts_spam_blocked_until_{channel_id}")
-    active = blocked_until is not None and blocked_until > now
+    strike = get_channel_strike_state(channel_id, db, now=now)
+    active = strike["strike_active"]
     policy = {
         "channel_id": int(channel_id),
-        "historical_strikes": _int_state(db, f"shorts_spam_strikes_{channel_id}"),
-        "blocked_until": blocked_until,
+        "historical_strikes": strike["historical_strikes"],
+        "blocked_until": strike["blocked_until"],
         "blocked": active,
         "strike_active": active,
         "scope": "all" if active else "none",

@@ -116,3 +116,12 @@ def test_get_pacing_value_fallback(tmp_path):
     assert pacing_profile.get_pacing_value("clave_inexistente", default=42, db=db) == 42
     # Perfil strike → valor real
     assert pacing_profile.get_pacing_value("shorts_per_channel_day", default=99, db=db) == 1
+
+
+def test_invalid_manual_override_uses_profile_and_reports_telemetry(tmp_path):
+    db = _db(tmp_path)
+    _reset_state(db)
+    db.set_system_state("pacing_max_longform_publish_day", "invalid")
+
+    assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 1
+    assert pacing_profile.get_pacing_telemetry()["invalid_values"] >= 1

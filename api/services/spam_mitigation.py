@@ -123,17 +123,15 @@ def get_account_upload_cap(db=None) -> int:
     """
     try:
         from api.services.pacing_profile import get_pacing_value
-        return int(get_pacing_value(
+        return max(0, int(get_pacing_value(
             "account_daily_upload_cap",
             default=0,
             db=db,
-        ) or 0)
+        ) or 0))
     except Exception:
-        try:
-            from config.defaults import ACCOUNT_DAILY_UPLOAD_CAP
-            return int(ACCOUNT_DAILY_UPLOAD_CAP or 0)
-        except Exception:
-            return 0
+        # Central resolver unavailable: fail closed rather than resurrecting
+        # the old per-channel config read in this consumer.
+        return 0
 
 
 def get_account_daily_uploads(account: str, db=None) -> int:
@@ -331,13 +329,13 @@ def restore_publication_frequency(channel_id: int, db=None) -> bool:
 
     try:
         from config.defaults import LONGFORM_DAILY_HARD_CAP
-        cap = int(LONGFORM_DAILY_HARD_CAP or 1)
+        cap = int(LONGFORM_DAILY_HARD_CAP or 0)
     except Exception:
-        cap = 1
+        cap = 0
 
     db.update_channel_planning_config(
         channel_id,
-        videos_per_day=min(int(original.get("videos_per_day", 2) or 2), cap),
+        videos_per_day=min(max(int(original.get("videos_per_day", 0) or 0), 0), cap),
         videos_day_boost_weight=0.0,
     )
     db.update_shorts_planning_config(
@@ -471,14 +469,9 @@ def ensure_spam_holds(db=None) -> dict:
         cid = int(ch.get("id", 0) or 0)
         if not cid:
             continue
-        raw = db.get_system_state(f"shorts_spam_blocked_until_{cid}")
-        if not raw:
-            continue
-        try:
-            until = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if until <= now:
+        from api.services.channel_policy import get_channel_strike_state
+        until = get_channel_strike_state(cid, db, now=now)["blocked_until"]
+        if until is None or until <= now:
             continue
         slug = ch.get("slug", "")
         try:

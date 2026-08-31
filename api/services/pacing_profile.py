@@ -26,8 +26,24 @@ el comportamiento de producción actual.
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from threading import Lock
 
 logger = logging.getLogger("autotube.pacing")
+
+_telemetry = Counter()
+_telemetry_lock = Lock()
+
+
+def _count(event: str) -> None:
+    with _telemetry_lock:
+        _telemetry[event] += 1
+
+
+def get_pacing_telemetry() -> dict[str, int]:
+    """Return process-local diagnostics; deliberately does not write to DB."""
+    with _telemetry_lock:
+        return dict(_telemetry)
 
 # ── Perfiles (schema) ──────────────────────────────────────────
 # Valores aprobados en el plan (Fase 0, ago 2026):
@@ -87,6 +103,7 @@ DEFAULT_PROFILE = "strike"
 
 _STATE_KEY = "pacing_profile"
 _OVERRIDE_PREFIX = "pacing_"
+_LEGACY_STATE_KEYS = {"global_upload_spacing_min"}
 
 # ── DB lazy ────────────────────────────────────────────────────
 
@@ -113,6 +130,8 @@ def get_active_profile_name(db=None) -> str:
         raw = None
     if raw and raw in PACING_PROFILES:
         return raw
+    if raw not in (None, ""):
+        _count("invalid_values")
     return DEFAULT_PROFILE
 
 
@@ -131,6 +150,14 @@ def get_pacing(db=None) -> dict:
             raw = None
         if raw is not None and raw != "":
             resolved[key] = _coerce(key, raw)
+        elif key in _LEGACY_STATE_KEYS:
+            try:
+                raw = db.get_system_state(key)
+            except Exception:
+                raw = None
+            if raw is not None and raw != "":
+                _count("legacy_fallbacks")
+                resolved[key] = _coerce(key, raw)
     return resolved
 
 
@@ -210,16 +237,22 @@ def _coerce(key: str, raw: str):
     except Exception:
         profile_value = None
     if isinstance(profile_value, bool):
-        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+        value = str(raw).strip().lower()
+        if value not in ("0", "1", "true", "false", "yes", "no", "on", "off"):
+            _count("invalid_values")
+            return profile_value
+        return value in ("1", "true", "yes", "on")
     if isinstance(profile_value, int):
         try:
             return int(float(str(raw)))
         except (TypeError, ValueError):
+            _count("invalid_values")
             return profile_value
     if isinstance(profile_value, float):
         try:
             return float(str(raw))
         except (TypeError, ValueError):
+            _count("invalid_values")
             return profile_value
     return str(raw)
 

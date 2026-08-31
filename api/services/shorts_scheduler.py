@@ -222,11 +222,9 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
         if db is None:
             from database.db_extended import ExtendedDatabase
             db = ExtendedDatabase()
+        from api.services.channel_policy import get_historical_strikes
         strikes_key = f"shorts_spam_strikes_{channel_id}"
-        try:
-            strikes = int(db.get_system_state(strikes_key) or 0) + 1
-        except (TypeError, ValueError):
-            strikes = 1
+        strikes = get_historical_strikes(channel_id, db) + 1
         db.set_system_state(strikes_key, str(strikes))
         from api.services.spam_mitigation import resolve_spam_block_duration_hours
         total_hours = resolve_spam_block_duration_hours(strikes)
@@ -332,16 +330,11 @@ def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
 
 def _channel_shorts_spam_blocked(channel_id: int, db=None) -> bool:
     """Return True if the channel's shorts are blocked by a spam strike."""
-    try:
-        if db is None:
-            from database.db_extended import ExtendedDatabase
-            db = ExtendedDatabase()
-        raw = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
-        if not raw:
-            return False
-        return time.time() < float(raw)
-    except Exception:
-        return False
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    from api.services.channel_policy import get_channel_strike_state
+    return get_channel_strike_state(channel_id, db)["strike_active"]
 
 
 def _shorts_paused(db=None) -> bool:

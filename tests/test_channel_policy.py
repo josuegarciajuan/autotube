@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 
 from api.services.channel_policy import (
     collect_channel_policy_snapshot,
+    get_channel_delivery_policy,
+    get_channel_strike_state,
+    get_policy_telemetry,
     resolve_channel_policy,
     removal_is_confirmed,
     should_create_removal_alert,
@@ -117,3 +120,51 @@ def test_channel_policy_preserves_more_restrictive_db_values():
     assert policy["same_channel_publish_gap_h"] == 48
     assert policy["same_channel_upload_gap_h"] == 12
     assert policy["publish_window_spread_min"] == 17
+
+
+def test_canonical_channel_keys_win_over_legacy_aliases():
+    before = get_policy_telemetry().get("legacy_fallbacks", 0)
+    db = FakeDB({"config_9": {
+        "max_longform_publish_day": 0,
+        "MAX_LONGFORM_PUBLISH_PER_DAY": 3,
+        "same_channel_upload_gap_h": 9,
+        "MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS": 48,
+    }})
+
+    policy = resolve_channel_policy(9, db=db, now=1000)
+
+    assert policy["longform_publish_cap"] == 0
+    assert policy["same_channel_upload_gap_h"] == 9
+    assert get_policy_telemetry().get("legacy_fallbacks", 0) == before
+
+
+def test_missing_canonical_key_uses_legacy_and_counts_fallback():
+    db = FakeDB({"config_10": {"MAX_LONGFORM_PUBLISH_PER_DAY": 2}})
+
+    assert resolve_channel_policy(10, db=db, now=1000)["longform_publish_cap"] == 1
+    assert get_policy_telemetry()["legacy_fallbacks"] >= 1
+
+
+def test_invalid_values_fall_back_without_becoming_truthy_defaults():
+    db = FakeDB({"config_11": {
+        "max_longform_publish_day": "n/a",
+        "MAX_LONGFORM_PUBLISH_PER_DAY": "also-n/a",
+    }})
+
+    assert resolve_channel_policy(11, db=db, now=1000)["longform_publish_cap"] == 1
+    assert get_policy_telemetry()["invalid_values"] >= 1
+
+
+def test_zero_delivery_policy_is_preserved_and_disables_longs():
+    db = FakeDB({
+        "channel_delivery_policy_12":
+        '{"mode":"explicit","longs_per_day":0,"native_shorts_per_day":0}',
+    })
+
+    assert get_channel_delivery_policy(12, db)["longs_per_day"] == 0
+
+
+def test_strike_state_separates_history_from_active_block():
+    db = FakeDB({"shorts_spam_strikes_13": "4", "shorts_spam_blocked_until_13": "900"})
+    state = get_channel_strike_state(13, db=db, now=1000)
+    assert state == {"historical_strikes": 4, "blocked_until": 900.0, "strike_active": False}

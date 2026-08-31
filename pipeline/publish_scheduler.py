@@ -1560,10 +1560,13 @@ def repack_channel_publish_times(
         from api.services.channel_policy import policy_value
         max_per_day = int(policy_value(
             channel_id, "longform_publish_cap", db=db, default=1,
-        ) or 1)
+        ) or 0)
     except Exception:
-        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
-    max_per_day = max(1, max_per_day)
+        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 0)
+    max_per_day = max(0, max_per_day)
+    if max_per_day == 0:
+        logger.info("[%s] repack: publicación long-form desactivada (cap=0)", slug)
+        return []
 
     # ── Política explícita por canal (ago 2026) ──────────────────────────
     # El techo del perfil es global (max_longform_publish_day). Si el canal
