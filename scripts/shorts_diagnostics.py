@@ -16,20 +16,7 @@ from pathlib import Path
 from collections import defaultdict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATABASE_PATH = PROJECT_ROOT / "data" / "autotube.db"
-
-if not DATABASE_PATH.exists():
-    DATABASE_PATH = PROJECT_ROOT / "autotube.db"
-if not DATABASE_PATH.exists():
-    # Try alternate locations
-    for candidate in [
-        PROJECT_ROOT / "var" / "autotube.db",
-        Path("/root/autotube/data/autotube.db"),
-        Path("/root/autotube/autotube.db"),
-    ]:
-        if candidate.exists():
-            DATABASE_PATH = candidate
-            break
+from config.settings import DATABASE_PATH
 
 
 def get_db() -> sqlite3.Connection:

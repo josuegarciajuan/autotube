@@ -3809,7 +3809,7 @@ def resolve_media_path(stored: str) -> Path | None:
     """Resolve a stored path (absolute, relative, or hybrid) to a filesystem Path.
 
     Handles three formats found in the DB:
-      1. Absolute:  /root/autotube/output/videos/foo.mp4
+      1. Absolute:  <project-root>/output/videos/foo.mp4
       2. Relative:  output/videos/foo.mp4
       3. Other abs: /tmp/foo.mp4 (not under project — try as-is)
 

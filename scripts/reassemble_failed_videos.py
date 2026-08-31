@@ -29,10 +29,13 @@ import urllib.request
 import json
 import sqlite3
 
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from config.settings import DATABASE_PATH
 
 API = "http://localhost:8000"
-DB_PATH = "/root/autotube/autotube.db"
+DB_PATH = DATABASE_PATH
 POLL_SEC = 60
 # A reassembly re-renders 100-170 scenes (40-90 min), so the poll cap must
 # be much larger than the old 20 min. 120 * 60s = 2h ceiling per job.

@@ -47,6 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database.db_extended import ExtendedDatabase
+from config.settings import PROJECT_ROOT
 from pipeline.youtube_uploader import YouTubeUploader
 from pipeline.publish_scheduler import calculate_target_public_time
 from config.config_bridge import get_channel_config
@@ -204,7 +205,7 @@ def upload_now(db: ExtendedDatabase, video: dict, dry_run: bool = False) -> bool
     # Validate file
     vp = Path(video_path)
     if not vp.is_absolute():
-        vp = Path("/root/autotube") / video_path
+        vp = PROJECT_ROOT / video_path
     if not vp.exists():
         logger.error("[%s] Video #%d: file not found: %s", slug, video_id, vp)
         with db._connect() as conn:

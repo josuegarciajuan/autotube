@@ -15,14 +15,13 @@ grande. Respeto de invariantes:
   - Nunca publicar antes de now + warmup; el primer slot = siguiente pico del canal.
   - No tocar vídeos cuya hora ya sea correcta (sin llamadas de cuota inútiles).
 
-Uso (desde /root/autotube o un worktree):
+Uso (desde la raíz del proyecto o un worktree):
   python3 scripts/spread_pending_publishes.py --dry-run           # solo plan
   python3 scripts/spread_pending_publishes.py --apply             # aplicar a todos los canales con backlog
   python3 scripts/spread_pending_publishes.py --apply --channels 3,5
   python3 scripts/spread_pending_publishes.py --apply --gap-hours 48
 
-Si se ejecuta desde un worktree, apuntar a los datos de producción:
-  AUTOTUBE_ROOT=/root/autotube python3 scripts/spread_pending_publishes.py --apply
+Si se ejecuta desde un worktree, configurar DATABASE_PATH hacia la BD deseada.
 """
 from __future__ import annotations
 

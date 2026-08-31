@@ -32,7 +32,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("fix_stale_targets")
 
-DB_PATH = "/root/autotube/autotube.db"
+from config.settings import DATABASE_PATH
+DB_PATH = DATABASE_PATH
 
 
 def _get_channel_config(conn, channel_id: int) -> dict:

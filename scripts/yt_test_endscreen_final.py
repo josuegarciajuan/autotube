@@ -9,18 +9,22 @@ import logging
 import sys
 import time
 
-sys.path.insert(0, "/root/autotube")
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from pipeline.youtube_browser import get_browser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("endscreen_test")
 
-VIDEO_ID = "qKpbl0-aK8M"
-ACCOUNT = "tracatrack"
+VIDEO_ID = None
+ACCOUNT = None
 
 
 def main():
+    if not VIDEO_ID or not ACCOUNT:
+        raise SystemExit("Configura VIDEO_ID y ACCOUNT explícitamente para ejecutar este diagnóstico")
     log.info("== End Screen Test for %s ==", VIDEO_ID)
 
     # ── 1. Get browser (reuses existing session) ─────────────────
