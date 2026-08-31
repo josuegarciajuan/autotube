@@ -30,6 +30,9 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from config import settings
+PROJECT_ROOT = settings.PROJECT_ROOT
+
 from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -44,8 +47,8 @@ logging.basicConfig(
 logger = logging.getLogger("diagnose_all")
 
 # ── Config ────────────────────────────────────────────────────
-TOKENS_DIR = PROJECT_ROOT / "tokens"
-OUTPUT_DIR = PROJECT_ROOT / "output"
+TOKENS_DIR = settings.TOKENS_DIR
+OUTPUT_DIR = settings.OUTPUT_DIR
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SCOPES = [
@@ -53,9 +56,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
-
-# Canales con token disponible
-CHANNELS_WITH_TOKENS = ["canal2", "canal3", "canal4", "canal5"]
 
 # Cuota: 1 unit por videos().list (50 ids) + 1 por channels().list + 1 por playlistItems
 QUOTA_ESTIMATE_PER_CHANNEL = 10  # generoso
@@ -466,10 +466,10 @@ def diagnose_channel(slug: str, yt_service, db: ExtendedDatabase) -> dict:
 # ── Global report generation ────────────────────────────────────
 
 
-def run_diagnostic(channel_filter: str = None, json_only: bool = False) -> dict:
+def run_diagnostic(channel_slugs: list[str], json_only: bool = False) -> dict:
     """Run diagnostic on all (or one) channels. Returns full report dict."""
     db = ExtendedDatabase()
-    channels_to_check = [channel_filter] if channel_filter else CHANNELS_WITH_TOKENS
+    channels_to_check = channel_slugs
 
     now_iso = datetime.now(timezone.utc).isoformat()
     report = {
@@ -582,20 +582,34 @@ def print_summary(report: dict):
 
 
 if __name__ == "__main__":
+    from scripts.runtime_context import add_channel_selector_arguments, resolve_channels, SelectorError
     parser = argparse.ArgumentParser(description="Diagnóstico completo de canales YouTube")
+    add_channel_selector_arguments(parser)
     parser.add_argument("--json-only", action="store_true",
                         help="Solo generar JSON de salida sin log verboso")
-    parser.add_argument("--channel", type=str, default=None,
-                        help="Analizar solo un canal (ej: canal2)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validar selector y mostrar alcance sin consumir cuota")
     parser.add_argument("--no-summary", action="store_true",
                         help="No imprimir resumen en pantalla")
     args = parser.parse_args()
+
+    try:
+        contexts = resolve_channels(
+            channel_id=args.channel_id, slug=args.slug, project=args.project,
+            all_channels=args.all_channels, yes=args.yes,
+        )
+    except SelectorError as exc:
+        parser.error(str(exc))
+
+    if args.dry_run:
+        print(json.dumps({"channels": [c.slug for c in contexts]}, ensure_ascii=False))
+        raise SystemExit(0)
 
     if args.json_only:
         logging.getLogger().setLevel(logging.WARNING)
 
     logger.info("Iniciando diagnóstico de canales...")
-    report = run_diagnostic(channel_filter=args.channel, json_only=args.json_only)
+    report = run_diagnostic([c.slug for c in contexts], json_only=args.json_only)
 
     output_path = save_report(report)
     logger.info("Reporte guardado en: %s", output_path)
