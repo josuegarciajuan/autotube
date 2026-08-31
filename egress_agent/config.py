@@ -25,6 +25,7 @@ class AgentConfig:
     google_account: str = ""           # cuenta Google (traza perfiles/tokens)
     egress_label: str = ""             # etiqueta UI (p. ej. "IP1-ES")
     auth_token: str = ""               # token secreto que valida el server principal
+    expected_ip: str = ""              # IP residencial esperada (58.68.169.25)
 
     # ── Paths (relativos a la raíz del repo o absolutos) ────────
     project_root: str = ""             # raíz del repo autotube en la VPS

@@ -81,6 +81,18 @@ class YouTubeChannelManager:
 
         Returns a dict with {updated_fields: list, ok: bool, ...}
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            _r = _egress.api_call("update_channel_metadata", {"kwargs": {
+                "description": description, "keywords": keywords,
+                "country": country, "language": language,
+            }})
+            if not _r.get("ok"):
+                return {"ok": False, "error": _r.get("error", "update_channel_metadata vía agente falló")}
+            return {"ok": True, "updated_fields": ["description", "keywords", "country", "language"]}
+
         if not self._service:
             if not self.authenticate():
                 return {"error": "Authentication failed"}

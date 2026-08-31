@@ -148,6 +148,15 @@ class YouTubeCommentManager:
 
         Returns {yt_comment_id, text}.
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            _r = _egress.api_call("post_comment", {"kwargs": {"video_id": yt_video_id, "text": text}})
+            if not _r.get("ok"):
+                raise RuntimeError(_r.get("error", "post_comment vía agente falló"))
+            return {"yt_comment_id": _r.get("result", {}).get("comment_id", ""), "text": text}
+
         self._ensure_auth()
 
         body = {
@@ -181,6 +190,15 @@ class YouTubeCommentManager:
 
         Returns {yt_comment_id, text}.
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            _r = _egress.api_call("reply_comment", {"kwargs": {"parent_id": parent_comment_id, "text": text}})
+            if not _r.get("ok"):
+                raise RuntimeError(_r.get("error", "reply_comment vía agente falló"))
+            return {"yt_comment_id": _r.get("result", {}).get("comment_id", ""), "text": text}
+
         self._ensure_auth()
 
         body = {
