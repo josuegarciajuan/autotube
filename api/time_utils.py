@@ -66,8 +66,11 @@ def madrid_day_range(day: date | str | None = None) -> tuple[str, str]:
         day = datetime.now(UTC).astimezone(MADRID).date()
     elif isinstance(day, str):
         day = date.fromisoformat(day)
-    start_local = datetime.combine(day, time.min, MADRID)
-    end_local = start_local + timedelta(days=1)
+    start_local = datetime.combine(day, time.min, tzinfo=MADRID)
+    # Build the next wall-clock midnight independently. Adding 24 hours to an
+    # aware datetime is not a calendar-day operation across DST transitions.
+    next_day = day + timedelta(days=1)
+    end_local = datetime.combine(next_day, time.min, tzinfo=MADRID)
     return sqlite_utc(start_local), sqlite_utc(end_local)
 
 

@@ -462,7 +462,6 @@ def _recover_inconsistent_upload_times(db) -> int:
     )
 
     now = datetime.now(UTC)
-    now_local = now.astimezone(MADRID).replace(tzinfo=None)
     for row in rows:
         video_id = row["id"]
         channel_id = row["channel_id"]
@@ -986,7 +985,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         return None
 
     # ── 2. Find videos awaiting upload (due now or needing scheduling) ──
-    now = datetime.now()
+    now = datetime.now(UTC)
+    now_local = now.astimezone(MADRID).replace(tzinfo=None)
 
     with db._connect() as conn:
         rows = conn.execute(

@@ -31,6 +31,12 @@ def test_madrid_day_range_handles_dst():
     assert end == "2026-08-30 22:00:00"
 
 
+def test_madrid_day_range_uses_next_local_midnight_in_winter():
+    start, end = madrid_day_range("2026-10-25")
+    assert start == "2026-10-24 22:00:00"
+    assert end == "2026-10-25 23:00:00"
+
+
 def test_timestamp_migration_dry_run_and_idempotency(tmp_path):
     from scripts.migrate_timestamps import migrate_timestamps
     import sqlite3

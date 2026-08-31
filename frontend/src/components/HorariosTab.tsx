@@ -17,6 +17,7 @@ import {
   ExecutionEvent,
   TimingStats,
   parseApiDate,
+  API_TIME_ZONE,
   formatApiDate,
 } from '../lib/api'
 
@@ -46,7 +47,12 @@ function getEventHour(dtStr: string | null): number | null {
   try {
     const d = parseApiDate(dtStr)
     if (!d) return null
-    return d.getHours() + d.getMinutes() / 60
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: API_TIME_ZONE, hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(d)
+    const hour = Number(parts.find(p => p.type === 'hour')?.value)
+    const minute = Number(parts.find(p => p.type === 'minute')?.value)
+    return Number.isFinite(hour) && Number.isFinite(minute) ? hour + minute / 60 : null
   } catch { return null }
 }
 
@@ -55,7 +61,12 @@ function getEventDate(dtStr: string | null): string | null {
   try {
     const d = parseApiDate(dtStr)
     if (!d) return null
-    return `${d.getDate()} ${['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][d.getMonth()]}`
+    const parts = new Intl.DateTimeFormat('es-ES', {
+      timeZone: API_TIME_ZONE, day: 'numeric', month: 'short',
+    }).formatToParts(d)
+    const day = parts.find(p => p.type === 'day')?.value
+    const month = parts.find(p => p.type === 'month')?.value
+    return day && month ? `${day} ${month}` : null
   } catch { return null }
 }
 
