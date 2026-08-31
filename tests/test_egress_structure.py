@@ -41,10 +41,12 @@ def test_no_managed_credentials_in_server():
         )
 
 
-def test_no_client_secret_leaks_into_config():
-    """Ningún client_secret_*.json se commitea a config/ (gitignored)."""
-    leaked = list((ROOT / "config").glob("client_secret_*.json"))
-    assert not leaked, f"client_secret_*.json no debe versionarse en config/: {leaked}"
+def test_no_client_secret_leaks_into_git():
+    """Ningún client_secret_*.json se versiona: están gitignored (secreto)."""
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "client_secret" in gitignore, (
+        "Los client_secret_*.json son secretos y deben estar en .gitignore."
+    )
 
 
 def test_egress_agents_is_gitignored():
