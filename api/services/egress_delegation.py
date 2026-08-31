@@ -30,6 +30,24 @@ def egress_client_for(slug: str) -> Optional[EgressAgent]:
     return get_egress_client(slug)
 
 
+def fail_closed_if_managed(slug: str, feature: str) -> None:
+    """Fail-closed: lanza si un canal gestionado intenta egress local no delegado.
+
+    Mientras un camino de egress (stats, playlists, comentarios, metadata...) no
+    esté aún delegado al agente, para un canal GESTIONADO se BLOQUEA con un
+    error claro en lugar de filtrar la IP del server. Cuando ese camino se delegue
+    en un incremento posterior, esta guardia se retira de esa llamada.
+    """
+    if not slug:
+        return
+    if is_egress_managed(slug):
+        raise EgressAgentUnavailableError(
+            f"El canal '{slug}' es gestionado por un agente egress y '{feature}' "
+            f"aún no está delegado — egress local bloqueado (fail-closed). "
+            f"Migrar '{feature}' a delegación vía agente o pausar el canal."
+        )
+
+
 def browser_action(slug: str, action: str, account: str = "",
                    params: Optional[dict] = None,
                    local_fn: Optional[Callable[[], dict]] = None) -> dict:

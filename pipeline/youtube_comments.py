@@ -93,6 +93,8 @@ class YouTubeCommentManager:
     # ── Auth ───────────────────────────────────────────────────────
 
     def authenticate(self) -> bool:
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(self.slug, "comments")
         creds = _load_credentials(self._token_path)
         if creds is None:
             return False

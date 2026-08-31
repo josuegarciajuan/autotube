@@ -201,6 +201,8 @@ class YouTubePlaylistManager:
 
     def authenticate(self) -> bool:
         """Load and refresh channel token. Returns True if authenticated."""
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(self.slug, "playlists")
         creds = _load_credentials(self._token_path)
         if creds is None:
             logger.error("No valid credentials for %s", self.slug)
