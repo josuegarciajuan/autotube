@@ -1043,6 +1043,85 @@ class YouTubeStatsFetcher:
 
     # ── Batch collection ───────────────────────────────────────
 
+    def _collect_and_store_via_egress(self, db, _egress) -> dict:
+        """Recolecta stats de un canal gestionado vía el agente (IP residencial).
+
+        El agente hace el fetch (videos + canal + watch-time) y devuelve el
+        payload; aquí se guarda en la DB del server. Solo se usa para canales
+        con egress configurado (no afecta a los canales locales).
+        """
+        import sqlite3 as _sqlite
+        from config.settings import DATABASE_PATH
+        video_ids = []
+        rows = []
+        channel_id = None
+        try:
+            with db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, yt_video_id FROM videos "
+                    "WHERE channel_id=(SELECT id FROM channels WHERE slug=?) "
+                    "AND yt_video_id IS NOT NULL AND yt_video_id != ''",
+                    (self.slug,),
+                ).fetchall()
+                video_ids = [r["yt_video_id"] for r in rows]
+                ch_row = conn.execute(
+                    "SELECT id FROM channels WHERE slug=?", (self.slug,)
+                ).fetchone()
+                channel_id = ch_row["id"] if ch_row else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] stats egress: no se pudo leer vídeos: %s", self.slug, exc)
+            channel_id = None
+
+        data = _egress.api_call("collect_stats", {"video_ids": video_ids})
+        if not data.get("ok"):
+            raise RuntimeError(data.get("error", "collect_stats falló"))
+        payload = data.get("result", {})
+
+        now = datetime.now().isoformat()
+        updated = 0
+        vids = payload.get("videos", {})
+        for r in (rows or []):
+            vid = r["id"]
+            yt = r["yt_video_id"]
+            s = vids.get(yt)
+            if not s:
+                continue
+            try:
+                with db._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO video_stats_history "
+                        "(video_id, yt_video_id, views, likes, comments, fetched_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (vid, yt, int(s.get("views", 0)), int(s.get("likes", 0)),
+                         int(s.get("comments", 0)), now),
+                    )
+                    conn.commit()
+                updated += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[%s] stats egress insert video failed: %s", self.slug, exc)
+
+        ch_updated = False
+        ch = payload.get("channel", {})
+        if ch and channel_id:
+            try:
+                with db._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO channel_stats_history "
+                        "(channel_id, subscribers, total_views, video_count, "
+                        " estimated_minutes_watched, fetched_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (channel_id, int(ch.get("subscribers", 0)),
+                         int(ch.get("total_views", 0)), int(ch.get("video_count", 0)),
+                         int(payload.get("watch_time_min", 0) or 0), now),
+                    )
+                    conn.commit()
+                ch_updated = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] stats egress insert channel failed: %s", self.slug, exc)
+
+        return {"videos_updated": updated, "shorts_updated": 0,
+                "channel_updated": ch_updated, "via_egress": True}
+
     def collect_and_store(
         self,
         db,
@@ -1061,6 +1140,19 @@ class YouTubeStatsFetcher:
         Returns summary dict including analytics_updated count and
         quota_exhausted flag for UI feedback.
         """
+        # ── Delegación al agente egress (canal gestionado) ──
+        # Si el canal tiene VPS+IP configurado, el fetch de stats lo hace el
+        # agente (IP residencial) y el server guarda el payload en su DB.
+        from api.services.egress_delegation import egress_client_for as _ecf
+        _egress = _ecf(self.slug)
+        if _egress is not None:
+            try:
+                return self._collect_and_store_via_egress(db, _egress)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] stats via egress failed: %s", self.slug, exc)
+                return {"videos_updated": 0, "shorts_updated": 0,
+                        "channel_updated": False, "error": str(exc)[:500]}
+
         # ── Scrape fallback config ──
         # Default ON (fail-open): this is a resilience fallback, so a config
         # load failure should not disable it.
