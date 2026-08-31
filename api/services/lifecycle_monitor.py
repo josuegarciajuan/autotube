@@ -312,6 +312,7 @@ def check_all_health(db) -> dict:
 
     # ── Check 6: Auto-resolve alerts for completed entities ──
     resolved += _auto_resolve_completed(db)
+    resolved += _auto_resolve_recovery_checkpoints(db)
 
     # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
     created += _check_platform_auth_errors(db)
@@ -352,6 +353,49 @@ def check_all_health(db) -> dict:
         created, resolved,
     )
     return {"alerts_created": created, "alerts_resolved": resolved}
+
+
+def _auto_resolve_recovery_checkpoints(db) -> int:
+    """Resolve a checkpoint only when a later durable checkpoint exists.
+
+    A checkpoint is diagnostic, not a failure: resolving it merely records that
+    the next review superseded it.  We never resolve on a transient stats read.
+    """
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT pa.id, pa.entity_id, pa.metadata_json
+                   FROM pipeline_alerts pa
+                   WHERE pa.resolved=0
+                     AND pa.alert_type LIKE 'recovery_checkpoint_%'"""
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                    hours = int(metadata["checkpoint_hours"])
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+                later = conn.execute(
+                    """SELECT 1 FROM recovery_checkpoints
+                       WHERE video_id=? AND checkpoint_hours>? LIMIT 1""",
+                    (row["entity_id"], hours),
+                ).fetchone()
+                if not later:
+                    continue
+                conn.execute(
+                    """UPDATE pipeline_alerts SET resolved=1,
+                       resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message, '') ||
+                       ' [Auto-resuelto: checkpoint posterior ejecutado]'
+                       WHERE id=? AND resolved=0""", (row["id"],),
+                )
+                resolved += 1
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Recovery checkpoint auto-resolve failed: %s", exc)
+    return resolved
 
 
 def create_alert(db, *,
