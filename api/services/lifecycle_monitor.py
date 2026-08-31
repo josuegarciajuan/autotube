@@ -40,6 +40,7 @@ TASK_TIMEOUTS = {
     "health_monitor": 1200,         # este mismo health-check (90s)
     "publish_coverage": 1200,        # cobertura de publicación (10 min)
     "yt_state_reconcile": 900,       # verdad externa de publicación de shorts (5 min)
+    "editorial_reviews": 3600,        # revisiones por vídeo + auditoría diaria
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

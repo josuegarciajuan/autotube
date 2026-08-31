@@ -1369,6 +1369,9 @@ def migrate_v2(db_path: str = None):
     # ── v49: durable recovery experiment checkpoints ──
     _migrate_v49(conn, logger)
 
+    # ── v50: durable, quota-free editorial review checkpoints ──
+    _migrate_v50(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3186,6 +3189,15 @@ def _migrate_v49(conn, logger):
     conn.commit()
     if schema.exists():
         logger.info("Migration v49: recovery checkpoints table ensured")
+
+
+def _migrate_v50(conn, logger):
+    """Idempotent v50: scheduled read-only editorial review ledger."""
+    schema = Path(__file__).parent / "schema_v50.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        conn.commit()
+        logger.info("Migration v50: editorial review checkpoints ensured")
 
 
 def _migrate_v10(conn, logger):

@@ -509,3 +509,18 @@ VIRAL_PLAYLIST_KEYWORDS = {
     "naufragios-historicos": ["shipwreck survival stories", "famous maritime disasters", "lost ships found documentary", "ocean survival true stories"],
     "montanas-mortales": ["mount everest disaster documentary", "deadliest mountain expeditions", "k2 climbing tragedy stories", "high altitude survival stories"],
 }
+
+# Recovery/editorial profile for this channel. The review service consumes it
+# via config_bridge; it does not import this module directly.
+EDITORIAL_RECOVERY_REVIEW = {
+    "enabled": True,
+    "max_attempts": 3,
+    "retry_minutes": 60,
+    "min_impressions": 100,
+    "min_ctr_percent": 4.0,
+    "min_retention_percent": 35.0,
+    "stats_max_age_days": 7,
+    "require_thumbnail": True,
+    "blocked_terms": ["cómo fabricar", "guía para suicidarse"],
+    "required_title_keywords": [],
+}

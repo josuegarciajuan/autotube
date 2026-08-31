@@ -2176,6 +2176,28 @@ class PipelineOrchestrator:
                 )
                 logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
 
+            # Last safe admission point: validate only this new upload. The
+            # channel profile owns the rules and failures are visible to the
+            # operator; no existing video is changed.
+            try:
+                from api.services.editorial_reviews import validate_new_video
+                verdict = validate_new_video(
+                    self.canal, (script or {}).get("tema", ""), title,
+                    video_data.get("thumbnail_path", ""),
+                )
+                if not verdict["allowed"]:
+                    from api.services.lifecycle_monitor import emit_alert
+                    emit_alert(
+                        self.db, entity_type="video", entity_id=self.db_video_id,
+                        channel_id=self._get_channel_id(), alert_type="editorial_preflight_blocked",
+                        severity="critical", title="Subida bloqueada por revisión editorial",
+                        message="; ".join(verdict["reasons"]), metadata=verdict,
+                    )
+                    logger.error("[%s] Editorial preflight blocked upload: %s", self.canal, verdict["reasons"])
+                    return None
+            except Exception as validation_exc:
+                logger.warning("Editorial preflight unavailable; upload continues: %s", validation_exc)
+
             # ── SEO filename slug from final title ─────────────────
             # YouTube uses the uploaded file name as a ranking signal.
             # We construct a keyword-rich slug so the temp copy sent to
@@ -2315,6 +2337,15 @@ class PipelineOrchestrator:
                                 target_public_at=publish_schedule_info["target_public_at"],
                                 peak_source=publish_schedule_info["peak_source"],
                             )
+
+                        # Opt-in channel review checkpoints. Scheduling is
+                        # attached to this new upload only; no historical video
+                        # is backfilled or modified.
+                        try:
+                            from api.services.editorial_reviews import schedule_video_reviews
+                            schedule_video_reviews(self.db, db_video_id)
+                        except Exception as review_exc:
+                            logger.warning("Editorial review scheduling skipped: %s", review_exc)
 
             duration_ms = int((time.time() - start) * 1000)
             self._timing["phases"]["upload"] = duration_ms
