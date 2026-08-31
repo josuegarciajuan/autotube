@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Bell, BellOff, CheckCircle, Eye, XCircle } from 'lucide-react'
 import { api } from '../../lib/api'
+import { useMonitorWebSocket } from '../../hooks/useMonitorWebSocket'
 
 interface Alert {
   id: number
@@ -44,6 +45,16 @@ export default function AlertsPanel() {
 
   useEffect(() => { fetchAlerts() }, [fetchAlerts])
   useEffect(() => { fetchSilenced() }, [fetchSilenced])
+
+  // v50: refresca la lista cuando llega una alerta nueva por WebSocket (el
+  // panel ya abierto no esperaba a recargar la página para mostrar alertas
+  // de reminders/cobertura de stats).
+  const { lastUpdate } = useMonitorWebSocket()
+  useEffect(() => {
+    if (lastUpdate?.type === 'health_update' && (lastUpdate.alerts_created || 0) > 0) {
+      fetchAlerts()
+    }
+  }, [lastUpdate, fetchAlerts])
 
   const visible = alerts.filter(a =>
     sevFilter === 'todas' || a.severity === sevFilter

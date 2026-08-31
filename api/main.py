@@ -469,6 +469,11 @@ async def lifespan(app: FastAPI):
     # endpoints leen esa verdad, no el status optimista que se marcaba al subir.
     yt_state_task = _supervised_loop("yt_state_reconcile", _yt_state_reconcile_loop)
 
+    # ── Recordatorios operativos (v50): solo alertan, nunca ejecutan ──
+    # Al vencer un scheduled_reminder se emite una alerta de sistema
+    # (scheduled_reminder_due) para revisión humana. Sin acciones en silencio.
+    reminders_task = _supervised_loop("reminders", _reminder_loop)
+
     yield
     
     # Shutdown
@@ -816,6 +821,54 @@ async def _health_monitor_loop():
         except Exception as exc:
             logger.warning("Health monitor error: %s", exc)
         await asyncio.sleep(90)  # Check every 90 seconds
+
+
+async def _reminder_loop():
+    """Fire due scheduled reminders as SYSTEM ALERTS (never silent actions).
+
+    v50: los recordatorios operativos (scheduled_reminders) son seguimientos
+    que SOLO alertan: al vencer emiten una alerta de sistema
+    `scheduled_reminder_due` visible en Monitor/Alert Center y se marcan como
+    'alerted'. NO ejecutan generación, subida, stats ni cambios de
+    configuración — el operador decide tras revisar la alerta.
+    """
+    await asyncio.sleep(45)  # startup grace
+    logger.info("Reminders loop started (interval: 60s)")
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            from api.services.lifecycle_monitor import emit_alert
+            _tth("reminders")
+            db = get_db()
+            due = await asyncio.to_thread(db.get_due_scheduled_reminders)
+            for r in due:
+                alert_id = emit_alert(
+                    db, entity_type="system",
+                    entity_id=r["id"],          # estable, nunca NULL → dedup OK
+                    alert_type=r.get("alert_type") or "scheduled_reminder_due",
+                    severity="warning",
+                    title=r["title"],
+                    message=r["message"],
+                    metadata={"reminder_id": r["id"], "due_at": r["due_at"]},
+                )
+                # Transición transaccional tras emitir: evita re-emitir el
+                # mismo recordatorio en cada pasada del loop.
+                await asyncio.to_thread(db.mark_scheduled_reminder_alerted, r["id"], alert_id)
+                logger.info("Reminder #%s fired → alert #%s (%s)", r["id"], alert_id, r["title"])
+                # Notificar a los clientes del Monitor para que el panel de
+                # alertas se refresque sin recargar la página.
+                try:
+                    from api.routers.monitor import broadcast_monitor_update
+                    await broadcast_monitor_update({
+                        "type": "health_update",
+                        "alerts_created": 1,
+                        "alerts_resolved": 0,
+                    })
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("Reminders loop error: %s", exc)
+        await asyncio.sleep(60)
 
 
 def _recover_quota_once(db, *, now_utc=None, dispatch_uploads=None) -> list:
@@ -3020,6 +3073,44 @@ def _reset_stale_collection_state():
     return False
 
 
+def _emit_stats_coverage_alert(db, channel: dict, status: str, reason: str = ""):
+    """Emit a deduplicated system alert when a channel lacks Analytics coverage.
+
+    v50: canales sin token/scope o con fallo técnico NO se reportan como ceros;
+    generan una alerta accionable (stats_requires_authorization /
+    stats_collection_failed) visible en Monitor/Alert Center.
+
+    entity_id = channel id (estable, no NULL) — el dedup de pipeline_alerts por
+    (entity_type, entity_id, alert_type) evita duplicados entre recolecciones.
+    """
+    try:
+        from api.services.lifecycle_monitor import emit_alert
+        if status == "failed":
+            emit_alert(
+                db, entity_type="system", entity_id=channel["id"],
+                channel_id=channel["id"], alert_type="stats_collection_failed",
+                severity="warning",
+                title=f"Recolección de stats falló: {channel.get('name', channel.get('slug', '?'))}",
+                message=reason or "Error técnico durante la recolección manual de stats.",
+                metadata={"channel_slug": channel.get("slug"), "status": status},
+            )
+        else:
+            emit_alert(
+                db, entity_type="system", entity_id=channel["id"],
+                channel_id=channel["id"], alert_type="stats_requires_authorization",
+                severity="warning",
+                title=f"Stats sin Analytics: {channel.get('name', channel.get('slug', '?'))}",
+                message=(
+                    "Impresiones, CTR y retención requieren YouTube Analytics con "
+                    "OAuth (scope yt-analytics.readonly). "
+                    + (reason or "Autoriza el canal y re-recolecta desde el dashboard.")
+                ),
+                metadata={"channel_slug": channel.get("slug"), "status": status},
+            )
+    except Exception as exc:
+        logger.warning("Could not emit stats coverage alert: %s", exc)
+
+
 def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
     """Collect YouTube stats for all active channels.
 
@@ -3075,10 +3166,24 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                 force or not db.is_quota_exhausted_for_channel(slug)
             )
             if channel_use_data_api and not token_path.exists():
+                # v50: sin token no hay Analytics API → el canal queda marcado
+                # como "requiere autorización" (nunca ceros falsos) y se crea
+                # una alerta accionable. Se registra también en el ledger.
+                ch_status = "requires_authorization"
                 STATS_COLLECTION_STATE["channels"].append({
                     "slug": slug, "ok": False, "skipped": True,
+                    "status": ch_status,
                     "reason": "no token",
                 })
+                try:
+                    db.record_stats_collection_run(
+                        ch["id"], ch_status, deep=deep,
+                        use_data_api=channel_use_data_api,
+                        result={"reason": "no token"},
+                    )
+                except Exception:
+                    pass
+                _emit_stats_coverage_alert(db, ch, ch_status, reason="No hay token OAuth en tokens/%s.pickle" % slug)
                 continue
             
             try:
@@ -3096,9 +3201,42 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     result.get("analytics_updated", 0),
                     result.get("channel_updated", False),
                 )
+                # ── v50: clasificar cobertura real del canal (nunca ceros) ──
+                # collected    → Analytics completo almacenado
+                # public_only  → sin Analytics (scrape/modo cuota), solo públicos
+                # requires_authorization → falta token o scope yt-analytics.readonly
+                # quota_limited → Analytics no disponible por cuota agotada
+                # failed       → error técnico
+                has_err = bool(result.get("error"))
+                analytics_ok = result.get("analytics_available", False)
+                any_analytics_stored = (
+                    result.get("analytics_updated", 0) > 0
+                    or result.get("retention_stored", 0) > 0
+                    or result.get("impressions_stored", 0) > 0
+                )
+                if has_err:
+                    ch_status = "failed"
+                elif not analytics_ok and not result.get("authenticated", False):
+                    ch_status = "requires_authorization"
+                elif not analytics_ok:
+                    ch_status = "public_only"
+                elif any_analytics_stored:
+                    ch_status = "collected"
+                else:
+                    ch_status = "public_only"
+                try:
+                    db.record_stats_collection_run(
+                        ch["id"], ch_status, deep=deep,
+                        use_data_api=channel_use_data_api, result=result,
+                    )
+                except Exception:
+                    pass
+                if ch_status in ("requires_authorization", "failed"):
+                    _emit_stats_coverage_alert(db, ch, ch_status, reason=result.get("error"))
                 STATS_COLLECTION_STATE["channels"].append({
                     "slug": slug,
                     "ok": "error" not in result,
+                    "status": ch_status,
                     "videos_updated": result.get("videos_updated", 0),
                     "shorts_updated": result.get("shorts_updated", 0),
                     "analytics_updated": result.get("analytics_updated", 0),
@@ -3178,12 +3316,41 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     
             except Exception as exc:
                 logger.error("Stats collection failed for %s: %s", slug, exc)
+                try:
+                    db.record_stats_collection_run(
+                        ch["id"], "failed", deep=deep,
+                        use_data_api=channel_use_data_api,
+                        result={"error": str(exc)},
+                    )
+                except Exception:
+                    pass
+                _emit_stats_coverage_alert(db, ch, "failed", reason=str(exc))
                 STATS_COLLECTION_STATE["channels"].append({
-                    "slug": slug, "ok": False, "error": str(exc),
+                    "slug": slug, "ok": False, "status": "failed", "error": str(exc),
                 })
 
+        # ── v50: resultado global con semántica real ──
+        # success = todos los canales con Analytics completo.
+        # partial  = algunos canales requieren autorización / solo públicos.
+        # error    = al menos un fallo técnico (el estado top-level se mantiene
+        #            'success' solo cuando no hubo fallos, para no romper la UI;
+        #            el campo `result` expresa la cobertura real).
+        chans = STATS_COLLECTION_STATE.get("channels", [])
+        any_failed = any(c.get("status") == "failed" for c in chans)
+        any_missing = any(
+            c.get("status") in ("requires_authorization", "public_only", "quota_limited")
+            for c in chans
+        )
+        if any_failed:
+            global_result = "error"
+        elif any_missing:
+            global_result = "partial"
+        else:
+            global_result = "success"
+
         STATS_COLLECTION_STATE.update({
-            "status": "success",
+            "status": "success" if not any_failed else "error",
+            "result": global_result,
             "finished_at": _time_module.time(),
             "scrape_mode": any_scrape_mode,
         })

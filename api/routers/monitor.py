@@ -559,6 +559,36 @@ def res_all_alerts(
     return {"ok": True, "resolved": count}
 
 
+# ── Scheduled reminders (v50): follow-ups that ONLY alert ──
+# Recordatorios operativos (auditorías programadas) que al vencer emiten una
+# alerta de sistema. Estos endpoints permiten listarlos y marcarlos como
+# resueltos tras la revisión humana. NUNCA ejecutan acciones de contenido.
+
+@router.get("/monitor/reminders")
+def list_reminders(status: Optional[str] = Query(None, description="pending, alerted, resolved"),
+                   limit: int = Query(50, ge=1, le=200)):
+    """List scheduled reminders (operator follow-ups)."""
+    db = get_db()
+    try:
+        rows = db.list_scheduled_reminders(status=status, limit=limit)
+        return {"ok": True, "reminders": rows}
+    except Exception as exc:
+        logger.error("List reminders error: %s", exc)
+        return {"ok": False, "reminders": [], "error": str(exc)}
+
+
+@router.post("/monitor/reminders/{reminder_id}/resolve")
+def resolve_reminder(reminder_id: int):
+    """Mark a reminder as resolved after the operator reviewed the follow-up."""
+    db = get_db()
+    try:
+        ok = db.resolve_scheduled_reminder(reminder_id)
+        return {"ok": ok, "reminder_id": reminder_id}
+    except Exception as exc:
+        logger.error("Resolve reminder error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/monitor/alerts/silenced-types")
 def get_silenced_types():
     """Get the alert types silenced by the operator."""

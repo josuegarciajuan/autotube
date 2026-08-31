@@ -96,10 +96,12 @@ def get_video_analytics(video_id: int):
     # Group by report_type
     grouped = {"traffic_source": [], "demographics": [], "retention": None}
     for row in analytics:
-        if row["report_type"] == "retention":
+        # v50: el writer guarda 'retention_pct'; el API lo normaliza a
+        # 'retention' para no romper el contrato existente del frontend.
+        if row["report_type"] in ("retention", "retention_pct"):
             grouped["retention"] = row["metric_value"]
         else:
-            grouped[row["report_type"]].append({
+            grouped.setdefault(row["report_type"], []).append({
                 "dimension": row["dimension"],
                 "value": row["metric_value"],
             })

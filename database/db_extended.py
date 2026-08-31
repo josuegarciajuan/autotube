@@ -1369,6 +1369,11 @@ def migrate_v2(db_path: str = None):
     # ── v49: durable recovery experiment checkpoints ──
     _migrate_v49(conn, logger)
 
+    # ── v50: analytics completeness + collection-runs ledger + operator reminders ──
+    # Impresiones/CTR/retención persistentes en toda recolección manual; estado
+    # por canal (nunca ceros falsos) y recordatorios que SOLO alertan.
+    _migrate_v50(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3188,6 +3193,90 @@ def _migrate_v49(conn, logger):
         logger.info("Migration v49: recovery checkpoints table ensured")
 
 
+def _seed_default_reminders(conn, logger):
+    """Seed the one-shot operator follow-ups (audit CO, ago 2026).
+
+    INSERT OR IGNORE + unique(entity_type, entity_id) ⇒ se insertan UNA vez,
+    aunque migrate_v2 se ejecute en cada arranque. Al vencer, el loop
+    `reminders` de api/main.py las emite como alerta de sistema
+    (scheduled_reminder_due) para revisión humana — nunca ejecuta nada en
+    silencio.
+    """
+    try:
+        now = datetime.utcnow()
+        defaults = [
+            (1, 1, "Revisión stats: cobertura OAuth y métricas Analytics",
+             "Verificar cobertura de impresiones/CTR/retención tras el despliegue: "
+             "canales sin token o sin scope yt-analytics.readonly figuran como "
+             "'requiere autorización'. Corregir autorizaciones y re-recolectar "
+             "desde el dashboard.",
+             1),
+            (2, 7, "Revisión distribución: impresiones, indexación y estados",
+             "Comparar impresiones confirmadas vs 0, estados de publicación "
+             "(deleted_on_yt, uploaded_private, unlisted) y restricciones por canal. "
+             "Diagnosticar distribución ANTES de tocar packaging. No confundir "
+             "cero impresiones con mal CTR.",
+             7),
+            (3, 14, "Revisión packaging: CTR y coherencia título-miniatura",
+             "Evaluar CTR por vídeo y coherencia título-miniatura. Con poco tráfico, "
+             "no concluir con <500 impresiones por variante o <7 días de exposición. "
+             "No ejecutar A/B de título y miniatura a la vez.",
+             14),
+            (4, 30, "Decisión editorial: topic-market fit, retención y pilares",
+             "Evaluar retención ponderada, pilares con fit y abandonos. Decidir "
+             "mantener/iterar/abandonar ángulos. No aumentar volumen como solución "
+             "automática.",
+             30),
+        ]
+        for entity_id, offset_days, title, message, days in defaults:
+            due_at = (now + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+            conn.execute(
+                """INSERT OR IGNORE INTO scheduled_reminders
+                   (entity_type, entity_id, title, message, alert_type, due_at, status, metadata_json)
+                   VALUES ('system', ?, ?, ?, 'scheduled_reminder_due', ?, 'pending', ?)""",
+                (entity_id, title, message, due_at,
+                 json.dumps({"offset_days": offset_days, "scope": "audit_follow_up"})),
+            )
+        logger.info("Migration v50: default operator reminders ensured (T+1/7/14/30)")
+    except Exception as exc:
+        logger.warning("Migration v50: could not seed default reminders: %s", exc)
+
+
+def _migrate_v50(conn, logger):
+    """Idempotent v50: analytics completeness + collection-runs ledger + reminders.
+
+    1. video_stats_history: añade retention_pct (retención media %) y
+       analytics_window_days (ventana analizada) para que el dashboard muestre
+       retención persistida con semántica real de ventana.
+    2. stats_collection_runs: ledger por canal de cada recolección manual.
+    3. scheduled_reminders: recordatorios operativos que solo alertan.
+    """
+    # ── 1. video_stats_history columns ──
+    try:
+        vsh = {row[1] for row in conn.execute("PRAGMA table_info(video_stats_history)").fetchall()}
+        for col, ddl in (("retention_pct", "REAL DEFAULT 0"),
+                         ("analytics_window_days", "INTEGER DEFAULT 365")):
+            if col not in vsh:
+                try:
+                    conn.execute(f"ALTER TABLE video_stats_history ADD COLUMN {col} {ddl}")
+                    logger.info("Migration v50: added video_stats_history.%s", col)
+                except sqlite3.OperationalError as exc:
+                    logger.warning("Migration v50: failed to add %s: %s", col, exc)
+    except Exception as exc:
+        logger.warning("Migration v50: video_stats_history check failed: %s", exc)
+
+    # ── 2. Tables ──
+    schema = Path(__file__).parent / "schema_v50.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        logger.info("Migration v50: stats_collection_runs + scheduled_reminders ensured")
+
+    # ── 3. Seed operator reminders (one-shot) ──
+    _seed_default_reminders(conn, logger)
+    conn.commit()
+    logger.info("Migration v50: complete")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -4630,14 +4719,26 @@ class ExtendedDatabase(Database):
             ctr_pct = round(float(ctr_raw) * 100, 2) if float(ctr_raw) <= 1 else round(float(ctr_raw), 2)
         except (TypeError, ValueError):
             ctr_pct = 0.0
+        # v50: retención media (%) y ventana analizada se persisten en el snapshot
+        # para que el dashboard muestre retención real (no solo vista pública).
+        try:
+            retention_pct = float(
+                stats.get("retention_pct", stats.get("averageViewPercentage", 0)) or 0
+            )
+        except (TypeError, ValueError):
+            retention_pct = 0.0
+        try:
+            window_days = int(stats.get("analytics_window_days", 365) or 365)
+        except (TypeError, ValueError):
+            window_days = 365
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO video_stats_history
                    (video_id, yt_video_id, views, likes, comments,
                     estimated_minutes_watched, average_view_duration,
                     subscribers_gained, estimated_revenue_min, estimated_revenue_max,
-                    embeddable, impressions, ctr)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    embeddable, impressions, ctr, retention_pct, analytics_window_days)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     yt_video_id,
@@ -4652,6 +4753,8 @@ class ExtendedDatabase(Database):
                     1 if stats.get("embeddable", True) else 0,
                     impressions,
                     ctr_pct,
+                    retention_pct,
+                    window_days,
                 ),
             )
             conn.commit()
@@ -4698,6 +4801,164 @@ class ExtendedDatabase(Database):
                    ORDER BY fetched_at ASC""",
                 (video_id, f"-{days} days"),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_video_packaging_snapshot(self, video_id: int, yt_video_id: str,
+                                        impressions: int, ctr_pct: float,
+                                        window_days: int = 30) -> bool:
+        """v50: sobreescribe impresiones/CTR del snapshot más reciente con los
+        valores de ventana 30d del deep analytics (la fuente que importa para
+        packaging). El bulk query (365d) es la base; el deep la afina a 30d."""
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """UPDATE video_stats_history
+                       SET impressions = ?, ctr = ?, analytics_window_days = ?
+                       WHERE id = (
+                           SELECT MAX(id) FROM video_stats_history
+                           WHERE video_id = ? AND yt_video_id = ?
+                       )""",
+                    (int(impressions or 0), round(float(ctr_pct or 0), 2),
+                     int(window_days), video_id, yt_video_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+        except Exception as exc:
+            logger.debug("update_video_packaging_snapshot failed: %s", exc)
+            return False
+
+    # ── Stats collection runs ledger (v50) ────────────────────
+
+    def record_stats_collection_run(self, channel_id: int, status: str,
+                                    deep: bool = False, use_data_api: bool = True,
+                                    result: dict = None,
+                                    started_at: str = None) -> int | None:
+        """Persist the outcome of a per-channel stats collection (manual button).
+
+        ``status`` ∈ collected | public_only | requires_authorization |
+        quota_limited | failed. Nunca se guarda "éxito" si faltan métricas:
+        el dashboard usa este ledger para mostrar cobertura real por canal.
+        """
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO stats_collection_runs
+                       (channel_id, started_at, finished_at, status, deep, use_data_api, result_json)
+                       VALUES (?, ?, datetime('now'), ?, ?, ?, ?)""",
+                    (channel_id, started_at, status, int(deep), int(use_data_api),
+                     json.dumps(result or {}, ensure_ascii=False, default=str)),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as exc:
+            logger.debug("record_stats_collection_run failed: %s", exc)
+            return None
+
+    def get_latest_stats_collection_run(self, channel_id: int) -> dict | None:
+        """Most recent collection run for a channel (for coverage status)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM stats_collection_runs
+                   WHERE channel_id = ? ORDER BY created_at DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_stats_collection_runs(self, channel_id: int = None, limit: int = 20) -> list[dict]:
+        """Recent collection runs (all channels or one)."""
+        with self._connect() as conn:
+            if channel_id is not None:
+                rows = conn.execute(
+                    """SELECT * FROM stats_collection_runs
+                       WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?""",
+                    (channel_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM stats_collection_runs
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Scheduled reminders — follow-ups that ONLY alert (v50) ──
+
+    def create_scheduled_reminder(self, title: str, message: str, due_at: str,
+                                  entity_id: int = None, entity_type: str = 'system',
+                                  alert_type: str = 'scheduled_reminder_due',
+                                  metadata: dict = None) -> int | None:
+        """Create a one-shot operator reminder.
+
+        Al vencer, el loop `reminders` de api/main.py emite una alerta de
+        sistema. NUNCA ejecuta acciones de contenido, stats ni configuración.
+        """
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO scheduled_reminders
+                       (entity_type, entity_id, title, message, alert_type, due_at, status, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                    (entity_type, entity_id or 0, title, message, alert_type, due_at,
+                     json.dumps(metadata or {}, ensure_ascii=False, default=str)),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as exc:
+            logger.debug("create_scheduled_reminder failed: %s", exc)
+            return None
+
+    def get_due_scheduled_reminders(self, now_iso: str = None) -> list[dict]:
+        """Reminders pending whose due_at has passed (ISO UTC)."""
+        if now_iso is None:
+            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM scheduled_reminders
+                   WHERE status = 'pending' AND due_at <= ?
+                   ORDER BY due_at ASC LIMIT 50""",
+                (now_iso,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_scheduled_reminder_alerted(self, reminder_id: int, alert_id: int = None) -> bool:
+        """Transition pending → alerted after the alert was emitted."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE scheduled_reminders
+                   SET status = 'alerted', alert_id = ?, resolved_at = datetime('now')
+                   WHERE id = ? AND status = 'pending'""",
+                (alert_id, reminder_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def resolve_scheduled_reminder(self, reminder_id: int) -> bool:
+        """Mark a reminder as resolved (operator reviewed the follow-up)."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE scheduled_reminders
+                   SET status = 'resolved', resolved_at = datetime('now')
+                   WHERE id = ? AND status = 'alerted'""",
+                (reminder_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def list_scheduled_reminders(self, status: str = None, limit: int = 50) -> list[dict]:
+        """List reminders, optionally filtered by status."""
+        with self._connect() as conn:
+            if status:
+                rows = conn.execute(
+                    """SELECT * FROM scheduled_reminders
+                       WHERE status = ? ORDER BY due_at DESC LIMIT ?""",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM scheduled_reminders
+                       ORDER BY due_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Scrape eligibility (incremental + age window) ─────────
@@ -4824,6 +5085,16 @@ class ExtendedDatabase(Database):
                 impressions = int(float(data.get("impressions", 0) or 0))
                 ctr_frac = float(data.get("impressionsClickThroughRate", 0) or 0)
                 ctr_pct = round(ctr_frac * 100, 2)  # fracción → porcentaje
+                # v50: retención media (%) + ventana analizada se persisten en el
+                # snapshot (averageViewPercentage viene del bulk query).
+                try:
+                    retention_pct = round(float(data.get("averageViewPercentage", 0) or 0), 2)
+                except (TypeError, ValueError):
+                    retention_pct = 0.0
+                try:
+                    window_days = int(data.get("analytics_window_days", 365) or 365)
+                except (TypeError, ValueError):
+                    window_days = 365
                 has_analytics = 1 if emw > 0 or data.get("averageViewPercentage", "0") != "0" else 0
                 cursor = conn.execute(
                     """UPDATE video_stats_history
@@ -4832,12 +5103,15 @@ class ExtendedDatabase(Database):
                            subscribers_gained = ?,
                            impressions = ?,
                            ctr = ?,
+                           retention_pct = ?,
+                           analytics_window_days = ?,
                            analytics_data_exists = ?
                        WHERE id = (
                            SELECT MAX(id) FROM video_stats_history
                            WHERE video_id = ? AND yt_video_id = ?
                        )""",
-                    (emw, avd, subg, impressions, ctr_pct, has_analytics, aid, yt_id),
+                    (emw, avd, subg, impressions, ctr_pct, retention_pct,
+                     window_days, has_analytics, aid, yt_id),
                 )
                 if cursor.rowcount > 0:
                     updated += 1
@@ -6414,71 +6688,82 @@ class ExtendedDatabase(Database):
     def _build_seo_summary(self, conn, channels_data: list[dict]) -> dict:
         """Build a lightweight SEO+CTR summary for all channels in the dashboard.
 
-        Uses batch queries (not per-channel) to avoid N×2 client HTTP requests.
-        Returns dict mapping channel_id → { seo_score, ctr, impressions, ... }.
+        v50: la fuente es `video_stats_history` (el snapshot fiable que escribe
+        el bulk analytics en CADA recolección) + el ledger `stats_collection_runs`
+        para cobertura real por canal. Antes se leía solo de
+        `video_analytics_detailed` (escrito únicamente en modo deep) → el
+        dashboard mostraba ceros aunque los datos existieran.
+
+        Returns dict mapping channel_id → { seo_score, avg_ctr_30d,
+        avg_retention_30d, total_impressions_30d, avg_view_duration_30d,
+        ctr_video_count, retention_video_count, analytics_status,
+        last_collection_at }.
         """
         if not channels_data:
             return {}
 
         channel_ids = [ch["id"] for ch in channels_data]
+        placeholders = ",".join("?" * len(channel_ids))
 
-        # ── Batch CTR + retention ──
-        ctr_rows = conn.execute(
+        # ── Latest snapshot per video, within the last 30 days ──
+        agg_rows = conn.execute(
             f"""SELECT v.channel_id,
-                       ROUND(AVG(vad.metric_value), 2) as avg_ctr,
-                       COUNT(*) as cnt
-                FROM video_analytics_detailed vad
-                JOIN videos v ON v.id = vad.video_id
-                WHERE vad.report_type = 'ctr' AND vad.metric_value > 0
-                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
+                       COUNT(*) AS cnt,
+                       SUM(CASE WHEN vsh.impressions > 0 THEN 1 ELSE 0 END) AS imp_cnt,
+                       COALESCE(SUM(vsh.impressions), 0) AS total_imp,
+                       ROUND(AVG(CASE WHEN vsh.impressions > 0 THEN vsh.ctr END), 2) AS avg_ctr,
+                       ROUND(AVG(CASE WHEN vsh.retention_pct > 0 THEN vsh.retention_pct END), 2) AS avg_ret,
+                       ROUND(AVG(CASE WHEN vsh.average_view_duration > 0 THEN vsh.average_view_duration END), 2) AS avg_avd,
+                       MAX(vsh.fetched_at) AS last_fetch
+                FROM video_stats_history vsh
+                JOIN videos v ON v.id = vsh.video_id
+                WHERE v.channel_id IN ({placeholders})
+                  AND v.yt_video_id IS NOT NULL
+                  AND vsh.id IN (
+                      SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                      WHERE vsh2.video_id = vsh.video_id
+                        AND vsh2.fetched_at >= datetime('now', '-30 days')
+                  )
                 GROUP BY v.channel_id""",
             channel_ids,
         ).fetchall()
-        ctr_map = {r["channel_id"]: r for r in ctr_rows}
+        agg_map = {r["channel_id"]: dict(r) for r in agg_rows}
 
-        ret_rows = conn.execute(
-            f"""SELECT v.channel_id,
-                       ROUND(AVG(vad.metric_value), 2) as avg_ret,
-                       COUNT(*) as cnt
-                FROM video_analytics_detailed vad
-                JOIN videos v ON v.id = vad.video_id
-                WHERE vad.report_type = 'retention_pct' AND vad.metric_value > 0
-                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
-                GROUP BY v.channel_id""",
+        # ── Coverage: latest collection run per channel ──
+        cov_rows = conn.execute(
+            f"""SELECT s1.channel_id, s1.status, s1.created_at
+                FROM stats_collection_runs s1
+                JOIN (
+                    SELECT channel_id, MAX(created_at) AS max_ts
+                    FROM stats_collection_runs
+                    WHERE channel_id IN ({placeholders})
+                    GROUP BY channel_id
+                ) s2 ON s2.channel_id = s1.channel_id AND s2.max_ts = s1.created_at""",
             channel_ids,
         ).fetchall()
-        ret_map = {r["channel_id"]: r for r in ret_rows}
-
-        # ── Batch impressions ──
-        imp_rows = conn.execute(
-            f"""SELECT v.channel_id,
-                       COALESCE(SUM(vad.metric_value), 0) as total_imp
-                FROM video_analytics_detailed vad
-                JOIN videos v ON v.id = vad.video_id
-                WHERE vad.report_type = 'impressions'
-                  AND v.channel_id IN ({','.join('?' * len(channel_ids))})
-                GROUP BY v.channel_id""",
-            channel_ids,
-        ).fetchall()
-        imp_map = {r["channel_id"]: r for r in imp_rows}
+        cov_map = {r["channel_id"]: dict(r) for r in cov_rows}
 
         # ── Build summary per channel ──
         result = {}
         for ch in channels_data:
             ch_id = ch["id"]
-            ctr_r = ctr_map.get(ch_id)
-            ret_r = ret_map.get(ch_id)
-            imp_r = imp_map.get(ch_id)
-
+            agg = agg_map.get(ch_id, {})
+            cov = cov_map.get(ch_id, {})
+            has_data = bool(agg.get("cnt"))
             result[ch_id] = {
                 "channel_id": ch_id,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
-                "avg_ctr_30d": ctr_r["avg_ctr"] if ctr_r else 0,
-                "avg_retention_30d": ret_r["avg_ret"] if ret_r else 0,
-                "total_impressions_30d": int(imp_r["total_imp"] or 0) if imp_r else 0,
-                "ctr_video_count": ctr_r["cnt"] if ctr_r else 0,
-                "retention_video_count": ret_r["cnt"] if ret_r else 0,
+                "avg_ctr_30d": agg.get("avg_ctr") if has_data else 0,
+                "avg_retention_30d": agg.get("avg_ret") if has_data else 0,
+                "avg_view_duration_30d": agg.get("avg_avd") if has_data else 0,
+                "total_impressions_30d": int(agg.get("total_imp") or 0) if has_data else 0,
+                "impression_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
+                "ctr_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
+                "retention_video_count": int(agg.get("cnt") or 0) if has_data else 0,
+                "analytics_status": cov.get("status", "no_data"),
+                "last_collection_at": str(cov.get("created_at", "")) if cov else "",
+                "has_analytics_data": has_data,
             }
         return result
 

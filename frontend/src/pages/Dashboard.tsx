@@ -124,12 +124,17 @@ export default function Dashboard() {
     const totalScraped = ok.reduce((n: number, c: any) => n + (c.scrape_fallback_videos || 0) + (c.scrape_fallback_shorts || 0), 0)
     const quotaExhausted = ok.some((c: any) => c.quota_exhausted)
     const scrapeMode = s.scrape_mode || ok.some((c: any) => c.scrape_mode)
-    let msg = `${ok.length} canal(es)`
+    // v50: cobertura por canal (requiere_autorización / solo públicos / collected)
+    const requiresAuth = chans.filter((c: any) => c.status === 'requires_authorization')
+    const publicOnly = chans.filter((c: any) => c.status === 'public_only')
+    let msg = `${chans.length} canal(es)`
     if (scrapeMode) {
       msg += ` · 🕸️ modo scraping`
     } else if (quotaExhausted) {
       msg += ` · ⚠️ Cuota Data API agotada`
     }
+    if (requiresAuth.length) msg += ` · ${requiresAuth.length} requieren autorización`
+    if (publicOnly.length) msg += ` · ${publicOnly.length} solo datos públicos`
     if (totalVideos > 0) msg += ` · ${totalVideos} videos`
     else if (quotaExhausted && totalScraped === 0) msg += ` · 0 videos (sin quota)`
     if (totalShorts > 0) msg += ` · ${totalShorts} shorts`
@@ -611,7 +616,30 @@ export default function Dashboard() {
               const ctr = seoData?.avg_ctr_30d
               const retention = seoData?.avg_retention_30d
               const impressions = seoData?.total_impressions_30d
-              const ctrCount = seoData?.ctr_video_count
+              const avgAvd = seoData?.avg_view_duration_30d
+              const impCount = seoData?.impression_video_count
+              const status = seoData?.analytics_status || 'no_data'
+              const lastCollect = seoData?.last_collection_at
+              const hasData = seoData?.has_analytics_data
+
+              // v50: cobertura real por canal — nunca ceros falsos.
+              const statusLabel: Record<string, string> = {
+                collected: 'Analytics OK',
+                public_only: 'Solo datos públicos',
+                requires_authorization: 'Requiere autorización',
+                quota_limited: 'Cuota agotada',
+                failed: 'Error de recolección',
+                no_data: 'Sin recolección',
+              }
+              const statusColor: Record<string, string> = {
+                collected: 'bg-green-500/20 text-green-400',
+                public_only: 'bg-amber-500/20 text-amber-400',
+                requires_authorization: 'bg-red-500/20 text-red-400',
+                quota_limited: 'bg-red-500/20 text-red-400',
+                failed: 'bg-red-500/20 text-red-400',
+                no_data: 'bg-gray-500/20 text-gray-400',
+              }
+
               return (
                 <div
                   key={ch.id}
@@ -624,7 +652,7 @@ export default function Dashboard() {
                     >
                       {ch.name}
                     </span>
-                    {ctr != null && (
+                    {ctr != null && hasData && (
                       <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
                         ctr >= 5 ? 'bg-green-500/20 text-green-400' :
                         ctr >= 2 ? 'bg-amber-500/20 text-amber-400' :
@@ -634,38 +662,60 @@ export default function Dashboard() {
                       </span>
                     )}
                   </div>
+                  <div className="mb-2">
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${statusColor[status] || statusColor.no_data}`}>
+                      {statusLabel[status] || status}
+                    </span>
+                  </div>
                   <div className="space-y-1.5 text-xs text-gray-400">
-                    {ctr != null && (
-                      <div className="flex justify-between">
-                        <span>CTR 30d</span>
-                        <span className={ctr >= 5 ? 'text-green-400' : ctr >= 2 ? 'text-amber-400' : 'text-red-400'}>
-                          {ctr}%
-                        </span>
-                      </div>
-                    )}
-                    {retention != null && (
-                      <div className="flex justify-between">
-                        <span>Retencion</span>
-                        <span className={retention >= 40 ? 'text-green-400' : retention >= 25 ? 'text-amber-400' : 'text-red-400'}>
-                          {retention}%
-                        </span>
-                      </div>
-                    )}
-                    {impressions != null && impressions > 0 && (
-                      <div className="flex justify-between">
-                        <span>Impresiones 30d</span>
-                        <span className="text-gray-500">{impressions.toLocaleString()}</span>
-                      </div>
-                    )}
-                    {ctrCount != null && ctrCount > 0 && (
-                      <div className="flex justify-between">
-                        <span>Videos con datos</span>
-                        <span className="text-gray-500">{ctrCount}</span>
-                      </div>
-                    )}
-                    {!ctr && !retention && (
-                      <div className="text-center text-gray-600 py-2">
-                        Sin datos de analytics
+                    {hasData ? (
+                      <>
+                        <div className="flex justify-between">
+                          <span>Impresiones 30d</span>
+                          <span className="text-gray-300">
+                            {impressions != null && impressions > 0
+                              ? impressions.toLocaleString()
+                              : '0'}
+                          </span>
+                        </div>
+                        {ctr != null && (
+                          <div className="flex justify-between">
+                            <span>CTR 30d</span>
+                            <span className={ctr >= 5 ? 'text-green-400' : ctr >= 2 ? 'text-amber-400' : 'text-red-400'}>
+                              {ctr}%
+                            </span>
+                          </div>
+                        )}
+                        {retention != null && (
+                          <div className="flex justify-between">
+                            <span>Retención media</span>
+                            <span className={retention >= 40 ? 'text-green-400' : retention >= 25 ? 'text-amber-400' : 'text-red-400'}>
+                              {retention}%
+                            </span>
+                          </div>
+                        )}
+                        {avgAvd != null && avgAvd > 0 && (
+                          <div className="flex justify-between">
+                            <span>Duración media vista</span>
+                            <span className="text-gray-300">{Math.round(avgAvd)}s</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between">
+                          <span>Videos con impresiones</span>
+                          <span className="text-gray-500">{impCount ?? 0}</span>
+                        </div>
+                        {lastCollect && (
+                          <div className="flex justify-between text-[10px] text-gray-600">
+                            <span>Última recolección</span>
+                            <span>{new Date(lastCollect.replace(' ', 'T')).toLocaleString()}</span>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-center text-gray-500 py-2">
+                        {status === 'requires_authorization'
+                          ? 'Autoriza el canal para métricas de impresiones/CTR/retención'
+                          : 'Sin datos de analytics — recolecta stats desde el botón del dashboard'}
                       </div>
                     )}
                   </div>

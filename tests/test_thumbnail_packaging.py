@@ -142,6 +142,8 @@ def test_thumbnail_style_persist_and_aggregate(tmp_path):
             embeddable INTEGER DEFAULT 1,
             analytics_data_exists INTEGER DEFAULT 0,
             impressions INTEGER DEFAULT 0, ctr REAL DEFAULT 0,
+            retention_pct REAL DEFAULT 0,
+            analytics_window_days INTEGER DEFAULT 365,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)

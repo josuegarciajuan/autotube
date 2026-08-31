@@ -399,6 +399,10 @@ class YouTubeStatsFetcher:
                         # canales (< 1 año) equivalen prácticamente a lifetime.
                         "likes": str(row[8]) if len(row) > 8 and row[8] else "0",
                         "comments": str(row[9]) if len(row) > 9 and row[9] else "0",
+                        # v50: ventana analizada para que el snapshot sepa de
+                        # qué periodo vienen las métricas (el dashboard agrega
+                        # por ventana, no etiqueta 30d lo que es 365d).
+                        "analytics_window_days": str(days),
                     }
                 logger.debug(
                     "Bulk analytics: %d videos returned for %d requested (batch %d/%d)",
@@ -821,16 +825,17 @@ class YouTubeStatsFetcher:
     def get_video_impressions_ctr(
         self, video_ids: list[str], days: int = 30
     ) -> dict[str, dict]:
-        """Get impressions and CTR for multiple videos.
+        """Get impressions and CTR for multiple videos (30d window).
 
-        NOTE: The `impressions` metric requires YouTube Studio Analytics scope
-        which is NOT available in the standard YouTube Analytics v2 API.
-        This method works around the limitation by collecting
-        `impressionClickThroughRate` where available.
+        v50 (ago 2026): corregido el nombre de métrica — la Analytics API usa
+        `impressionsClickThroughRate` (plural), no `impressionClickThroughRate`.
+        El valor devuelto es FRACCIÓN (0.05 = 5%): se convierte a porcentaje aquí
+        para que lo que se persiste sea directamente comparable con el resto del
+        sistema.
 
         Returns:
-            Dict mapping yt_video_id → {impressions: int, ctr_percent: float}
-            Impressions will be 0 if the metric is not available for this channel.
+            Dict mapping yt_video_id → {impressions: int, ctr_percent: float,
+                                         analytics_window_days: int}
         """
         if not self._analytics_service or not video_ids:
             return {}
@@ -849,7 +854,7 @@ class YouTubeStatsFetcher:
                         ids="channel==MINE",
                         startDate=start_date,
                         endDate=end_date,
-                        metrics="impressions,impressionClickThroughRate",
+                        metrics="impressions,impressionsClickThroughRate",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
@@ -858,11 +863,14 @@ class YouTubeStatsFetcher:
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
-                    # row: [video_id, impressions, ctr]
+                    # row: [video_id, impressions, ctr_fraction]
                     vid = row[0]
+                    ctr_frac = float(row[2]) if len(row) > 2 and row[2] else 0.0
                     result[vid] = {
                         "impressions": int(row[1]) if len(row) > 1 and row[1] else 0,
-                        "ctr_percent": round(float(row[2]), 2) if len(row) > 2 and row[2] else 0.0,
+                        # fracción (0.05) → porcentaje (5.0)
+                        "ctr_percent": round(ctr_frac * 100, 2) if ctr_frac <= 1 else round(ctr_frac, 2),
+                        "analytics_window_days": days,
                     }
                 logger.debug(
                     "Impressions/CTR: %d videos returned (batch %d/%d)",
@@ -1102,6 +1110,10 @@ class YouTubeStatsFetcher:
             "scrape_fallback_videos": 0,
             "scrape_fallback_shorts": 0,
             "scrape_mode": not use_data_api,
+            # v50: capacidad real de Analytics para clasificar cobertura por
+            # canal (requires_authorization vs public_only vs collected).
+            "authenticated": authenticated,
+            "analytics_available": self._analytics_service is not None,
         }
 
         # In scrape-only mode the Data API is intentionally skipped → treat as
@@ -1355,6 +1367,13 @@ class YouTubeStatsFetcher:
                                 "impressionsClickThroughRate": float(
                                     bdata.get("impressionsClickThroughRate", 0) or 0
                                 ),
+                                # v50: retención media (%) + ventana para el snapshot
+                                "averageViewPercentage": float(
+                                    bdata.get("averageViewPercentage", 0) or 0
+                                ),
+                                "analytics_window_days": int(
+                                    bdata.get("analytics_window_days", 365) or 365
+                                ),
                                 "is_analytics_fallback": True,
                             }
                             db.insert_video_stats(v["id"], yt_id, analytics_stats)
@@ -1542,6 +1561,18 @@ class YouTubeStatsFetcher:
                                 [{"dimension": None, "metric_value": ctr}],
                             )
                             stored_ctr += 1
+                        # v50: afinar el snapshot (video_stats_history) con la
+                        # ventana 30d — la fuente que lee el dashboard para
+                        # impresiones/CTR reales de packaging.
+                        try:
+                            db.update_video_packaging_snapshot(
+                                v["id"], yt_id, impressions, ctr,
+                                window_days=idata.get("analytics_window_days", 30),
+                            )
+                        except Exception as _pexc:
+                            logger.debug(
+                                "packaging snapshot update failed for %s: %s", yt_id, _pexc
+                            )
                 result["impressions_stored"] = stored_imp
                 result["ctr_stored"] = stored_ctr
                 logger.info("Deep analytics: %d impressions, %d CTR stored for %s",

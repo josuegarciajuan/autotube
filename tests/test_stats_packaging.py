@@ -32,11 +32,14 @@ def stats_db(tmp_path):
             analytics_data_exists INTEGER DEFAULT 0,
             impressions INTEGER DEFAULT 0,
             ctr REAL DEFAULT 0,
+            retention_pct REAL DEFAULT 0,
+            analytics_window_days INTEGER DEFAULT 365,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            canal TEXT, yt_video_id TEXT, status TEXT DEFAULT 'published'
+            canal TEXT, yt_video_id TEXT, status TEXT DEFAULT 'published',
+            channel_id INTEGER
         );
     """)
     conn.execute("INSERT INTO videos (id, canal, yt_video_id, status) VALUES (1, 'canal3', 'ABC123', 'published')")
@@ -140,3 +143,100 @@ def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
     assert result["VID1"]["impressionsClickThroughRate"] == "0.042"
     assert result["VID1"]["likes"] == "30"
     assert result["VID1"]["comments"] == "5"
+    # v50: la ventana analizada viaja con el snapshot
+    assert result["VID1"]["analytics_window_days"] == "30"
+
+
+# ── v50: retención + ventana en el snapshot ─────────────────────
+
+def test_insert_video_stats_guarda_retencion_y_ventana(stats_db):
+    db = _get_db(stats_db)
+    row_id = db.insert_video_stats(1, "ABC123", {
+        "viewCount": 100, "impressions": 500,
+        "averageViewPercentage": 21.5,
+        "analytics_window_days": 365,
+    })
+    with sqlite3.connect(str(stats_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT retention_pct, analytics_window_days FROM video_stats_history WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert abs(row["retention_pct"] - 21.5) < 0.001
+    assert row["analytics_window_days"] == 365
+
+
+def test_batch_update_video_analytics_guarda_retencion(stats_db):
+    db = _get_db(stats_db)
+    db.insert_video_stats(1, "ABC123", {"viewCount": 50})
+    updated = db.batch_update_video_analytics(
+        {"ABC123": 1},
+        {"ABC123": {
+            "estimatedMinutesWatched": "10",
+            "averageViewDuration": "120",
+            "subscribersGained": "1",
+            "impressions": "1500",
+            "impressionsClickThroughRate": "0.042",
+            "averageViewPercentage": "19.3",
+            "analytics_window_days": "365",
+        }},
+    )
+    assert updated == 1
+    with sqlite3.connect(str(stats_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT impressions, ctr, retention_pct, analytics_window_days FROM video_stats_history WHERE video_id = 1"
+        ).fetchone()
+    assert row["impressions"] == 1500
+    assert abs(row["ctr"] - 4.2) < 0.001
+    assert abs(row["retention_pct"] - 19.3) < 0.001
+    assert row["analytics_window_days"] == 365
+
+
+def test_update_video_packaging_snapshot_afina_ventana_30d(stats_db):
+    db = _get_db(stats_db)
+    db.insert_video_stats(1, "ABC123", {"viewCount": 50, "impressions": 1000, "ctr": 2.0})
+    ok = db.update_video_packaging_snapshot(1, "ABC123", 700, 4.5, window_days=30)
+    assert ok is True
+    with sqlite3.connect(str(stats_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT impressions, ctr, analytics_window_days FROM video_stats_history WHERE video_id = 1"
+        ).fetchone()
+    assert row["impressions"] == 700
+    assert abs(row["ctr"] - 4.5) < 0.001
+    assert row["analytics_window_days"] == 30
+
+
+# ── v50: métrica correcta + conversión fracción→% en deep ──────
+
+def test_get_video_impressions_ctr_metric_correcta_y_porcentaje(monkeypatch):
+    """El deep query usa `impressionsClickThroughRate` (plural) y convierte la
+    fracción 0.05 → 5.0% (antes: métrica errónea + sin conversión)."""
+    import pipeline.youtube_stats as ys
+
+    captured = {}
+
+    class FakeQuery:
+        def __init__(self, **kw):
+            captured.update(kw)
+        def execute(self):
+            return {"rows": [["VID1", 2000, 0.05]]}
+
+    class FakeReports:
+        def query(self, **kw):
+            return FakeQuery(**kw)
+
+    class FakeService:
+        def reports(self):
+            return FakeReports()
+
+    obj = ys.YouTubeStatsFetcher("canal3")
+    obj._analytics_service = FakeService()
+
+    result = obj.get_video_impressions_ctr(["VID1"], days=30)
+    assert "impressions,impressionsClickThroughRate" in captured.get("metrics", "")
+    assert "impressionClickThroughRate" not in captured.get("metrics", "")
+    assert result["VID1"]["impressions"] == 2000
+    assert abs(result["VID1"]["ctr_percent"] - 5.0) < 0.001
+    assert result["VID1"]["analytics_window_days"] == 30
