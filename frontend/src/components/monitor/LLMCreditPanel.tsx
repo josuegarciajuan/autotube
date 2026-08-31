@@ -1,6 +1,6 @@
 import { Brain, Bot, Youtube, RefreshCw, AlertTriangle, CheckCircle, XCircle } from 'lucide-react'
 import { motion } from 'framer-motion'
-import { api } from '../../lib/api'
+import { api, parseApiDate } from '../../lib/api'
 import { useLLMCredits } from '../../hooks/useQueries'
 import { useState } from 'react'
 
@@ -21,7 +21,8 @@ export default function LLMCreditPanel() {
   function fmtTime(iso: string | null): string {
     if (!iso) return '--'
     try {
-      const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'))
+      const d = parseApiDate(iso)
+      if (!d) return iso
       const now = Date.now()
       const diffMin = Math.round((now - d.getTime()) / 60000)
       if (diffMin < 1) return 'ahora'

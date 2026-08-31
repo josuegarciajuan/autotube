@@ -16,6 +16,8 @@ import {
   TimingConfig,
   ExecutionEvent,
   TimingStats,
+  parseApiDate,
+  formatApiDate,
 } from '../lib/api'
 
 // ── helpers ──────────────────────────────────────────────────
@@ -42,8 +44,8 @@ function fmtJitterRange(hour: number, min: number, jitter: number) {
 function getEventHour(dtStr: string | null): number | null {
   if (!dtStr) return null
   try {
-    const d = new Date(dtStr)
-    if (isNaN(d.getTime())) return null
+    const d = parseApiDate(dtStr)
+    if (!d) return null
     return d.getHours() + d.getMinutes() / 60
   } catch { return null }
 }
@@ -51,8 +53,8 @@ function getEventHour(dtStr: string | null): number | null {
 function getEventDate(dtStr: string | null): string | null {
   if (!dtStr) return null
   try {
-    const d = new Date(dtStr)
-    if (isNaN(d.getTime())) return null
+    const d = parseApiDate(dtStr)
+    if (!d) return null
     return `${d.getDate()} ${['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][d.getMonth()]}`
   } catch { return null }
 }
@@ -70,9 +72,9 @@ function closestUploadWindow(slotHour: number, windows: {start:number,end:number
 function formatSlotTime(utcStr: string | null): string {
   if (!utcStr) return '—'
   try {
-    const d = new Date(utcStr)
-    if (isNaN(d.getTime())) return '—'
-    return d.toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    const d = parseApiDate(utcStr)
+    if (!d) return '—'
+    return formatApiDate(utcStr, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
   } catch { return '—' }
 }
 

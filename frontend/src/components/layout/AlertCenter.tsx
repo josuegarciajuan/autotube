@@ -15,7 +15,7 @@ import {
   Ban,
   Radio,
 } from 'lucide-react'
-import { api } from '../../lib/api'
+import { api, parseApiDate, formatApiDate, formatTime } from '../../lib/api'
 import { useQuotaStatus, useChannelRestrictions } from '../../hooks/useQueries'
 
 // Persistencia del plegado (igual que antes): guardamos el CONJUNTO de identidades
@@ -79,8 +79,8 @@ function fmtRestan(restan_h: number): string {
 function fmtDate(iso: string | number | null | undefined): string {
   if (!iso) return ''
   try {
-    const d = typeof iso === 'number' ? new Date(iso * 1000) : new Date(iso)
-    return d.toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    const d = typeof iso === 'number' ? new Date(iso * 1000) : parseApiDate(iso)
+    return d ? formatApiDate(typeof iso === 'number' ? new Date(iso * 1000).toISOString() : iso, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''
   } catch {
     return ''
   }
@@ -498,7 +498,7 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
                 {quotaProjects.map(p => {
                   const label = p.account || p.project_id || 'cuenta'
                   const pReset = p.reset_at_utc
-                    ? new Date(p.reset_at_utc).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+                    ? (formatTime(p.reset_at_utc) || '—')
                     : null
                   return (
                     <div key={p.project_id || label} className="flex items-center gap-2 flex-wrap text-xs">

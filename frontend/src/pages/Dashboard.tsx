@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api } from '../lib/api'
+import { api, API_TIME_ZONE } from '../lib/api'
 import { useDashboard, useRecentEvents, useQuotaStatus } from '../hooks/useQueries'
 import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -156,7 +156,7 @@ export default function Dashboard() {
       if (showBanner) {
         setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
       }
-      setCollectStatsFinishedAt(s.finished_at ? new Date(s.finished_at * 1000).toLocaleTimeString() : null)
+      setCollectStatsFinishedAt(s.finished_at ? new Date(s.finished_at * 1000).toLocaleTimeString('es-ES', { timeZone: API_TIME_ZONE }) : null)
     } else if (s.status === 'error') {
       setCollectStatsError(true)
       if (showBanner) {

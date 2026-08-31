@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+from api.time_utils import madrid_day_range, MADRID, UTC, parse_utc
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
@@ -372,11 +373,12 @@ def _global_shorts_daily_cap_reached(db=None) -> bool:
     try:
         import sqlite3 as _sql_cap
         from config.settings import DATABASE_PATH as _DBP_CAP
+        day_start, day_end = madrid_day_range()
         with _sql_cap.connect(str(_DBP_CAP), timeout=10) as _conn_cap:
             row = _conn_cap.execute(
                 """SELECT COUNT(*) FROM shorts
                    WHERE youtube_id IS NOT NULL AND youtube_id != ''
-                     AND date(published_at) = date('now', 'localtime')"""
+                      AND published_at >= ? AND published_at < ?""", (day_start, day_end)
             ).fetchone()
         return (row[0] if row else 0) >= _global_shorts_daily_cap()
     except Exception:
@@ -411,6 +413,7 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
         except Exception:
             pass
         _type_clause = "AND type IN ('native','standalone')" if _native_only else ""
+        day_start, day_end = madrid_day_range()
         with _sql_pc.connect(str(_DBP_PC), timeout=10) as _conn_pc:
             row = _conn_pc.execute(
                 f"""SELECT COUNT(*) FROM shorts
@@ -418,8 +421,8 @@ def _channel_hard_daily_short_cap_reached(channel_id: int, db=None) -> bool:
                      AND youtube_id IS NOT NULL
                      AND youtube_id != ''
                      {_type_clause}
-                     AND date(published_at) = date('now', 'localtime')""",
-                (channel_id,),
+                      AND published_at >= ? AND published_at < ?""",
+                 (channel_id, day_start, day_end),
             ).fetchone()
         return (row[0] if row else 0) >= _hard_daily_cap(channel_id, db)
     except Exception:

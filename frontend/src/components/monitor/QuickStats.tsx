@@ -1,5 +1,6 @@
 import { TrendingUp, Clock, Target, Zap, ShieldCheck, Radar } from 'lucide-react'
 import { useMonitorDashboard } from '../../hooks/useQueries'
+import { formatApiDate } from '../../lib/api'
 
 interface QuickStatsData {
   generated_today: number
@@ -19,8 +20,7 @@ export default function QuickStats() {
 
   function fmtDate(iso: string): string {
     try {
-      const d = new Date(iso + 'Z')
-      return d.toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })
+      return formatApiDate(iso, { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) || iso
     } catch { return iso }
   }
 

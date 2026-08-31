@@ -718,18 +718,47 @@ export function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-/** Format date string — DB stores server local time (Europe/Madrid) */
-export function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr.replace(' ', 'T'));
-  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+/**
+ * Parse a timestamp returned by the API.
+ *
+ * SQLite timestamps are UTC but have no zone marker. Add Z only for those
+ * naive values; timestamps that already carry Z or an offset are preserved.
+ */
+export function parseApiDate(dateValue: string | null | undefined): Date | null {
+  if (!dateValue) return null;
+  const raw = dateValue.trim();
+  if (!raw) return null;
+
+  const hasExplicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const normalized = raw.includes(' ') ? raw.replace(' ', 'T') : raw;
+  const candidate = hasExplicitZone
+    ? normalized
+    : /^\d{4}-\d{2}-\d{2}$/.test(normalized)
+      ? `${normalized}T00:00:00Z`
+      : `${normalized}Z`;
+  const parsed = new Date(candidate);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-/** Format date + time — DB stores server local time (Europe/Madrid) */
+export const API_TIME_ZONE = 'Europe/Madrid';
+
+/** Format a parsed API timestamp in the panel's fixed timezone. */
+export function formatApiDate(
+  dateValue: string | null,
+  options: Intl.DateTimeFormatOptions,
+): string {
+  const date = parseApiDate(dateValue);
+  return date ? date.toLocaleString('es-ES', { ...options, timeZone: API_TIME_ZONE }) : '-';
+}
+
+/** Format date string in Europe/Madrid, regardless of browser timezone. */
+export function formatDate(dateStr: string | null): string {
+  return formatApiDate(dateStr, { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+/** Format date + time in Europe/Madrid, regardless of browser timezone. */
 export function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr.replace(' ', 'T'));
-  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return formatApiDate(dateStr, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 /** Format milliseconds to human-readable minutes */
@@ -842,7 +871,8 @@ export function apiUrl(path: string): string {
 export function formatCountdown(targetIso: string | null): string {
   if (!targetIso) return '';
   try {
-    const target = new Date(targetIso.replace(' ', 'T'));
+    const target = parseApiDate(targetIso);
+    if (!target) return '';
     const now = new Date();
     const diff = target.getTime() - now.getTime();
     if (diff <= 0) return 'Ahora';
@@ -857,15 +887,29 @@ export function formatCountdown(targetIso: string | null): string {
   }
 }
 
-/** Format target time as HH:MM (local) with jitter indicator */
+/** Format target time as HH:MM in Europe/Madrid with jitter indicator */
 export function formatTargetTime(targetIso: string | null): string {
   if (!targetIso) return '';
   try {
-    const d = new Date(targetIso.replace(' ', 'T'));
-    return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    const d = parseApiDate(targetIso);
+    if (!d) return '';
+    return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: API_TIME_ZONE });
   } catch {
     return '';
   }
+}
+
+/** Format an API timestamp as a Madrid-local clock time. */
+export function formatTime(dateStr: string | null): string {
+  return formatApiDate(dateStr, { hour: '2-digit', minute: '2-digit' });
+}
+
+export function madridDateKey(value: string | Date = new Date()): string {
+  const date = value instanceof Date ? value : parseApiDate(value);
+  if (!date) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: API_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 // ═══════════════════════════════════════════════════════════════

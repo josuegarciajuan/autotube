@@ -3,7 +3,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { api } from '../lib/api'
+import { api, parseApiDate } from '../lib/api'
 import { Clock, Play, Smartphone, AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react'
 import { CHANNEL_TABLE_ROW, DEFAULT_TABLE_ROW, getChannelShort } from '../lib/channelConfig'
 
@@ -122,7 +122,7 @@ export default function ChannelScheduleTable() {
             const a = activeSlots[i].target_upload_at
             const b = activeSlots[j].target_upload_at
             if (a && b) {
-              const diff = Math.abs(new Date(a).getTime() - new Date(b).getTime())
+              const diff = Math.abs((parseApiDate(a)?.getTime() ?? 0) - (parseApiDate(b)?.getTime() ?? 0))
               if (diff < 5 * 60 * 1000) { ch.has_overlap = true; break }
             }
           }
@@ -150,7 +150,8 @@ export default function ChannelScheduleTable() {
   // Countdown to next execution
   const countdown = firstNext?.next_slot_time
     ? (() => {
-        const target = new Date(firstNext.next_slot_time!)
+        const target = parseApiDate(firstNext.next_slot_time!)
+        if (!target) return '—'
         const diff = target.getTime() - now.getTime()
         if (diff <= 0) return 'AHORA'
         const mins = Math.floor(diff / 60000)

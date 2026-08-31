@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { api } from '../lib/api'
+import { api, parseApiDate, formatApiDate } from '../lib/api'
 import type { ChannelInsight, InsightRecommendation, InsightCategory, KeyMetric, RefinedVersion, ValidationResult } from '../types/channel'
 import { getCategoryMeta } from '../types/channel'
 import {
@@ -554,7 +554,7 @@ function RecommendationCard({
                     </div>
                   )}
                   <p className="text-[10px] text-gray-600 mt-1">
-                    Confianza: {validation.confidence}% · {new Date(validation.validated_at).toLocaleString('es-ES')}
+                    Confianza: {validation.confidence}% · {formatApiDate(validation.validated_at, {}) || '—'}
                   </p>
                 </div>
               </div>
@@ -1346,10 +1346,10 @@ export default function InsightsTab({
             {insights.generated_at && (
               <p className="text-xs text-gray-500">
                 Analisis del{' '}
-                {new Date(insights.generated_at).toLocaleDateString('es-ES', {
-                  day: 'numeric', month: 'short', year: 'numeric',
-                  hour: '2-digit', minute: '2-digit',
-                })}
+                 {formatApiDate(insights.generated_at, {
+                   day: 'numeric', month: 'short', year: 'numeric',
+                   hour: '2-digit', minute: '2-digit',
+                 }) || '—'}
                 {insights.model_used && (
                   <span className="ml-2 text-gray-600">
                     · {insights.model_used} · {(insights.tokens_input + insights.tokens_output).toLocaleString()} tokens

@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { api, formatDateTime } from '../lib/api'
+import { api, formatDateTime, parseApiDate } from '../lib/api'
 import { Clock, CheckCircle, AlertCircle, Loader2, Filter, RefreshCw, Play, Youtube, X, XCircle } from 'lucide-react'
 
 type FilterStatus = 'all' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -56,7 +56,7 @@ export default function ExecutionTimeline() {
       }
 
       // Sort by date descending (newest first)
-      execs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      execs.sort((a, b) => (parseApiDate(b.date)?.getTime() ?? -Infinity) - (parseApiDate(a.date)?.getTime() ?? -Infinity))
       setExecutions(execs)
     } catch (e) { console.error(e) }
     setLoading(false)

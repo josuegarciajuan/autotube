@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Clock, ExternalLink, Film, Smartphone, AlertTriangle, CheckCircle, Upload, PenTool } from 'lucide-react'
 import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
+import { parseApiDate, formatTime } from '../lib/api'
 
 interface TodayAction {
   entity_id: number
@@ -20,8 +21,8 @@ interface RecentActionsProps {
 
 function fmtTime(isoStr: string): string {
   try {
-    const d = new Date(isoStr + 'Z')
-    return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+    const d = parseApiDate(isoStr)
+    return d ? formatTime(isoStr) : isoStr
   } catch {
     return isoStr
   }
