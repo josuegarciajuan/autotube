@@ -8,6 +8,11 @@
 - Reducido ritmo: `videos_per_day=1`, shorts 2/día por canal, `GLOBAL_DAILY_UPLOAD_CAP=12`; `yt-dlp` pineado a `<2026` por compatibilidad con Python 3.10.
 - Limpieza operativa: cancelados clips pendientes inválidos/del día tras el incidente y reforzado cleanup de Playwright para no dejar driver Node huérfano.
 
+### Fase 0 — Política efectiva por canal y verificación de visibilidad
+- Documentada la línea base de fuentes canónicas, puntos de enforcement y dependencias legacy en `docs/channel-policy-audit-2026-08-31.md`.
+- Registrada la decisión arquitectónica de separar strikes históricos, bloqueos activos y ritmo personalizado en `docs/adr/ADR-20260831-channel-policy.md`.
+- Estados `private`, `scheduled`, `unknown`, `error` y `LOGIN_REQUIRED` ya no se consideran eliminaciones automáticamente.
+
 ### Fase A — FIX: Duplicación (1 generación = 1 registro) + yt_video_id en registro trackeado
 - **orchestrator.py**: añadido `db_video_id` opcional; `phase_video`/`phase_upload` usan `update_video` en vez de `insert_video` cuando viene de API.
 - **api/services/generation_service.py**: pasa `db_video_id` al orquestador; guarda `yt_video_id`/`yt_url` en el registro trackeado tras subida exitosa.
