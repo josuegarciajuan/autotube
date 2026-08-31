@@ -592,12 +592,22 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
     """
     import time as _time
     from pipeline.youtube_browser import cleanup_browser_thread
-    
-    try:
-        _time.sleep(20)  # Wait for YouTube to finish processing
+    from api.services.egress_delegation import egress_client_for
+
+    _egress = egress_client_for(channel_slug)
+    browser = None
+    if _egress is None:
         from pipeline.youtube_browser import get_browser
         browser = get_browser(account)
-        success = browser.mark_altered_content(yt_id)
+
+    try:
+        _time.sleep(20)  # Wait for YouTube to finish processing
+        if _egress is not None:
+            _r = _egress.browser_action("mark_altered", account=account,
+                                        params={"video_id": yt_id})
+            success = bool(_r.get("ok"))
+        else:
+            success = browser.mark_altered_content(yt_id)
         if success:
             import sqlite3
             from config.settings import DATABASE_PATH
@@ -779,9 +789,17 @@ def _auto_link_longform_for_short(short_yt_id: str, channel_slug: str, account: 
 
         longform_yt_id = row[0]
 
-        from pipeline.youtube_browser import get_browser
-        browser = get_browser(account)
-        success = browser.link_longform_video(short_yt_id, longform_yt_id)
+        from api.services.egress_delegation import egress_client_for
+        _egress = egress_client_for(channel_slug)
+        if _egress is not None:
+            _r = _egress.browser_action("link_longform", account=account,
+                                        params={"short_yt_id": short_yt_id,
+                                                "longform_yt_id": longform_yt_id})
+            success = bool(_r.get("ok"))
+        else:
+            from pipeline.youtube_browser import get_browser
+            browser = get_browser(account)
+            success = browser.link_longform_video(short_yt_id, longform_yt_id)
 
         conn2 = sqlite3.connect(str(DATABASE_PATH), timeout=10)
         if success:

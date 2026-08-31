@@ -56,10 +56,19 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
     """Background thread: mark video as AI-generated + configure end screens.
 
     End screens are ALWAYS attempted independently of the IA-mark result.
+    Para canales gestionados por agente egress, delega ambas acciones al agente
+    (la IP de salida es la del agente, no la del server).
     """
     import random
     from pipeline.youtube_browser import cleanup_browser_thread
-    
+    from api.services.egress_delegation import egress_client_for
+
+    _egress = egress_client_for(canal)
+    browser = None
+    if _egress is None:
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
+
     try:
         db = ExtendedDatabase()
 
@@ -67,12 +76,14 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
         logger.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
         time.sleep(60)
 
-        from pipeline.youtube_browser import get_browser
-        browser = get_browser(account)
-
         # ── Step 1: Mark AI-generated content (best-effort, non-blocking) ──
         try:
-            success = browser.mark_altered_content(yt_video_id)
+            if _egress is not None:
+                _r = _egress.browser_action("mark_altered", account=account,
+                                            params={"video_id": yt_video_id})
+                success = bool(_r.get("ok"))
+            else:
+                success = browser.mark_altered_content(yt_video_id)
             if success:
                 db.update_video(video_id, manual_altered_content_done=1)
                 logger.info("[%s] IA altered content marked for %s", canal, yt_video_id)
@@ -92,7 +103,10 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
                 time.sleep(delay)
 
                 logger.info("[%s] 🎬 Attempting end screens for %s (up to 3 retries)", canal, yt_video_id)
-                success2 = _retry_end_screens(browser, yt_video_id, max_retries=3)
+                if _egress is not None:
+                    success2 = _retry_end_screens_egress(_egress, account, yt_video_id)
+                else:
+                    success2 = _retry_end_screens(browser, yt_video_id, max_retries=3)
                 if success2:
                     db.update_video(video_id, manual_end_screens_done=1)
                     logger.info("[%s] ✅ End screens configured for %s", canal, yt_video_id)
@@ -104,6 +118,26 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
             logger.warning("[%s] Auto end-screen error for %s: %s", canal, yt_video_id, e)
     finally:
         cleanup_browser_thread()
+
+
+def _retry_end_screens_egress(_egress, account: str, yt_video_id: str,
+                              max_retries: int = 3) -> bool:
+    """Retry end screens delegando al agente egress con backoff."""
+    import random
+    for attempt in range(1, max_retries + 1):
+        try:
+            _r = _egress.browser_action("end_screens", account=account,
+                                        params={"video_id": yt_video_id})
+            if _r.get("ok"):
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("egress end_screens attempt %d failed: %s", attempt, exc)
+        if attempt < max_retries:
+            wait_s = 30 * (2 ** (attempt - 1)) + random.uniform(0, 15)
+            logger.warning("End screens (egress) attempt %d/%d failed for %s — retrying in %.0fs",
+                           attempt, max_retries, yt_video_id, wait_s)
+            time.sleep(wait_s)
+    return False
 
 logger = logging.getLogger("autotube.generation")
 
