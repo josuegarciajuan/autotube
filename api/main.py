@@ -474,6 +474,12 @@ async def lifespan(app: FastAPI):
     # (scheduled_reminder_due) para revisión humana. Sin acciones en silencio.
     reminders_task = _supervised_loop("reminders", _reminder_loop)
 
+    # ── Liveness de la IP residencial de los agentes egress ──
+    # Comprueba cada 5 min que cada canal gestionado sale por su IP residencial
+    # esperada. Si cae → alerta egress_ip_down + flag egress_down_<slug>
+    # (fail-closed: la delegación no intenta nada con la IP muerta).
+    egress_monitor_task = _supervised_loop("egress_monitor", _egress_monitor_loop)
+
     yield
     
     # Shutdown
@@ -698,6 +704,27 @@ async def _publish_verify_loop():
             logger.warning("Publish verify error: %s", exc)
         
         await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _egress_monitor_loop():
+    """Background loop: verifica la salud de la IP residencial de los agentes egress.
+
+    Corre cada ~5 min (en thread vía asyncio.to_thread). Marca egress_down_<slug>
+    y alerta egress_ip_down si el agente no sale por su IP residencial esperada.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.egress_monitor_loop")
+    await asyncio.sleep(120)
+    while True:
+        try:
+            from api.services.egress_monitor import check_all_egress
+            from database.db_extended import ExtendedDatabase
+            results = await asyncio.to_thread(check_all_egress, ExtendedDatabase())
+            for slug, st in results.items():
+                logger.debug("[egress_monitor] %s ok=%s ip=%s", slug, st["ok"], st.get("ip", ""))
+        except Exception as exc:
+            logger.warning("egress monitor loop error: %s", exc)
+        await asyncio.sleep(300)
 
 
 async def _yt_state_reconcile_loop():

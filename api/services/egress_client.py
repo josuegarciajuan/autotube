@@ -82,9 +82,25 @@ class EgressAgent:
             h["X-Agent-Token"] = self.token
         return h
 
+    def _check_egress_health(self) -> None:
+        """Fail-closed: si el monitor marcó egress_down_<slug>, bloquea la op."""
+        try:
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            if _db.get_system_state(f"egress_down_{self.slug}") == "1":
+                raise EgressAgentUnavailableError(
+                    f"IP residencial de {self.slug} caída/inactiva (egress_down) — "
+                    f"renovar en Geonix. Operación bloqueada (fail-closed)."
+                )
+        except EgressAgentUnavailableError:
+            raise
+        except Exception:
+            pass  # si no se puede leer el flag, no bloquear por esto
+
     def _post(self, path: str, payload: Optional[dict] = None,
               files: Optional[dict] = None, timeout: Optional[int] = None,
               stream: bool = False) -> dict:
+        self._check_egress_health()
         url = f"{self.base_url}{path}"
         try:
             if files:
@@ -109,6 +125,7 @@ class EgressAgent:
         return data
 
     def _get(self, path: str) -> dict:
+        self._check_egress_health()
         try:
             resp = requests.get(f"{self.base_url}{path}", headers=self._headers(),
                                 timeout=self.timeout)
