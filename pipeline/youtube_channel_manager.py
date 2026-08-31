@@ -40,6 +40,8 @@ class YouTubeChannelManager:
 
     def authenticate(self) -> bool:
         """Load and refresh channel token. Returns True if authenticated."""
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(self.slug, "channel metadata sync")
         if not self._token_path.exists():
             logger.error("Token not found: %s. Authenticate first.", self._token_path)
             return False

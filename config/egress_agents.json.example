@@ -1,0 +1,13 @@
+{
+  "_comment": "Mapa secreto slug -> {url, token} de los agentes egress. Copia este fichero a config/egress_agents.json (gitignored) y rellena los valores reales. Cada canal listado aquí DELEGA todo su egress a YouTube/Google al agente (fail-closed: si el agente no responde, la operación falla, NUNCA cae a la IP del server).",
+  "canal6": {
+    "url": "http://VPS_A_IP:9101",
+    "token": "<AQUI_TU_TOKEN>",
+    "egress_label": "IP1"
+  },
+  "canal7": {
+    "url": "http://VPS_B_IP:9101",
+    "token": "<AQUI_TU_TOKEN>",
+    "egress_label": "IP2"
+  }
+}

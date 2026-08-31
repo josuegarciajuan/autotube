@@ -147,6 +147,34 @@ def _retry_end_screens_worker(browser, yt_video_id: str, wlog, max_retries: int 
     return False
 
 
+def _retry_end_screens_worker_egress(_egress, account: str, yt_video_id: str, wlog,
+                                     max_retries: int = 3) -> bool:
+    """Retry end screens delegando al agente egress (worker process)."""
+    import time as _wt
+    import random as _wr
+    for attempt in range(1, max_retries + 1):
+        try:
+            _r = _egress.browser_action("end_screens", account=account,
+                                        params={"video_id": yt_video_id})
+            if _r.get("ok"):
+                return True
+        except Exception as exc:  # noqa: BLE001
+            wlog.warning("egress end_screens attempt %d failed: %s", attempt, exc)
+        if attempt < max_retries:
+            wait_s = 30 * (2 ** (attempt - 1)) + _wr.uniform(0, 15)
+            wlog.warning(
+                "End screens (egress) attempt %d/%d failed for %s — retrying in %.0fs",
+                attempt, max_retries, yt_video_id, wait_s,
+            )
+            _wt.sleep(wait_s)
+        else:
+            wlog.error(
+                "End screens (egress) exhausted %d retries for %s — giving up",
+                max_retries, yt_video_id,
+            )
+    return False
+
+
 def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: int):
     """Background thread (worker subprocess): mark video as AI-generated + configure end screens.
 
@@ -156,6 +184,13 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
     import time as _time
     import random
     from pipeline.youtube_browser import cleanup_browser_thread
+    from api.services.egress_delegation import egress_client_for
+
+    _egress = egress_client_for(canal)
+    browser = None
+    if _egress is None:
+        from pipeline.youtube_browser import get_browser
+        browser = get_browser(account)
 
     try:
         db = None
@@ -164,12 +199,14 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
         wlog.info("[%s] Waiting 60s for YouTube processing before Studio automation...", canal)
         _time.sleep(60)
 
-        from pipeline.youtube_browser import get_browser
-        browser = get_browser(account)
-
         # ── Step 1: Mark AI-generated content (best-effort, non-blocking) ──
         try:
-            success = browser.mark_altered_content(yt_video_id)
+            if _egress is not None:
+                _r = _egress.browser_action("mark_altered", account=account,
+                                            params={"video_id": yt_video_id})
+                success = bool(_r.get("ok"))
+            else:
+                success = browser.mark_altered_content(yt_video_id)
             if success:
                 from database.db_extended import ExtendedDatabase
                 db = ExtendedDatabase()
@@ -209,7 +246,10 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
                 _time.sleep(delay)
 
                 wlog.info("[%s] 🎬 Attempting end screens for %s (up to 3 retries)", canal, yt_video_id)
-                success2 = _retry_end_screens_worker(browser, yt_video_id, wlog, max_retries=3)
+                if _egress is not None:
+                    success2 = _retry_end_screens_worker_egress(_egress, account, yt_video_id, wlog, max_retries=3)
+                else:
+                    success2 = _retry_end_screens_worker(browser, yt_video_id, wlog, max_retries=3)
                 if success2:
                     if db is None:
                         from database.db_extended import ExtendedDatabase

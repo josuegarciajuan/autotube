@@ -175,8 +175,24 @@ def human_delay(min_s: float = 0.3, max_s: float = 1.5, label: str = ""):
 class YouTubeBrowser:
     """Browser automation for YouTube Studio per Google account."""
 
-    def __init__(self, account: str):
+    def __init__(self, account: str, fingerprint: dict | None = None,
+                 proxy: dict | None = None):
+        """Initialize a per-account YouTube Studio browser.
+
+        Args:
+            account: Google account (resolves to tokens/{account}_browser_profile).
+            fingerprint: Optional per-account browser fingerprint overrides:
+                ``locale``, ``timezone_id``, ``viewport_width/height``,
+                ``screen_width/height``, ``user_agent``. Defaults keep the
+                legacy es-ES / Europe/Madrid behavior when not provided.
+            proxy: Optional Playwright proxy spec (``{"server": ...,
+                "username": ..., "password": ...}``) for the context. When
+                None the context uses the host's OS-level routing (e.g. an
+                egress tunnel configured at the system level).
+        """
         self.account = account
+        self.fingerprint = fingerprint or {}
+        self.proxy = proxy
         self.session_file = TOKENS_DIR / f"{account}_browser_session.json"
         self.user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
         self._playwright = None
@@ -238,13 +254,37 @@ class YouTubeBrowser:
         last_error = None
         for attempt in range(1, 4):
             try:
-                self._context = self._playwright.chromium.launch_persistent_context(
+                fp = self.fingerprint or {}
+                launch_kwargs = dict(
                     user_data_dir=str(self.user_data_dir),
                     headless=False,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
-                    viewport={"width": 1280, "height": 900},
-                    locale="es-ES",
-                    timezone_id="Europe/Madrid",
+                    # --force-webrtc-ip-handling-policy: evita que WebRTC/STUN
+                    # filtre la IP real del host aunque el tráfico HTTP vaya por
+                    # proxy/túnel (fuga anti-detección, ago 2026).
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox", "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                        "--proxy-bypass-list=<-loopback>",
+                    ],
+                    viewport={
+                        "width": fp.get("viewport_width", 1280),
+                        "height": fp.get("viewport_height", 900),
+                    },
+                    locale=fp.get("locale", "es-ES"),
+                    timezone_id=fp.get("timezone_id", "Europe/Madrid"),
+                )
+                if fp.get("screen_width") and fp.get("screen_height"):
+                    launch_kwargs["screen"] = {
+                        "width": fp["screen_width"], "height": fp["screen_height"],
+                    }
+                if fp.get("user_agent"):
+                    launch_kwargs["user_agent"] = fp["user_agent"]
+                if self.proxy:
+                    launch_kwargs["proxy"] = self.proxy
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    **launch_kwargs
                 )
                 self._owning_thread_id = current_thread
                 logger.info("Browser ready for account: %s (thread %s, attempt %d)",
@@ -1948,14 +1988,60 @@ YouTubeBrowser._do_search_channels = _do_browser_search_channels
 YouTubeBrowser._do_channel_videos = _do_browser_channel_videos
 
 
-def get_browser(account: str) -> YouTubeBrowser:
+def get_browser(account: str, fingerprint: dict | None = None,
+                proxy: dict | None = None) -> YouTubeBrowser:
+    """Return (and cache) the YouTubeBrowser for an account.
+
+    The proxy/fingerprint are honoured on the FIRST instantiation per account
+    (subsequent calls reuse the cached instance). Pass ``force_reset=True`` to
+    rebuild with new settings (used by the egress agent when fingerprint or
+    proxy are configured per account).
+    """
     with _browser_lock:
         if account not in _browser_instances:
-            _browser_instances[account] = YouTubeBrowser(account)
+            _browser_instances[account] = YouTubeBrowser(account, fingerprint=fingerprint, proxy=proxy)
+        elif fingerprint is not None or proxy is not None:
+            # Rebuild only if the caller explicitly requests a fingerprint/proxy
+            # change AND the existing instance was created without one.
+            existing = _browser_instances[account]
+            if (fingerprint is not None and not existing.fingerprint) or \
+               (proxy is not None and existing.proxy is None):
+                try:
+                    existing.close()
+                except Exception:
+                    pass
+                _browser_instances[account] = YouTubeBrowser(
+                    account, fingerprint=fingerprint, proxy=proxy,
+                )
         return _browser_instances[account]
 
 
-def close_all_browsers():
+def close_browser(account: str):
+    """Close the browser context for a single account only (scoped cleanup).
+
+    Unlike ``close_all_browsers``, this never touches other accounts' browsers,
+    so a proxied/managed account's operation is not aborted by an unrelated
+    account's cleanup.
+    """
+    with _browser_lock:
+        b = _browser_instances.pop(account, None)
+    if b is not None:
+        try:
+            b.close()
+        except Exception:
+            pass
+
+
+def close_all_browsers(account: str | None = None):
+    """Close browser contexts.
+
+    Args:
+        account: If given, closes ONLY that account's browser (scoped). If None,
+            closes all accounts' browsers (legacy global behavior).
+    """
+    if account is not None:
+        close_browser(account)
+        return
     with _browser_lock:
         for b in _browser_instances.values():
             try: b.close()
@@ -1995,7 +2081,9 @@ def get_account_for_channel(channel_slug: str) -> Optional[str]:
 _session_check_cache: dict = {}  # {account: (timestamp, status_dict)}
 
 
-async def check_session_valid(account: str, cache_seconds: int = 300) -> dict:
+async def check_session_valid(account: str, cache_seconds: int = 300,
+                              fingerprint: dict | None = None,
+                              proxy: dict | None = None) -> dict:
     """Check if a browser session is still authenticated.
     
     Launches a temporary browser with the persistent profile, navigates
@@ -2061,14 +2149,27 @@ async def check_session_valid(account: str, cache_seconds: int = 300) -> dict:
         _ensure_xvfb()
         from playwright.async_api import async_playwright as _async_pw
         pw = await _async_pw().start()
-        ctx = await pw.chromium.launch_persistent_context(
+        fp = fingerprint or {}
+        launch_kwargs = dict(
             user_data_dir=str(user_data_dir),
             headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer"],
-            viewport={"width": 1280, "height": 900},
-            locale="es-ES",
-            timezone_id="Europe/Madrid",
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                  "--disable-gpu", "--disable-software-rasterizer",
+                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--proxy-bypass-list=<-loopback>"],
+            viewport={"width": fp.get("viewport_width", 1280),
+                      "height": fp.get("viewport_height", 900)},
+            locale=fp.get("locale", "es-ES"),
+            timezone_id=fp.get("timezone_id", "Europe/Madrid"),
         )
+        if fp.get("screen_width") and fp.get("screen_height"):
+            launch_kwargs["screen"] = {"width": fp["screen_width"],
+                                       "height": fp["screen_height"]}
+        if fp.get("user_agent"):
+            launch_kwargs["user_agent"] = fp["user_agent"]
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
         try:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             await page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)

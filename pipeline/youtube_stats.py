@@ -53,6 +53,8 @@ class YouTubeStatsFetcher:
 
     def authenticate(self) -> bool:
         """Load and refresh channel token."""
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(self.slug, "stats collection")
         if not self._token_path.exists():
             logger.warning("No token for %s at %s", self.slug, self._token_path)
             return False

@@ -179,6 +179,14 @@ def main():
     by_account = {}
     for item in pending:
         context = next((c for c in channels if c.slug == item["canal"]), None)
+        # Fail-closed: canales gestionados por agente egress NO se procesan con
+        # el navegador del server (filtraría la IP del server). El hold de esos
+        # canales debe hacerse vía agente (browser_action hold_private) o manual.
+        from api.services.egress_delegation import is_egress_managed
+        if item["canal"] and is_egress_managed(item["canal"]):
+            logger.warning("Skipping managed channel %s in hold script (fail-closed) — usar agente/manual",
+                           item["canal"])
+            continue
         account = context.google_account if context else None
         if not account:
             logger.warning("No google_account in DB for %s — skipping #%s",

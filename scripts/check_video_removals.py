@@ -133,6 +133,15 @@ def main():
         yt_id = (row["yt_video_id"] if "yt_video_id" in row.keys() else row["youtube_id"])
         if not yt_id:
             continue
+        # Fail-closed: los canales gestionados por agente egress NO se barren
+        # desde el server (la watch page filtraría la IP del server). El sweep
+        # de esos canales debe hacerse vía agente (pendiente de delegación).
+        _cid = row["channel_id"]
+        _slug = row["canal"] if "canal" in row.keys() else (db.get_channel(_cid) or {}).get("slug", f"ch{_cid}")
+        from api.services.egress_delegation import is_egress_managed
+        if is_egress_managed(_slug):
+            logger.debug("Skipping managed channel %s in server sweep (fail-closed)", _slug)
+            continue
         total += 1
         st = watch_page_status(yt_id)
         # A single watch-page response is insufficient evidence: transient

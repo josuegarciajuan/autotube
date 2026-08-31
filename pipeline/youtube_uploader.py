@@ -768,7 +768,13 @@ class YouTubeUploader:
                     f"Unparseable publishAt: {publish_at!r}"
                 ) from _pe
 
-        service = self._get_service()
+        service = None
+        _egress_client = None
+        if self.channel_slug:
+            from api.services.egress_delegation import egress_client_for
+            _egress_client = egress_client_for(self.channel_slug)
+        if _egress_client is None:
+            service = self._get_service()
 
         # ── Anti-strike: espaciado global de subidas entre canales ──
         # YouTube elimina subidas en ráfagas cruzadas (varios canales a la vez
@@ -848,47 +854,79 @@ class YouTubeUploader:
                     publish_at,
                 )
 
-            media = MediaFileUpload(
-                str(video_path),
-                mimetype="video/*",
-                chunksize=256 * 1024,
-                resumable=True,
-            )
-
-            request = service.videos().insert(
-                part="snippet,status",
-                body=body,
-                media_body=media,
-            )
-
-            logger.info("Uploading: %s (privacy=%s)", title, privacy)
-            # The dispatcher reserves exactly 1,600 units atomically.  The
-            # transport marks the boundary immediately before next_chunk(),
-            # where the first billable videos.insert request is issued.
-            from api.services.youtube_upload_dispatcher import (
-                UploadDispatchBlocked,
-                YouTubeUploadDispatcher,
-            )
-            # Callers with a durable database/job ID can supply it explicitly;
-            # legacy callers retain a deterministic canonical-path fallback
-            # (original pre-rename path — unique per generated video).
-            reference_id = quota_reference_id or (
-                f"upload:{self.channel_slug or self.account_name}:{original_video_path}"
-            )
-            try:
-                response = YouTubeUploadDispatcher(self.channel_slug or self.account_name).dispatch(
-                    reference_id=reference_id,
-                    content_class="short" if "short" in str(video_path).lower() else "long",
-                    transport=lambda request_started: self._upload_transport(
-                        request, request_started, heartbeat_callback, progress_callback,
-                        progress_callback_detail,
-                    ),
+            if _egress_client is not None:
+                # ── Subida delegada al agente egress (IP aislada) ──
+                # El agente hace el videos.insert + thumbnail + verificación
+                # post-subida desde su red. El server conserva el bookkeeping
+                # de DB (track_quota, record_upload, logs) con el resultado.
+                logger.info("[%s] delegando subida al agente egress (%s)", self.channel_slug, _egress_client.base_url)
+                agent_res = _egress_client.upload(
+                    str(video_path),
+                    meta={
+                        "title": body["snippet"]["title"],
+                        "description": body["snippet"]["description"],
+                        "tags": body["snippet"].get("tags", []),
+                        "category_id": body["snippet"]["categoryId"],
+                        "language": body["snippet"].get("defaultLanguage", "es"),
+                        "privacy": privacy,
+                        "publish_at": publish_at,
+                        "self_declared_made_for_kids": body["status"].get("selfDeclaredMadeForKids", False),
+                        "embeddable": body["status"].get("embeddable", True),
+                        "public_stats_viewable": body["status"].get("publicStatsViewable", True),
+                    },
+                    thumbnail_path=str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).exists() else None,
                 )
-            except UploadDispatchBlocked as exc:
-                # Local admission denial (reference collision, budget, unknown
-                # project...). NOT a YouTube quota error: must not trip the
-                # per-project breaker nor create a "quota agotada" alert.
-                raise UploadAdmissionDeniedError(str(exc)) from exc
+                if not agent_res.get("ok"):
+                    raise RuntimeError(agent_res.get("error", "subida vía agente falló"))
+                response = {
+                    "id": agent_res["video_id"],
+                    "status": {"uploadStatus": "processed",
+                               "privacyStatus": "private" if publish_at else privacy},
+                }
+                _egress_agent_uploaded = True
+            else:
+                _egress_agent_uploaded = False
+                media = MediaFileUpload(
+                    str(video_path),
+                    mimetype="video/*",
+                    chunksize=256 * 1024,
+                    resumable=True,
+                )
+
+                request = service.videos().insert(
+                    part="snippet,status",
+                    body=body,
+                    media_body=media,
+                )
+
+                logger.info("Uploading: %s (privacy=%s)", title, privacy)
+                # The dispatcher reserves exactly 1,600 units atomically.  The
+                # transport marks the boundary immediately before next_chunk(),
+                # where the first billable videos.insert request is issued.
+                from api.services.youtube_upload_dispatcher import (
+                    UploadDispatchBlocked,
+                    YouTubeUploadDispatcher,
+                )
+                # Callers with a durable database/job ID can supply it explicitly;
+                # legacy callers retain a deterministic canonical-path fallback
+                # (original pre-rename path — unique per generated video).
+                reference_id = quota_reference_id or (
+                    f"upload:{self.channel_slug or self.account_name}:{original_video_path}"
+                )
+                try:
+                    response = YouTubeUploadDispatcher(self.channel_slug or self.account_name).dispatch(
+                        reference_id=reference_id,
+                        content_class="short" if "short" in str(video_path).lower() else "long",
+                        transport=lambda request_started: self._upload_transport(
+                            request, request_started, heartbeat_callback, progress_callback,
+                            progress_callback_detail,
+                        ),
+                    )
+                except UploadDispatchBlocked as exc:
+                    # Local admission denial (reference collision, budget, unknown
+                    # project...). NOT a YouTube quota error: must not trip the
+                    # per-project breaker nor create a "quota agotada" alert.
+                    raise UploadAdmissionDeniedError(str(exc)) from exc
 
             # ── Validate YouTube response ─────────────────────────
             self._validate_upload_response(response)
@@ -909,7 +947,9 @@ class YouTubeUploader:
                 logger.debug("record_upload failed: %s", _sp_exc)
 
             # ── Post-upload verification: confirm video exists on YouTube ──
-            self._verify_upload_exists(service, video_id)
+            # (El agente ya verifica post-subida desde su red; se omite local.)
+            if not _egress_agent_uploaded:
+                self._verify_upload_exists(service, video_id)
 
             # ── Build warnings for non-uploadable fields ─────────
             warnings = []
@@ -923,7 +963,7 @@ class YouTubeUploader:
                 "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
                 "ready": False,
             })
-            if thumbnail_path and Path(thumbnail_path).exists():
+            if thumbnail_path and Path(thumbnail_path).exists() and not _egress_agent_uploaded:
                 if not self._set_thumbnail(service, video_id, Path(thumbnail_path)):
                     warnings.append({
                         "type": "thumbnail",
