@@ -1131,6 +1131,13 @@ def fetch_short_assets_exhaustive(
 # v2: Hybrid render (video + Ken Burns images + xfade)
 # ═══════════════════════════════════════════════════════════════════════════
 
+def has_sufficient_visual_assets(asset_items, min_ratio: float = 0.5) -> bool:
+    """Reject solid-bg or mostly-filler renders before ffmpeg/upload."""
+    positions = len(asset_items or [])
+    valid = sum(1 for asset in (asset_items or []) if asset is not None)
+    return positions > 0 and valid > 0 and (valid / positions) >= float(min_ratio)
+
+
 def render_short_hybrid(
     asset_items: list[dict[str, Any] | None],
     audio_path: Path,
@@ -1231,13 +1238,6 @@ def render_short_hybrid(
     # ── No renderable assets is a hard rejection ─────────────────
     if not has_any_valid:
         raise RuntimeError("degraded render rejected: no valid visual assets")
-
-
-def has_sufficient_visual_assets(asset_items, min_ratio: float = 0.5) -> bool:
-    """Reject solid-bg or mostly-filler renders before ffmpeg/upload."""
-    positions = len(asset_items or [])
-    valid = sum(1 for asset in (asset_items or []) if asset is not None)
-    return positions > 0 and valid > 0 and (valid / positions) >= float(min_ratio)
 
     # ── Hybrid render: mixed video + image scenes ─────────────
     n_assets = len(asset_items)  # total positions including None fillers
