@@ -447,6 +447,30 @@ PROXY_PORT=1080
 PROXY_CHANNELS=canal2         # vacío = todos los canales
 ```
 
+## 🛰️ Egress aislado por cuenta (agente egress en VPS)
+> **Invariante egress (NO relajar):** cualquier interacción con YouTube/Google de
+> un canal **con IP/VPS externo configurado** DEBE salir por esa IP (agente egress
+> del VPS). Solo los canales SIN egress externo usan la IP del server. **Nunca**
+> mezclar la IP del server con canales con egress propio. Ver `specs/egress-aislado.md`.
+
+- Un canal se marca como gestionado añadiéndolo a **`config/egress_agents.json`**
+  (gitignored) con `{url, token}` del agente. Entonces todo su egress se **delega**
+  al agente del VPS (subidas, navegador, reconciler, OAuth, comentarios, colabs,
+  sweep) o se **bloquea fail-closed** (stats/playlists/comments-API/metadata aún no
+  delegados → `EgressAgentUnavailableError`, nunca filtra la IP del server).
+- **IP de egreso:** el agente sale por la IP residencial `58.68.169.25` (Madrid).
+  Verificar con `/egress-check` que devuelve esa IP, nunca la del server.
+- **Despliegue remoto automático:** `scripts/apply_changes.sh` incluye un
+  **Step 4** que hace `git pull --ff-only` en `/opt/autotube` del VPS +
+  `systemctl restart egress-agent` (fail-open si el VPS no responde). Un hook
+  `post-merge` en `main` ejecuta `apply_changes.sh` automáticamente tras cada
+  merge (flock para evitar solapamiento). El VPS sigue `origin/main`.
+- **Servicios systemd en el VPS** (`194.233.67.64`): `egress-agent`, y el entorno
+  visual de creación de cuenta `xvfb`/`xfce-desktop`/`vnc`/`novnc` (acceso por
+  túnel SSH `:6080`, password `canal6madrid`, Chromium `/opt/navegador_canal6.sh`
+  sale por la IP residencial).
+- Credenciales SSH/proxy viven en `.env` (`VPS_SSH_*`, `EGRESS_PROXY1`), gitignored.
+
 ## Campos subibles vs manuales (YouTube API)
 | Dato | API | Manual |
 |------|-----|--------|
