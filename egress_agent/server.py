@@ -59,12 +59,22 @@ class AgentApp:
     def _require_egress(self) -> None:
         """Fail-closed: antes de tocar YT, confirma que la salida es la IP esperada.
 
-        Si la IP cambió/caducó (o no se puede verificar), rechaza la operación:
-        jamás se toca YouTube desde una IP distinta a la residencial esperada.
+        - Si no hay ``expected_ip`` configurado (misconfiguration), se rechaza la
+          operación: un agente sin IP esperada NO puede verificar su egress, y
+          permitir la operación dejaría la salida sin verificar (riesgo de usar
+          la IP del datacenter del VPS). Ya no se hace skip silencioso.
+        - Si la IP cambió/caducó (o no se puede verificar), se rechaza la
+          operación: jamás se toca YouTube desde una IP distinta a la residencial.
         """
+        if not self.cfg.egress_verify:
+            return  # opt-out explícito (solo desarrollo/test, NUNCA en producción)
         expected = (self.cfg.expected_ip or "").strip()
         if not expected:
-            return  # no verificación configurada
+            raise EgressGuardError(
+                "expected_ip no configurado en agent_config.json — la salida del "
+                "agente NO está verificada. Rellene expected_ip (IP residencial) "
+                "en el VPS, o el agente no debe operar (fail-closed)."
+            )
         now = time.time()
         cache = AgentApp._egress_verify_cache
         if now - cache["ts"] < AgentApp._EGRESS_VERIFY_TTL and cache["ok"]:
@@ -126,6 +136,36 @@ class AgentApp:
         def egress_check(x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
             return scraper.egress_check(self.cfg)
+
+        @app.get("/healthz")
+        def healthz(x_agent_token: Optional[str] = Header(None)):
+            """Health completo del agente en una sola llamada (para monitor/CI)."""
+            self._check_token(x_agent_token)
+            expected = (self.cfg.expected_ip or "").strip()
+            ip = ""
+            try:
+                self._require_egress()
+                ip = self._probe_egress_ip()
+                egress_ok = bool(ip) and ip == expected
+            except EgressGuardError:
+                egress_ok = False
+            return {
+                "ok": True,
+                "slug": self.cfg.slug,
+                "egress_label": self.cfg.egress_label,
+                "token_valid": True,
+                "expected_ip": expected,
+                "egress_ip": ip,
+                "egress_ok": egress_ok,
+            }
+
+        @app.get("/egress-check-browser")
+        def egress_check_browser(x_agent_token: Optional[str] = Header(None)):
+            """Verifica el egress REAL del navegador (no solo curl): lanza una
+            página headless vía Playwright por el proxy residencial y devuelve
+            la IP que ve la página + estado de WebRTC (fuga anti-detección)."""
+            self._check_token(x_agent_token)
+            return browser_mod.browser_egress_probe(self.cfg)
 
         @app.post("/browser/action")
         def browser_action(body: AgentApp.BrowserActionModel,

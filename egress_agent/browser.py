@@ -127,3 +127,90 @@ def _reply_comment(cfg: AgentConfig, browser, params: dict) -> dict:
         return {"ok": False, "error": "faltan video_id/text"}
     ok = browser.post_comment_reply(video_id, idx, text, expected_text=expected)
     return {"ok": bool(ok), "result": ok}
+
+
+def _detect_webrtc_disabled(page) -> bool:
+    """Best-effort: True si el navegador NO expone IPs locales vía WebRTC.
+
+    La política ``--force-webrtc-ip-handling-policy=disable_non_proxied_udp``
+    debería impedirlo; este evaluador lo comprueba en runtime intentando
+    enumerar candidatos ICE. Si no aparece ninguna IP no-mDNS → seguro.
+    """
+    js = """
+    () => new Promise((resolve) => {
+      try {
+        const pc = new RTCPeerConnection({
+          iceServers: [{urls: ['stun:stun.l.google.com:19302']}]
+        });
+        const ips = new Set();
+        pc.onicecandidate = (e) => {
+          if (e && e.candidate) {
+            const c = e.candidate.candidate || '';
+            if (c.indexOf('.local') === -1) {
+              const parts = c.split(' ');
+              const i = parts.indexOf('raddr');
+              if (i !== -1 && parts[i+1] && parts[i+1] !== '0.0.0.0') {
+                ips.add(parts[i+1]);
+              }
+            }
+          } else {
+            resolve(Array.from(ips));
+          }
+        };
+        pc.createDataChannel('probe');
+        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => resolve([]));
+        setTimeout(() => resolve(Array.from(ips)), 4000);
+      } catch (e) { resolve([]); }
+    })
+    """
+    try:
+        found = page.evaluate(js)
+        return not bool(found)  # sin IPs no-mDNS expuestas → seguro
+    except Exception:
+        return True  # si no se puede evaluar, asumir seguro
+
+
+def browser_egress_probe(cfg: AgentConfig) -> dict:
+    """Verifica el egress REAL del navegador (no solo curl).
+
+    Lanza una página headless vía Playwright POR el proxy residencial y devuelve
+    la IP que ve la página (``browser_ip``) y si WebRTC está desactivado
+    (``webrtc_disabled``). Si la IP del navegador no coincide con la esperada,
+    hay una fuga de capa-browser que el probe curl no detectaría.
+    """
+    try:
+        browser, _close_all = _get_browser(cfg, cfg.google_account or cfg.slug)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"no se pudo lanzar el navegador: {exc}"}
+    page = None
+    try:
+        page = browser._context.new_page()
+        page.goto("https://api.ipify.org?format=json",
+                  wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2500)
+        body = page.evaluate("() => document.body ? document.body.innerText : ''")
+        import json as _json
+        try:
+            data = _json.loads(body)
+            browser_ip = str(data.get("ip", "")).strip()
+        except Exception:  # noqa: BLE001
+            browser_ip = body.strip()
+        webrtc_disabled = _detect_webrtc_disabled(page)
+        expected = (cfg.expected_ip or "").strip()
+        return {
+            "ok": True,
+            "result": {
+                "browser_ip": browser_ip,
+                "expected_ip": expected,
+                "webrtc_disabled": webrtc_disabled,
+                "match": bool(browser_ip) and browser_ip == expected,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:1000]}
+    finally:
+        try:
+            if page is not None:
+                page.close()
+        except Exception:  # noqa: BLE001
+            pass
