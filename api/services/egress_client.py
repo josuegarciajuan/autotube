@@ -145,16 +145,53 @@ class EgressAgent:
         return self._post("/fetch", {"url": url, "timeout": timeout})
 
     def upload(self, video_path: str, meta: dict,
-               thumbnail_path: Optional[str] = None) -> dict:
-        files = {
-            "video": (Path(video_path).name, open(video_path, "rb"), "video/*"),
-            "meta": (None, json.dumps(meta)),
-        }
+               thumbnail_path: Optional[str] = None,
+               staged_path: Optional[str] = None) -> dict:
+        """Sube un vídeo al agente.
+
+        Si ``staged_path`` se da, el agente ya tiene el archivo (transferencia
+        previa vía ``stage``) → se envía solo la orden (sin el fichero).
+        Si no, se envía el fichero en multipart (carga directa).
+        """
+        files = {"meta": (None, json.dumps(meta))}
+        if staged_path:
+            files["staged_path"] = (None, staged_path)
+            if thumbnail_path:
+                meta["thumbnail_path"] = thumbnail_path
+            try:
+                return self._post("/upload", files=files, timeout=max(self.timeout, 1800))
+            finally:
+                pass
+        files["video"] = (Path(video_path).name, open(video_path, "rb"), "video/*")
         if thumbnail_path and Path(thumbnail_path).exists():
             files["thumbnail"] = (Path(thumbnail_path).name,
                                   open(thumbnail_path, "rb"), "image/jpeg")
         try:
             return self._post("/upload", files=files, timeout=max(self.timeout, 1800))
+        finally:
+            for key in ("video", "thumbnail"):
+                fobj = files.get(key)
+                if isinstance(fobj, tuple) and len(fobj) > 1:
+                    try:
+                        fobj[1].close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def stage(self, video_path: str, ref: str,
+              thumbnail_path: Optional[str] = None) -> dict:
+        """Transfiere el vídeo (+thumb) al VPS SIN subir (estado intermedio).
+
+        Devuelve {ok, staged_path, thumbnail_path} para pasarlos a ``upload``.
+        """
+        files = {
+            "video": (Path(video_path).name, open(video_path, "rb"), "video/*"),
+            "ref": (None, ref),
+        }
+        if thumbnail_path and Path(thumbnail_path).exists():
+            files["thumbnail"] = (Path(thumbnail_path).name,
+                                  open(thumbnail_path, "rb"), "image/jpeg")
+        try:
+            return self._post("/stage", files=files, timeout=max(self.timeout, 1800))
         finally:
             for key in ("video", "thumbnail"):
                 fobj = files.get(key)

@@ -1,4 +1,6 @@
 """Tests del servidor del agente egress (endpoints, auth, dispatcher)."""
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -104,3 +106,43 @@ def test_collab_adapter_delegates(tmp_path):
     res2 = adapter.get_channel_videos("https://www.youtube.com/@x", limit=3)
     assert res2 and res2[0]["yt_video_id"] == "abc"
     assert calls[-1][0] == "collab_channel_videos"
+
+
+def test_api_op_registry_has_complete_ops(tmp_path):
+    """El registro de ops del agente cubre playlists/comments/metadata/stats."""
+    from egress_agent import youtube_api as ya
+    ops = set(ya._OP_REGISTRY.keys())
+    required = {"create_playlist", "add_video_to_playlist", "list_playlists",
+                "post_comment", "reply_comment", "list_comments",
+                "update_video_metadata", "update_channel_metadata", "collect_stats"}
+    assert required <= ops
+
+
+def test_stage_saves_file(tmp_path):
+    """/stage guarda el vídeo en el VPS y devuelve staged_path (sin subir)."""
+    app = create_app(_cfg(tmp_path))
+    c = TestClient(app)
+    payload = b"fakemp4data"
+    r = c.post("/stage", files={
+        "video": ("v.mp4", payload, "video/mp4"),
+        "ref": (None, "testref123"),
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    sp = body["staged_path"]
+    assert Path(sp).exists()
+    assert Path(sp).read_bytes() == payload
+
+
+def test_upload_with_staged_path_graceful(tmp_path):
+    """/upload con staged_path intenta subir; sin token devuelve error (no 500)."""
+    app = create_app(_cfg(tmp_path))
+    c = TestClient(app)
+    r = c.post("/upload", files={
+        "meta": (None, "{}"),
+        "staged_path": (None, "/nonexistent/video.mp4"),
+    })
+    assert r.status_code == 200
+    assert r.json()["ok"] is False  # sin credenciales reales → error controlado
+
