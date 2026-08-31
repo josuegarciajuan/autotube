@@ -116,14 +116,16 @@ def build_plan(db, persist: bool = True) -> dict:
         if not cid or not slug:
             continue
         entry = None
-        b = _get_blocked_until(db, cid)
+        from api.services.channel_policy import resolve_channel_policy
+        policy = resolve_channel_policy(cid, db=db, now=now_ts)
+        b = policy["blocked_until"]
         if b and b > now_ts:
             entry = {"start_iso": _iso_utc(b), "source": "unblock", "slug": slug}
         else:
             # ¿Tuvo strike PROPIO alguna vez (contador > 0)? → rampa fase 1 desde
             # SU desbloqueo, aunque la fecha ya haya pasado (ej. canal5).
             try:
-                own_strikes = int(db.get_system_state(f"shorts_spam_strikes_{cid}") or 0)
+                own_strikes = policy["historical_strikes"]
             except (TypeError, ValueError):
                 own_strikes = 0
             if own_strikes > 0 and b:

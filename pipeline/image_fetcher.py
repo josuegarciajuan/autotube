@@ -568,6 +568,8 @@ class ImageFetcher:
         self.fallback: PixabayImageProvider | None = None
         if config is None:
             from config.config_bridge import get_channel_config
+            if not settings.ACTIVE_CHANNELS:
+                raise ValueError("No active channel is available for ImageFetcher")
             config = get_channel_config(settings.ACTIVE_CHANNELS[0])
         self._config = config
 

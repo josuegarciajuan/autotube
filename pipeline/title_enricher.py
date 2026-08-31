@@ -114,6 +114,14 @@ _STRATEGIES = [
     (10, "question",          _strategy_question),
 ]
 
+
+def resolve_title_max_chars(config, default: int = 100) -> int:
+    """Return the single configured title limit used by all title stages."""
+    try:
+        return max(1, int(getattr(config, "TITLE_MAX_CHARS", default)))
+    except (TypeError, ValueError):
+        return default
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _fit(base: str, suffix: str, max_chars: int) -> Optional[str]:

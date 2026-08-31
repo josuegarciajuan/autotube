@@ -169,7 +169,7 @@ def get_account_daily_uploads(account: str, db=None) -> int:
                           AND (date(uploaded_at) = ? OR date(published_at) = ?)) AS vids,
                       (SELECT COUNT(*) FROM shorts
                         WHERE channel_id IN ({ids_sql})
-                          AND status IN ('uploaded','published')
+                           AND status IN ('uploaded','published','scheduled')
                           AND date(published_at) = ?) AS shs""",
                 (today, today, today),
             ).fetchone()
@@ -664,23 +664,12 @@ def build_spam_situation(channel_id: int, db=None) -> dict:
     slug = ch.get("slug", "")
     now = time.time()
 
-    raw_block = db.get_system_state(f"shorts_spam_blocked_until_{channel_id}")
-    blocked_until = None
-    blocked = False
-    restan_h = 0.0
-    if raw_block:
-        try:
-            blocked_until = float(raw_block)
-            blocked = now < blocked_until
-            restan_h = round((blocked_until - now) / 3600.0, 1) if blocked else 0.0
-        except (TypeError, ValueError):
-            pass
-
-    strikes = 0
-    try:
-        strikes = int(db.get_system_state(f"shorts_spam_strikes_{channel_id}") or 0)
-    except (TypeError, ValueError):
-        strikes = 0
+    from api.services.channel_policy import resolve_channel_policy
+    policy = resolve_channel_policy(channel_id, db=db, now=now)
+    blocked_until = policy["blocked_until"]
+    blocked = policy["blocked"]
+    restan_h = round((blocked_until - now) / 3600.0, 1) if blocked_until and blocked else 0.0
+    strikes = policy["historical_strikes"]
 
     last_removal = None
     try:

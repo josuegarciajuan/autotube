@@ -72,8 +72,8 @@ def classify_video_visibility(yt_id: str) -> str:
             return "age_restricted"
         if "private video" in msg or "granted access" in msg:
             return "private"
-        if "video unavailable" in msg or "isn't available" in msg:
-            return "removed"
+        if "login required" in msg or "sign in to access" in msg:
+            return "login_required"
         if "has been removed" in msg or "removed for violating" in msg:
             return "removed"
         if "unavailable" in msg:
@@ -165,6 +165,14 @@ def reconcile_recent_shorts(db=None) -> dict:
 
             vis = classify_video_visibility(yt_id)
             summary["checked"] += 1
+
+            # A transient extractor response is not proof of removal. Require
+            # an immediate second explicit signal before caching ``removed``.
+            if vis == "removed":
+                from api.services.channel_policy import removal_is_confirmed
+                second_vis = classify_video_visibility(yt_id)
+                if not removal_is_confirmed(vis, int(second_vis == "removed")):
+                    vis = second_vis if second_vis != "removed" else "unknown"
 
             # RSS feed is authoritative for "public".
             if vis in ("public", "unknown", "error") and yt_id in feed:

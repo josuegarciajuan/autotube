@@ -46,10 +46,7 @@ def test_default_profile_is_strike_with_antiban_values(tmp_path):
     pacing = pacing_profile.get_pacing(db)
     # Valores antiban actuales (ago 2026) — NO deben cambiar el comportamiento.
     assert pacing["shorts_per_channel_day"] == 1
-    # Techo de longs (ago 2026): relajado a 2 tras levantar los strikes. Sigue
-    # siendo un tope DURA independiente del perfil (permanent override), pero
-    # ahora permite 2 longs/día para los canales con política explícita de 2.
-    assert pacing["max_longform_publish_day"] == 2
+    assert pacing["max_longform_publish_day"] == 1
     assert pacing["same_channel_publish_gap_h"] == 24
     assert pacing["same_channel_upload_gap_h"] == 6
     assert pacing["global_upload_spacing_min"] == 45
@@ -79,9 +76,10 @@ def test_profile_relaxes_all_keys_at_once(tmp_path):
     strike = pacing_profile.get_pacing(db)
     pacing_profile.set_pacing_profile("normal", db)
     normal = pacing_profile.get_pacing(db)
-    # El máximo de long-form normal (2) coincide con el techo DURA relajado (2).
+    # El máximo de long-form sigue la política del perfil sin escritura lateral.
     assert normal["shorts_per_channel_day"] > strike["shorts_per_channel_day"]
-    assert normal["max_longform_publish_day"] == strike["max_longform_publish_day"] == 2
+    assert normal["max_longform_publish_day"] == 2
+    assert strike["max_longform_publish_day"] == 1
     for key in ("same_channel_publish_gap_h", "same_channel_upload_gap_h",
                 "global_upload_spacing_min", "shorts_cooldown_min",
                 "shorts_same_type_gap_min"):
@@ -97,6 +95,12 @@ def test_manual_override_wins_over_profile(tmp_path):
     assert pacing_profile.get_pacing_value("shorts_per_channel_day", db=db) == 1
     # El resto del perfil normal sigue aplicando
     assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 2
+
+
+def test_pacing_resolution_does_not_persist_longform_override(tmp_path):
+    db = _db(tmp_path)
+    pacing_profile.get_pacing(db)
+    assert db.get_system_state("pacing_max_longform_publish_day") in (None, "")
 
 
 def test_unknown_profile_raises(tmp_path):

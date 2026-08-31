@@ -39,7 +39,7 @@ class _FakeYDL:
     ("", "public"),
     ("ERROR: Private video. Sign in if you've been granted access", "private"),
     ("ERROR: Sign in to confirm your age. This video may be inappropriate", "age_restricted"),
-    ("ERROR: Video unavailable. This video isn't available anymore", "removed"),
+    ("ERROR: Video unavailable. This video isn't available anymore", "unavailable"),
     ("ERROR: This video has been removed for violating YouTube's Terms", "removed"),
     ("ERROR: some weird network thing", "error"),
 ])

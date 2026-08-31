@@ -136,6 +136,32 @@ def _clean_duplicate_keys(db_config: dict, py_safe: dict) -> dict:
     return db_config
 
 
+def _deep_merge_dicts(base: dict, overlay: dict) -> dict:
+    """Recursively merge mappings, with values in *overlay* taking precedence."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _merge_policy_dict(defaults: object, db_value: object, python_value: object) -> object:
+    """Merge policy dictionaries while keeping explicitly defined Python keys.
+
+    DB may add or tune nested policy fields, but a value explicitly supplied by
+    the channel's Python module remains authoritative at that same nesting level.
+    """
+    if not any(isinstance(value, dict) for value in (defaults, db_value, python_value)):
+        return python_value if python_value is not None else db_value
+    merged: dict = {}
+    for value in (defaults, db_value, python_value):
+        if isinstance(value, dict):
+            merged = _deep_merge_dicts(merged, value)
+    return merged
+
+
 def _merge_configs(
     py_mod: object,
     db_config: dict | None,
@@ -181,9 +207,8 @@ def _merge_configs(
         seen_normalized: set[str] = set()
 
         for db_key, db_value in db_config.items():
-            # MEDIA_STRATEGY is authoritative from Python — never overridden
-            # from DB, to prevent dead providers (e.g. Pexels) from reactivating.
-            if db_key.upper() == "MEDIA_STRATEGY":
+            # Policy dictionaries are merged below so DB can add nested fields.
+            if db_key.upper() in {"MEDIA_STRATEGY", "CROSS_PLATFORM"}:
                 continue
             upper_key = db_key.upper()
 
@@ -210,6 +235,18 @@ def _merge_configs(
             else:
                 # Unknown field — store as-is (preserves casing from DB)
                 merged[db_key] = db_value
+
+        # Preserve Python's authority only for keys it explicitly defines;
+        # defaults and DB values still contribute missing nested policy fields.
+        for policy_key in ("MEDIA_STRATEGY", "CROSS_PLATFORM"):
+            db_key = next((key for key in db_config if key.upper() == policy_key), None)
+            if db_key is None:
+                continue
+            merged[policy_key] = _merge_policy_dict(
+                vars(defaults_mod).get(policy_key) if defaults_mod else None,
+                db_config[db_key],
+                vars(py_mod).get(policy_key),
+            )
 
     # Channel identity fields must never be overridden from DB —
     # the Python module is the authoritative source.
@@ -347,10 +384,13 @@ def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
             for key, value in safe.items():
                 if key not in existing_db:
                     merged[key] = value
-            # Always override MEDIA_STRATEGY from Python — provider config
-            # is authoritative from code, not from DB edits.
-            if "MEDIA_STRATEGY" in safe:
-                merged["MEDIA_STRATEGY"] = safe["MEDIA_STRATEGY"]
+            # Policy mappings are merged recursively: Python wins on keys it
+            # defines, while DB-only nested settings remain available.
+            for policy_key in ("MEDIA_STRATEGY", "CROSS_PLATFORM"):
+                if policy_key in safe:
+                    merged[policy_key] = _merge_policy_dict(
+                        None, existing_db.get(policy_key), safe[policy_key]
+                    )
             # Preserve DB-only planning keys
             for key in ("videos_per_day", "planning_enabled",
                         "alternate_pattern", "alternate_offset"):
@@ -364,6 +404,11 @@ def sync_config_to_db(slug: str, merge_mode: bool = False) -> dict | None:
                         "alternate_pattern", "alternate_offset"):
                 if key in existing_db and key not in safe:
                     safe[key] = existing_db[key]
+            for policy_key in ("MEDIA_STRATEGY", "CROSS_PLATFORM"):
+                if policy_key in safe and policy_key in existing_db:
+                    safe[policy_key] = _merge_policy_dict(
+                        None, existing_db[policy_key], safe[policy_key]
+                    )
 
         # Update name from display name
         display_name = safe.get("CANAL_DISPLAY_NAME") or safe.get("canal_display_name")

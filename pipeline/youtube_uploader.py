@@ -1284,19 +1284,25 @@ class YouTubeUploader:
         if '"status":"OK"' in html or '"status":"LIVE_STREAM_OFFLINE"' in html:
             return "available"
         if '"status":"LOGIN_REQUIRED"' in html:
-            return "private"
-        # Marcadores claros de eliminación / no disponible.
+            return "login_required"
+        # LOGIN_REQUIRED y los mensajes genéricos de disponibilidad no prueban
+        # una eliminación; solo marcadores explícitos son removal candidates.
         for marker in (
-            "Este vídeo no está disponible",
-            "Este video no está disponible",
-            "El vídeo no está disponible",
             "This video isn't available anymore",
-            "Video unavailable",
             "This video has been removed",
         ):
             if marker in html:
                 return "removed"
         return "unknown"
+
+    def _watch_page_removal_confirmed(self, video_id: str) -> bool:
+        """Require two explicit watch-page observations before a strike."""
+        from api.services.channel_policy import should_create_removal_alert
+        first = self._watch_page_status(video_id)
+        if first != "removed":
+            return False
+        second = self._watch_page_status(video_id)
+        return should_create_removal_alert(first, int(second == "removed"))
 
     def _verify_upload_exists(self, service: Any, video_id: str) -> None:
         """Post-upload verification: confirm the video actually exists on YouTube.
@@ -1340,7 +1346,8 @@ class YouTubeUploader:
                     # indexado de un vídeo recién subido (o private programado).
                     # Si la página dice private/available, NO es una eliminación.
                     _wp = self._watch_page_status(video_id)
-                    if _wp in ("private", "available"):
+                    if _wp in ("private", "scheduled", "login_required", "available",
+                               "unknown", "error", "unavailable"):
                         logger.warning(
                             "Post-upload verification: API vacía para %s pero watch "
                             "page=%s (lag de indexado / private programado) — NO se "
@@ -1348,7 +1355,9 @@ class YouTubeUploader:
                             video_id, _wp,
                         )
                         return
-                    # Real (o inconcluso → fail-closed): registrar strike.
+                    # Solo dos señales explícitas de eliminación permiten strike.
+                    if not self._watch_page_removal_confirmed(video_id):
+                        return
                     self._record_spam_strike_if_needed(
                         video_id=video_id,
                         reason="video no aparece en YouTube tras la subida (eliminado por spam/IA)",
@@ -1372,12 +1381,15 @@ class YouTubeUploader:
                 if title == "Deleted video" or (not title and not snippet.get("description")):
                     # ── Anti-strike: confirmar con la watch page (lag/falso positivo) ──
                     _wp2 = self._watch_page_status(video_id)
-                    if _wp2 in ("private", "available"):
+                    if _wp2 in ("private", "scheduled", "login_required", "available",
+                                "unknown", "error", "unavailable"):
                         logger.warning(
                             "Post-upload verification: título 'Deleted video' para %s "
                             "pero watch page=%s — NO se registra strike (falso positivo).",
                             video_id, _wp2,
                         )
+                        return
+                    if not self._watch_page_removal_confirmed(video_id):
                         return
                     self._record_spam_strike_if_needed(
                         video_id=video_id,

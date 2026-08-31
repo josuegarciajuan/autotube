@@ -613,14 +613,15 @@ def _channels_need_repack(db, now) -> list[int]:
         logger.debug("repack detection scan skipped: %s", exc)
         return []
 
-    from pipeline.publish_scheduler import SAME_CHANNEL_PUBLISH_GAP_HOURS
-    gap = timedelta(hours=SAME_CHANNEL_PUBLISH_GAP_HOURS)
+    from api.services.channel_policy import policy_value
     threshold = now + timedelta(hours=FAR_FUTURE_PUBLISH_HOURS,
                                 minutes=FAR_FUTURE_SCAN_TOLERANCE_MIN)
     score: dict[int, int] = {}
     last: dict[int, object] = {}
     for row in rows:
         ch_id = row["channel_id"]
+        gap_hours = int(policy_value(ch_id, "same_channel_publish_gap_h", db=db, default=24))
+        gap = timedelta(hours=gap_hours)
         # Síntoma 4: target NULL → el vídeo nunca publicaría sin el repack
         if not row["target_public_at"]:
             score[ch_id] = max(score.get(ch_id, 0), 10)
@@ -637,7 +638,7 @@ def _channels_need_repack(db, now) -> list[int]:
         if ch_id in last:
             prev_dt = last[ch_id]
             diff_h = (parsed - prev_dt).total_seconds() / 3600
-            if 0 < diff_h < SAME_CHANNEL_PUBLISH_GAP_HOURS:
+            if 0 < diff_h < gap_hours:
                 score[ch_id] = max(score.get(ch_id, 0), 5)
         last[ch_id] = parsed
 
@@ -882,16 +883,10 @@ def _apply_same_channel_gap(db, ch_cfg: dict, channel_id: int,
     minutes_since_last_upload). Returns candidate unchanged if no gap applies or
     it is already beyond the earliest allowed time.
     """
-    try:
-        from api.services.pacing_profile import get_pacing_value
-        gap_hours = int(get_pacing_value(
-            "same_channel_upload_gap_h", default=3, db=db,
-        ) or 3)
-    except Exception:
-        try:
-            gap_hours = int(ch_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
-        except (TypeError, ValueError):
-            gap_hours = 3
+    from api.services.channel_policy import policy_value
+    gap_hours = int(policy_value(
+        channel_id, "same_channel_upload_gap_h", db=db, default=6,
+    ) or 6)
     if gap_hours <= 0:
         return candidate
     mins_ago = _minutes_since_last_upload(db, channel_id)
@@ -1184,13 +1179,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 # al perfil de pacing (``max_longform_publish_day``), igual que
                 # el repack y el planning. Cada publicación necesita su subida,
                 # así que ambos topes deben coincidir (strike=1, normal=2).
-                try:
-                    from api.services.pacing_profile import get_pacing_value
-                    cap = int(get_pacing_value(
-                        "max_longform_publish_day", default=1, db=db,
-                    ) or 1)
-                except Exception:
-                    cap = 1
+                from api.services.channel_policy import policy_value
+                cap = int(policy_value(ch_id, "longform_publish_cap", db=db, default=1) or 1)
                 ch_vpd[ch_id] = min(max(vpd, 1), max(1, cap))
             except Exception:
                 ch_vpd[ch_id] = 1
@@ -1220,16 +1210,10 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 sel_cfg = json.loads(entry["row"].get("config_json") or "{}")
             except (json.JSONDecodeError, TypeError):
                 pass
-            try:
-                from api.services.pacing_profile import get_pacing_value
-                gap_hours = int(get_pacing_value(
-                    "same_channel_upload_gap_h", default=3, db=db,
-                ) or 3)
-            except Exception:
-                try:
-                    gap_hours = int(sel_cfg.get("MIN_SAME_CHANNEL_UPLOAD_GAP_HOURS", 3) or 3)
-                except (TypeError, ValueError):
-                    gap_hours = 3
+            from api.services.channel_policy import policy_value
+            gap_hours = int(policy_value(
+                ch_id, "same_channel_upload_gap_h", db=db, default=6,
+            ) or 6)
             if gap_hours > 0:
                 mins_ago = _minutes_since_last_upload(db, ch_id)
                 if mins_ago is not None and mins_ago < gap_hours * 60:
@@ -1308,7 +1292,10 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             pass
         ch_cfg_raw = sel_cfg2.get("PUBLISH_TIMEZONE", "Europe/Madrid")
-        ch_cfg_spread = sel_cfg2.get("PUBLISH_WINDOW_SPREAD_MIN", 90)
+        from api.services.channel_policy import policy_value
+        ch_cfg_spread = int(policy_value(
+            channel_id, "publish_window_spread_min", db=db, default=0,
+        ) or 0)
         ch_cfg_warmup = int(sel_cfg2.get("PUBLISH_WARMUP_MIN", 60) or 60)
         if _target_is_stale(effective_target, timezone_str=ch_cfg_raw, warmup_min=ch_cfg_warmup):
             logger.warning(

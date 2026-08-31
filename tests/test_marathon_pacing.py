@@ -61,12 +61,12 @@ def test_channel_configs_enable_marathons_only_for_approved_channels(monkeypatch
     assert config_bridge.get_channel_config("canal5", force_reload=True).MARATHON_ENABLED is True
 
 
-def test_longform_cap_is_persisted_as_central_safety_override(tmp_path):
+def test_longform_cap_follows_profile_without_persisting_override(tmp_path):
     from api.services import pacing_profile
 
     db = _db(tmp_path)
     assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 1
-    assert db.get_system_state("pacing_max_longform_publish_day") == "1"
+    assert db.get_system_state("pacing_max_longform_publish_day") in (None, "")
 
 
 def test_scheduled_marathon_gets_a_publish_target():

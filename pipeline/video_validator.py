@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from pipeline.title_enricher import enforce_power_words
+from pipeline.title_enricher import enforce_power_words, resolve_title_max_chars
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class VideoValidator:
         self.duration_max_sec: int = (
             getattr(channel_config, "PROD_VIDEO_DURATION_MAX", 14) * 60
         )
-        self.title_max_chars: int = getattr(channel_config, "TITLE_MAX_CHARS", 100)
+        self.title_max_chars: int = resolve_title_max_chars(channel_config)
 
     # ── Pre-validation (after script, before TTS) ──────────────────
 

@@ -20,12 +20,14 @@ a su hora original. Nunca se fuerza una publicación manual.
 import json
 import logging
 
-from pipeline.publish_scheduler import (
-    MAX_PUBLISH_AHEAD_SAFETY_HOURS,
-    SAME_CHANNEL_PUBLISH_GAP_HOURS,
-)
+from pipeline.publish_scheduler import MAX_PUBLISH_AHEAD_SAFETY_HOURS
 
 logger = logging.getLogger("autotube.publish_repack")
+
+
+def _policy(db, channel_id: int) -> dict:
+    from api.services.channel_policy import resolve_channel_policy_values
+    return resolve_channel_policy_values(channel_id, db=db)
 
 # Máximo de llamadas videos.update por invocación (self-heal lo acota; el
 # endpoint manual puede pasarlo a None = todas).
@@ -158,7 +160,7 @@ def apply_publish_repack(
     plan = repack_channel_publish_times(
         db, channel_id, slug,
         timezone_str=tz_str, warmup_min=warmup,
-        gap_hours=gap_hours if gap_hours is not None else SAME_CHANNEL_PUBLISH_GAP_HOURS,
+        gap_hours=gap_hours if gap_hours is not None else _policy(db, channel_id)["same_channel_publish_gap_h"],
         safety_ahead_hours=safety_ahead_hours if safety_ahead_hours is not None else MAX_PUBLISH_AHEAD_SAFETY_HOURS,
     )
     if not plan:

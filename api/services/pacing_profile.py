@@ -88,18 +88,6 @@ DEFAULT_PROFILE = "strike"
 _STATE_KEY = "pacing_profile"
 _OVERRIDE_PREFIX = "pacing_"
 
-# Anti-spam guard that must remain active regardless of the selected profile.
-# It is persisted using the same central override mechanism as every other
-# pacing kill-switch, rather than being copied into channel configuration.
-#
-# ago 2026 (post-strike relajación): el techo se sube a 2 longs/día para
-# permitir la nueva cadencia de los canales ESR/AM (2 longs/día). Sigue siendo
-# un tope DURA independiente del perfil: ningún perfil puede superarlo, pero
-# ahora el perfil "normal" (2) coincide con él. Relajar por canal se hace vía
-# política explícita (longs_per_day), que a su vez se capa contra este techo.
-_PERMANENT_OVERRIDES = {"max_longform_publish_day": 2}
-
-
 # ── DB lazy ────────────────────────────────────────────────────
 
 def _get_db():
@@ -143,13 +131,6 @@ def get_pacing(db=None) -> dict:
             raw = None
         if raw is not None and raw != "":
             resolved[key] = _coerce(key, raw)
-    for key, value in _PERMANENT_OVERRIDES.items():
-        resolved[key] = value
-        try:
-            if db.get_system_state(f"{_OVERRIDE_PREFIX}{key}") != str(value):
-                db.set_system_state(f"{_OVERRIDE_PREFIX}{key}", str(value))
-        except Exception:
-            pass
     return resolved
 
 

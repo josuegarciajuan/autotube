@@ -101,13 +101,20 @@ HISTORY_MIN_DATA_POINTS = 3    # Mínimos puntos de datos para confiar en histó
 SAME_CHANNEL_PUBLISH_GAP_HOURS = 24
 
 
-def _same_channel_publish_gap_hours(db=None) -> int:
+def _same_channel_publish_gap_hours(db=None, channel_id=None) -> int:
     """Gap mínimo entre publicaciones del mismo canal (horas).
 
     Fuente: perfil central de pacing (``same_channel_publish_gap_h``), con
     fallback a la constante antiban. El perfil es el switch central "strike
     mode": relajar los strikes = cambiar el perfil y todo se reajusta.
     """
+    try:
+        if db is not None and channel_id is not None:
+            from api.services.channel_policy import policy_value
+            return int(policy_value(channel_id, "same_channel_publish_gap_h", db=db,
+                                    default=SAME_CHANNEL_PUBLISH_GAP_HOURS))
+    except Exception:
+        pass
     try:
         from api.services.pacing_profile import get_pacing_value
         return int(get_pacing_value(
@@ -194,8 +201,14 @@ def get_channel_peak_info(config_or_dict) -> dict:
 
     primary_kw = cfg.get("SEO_PRIMARY_KEYWORD", "") or cfg.get("seo_primary_keyword", "")
     secondary_kws = cfg.get("SEO_SECONDARY_KEYWORDS", []) or cfg.get("seo_secondary_keywords", [])
-    target_hour = cfg.get("PUBLISH_TARGET_HOUR") or cfg.get("publish_target_hour")
-    jitter = cfg.get("PUBLISH_JITTER_MIN", 20) or cfg.get("publish_jitter_min", 20)
+    target_hour = cfg.get("PUBLISH_TARGET_HOUR")
+    if target_hour is None:
+        target_hour = cfg.get("publish_target_hour")
+    jitter = cfg.get("PUBLISH_WINDOW_SPREAD_MIN")
+    if jitter is None:
+        jitter = cfg.get("publish_window_spread_min")
+    if jitter is None:
+        jitter = cfg.get("PUBLISH_JITTER_MIN", cfg.get("publish_jitter_min", 20))
     warmup = cfg.get("PUBLISH_WARMUP_MIN", 120) or cfg.get("publish_warmup_min", 120)
     tz_str = cfg.get("PUBLISH_TIMEZONE", "Europe/Madrid") or cfg.get("publish_timezone", "Europe/Madrid")
 
@@ -299,7 +312,7 @@ def _avoid_channel_collision(
     try:
         import sqlite3
         from datetime import timedelta as _timedelta
-        min_gap = _timedelta(hours=_same_channel_publish_gap_hours(db))
+        min_gap = _timedelta(hours=_same_channel_publish_gap_hours(db, channel_id))
         # Cross-channel: minimum 30 min gap between different channels
         MIN_CROSS_CHANNEL_GAP_MINUTES = 30
         cross_gap = _timedelta(minutes=MIN_CROSS_CHANNEL_GAP_MINUTES)
@@ -747,8 +760,10 @@ def calculate_target_public_time(
         all_keywords.extend(secondary_keywords)
 
     # ── 0. Intentar usar franjas óptimas calculadas (v10) ──
+    # Una hora fijada por el canal es una decisión editorial explícita y no
+    # puede ser sustituida silenciosamente por el histórico.
     optimal_slot_rank = None
-    if db is not None and channel_id is not None:
+    if target_hour is None and db is not None and channel_id is not None:
         try:
             optimal_slot = _pick_optimal_slot(db, channel_id, slug)
             if optimal_slot is not None:
@@ -772,9 +787,10 @@ def calculate_target_public_time(
                     pass
 
                 # ── Snap to HH:00 ± spread_min, respecting warmup ──
+                effective_spread = publish_window_spread_min or jitter_min
                 target_utc, target_local = _snap_to_next_target_hour(
                     seed_hour, timezone_str, warmup_min, slug,
-                    spread_min=publish_window_spread_min,
+                    spread_min=effective_spread,
                 )
 
                 # ── Avoid same-channel publish time collisions ──
@@ -798,7 +814,7 @@ def calculate_target_public_time(
                     "peak_hour_local": seed_hour,
                     "peak_source": peak_source,
                     "niche": niche,
-                    "jitter_applied": 0,
+                    "jitter_applied": target_local.minute if effective_spread else 0,
                     "warmup_min": warmup_min,
                     "optimal_slot_rank": optimal_slot_rank,
                 }
@@ -814,7 +830,7 @@ def calculate_target_public_time(
     else:
         seed_hour = target_hour
 
-    peak_source = "heuristic"
+    peak_source = "config" if target_hour is not None else "heuristic"
 
     # ── 2. Auto-ajuste con histórico si hay datos ──
     if db is not None and channel_id is not None:
@@ -833,9 +849,10 @@ def calculate_target_public_time(
             logger.debug("[%s] History adjustment skipped: %s", slug, e)
 
     # ── 3. Snap to HH:00 ± spread_min, respecting warmup ──
+    effective_spread = publish_window_spread_min or jitter_min
     target_utc, target_local = _snap_to_next_target_hour(
         seed_hour, timezone_str, warmup_min, slug,
-        spread_min=publish_window_spread_min,
+        spread_min=effective_spread,
     )
 
     # ── 4. Avoid same-channel publish time collisions ──
@@ -860,7 +877,7 @@ def calculate_target_public_time(
         "peak_hour_local": seed_hour,
         "peak_source": peak_source,
         "niche": niche,
-        "jitter_applied": 0,
+        "jitter_applied": target_local.minute if effective_spread else 0,
         "warmup_min": warmup_min,
     }
 
@@ -1440,7 +1457,7 @@ def repack_channel_publish_times(
 
     # Gap desde el perfil central de pacing si no se pasó explícito.
     if gap_hours is None:
-        gap_hours = _same_channel_publish_gap_hours(db)
+        gap_hours = _same_channel_publish_gap_hours(db, channel_id)
 
     # ── 1. Candidatos ──
     try:
@@ -1485,7 +1502,12 @@ def repack_channel_publish_times(
         cfg = {}
     tz_str = cfg.get("PUBLISH_TIMEZONE", timezone_str)
     warmup = int(cfg.get("PUBLISH_WARMUP_MIN", warmup_min) or warmup_min)
-    target_hour = cfg.get("PUBLISH_TARGET_HOUR")
+    try:
+        from api.services.channel_policy import resolve_channel_policy_values
+        _policy = resolve_channel_policy_values(channel_id, db=db)
+        target_hour = _policy.get("publish_target_hour")
+    except Exception:
+        target_hour = cfg.get("PUBLISH_TARGET_HOUR")
 
     peak_info = get_channel_peak_info(
         {k: v for k, v in cfg.items()} if cfg else {"SEO_PRIMARY_KEYWORD": ""}
@@ -1528,8 +1550,9 @@ def repack_channel_publish_times(
     max_per_day = 1
     try:
         from api.services.pacing_profile import get_pacing_value
-        max_per_day = int(get_pacing_value(
-            "max_longform_publish_day", default=1, db=db,
+        from api.services.channel_policy import policy_value
+        max_per_day = int(policy_value(
+            channel_id, "longform_publish_cap", db=db, default=1,
         ) or 1)
     except Exception:
         max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 1)
@@ -1543,14 +1566,6 @@ def repack_channel_publish_times(
     # criterio que `_hard_daily_cap` de shorts_scheduler (política explícita
     # gana sobre el perfil). Se capa al mínimo (el perfil manda, la política
     # puede bajar el número pero nunca subirlo por encima del perfil).
-    try:
-        from api.services.gradual_resume import get_explicit_delivery_policy
-        _policy = get_explicit_delivery_policy(channel_id, db)
-        if _policy is not None and int(_policy.get("longs_per_day", 0) or 0) > 0:
-            max_per_day = min(max_per_day, int(_policy["longs_per_day"]))
-    except Exception:
-        pass
-
     safety_limit = now_utc + _td(hours=safety_ahead_hours)
     plan = []
     day_used: dict = {}  # local date -> nº de vídeos asignados ese día

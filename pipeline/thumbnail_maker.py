@@ -98,6 +98,8 @@ class ThumbnailMaker:
         if config is None:
             from config.config_bridge import get_channel_config
             from config import settings
+            if not settings.ACTIVE_CHANNELS:
+                raise ValueError("No active channel is available for ThumbnailMaker")
             config = get_channel_config(settings.ACTIVE_CHANNELS[0])
         self.width = getattr(config, "THUMBNAIL_WIDTH", THUMBNAIL_WIDTH)
         self.height = getattr(config, "THUMBNAIL_HEIGHT", THUMBNAIL_HEIGHT)

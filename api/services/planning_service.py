@@ -404,9 +404,34 @@ CHANNEL_FAILURE_WINDOW_H = 6         # look-back window for counting failures
 CHANNEL_BREAKER_ACTIONS = ("generate_only", "generate_and_upload")
 
 
+def _publish_gap_minutes(channel_id=None, db=None, config=None) -> int:
+    try:
+        from api.services.channel_policy import resolve_policy_for_config
+        policy = resolve_policy_for_config(int(channel_id or 0), config or {}, db=db)
+        return max(0, int(policy["same_channel_publish_gap_h"]) * 60)
+    except Exception:
+        return MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+
+
+def _generation_gap_minutes(db=None, channel_id=None, config=None) -> int:
+    try:
+        from api.services.channel_policy import resolve_policy_for_config
+        return int(resolve_policy_for_config(int(channel_id or 0), config or {}, db=db)["generation_start_gap_min"])
+    except Exception:
+        return MIN_GAP_MINUTES
+
+
+def _global_generation_gap_minutes(db=None, channel_id=None, config=None) -> int:
+    try:
+        from api.services.channel_policy import resolve_policy_for_config
+        return int(resolve_policy_for_config(int(channel_id or 0), config or {}, db=db)["global_generation_gap_min"])
+    except Exception:
+        return GLOBAL_GAP_MINUTES
+
+
 # ── Alternate pattern resolution ─────────────────────────────────
 
-def _publish_cap_per_day() -> int:
+def _publish_cap_per_day(db=None, channel_id=None, config=None) -> int:
     """Techo diario de publicación por canal (fuente ÚNICA = perfil de pacing).
 
     Lee ``max_longform_publish_day`` del perfil central (strike/recovery/normal).
@@ -419,8 +444,17 @@ def _publish_cap_per_day() -> int:
     _now = _t.time()
     if _now - _PUBLISH_CAP_CACHE["ts"] > 300:
         try:
-            from api.services.pacing_profile import get_pacing_value
-            _value = int(get_pacing_value("max_longform_publish_day", default=1) or 1)
+            from api.services.channel_policy import policy_value
+            if db is not None:
+                _value = int(policy_value(channel_id or 0, "longform_publish_cap", db=db,
+                                          default=1) or 1)
+            else:
+                # Unit/test callers may provide only an in-memory channel row;
+                # preserve the profile lookup without opening the live DB.
+                from api.services.pacing_profile import get_pacing_value
+                _value = int(get_pacing_value(
+                    "max_longform_publish_day", default=1, db=None,
+                ) or 1)
         except Exception:
             _value = 1
         _PUBLISH_CAP_CACHE.update(ts=_now, value=max(1, _value))
@@ -430,7 +464,7 @@ def _publish_cap_per_day() -> int:
 _PUBLISH_CAP_CACHE: dict = {"ts": 0.0, "value": 1}
 
 
-def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
+def _resolve_videos_per_day(ch: dict, date_str: str, db=None) -> int:
     """Resolve effective videos_per_day for a channel on a specific date.
 
     Supports two modes:
@@ -445,7 +479,16 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     long-forms/día fue la causa raíz de los strikes). El techo es uniforme y
     sigue al perfil: al relajarlo (recovery/normal) la planificación sube sola.
     """
-    cap = _publish_cap_per_day()
+    try:
+        if db is None:
+            cap = _publish_cap_per_day()
+        else:
+            from api.services.channel_policy import resolve_policy_for_config
+            cap = int(resolve_policy_for_config(
+                int(ch.get("channel_id", 0) or 0), ch, db=db
+            )["longform_publish_cap"])
+    except Exception:
+        cap = _publish_cap_per_day()
 
     # Legacy alternate pattern takes precedence if explicitly set
     pattern = ch.get("alternate_pattern")
@@ -478,7 +521,7 @@ def _resolve_videos_per_day(ch: dict, date_str: str) -> int:
     return min(base, cap)
 
 
-def _resolve_generation_per_day(ch: dict, date_str: str) -> int:
+def _resolve_generation_per_day(ch: dict, date_str: str, db=None) -> int:
     """Nº de long-forms a GENERAR por día para un canal (desacoplado de subida).
 
     ago 2026: la generación (generate_only) no consume cuota de YouTube, por lo
@@ -489,13 +532,17 @@ def _resolve_generation_per_day(ch: dict, date_str: str) -> int:
     válvula de publicación los despacha a 1/día. Si no está definido, fallback al
     comportamiento legacy (``_resolve_videos_per_day``, techo 1/día).
     """
+    # The DB/UI field is lowercase; Python config exposes the legacy uppercase
+    # name. Accept both so planning has one effective generation limit.
     raw = ch.get("longform_generation_per_day")
+    if raw is None:
+        raw = ch.get("LONGFORM_GENERATION_PER_DAY")
     if raw is not None and str(raw).strip() not in ("", "none", "None"):
         try:
             return max(0, int(raw))
         except (TypeError, ValueError):
             pass
-    return _resolve_videos_per_day(ch, date_str)
+    return _resolve_videos_per_day(ch, date_str, db=db)
 
 
 # ── Quota-aware planning (ago 2026) ────────────────────────────
@@ -984,21 +1031,11 @@ def _distribute_slots(
     # ── v10.1: Enforce minimum spread between same-channel publish times ──
     # After sorting, ensure no two adjacent slots are closer than 
     # MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS. Push later slots forward if needed.
-    # ago 2026: cuando el canal genera >1/día (longform_generation_per_day>1),
-    # el espaciado de 24h degeneraba slots duplicados (todos a 23:xx del mismo
-    # día). Se salta: los slots se reparten por las ventanas del día y el
-    # espaciado real de publicación lo aplica la válvula (publish_scheduler
-    # same_channel_publish_gap_h + _avoid_channel_collision + repack 1/día).
-    _skip_publish_spread = False
-    if scheduled_cfg:
-        try:
-            _gen_raw = scheduled_cfg.get("longform_generation_per_day")
-            if _gen_raw is not None and str(_gen_raw).strip() not in ("", "0"):
-                _skip_publish_spread = int(_gen_raw) > 1
-        except (TypeError, ValueError):
-            _skip_publish_spread = False
-    if len(slots) >= 2 and not _skip_publish_spread:
-        min_gap_minutes = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+    # La generación puede producir más de un vídeo, pero no debe saltarse el
+    # gap efectivo de publicación. El mismo valor debe gobernar planning,
+    # repack y publish scheduler.
+    if len(slots) >= 2:
+        min_gap_minutes = _publish_gap_minutes(channel_id, db=db, config=scheduled_cfg)
         spread_slots = [slots[0]]
         for i in range(1, len(slots)):
             prev_minutes = spread_slots[-1][0] * 60 + spread_slots[-1][1]
@@ -1065,7 +1102,7 @@ def compute_daily_slots(
     for ch in channel_configs:
         if not ch.get("planning_enabled", True):
             continue
-        n = _resolve_generation_per_day(ch, date_str)
+        n = _resolve_generation_per_day(ch, date_str, db=db)
         if db is not None:
             n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
         if n <= 0:
@@ -1137,9 +1174,9 @@ def compute_daily_slots(
             this_total = this_h * 60 + this_m
             
             diff = this_total - last_total
-            if diff < MIN_GAP_MINUTES:
+            if diff < _generation_gap_minutes():
                 # Push this slot's generation START forward
-                new_total = last_total + MIN_GAP_MINUTES
+                new_total = last_total + _generation_gap_minutes()
                 nh = new_total // 60
                 nm = new_total % 60
                 nh = min(nh, 23)
@@ -1161,7 +1198,7 @@ def compute_daily_slots(
     for ch_id, ch_slots in channel_slots.items():
         # Sort by target_upload_at for this channel
         ch_slots.sort(key=lambda s: s["target_upload_at"])
-        min_gap = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
+        min_gap = _publish_gap_minutes(ch_id, db=db)
         
         for i in range(1, len(ch_slots)):
             prev = ch_slots[i - 1]
@@ -1490,7 +1527,7 @@ def compute_horizon_slots(
         for ch in channel_configs:
             if not ch.get("planning_enabled", True):
                 continue
-            n = _resolve_generation_per_day(ch, date_str)
+            n = _resolve_generation_per_day(ch, date_str, db=db)
             if db is not None:
                 n = _resolve_long_cap(alloc, ch.get("slug", ""), n)
             if n <= 0:
@@ -1742,7 +1779,7 @@ def _resolve_existing_collisions(
     import sqlite3
     from datetime import timezone as _tz, datetime as _dt, timedelta as _td
 
-    min_gap = _td(hours=MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS)
+    min_gap = _td(minutes=_publish_gap_minutes(None, db=db))
 
     # Group slots by channel for efficient DB queries
     by_channel = {}
@@ -1834,7 +1871,7 @@ def _resolve_existing_collisions(
                 adjusted = tpa
                 for ex_dt, ex_label in existing_targets:
                     gap = abs((adjusted - ex_dt).total_seconds()) / 3600.0
-                    if gap < MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS:
+                    if gap < (_publish_gap_minutes(ch_id, db=db) / 60.0):
                         # Collision! Push our slot forward to after the existing one
                         pushed = ex_dt + min_gap
                         logger.info(
@@ -5024,7 +5061,7 @@ def full_replan(db=None) -> dict:
         # ── Same-channel publish gap: 3h minimum ──
         if is_scheduled and ch_id in last_channel_target:
             last_target = last_channel_target[ch_id]
-            min_gap = _td(hours=MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS)
+            min_gap = _td(minutes=_publish_gap_minutes(ch_id, db=db))
             if upload_target - last_target < min_gap:
                 upload_target = last_target + min_gap
                 # Recalculate scheduled_at backwards
@@ -5234,8 +5271,11 @@ def _resolve_cross_day_collisions(slots: list[dict]) -> None:
             by_channel[ch_id] = []
         by_channel[ch_id].append(s)
 
-    min_gap = MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS * 60
     for ch_slots in by_channel.values():
+        ch_id = ch_slots[0]["channel_id"]
+        min_gap = _publish_gap_minutes(
+            ch_id, config=ch_slots[0], db=None,
+        )
         ch_slots.sort(key=lambda s: s["target_upload_at"])
         for i in range(1, len(ch_slots)):
             prev = ch_slots[i - 1]
