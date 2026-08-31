@@ -8,6 +8,7 @@ Endpoints for managing cross-platform video distribution:
 
 import json
 import logging
+from collections.abc import Mapping
 
 from fastapi import APIRouter, HTTPException
 
@@ -23,6 +24,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Cross-Platform"])
 
 
+def _mapping_or_empty(value) -> dict:
+    """Return a JSON object value without allowing ``null`` to leak through."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 # ── Channel-level config ──────────────────────────────────
 
 
@@ -34,15 +45,10 @@ def get_cross_platform_config(channel_id: int) -> CrossPlatformConfigResponse:
     if not ch:
         raise HTTPException(404, f"Channel {channel_id} not found")
 
-    config_json = ch.get("config_json", "{}")
-    if isinstance(config_json, str):
-        try:
-            config_json = json.loads(config_json)
-        except json.JSONDecodeError:
-            config_json = {}
+    config_json = _mapping_or_empty(ch.get("config_json", "{}"))
 
-    upload_config = config_json.get("CROSS_PLATFORM_UPLOAD", {})
-    settings = config_json.get("CROSS_PLATFORM_SETTINGS", {})
+    upload_config = _mapping_or_empty(config_json.get("CROSS_PLATFORM_UPLOAD"))
+    settings = _mapping_or_empty(config_json.get("CROSS_PLATFORM_SETTINGS"))
 
     return CrossPlatformConfigResponse(
         facebook=upload_config.get("facebook", False),
@@ -60,15 +66,10 @@ def update_cross_platform_config(channel_id: int, data: CrossPlatformConfigUpdat
     if not ch:
         raise HTTPException(404, f"Channel {channel_id} not found")
 
-    config_json = ch.get("config_json", "{}")
-    if isinstance(config_json, str):
-        try:
-            config_json = json.loads(config_json)
-        except json.JSONDecodeError:
-            config_json = {}
+    config_json = _mapping_or_empty(ch.get("config_json", "{}"))
 
     # Update only provided fields
-    upload_config = config_json.get("CROSS_PLATFORM_UPLOAD", {})
+    upload_config = _mapping_or_empty(config_json.get("CROSS_PLATFORM_UPLOAD"))
     if data.facebook is not None:
         upload_config["facebook"] = data.facebook
     if data.rumble is not None:

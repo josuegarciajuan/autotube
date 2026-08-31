@@ -806,17 +806,26 @@ class YouTubeBrowser:
                 return
             db.set_system_state(key, "1")
             channel_id = None
+            video_db_id = None
             try:
-                slug = getattr(self, "account", "")
-                ch = db.get_channel_by_slug(slug) if slug else None
-                if ch:
-                    channel_id = ch.get("id")
+                # ``self.account`` is the Google account, not the channel slug.
+                # Resolve the actual video first so the alert is attached to the
+                # video that needs manual action (and not to an unrelated channel).
+                with db._connect() as conn:
+                    row = conn.execute(
+                        "SELECT id, channel_id FROM videos WHERE yt_video_id=? LIMIT 1",
+                        (youtube_video_id,),
+                    ).fetchone()
+                if row:
+                    video_db_id = row["id"]
+                    channel_id = row["channel_id"]
             except Exception:
+                video_db_id = None
                 channel_id = None
             create_alert(
                 db,
-                entity_type="video" if channel_id else "channel",
-                entity_id=channel_id,
+                entity_type="video" if video_db_id else "channel",
+                entity_id=video_db_id if video_db_id else channel_id,
                 channel_id=channel_id,
                 alert_type="altered_content_mark_failed",
                 severity="warning",

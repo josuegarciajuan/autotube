@@ -79,7 +79,7 @@ def _channel_coverage_by_day(pending: list[dict], tz) -> dict:
     return coverage
 
 
-def _maybe_alert_dry(db, slug: str) -> bool:
+def _maybe_alert_dry(db, slug: str, channel_id: int | None = None) -> bool:
     """Alerta (deduplicada 1/día) si el canal no tiene nada pendiente de publicar."""
     try:
         today = datetime.now().date().isoformat()
@@ -90,7 +90,7 @@ def _maybe_alert_dry(db, slug: str) -> bool:
         from api.services.lifecycle_monitor import create_alert
         create_alert(
             db,
-            entity_type="channel", entity_id=None, channel_id=None,
+            entity_type="channel", entity_id=channel_id, channel_id=channel_id,
             alert_type="publish_coverage_dry",
             severity="warning",
             title=f"[{slug}] Cobertura de publicación: canal seco",
@@ -105,6 +105,33 @@ def _maybe_alert_dry(db, slug: str) -> bool:
     except Exception as exc:
         logger.debug("[%s] dry alert skip: %s", slug, exc)
         return False
+
+
+def _resolve_dry_alert(db, slug: str, channel_id: int | None = None) -> int:
+    """Close only this channel's dry alert once pending work exists again."""
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, message FROM pipeline_alerts
+                   WHERE entity_type='channel' AND entity_id=?
+                     AND alert_type='publish_coverage_dry' AND resolved=0""",
+                (channel_id,),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """UPDATE pipeline_alerts SET resolved=1,
+                       resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message, '') ||
+                       ' [Auto-resuelto: cobertura de publicación recuperada]'
+                       WHERE id=? AND resolved=0""", (row["id"],),
+                )
+                resolved += 1
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.debug("[%s] dry alert resolve skip: %s", slug, exc)
+    return resolved
 
 
 def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
@@ -211,10 +238,12 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             triggered = False
 
             if not pending:
-                if _maybe_alert_dry(db, slug):
+                if _maybe_alert_dry(db, slug, channel_id=ch_id):
                     result["alerted_dry"] += 1
                 reason = "seco (sin vídeos pendientes)"
-            elif deficit_days and repacked_in_run < max_channels:
+            else:
+                _resolve_dry_alert(db, slug, channel_id=ch_id)
+            if pending and deficit_days and repacked_in_run < max_channels:
                 triggered = True
                 reason = f"déficit en {len(deficit_days)} día(s): {deficit_days}"
                 try:
