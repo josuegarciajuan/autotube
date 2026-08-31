@@ -125,7 +125,7 @@ echo "   ✅ API restart triggered"
 
 # ── Step 3: Verify ──
 echo ""
-echo "🔍 Step 3/3: Verifying..."
+echo "🔍 Step 3/4: Verifying..."
 
 for i in $(seq 1 10); do
     if curl -s http://localhost:8000/api/stats > /dev/null 2>&1; then
@@ -141,6 +141,32 @@ if [ "$WORKER_COUNT" -gt 0 ]; then
     echo "   ⏳ $WORKER_COUNT generation worker(s) still running (unaffected)"
 fi
 
+# ── Step 4: Remote agent sync (VPS de egreso) ──
+# Cada despliegue actualiza también el agente egress del VPS (git pull + restart),
+# para que el agente quede siempre en la misma versión que el server principal.
+echo ""
+echo "🔍 Step 4/4: Syncing egress agent on remote VPS..."
+VPS_HOST=$(grep -E '^VPS_SSH_HOST=' .env 2>/dev/null | cut -d= -f2)
+VPS_USER=$(grep -E '^VPS_SSH_USER=' .env 2>/dev/null | cut -d= -f2)
+VPS_PASS=$(grep -E '^VPS_SSH_PASS=' .env 2>/dev/null | cut -d= -f2)
+if [ -n "$VPS_HOST" ] && [ -n "$VPS_PASS" ]; then
+    if command -v sshpass >/dev/null 2>&1; then
+        VPS_SYNC=$(sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            "${VPS_USER:-root}@$VPS_HOST" \
+            'cd /opt/autotube && git pull --ff-only origin main 2>&1 && systemctl restart egress-agent && echo VPS_SYNC_OK' 2>&1)
+        if echo "$VPS_SYNC" | grep -q "VPS_SYNC_OK"; then
+            echo "   ✅ Egress agent actualizado en $VPS_HOST (git pull + restart)"
+        else
+            echo "   ⚠️  No se pudo sincronizar el VPS ($VPS_HOST) — revisar SSH/red (no bloquea el deploy local)"
+            echo "      $(echo "$VPS_SYNC" | tail -1)"
+        fi
+    else
+        echo "   ⚠️  sshpass no instalado — no se pudo sincronizar el VPS"
+    fi
+else
+    echo "   ⚪ VPS_SSH_HOST no configurado en .env — sin sincronización remota"
+fi
+
 echo ""
 NEW_PID=$(systemctl show -p MainPID autotube-panel 2>/dev/null | cut -d= -f2)
 echo "╔═════════════════════════════════════════════════════╗"
@@ -148,4 +174,5 @@ echo "║  ✅ Changes applied successfully!                    ║"
 echo "║  Frontend: rebuilt (dist/)                          ║"
 echo "║  API:      restarted (systemd, PID ${NEW_PID:-?})   ║"
 echo "║  Workers:  $WORKER_COUNT running (uninterrupted)    ║"
+echo "║  VPS:      ${VPS_SYNC:+sync attempted (see above)}  ║"
 echo "╚═════════════════════════════════════════════════════╝"
