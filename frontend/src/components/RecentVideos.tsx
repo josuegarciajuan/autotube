@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { ExternalLink, Play, Film, AlertTriangle, Loader2, Zap, Upload, CheckCircle, Circle, Trophy } from 'lucide-react'
-import { formatDate } from '../lib/api'
+import { formatDate, formatTime } from '../lib/api'
 import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface ActionHistoryItem {
@@ -29,8 +29,7 @@ interface RecentVideosProps {
 
 function fmtTime(dateStr: string): string {
   if (!dateStr) return ''
-  const d = new Date(dateStr)
-  return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+  return formatTime(dateStr)
 }
 
 function fmtDuration(sec: number | null): string {

@@ -1,5 +1,5 @@
 import { Clock, ChevronRight } from 'lucide-react'
-import { statusBadge, statusLabel, formatCountdown, formatTargetTime, type UpcomingPublication } from '../lib/api'
+import { statusBadge, statusLabel, formatCountdown, formatTargetTime, madridDateKey, type UpcomingPublication } from '../lib/api'
 import { useUpcomingPublications } from '../hooks/useQueries'
 
 export default function UpcomingPublications() {
@@ -7,9 +7,11 @@ export default function UpcomingPublications() {
 
   if (loading) return null;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const todayPubs = publications.filter(p => p.target_public_at?.startsWith(today));
-  const futurePubs = publications.filter(p => !p.target_public_at?.startsWith(today) || new Date(p.target_public_at!) > new Date(today + 'T23:59:59'));
+  const today = madridDateKey();
+  const todayPubs = publications.filter(p => p.target_public_at && madridDateKey(p.target_public_at) === today);
+  const futurePubs = publications.filter(p => {
+    return !!p.target_public_at && madridDateKey(p.target_public_at) !== today;
+  });
 
   if (publications.length === 0) return null;
 

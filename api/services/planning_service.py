@@ -21,6 +21,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import pytz
+from api.time_utils import local_to_utc, sqlite_utc, MADRID, UTC
 
 logger = logging.getLogger("autotube.planning")
 
@@ -812,15 +813,16 @@ def _naive_local_to_utc(naive_str: str, tz_str: str) -> str:
         ISO8601 UTC string, e.g. '2026-07-24T19:07:00+00:00'.
     """
     try:
-        tz = pytz.timezone(tz_str)
-        naive_dt = datetime.strptime(naive_str, "%Y-%m-%d %H:%M:%S")
-        localized = tz.localize(naive_dt)
-        utc_dt = localized.astimezone(timezone.utc)
-        return utc_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    except (pytz.UnknownTimeZoneError, ValueError, TypeError):
+        return local_to_utc(naive_str, tz_str).isoformat(timespec="seconds")
+    except (ValueError, TypeError, KeyError):
         # Fallback: return as-is (will be treated as naive by downstream parsers)
         logger.debug("_naive_local_to_utc failed for '%s' (tz=%s) — returning as-is", naive_str, tz_str)
         return naive_str
+
+
+def _local_to_sqlite(naive_str: str, tz_str: str) -> str:
+    """Serialize a planning-local value as UTC-naive SQLite text."""
+    return sqlite_utc(local_to_utc(naive_str, tz_str))
 
 
 # ── Core algorithm ────────────────────────────────────────────
@@ -1228,6 +1230,9 @@ def compute_daily_slots(
             s["target_public_at"] = _naive_local_to_utc(s["target_public_at"], tz_str)
         elif not s.get("publish_mode") == "scheduled":
             s["target_public_at"] = None
+        tz_str = s.get("publish_timezone", "Europe/Madrid")
+        s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
+        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
     
     return resolved
 
@@ -1470,8 +1475,9 @@ def compute_horizon_slots(
     """
     from datetime import date as _date, datetime as _dt, timedelta as _td
     
-    today = _date.today()
-    now = _dt.now()
+    now_utc = _dt.now(UTC)
+    today = now_utc.astimezone(MADRID).date()
+    now = now_utc.astimezone(MADRID).replace(tzinfo=None)
     all_raw_slots = []
     
     # ── 1. Collect all raw slots across the horizon ──────────────
@@ -1715,6 +1721,9 @@ def compute_horizon_slots(
             s["target_public_at"] = _naive_local_to_utc(s["target_public_at"], tz_str)
         elif not s.get("publish_mode") == "scheduled":
             s["target_public_at"] = None
+        tz_str = _get_slot_timezone(s)
+        s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
+        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
     
     return all_raw_slots
 

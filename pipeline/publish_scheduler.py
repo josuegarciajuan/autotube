@@ -12,6 +12,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pytz
+from api.time_utils import local_to_utc, parse_utc
 
 logger = logging.getLogger(__name__)
 
@@ -1016,6 +1017,12 @@ def _parse_target_public_at(target_public_at: str, timezone_str: str = "Europe/M
         return None
 
     raw = str(target_public_at).strip()
+    # Runtime contract: persisted naive values are UTC. Legacy local values
+    # are converted by the explicit data migration, not guessed here.
+    parsed = parse_utc(raw)
+    if parsed is not None:
+        return parsed
+    return None
 
     # Try ISO8601 with timezone info (contains +, Z, or explicit offset)
     for fmt, is_utc in [

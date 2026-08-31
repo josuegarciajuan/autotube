@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { RefreshCw, Play, Pause, ListPlus, Database } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, formatDateTime } from '../lib/api'
 import { SOCIAL_PLATFORMS } from '../types/channel'
 
 interface PlatformStatus {
@@ -206,9 +206,9 @@ export default function Distribution() {
                 <div className="flex justify-between"><span>En cola</span><b className="text-white">{p.pending_count}</b></div>
                 <div className="flex justify-between"><span>Cap diario</span><b className="text-white">{p.daily_cap}</b></div>
                 <div className="flex justify-between"><span>Última subida</span>
-                  <b className="text-white">{p.last_publish_at ? new Date(p.last_publish_at).toLocaleString() : '—'}</b></div>
+                  <b className="text-white">{p.last_publish_at ? formatDateTime(p.last_publish_at) : '—'}</b></div>
                 {p.backoff_until && (
-                  <div className="text-red-400">⏳ Backoff hasta {new Date(p.backoff_until).toLocaleString()}</div>
+                  <div className="text-red-400">⏳ Backoff hasta {formatDateTime(p.backoff_until)}</div>
                 )}
                 {!p.has_account && <div className="text-amber-400/80">⚠️ Conecta la cuenta en Canales → Redes Sociales</div>}
               </div>

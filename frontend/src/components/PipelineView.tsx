@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { api, formatCountdown, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
+import { api, formatApiDate, formatCountdown, parseApiDate, formatTime, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
 import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, Flame, RefreshCw, Check } from 'lucide-react'
 import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
@@ -8,36 +8,12 @@ import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
 /**
  * Parse a datetime string and return the local time as "HH:MM".
- * Handles both ISO8601 UTC ("2026-07-24T20:43:00+00:00") and naive local
- * ("2026-07-24 20:43:00") formats. Converts UTC to Europe/Madrid local.
+ * Handles ISO8601 timestamps and SQLite's naive UTC format consistently.
  */
 function toLocalTime(ts: string): string {
   if (!ts) return '--:--'
-  const raw = ts.trim()
-
-  // ISO8601 with explicit timezone offset or Z suffix → parse as full datetime
-  if (raw.match(/[+-]\d{2}:\d{2}$/) || raw.endsWith('Z')) {
-    const dt = new Date(raw)
-    if (!isNaN(dt.getTime())) {
-      return dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
-    }
-  }
-
-  // ISO8601 without timezone ("YYYY-MM-DDTHH:MM:SS") → treat as UTC
-  if (raw.includes('T') && raw.length >= 16) {
-    const dt = new Date(raw + '+00:00')
-    if (!isNaN(dt.getTime())) {
-      return dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
-    }
-  }
-
-  // Naive local "YYYY-MM-DD HH:MM:SS" → extract HH:MM directly
-  const m = raw.match(/[\sT](\d{2}):(\d{2})/)
-  if (m) {
-    return `${m[1]}:${m[2]}`
-  }
-
-  return raw.length >= 5 ? raw.slice(0, 5) : '--:--'
+  const dt = parseApiDate(ts)
+  return dt ? formatTime(ts) : '--:--'
 }
 
 /**
@@ -46,21 +22,9 @@ function toLocalTime(ts: string): string {
 function toLocalDate(ts: string): string {
   if (!ts) return ''
   try {
-    let dt: Date
-    const raw = ts.trim()
-
-    if (raw.match(/[+-]\d{2}:\d{2}$/) || raw.endsWith('Z')) {
-      dt = new Date(raw)
-    } else if (raw.includes('T') && raw.length >= 16) {
-      dt = new Date(raw + '+00:00')
-    } else {
-      const m = raw.match(/(\d{4})-(\d{2})-(\d{2})/)
-      if (m) dt = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
-      else return ''
-    }
-
-    if (isNaN(dt.getTime())) return ''
-    return dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })
+    const dt = parseApiDate(ts)
+    if (!dt) return ''
+    return formatApiDate(ts, { weekday: 'short', day: 'numeric', month: 'short' })
   } catch {
     return ''
   }
@@ -80,20 +44,9 @@ function fmtFull(ts?: string | null): string {
  */
 function fmtCompact(ts?: string | null): string {
   if (!ts) return '—'
-  const raw = ts.trim()
-  // Naive local "YYYY-MM-DD HH:MM[:SS]"
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})/)
-  if (m) return `${m[3]}/${m[2]} ${m[4]}:${m[5]}`
-  // ISO with timezone → convert to local
-  try {
-    const dt = new Date(raw)
-    if (!isNaN(dt.getTime())) {
-      const d = `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}`
-      const t = dt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false })
-      return `${d} ${t}`
-    }
-  } catch { /* fallthrough */ }
-  return raw.slice(0, 16)
+  const dt = parseApiDate(ts)
+  if (!dt) return '—'
+  return formatApiDate(ts, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 /**
@@ -102,13 +55,7 @@ function fmtCompact(ts?: string | null): string {
  */
 function tsNum(ts?: string | null): number {
   if (!ts) return -Infinity
-  const raw = ts.trim()
-  if (raw.includes('T') || raw.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(raw)) {
-    const n = new Date(raw).getTime()
-    return isNaN(n) ? -Infinity : n
-  }
-  const n = new Date(raw.replace(' ', 'T') + 'Z').getTime()
-  return isNaN(n) ? -Infinity : n
+  return parseApiDate(ts)?.getTime() ?? -Infinity
 }
 
 function phaseLabel(phase: string): string {
@@ -211,8 +158,9 @@ const isViral = (mode?: string) => mode === 'viral'
 
 function calcWarmup(v: WarmingVideo): number {
   try {
-    const uploaded = new Date(v.uploaded_at.replace(' ', 'T')).getTime()
-    const target = new Date(v.target_public_at.replace(' ', 'T')).getTime()
+    const uploaded = parseApiDate(v.uploaded_at)?.getTime()
+    const target = parseApiDate(v.target_public_at)?.getTime()
+    if (uploaded === undefined || target === undefined) return 50
     const now = Date.now()
     if (target <= uploaded) return 100
     return Math.min(100, Math.max(0, Math.round(((now - uploaded) / (target - uploaded)) * 100)))

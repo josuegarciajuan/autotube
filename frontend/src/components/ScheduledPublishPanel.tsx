@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Clock, Zap, Hash, ListPlus } from 'lucide-react';
-import { api, statusBadge, statusLabel, formatCountdown, formatTargetTime } from '../lib/api';
+import { api, statusBadge, statusLabel, formatCountdown, formatTargetTime, formatDateTime } from '../lib/api';
 
 interface ScheduledPublishPanelProps {
   videoId: number;
@@ -97,7 +97,7 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
         {video.uploaded_at && (
           <div className="flex items-center gap-2 text-gray-400">
             <span className="w-2 h-2 rounded-full bg-cyan-500" />
-            Subido como no listado: {new Date(video.uploaded_at).toLocaleString('es-ES')}
+            Subido como no listado: {formatDateTime(video.uploaded_at)}
           </div>
         )}
 
@@ -149,7 +149,7 @@ export default function ScheduledPublishPanel({ videoId, onRefresh }: ScheduledP
         {isPublished && video.published_at && (
           <div className="flex items-center gap-2 text-emerald-400">
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            Publicado: {new Date(video.published_at).toLocaleString('es-ES')}
+            Publicado: {formatDateTime(video.published_at)}
           </div>
         )}
 

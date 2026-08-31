@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, apiUrl, statusBadge, statusLabel } from '../lib/api'
+import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, parseApiDate, API_TIME_ZONE, apiUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import { useResumeStatus } from '../hooks/useQueries'
@@ -1128,7 +1128,7 @@ export default function ChannelDetail() {
                   ? `Quedan ${resumeEntry.days_remaining_in_phase} día${resumeEntry.days_remaining_in_phase !== 1 ? 's' : ''} de Fase 1`
                   : 'Pasa a Fase 2 hoy'}
                 {resumeEntry.next_transition_iso && (
-                  <span className="text-gray-500"> · Fase 2 desde {new Date(resumeEntry.next_transition_iso).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}</span>
+                  <span className="text-gray-500"> · Fase 2 desde {formatDate(resumeEntry.next_transition_iso)}</span>
                 )}
               </span>
             )}
@@ -1144,7 +1144,7 @@ export default function ChannelDetail() {
               {(resumeEntry.pending_publish.upcoming || []).map((p: any, i: number) => (
                 <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
                   {p.target_public_at
-                    ? new Date(p.target_public_at).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                    ? (parseApiDate(p.target_public_at)?.toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: API_TIME_ZONE }) || '—')
                     : p.video_id || '?'}
                 </span>
               ))}
@@ -2400,7 +2400,7 @@ export default function ChannelDetail() {
                         <div className="text-xs text-green-400">✅ Generado</div>
                         {data.generated_at && (
                           <div className="text-[10px] text-gray-500">
-                            {new Date(data.generated_at).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                            {parseApiDate(data.generated_at)?.toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: API_TIME_ZONE }) || '—'}
                           </div>
                         )}
                       </>

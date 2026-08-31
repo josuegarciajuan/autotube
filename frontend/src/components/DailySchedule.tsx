@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { api } from '../lib/api'
+import { api, parseApiDate, madridDateKey } from '../lib/api'
 import { Clock, CheckCircle2, Loader2, Calendar, Play, XCircle, BarChart3, Smartphone, Scissors, Filter, X } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_DOT, CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
@@ -111,7 +111,7 @@ export default function DailySchedule() {
       const videoSlots: Slot[] = (today.slots || []).map((s: Slot) => ({ ...s, kind: 'video' }))
       const shortSlots: Slot[] = (shortsToday.slots || []).map((s: Slot) => ({ ...s, kind: 'short' }))
       const allSlots = [...videoSlots, ...shortSlots].sort(
-        (a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
+        (a, b) => (parseApiDate(a.scheduled_at)?.getTime() ?? Infinity) - (parseApiDate(b.scheduled_at)?.getTime() ?? Infinity)
       )
       setSlots(allSlots)
       setStats({
@@ -342,7 +342,7 @@ export default function DailySchedule() {
         <div className="space-y-2">
           {filteredSlots.map((s, i) => {
             const isShort = s.kind === 'short'
-            const isPast = s.scheduled_at && new Date(s.scheduled_at) < new Date() && s.status === 'pending'
+            const isPast = s.scheduled_at && (parseApiDate(s.scheduled_at)?.getTime() ?? Infinity) < Date.now() && s.status === 'pending'
             const shortColor = isShort ? SHORTS_TYPE_COLORS[s.short_type || 'native'] : null
             return (
               <div
@@ -455,7 +455,7 @@ export default function DailySchedule() {
             }}
           >
             {weekDays.map((day) => {
-              const today = new Date().toISOString().slice(0, 10)
+              const today = madridDateKey()
               const isToday = day.date === today
 
               // Group video slots by channel

@@ -23,6 +23,7 @@ import logging
 import random
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from api.time_utils import parse_utc, sqlite_utc, local_to_utc, MADRID, UTC
 
 logger = logging.getLogger("autotube.upload_scheduler")
 
@@ -466,7 +467,7 @@ def _recover_inconsistent_upload_times(db) -> int:
         _target_is_stale, ensure_future_target_public_at,
     )
 
-    now = datetime.now()
+    now = datetime.now(UTC)
     for row in rows:
         video_id = row["id"]
         channel_id = row["channel_id"]
@@ -990,7 +991,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         return None
 
     # ── 2. Find videos awaiting upload (due now or needing scheduling) ──
-    now = datetime.now()
+    now = datetime.now(UTC)
+    now_local = now.astimezone(MADRID).replace(tzinfo=None)
 
     with db._connect() as conn:
         rows = conn.execute(
@@ -1004,7 +1006,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                   AND v.video_path IS NOT NULL
                   AND v.video_path != ''
                   AND (v.scheduled_upload_at IS NULL
-                       OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now', 'localtime'))
+                       OR REPLACE(v.scheduled_upload_at, 'T', ' ') <= datetime('now'))
                   -- v24: exclude videos that exceeded upload retry limit
                    AND (SELECT COUNT(*) FROM generation_jobs gj2
                         WHERE gj2.video_id = v.id AND gj2.action = 'upload_only'
@@ -1045,6 +1047,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         # Check if scheduled_upload_at needs to be set (first time seeing this video)
         # sqlite3.Row doesn't have .get() — use dict-style access with fallback
         sched_at_val = row["scheduled_upload_at"] if "scheduled_upload_at" in row.keys() else None
+        scheduled_utc = parse_utc(sched_at_val) if sched_at_val else None
         if sched_at_val is None:
             # ── v24: exponential backoff for retries ──
             retry_count = 0
@@ -1067,16 +1070,17 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                     sched_time.strftime("%H:%M"),
                 )
             else:
-                sched_time = _compute_random_upload_time(windows, now, channel_id)
+                sched_time = _compute_random_upload_time(windows, now_local, channel_id)
                 if sched_time is None:
                     logger.debug("Video %d: no upload window available, skipping", video_id)
                     continue
             # Store in DB for future cycles
             try:
-                db.update_video(video_id, scheduled_upload_at=sched_time.strftime('%Y-%m-%d %H:%M:%S'))
+                scheduled_utc = (sched_time if sched_time.tzinfo else local_to_utc(sched_time))
+                db.update_video(video_id, scheduled_upload_at=sqlite_utc(scheduled_utc))
             except Exception:
                 pass
-            if sched_time > now:
+            if scheduled_utc > now:
                 logger.debug(
                     "Video %d: scheduled at %s, waiting...",
                     video_id, sched_time.strftime("%H:%M"),
@@ -1084,7 +1088,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 continue
             # sched_time <= now — ready to dispatch now
 
-        current_hour = now.hour
+        current_hour = now_local.hour
         in_window = _is_in_any_window(current_hour, windows)
 
         # ── Quota-aware (ago 2026): subidas de batch planificadas ──
@@ -1341,6 +1345,12 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
     # ── v23: Overlap guard — detect and auto-fix if multiple videos share the same target_public_at ──
     effective_target = _check_for_overlapping_targets(db, channel_id, slug, effective_target, video_id)
+    # The persisted value is the source of truth for both the worker and the
+    # YouTube request. Do this before creating the upload job (and after every
+    # collision/staleness adjustment).
+    if effective_target != video.get("target_public_at"):
+        db.update_video(video_id, target_public_at=effective_target)
+        video["target_public_at"] = effective_target
 
     # ── Frescura (Fase 4 bis): refrescar título+thumbnail si el vídeo lleva
     # demasiado tiempo en cola (fábrica continua → contenido 'viejo').
@@ -1381,7 +1391,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         "📤 Despachando subida: video #%d (%s), archivo=%s | público programado: %s",
         video_id, slug, vp.name,
         (
-            (str(video.get("target_public_at") or "?")[:19]
+            (str(effective_target or "?")[:19]
              if video.get("target_public_at")
              else "INMEDIATA")
         ),
@@ -1430,7 +1440,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             event="upload_dispatched",
             slug=slug,
             video_id=video_id,
-            target_public_at=str(video.get("target_public_at", "") or "INMEDIATA")[:19],
+            target_public_at=str(effective_target or "INMEDIATA")[:19],
             job_id=job_id,
         )
     except Exception:
@@ -1452,7 +1462,7 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         "video_id": video_id,
         "job_id": job_id,
         "channel_slug": slug,
-        "target_public_at": video.get("target_public_at"),
+        "target_public_at": effective_target,
     }
 
 

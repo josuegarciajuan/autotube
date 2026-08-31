@@ -42,20 +42,19 @@ class TestParseTargetPublicAt:
         assert result is not None
         assert result.tzinfo is not None
 
-    def test_naive_local_cest_summer(self):
-        """Naive local '2026-07-24 21:07:00' parsed as Europe/Madrid → UTC.
-        CEST = UTC+2, so 21:07 CEST = 19:07 UTC."""
+    def test_naive_utc_summer(self):
+        """Persisted naive timestamps are UTC under the canonical contract."""
         result = _parse_target_public_at("2026-07-24 21:07:00")
         assert result is not None
         assert result.tzinfo is not None
-        assert result.hour == 19  # 21:07 CEST = 19:07 UTC
+        assert result.hour == 21
         assert result.day == 24
 
-    def test_naive_local_cet_winter(self):
-        """Naive local in winter (CET = UTC+1). 21:07 CET = 20:07 UTC."""
+    def test_naive_utc_winter(self):
+        """Persisted naive timestamps remain UTC in winter too."""
         result = _parse_target_public_at("2026-01-15 21:07:00", timezone_str="Europe/Madrid")
         assert result is not None
-        assert result.hour == 20  # 21:07 CET = 20:07 UTC
+        assert result.hour == 21
 
     def test_empty_string_returns_none(self):
         assert _parse_target_public_at("") is None

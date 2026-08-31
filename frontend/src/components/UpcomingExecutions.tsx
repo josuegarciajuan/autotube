@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { api } from '../lib/api'
+import { api, parseApiDate, formatApiDate, formatTime, madridDateKey } from '../lib/api'
 import { Clock, Play, Smartphone, Loader2, Filter } from 'lucide-react'
 import { CHANNEL_SHORT, CHANNEL_DOT, CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
@@ -23,19 +23,17 @@ interface Slot {
 }
 
 // ── Timezone helper ──────────────────────────────────────
-// DB stores Europe/Madrid local time strings (e.g. "2026-07-13 21:00:00")
+// API timestamps without a zone are UTC and are converted to browser local time.
 
 function toLocal(ts: string): string {
-  const match = ts.match(/(\d{2}):(\d{2})/)
-  return match ? `${match[1]}:${match[2]}` : ts.slice(0, 5)
+  const date = parseApiDate(ts)
+  return date ? formatTime(ts) : '—'
 }
 
 function toLocalFull(ts: string): string {
-  // Parse "YYYY-MM-DD HH:MM:SS" as local time
-  const m = ts.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/)
-  if (!m) return ts
-  const date = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
-  return date.toLocaleString('es-ES', {
+  const date = parseApiDate(ts)
+  if (!date) return ts
+  return formatApiDate(ts, {
     weekday: 'short', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
   })
@@ -44,6 +42,12 @@ function toLocalFull(ts: string): string {
 function fmtTime(ts: string): string {
   if (!ts) return '??:??'
   return toLocal(ts)
+}
+
+function localDateKey(ts: string): string {
+  const date = parseApiDate(ts)
+  if (!date) return ''
+  return madridDateKey(date)
 }
 
 export default function UpcomingExecutions() {
@@ -62,27 +66,30 @@ export default function UpcomingExecutions() {
 
       // Collect all future pending slots
       const allSlots: Slot[] = []
-      const todayLocal = new Date().toLocaleDateString('sv-SE')  // YYYY-MM-DD in local timezone
+      const todayLocal = madridDateKey()  // YYYY-MM-DD in panel timezone
 
       for (const day of (week.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at.replace(' ', 'T')).getTime() > Date.now()
-              && (s.scheduled_at || '').slice(0, 10) === todayLocal) {
+          if (s.status === 'pending' && (parseApiDate(s.scheduled_at)?.getTime() || 0) > Date.now()
+              && localDateKey(s.scheduled_at) === todayLocal) {
             allSlots.push({ ...s, kind: 'video' })
           }
         }
       }
       for (const day of (shortsWeek.days || [])) {
         for (const s of (day.slots || [])) {
-          if (s.status === 'pending' && new Date(s.scheduled_at.replace(' ', 'T')).getTime() > Date.now()
-              && (s.scheduled_at || '').slice(0, 10) === todayLocal) {
+          if (s.status === 'pending' && (parseApiDate(s.scheduled_at)?.getTime() || 0) > Date.now()
+              && localDateKey(s.scheduled_at) === todayLocal) {
             allSlots.push({ ...s, kind: 'short' })
           }
         }
       }
 
-      // Sort by scheduled_at
-      allSlots.sort((a, b) => (a.scheduled_at || '').localeCompare(b.scheduled_at || ''))
+      // Sort by the actual instant, not the source string representation.
+      allSlots.sort((a, b) =>
+        (parseApiDate(a.scheduled_at)?.getTime() ?? Infinity) -
+        (parseApiDate(b.scheduled_at)?.getTime() ?? Infinity),
+      )
       setSlots(allSlots)
     } catch (e) {
       console.error('UpcomingExecutions load error:', e)
@@ -112,7 +119,7 @@ export default function UpcomingExecutions() {
   // ── Group by date ────────────────────────────────────────
   const groups = new Map<string, Slot[]>()
   for (const s of filtered) {
-    const dateKey = (s.scheduled_at || '').slice(0, 10)
+    const dateKey = localDateKey(s.scheduled_at)
     if (!groups.has(dateKey)) groups.set(dateKey, [])
     groups.get(dateKey)!.push(s)
   }
@@ -187,7 +194,8 @@ export default function UpcomingExecutions() {
       {Array.from(groups.entries()).map(([dateKey, daySlots]) => {
         const first = daySlots[0]
         const countdown = (() => {
-          const target = new Date(first.scheduled_at.replace(' ', 'T'))
+          const target = parseApiDate(first.scheduled_at)
+          if (!target) return '—'
           const diff = target.getTime() - now
           if (diff <= 0) return 'AHORA'
           const mins = Math.floor(diff / 60000)

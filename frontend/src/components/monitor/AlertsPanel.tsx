@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Bell, BellOff, CheckCircle, Eye, XCircle } from 'lucide-react'
-import { api } from '../../lib/api'
+import { api, formatApiDate } from '../../lib/api'
 import { useMonitorWebSocket } from '../../hooks/useMonitorWebSocket'
 
 interface Alert {
@@ -128,8 +128,7 @@ export default function AlertsPanel() {
 
   function fmtTime(iso: string) {
     try {
-      const d = new Date(iso + 'Z')
-      return d.toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })
+      return formatApiDate(iso, { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) || iso
     } catch { return iso }
   }
 

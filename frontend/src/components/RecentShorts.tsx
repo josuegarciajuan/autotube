@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { Clock, ExternalLink, Smartphone, Scissors, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
-import { formatDate, formatDateTime } from '../lib/api'
+import { formatDate, formatDateTime, parseApiDate } from '../lib/api'
 import { CHANNEL_PILL, DEFAULT_PILL } from '../lib/channelConfig'
 
 interface RecentShort {
@@ -24,7 +24,8 @@ interface RecentShortsProps {
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return ''
   const now = Date.now()
-  const then = new Date(dateStr).getTime()
+  const then = parseApiDate(dateStr)?.getTime()
+  if (then === undefined) return ''
   const diffMs = now - then
   const diffMin = Math.floor(diffMs / 60000)
   if (diffMin < 1) return 'Ahora'

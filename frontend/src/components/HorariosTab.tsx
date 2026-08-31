@@ -16,6 +16,9 @@ import {
   TimingConfig,
   ExecutionEvent,
   TimingStats,
+  parseApiDate,
+  API_TIME_ZONE,
+  formatApiDate,
 } from '../lib/api'
 
 // ── helpers ──────────────────────────────────────────────────
@@ -42,18 +45,28 @@ function fmtJitterRange(hour: number, min: number, jitter: number) {
 function getEventHour(dtStr: string | null): number | null {
   if (!dtStr) return null
   try {
-    const d = new Date(dtStr)
-    if (isNaN(d.getTime())) return null
-    return d.getHours() + d.getMinutes() / 60
+    const d = parseApiDate(dtStr)
+    if (!d) return null
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: API_TIME_ZONE, hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(d)
+    const hour = Number(parts.find(p => p.type === 'hour')?.value)
+    const minute = Number(parts.find(p => p.type === 'minute')?.value)
+    return Number.isFinite(hour) && Number.isFinite(minute) ? hour + minute / 60 : null
   } catch { return null }
 }
 
 function getEventDate(dtStr: string | null): string | null {
   if (!dtStr) return null
   try {
-    const d = new Date(dtStr)
-    if (isNaN(d.getTime())) return null
-    return `${d.getDate()} ${['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][d.getMonth()]}`
+    const d = parseApiDate(dtStr)
+    if (!d) return null
+    const parts = new Intl.DateTimeFormat('es-ES', {
+      timeZone: API_TIME_ZONE, day: 'numeric', month: 'short',
+    }).formatToParts(d)
+    const day = parts.find(p => p.type === 'day')?.value
+    const month = parts.find(p => p.type === 'month')?.value
+    return day && month ? `${day} ${month}` : null
   } catch { return null }
 }
 
@@ -70,9 +83,9 @@ function closestUploadWindow(slotHour: number, windows: {start:number,end:number
 function formatSlotTime(utcStr: string | null): string {
   if (!utcStr) return '—'
   try {
-    const d = new Date(utcStr)
-    if (isNaN(d.getTime())) return '—'
-    return d.toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    const d = parseApiDate(utcStr)
+    if (!d) return '—'
+    return formatApiDate(utcStr, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
   } catch { return '—' }
 }
 
