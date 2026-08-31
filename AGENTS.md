@@ -470,6 +470,8 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
   túnel SSH `:6080`, password `canal6madrid`, Chromium `/opt/navegador_canal6.sh`
   sale por la IP residencial).
 - Credenciales SSH/proxy viven en `.env` (`VPS_SSH_*`, `EGRESS_PROXY1`), gitignored.
+- **Onboarding de un canal gestionado** (crear cuenta primero en el entorno visual
+  del VPS con la IP residencial, luego darlo de alta): ver `specs/onboarding-canal-egress.md`.
 
 ## Campos subibles vs manuales (YouTube API)
 | Dato | API | Manual |
