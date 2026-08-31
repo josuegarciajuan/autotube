@@ -77,7 +77,7 @@ def _check_one(slug: str, skip_browser: bool) -> dict:
                            f"— IP caída/caducada (fail-closed)")
         return result
 
-    # 3) Egress del navegador (opcional)
+    # 3) Egress del navegador (opcional; pendiente si aún no hay perfil)
     if skip_browser:
         result["checks"]["browser"] = "skipped"
         return result
@@ -86,6 +86,13 @@ def _check_one(slug: str, skip_browser: bool) -> dict:
     except EgressAgentUnavailableError as exc:
         result["ok"] = False
         result["error"] = f"egress-check-browser no accesible: {exc}"
+        return result
+    eb_err = eb.get("error", "") if not eb.get("ok") else ""
+    if eb_err and "profile not found" in eb_err.lower():
+        # Aún no hay perfil de navegador (cuenta no creada / sin login browser).
+        # Sin perfil no hay operaciones de navegador que puedan filtrar IP, así
+        # que no es un fallo: se marca como pendiente hasta el onboarding.
+        result["checks"]["browser"] = "pending-onboarding"
         return result
     eb_res = eb.get("result") if eb.get("ok") else {}
     browser_ip = (eb_res or {}).get("browser_ip", "")
