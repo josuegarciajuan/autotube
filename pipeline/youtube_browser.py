@@ -27,9 +27,40 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # TOKENS_DIR override: permite ejecutar scripts desde una worktree (git) apuntando
-# a los tokens/sesiones reales del árbol de producción (p. ej. emergencias).
-# Ej: YT_BROWSER_TOKENS_DIR=/root/autotube/tokens python3 scripts/hold_...
+# a los tokens/sesiones reales del árbol de producción (p. ej. emergencias).# Ej: YT_BROWSER_TOKENS_DIR=/root/autotube/tokens python3 scripts/hold_...
 TOKENS_DIR = Path(os.getenv("YT_BROWSER_TOKENS_DIR") or (PROJECT_ROOT / "tokens"))
+
+
+def _normalize_proxy(proxy: dict | None) -> dict | None:
+    """Normaliza un spec de proxy Playwright para que la autenticación se envíe.
+
+    Playwright NO extrae credenciales embebidas en ``server``
+    (``http://user:pass@host:port`` → devuelve 407 Proxy Authentication Required
+    y cuelga en HTTPS). Este helper las separa en ``username``/``password``.
+
+    Entrada: {"server": "http://user:pass@58.68.169.25:59100"}
+    Salida:  {"server": "http://58.68.169.25:59100", "username": "user", "password": "pass"}
+    """
+    if not proxy:
+        return proxy
+    d = dict(proxy)
+    server = str(d.get("server") or "")
+    if "@" not in server:
+        return d
+    scheme_rest = server.split("://", 1)
+    if len(scheme_rest) != 2 or "@" not in scheme_rest[1]:
+        return d
+    scheme, rest = scheme_rest
+    creds, hostport = rest.rsplit("@", 1)
+    d["server"] = f"{scheme}://{hostport}"
+    if ":" in creds:
+        u, p = creds.split(":", 1)
+        d.setdefault("username", u)
+        d.setdefault("password", p)
+    else:
+        d.setdefault("username", creds)
+    return d
+
 
 # -- Selectors (confirmed working 2026-07-17, updated 2026-07-21) --
 SEL_MOSTRAR_MAS = "text=Mostrar más"
@@ -192,7 +223,8 @@ class YouTubeBrowser:
         """
         self.account = account
         self.fingerprint = fingerprint or {}
-        self.proxy = proxy
+        # Normaliza credenciales embebidas en el server (Playwright no las envía).
+        self.proxy = _normalize_proxy(proxy)
         self.session_file = TOKENS_DIR / f"{account}_browser_session.json"
         self.user_data_dir = TOKENS_DIR / f"{account}_browser_profile"
         self._playwright = None

@@ -33,6 +33,8 @@ def verify_module(monkeypatch):
             return {"ok": True, "result": {"ip": self.cfg["curl"]}}
 
         def egress_check_browser(self):
+            if self.cfg.get("profile_missing"):
+                return {"ok": False, "error": "Browser profile not found: /x"}
             return {"ok": True, "result": {
                 "browser_ip": self.cfg["browser"],
                 "webrtc_disabled": self.cfg.get("webrtc", True),
@@ -103,3 +105,15 @@ def test_skip_browser(verify_module):
         "curl": "58.68.169.25", "browser": "194.233.67.64", "webrtc": True,
     }
     assert verify_module._check_one("canal6", skip_browser=True)["ok"] is True
+
+
+def test_profile_pending_is_not_fail(verify_module):
+    """Sin perfil de navegador (pre-onboarding) no es un fallo del gate."""
+    verify_module.agents["canal6"] = {
+        "agent": True, "expected": "58.68.169.25",
+        "curl": "58.68.169.25", "browser": "", "webrtc": True,
+        "profile_missing": True,
+    }
+    res = verify_module._check_one("canal6", skip_browser=False)
+    assert res["ok"] is True
+    assert res["checks"]["browser"] == "pending-onboarding"

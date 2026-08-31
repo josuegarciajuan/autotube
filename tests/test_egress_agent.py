@@ -205,3 +205,21 @@ def test_egress_check_browser_endpoint(tmp_path):
     # En CI/sin Playwright puede fallar el lanzamiento, pero nunca 500.
     assert "ok" in body
 
+
+def test_normalize_proxy_splits_embedded_credentials():
+    """Playwright no envía credenciales embebidas en server → se separan."""
+    from pipeline.youtube_browser import _normalize_proxy
+    out = _normalize_proxy({"server": "http://user:pass@58.68.169.25:59100"})
+    assert out["server"] == "http://58.68.169.25:59100"
+    assert out["username"] == "user"
+    assert out["password"] == "pass"
+
+
+def test_normalize_proxy_passthrough_when_no_auth():
+    from pipeline.youtube_browser import _normalize_proxy
+    out = _normalize_proxy({"server": "http://58.68.169.25:59100",
+                            "username": "u", "password": "p"})
+    assert out["server"] == "http://58.68.169.25:59100"
+    assert out["username"] == "u"
+    assert out["password"] == "p"
+
