@@ -58,8 +58,10 @@ _TIPO_TO_PHASE = {
 class ScenePlanner:
     """Computes per-scene durations respecting hard/soft limits and phase targets."""
 
-    def __init__(self, cfg: Any):
+    def __init__(self, cfg: Any, legacy_min: float = 5.0, legacy_max: float = 16.0):
         self._cfg = cfg
+        self._legacy_min = float(legacy_min)
+        self._legacy_max = float(legacy_max)
 
     # ── Structure / phase helpers ─────────────────────────────
     def structure(self) -> list[dict]:
@@ -110,13 +112,18 @@ class ScenePlanner:
 
     # ── Limits ────────────────────────────────────────────────
     def limits(self, media_type: str) -> tuple[float, float]:
-        """Return (hard_min, soft_max) for a media type."""
+        """Return (hard_min, soft_max) for a media type.
+
+        Falls back to the legacy ``SCENE_DURATION_MIN/MAX`` when the
+        media-specific keys are absent, so direct callers that only set the
+        legacy keys keep their previous behaviour.
+        """
         mtype = self._normalize_media(media_type)
         prefix = "VIDEO" if mtype == "video" else "IMAGE"
-        default_min = 4.0 if mtype == "video" else 5.0
-        default_max = 6.0 if mtype == "video" else 7.0
-        hard_min = float(_cget(self._cfg, f"{prefix}_SCENE_DURATION_MIN", default_min))
-        soft_max = float(_cget(self._cfg, f"{prefix}_SCENE_DURATION_MAX", default_max))
+        legacy_min = float(_cget(self._cfg, "SCENE_DURATION_MIN", self._legacy_min))
+        legacy_max = float(_cget(self._cfg, "SCENE_DURATION_MAX", self._legacy_max))
+        hard_min = float(_cget(self._cfg, f"{prefix}_SCENE_DURATION_MIN", legacy_min))
+        soft_max = float(_cget(self._cfg, f"{prefix}_SCENE_DURATION_MAX", legacy_max))
         return hard_min, soft_max
 
     def target(self, phase_id: str | None, media_type: str) -> float:
