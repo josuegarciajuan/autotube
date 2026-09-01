@@ -618,11 +618,14 @@ def _channels_need_repack(db, now) -> list[int]:
     threshold = now + timedelta(hours=FAR_FUTURE_PUBLISH_HOURS,
                                 minutes=FAR_FUTURE_SCAN_TOLERANCE_MIN)
     score: dict[int, int] = {}
-    last: dict[int, object] = {}
+    # targets por canal: (parsed_dt, gap_hours). Se comparan ORDENADOS al final
+    # para detectar también colisiones EXACTAS (misma hora) — el viejo check
+    # `0 < diff_h < gap` ignoraba diff_h == 0, así que 2+ vídeos a la MISMA hora
+    # (p. ej. la ráfaga de ESR/canal4 de 1/9) pasaban invisibles.
+    per_channel: dict[int, list] = {}
     for row in rows:
         ch_id = row["channel_id"]
         gap_hours = int(policy_value(ch_id, "same_channel_publish_gap_h", db=db, default=24))
-        gap = timedelta(hours=gap_hours)
         # Síntoma 4: target NULL → el vídeo nunca publicaría sin el repack
         if not row["target_public_at"]:
             score[ch_id] = max(score.get(ch_id, 0), 10)
@@ -635,13 +638,19 @@ def _channels_need_repack(db, now) -> list[int]:
         # Síntoma 1: lejano (>24h + tolerancia) — gravedad alta
         if parsed > threshold:
             score[ch_id] = max(score.get(ch_id, 0), 10)
-        # Síntoma 2: colisión < gap con la publicación anterior del canal
-        if ch_id in last:
-            prev_dt = last[ch_id]
-            diff_h = (parsed - prev_dt).total_seconds() / 3600
-            if 0 < diff_h < gap_hours:
+        per_channel.setdefault(ch_id, []).append((parsed, gap_hours))
+
+    # Síntoma 2: cualquier par de publicaciones del mismo canal más juntas que
+    # su gap (incluye diff == 0 = misma hora exacta). Se comparan ordenadas por
+    # target para no depender del orden de subida.
+    for ch_id, items in per_channel.items():
+        items.sort(key=lambda it: it[0])
+        for i in range(1, len(items)):
+            prev_dt, _ = items[i - 1]
+            cur_dt, gap_hours = items[i]
+            diff_h = (cur_dt - prev_dt).total_seconds() / 3600
+            if diff_h < gap_hours:
                 score[ch_id] = max(score.get(ch_id, 0), 5)
-        last[ch_id] = parsed
 
     # ── Síntoma 3 (ago 2026): vídeos RETENIDOS a Privado pendientes de re-programar ──
     # Tras un hold por cuota agotada, el vídeo está privado sin programar y su
