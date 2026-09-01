@@ -1366,7 +1366,11 @@ class PipelineOrchestrator:
             else:
                 escenas = escenas_raw or []
 
-            image_paths = self.image_fetcher.fetch_for_script(escenas)
+            # P8: pass the global theme so the legacy path stays coherent with
+            # the video (era/subject) instead of a bare 7-word snippet.
+            image_paths = self.image_fetcher.fetch_for_script(
+                escenas, theme_ctx=getattr(self, "_theme_context", None),
+            )
 
             # Process each image
             processed = []
