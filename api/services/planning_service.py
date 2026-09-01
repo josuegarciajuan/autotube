@@ -1287,7 +1287,11 @@ def compute_daily_slots(
             s["target_public_at"] = None
         tz_str = s.get("publish_timezone", "Europe/Madrid")
         s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
-        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        # Batch upload times are a wall-clock contract for the configured
+        # channel/account (09:30/16:00 Madrid). Keep this field local for the
+        # planner/UI; dispatch converts it once at the worker boundary.
+        if s.get("publish_mode") != "scheduled":
+            s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
         if s.get("publish_mode") != "scheduled" and int(s["target_upload_at"][11:13]) < 10:
             # Stored scheduling timestamps are UTC; avoid an accidental early
             # morning dispatch after local→UTC conversion.
@@ -1784,7 +1788,8 @@ def compute_horizon_slots(
             s["target_public_at"] = None
         tz_str = _get_slot_timezone(s)
         s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
-        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        if s.get("publish_mode") != "scheduled":
+            s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
     
     return all_raw_slots
 
@@ -3329,7 +3334,10 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
             # suba en el batch y no recalcule un momento aleatorio.
             planned_upload_at = next_slot.get("target_upload_at")
             if is_scheduled and planned_upload_at:
-                planned_upload_at = str(planned_upload_at).replace("T", " ")[:19]
+                planned_upload_at = sqlite_utc(local_to_utc(
+                    str(planned_upload_at).replace("T", " ")[:19],
+                    next_slot.get("publish_timezone", "Europe/Madrid"),
+                ))
             cursor = conn.execute(
                 "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
                 "publish_mode, target_public_at, scheduled_upload_at, created_at) "

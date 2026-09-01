@@ -86,6 +86,19 @@ def test_duplicate_cleanup_reports_and_unique_active_upload_protection(tmp_path)
             conn.execute("INSERT INTO generation_jobs (channel_id, video_id, action, status) VALUES (1, 1, 'upload_only', 'running')")
 
 
+def test_public_admission_caps_longform_and_shorts_but_not_private_backlog(tmp_path):
+    db = _db(tmp_path)
+    from api.services.publication_policy import assert_public_admission
+    with db._connect() as conn:
+        conn.execute("INSERT INTO videos (channel_id, canal, video_path, status, published_at) VALUES (1, 'one', '/a', 'published', datetime('now'))")
+        conn.execute("INSERT INTO shorts (channel_id, type, status, actual_published_at) VALUES (1, 'native', 'published', datetime('now'))")
+        conn.commit()
+    with __import__('pytest').raises(ValueError):
+        assert_public_admission(db, channel_id=1, content_type="long")
+    with __import__('pytest').raises(ValueError):
+        assert_public_admission(db, channel_id=1, content_type="short")
+
+
 def test_claim_planned_slot_is_single_winner(tmp_path):
     db = _db(tmp_path)
     slot_id = db.create_planned_slot(1, "2030-01-01", "2030-01-01 10:00:00")

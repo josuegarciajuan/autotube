@@ -3291,12 +3291,16 @@ def _migrate_v51(conn, logger):
         state TEXT PRIMARY KEY CHECK(state IN ('strike','recovery','normal')),
         public_videos_per_day INTEGER NOT NULL CHECK(public_videos_per_day >= 0),
         native_shorts_per_day INTEGER NOT NULL DEFAULT 1,
+        global_shorts_per_day INTEGER NOT NULL DEFAULT 6,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""")
+    profile_columns = {row[1] for row in conn.execute("PRAGMA table_info(delivery_profiles)")}
+    if "global_shorts_per_day" not in profile_columns:
+        conn.execute("ALTER TABLE delivery_profiles ADD COLUMN global_shorts_per_day INTEGER NOT NULL DEFAULT 6")
     # Policy values belong to the migration/data model, not scheduler code.
     conn.executemany(
-        "INSERT OR IGNORE INTO delivery_profiles(state, public_videos_per_day, native_shorts_per_day) VALUES (?, ?, ?)",
-        (("strike", 1, 1), ("recovery", 1, 2), ("normal", 2, 3)),
+        "INSERT OR IGNORE INTO delivery_profiles(state, public_videos_per_day, native_shorts_per_day, global_shorts_per_day) VALUES (?, ?, ?, ?)",
+        (("strike", 1, 1, 6), ("recovery", 1, 2, 8), ("normal", 2, 3, 12)),
     )
     conn.execute("""CREATE TABLE IF NOT EXISTS channel_delivery_state (
         channel_id INTEGER PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,

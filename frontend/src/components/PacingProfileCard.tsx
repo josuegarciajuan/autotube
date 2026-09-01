@@ -6,7 +6,7 @@ interface PacingSummary {
   active_profile: string
   available_profiles: string[]
   pacing: Record<string, any>
-  active_channels: { id: number; slug: string; name: string; google_account: string; delivery_state?: string; manual_override?: boolean; longform_publish_cap?: number; generation_per_day?: number; upload_capacity_per_day?: number }[]
+  active_channels: { id: number; slug: string; name: string; google_account: string; delivery_state?: string; manual_override?: boolean; longform_publish_cap?: number; native_shorts_per_day?: number; generation_per_day?: number; upload_capacity_per_day?: number }[]
 }
 
 interface FactoryStatus {
@@ -209,7 +209,7 @@ export default function PacingProfileCard() {
           {(summary?.active_channels ?? []).map((channel) => (
             <div key={channel.id} className="flex items-center gap-2 bg-dark-700/40 rounded-lg p-2 text-xs">
               <span className="text-gray-200 flex-1 truncate">{channel.name}</span>
-              <span className="text-gray-500 font-mono">gen {channel.generation_per_day ?? '—'} · upload {channel.upload_capacity_per_day ?? '—'}</span>
+              <span className="text-gray-500 font-mono">pub {channel.longform_publish_cap ?? '—'}L/{channel.native_shorts_per_day ?? '—'}S · gen {channel.generation_per_day ?? '—'} · upload {channel.upload_capacity_per_day ?? '—'}</span>
               <select
                 aria-label={`Estado de entrega de ${channel.name}`}
                 value={channel.delivery_state ?? 'strike'}

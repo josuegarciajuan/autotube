@@ -240,12 +240,14 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
         # resolves this value from delivery_profiles.
         pacing.get("max_longform_publish_day", 1) if not hasattr(db, "get_delivery_profile") else 0,
     )))
+    native_short_cap = int((profile_row or {}).get("native_shorts_per_day", 0))
     # La política explícita vive en system_state y tiene prioridad sobre los
     # campos de planificación legacy. El perfil continúa siendo el techo de
     # seguridad; un contador histórico de strikes no modifica este valor.
     explicit = _channel_override(channel_id, db) or get_channel_delivery_policy(channel_id, db)
     if explicit is not None:
         channel_cap = explicit.get("public_videos_per_day", explicit.get("longs_per_day", global_cap))
+        native_short_cap = int(explicit.get("native_shorts_per_day", native_short_cap))
     elif cfg.get("longs_per_day") not in (None, ""):
         channel_cap = number("longs_per_day", default=global_cap)
     else:
@@ -264,6 +266,9 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     return {
         "channel_id": int(channel_id),
         "longform_publish_cap": max(0, min(int(channel_cap), global_cap)) if channel_cap is not None else global_cap,
+        "native_shorts_per_day": max(0, native_short_cap),
+        "public_longform_per_day": max(0, min(int(channel_cap), global_cap)) if channel_cap is not None else global_cap,
+        "public_shorts_per_day": max(0, native_short_cap),
         "same_channel_publish_gap_h": max(publish_gap, int(pacing.get("same_channel_publish_gap_h", 24))),
         "same_channel_upload_gap_h": max(upload_gap, int(pacing.get("same_channel_upload_gap_h", 6))),
         "publish_target_hour": target,
@@ -273,7 +278,9 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
         "delivery_state": state,
         "manual_override": bool(override),
         "generation_per_day": max(0, number("longform_generation_per_day", "LONGFORM_GENERATION_PER_DAY", default=1)),
-        "upload_capacity_per_day": max(0, number("upload_capacity_per_day", default=global_cap)),
+        "upload_capacity_per_day": max(0, number(
+            "upload_capacity_per_day", default=cfg.get("videos_per_day", 1)
+        )),
     }
 
 
