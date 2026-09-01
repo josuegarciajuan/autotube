@@ -142,8 +142,31 @@ def _maybe_flush() -> None:
         _flush()
 
 
+# Reintentos del flush y backoff (fix ago 2026). El flush anterior descartaba
+# la batch ante cualquier error (p. ej. lock de SQLite), lo que hacía que
+# `yt_quota_log` subestimara el consumo REAL → los gates de cuota
+# (should_throttle / project_has_free_capacity) veían ~4% y nunca cortaban.
+_FLUSH_RETRIES = 3
+_FLUSH_RETRY_DELAY = 0.5  # segundos entre intentos
+
+
+def _requeue(batch: list) -> None:
+    """Re-encolar la batch al frente del buffer si no se pudo persistir.
+
+    Nunca se pierde una entrada (el flush anterior las descartaba). Al
+    re-encolarlas, el siguiente flush (disparado por la próxima track_quota)
+    reintenta. Con WAL + busy_timeout 45s un lock persistente es raro, así
+    que el buffer no crece indefinidamente en la práctica.
+    """
+    global _batch_buffer
+    if not batch:
+        return
+    with _batch_lock:
+        _batch_buffer = batch + _batch_buffer
+
+
 def _flush() -> None:
-    """Write buffered entries to the database."""
+    """Write buffered entries to the database (con reintento y re-encolado)."""
     global _last_flush, _batch_buffer
     with _batch_lock:
         if not _batch_buffer:
@@ -155,20 +178,39 @@ def _flush() -> None:
     try:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
-        with db._connect() as conn:
-            conn.executemany(
-                """INSERT INTO yt_quota_log
-                   (timestamp, channel_slug, operation, units, yt_id, success, error, caller)
-                   VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?)""",
-                batch,
-            )
-            conn.commit()
     except Exception as exc:
-        logger.debug("quota_tracker flush failed: %s (dropped %d entries)",
-                     exc, len(batch))
-        # Re-queue silently lost entries (best effort) — but don't infinite loop
-        # Just log them at WARNING level for manual analysis
-        logger.warning("quota_tracker: %d entries could not be persisted", len(batch))
+        logger.warning("quota_tracker flush init failed (%d entries re-encoladas): %s",
+                       len(batch), exc)
+        _requeue(batch)
+        return
+
+    for attempt in range(1, _FLUSH_RETRIES + 1):
+        try:
+            with db._connect() as conn:
+                conn.executemany(
+                    """INSERT INTO yt_quota_log
+                       (timestamp, channel_slug, operation, units, yt_id, success, error, caller)
+                       VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?)""",
+                    batch,
+                )
+                conn.commit()
+            return  # éxito — batch persistida
+        except Exception as exc:
+            if attempt < _FLUSH_RETRIES:
+                logger.debug(
+                    "quota_tracker flush attempt %d/%d failed (%d entries): %s",
+                    attempt, _FLUSH_RETRIES, len(batch), exc,
+                )
+                _time.sleep(_FLUSH_RETRY_DELAY)
+            else:
+                # Último intento falló: loguear la excepción REAL (era invisible)
+                # y re-encolar en vez de descartar.
+                logger.warning(
+                    "quota_tracker: %d entries no persistidas tras %d intentos — "
+                    "se re-encolan: %s",
+                    len(batch), _FLUSH_RETRIES, exc,
+                )
+                _requeue(batch)
 
 
 def flush_quota_log() -> None:
@@ -519,6 +561,21 @@ def get_projects_usage(db=None, date: Optional[str] = None) -> dict:
     ordered = []
     for proj in projects.values():
         proj["exhausted"] = proj["remaining"] <= 0
+        # ── Fidelidad del dashboard (fix ago 2026): el widget de "créditos"
+        # leía SOLO el log pasivo (yt_quota_log), que con el flush roto mostraba
+        # "mucho disponible" mientras el breaker real (403) ya estaba agotado.
+        # Si el breaker del proyecto está abierto, reflejarlo SIEMPRE:
+        # exhausted=True, remaining=0 y la hora de reset, para que dashboard y
+        # StatusBar lean la misma verdad.
+        try:
+            _reset = db.get_quota_reset_time(project_id=proj["project_id"])
+        except Exception:
+            _reset = {}
+        if _reset.get("exhausted"):
+            proj["exhausted"] = True
+            proj["remaining"] = 0
+            proj["reset_at_utc"] = _reset.get("reset_at_utc")
+            proj["remaining_hours"] = _reset.get("remaining_hours")
         proj["channels"].sort(key=lambda c: c["units"], reverse=True)
         ordered.append(proj)
     ordered.sort(key=lambda p: (not p["exhausted"], -p["total_units"]))

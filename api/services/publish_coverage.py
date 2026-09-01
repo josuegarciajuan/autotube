@@ -30,6 +30,7 @@ _PENDING_STATUSES = (
     "uploaded_private", "warming", "scheduled", "awaiting_upload", "ready",
 )
 _ALERT_DRY_PREFIX = "publish_coverage_dry_"
+_ALERT_DEFICIT_PREFIX = "publish_coverage_deficit_"
 
 # Guard contra ejecuciones concurrentes (el repack ya corre cada minuto desde
 # upload_scheduler; aquí solo disparamos, nunca en paralelo con nosotros mismos).
@@ -134,25 +135,88 @@ def _resolve_dry_alert(db, slug: str, channel_id: int | None = None) -> int:
     return resolved
 
 
+def _maybe_alert_deficit(db, slug: str, channel_id: int | None,
+                         deficit_days: list[str]) -> bool:
+    """Alerta de sistema (deduplicada 1/día) cuando un día tiene hueco de
+    publicación. AUDITORÍA SOLO: no corrige nada automáticamente (el repack
+    automático se eliminó, ago 2026). El operador decide cómo resolverlo."""
+    try:
+        today = datetime.now().date().isoformat()
+        key = f"{_ALERT_DEFICIT_PREFIX}{slug}"
+        if db.get_system_state(key) == today:
+            return False
+        db.set_system_state(key, today)
+        from api.services.lifecycle_monitor import create_alert
+        create_alert(
+            db,
+            entity_type="channel", entity_id=channel_id, channel_id=channel_id,
+            alert_type="publish_coverage_deficit",
+            severity="warning",
+            title=f"[{slug}] Cobertura de publicación: días con hueco",
+            message=(
+                f"[{slug}] Déficit de publicación en {len(deficit_days)} día(s): "
+                f"{', '.join(deficit_days)}. Revisar la programación de este canal "
+                f"(corregir a mano si procede)."
+            ),
+            metadata={"slug": slug, "deficit_days": deficit_days},
+        )
+        return True
+    except Exception as exc:
+        logger.debug("[%s] deficit alert skip: %s", slug, exc)
+        return False
+
+
+def _resolve_deficit_alert(db, slug: str, channel_id: int | None) -> int:
+    """Close this channel's deficit alert once no day is left with a gap."""
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, message FROM pipeline_alerts
+                   WHERE entity_type='channel' AND entity_id=?
+                     AND alert_type='publish_coverage_deficit' AND resolved=0""",
+                (channel_id,),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """UPDATE pipeline_alerts SET resolved=1,
+                       resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message, '') ||
+                       ' [Auto-resuelto: cobertura recuperada]'
+                       WHERE id=? AND resolved=0""", (row["id"],),
+                )
+                resolved += 1
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.debug("[%s] deficit alert resolve skip: %s", slug, exc)
+    return resolved
+
+
 def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                                   max_channels: int = 8) -> dict:
-    """Audita y rellena la cobertura de publicación de todos los canales libres.
+    """Audita la cobertura de publicación de todos los canales libres.
+
+    AUDITORÍA SOLO (ago 2026): ya NO dispara repack automático (el repack por
+    timer se eliminó porque drenaba la cuota). Solo comprueba si cada día
+    próximo tiene cobertura y, si hay hueco, genera una alerta de sistema
+    (`publish_coverage_deficit`) para revisión posterior. 0 cuota de YouTube.
 
     Args:
         db: ExtendedDatabase (o None → lazy).
         horizon_days: días hacia delante a auditar (2 por defecto).
-        max_channels: límite de repacks disparados por pasada (cuota).
+        max_channels: conservado por compatibilidad de firma (sin efecto).
 
     Returns:
-        dict con {channels: {slug: {...}}, repacked, alerted_dry, skipped}.
+        dict con {channels: {slug: {...}}, alerted_deficit, alerted_dry, skipped}.
     """
     if db is None:
         db = _db_instance()
     if not _RUN_LOCK.acquire(blocking=False):
         logger.debug("Publish coverage: pasada anterior aún en curso — skip")
-        return {"channels": {}, "repacked": 0, "alerted_dry": 0, "skipped": 1}
+        return {"channels": {}, "alerted_deficit": 0, "alerted_dry": 0, "skipped": 1}
 
-    result: dict = {"channels": {}, "repacked": 0, "alerted_dry": 0, "skipped": 0}
+    result: dict = {"channels": {}, "alerted_deficit": 0, "alerted_dry": 0, "skipped": 0}
     try:
         now_utc = datetime.now(timezone.utc)
 
@@ -170,7 +234,6 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             return result
         channels = [c for c in channels if c.get("slug") != "test"]
 
-        repacked_in_run = 0
         for ch in channels:
             ch_id = int(ch["id"])
             slug = ch.get("slug", f"canal{ch_id}")
@@ -243,25 +306,20 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                 reason = "seco (sin vídeos pendientes)"
             else:
                 _resolve_dry_alert(db, slug, channel_id=ch_id)
-            if pending and deficit_days and repacked_in_run < max_channels:
+
+            # ── Auditoría SOLO (ago 2026): ya NO se dispara repack automático ──
+            # El repack por timer se eliminó (drenaba la cuota con el ping-pong de
+            # set_publish_at). Este loop ahora solo vigila la cobertura y alerta
+            # si un día queda con hueco; la corrección se hace a mano cuando el
+            # operador lo detecta. 0 cuota de YouTube (solo SQLite + alertas).
+            if pending and deficit_days:
                 triggered = True
                 reason = f"déficit en {len(deficit_days)} día(s): {deficit_days}"
-                try:
-                    from api.services.publish_repack import apply_publish_repack
-                    res = apply_publish_repack(
-                        db, ch_id, slug, dry_run=False, quota_gate=True,
-                    )
-                    repacked_in_run += 1
-                    result["repacked"] += 1
-                    reason += (f" | repack: {res.get('rescheduled', 0)} reprogramados, "
-                               f"{res.get('no_change', 0)} sin cambio")
-                    if res.get("quota_skipped"):
-                        reason += " (cuota insuficiente — se reintentará)"
-                except Exception as exc:
-                    logger.warning("[%s] publish coverage repack failed: %s", slug, exc)
-                    reason += " | ERROR repack"
-            elif deficit_days:
-                reason = f"déficit pero límite de {max_channels} canales/pasada alcanzado"
+                if _maybe_alert_deficit(db, slug, channel_id=ch_id, deficit_days=deficit_days):
+                    result["alerted_deficit"] = result.get("alerted_deficit", 0) + 1
+                    reason += " — alerta generada para revisión"
+            else:
+                _resolve_deficit_alert(db, slug, channel_id=ch_id)
 
             result["channels"][slug] = {
                 "pending": len(pending),
@@ -273,8 +331,8 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             }
 
         logger.info(
-            "Publish coverage: %d canal(es) auditados, %d repackeados, %d alertas secas, %d saltados",
-            len(result["channels"]), result["repacked"],
+            "Publish coverage: %d canal(es) auditados, %d déficits alertados, %d alertas secas, %d saltados",
+            len(result["channels"]), result.get("alerted_deficit", 0),
             result["alerted_dry"], result["skipped"],
         )
         return result
