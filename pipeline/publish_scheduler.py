@@ -1578,7 +1578,40 @@ def repack_channel_publish_times(
     # puede bajar el número pero nunca subirlo por encima del perfil).
     safety_limit = now_utc + _td(hours=safety_ahead_hours)
     plan = []
-    day_used: dict = {}  # local date -> nº de vídeos asignados ese día
+    # day_used: local date -> nº de vídeos NORMALES asignados ese día (presupuesto
+    # max_per_day). Las maratones NO consumen este presupuesto.
+    day_used: dict = {}
+    # day_slots_used: local date -> horas de rank ya ocupadas ese día (TODOS los
+    # vídeos, maratones incluidas). Gobierna la selección de rank intra-día para
+    # que una maratón ocupe una franja distinta y nunca dos vídeos elijan la misma
+    # hora el mismo día. (fix ago 2026: colisión maratón+2normales en ESR/canal4)
+    day_slots_used: dict = {}
+    # assigned_slots: UTC datetimes ya asignados en este walk (para la unicidad).
+    assigned_slots: list = []
+    last_slot_utc = None
+
+    def _snap_next_free_rank(base_local: datetime) -> datetime:
+        """Devuelve (UTC) el siguiente rank libre y futuro (>= base_local),
+        saltando horas ya ocupadas ese día local y rodando a días posteriores.
+        base_local debe ser tz-aware."""
+        cand_local = base_local
+        for _ in range(8):
+            occ = set(day_slots_used.get(cand_local.date(), []))
+            found = None
+            for h in peak_hours:
+                if h in occ:
+                    continue
+                c = cand_local.replace(hour=h, minute=0, second=0, microsecond=0)
+                if c >= base_local and c >= now_utc.astimezone(tz):
+                    found = c
+                    break
+            if found is not None:
+                return found.astimezone(_tz.utc)
+            cand_local = cand_local.replace(
+                hour=peak_hours[0], minute=0, second=0, microsecond=0,
+            ) + _td(days=1)
+        return cand_local.astimezone(_tz.utc)
+
     for row in rows:
         video_id = row["id"]
         status = row["status"]
@@ -1622,34 +1655,11 @@ def repack_channel_publish_times(
             ) + _td(days=1)
             guard += 1
 
-        # ── v-fix 2longs: repartir N/día en N franjas del MISMO día local ──
-        # En vez de un único peak_hour + cursor+gap (que cruzaba medianoche y
-        # dejaba solo 1 publicación/día), el slot de hoy usa la franja rank
-        # correspondiente al nº ya asignado ese día (rank1, rank2, rank3...).
-        used_today = day_used.get(cursor_local_now.date(), 0)
-        peak_idx = min(used_today, len(peak_hours) - 1)
-        chosen_hour = peak_hours[peak_idx]
-        cursor_local_now = cursor_local_now.replace(
-            hour=chosen_hour, minute=0, second=0, microsecond=0,
-        )
-        # Nunca en el pasado: si la franja rank ya pasó HOY (p. ej. se corre el
-        # repack a las 23h y rank1=9h), subimos al siguiente rank futuro de hoy
-        # o, si todos pasaron, al rank1 del día siguiente.
-        if cursor_local_now < now_utc.astimezone(tz):
-            advanced = False
-            for extra in range(peak_idx + 1, len(peak_hours)):
-                cand = cursor_local_now.replace(hour=peak_hours[extra], minute=0,
-                                                second=0, microsecond=0)
-                if cand >= now_utc.astimezone(tz):
-                    cursor_local_now = cand
-                    advanced = True
-                    break
-            if not advanced:
-                cursor_local_now = cursor_local_now.replace(
-                    hour=peak_hours[0], minute=0, second=0, microsecond=0,
-                ) + _td(days=1)
-        cursor_utc = cursor_local_now.astimezone(_tz.utc)
-        slot = cursor_utc
+        # ── v-fix 2longs + fix maratón: repartir N/día en N franjas del MISMO
+        # día local. La franja se elige como el primer rank de peak_hours NO
+        # ocupado ese día (day_slots_used incluye maratones). Si todos los ranks
+        # del día están ocupados o en el pasado, se rueda al siguiente día.
+        slot = _snap_next_free_rank(cursor_local_now)
 
         # awaiting_upload/ready: publish despues de upload + warmup + buffer 60min
         adjusted_upload_at = None
@@ -1666,12 +1676,22 @@ def repack_channel_publish_times(
                 if candidate_up > now_utc and (up_dt is None or candidate_up < up_dt):
                     adjusted_upload_at = candidate_up.strftime("%Y-%m-%d %H:%M:%S")
 
+        # ── Espaciado mínimo (fix ago 2026): TODO vídeo (maratón incluida) debe
+        # quedar >= gap_hours después del último slot asignado en este walk. Sin
+        # esto una maratón, al no contar en day_used, podía apilarse en la MISMA
+        # hora que una normal (la ráfaga de ESR/canal4 de 1/9).
+        if last_slot_utc is not None and slot < last_slot_utc + _td(hours=gap_hours):
+            min_slot = last_slot_utc + _td(hours=gap_hours)
+            snapped = _snap_next_free_rank(min_slot.astimezone(tz))
+            slot = snapped if snapped > min_slot else min_slot
+
         # ── Idempotencia (ago 2026): preservar targets ya correctos ──
-        # Si el target existente es futuro y cae en el MISMO día local que el que
-        # le toca al vídeo (el día del cursor), se conserva tal cual en vez de
-        # re-snappear: evita el churn del repack (que movía cada minuto un target
-        # bueno de hoy a mañana) y, a la vez, los targets de días lejanos (puestos
-        # por el planning) se comprimen al día que les corresponde en la cola.
+        # Solo se preserva si el target existente es futuro, cae en el MISMO día
+        # local que el slot calculado, respeta el gap respecto al último slot y
+        # NO colisiona con ningún slot ya asignado en este walk. Si colisiona,
+        # se descarta la preservación y se usa el slot único calculado
+        # (requires_yt_update=True), para que el repack NUNCA congele una
+        # colisión de misma hora (fix ESR/canal4).
         preserved = False
         if (old_dt is not None and old_dt > now_utc
                 and old_dt.astimezone(tz).date() == slot.astimezone(tz).date()):
@@ -1680,7 +1700,15 @@ def repack_channel_publish_times(
                 up_dt2 = _parse_target_public_at(str(up_raw), tz_str)
                 if up_dt2 is not None and old_dt < up_dt2 + _td(minutes=warmup + 60):
                     min_public_ok = False
-            if min_public_ok:
+            gap_ok = (
+                last_slot_utc is None
+                or old_dt >= last_slot_utc + _td(hours=gap_hours)
+            )
+            unique_ok = all(
+                abs((old_dt - a).total_seconds()) >= gap_hours * 3600
+                for a in assigned_slots
+            )
+            if min_public_ok and gap_ok and unique_ok:
                 slot = old_dt
                 preserved = True
 
@@ -1703,26 +1731,27 @@ def repack_channel_publish_times(
             "adjusted_upload_at": adjusted_upload_at,
             "preserved": preserved,
         })
+        assigned_slots.append(slot)
+        last_slot_utc = slot
+        slot_local = slot.astimezone(tz)
         if counts_toward_cap:
-            day_used[slot.astimezone(tz).date()] = (
-                day_used.get(slot.astimezone(tz).date(), 0) + 1
-            )
+            day_used[slot_local.date()] = day_used.get(slot_local.date(), 0) + 1
+        day_slots_used.setdefault(slot_local.date(), []).append(slot_local.hour)
         # ── v-fix 2longs: avanzar cursor sin cruzar la medianoche ──
-        # Si el día local aún tiene hueco (< max_per_day), el siguiente slot usa
-        # la siguiente franja rank del MISMO día (el walk ya lo elige por
-        # day_used). Si el día está lleno, saltamos al rank1 del día siguiente.
-        # El viejo `slot + gap_hours` cruzaba la medianoche (pico tarde + gap)
-        # y dejaba solo 1 publicación visible por día.
-        if counts_toward_cap and day_used.get(slot.astimezone(tz).date(), 0) >= max_per_day:
+        # Si el día local aún tiene hueco de normales (< max_per_day), el
+        # siguiente slot usa la siguiente franja rank del MISMO día (day_slots_used
+        # ya conoce las horas ocupadas). Si el día está lleno, saltamos al rank1
+        # del día siguiente.
+        if counts_toward_cap and day_used.get(slot_local.date(), 0) >= max_per_day:
             cursor_utc = (
-                slot.astimezone(tz).replace(
+                slot_local.replace(
                     hour=peak_hours[0], minute=0, second=0, microsecond=0,
                 ) + _td(days=1)
             ).astimezone(_tz.utc)
         else:
             # aún queda hueco hoy: mantener cursor en el mismo día (el walk
-            # incrementará day_used y elegirá la siguiente franja)
-            cursor_utc = slot.astimezone(tz).astimezone(_tz.utc)
+            # incrementará day_slots_used y elegirá la siguiente franja libre)
+            cursor_utc = slot_local.astimezone(_tz.utc)
 
     logger.info(
         "[%s] repack: %d vídeo(s) planificados (gap=%dh, pico=%02d:00 %s, máx %d/día, "
