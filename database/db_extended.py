@@ -7404,6 +7404,15 @@ class ExtendedDatabase(Database):
                 (channel_id,),
             ).fetchone()
         return row["cnt"] if row else 0
+
+    def count_warming(self, channel_id: int) -> int:
+        """Count videos in uploaded_private (warming) status for a channel."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos WHERE channel_id=? AND status='uploaded_private'",
+                (channel_id,),
+            ).fetchone()
+        return row["cnt"] if row else 0
     
     def count_slots_by_status(self, date_key: str, status: str) -> int:
         """Count slots by status for a specific date."""
