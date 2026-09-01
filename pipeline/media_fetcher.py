@@ -451,6 +451,7 @@ class MediaFetcher:
             theme_keywords=ctx.theme_keywords_en if ctx else None,
             theme_ctx=ctx,  # v8: pass full ThemeContext for richer anchoring
             era_enabled=self._media_strategy.get("era_anchor_enabled", True),
+            scene_text=block.get("texto", ""),  # P7: ground via narration
         )
         logger.info("Built search query: %r (%d chars)", query, len(query))
 
@@ -1621,7 +1622,8 @@ class MediaFetcher:
         if the asset is not a stock video.
         """
         quality_info: dict = {}
-        query_pool = self._build_query_pool(scene, ctx)
+        scene["scene_idx"] = scene_idx
+        query_pool = self._build_query_pool(scene, ctx, scene_idx=scene_idx)
         query_attempt = 0
 
         # ── Choose tiers based on scene type ─────────────────
@@ -2492,7 +2494,24 @@ class MediaFetcher:
 
         return result[:100]
 
-    def _build_query_pool(self, scene: dict, ctx) -> list[str]:
+    def _scene_structure(self) -> list[dict]:
+        cfg = getattr(self, "_config", None)
+        if isinstance(cfg, dict):
+            return cfg.get("SCRIPT_STRUCTURE", []) or []
+        return getattr(cfg, "SCRIPT_STRUCTURE", []) or []
+
+    def _scene_context(self, scene: dict, scene_idx: int = 0) -> "SceneVisualContext":
+        from pipeline.scene_context import build_scene_context
+        return build_scene_context(
+            scene,
+            scene_idx=scene_idx,
+            theme_ctx=getattr(self, "_theme_context", None),
+            visual_bible=getattr(self, "_visual_bible", None),
+            structure=self._scene_structure(),
+            script_title=scene.get("video_title", ""),
+        )
+
+    def _build_query_pool(self, scene: dict, ctx, scene_idx: int = 0) -> list[str]:
         """Build an ordered list of query variations for a scene.
 
         Order (narrative priority): narrative-first queries try first,
@@ -2515,6 +2534,17 @@ class MediaFetcher:
         #    thanks to the improved LLM prompt in script_generator.py)
         if base and base.strip():
             pool.append(base.strip())
+
+        # 1b. Bible-derived variant (Phase 3, C2): grounds the scene in the
+        #     video's GLOBAL visual world (visual concept / entity / motif /
+        #     era). Comes right after the narrative-first query so "lo que ves
+        #     = lo que oyes" stays dominant while stock clips also respect the
+        #     bible's protagonist/bridge/recurring-motif direction.
+        if getattr(self, "_visual_bible", None):
+            sctx = self._scene_context(scene, scene_idx=scene_idx)
+            bv = sctx.to_query_variant()
+            if bv and bv != (base or "").strip() and bv not in pool:
+                pool.append(bv)
 
         scene_tipo = scene.get("tipo", "desarrollo")
 
@@ -2720,10 +2750,18 @@ class MediaFetcher:
 
         return max(0.0, score)
 
-    def _llm_relevance_filter(self, candidates: list[dict], scene: dict) -> list[dict] | None:
+    def _llm_relevance_filter(
+        self, candidates: list[dict], scene: dict, scene_context=None
+    ) -> list[dict] | None:
         """Reorder up to 8 candidates with ONE LLM call so the best match
         comes first. Returns the reordered list, or None on any failure
-        (caller keeps the original order — never blocks the pipeline)."""
+        (caller keeps the original order — never blocks the pipeline).
+
+        C3: when ``scene_context`` is provided, the prompt includes the full
+        narrative+visual brief (fase, era, visual concept, forbidden elements)
+        so the LLM choice cannot contradict the deterministic era filter or
+        the visual bible direction.
+        """
         try:
             from config.llm_client import create_llm_client
             from config.llm_helpers import llm_json_call_or_fallback
@@ -2744,14 +2782,20 @@ class MediaFetcher:
             )
 
         scene_text = (str(scene.get("texto", "")) or "")[:400]
+        context_block = ""
+        if scene_context is not None:
+            brief = scene_context.to_rerank_brief()
+            if brief:
+                context_block = f"\nCONTEXTO DEL VIDEO:\n{brief}\n"
         user_prompt = (
             "Escena de un documental (texto narrado):\n"
-            f'"{scene_text}"\n\n'
+            f'"{scene_text}"\n'
+            f"{context_block}\n"
             "Candidatos de stock (índice y metadatos):\n"
             + "\n".join(numbered)
             + "\n\nElige el índice del clip que MEJOR encaja visualmente con la "
-              "escena, evitando anacronismos (material moderno en escenas "
-              "históricas). "
+              "escena, respetando el contexto y evitando anacronismos (material "
+              "moderno en escenas históricas) y elementos prohibidos. "
               'Responde SOLO con JSON: {"best_index": N}'
         )
 
@@ -2811,11 +2855,15 @@ class MediaFetcher:
         # optional LLM reranking remain authoritative below; this ordering
         # only prevents a generic label match from winning a more observable
         # action match when both candidates otherwise tie.
+        # C4: pass the full scene context so ranking uses the whole-video brief
+        # (fase, vecinos, concepto visual) instead of only the bare fragment.
+        scene_context = self._scene_context(scene, scene.get("scene_idx", 0))
         from pipeline.cinematic_staging import rank_candidates
         ranked_candidates = rank_candidates(
             asset_candidates,
             scene.get("texto", "") or scene.get("search_query_en", ""),
             ctx,
+            scene_context=scene_context,
         )
         if ranked_candidates:
             asset_candidates = ranked_candidates
@@ -2852,7 +2900,7 @@ class MediaFetcher:
             self._media_strategy.get("llm_relevance_filter", False)
             and len(ordered) >= 2
         ):
-            reordered = self._llm_relevance_filter(ordered, scene)
+            reordered = self._llm_relevance_filter(ordered, scene, scene_context)
             if reordered:
                 ordered = reordered
 
@@ -3631,9 +3679,15 @@ class MediaFetcher:
         theme_ctx = None,  # ThemeContext object (v8 — full context)
         max_len: int = 100,
         era_enabled: bool = True,
+        scene_text: str = "",
     ) -> str:
         """Build a search query that fuses scene-specific narrative content with
         video-level theme context.
+
+        ``scene_text`` (the scene's narration) grounds recurring labels (money,
+        expedition, archive) in observable staging via ``enrich_scene_query``.
+        ``fetch_for_block`` passes the block's ``texto`` so direct callers get
+        the same grounding as the main ``fetch_for_script`` path (P7).
 
         Strategy (v9 — full ThemeContext fusion + era anchoring):
         1. Extract scene narrative keywords from the LLM query (primary subject)
@@ -3652,7 +3706,7 @@ class MediaFetcher:
         # Ground recurring labels (money, expedition, archive investigation)
         # in actions/period objects before allocating the strict stock budget.
         from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
-        query = enrich_scene_query(query, theme_ctx)
+        query = enrich_scene_query(query, theme_ctx, scene_text=scene_text)
         query = sanitize_person_query(query)
 
         # 1. Extract scene topic keywords (strip style words, keep content nouns)
