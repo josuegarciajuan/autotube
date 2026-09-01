@@ -2006,6 +2006,10 @@ def compute_and_store_slots(
     
     # Store them
     stored = db.create_planned_slots_batch(slots)
+    try:
+        db.reconcile_active_public_slot_caps()
+    except Exception as exc:
+        logger.warning("Horizon public-slot cap reconciliation skipped: %s", exc)
     
     slots_by_channel = {}
     for s in slots:
@@ -2282,6 +2286,10 @@ def compute_and_store_horizon(
     
     # Store them
     stored = db.create_planned_slots_batch(slots)
+    try:
+        db.reconcile_active_public_slot_caps()
+    except Exception as exc:
+        logger.warning("Horizon public-slot cap reconciliation skipped: %s", exc)
     
     # Collect stats
     slots_by_channel = {}
@@ -3104,6 +3112,10 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     
     # 1b. Cancel stale pending slots (upload window already passed)
     _cancel_stale_slots(db)
+    try:
+        db.reconcile_active_public_slot_caps()
+    except Exception as exc:
+        logger.warning("Active public-slot cap reconciliation skipped: %s", exc)
     
     # 2. Find candidate slots and pick the best one by priority score
     from datetime import date as _date
@@ -4570,6 +4582,31 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
     return review, counts
 
 
+def _cap_pending_public_slots(existing: list[dict], db) -> tuple[list[dict], list[dict]]:
+    """Partition pending slots by normalized publication day and public cap."""
+    from api.time_utils import parse_utc, MADRID
+    groups = {}
+    for slot in existing:
+        parsed = parse_utc(slot.get("target_public_at"))
+        if not parsed:
+            continue
+        day = parsed.astimezone(MADRID).date().isoformat()
+        groups.setdefault((int(slot["channel_id"]), day), []).append(slot)
+    keep = set()
+    excess = []
+    for (channel_id, _day), group in groups.items():
+        from api.services.channel_policy import policy_value
+        cap = max(0, int(policy_value(channel_id, "longform_publish_cap", db=db, default=0) or 0))
+        ordered = sorted(group, key=lambda row: (str(row.get("target_public_at")),
+                                                   str(row.get("scheduled_at") or ""), int(row["id"])))
+        for row in ordered[:cap]:
+            keep.add(int(row["id"]))
+        excess.extend(row for row in ordered[cap:])
+    # Null targets are handled by the normal replan path, not silently dropped.
+    keep_rows = [row for row in existing if not row.get("target_public_at") or int(row["id"]) in keep]
+    return keep_rows, excess
+
+
 def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
     """Create a non-mutating, expiring confirmation for long-form and Shorts."""
     if db is None:
@@ -4589,7 +4626,25 @@ def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
         running_shorts = [dict(row) for row in conn.execute("""
             SELECT * FROM shorts_planned_slots WHERE status = 'running' ORDER BY scheduled_at, id
         """).fetchall()]
+        running_long = [dict(row) for row in conn.execute("""
+            SELECT * FROM planned_slots WHERE status = 'running' ORDER BY scheduled_at, id
+        """).fetchall()]
+    existing, excess_long = _cap_pending_public_slots(existing, db)
     long_review, long_counts = _safe_replan_review(existing, proposed_slots)
+    for row in excess_long:
+        long_review.append({"kind": "long_form", "action": "retained",
+                            "reason": "public_cap_exceeded", "superseded": True,
+                            "slot_id": row["id"], "channel_id": row["channel_id"],
+                            "before": row, "after": row})
+        long_counts["retained"] += 1
+    if running_long:
+        running_channels = {int(row["channel_id"]) for row in running_long}
+        long_review = [item for item in long_review
+                       if not (item["action"] == "new" and int(item["channel_id"]) in running_channels)]
+        long_counts["new"] = sum(1 for item in long_review if item["action"] == "new")
+        long_review.extend({"kind": "long_form", "action": "protected", "reason": "running_job",
+                            "slot_id": row["id"], "channel_id": row["channel_id"],
+                            "before": row, "after": row} for row in running_long)
     shorts_review, shorts_counts = _safe_replan_review(
         existing_shorts, proposed_shorts, kind="short",
     )
@@ -4690,6 +4745,9 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
             kind = item.get("kind", "long_form")
             actual_counts = actual_shorts_counts if kind == "short" else actual_long_counts
             if action == "retained":
+                if item.get("superseded") and kind != "short":
+                    conn.execute("UPDATE planned_slots SET status='cancelled' WHERE id=? AND status='pending'",
+                                 (item["slot_id"],))
                 actual_counts["retained"] += 1
             elif action == "rescheduled":
                 new = item["after"]

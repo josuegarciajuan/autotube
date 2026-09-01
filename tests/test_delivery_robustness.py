@@ -99,6 +99,48 @@ def test_public_admission_caps_longform_and_shorts_but_not_private_backlog(tmp_p
         assert_public_admission(db, channel_id=1, content_type="short")
 
 
+def test_active_slots_are_capped_by_public_target_date_not_generation_date(tmp_path):
+    db = _db(tmp_path)
+    channel_policy.set_channel_delivery_state("normal", 1, db=db)
+    with db._connect() as conn:
+        conn.execute("DROP INDEX uq_active_planned_public_target")
+        for idx, status in enumerate(("pending", "pending", "pending", "running"), 1):
+            conn.execute("""INSERT INTO planned_slots
+                (channel_id, date_key, scheduled_at, target_public_at, source_mode, status)
+                VALUES (1, ?, ?, '2030-01-01T20:00:00+00:00', ?, ?)""",
+                (f"2029-12-{20 + idx:02d}", f"2029-12-{20 + idx:02d} 10:00:00",
+                 "viral" if idx % 2 else "original", status))
+        conn.commit()
+    result = db.reconcile_active_public_slot_caps()
+    assert result["cancelled"] == 2
+    with db._connect() as conn:
+        rows = conn.execute("SELECT status FROM planned_slots WHERE target_public_at='2030-01-01T20:00:00+00:00' ORDER BY id").fetchall()
+    assert sum(row[0] in ("pending", "running") for row in rows) == 2
+
+
+def test_safe_full_replan_cancels_excess_public_targets_without_deleting_history(tmp_path):
+    db = _db(tmp_path)
+    channel_policy.set_channel_delivery_state("normal", 1, db=db)
+    with db._connect() as conn:
+        conn.execute("DROP INDEX uq_active_planned_public_target")
+        for idx in range(4):
+            conn.execute("""INSERT INTO planned_slots
+                (channel_id, date_key, scheduled_at, target_public_at, status)
+                VALUES (1, '2029-12-20', ?, '2030-01-01T20:00:00+00:00', 'pending')""",
+                (f"2029-12-20 0{idx}:00:00",))
+        conn.commit()
+    from api.services.planning_service import safe_full_replan_preflight, safe_full_replan_apply
+    preflight = safe_full_replan_preflight(db=db, horizon_days=1)
+    safe_full_replan_apply(preflight["confirmation_token"], db=db)
+    with db._connect() as conn:
+        active = conn.execute("""SELECT COUNT(*) FROM planned_slots
+            WHERE channel_id=1 AND target_public_at='2030-01-01T20:00:00+00:00'
+              AND status IN ('pending','running')""").fetchone()[0]
+        historical = conn.execute("SELECT COUNT(*) FROM planned_slots WHERE status='cancelled'").fetchone()[0]
+    assert active == 2
+    assert historical >= 2
+
+
 def test_claim_planned_slot_is_single_winner(tmp_path):
     db = _db(tmp_path)
     slot_id = db.create_planned_slot(1, "2030-01-01", "2030-01-01 10:00:00")
