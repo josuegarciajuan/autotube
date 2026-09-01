@@ -531,6 +531,38 @@ async def lifespan(app: FastAPI):
             "WAL checkpoint failed at shutdown: %s", _wal_exc,
         )
 
+    # ── FIX (stabilize-scheduler): salida forzada acotada para evitar SIGKILL.
+    # Si quedan threads no-daemon colgados (p. ej. un upload con time.sleep de
+    # spacing o una llamada de red bloqueante), el proceso no termina solo y
+    # systemd acaba mandando SIGKILL tras TimeoutStopSec — matando también la
+    # generación en curso. Lanzamos un thread daemon que fuerza os._exit(0)
+    # tras un margen corto, garantizando una salida limpia sin SIGKILL.
+    try:
+        import os as _os_exit
+        import threading as _threading_exit
+        import time as _time_exit
+        _exit_grace_sec = int(os.environ.get("SHUTDOWN_FORCE_EXIT_SEC", "20"))
+
+        def _force_exit():
+            _time_exit.sleep(_exit_grace_sec)
+            logging.getLogger("autotube.startup").warning(
+                "Shutdown: forcing os._exit(0) tras %ds (threads colgados) — "
+                "evita SIGKILL de systemd",
+                _exit_grace_sec,
+            )
+            _os_exit._exit(0)
+
+        _exit_thread = _threading_exit.Thread(
+            target=_force_exit,
+            name="shutdown-force-exit",
+            daemon=True,
+        )
+        _exit_thread.start()
+    except Exception as _exit_setup_exc:
+        logging.getLogger("autotube.startup").debug(
+            "Shutdown force-exit setup skipped: %s", _exit_setup_exc,
+        )
+
 
 # ── Orphan detection config ─────────────────────────────────
 ORPHAN_TIMEOUT_MINUTES = 60  # Jobs stuck for >1h without heartbeat are declared orphaned
@@ -1416,6 +1448,12 @@ async def _schedule_checker_loop():
                 # content_schedules está vacía en producción y la planificación
                 # la gobiernan planned_slots (planning_service). Las funciones
                 # se conservan (deprecadas) por si algún script legacy las usa.
+                #
+                # ── FIX (stabilize-scheduler): tocar el heartbeat antes de cada
+                # operación larga (dispatch / upload / repack) para que una
+                # operación que tarde minutos no deje el loop "stale" y dispare
+                # un reinicio controlado de la API (que mataría la generación).
+                _tth("schedule_checker")
                 long_dispatched = await _process_planned_slots()
 
                 # ── Shorts interleaving: when long-form is blocked (pipelining
@@ -1423,6 +1461,7 @@ async def _schedule_checker_loop():
                 #     the gap. Per-channel project guards inside decide.
                 if not long_dispatched:
                     if not _all_quota_exhausted:
+                        _tth("schedule_checker")
                         await _process_shorts_slots()
                     # ── Never-dry guard: if still no dispatch and pipeline
                     #     is running empty, force horizon replan.
@@ -1435,6 +1474,10 @@ async def _schedule_checker_loop():
 
                 await _queue_consumer()
 
+                # ── FIX (stabilize-scheduler): refresca el heartbeat tras el
+                # dispatch/queue (pueden tardar) antes de la siguiente fase.
+                _tth("schedule_checker")
+
                 # ════════════════════════════════════════════════════════════
                 # Marathon check: always runs — marathon service dispatches
                 # as generate_only if quota is exhausted, generate_and_upload otherwise.
@@ -1442,6 +1485,7 @@ async def _schedule_checker_loop():
                 if now - last_marathon_check > 3600:  # every 60 min
                     try:
                         from api.services.marathon_service import check_and_dispatch_marathon
+                        _tth("schedule_checker")
                         marathon_result = await asyncio.to_thread(
                             check_and_dispatch_marathon, _sched_db
                         )
@@ -1742,6 +1786,10 @@ async def _schedule_checker_loop():
                         )
                         _schedule_checker_loop._last_qex_log = now
 
+            # ── FIX (stabilize-scheduler): tocar el heartbeat antes del costoso
+            # barrido de huérfanos (cleanup_orphaned_jobs + ghost workers) para
+            # que no deje el loop stale si tarda.
+            _tth("schedule_checker")
             await _detect_and_clean_orphans()
             
             # Collect YouTube stats every 6 hours
