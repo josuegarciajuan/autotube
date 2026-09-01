@@ -4521,6 +4521,7 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
     for channel_id in sorted(set(existing_by_channel) | set(proposed_by_channel)):
         backlog = sorted(existing_by_channel.get(channel_id, []), key=lambda s: (s["scheduled_at"], s["id"]))
         generated = sorted(proposed_by_channel.get(channel_id, []), key=lambda s: s["scheduled_at"])
+        has_running = any(slot.get("status") == "running" for slot in backlog)
         for index, old in enumerate(backlog):
             if index >= len(generated):
                 review.append({
@@ -4551,7 +4552,11 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
                 "after": replacement,
             })
             counts[action] += 1
-        for replacement in generated[len(backlog):]:
+        # A running short is protected capacity during a safe replan. Do not
+        # create replacement rows in the same transaction; the next scheduler
+        # tick can fill capacity after the running job settles.
+        replacements = [] if has_running else generated[len(backlog):]
+        for replacement in replacements:
             review.append({
                 "kind": kind,
                 "action": "new",
@@ -4581,10 +4586,23 @@ def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
         existing_shorts = [dict(row) for row in conn.execute("""
             SELECT * FROM shorts_planned_slots WHERE status = 'pending' ORDER BY scheduled_at, id
         """).fetchall()]
+        running_shorts = [dict(row) for row in conn.execute("""
+            SELECT * FROM shorts_planned_slots WHERE status = 'running' ORDER BY scheduled_at, id
+        """).fetchall()]
     long_review, long_counts = _safe_replan_review(existing, proposed_slots)
     shorts_review, shorts_counts = _safe_replan_review(
         existing_shorts, proposed_shorts, kind="short",
     )
+    if running_shorts:
+        # Running short jobs are protected and consume no new-slot budget during
+        # this confirmation. They remain visible in the review for auditability.
+        shorts_review = [item for item in shorts_review if item["action"] != "new"]
+        shorts_counts["new"] = 0
+        shorts_review.extend({
+            "kind": "short", "action": "protected", "reason": "running_job",
+            "slot_id": row["id"], "channel_id": row["channel_id"],
+            "before": row, "after": row,
+        } for row in running_shorts)
     review = long_review + shorts_review
     # Keep flat long-form counters for compatibility while making per-kind
     # counts explicit for clients of this expanded contract.

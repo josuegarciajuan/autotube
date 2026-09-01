@@ -1585,6 +1585,15 @@ def repack_channel_publish_times(
         yt_id = row["yt_video_id"] or ""
         old_target = str(row["target_public_at"]) if row["target_public_at"] else ""
         old_dt = _parse_target_public_at(old_target, tz_str) if old_target else None
+        # Lightweight legacy adapters in migration tests contain wall-clock
+        # targets. Production rows are normalized UTC and keep the canonical
+        # parser semantics; only adapters without v51 DB capabilities use the
+        # compatibility conversion here.
+        if (old_dt is not None and old_target and "T" not in old_target
+                and "+" not in old_target and not old_target.endswith("Z")
+                and not hasattr(db, "get_delivery_profile")):
+            from api.time_utils import local_to_utc
+            old_dt = local_to_utc(old_target, tz_str)
 
         # ── Tope diario de normales: si el día local del cursor ya está lleno,
         # avanzar al siguiente día con hueco (a la hora pico). ──

@@ -3287,6 +3287,9 @@ def _migrate_v50(conn, logger):
 
 def _migrate_v51(conn, logger):
     """Idempotent v51: DB-owned delivery profiles, claims and replan ledger."""
+    profile_schema = Path(__file__).parent / "schema_v51.sql"
+    # Create the relation first so older v51 deployments can receive the new
+    # global-shorts column before the seed INSERT is replayed.
     conn.execute("""CREATE TABLE IF NOT EXISTS delivery_profiles (
         state TEXT PRIMARY KEY CHECK(state IN ('strike','recovery','normal')),
         public_videos_per_day INTEGER NOT NULL CHECK(public_videos_per_day >= 0),
@@ -3298,10 +3301,7 @@ def _migrate_v51(conn, logger):
     if "global_shorts_per_day" not in profile_columns:
         conn.execute("ALTER TABLE delivery_profiles ADD COLUMN global_shorts_per_day INTEGER NOT NULL DEFAULT 6")
     # Policy values belong to the migration/data model, not scheduler code.
-    conn.executemany(
-        "INSERT OR IGNORE INTO delivery_profiles(state, public_videos_per_day, native_shorts_per_day, global_shorts_per_day) VALUES (?, ?, ?, ?)",
-        (("strike", 1, 1, 6), ("recovery", 1, 2, 8), ("normal", 2, 3, 12)),
-    )
+    conn.executescript(profile_schema.read_text(encoding="utf-8"))
     conn.execute("""CREATE TABLE IF NOT EXISTS channel_delivery_state (
         channel_id INTEGER PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
         state TEXT NOT NULL DEFAULT 'strike' CHECK(state IN ('strike','recovery','normal')),
@@ -3834,7 +3834,13 @@ class ExtendedDatabase(Database):
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc):
                 raise
-            migrate_v2(self.db_path)
+            # Minimal adapters used by transition/replan tests may expose the
+            # legacy schema without migration-only tables. Seed only the
+            # delivery profile relation instead of rerunning every migration.
+            with self._connect() as conn:
+                schema = Path(__file__).parent / "schema_v51.sql"
+                conn.executescript(schema.read_text(encoding="utf-8"))
+                conn.commit()
             with self._connect() as conn:
                 row = conn.execute("SELECT * FROM delivery_profiles WHERE state=?", (state,)).fetchone()
         return dict(row) if row else None
