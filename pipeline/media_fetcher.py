@@ -924,34 +924,52 @@ class MediaFetcher:
         list as the renderer's timing contract.  It only partitions a scene's
         own [start, end] range, therefore subsequent timestamps are unchanged.
         """
-        config = self._config
-        if isinstance(config, dict):
-            image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 6.0))
-        else:
-            image_max = float(getattr(config, "IMAGE_SCENE_DURATION_MAX", 6.0))
+        from pipeline.scene_planner import ScenePlanner
+        planner = ScenePlanner(self._config)
 
         expanded_scenes: list[dict] = []
         expanded_assets: list[dict] = []
         for scene, asset in zip(scenes, assets):
             actual_type = asset.get("type") if asset else None
             duration = float(scene.get("duration", 0))
-            if actual_type != "image" or duration <= image_max:
+            if actual_type != "image":
                 expanded_scenes.append(scene)
                 expanded_assets.append(asset)
                 continue
 
-            count = max(2, int((duration + image_max - 1e-9) / image_max))
-            sub_duration = duration / count
+            # Decide how many image scenes this narration region should become,
+            # respecting the HARD minimum (never a flash below it) and preferring
+            # the phase target. A soft exception keeps ONE scene when no valid
+            # split exists — the original 6.01s→two×3.005s bug is gone.
+            count, parts, soft_exception = planner.partition(
+                duration, "image", scene.get("phase_id")
+            )
+            if count == 1:
+                scene = dict(scene)
+                scene["soft_exception"] = soft_exception
+                if soft_exception:
+                    logger.info(
+                        "Image scene %.1fs kept as ONE scene (soft exception — "
+                        "no split respects the hard minimum)",
+                        duration,
+                    )
+                expanded_scenes.append(scene)
+                expanded_assets.append(asset)
+                continue
+
             parent_request = str(scene.get("media_request_id", "scene"))
             seen_identity_tokens = self._asset_identity_tokens(asset)
-            for index in range(count):
+            sub_start = float(scene["start"])
+            for index, part in enumerate(parts):
                 subscene = dict(scene)
-                subscene["start"] = float(scene["start"]) + index * sub_duration
-                subscene["end"] = float(scene["start"]) + (index + 1) * sub_duration
+                subscene["start"] = sub_start
+                subscene["end"] = sub_start + part
                 subscene["duration"] = subscene["end"] - subscene["start"]
                 subscene["media_tipo"] = "image"
                 subscene["is_subscene"] = True
+                subscene["soft_exception"] = False
                 subscene["media_request_id"] = f"{parent_request}:image:{index}"
+                sub_start = subscene["end"]
                 if index == 0:
                     subasset = asset
                 else:
@@ -971,11 +989,17 @@ class MediaFetcher:
                 expanded_scenes.append(subscene)
                 expanded_assets.append(subasset)
 
-        if len(expanded_scenes) != len(scenes):
-            scenes[:] = expanded_scenes
+        # Always write back: a count==1 soft-exception also rebuilds the scene
+        # (e.g. adds ``soft_exception``), even though the length is unchanged.
+        # Unchanged scenes are appended as the same object, so references hold.
+        scenes[:] = expanded_scenes
+        if len(expanded_scenes) != len(assets) or any(
+            s.get("soft_exception") for s in expanded_scenes
+        ):
             logger.info(
-                "Expanded %d fetched scene(s) into %d actual-media ranges to enforce image timing",
-                len(assets), len(expanded_assets),
+                "Reconciled %d actual-media ranges to enforce image timing "
+                "(%d scenes, %d assets)",
+                len(expanded_scenes), len(scenes), len(expanded_assets),
             )
         return scenes, expanded_assets
 
