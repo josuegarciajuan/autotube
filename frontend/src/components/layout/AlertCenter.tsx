@@ -37,6 +37,8 @@ interface ChannelRestriction {
     findings?: string[]
     scanned_at?: string | null
   } | null
+  delivery_state: 'strike' | 'recovery' | 'normal'
+  policy: { longs_per_day?: number | null; shorts_per_day?: number | null }
   internal: {
     blocked: boolean
     blocked_until: number | null
@@ -486,16 +488,16 @@ function ChannelCard({ c, busy, onOpenReport, onRestore, onUnblock, onStudioScan
             </div>
           )}
           {c.internal.freq_reduced && (
-            <div className="flex items-center gap-1.5 text-amber-200">
+            <div className="flex items-center gap-1.5 text-gray-400">
               <AlertTriangle size={12} />
-              Frecuencia de publicación rebajada (restaurar cuando verifiques en Studio que la penalización cesó).
+              Histórico: la frecuencia de publicación estuvo rebajada por spam (ya no limita la cadencia actual).
             </div>
           )}
           {c.internal.phase > 0 && (
-            <div className="flex items-center gap-1.5 text-cyan-200">
+            <div className="flex items-center gap-1.5 text-gray-400">
               <TrendingUp size={12} />
-              Reanudación gradual: {c.internal.phase_label}
-              {c.internal.phase_days_remaining != null ? ` · quedan ${c.internal.phase_days_remaining} día(s)` : ''}
+              Histórico: plan de reanudación ({c.internal.phase_label}).
+              {c.internal.phase_days_remaining != null ? ` quedan ${c.internal.phase_days_remaining} día(s)` : ''}
             </div>
           )}
           {c.internal.why && <div className="text-gray-500">⚠️ {c.internal.why}</div>}
