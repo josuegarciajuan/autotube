@@ -264,6 +264,20 @@ class VideoEditor:
         # On-demand image fetcher callback (set by orchestrator before build_video)
         self._on_demand_fetcher: Optional[callable] = None
 
+    @property
+    def _planner(self):
+        """Central scene pacing planner, built lazily from the current config.
+
+        Built on every access so a reassigned ``self.canal`` (tests, runtime
+        config refresh) is always honoured instead of a stale reference.
+        """
+        from pipeline.scene_planner import ScenePlanner
+        return ScenePlanner(
+            self.canal,
+            legacy_min=self.SCENE_DURATION_MIN,
+            legacy_max=self.SCENE_DURATION_MAX,
+        )
+
     # ── Public API ──────────────────────────────────────────────
 
     def build_video(
@@ -1357,6 +1371,7 @@ class VideoEditor:
                     "end": end_time,
                     "duration": end_time - start_time,
                     "tipo": bloque.get("tipo", "desarrollo"),
+                    "phase_id": bloque.get("phase_id"),
                     "texto": bloque.get("texto", ""),
                     "onscreen_text": bloque.get("onscreen_text", ""),
                     "media_tipo": bloque.get("media_tipo", "imagen"),
@@ -1387,6 +1402,7 @@ class VideoEditor:
                 "end": cumulative + dur,
                 "duration": dur,
                 "tipo": bloque.get("tipo", "desarrollo"),
+                "phase_id": bloque.get("phase_id"),
                 "texto": bloque.get("texto", ""),
                 "onscreen_text": bloque.get("onscreen_text", ""),
                 "media_tipo": bloque.get("media_tipo", "imagen"),
@@ -1409,22 +1425,23 @@ class VideoEditor:
     def _enforce_scene_durations(self, block_ranges: list[dict]) -> list[dict]:
         """Enforce media-specific scene pacing while preserving coverage.
 
-        - Scenes shorter than SCENE_DURATION_MIN are merged with the next scene.
-        - Scenes longer than SCENE_DURATION_MAX are split into sub-scenes.
-        - Merged scenes inherit the first scene's asset_idx and tipo; the second
-          scene's asset is skipped (its media will not be used in this build).
-        - Split sub-scenes inherit the parent's asset_idx and tipo.
+        Delegates duration decisions to the central ``ScenePlanner``:
+          - ``*_MIN`` is HARD: scenes shorter are merged with a neighbour.
+          - ``*_MAX`` is SOFT: scenes longer are split into sub-scenes, except
+            when no split respects ``*_MIN`` (then a "soft exception" keeps a
+            single, slightly longer scene — never a flash below the minimum).
+          - Split sub-scenes inherit the parent's asset_idx/tipo and use the
+            phase's target duration to pick semantic sentence boundaries.
         """
+        planner = self._planner
+        total_dur = sum(float(r.get("duration", 0) or 0) for r in block_ranges) or 1.0
+        structure = planner.structure()
+
         # ---- Phase 1: Merge short scenes (repeat until stable) ----
-        # Repeatedly scan the list and merge any scene whose duration
-        # falls below min_dur with the next scene. The outer loop runs
-        # at most len(merged) times (each merge pass reduces the list
-        # by at least one element). A hard safety cap prevents infinite
-        # loops in pathological cases.
         merged = list(block_ranges)  # work on a mutable copy
         changed = True
         safety = 0
-        max_safety = max(len(merged), 1) + 3  # generous upper bound
+        max_safety = max(len(merged), 1) + 3
         while changed and safety < max_safety:
             changed = False
             safety += 1
@@ -1432,9 +1449,8 @@ class VideoEditor:
             i = 0
             while i < len(merged):
                 br = dict(merged[i])
-                min_dur, _ = self._scene_duration_limits(br)
+                min_dur, _ = planner.limits(br.get("media_tipo", "imagen"))
                 if br["duration"] < min_dur and i + 1 < len(merged):
-                    # Merge this short scene with the next one
                     nxt = merged[i + 1]
                     br["end"] = nxt["end"]
                     br["duration"] = br["end"] - br["start"]
@@ -1461,13 +1477,8 @@ class VideoEditor:
             )
 
         # ---- Phase 1b: Backward-merge last scene ------------------
-        # The forward loop above can only merge scene[i] with scene[i+1],
-        # so the last scene never gets a chance to be swallowed when it
-        # is the one that is too short.  Here we merge the last scene
-        # backward into the previous one when it still falls below the
-        # minimum duration.
         if (len(merged) >= 2
-                and merged[-1]["duration"] < self._scene_duration_limits(merged[-1])[0]
+                and merged[-1]["duration"] < planner.limits(merged[-1].get("media_tipo", "imagen"))[0]
                 and not any(r.get("is_subscene") for r in merged[-2:])):
             prev = merged[-2]
             last = merged.pop()
@@ -1483,49 +1494,122 @@ class VideoEditor:
                 last["duration"], prev["duration"],
             )
 
-        # ---- Phase 2: Split long scenes ----
+        # ---- Phase 2: Split long scenes (target-aware, hard-min safe) ----
         new_ranges: list[dict] = []
         for br in merged:
-            _, max_dur = self._scene_duration_limits(br)
-            if br["duration"] > max_dur:
-                sub_ranges = self._semantic_subscene_ranges(br, max_dur)
-                self.logger.info(
-                    "Splitting long scene (%.1fs > %.1fs) into %d semantic sub-scenes",
-                    br["duration"], max_dur, len(sub_ranges),
-                )
-                for j, (start, end, fragment_text, fragment_words) in enumerate(sub_ranges):
-                    sub = dict(br)
-                    sub["start"] = start
-                    sub["end"] = end
-                    sub["duration"] = sub["end"] - sub["start"]
-                    sub["texto"] = fragment_text
-                    sub["fragment_text"] = fragment_text
-                    sub["word_timestamps"] = fragment_words
-                    fragment_hint = " ".join(fragment_text.split()[:8])
-                    if fragment_hint:
-                        sub["search_query_en"] = ", ".join(
-                            value for value in (br.get("search_query_en", ""), fragment_hint) if value
-                        )
-                    sub["is_subscene"] = True
-                    sub["parent_tipo"] = br["tipo"]
-                    # MediaFetcher receives one request per subscene.  Keep the
-                    # parent index only as metadata; request identity is unique.
-                    sub["media_request_id"] = f"{br.get('asset_idx', 'scene')}:{j}"
-                    new_ranges.append(sub)
-            else:
+            mtype = br.get("media_tipo", "imagen")
+            hard_min, max_dur = planner.limits(mtype)
+            phase_id = planner.resolve_phase(br, total_dur, structure) or br.get("phase_id", "default")
+            target = planner.target(phase_id, mtype)
+            br["phase_id"] = phase_id
+            br["target_dur"] = target
+
+            if br["duration"] <= max_dur:
                 br = dict(br)
                 br["is_subscene"] = False
+                br["soft_exception"] = False
                 br["media_request_id"] = f"{br.get('asset_idx', 'scene')}:0"
                 new_ranges.append(br)
+                continue
+
+            count, _parts, soft_exception = planner.partition(br["duration"], mtype, phase_id)
+            if count == 1:
+                # No split can respect the hard minimum → soft exception.
+                br = dict(br)
+                br["is_subscene"] = False
+                br["soft_exception"] = soft_exception
+                br["media_request_id"] = f"{br.get('asset_idx', 'scene')}:0"
+                self.logger.info(
+                    "Scene %.1fs [%s/%s] exceeds soft max %.1fs but cannot split "
+                    "without violating hard min %.1fs — kept as ONE scene (soft exception)",
+                    br["duration"], phase_id, mtype, max_dur, hard_min,
+                )
+                new_ranges.append(br)
+                continue
+
+            sub_ranges = self._semantic_subscene_ranges(br, max_dur=max_dur, target_dur=target, count=count)
+            sub_ranges = self._merge_short_fragments(sub_ranges, hard_min)
+            self.logger.info(
+                "Splitting long scene (%.1fs > %.1fs) into %d semantic sub-scenes "
+                "[phase=%s target=%.1fs]",
+                br["duration"], max_dur, len(sub_ranges), phase_id, target,
+            )
+            for j, (start, end, fragment_text, fragment_words) in enumerate(sub_ranges):
+                sub = dict(br)
+                sub["start"] = start
+                sub["end"] = end
+                sub["duration"] = sub["end"] - sub["start"]
+                sub["texto"] = fragment_text
+                sub["fragment_text"] = fragment_text
+                sub["word_timestamps"] = fragment_words
+                # English query stays clean (P5 fix): do NOT append the Spanish
+                # fragment to the provider query. The fragment goes to
+                # ``query_context`` for enrichment in the media fetcher.
+                sub["search_query_en"] = br.get("search_query_en", "")
+                sub["query_context"] = fragment_text
+                sub["is_subscene"] = True
+                sub["parent_tipo"] = br["tipo"]
+                sub["phase_id"] = phase_id
+                sub["target_dur"] = target
+                sub["soft_exception"] = False
+                sub["media_request_id"] = f"{br.get('asset_idx', 'scene')}:{j}"
+                new_ranges.append(sub)
 
         return new_ranges
 
-    def _semantic_subscene_ranges(self, scene: dict, max_dur: float) -> list[tuple[float, float, str, list[dict]]]:
-        """Split long narration at sentence boundaries when TTS words exist."""
+    def _merge_short_fragments(
+        self,
+        sub_ranges: list[tuple[float, float, str, list[dict]]],
+        hard_min: float,
+    ) -> list[tuple[float, float, str, list[dict]]]:
+        """Merge semantic fragments shorter than the HARD minimum.
+
+        A semantic sentence boundary can land close to the target but leave a
+        short fragment at the start/middle/end. Merge it into the previous
+        fragment (or the next when it is the first) so no scene falls below
+        the hard minimum. Coverage stays exact.
+        """
+        if not sub_ranges or len(sub_ranges) == 1:
+            return sub_ranges
+        result: list[tuple[float, float, str, list[dict]]] = []
+        i = 0
+        while i < len(sub_ranges):
+            start, end, text, words = sub_ranges[i]
+            if (end - start) < hard_min - 1e-9 and result:
+                # Merge into previous fragment.
+                p_start, p_end, p_text, p_words = result[-1]
+                result[-1] = (p_start, end, f"{p_text} {text}".strip(), list(p_words) + list(words))
+            elif (end - start) < hard_min - 1e-9 and i + 1 < len(sub_ranges):
+                # First fragment is short → merge into next.
+                n_start, n_end, n_text, n_words = sub_ranges[i + 1]
+                result.append((start, n_end, f"{text} {n_text}".strip(), list(words) + list(n_words)))
+                i += 1
+            else:
+                result.append((start, end, text, words))
+            i += 1
+        return result
+
+    def _semantic_subscene_ranges(
+        self,
+        scene: dict,
+        max_dur: float,
+        target_dur: float | None = None,
+        count: int | None = None,
+    ) -> list[tuple[float, float, str, list[dict]]]:
+        """Split long narration at sentence boundaries when TTS words exist.
+
+        ``count`` is provided by the ``ScenePlanner.partition`` decision (the
+        number of scenes that best fit the phase target within hard/soft
+        limits). When absent, it is derived from ``max_dur`` as before.
+        """
         start, end = float(scene["start"]), float(scene["end"])
         duration = end - start
         words = list(scene.get("word_timestamps") or [])
-        count = max(2, int(duration / max_dur) + 1)
+        if count is None:
+            count = max(2, int(duration / max_dur) + 1)
+        # Spacing MUST be duration/count so the fragments tile the scene exactly.
+        # ``target_dur`` only influences the count choice (via partition); it is
+        # never used as the physical spacing or coverage breaks.
         target = duration / count
         if not words:
             text = scene.get("texto", "")
@@ -1570,15 +1654,9 @@ class VideoEditor:
         return text[matches[left].start():matches[right - 1].end()]
 
     def _scene_duration_limits(self, scene: dict) -> tuple[float, float]:
-        """Return limits for a scene, retaining legacy config fallback."""
+        """Return (hard_min, soft_max) for a scene, via the central planner."""
         media_type = str(scene.get("media_tipo", "imagen")).lower()
-        is_video = media_type == "video"
-        prefix = "VIDEO" if is_video else "IMAGE"
-        legacy_min = self.canal.get("SCENE_DURATION_MIN", self.SCENE_DURATION_MIN)
-        legacy_max = self.canal.get("SCENE_DURATION_MAX", self.SCENE_DURATION_MAX)
-        minimum = float(self.canal.get(f"{prefix}_SCENE_DURATION_MIN", legacy_min))
-        maximum = float(self.canal.get(f"{prefix}_SCENE_DURATION_MAX", legacy_max))
-        return minimum, maximum
+        return self._planner.limits(media_type)
 
     def _align_last_scene_to_audio(self, block_ranges: list[dict], audio_duration: float) -> None:
         """Set only the final planned endpoint to the decoded narration end."""

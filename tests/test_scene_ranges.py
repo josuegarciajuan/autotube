@@ -147,3 +147,33 @@ class TestSceneDurations:
             (0.0, 4.5), (4.5, 9.0), (9.0, 12.0)
         ]
         assert all(part["word_timestamps"] for part in result)
+
+    def test_subscene_split_keeps_english_query_and_propagates_phase(self):
+        """P5: split subscenes keep the parent's English query (no Spanish
+        fragment appended) and the fragment goes to ``query_context``."""
+        editor = self._make_editor()
+        editor.canal = {
+            "IMAGE_SCENE_DURATION_MIN": 3.0,
+            "IMAGE_SCENE_DURATION_MAX": 5.0,
+            "SCRIPT_STRUCTURE": [
+                {"id": "desarrollo", "time_pct": "0-100%",
+                 "scene_pacing": {"image_target_sec": 4.0, "video_target_sec": 4.0}},
+            ],
+        }
+        scene = self._make_scene(0, 12, asset_idx=7)
+        scene["texto"] = "Los mercaderes usaban balanzas para pesar el oro."
+        scene["search_query_en"] = "merchant weighing gold scale ancient Egyptian"
+        scene["phase_id"] = "desarrollo"
+
+        result = editor._enforce_scene_durations([scene])
+
+        assert len(result) >= 2
+        for part in result:
+            # English parent query is preserved verbatim, never polluted with
+            # the Spanish fragment.
+            assert part["search_query_en"] == "merchant weighing gold scale ancient Egyptian"
+            assert "Los mercaderes" not in part["search_query_en"]
+        # The fragment is exposed as context for later enrichment, and the
+        # phase id is propagated to every subscene.
+        assert any(part.get("query_context") for part in result)
+        assert all(part.get("phase_id") == "desarrollo" for part in result)
