@@ -1,5 +1,6 @@
 /** Per-channel planning configuration card.
  *  Allows setting videos_per_day, viral_per_day, and toggling planning_enabled.
+ *  Public target, generation and upload capacity are deliberately separate.
  */
 
 import { useState, useEffect } from 'react'
@@ -12,6 +13,9 @@ interface ChannelConfig {
   channel_name: string
   channel_slug: string
   videos_per_day: number
+  public_videos_per_day?: number
+  longform_generation_per_day?: number
+  upload_capacity_per_day?: number
   viral_per_day: number
   planning_enabled: boolean
   videos_day_boost_weight: number
@@ -23,7 +27,7 @@ export default function ChannelConfigCard({
   onUpdate,
 }: {
   config: ChannelConfig
-  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number;
+  onUpdate: (data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; public_videos_per_day?: number; longform_generation_per_day?: number; upload_capacity_per_day?: number;
                       videos_day_boost_weight?: number; viral_day_boost_weight?: number }) => void
 }) {
   const [saving, setSaving] = useState(false)
@@ -34,7 +38,7 @@ export default function ChannelConfigCard({
     api.getChannelPeakInfo(config.channel_id).then(setPeakInfo).catch(() => {})
   }, [config.channel_id])
 
-  async function update(data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number;
+  async function update(data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; public_videos_per_day?: number; longform_generation_per_day?: number; upload_capacity_per_day?: number;
                                  videos_day_boost_weight?: number; viral_day_boost_weight?: number }) {
     setSaving(true)
     try { onUpdate(data) } finally { setTimeout(() => setSaving(false), 500) }
@@ -65,6 +69,21 @@ export default function ChannelConfigCard({
             }`}
           />
         </button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-[10px] border-t border-surface-border/40 pt-2">
+        {([
+          ['public_videos_per_day', 'Públicos', config.public_videos_per_day ?? config.videos_per_day, 10],
+          ['longform_generation_per_day', 'Generación', config.longform_generation_per_day ?? config.videos_per_day, 10],
+          ['upload_capacity_per_day', 'Cap. subida', config.upload_capacity_per_day ?? config.videos_per_day, 20],
+        ] as const).map(([key, label, value, max]) => (
+          <label key={key} className="text-gray-500">
+            {label}
+            <input type="number" min={0} max={max} value={value}
+              onChange={(e) => update({ [key]: Math.max(0, Math.min(max, Number(e.target.value))) } as any)}
+              className="mt-1 w-full rounded bg-dark-600 border border-surface-border px-1.5 py-1 text-gray-200" />
+          </label>
+        ))}
       </div>
 
       {/* Videos/día slider */}

@@ -41,6 +41,9 @@ export const api = {
   // Pacing (strike mode profile)
   getPacingProfile: () => request<any>(`/pacing/profile`),
   setPacingProfile: (profile: string) => request<any>(`/pacing/profile`, { method: 'PUT', body: JSON.stringify({ profile }) }),
+  getChannelDelivery: (channelId: number) => request<any>(`/pacing/channels/${channelId}`),
+  setChannelDelivery: (channelId: number, data: { state: string; override?: Record<string, unknown> }) =>
+    request<any>(`/pacing/channels/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   getFactoryStatus: () => request<any>(`/pacing/factory-status`),
   // Channels
   getChannels: (activeOnly = false) => request<any[]>(`/channels?active_only=${activeOnly}`),
@@ -245,7 +248,7 @@ export const api = {
 
   // Planning (dynamic scheduling v2)
   getPlanningConfig: () => request<any[]>('/planning/config'),
-  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; videos_day_boost_weight?: number; viral_day_boost_weight?: number }) =>
+  updatePlanningConfig: (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; videos_day_boost_weight?: number; viral_day_boost_weight?: number; public_videos_per_day?: number; upload_capacity_per_day?: number; longform_generation_per_day?: number }) =>
     request<any>(`/planning/config/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
   getPlannedSlots: (date?: string, channelId?: number, status?: string) => {
     const params = new URLSearchParams();

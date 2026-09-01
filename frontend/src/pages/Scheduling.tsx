@@ -30,6 +30,9 @@ interface PlanningConfig {
   channel_name: string
   channel_slug: string
   videos_per_day: number
+  public_videos_per_day?: number
+  longform_generation_per_day?: number
+  upload_capacity_per_day?: number
   viral_per_day: number
   planning_enabled: boolean
   videos_day_boost_weight: number
@@ -339,7 +342,7 @@ function PlanningConfigSection() {
   const { data: rawConfigs = [], isLoading: loading, isError, refetch } = usePlanningConfig()
   const configs = rawConfigs.filter((c: any) => c.channel_slug !== 'test')
 
-  const update = useCallback(async (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number }) => {
+  const update = useCallback(async (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; public_videos_per_day?: number; longform_generation_per_day?: number; upload_capacity_per_day?: number }) => {
     try {
       await api.updatePlanningConfig(channelId, data)
       refetch()
