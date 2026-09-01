@@ -89,6 +89,26 @@ if [[ "$ACTIVE_JOBS" == ACTIVE:* ]]; then
     fi
 fi
 
+# ── FIX (stabilize-scheduler): no reiniciar con generación activa.
+# Aunque el worker subprocess sobreviva al reinicio del API, cada reinicio
+# mata workers (SIGTERM) cuando hay cascadas (stale scheduler, kills de
+# huérfanos), y los deploys sumados agravan el problema. Si hay CUALQUIER
+# worker de generación vivo, abortamos el deploy y avisamos de reintentar
+# cuando termine. Kill-switch: SKIP_ACTIVE_WORKER_CHECK=true fuerza el deploy.
+if [ "${SKIP_ACTIVE_WORKER_CHECK:-false}" != "true" ]; then
+    ACTIVE_WORKERS=$(pgrep -f "full_pipeline_worker" 2>/dev/null | wc -l)
+    if [ "$ACTIVE_WORKERS" -gt 0 ]; then
+        echo ""
+        echo "⚠️  Hay $ACTIVE_WORKERS worker(s) de generación activo(s)."
+        echo "   Reiniciar el API puede matar generaciones (cascada de SIGTERM)."
+        echo "   Se ABORTA el deploy para no interrumpir la generación."
+        echo "   Reintenta cuando termine, o fuerza con SKIP_ACTIVE_WORKER_CHECK=true"
+        echo "   (p. ej. si solo hay shorts / maintenance)."
+        echo ""
+        exit 0
+    fi
+fi
+
 # ── Step 1: Rebuild frontend ──
 echo ""
 echo "📦 Step 1/3: Rebuilding frontend..."

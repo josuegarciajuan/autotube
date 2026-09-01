@@ -447,6 +447,60 @@ def _kill_orphaned_workers(logger) -> int:
 
         job_id = int(job_match.group(1))
         if job_id not in running_jobs:
+            # ── FIX (stabilize-scheduler): grace period para fallos transitorios.
+            # Un worker cuyo job fue marcado failed por SIGTERM/restart de la API
+            # (p. ej. "interrupted: server restarted (SIGTERM)") puede seguir vivo
+            # limpiando/terminando. Matarlo aquí —en el dispatch del siguiente
+            # slot— convierte cada reinicio en una cascada de workers muertos.
+            # Solo matamos huérfanos GENUINOS: job inexistente o muerto hace rato.
+            try:
+                import sqlite3 as _sql_gr
+                from config.settings import DATABASE_PATH as _DBP_gr
+                _gconn = _sql_gr.connect(str(_DBP_gr), timeout=5)
+                _gconn.row_factory = _sql_gr.Row
+                _grow = _gconn.execute(
+                    "SELECT status, error_msg, finished_at, last_heartbeat_at "
+                    "FROM generation_jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                _gconn.close()
+            except Exception:
+                _grow = None
+
+            _transient_recent = False
+            try:
+                if _grow is not None:
+                    _err = (_grow["error_msg"] or "").lower()
+                    _transient = any(
+                        pat in _err
+                        for pat in ("interrupted", "server restarted", "sigterm",
+                                    "worker died early", "worker_died")
+                    )
+                    _now_ts = _time.time()
+                    _finished = None
+                    if _grow["finished_at"]:
+                        try:
+                            from datetime import datetime as _dt_f
+                            _finished = _dt_f.strptime(
+                                str(_grow["finished_at"])[:19], "%Y-%m-%d %H:%M:%S"
+                            ).timestamp()
+                        except Exception:
+                            _finished = None
+                    _recent = (
+                        _finished is None
+                        or (_now_ts - _finished) < _ORPHAN_TRANSIENT_GRACE_SEC
+                    )
+                    _transient_recent = _transient and _recent
+            except Exception:
+                _transient_recent = False
+
+            if _transient_recent:
+                logger.info(
+                    "Worker PID=%d (job %d): fallo transitorio reciente — "
+                    "grace period, NO se mata (deja que el monitor lo gestione)",
+                    pid, job_id,
+                )
+                continue  # no matar; el progress monitor ya hace "letting it finish naturally"
+
             logger.warning(
                 "Killing orphaned worker PID=%d (job %d not in running set)",
                 pid, job_id,
@@ -654,6 +708,11 @@ VIDEO_MEMORY_GUARD_MB = settings.VIDEO_MEMORY_GUARD_MB
 
 # Dedicated thread pool for pipeline blocking work — avoids starving
 # the default asyncio executor (which has limited threads).
+# ── FIX (stabilize-scheduler): grace period (segundos) antes de que
+# `_kill_orphaned_workers` mate a un worker cuyo job falló por causa
+# TRANSITORIA (SIGTERM / restart de la API). Evita la cascada de workers
+# muertos en cada reinicio del scheduler.
+_ORPHAN_TRANSIENT_GRACE_SEC = int(os.environ.get("ORPHAN_TRANSIENT_GRACE_SEC", "1800"))
 _PIPELINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="autotube-pipeline-",

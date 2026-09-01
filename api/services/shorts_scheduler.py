@@ -77,6 +77,9 @@ def _alert_shorts_dispatch_exhausted(detail: str, max_retries: int = 3) -> None:
 # Cleared each calendar day at first invocation.
 _VIDEOS_WITHOUT_SCRIPT: set[int] = set()
 _VIDEOS_WITHOUT_SCRIPT_DATE: str = ""
+# Serializa una única subida de shorts de fondo a la vez (evita doble subida).
+import threading as _threading_mod
+_SHORT_UPLOAD_BACKGROUND_LOCK = _threading_mod.Lock()
 # Cooldown after all slots exhausted to prevent log spam and CPU waste
 _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
@@ -2429,8 +2432,17 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     # (cuota por proyecto, tope duro por canal, tope global, cooldown, caps de
     # planning), así que puede correr incluso con cuota/tope global alcanzados
     # (drena hasta que el tope global real lo frene) sin arriesgar spam.
+    #
+    # FIX (stabilize-scheduler): la subida in-process de un short incluye
+    # `_wait_global_upload_spacing()` que hace `time.sleep(30)` hasta 3600s
+    # (youtube_uploader.py). Si esto se ejecuta de forma síncrona dentro del
+    # tick del `schedule_checker`, el loop queda bloqueado esperando el thread
+    # (`await asyncio.to_thread(...)`) y su heartbeat deja de latir → el
+    # task_watchdog declara el loop "stale" y pide un "controlled API restart",
+    # matando la generación long-form en curso. Se lanza en un thread daemon
+    # independiente para que el tick del scheduler retorne al instante.
     try:
-        _upload_queued_shorts(db, max_per_pass=2)
+        _spawn_background_short_upload(db, max_per_pass=2)
     except Exception as exc:
         logger.warning("Shorts dispatch: queued upload pasada falló: %s", exc)
 
@@ -4714,6 +4726,43 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
 def _upload_queued_native_short(short_record: dict, db=None) -> bool:
     """Compat: sube un short nativo en cola. Delega en la válvula unificada."""
     return _upload_queued_short(short_record, db=db)
+
+
+def _spawn_background_short_upload(db=None, max_per_pass: int = 2) -> None:
+    """Lanza la válvula de goteo de shorts en un thread daemon NO bloqueante.
+
+    El scheduler del API llama a esta función en cada tick. La subida de un
+    short puede tardar mucho (espera de "global upload spacing" con time.sleep
+    de hasta 3600s + subida real a YouTube). Ejecutarla de forma síncrona
+    congelaría el loop `schedule_checker` y dejaría su heartbeat stale,
+    provocando reinicios en cascada de la API (y matando generaciones).
+
+    Se usa un thread daemon con un lock global para garantizar que solo haya
+    UNA pasada de subida de fondo a la vez (evita solapamientos / doble subida).
+    Devuelve inmediatamente.
+    """
+    import threading
+
+    if not _SHORT_UPLOAD_BACKGROUND_LOCK.acquire(blocking=False):
+        return  # otra pasada de subida de fondo ya está en marcha
+
+    def _runner():
+        try:
+            _upload_queued_shorts(db, max_per_pass=max_per_pass)
+        except Exception as exc:
+            logger.warning("Background short upload runner error: %s", exc)
+        finally:
+            try:
+                _SHORT_UPLOAD_BACKGROUND_LOCK.release()
+            except Exception:
+                pass
+
+    thread = threading.Thread(
+        target=_runner,
+        name="short-upload-valve",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:

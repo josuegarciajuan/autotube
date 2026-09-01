@@ -30,7 +30,7 @@ logger = logging.getLogger("autotube.lifecycle")
 # se considera muerto/bloqueado y se crea una alerta CRITICA task_stalled.
 # (Un scheduler muerto para todo el sistema en silencio — el gap más peligroso.)
 TASK_TIMEOUTS = {
-    "schedule_checker": 900,        # loop principal (cada 60s) — timeout 15 min
+    "schedule_checker": 1800,       # loop principal — 30 min (FIX stabilize-scheduler: margen para operaciones largas)
     "publish_verify": 900,          # verificación de publicación (5 min)
     "upload_health_checker": 900,   # monitor de procesamiento YT
     "quota_recovery": 2400,         # recuperación de cuota (loop duerme 1800s)
