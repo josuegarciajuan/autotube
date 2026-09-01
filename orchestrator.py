@@ -307,6 +307,36 @@ class PipelineOrchestrator:
             self._theme_extractor = ThemeExtractor(config=self.config)
         return self._theme_extractor
 
+    def _reanchor_theme_from_script(self, script: dict) -> None:
+        """Re-anchor the ThemeContext against the FINAL script (P4 fix).
+
+        The theme extracted from the source can drift from the actual narration.
+        Re-anchoring era/subject/motifs to the final script keeps stock queries
+        and the visual bible coherent with what is actually narrated.
+        Fail-open: on any error the previous context is kept.
+        """
+        if self._theme_context is None or not script:
+            return
+        bloques = script.get("bloques") or script.get("bloques_json")
+        if isinstance(bloques, str):
+            import json as _json
+            try:
+                bloques = _json.loads(bloques)
+            except Exception:
+                bloques = None
+        if not isinstance(bloques, list) or not bloques:
+            return
+        script_text = "\n\n".join(b.get("texto", "") for b in bloques if isinstance(b, dict))
+        if len(script_text.strip()) < 40:
+            return
+        from pipeline.theme_extractor import reanchor_from_script
+        new_ctx = reanchor_from_script(self._theme_context, script_text, config=self.config)
+        if new_ctx is not None and new_ctx is not self._theme_context:
+            self._theme_context = new_ctx
+            self.script_gen.set_theme_context(new_ctx)
+            self.media_fetcher.set_theme_context(new_ctx)
+            logger.info("[%s] Theme re-anchored from final script", self.canal)
+
     def _extract_and_set_theme(self, content_text: str, content_title: str = "") -> None:
         """Extract visual theme from content and inject into script gen + media fetcher.
 
@@ -560,6 +590,10 @@ class PipelineOrchestrator:
 
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_item)
+
+        # ── P4 fix: re-anchor the theme to the FINAL script (source may drift) ──
+        if result:
+            self._reanchor_theme_from_script(result)
 
         # ── Anti-strike: verificación post-guion (el LLM puede enmarcar un
         # tema neutro de forma sensible) ──
@@ -1234,6 +1268,10 @@ class PipelineOrchestrator:
             # ── Save scene_ranges for phase_video (ensures 1:1 alignment) ──
             self._last_scene_ranges = scene_ranges
             self._last_media_assets = None
+
+            # ── P4 fix: re-anchor theme to the final timed script before the
+            # bible and stock search, so era/subject match the narration ──
+            self._reanchor_theme_from_script(script)
 
             # ── Phase 3: Visual Bible (LLM-generated visual direction) ──
             if self._media_strategy.get("visual_bible_enabled", False):
