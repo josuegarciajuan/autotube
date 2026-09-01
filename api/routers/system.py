@@ -481,13 +481,43 @@ def _studio_severity(findings) -> str | None:
     return "warning"
 
 
-def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
+_DELIVERY_STATE_LABEL = {
+    "strike": "Modo strike — cadencia reducida",
+    "recovery": "Recuperación — cadencia parcial",
+    "normal": "Operativo",
+}
+
+
+def _cadence_text(policy: dict) -> str:
+    """Cadencia efectiva resuelta en lenguaje humano."""
+    longs = policy.get("public_longform_per_day")
+    shorts = policy.get("public_shorts_per_day")
+    if longs is None and shorts is None:
+        return ""
+    bits = []
+    if longs is not None:
+        bits.append(f"{longs} long{longs != 1 and 's' or ''}/día")
+    if shorts is not None:
+        bits.append(f"{shorts} short{shorts != 1 and 's' or ''}/día")
+    return " · ".join(bits)
+
+
+def _build_verdict(internal: dict, youtube: dict, studio_scan, delivery_state: str = "normal", policy: dict | None = None) -> dict:
     """Veredicto único por canal (fuente única de verdad para la UI).
 
-    Escalera de prioridad de mayor a menor severidad: primero la evidencia
-    EXTERNA real (removed / age_restricted / discrepancias de eliminación),
-    después los hallazgos de Studio, luego el bloqueo interno temporal y por
-    último el estado pasivo de política (freq_reduced / fase / strikes).
+    Escalera de prioridad de mayor a menor severidad:
+      1. Evidencia EXTERNA real (removed / age_restricted / discrepancias de
+         eliminación): algo se borró o restringió en YouTube.
+      2. Hallazgos graves de Studio (strikes/avisos/desmonetización).
+      3. Bloqueo interno temporal activo.
+      4. Hallazgos leves de Studio / discrepancia de publicación (lag).
+      5. Estado de entrega autoritativo (channel_delivery_state): normal →
+         Operativo, recovery → Recuperación, strike → Modo strike.
+
+    El estado de entrega (delivery_state) es la fuente que refleja la cadencia
+    REAL que aplica el pipeline (resolve_channel_policy_values). Los marcadores
+    históricos anti-spam (freq_reduced / fase de reanudación / strikes) NO se
+    usan como motor del veredicto: son detalle de contexto, no el estado actual.
     """
     removed = youtube.get("removed") or []
     age_restricted = youtube.get("age_restricted") or []
@@ -500,11 +530,7 @@ def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
     studio_sev = _studio_severity(findings)
 
     blocked = bool(internal.get("blocked"))
-    blocked_until = internal.get("blocked_until")
     restan_h = internal.get("restan_h", 0.0)
-    freq_reduced = bool(internal.get("freq_reduced"))
-    phase = int(internal.get("phase") or 0)
-    strikes = int(internal.get("strikes") or 0)
 
     def _parts(items, label):
         if not items:
@@ -513,24 +539,27 @@ def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
 
     parts = []
     if removed:
-        parts.append(_parts(removed, "vídeo(s) eliminado(s) en YouTube"))
+        parts.append(_parts(removed, "vídeo(s) no disponibles/eliminado(s) en YouTube"))
     if age_restricted:
         parts.append(_parts(age_restricted, "vídeo(s) con restricción de edad"))
     if removed_disc:
         parts.append(_parts(removed_disc, "discrepancia(s) de eliminación"))
 
+    # 1. Evidencia externa real → algo se borró/restringió en YouTube.
     if removed or age_restricted or removed_disc:
         detail = " · ".join(p for p in parts if p)
         if youtube.get("checked_at"):
             detail += f" · verific. {youtube['checked_at'][:16]}"
-        return {"severity": "critical", "label": "Restricción real en YouTube", "detail": detail}
+        return {"severity": "critical", "label": "Posible eliminación en YouTube", "detail": detail}
 
+    # 2. Hallazgos graves de Studio.
     if studio_sev == "critical":
         d = f"{len(findings)} aviso(s) en Studio (strike/políticas/desmonetización)"
         if scanned_at:
             d += f" · escaneado {scanned_at[:16]}"
         return {"severity": "critical", "label": "Avisos graves en YouTube Studio", "detail": d}
 
+    # 3. Bloqueo interno temporal activo.
     if blocked:
         d = "No publicará contenido hasta el final del bloqueo interno de Autotube"
         if restan_h:
@@ -538,6 +567,7 @@ def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
         d += " · no es una sanción confirmada por YouTube"
         return {"severity": "blocked", "label": "Bloqueo interno temporal", "detail": d}
 
+    # 4. Hallazgos leves de Studio / discrepancia de publicación.
     if studio_sev == "warning":
         d = f"{len(findings)} aviso(s) leve(s) en Studio — revisar"
         if scanned_at:
@@ -551,17 +581,18 @@ def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
             "detail": f"{len(sched_disc)} vídeo(s) que BD da por publicado aún aparecen programado/privado en YouTube (lag de indexado)",
         }
 
-    if freq_reduced or phase > 0 or strikes > 0:
-        d = "Modo defensivo post-strike"
-        if strikes:
-            d += f" · {strikes} strike(s) histórico(s)"
-        if phase > 0:
-            d += f" · {internal.get('phase_label') or f'Fase {phase}'}"
-        if freq_reduced:
-            d += " · frecuencia de publicación rebajada"
-        return {"severity": "defensive", "label": "Modo defensivo post-strike", "detail": d}
-
-    return {"severity": "ok", "label": "Operativo", "detail": "Sin restricciones detectadas"}
+    # 5. Estado de entrega autoritativo.
+    state = (delivery_state or "normal").lower()
+    if state == "strike":
+        return {"severity": "defensive", "label": "Modo strike — cadencia reducida",
+                "detail": "Cadencia limitada por el perfil de cadencia (strike)."}
+    if state == "recovery":
+        return {"severity": "warning", "label": "Recuperación — cadencia parcial",
+                "detail": "Cadencia parcial durante la recuperación tras los strikes."}
+    # normal (default)
+    cadence = _cadence_text(policy or {})
+    return {"severity": "ok", "label": "Operativo",
+            "detail": f"Estado normal · {cadence}" if cadence else "Estado normal"}
 
 
 @router.get("/system/channel-restrictions")
@@ -702,12 +733,29 @@ def channel_restrictions():
         except Exception:
             studio_scan = None
 
-        verdict = _build_verdict(internal, youtube, studio_scan)
+        # ── Estado de entrega autoritativo + cadencia efectiva resuelta ──
+        try:
+            from api.services.channel_policy import (
+                get_channel_delivery_state, resolve_channel_policy_values,
+            )
+            delivery_state = get_channel_delivery_state(cid, db)
+            policy = resolve_channel_policy_values(cid, db=db) or {}
+        except Exception:
+            delivery_state = "normal"
+            policy = {}
+
+        verdict = _build_verdict(internal, youtube, studio_scan, delivery_state, policy)
 
         out.append({
             "channel_id": cid, "slug": slug, "name": ch.get("name", ""),
             "internal": internal, "youtube": youtube,
-            "studio_scan": studio_scan, "verdict": verdict,
+            "studio_scan": studio_scan,
+            "delivery_state": delivery_state,
+            "policy": {
+                "longs_per_day": policy.get("public_longform_per_day"),
+                "shorts_per_day": policy.get("public_shorts_per_day"),
+            },
+            "verdict": verdict,
         })
 
     return {"ok": True, "generated_at": now_utc.isoformat(), "channels": out}
