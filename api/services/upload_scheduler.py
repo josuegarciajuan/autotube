@@ -977,13 +977,13 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # Self-heals the "publish before upload" and "upload too far" inconsistencies.
     _recover_inconsistent_upload_times(db)
 
-    # ── 0b2. (ago 2026) Far-future publishAt en "calentando": acercar la publicación ──
-    # Vídeos ya subidos como private con publishAt a >24h vista se quedan en
-    # uploaded_private días. Se reprograman (máx 4/pasada, solo con cuota libre).
-    try:
-        _recover_far_future_published(db)
-    except Exception as exc:
-        logger.debug("Far-future publish recovery skipped: %s", exc)
+    # NOTA (ago 2026): se eliminó el repack automático por timer
+    # (`_recover_far_future_published`) porque reprogramaba `publishAt` en YouTube
+    # cada tick (loop ping-pong) y drenaba la cuota diaria (100k) sin converger.
+    # La validación de `publish_at` futuro + sin colisión ya vive en la subida
+    # (ensure_future_target_public_at + _avoid_channel_collision + guard v25).
+    # Los fallos puntuales de publicación se corrigen a mano (endpoint
+    # POST /api/channels/{id}/repack) cuando se detectan.
 
     # ── 1. Count active upload jobs ──
     active_uploads = db.count_active_upload_jobs()

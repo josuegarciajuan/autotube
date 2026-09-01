@@ -21,6 +21,8 @@ interface QuotaProject {
   quota_limit: number
   remaining: number
   exhausted: boolean
+  reset_at_utc?: string | null
+  remaining_hours?: number | null
 }
 
 interface QuotaProjects {
@@ -105,6 +107,12 @@ export default function QuotaWidget() {
             Cuota YouTube API
           </span>
           <span className="text-xs text-gray-500">{data.date}</span>
+          <span
+            className="text-[10px] text-gray-600 border border-dark-600 rounded px-1"
+            title="Consumo estimado a partir del registro local de llamadas. No es el contador oficial de Google."
+          >
+            estimado local
+          </span>
         </div>
         <button
           onClick={fetchQuota}
@@ -158,8 +166,14 @@ export default function QuotaWidget() {
               </motion.div>
             </div>
             <div className="flex justify-between text-[10px] text-gray-600 mt-0.5">
-              <span>{proj.remaining.toLocaleString()} restantes</span>
-              <span>{pct.toFixed(0)}%</span>
+              <span>
+                {proj.exhausted
+                  ? (proj.remaining_hours != null
+                      ? `Recarga en ~${proj.remaining_hours.toFixed(1)}h`
+                      : 'Agotada')
+                  : `${proj.remaining.toLocaleString()} restantes`}
+              </span>
+              <span>{proj.exhausted ? '100%' : `${pct.toFixed(0)}%`}</span>
             </div>
 
             {/* Per-channel sub-bars */}
@@ -193,7 +207,12 @@ export default function QuotaWidget() {
             {proj.exhausted && (
               <div className="flex items-center gap-1.5 text-[11px] text-red-400 mt-1">
                 <Zap size={12} />
-                <span>Cuota agotada — recarga a medianoche (hora del Pacífico)</span>
+                <span>
+                  Cuota agotada — recarga{' '}
+                  {proj.remaining_hours != null
+                    ? `en ~${proj.remaining_hours.toFixed(1)}h`
+                    : 'a medianoche (hora del Pacífico)'}
+                </span>
               </div>
             )}
           </div>
