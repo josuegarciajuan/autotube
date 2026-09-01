@@ -109,6 +109,11 @@ for v in private:
             fail += 1
             continue
         
+        from api.services.publication_policy import validate_manual_publication
+        validate_manual_publication(
+            publish_mode=str(v.get("publish_mode") or "immediate").lower(),
+            target_public_at=v.get("target_public_at"),
+        )
         orch.uploader.set_privacy(yt, "public")
         db.update_video(vid, status="published", privacy_status="public",
                          published_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
