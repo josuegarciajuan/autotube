@@ -42,7 +42,7 @@ def get_profiles():
     """Schema completo de perfiles disponibles."""
     return {
         "active_profile": pacing_profile.get_active_profile_name(),
-        "profiles": pacing_profile.list_pacing_profiles(),
+        "profiles": pacing_profile.list_pacing_profiles(get_db()),
     }
 
 

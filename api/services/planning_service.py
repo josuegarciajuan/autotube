@@ -85,6 +85,17 @@ def get_last_replan_ts(db=None) -> float:
 _POST_FULL_REPLAN_QUIET_MIN = 120
 _post_full_replan_block_until: Optional[datetime] = None
 
+
+def trigger_delivery_replan(db, channel_id: int) -> dict:
+    """Consume a delivery-change request under the single replan lock."""
+    with _REPLAN_LOCK:
+        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        with db._connect() as conn:
+            conn.execute("UPDATE scheduling_replan_requests SET status='completed' WHERE channel_id=? AND status='pending'",
+                         (channel_id,))
+            conn.commit()
+        return result
+
 # ── Dynamic VPD adjuster ───────────────────────────────────
 class DynamicSlotAdjuster:
     """
@@ -1280,7 +1291,9 @@ def compute_daily_slots(
         if s.get("publish_mode") != "scheduled" and int(s["target_upload_at"][11:13]) < 10:
             # Stored scheduling timestamps are UTC; avoid an accidental early
             # morning dispatch after local→UTC conversion.
-            s["target_upload_at"] = f"{date_str} 10:07:00"
+            target = datetime.strptime(f"{date_str} 10:07:00", "%Y-%m-%d %H:%M:%S")
+            s["target_upload_at"] = target.strftime("%Y-%m-%d %H:%M:%S")
+            s["scheduled_at"] = (target - timedelta(minutes=ESTIMATED_PIPELINE_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
     
     return resolved
 

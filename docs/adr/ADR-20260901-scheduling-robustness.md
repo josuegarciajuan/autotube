@@ -13,7 +13,8 @@ video. Manual pacing exceptions could survive a safety-state change.
 
 ## Decision
 
-- Persist a per-channel delivery state (`strike`, `recovery`, `normal`).
+- Persist state/overrides in `channel_delivery_state`; persist state caps in
+  the idempotently seeded `delivery_profiles` table.
 - Resolve channel policy centrally; changing state clears manual overrides.
 - Expose independent public target, generation capacity, and upload capacity
   fields in planning configuration.

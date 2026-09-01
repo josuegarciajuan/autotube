@@ -46,6 +46,46 @@ def test_planning_config_exposes_public_generation_and_upload_capacity(tmp_path)
     assert config["upload_capacity_per_day"] == 2
 
 
+def test_delivery_profiles_are_database_values_and_public_target_is_not_aliased(tmp_path):
+    db = _db(tmp_path)
+    with db._connect() as conn:
+        conn.execute("DROP INDEX uq_active_planned_public_target")
+        rows = conn.execute("SELECT state, public_videos_per_day FROM delivery_profiles ORDER BY state").fetchall()
+    assert [(r[0], r[1]) for r in rows] == [("normal", 2), ("recovery", 1), ("strike", 1)]
+
+    db.update_channel_planning_config(1, public_videos_per_day=2, longform_generation_per_day=5, upload_capacity_per_day=4)
+    with db._connect() as conn:
+        cfg = json.loads(conn.execute("SELECT config_json FROM channels WHERE id=1").fetchone()[0])
+    assert cfg["public_videos_per_day"] == 2
+    assert cfg["videos_per_day"] == 1
+
+
+def test_delivery_change_creates_idempotent_replan_requests(tmp_path):
+    db = _db(tmp_path)
+    assert db.set_channel_delivery_state_atomic(1, "recovery") is True
+    assert db.set_channel_delivery_state_atomic(1, "recovery") is False
+    with db._connect() as conn:
+        requests = conn.execute("SELECT COUNT(*) FROM scheduling_replan_requests WHERE channel_id=1").fetchone()[0]
+    assert requests == 7
+
+
+def test_duplicate_cleanup_reports_and_unique_active_upload_protection(tmp_path):
+    db = _db(tmp_path)
+    with db._connect() as conn:
+        conn.execute("DROP INDEX uq_active_planned_public_target")
+        conn.execute("INSERT INTO videos (channel_id, canal, status, video_path) VALUES (1, 'one', 'awaiting_upload', '/a')")
+        conn.execute("INSERT INTO videos (channel_id, canal, status, video_path) VALUES (1, 'one', 'awaiting_upload', '/b')")
+        conn.execute("INSERT INTO planned_slots (channel_id, date_key, scheduled_at, target_public_at, status) VALUES (1, '2030-01-01', '2030-01-01 10:00:00', '2030-01-01 12:00:00', 'pending')")
+        conn.execute("INSERT INTO planned_slots (channel_id, date_key, scheduled_at, target_public_at, status) VALUES (1, '2030-01-01', '2030-01-01 10:00:00', '2030-01-01 12:00:00', 'pending')")
+        conn.commit()
+    diagnostics = db.cleanup_scheduling_duplicates()
+    assert diagnostics["planned_slots_cancelled"] == 1
+    with db._connect() as conn:
+        conn.execute("INSERT INTO generation_jobs (channel_id, video_id, action, status) VALUES (1, 1, 'upload_only', 'running')")
+        with __import__('pytest').raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO generation_jobs (channel_id, video_id, action, status) VALUES (1, 1, 'upload_only', 'running')")
+
+
 def test_claim_planned_slot_is_single_winner(tmp_path):
     db = _db(tmp_path)
     slot_id = db.create_planned_slot(1, "2030-01-01", "2030-01-01 10:00:00")

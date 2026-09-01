@@ -11,6 +11,7 @@ import sqlite3
 import os
 import threading
 from datetime import datetime, timedelta, timezone as _dt_timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
 
@@ -3285,7 +3286,74 @@ def _migrate_v50(conn, logger):
 
 
 def _migrate_v51(conn, logger):
-    """Idempotent v51: durable claims and separated delivery capacities."""
+    """Idempotent v51: DB-owned delivery profiles, claims and replan ledger."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS delivery_profiles (
+        state TEXT PRIMARY KEY CHECK(state IN ('strike','recovery','normal')),
+        public_videos_per_day INTEGER NOT NULL CHECK(public_videos_per_day >= 0),
+        native_shorts_per_day INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    # Policy values belong to the migration/data model, not scheduler code.
+    conn.executemany(
+        "INSERT OR IGNORE INTO delivery_profiles(state, public_videos_per_day, native_shorts_per_day) VALUES (?, ?, ?)",
+        (("strike", 1, 1), ("recovery", 1, 2), ("normal", 2, 3)),
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS channel_delivery_state (
+        channel_id INTEGER PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'strike' CHECK(state IN ('strike','recovery','normal')),
+        override_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS scheduling_replan_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+        date_key TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(channel_id, date_key, reason)
+    )""")
+    # Migrate the previous system_state representation without overwriting
+    # explicit rows already created by an operator.
+    conn.execute("""INSERT OR IGNORE INTO channel_delivery_state(channel_id, state, override_json)
+        SELECT c.id, COALESCE(ss.value, 'strike'),
+               COALESCE(ov.value, '{}')
+        FROM channels c
+        LEFT JOIN system_state ss ON ss.key = 'channel_delivery_state_' || c.id
+        LEFT JOIN system_state ov ON ov.key = 'channel_delivery_override_' || c.id""")
+    # Existing duplicate active targets are diagnosed and deterministically
+    # cancelled before the unique protection is installed.
+    duplicate_slots = conn.execute("""SELECT COUNT(*) FROM (SELECT id,
+        ROW_NUMBER() OVER (PARTITION BY channel_id,target_public_at ORDER BY id) rn
+        FROM planned_slots WHERE status IN ('pending','running') AND target_public_at IS NOT NULL)
+        WHERE rn > 1""").fetchone()[0]
+    duplicate_jobs = conn.execute("""SELECT COUNT(*) FROM (SELECT id,
+        ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id) rn FROM generation_jobs
+        WHERE action='upload_only' AND status IN ('queued','running') AND video_id IS NOT NULL)
+        WHERE rn > 1""").fetchone()[0]
+    conn.execute("""UPDATE planned_slots SET status='cancelled'
+        WHERE id IN (SELECT duplicate_id FROM (
+          SELECT id AS duplicate_id, ROW_NUMBER() OVER
+            (PARTITION BY channel_id, target_public_at ORDER BY id) AS rn
+          FROM planned_slots
+          WHERE status IN ('pending','running') AND target_public_at IS NOT NULL
+        ) WHERE rn > 1)""")
+    conn.execute("""UPDATE generation_jobs SET status='failed', error_msg='v51 duplicate cleanup'
+        WHERE id IN (SELECT duplicate_id FROM (
+          SELECT id AS duplicate_id, ROW_NUMBER() OVER
+            (PARTITION BY video_id ORDER BY id) AS rn
+          FROM generation_jobs
+          WHERE action='upload_only' AND status IN ('queued','running') AND video_id IS NOT NULL
+        ) WHERE rn > 1)""")
+    conn.execute("""INSERT INTO system_state(key,value) VALUES('scheduling_v51_duplicate_cleanup',?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP""",
+        (json.dumps({"planned_slots": duplicate_slots, "upload_jobs": duplicate_jobs}),))
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_planned_public_target
+        ON planned_slots(channel_id, target_public_at)
+        WHERE status IN ('pending','running') AND target_public_at IS NOT NULL""")
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_upload_job_per_video
+        ON generation_jobs(video_id)
+        WHERE action='upload_only' AND status IN ('queued','running') AND video_id IS NOT NULL""")
     for table, columns in {
         "planned_slots": (("claimed_by", "TEXT"), ("claimed_at", "TEXT")),
         "videos": (("upload_claimed_by", "TEXT"), ("upload_claimed_at", "TEXT")),
@@ -3754,6 +3822,85 @@ class ExtendedDatabase(Database):
             ).rowcount
             conn.commit()
         return updated == 1
+
+    def get_delivery_profile(self, state: str) -> dict | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM delivery_profiles WHERE state=?", (state,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            migrate_v2(self.db_path)
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM delivery_profiles WHERE state=?", (state,)).fetchone()
+        return dict(row) if row else None
+
+    def set_channel_delivery_state_atomic(self, channel_id: int, state: str,
+                                          horizon_days: int = 7) -> bool:
+        if state not in ("strike", "recovery", "normal"):
+            raise ValueError(f"Unknown delivery state: {state}")
+        today = datetime.now(_dt_timezone.utc).astimezone(ZoneInfo("Europe/Madrid")).date()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute("SELECT state FROM channel_delivery_state WHERE channel_id=?", (channel_id,)).fetchone()
+            if old and old[0] == state:
+                conn.commit()
+                return False
+            conn.execute("""INSERT INTO channel_delivery_state(channel_id,state,override_json)
+                VALUES(?,?, '{}') ON CONFLICT(channel_id) DO UPDATE SET state=excluded.state,
+                override_json='{}', updated_at=CURRENT_TIMESTAMP""", (channel_id, state))
+            conn.execute("DELETE FROM system_state WHERE key IN (?, ?)",
+                         (f"channel_delivery_override_{channel_id}",
+                          f"channel_delivery_policy_{channel_id}"))
+            for offset in range(max(1, horizon_days)):
+                day = (today + timedelta(days=offset)).isoformat()
+                conn.execute("""INSERT OR IGNORE INTO scheduling_replan_requests
+                    (channel_id,date_key,reason) VALUES (?,?,?)""",
+                    (channel_id, day, "delivery_state_changed"))
+            conn.commit()
+        return True
+
+    def set_channel_delivery_override_atomic(self, channel_id: int, override: dict,
+                                             horizon_days: int = 7) -> bool:
+        if not isinstance(override, dict):
+            raise ValueError("override must be an object")
+        allowed = {"public_videos_per_day", "longs_per_day", "native_shorts_per_day"}
+        value = {k: override[k] for k in allowed if k in override}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT override_json FROM channel_delivery_state WHERE channel_id=?", (channel_id,)).fetchone()
+            old = json.loads(row[0] or "{}") if row else {}
+            if old == value:
+                conn.commit()
+                return False
+            conn.execute("""INSERT INTO channel_delivery_state(channel_id,state,override_json)
+                VALUES(?, 'strike', ?) ON CONFLICT(channel_id) DO UPDATE SET override_json=excluded.override_json,
+                updated_at=CURRENT_TIMESTAMP""", (channel_id, json.dumps(value)))
+            today = datetime.now(_dt_timezone.utc).astimezone(ZoneInfo("Europe/Madrid")).date()
+            for offset in range(max(1, horizon_days)):
+                conn.execute("INSERT OR IGNORE INTO scheduling_replan_requests(channel_id,date_key,reason) VALUES(?,?,?)",
+                             (channel_id, (today + timedelta(days=offset)).isoformat(), "public_override_changed"))
+            conn.commit()
+        return True
+
+    def cleanup_scheduling_duplicates(self) -> dict:
+        """Cancel duplicate active targets and return an operator diagnostic."""
+        with self._connect() as conn:
+            rows = conn.execute("""SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY channel_id,target_public_at ORDER BY id) rn
+                FROM planned_slots WHERE status IN ('pending','running') AND target_public_at IS NOT NULL
+            ) WHERE rn > 1""").fetchall()
+            ids = [row[0] for row in rows]
+            if ids:
+                conn.executemany("UPDATE planned_slots SET status='cancelled' WHERE id=?", ((i,) for i in ids))
+            conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_planned_public_target
+                ON planned_slots(channel_id, target_public_at)
+                WHERE status IN ('pending','running') AND target_public_at IS NOT NULL""")
+            conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_upload_job_per_video
+                ON generation_jobs(video_id)
+                WHERE action='upload_only' AND status IN ('queued','running') AND video_id IS NOT NULL""")
+            conn.commit()
+        return {"planned_slots_cancelled": len(ids), "duplicate_slot_ids": ids}
     
     def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
         """Mark a video as uploaded to YouTube. Supports scheduled mode statuses.
@@ -7512,7 +7659,6 @@ class ExtendedDatabase(Database):
             config["videos_per_day"] = max(0, min(10, videos_per_day))
         if public_videos_per_day is not None:
             config["public_videos_per_day"] = max(0, min(10, public_videos_per_day))
-            config["videos_per_day"] = config["public_videos_per_day"]
         if upload_capacity_per_day is not None:
             config["upload_capacity_per_day"] = max(0, min(20, upload_capacity_per_day))
         if longform_generation_per_day is not None:
