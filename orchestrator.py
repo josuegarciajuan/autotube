@@ -2083,6 +2083,33 @@ class PipelineOrchestrator:
                         except Exception:
                             target_dt = now_utc_dt + timedelta(minutes=warmup)
 
+                    # ── Guard anti-colisión (fix ago 2026): aunque el target
+                    # planificado no sea stale, empujarlo si colisiona (<gap) con
+                    # otra publicación pendiente del MISMO canal. Sin este guard,
+                    # la subida enviaba a YouTube un publishAt duplicado (p. ej.
+                    # la ráfaga de ESR/canal4: 3 vídeos a 1/9 20:00Z).
+                    try:
+                        from pipeline.publish_scheduler import _avoid_channel_collision
+                        adjusted_dt = _avoid_channel_collision(
+                            channel_id, target_dt, db=self.db, slug=self.canal,
+                        )
+                        if adjusted_dt != target_dt:
+                            logger.info(
+                                "[%s] Target planificado %s colisiona — empujado a %s",
+                                self.canal, target_dt.isoformat(), adjusted_dt.isoformat(),
+                            )
+                            target_dt = adjusted_dt
+                            try:
+                                if self.db and self.db_video_id:
+                                    self.db.update_video(
+                                        self.db_video_id,
+                                        target_public_at=target_dt.isoformat(),
+                                    )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     publish_schedule_info = {
                         "target_public_at": target_dt.isoformat(),
                         "peak_hour_local": target_h or 0,
