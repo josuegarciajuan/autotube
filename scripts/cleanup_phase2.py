@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Phase 2: Upload remaining ready + publish all uploaded_private."""
-import sys, json, time
+import sys, json, time, argparse
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+parser = argparse.ArgumentParser(description="Legacy cleanup; dry-run by default")
+parser.add_argument("--apply", action="store_true", help="explicitly allow upload/publication actions")
+args = parser.parse_args()
+if not args.apply:
+    print("DRY-RUN/BLOCKED: cleanup_phase2 no ejecuta subidas ni publicaciones sin --apply")
+    sys.exit(0)
 
 from database.db_extended import ExtendedDatabase
 from orchestrator import PipelineOrchestrator
@@ -40,13 +47,18 @@ if v and v["status"] == "ready":
                 db.update_video(471, progress=30 + int(pct * 0.6), progress_phase="upload")
             
             print(f"  ⬆️  Subiendo ({Path(vpath).stat().st_size / 1e6:.0f} MB)...")
+            from api.services.publication_policy import upload_publication_kwargs
+            publication = upload_publication_kwargs(
+                publish_mode=str(v.get("publish_mode") or "immediate").lower(),
+                target_public_at=v.get("target_public_at"),
+            )
             result = orch.uploader.upload(
                 video_path=Path(vpath),
                 title=v.get("titulo_final", "Sin titulo"),
                 description=v.get("description", ""),
                 tags=tags,
                 thumbnail_path=Path(v["thumbnail_path"]) if v.get("thumbnail_path") else None,
-                privacy="public",
+                **publication,
                 progress_callback=cb,
             )
             

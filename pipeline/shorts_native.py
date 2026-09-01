@@ -517,13 +517,17 @@ NADA MAS fuera del JSON."""
             channel_url=channel_url,
         )
 
+        from api.services.publication_policy import upload_publication_kwargs
+        publication = upload_publication_kwargs(
+            publish_mode=getattr(self.config, "PUBLISH_MODE", "immediate"),
+        )
         result = uploader.upload(
             video_path=video_path,
             title=title,
             description=description[:5000],
             tags=script.get("hashtags", [])[:60],
             category_id=getattr(self.config, "YT_CATEGORY_ID", "24"),
-            privacy="public",
+            **publication,
         )
 
         video_id = result.get("video_id")

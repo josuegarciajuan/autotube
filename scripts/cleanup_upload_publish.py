@@ -7,11 +7,19 @@ import sqlite3
 import sys
 import json
 import time
+import argparse
 from pathlib import Path
 from datetime import datetime
 
 # ── Setup ────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+parser = argparse.ArgumentParser(description="Legacy cleanup; dry-run by default")
+parser.add_argument("--apply", action="store_true", help="explicitly allow upload/publication actions")
+args = parser.parse_args()
+if not args.apply:
+    print("DRY-RUN/BLOCKED: cleanup_upload_publish no ejecuta subidas ni publicaciones sin --apply")
+    sys.exit(0)
 
 from config.settings import DATABASE_PATH
 from database.db_extended import ExtendedDatabase
@@ -84,6 +92,12 @@ for v in ready_videos:
             print(f"  Modo: scheduled (se sube como privado)")
         else:
             privacy = v.get("privacy_status", "public")
+
+        from api.services.publication_policy import upload_publication_kwargs
+        publication = upload_publication_kwargs(
+            publish_mode=pub_mode,
+            target_public_at=v.get("target_public_at"),
+        )
         
         thumb = v.get("thumbnail_path")
         thumb_path = Path(thumb) if thumb else None
@@ -99,7 +113,7 @@ for v in ready_videos:
                 description=v.get("description", ""),
                 tags=tags,
                 thumbnail_path=thumb_path,
-                privacy=privacy,
+                **publication,
                 progress_callback=uploader_cb,
             )
         except Exception as upload_err:
@@ -168,6 +182,15 @@ for v in private_videos:
             print(f"  ❌ Fallo autenticación para canal {slug}")
             continue
         
+        from api.services.publication_policy import validate_manual_publication
+        try:
+            validate_manual_publication(
+                publish_mode=str(v.get("publish_mode") or "immediate").lower(),
+                target_public_at=v.get("target_public_at"),
+            )
+        except ValueError as exc:
+            print(f"  ⏸️  Bloqueado por política de publicación: {exc}")
+            continue
         print(f"  🔓 Cambiando privacidad a 'public'...")
         result = orch.uploader.set_privacy(yt_video_id, "public")
         

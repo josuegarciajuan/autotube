@@ -224,6 +224,15 @@ class VideoLifecycleManager:
             logger.warning("[%s] No target_public_at — skipping lifecycle scheduling", self.slug)
             return 0
 
+        from api.services.publication_policy import validate_manual_publication
+        try:
+            validate_manual_publication(
+                publish_mode="scheduled", target_public_at=target_public_at,
+            )
+        except ValueError as exc:
+            logger.error("[%s] Refusing unsafe lifecycle publication target: %s", self.slug, exc)
+            return 0
+
         # ── Parse target_public_at for relative scheduling ──
         from datetime import datetime as _dt, timedelta as _td
         try:
@@ -694,6 +703,22 @@ class VideoLifecycleManager:
         # Get channel_id for job creation
         ch_record = self.db.get_channel_by_slug(slug)
         channel_id = ch_record["id"] if ch_record else None
+
+        # Legacy go_public actions are still a direct publication boundary.
+        # Refuse early/malformed transitions and enforce the DB-owned cap before
+        # creating a publish job or touching YouTube.
+        try:
+            from api.services.publication_policy import (
+                validate_manual_publication, assert_public_admission,
+            )
+            validate_manual_publication(
+                publish_mode="scheduled", target_public_at=target_public,
+            )
+            if channel_id:
+                assert_public_admission(self.db, channel_id=channel_id, content_type="long")
+        except ValueError as exc:
+            logger.warning("[%s] go_public blocked by publication policy: %s", self.slug, exc)
+            return False
 
         # ── Create publish job for progress bar feedback ──
         publish_job_id = None
