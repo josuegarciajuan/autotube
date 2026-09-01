@@ -1,10 +1,8 @@
 """Tests del amplificador de maratones (Fase 3).
 
 Verifica que el umbral de backlog para disparar maratones viene del perfil
-central de pacing (strike=4, recovery=3, normal=3) y que el cálculo de
-"backlog profundo" usa ese umbral. También verifica que todas las canales
-activas tienen maratones habilitados y que el backlog solo cuenta canales
-maratoneables.
+central de pacing (strike=4, recovery=3, normal=2) y que el cálculo de
+"backlog profundo" usa ese umbral.
 """
 
 import sqlite3
@@ -41,7 +39,7 @@ def test_backlog_threshold_follows_profile(tmp_path):
     from api.services import pacing_profile
     db = _db(tmp_path)
     pacing_profile.set_pacing_profile("normal", db)
-    assert ms._marathon_backlog_per_channel(db) == 3
+    assert ms._marathon_backlog_per_channel(db) == 2
     pacing_profile.set_pacing_profile("recovery", db)
     assert ms._marathon_backlog_per_channel(db) == 3
 
@@ -51,14 +49,16 @@ def test_backlog_deep_with_no_channels_is_false(tmp_path):
     assert ms.marathon_backlog_deep(db, active_channels=0) is False
 
 
-def test_all_active_channels_have_marathons_enabled(monkeypatch):
+def test_channel_configs_enable_marathons_only_for_approved_channels(monkeypatch):
     from config import config_bridge
 
     monkeypatch.setattr(config_bridge, "_load_db_config", lambda slug: None)
     config_bridge._config_cache.clear()
 
-    for slug in ("canal2", "canal3", "canal4", "canal5"):
-        assert config_bridge.get_channel_config(slug, force_reload=True).MARATHON_ENABLED is True
+    assert config_bridge.get_channel_config("canal2", force_reload=True).MARATHON_ENABLED is True
+    assert config_bridge.get_channel_config("canal3", force_reload=True).MARATHON_ENABLED is False
+    assert config_bridge.get_channel_config("canal4", force_reload=True).MARATHON_ENABLED is True
+    assert config_bridge.get_channel_config("canal5", force_reload=True).MARATHON_ENABLED is True
 
 
 def test_longform_cap_follows_profile_without_persisting_override(tmp_path):

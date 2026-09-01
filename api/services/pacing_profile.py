@@ -85,7 +85,7 @@ PACING_PROFILES: dict[str, dict] = {
         "shorts_cross_type_gap_min": 20,
         "shorts_min_gap_min": 20,
         "content_safety_disabled": False,
-        "marathon_backlog_per_channel": 3,
+        "marathon_backlog_per_channel": 2,
     },
 }
 
