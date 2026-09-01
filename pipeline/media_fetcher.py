@@ -1501,6 +1501,14 @@ class MediaFetcher:
         hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
         max_video = min(round(max_pct * n_scenes), hard_cap)
 
+        # C7 (Fase 8): hook/climax are the retention-critical beats. They only
+        # receive STOCK VIDEO when the visual bible is available, so the clip
+        # is grounded in the video's global visual direction. Without a bible
+        # they fall back to AI images (coherent by construction).
+        bible_gate = self._media_strategy.get("hook_climax_video_requires_bible", True)
+        has_bible = bool(getattr(self, "_visual_bible", None))
+        hook_video_blocked = bible_gate and not has_bible
+
         # Build candidate list sorted by priority
         candidates: list[tuple[int, int]] = []  # (priority, idx) — higher = better
         cumulative = 0.0
@@ -1516,9 +1524,10 @@ class MediaFetcher:
 
             priority = 0
 
-            # Hook / climax always candidates with top priority
+            # Hook / climax always candidates with top priority, UNLESS the
+            # bible gate blocks stock video for them (C7).
             if tipo in ("hook", "climax"):
-                priority = 100
+                priority = 0 if hook_video_blocked else 100
             # Long scene in first half of runtime
             elif dur >= min_dur and pos_in_runtime <= first_half_pct:
                 # Priority decays as we get further into the video

@@ -153,6 +153,8 @@ class TestSecondPass:
             video_fallback_queries=["generic aerial drone"],
         )
         fetcher = MediaFetcher(config=cfg)
+        # C7: keep hook/climax as video-priority by providing a visual bible.
+        fetcher._visual_bible = {"visual_universe": "test", "scene_visual_map": []}
 
         # 5 scenes: scenes 0,1 are hook/climax → video-priority by type, but
         # the v2 fetch returns images for ALL scenes (videos "failed").
@@ -320,6 +322,8 @@ class TestVideoForcing:
         mf._pexels = None
         mf._unsplash = None
         mf._used_image_urls = set()
+        # C7: hook/climax keep stock video only when the visual bible exists.
+        mf._visual_bible = {"visual_universe": "test", "scene_visual_map": []}
 
         scenes = [
             _make_scene_range(tipo="hook", duration=6, media_tipo="imagen", asset_idx=0),
@@ -880,3 +884,52 @@ class TestQueryPoolEraVariant:
         scene = _make_scene_range(search_query_en="city skyline modern")
         pool = fetcher._build_query_pool(scene, ctx)
         assert not any("17th century" in q for q in pool)
+
+
+class TestHookClimaxVideoGate:
+    """C7: hook/climax only get stock video when the visual bible exists."""
+
+    def _fetcher(self, has_bible, flag=True):
+        from pipeline.media_fetcher import MediaFetcher
+        f = object.__new__(MediaFetcher)
+        f._media_strategy = {
+            "hook_climax_video_requires_bible": flag,
+            "video_min_scene_duration": 6,
+            "video_first_half_pct": 40,
+            "video_scene_pct_max": 80,
+            "video_scene_hard_cap": 50,
+            "stock_image_pct": 0,
+        }
+        f._visual_bible = {"visual_universe": "x"} if has_bible else None
+        return f
+
+    def test_hook_climax_blocked_without_bible(self):
+        scenes = [
+            _make_scene_range(tipo="hook", duration=8, start=0, end=8),
+            _make_scene_range(tipo="desarrollo", duration=8, start=8, end=16),
+            _make_scene_range(tipo="climax", duration=8, start=16, end=24),
+        ]
+        f = self._fetcher(has_bible=False)
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        # hook (0) and climax (2) must NOT be video-priority without a bible
+        assert 0 not in video_scenes
+        assert 2 not in video_scenes
+
+    def test_hook_climax_allowed_with_bible(self):
+        scenes = [
+            _make_scene_range(tipo="hook", duration=8, start=0, end=8),
+            _make_scene_range(tipo="desarrollo", duration=8, start=8, end=16),
+            _make_scene_range(tipo="climax", duration=8, start=16, end=24),
+        ]
+        f = self._fetcher(has_bible=True)
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert 0 in video_scenes  # hook allowed when bible present
+        assert 2 in video_scenes  # climax allowed when bible present
+
+    def test_policy_flag_can_be_disabled(self):
+        scenes = [
+            _make_scene_range(tipo="hook", duration=8, start=0, end=8),
+        ]
+        f = self._fetcher(has_bible=False, flag=False)
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert 0 in video_scenes  # gate disabled → hook gets video anyway
