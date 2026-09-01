@@ -3911,6 +3911,47 @@ class ExtendedDatabase(Database):
                 WHERE action='upload_only' AND status IN ('queued','running') AND video_id IS NOT NULL""")
             conn.commit()
         return {"planned_slots_cancelled": len(ids), "duplicate_slot_ids": ids}
+
+    def reconcile_active_public_slot_caps(self) -> dict:
+        """Cancel excess pending slots by normalized public date.
+
+        ``date_key`` is the generation/publication-plan date and is therefore
+        not suitable for a publication cap. Running slots are always retained;
+        pending excess rows are cancelled in deterministic target/id order.
+        """
+        from api.time_utils import parse_utc, MADRID
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT * FROM planned_slots
+                WHERE status IN ('pending','running') AND target_public_at IS NOT NULL""").fetchall()]
+        groups = {}
+        for row in rows:
+            parsed = parse_utc(row["target_public_at"])
+            day = parsed.astimezone(MADRID).date().isoformat() if parsed else str(row["target_public_at"])[:10]
+            groups.setdefault((int(row["channel_id"]), day), []).append(row)
+        cancelled = []
+        for (channel_id, _day), group in groups.items():
+            try:
+                from api.services.channel_policy import policy_value
+                cap = max(0, int(policy_value(channel_id, "longform_publish_cap", db=self, default=0) or 0))
+            except Exception:
+                cap = 0
+            ordered = sorted(group, key=lambda row: (
+                0 if row["status"] == "running" else 1,
+                str(row["target_public_at"]), str(row.get("scheduled_at") or ""), int(row["id"]),
+            ))
+            kept = 0
+            for row in ordered:
+                if row["status"] == "running" or kept < cap:
+                    kept += 1
+                else:
+                    cancelled.append(int(row["id"]))
+        if cancelled:
+            with self._connect() as conn:
+                conn.executemany("UPDATE planned_slots SET status='cancelled' WHERE id=? AND status='pending'",
+                                 ((slot_id,) for slot_id in cancelled))
+                conn.commit()
+        return {"cancelled": len(cancelled), "cancelled_slot_ids": cancelled,
+                "groups": len(groups)}
     
     def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
         """Mark a video as uploaded to YouTube. Supports scheduled mode statuses.
