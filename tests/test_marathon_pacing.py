@@ -21,12 +21,25 @@ CREATE TABLE IF NOT EXISTS system_state (
 )
 """
 
+_CHANNELS_DDL = """
+CREATE TABLE IF NOT EXISTS channels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    slug        TEXT NOT NULL UNIQUE,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    active      BOOLEAN NOT NULL DEFAULT 1,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 def _db(tmp_path):
     path = tmp_path / "marathon.db"
     init_db(str(path))
     with sqlite3.connect(str(path)) as conn:
         conn.executescript(_SYSTEM_STATE_DDL)
+        conn.executescript(_CHANNELS_DDL)
     return ExtendedDatabase(str(path))
 
 
@@ -84,3 +97,24 @@ def test_marathons_do_not_consume_normal_daily_publish_cap():
 
     assert _counts_toward_normal_daily_cap({"is_marathon": 0}) is True
     assert _counts_toward_normal_daily_cap({"is_marathon": 1}) is False
+
+
+def test_select_marathon_channel_excludes_disabled_channel(tmp_path):
+    """The runtime gate reads MARATHON_ENABLED from the DB and must never
+    select a channel whose flag is False (canal3's anti-spam block)."""
+    import json
+    db = _db(tmp_path)
+    db.create_channel("A", "canalA", {"MARATHON_ENABLED": True})
+    db.create_channel("B", "canalB", {"MARATHON_ENABLED": False})
+
+    sel = ms.select_marathon_channel(db)
+    # Only the enabled channel can be selected.
+    assert sel is not None
+    assert sel[0] == "canalA"
+
+
+def test_select_marathon_channel_none_when_all_disabled(tmp_path):
+    db = _db(tmp_path)
+    db.create_channel("A", "canalA", {"MARATHON_ENABLED": False})
+    db.create_channel("B", "canalB", {"MARATHON_ENABLED": False})
+    assert ms.select_marathon_channel(db) is None
