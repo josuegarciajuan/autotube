@@ -210,12 +210,20 @@ def get_pacing_summary(db=None) -> dict:
     channels = []
     try:
         for ch in db.get_channels(active_only=True) or []:
-            channels.append({
+            item = {
                 "id": ch.get("id"),
                 "slug": ch.get("slug"),
                 "name": ch.get("name"),
                 "google_account": ch.get("google_account") or "",
-            })
+            }
+            try:
+                from api.services.channel_policy import resolve_channel_policy
+                item.update({k: resolve_channel_policy(ch["id"], db=db).get(k)
+                             for k in ("delivery_state", "manual_override", "longform_publish_cap",
+                                       "generation_per_day", "upload_capacity_per_day")})
+            except Exception:
+                pass
+            channels.append(item)
     except Exception:
         pass
     return {

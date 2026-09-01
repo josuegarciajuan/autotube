@@ -1172,20 +1172,21 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
             today_uploads[ch_id] = row["cnt"] if row else 0
 
     # Resolve videos_per_day per channel from config_json
-    ch_vpd = {}  # channel_id → videos_per_day
+    ch_vpd = {}  # channel_id → upload capacity (not public target)
     for entry in eligible:
         ch_id = entry["row"]["channel_id"]
         if ch_id not in ch_vpd:
             try:
                 cfg = json.loads(entry["row"].get("config_json") or "{}")
-                vpd = cfg.get("videos_per_day", 1)
-                # Techo antiban (ago 2026): el nº de subidas/día por canal sigue
-                # al perfil de pacing (``max_longform_publish_day``), igual que
-                # el repack y el planning. Cada publicación necesita su subida,
-                # así que ambos topes deben coincidir (strike=1, normal=2).
+                vpd = cfg.get("upload_capacity_per_day", cfg.get("videos_per_day", 1))
+                # Publication policy is separate from upload throughput. A
+                # private warm-up upload may be admitted ahead of the public
+                # target; the publication cap remains enforced by the publish
+                # scheduler/replanner.
                 from api.services.channel_policy import policy_value
-                cap = int(policy_value(ch_id, "longform_publish_cap", db=db, default=1) or 1)
-                ch_vpd[ch_id] = min(max(vpd, 1), max(1, cap))
+                capacity = int(vpd or 0)
+                policy_cap = int(policy_value(ch_id, "upload_capacity_per_day", db=db, default=capacity) or capacity)
+                ch_vpd[ch_id] = min(max(capacity, 0), max(policy_cap, 0))
             except Exception:
                 ch_vpd[ch_id] = 1
 
@@ -1407,11 +1408,18 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         )
         return None
 
-    # ── 5. Create upload job and dispatch (Fase 1.3: subproceso independiente) ──
+    # ── 5. Atomic claim closes the selection→dispatch race ──
+    claimant = f"upload:{__import__('os').getpid()}:{__import__('threading').get_ident()}"
+    if hasattr(db, "claim_upload_video") and not db.claim_upload_video(video_id, claimant):
+        logger.info("📤 Video #%d was claimed by another upload dispatcher", video_id)
+        return None
+
+    # ── 6. Create upload job and dispatch (Fase 1.3: subproceso independiente) ──
     job_id = db.create_job(channel_id, "upload_only", video_id)
     db.update_job(job_id, status="running")
 
-    # Update video status and clear scheduled_upload_at after dispatch
+    # The atomic claim already owns the status; update progress and clear the
+    # transient schedule only after the job record exists.
     db.update_video(
         video_id,
         status="uploading",

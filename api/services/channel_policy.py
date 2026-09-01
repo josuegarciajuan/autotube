@@ -102,6 +102,53 @@ def get_channel_delivery_policy(channel_id: int, db) -> dict | None:
         return None
 
 
+DELIVERY_STATES = ("strike", "recovery", "normal")
+
+
+def get_channel_delivery_state(channel_id: int, db) -> str:
+    """Return the persisted per-channel delivery state."""
+    raw = db.get_system_state(f"channel_delivery_state_{channel_id}")
+    if raw in DELIVERY_STATES:
+        return raw
+    try:
+        from api.services.pacing_profile import get_active_profile_name
+        return get_active_profile_name(db)
+    except Exception:
+        return "strike"
+
+
+def set_channel_delivery_override(channel_id: int, override: dict, db) -> dict:
+    """Persist a bounded manual override for one channel."""
+    if not isinstance(override, dict):
+        raise ValueError("override must be an object")
+    allowed = {"longs_per_day", "native_shorts_per_day", "shorts_enabled", "clips_enabled"}
+    value = {key: override[key] for key in allowed if key in override}
+    db.set_system_state(f"channel_delivery_override_{channel_id}", json.dumps(value))
+    return value
+
+
+def set_channel_delivery_state(state: str, channel_id: int, db) -> str:
+    """Change state and clear manual controls so old exceptions cannot leak."""
+    if state not in DELIVERY_STATES:
+        raise ValueError(f"Unknown delivery state: {state}")
+    previous = get_channel_delivery_state(channel_id, db)
+    db.set_system_state(f"channel_delivery_state_{channel_id}", state)
+    if previous != state:
+        db.set_system_state(f"channel_delivery_override_{channel_id}", "")
+        db.set_system_state(f"channel_delivery_policy_{channel_id}", "")
+    return state
+
+
+def _channel_override(channel_id: int, db) -> dict:
+    try:
+        raw = db.get_system_state(f"channel_delivery_override_{channel_id}")
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        _count("invalid_values")
+        return {}
+
+
 def get_channel_strike_state(channel_id: int, db, now: float | None = None) -> dict:
     """Return strike history separately from whether the block is active."""
     now = time.time() if now is None else float(now)
@@ -131,7 +178,12 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     cfg = _channel_config(channel_id, db)
     if config:
         cfg.update(config)
-    pacing = _pacing(db)
+    state = get_channel_delivery_state(channel_id, db)
+    try:
+        from api.services.pacing_profile import PACING_PROFILES
+        pacing = dict(PACING_PROFILES[state])
+    except Exception:
+        pacing = _pacing(db)
     def number(canonical, *legacy, default=None):
         if cfg.get(canonical) not in (None, ""):
             try:
@@ -153,7 +205,7 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     # La política explícita vive en system_state y tiene prioridad sobre los
     # campos de planificación legacy. El perfil continúa siendo el techo de
     # seguridad; un contador histórico de strikes no modifica este valor.
-    explicit = get_channel_delivery_policy(channel_id, db)
+    explicit = _channel_override(channel_id, db) or get_channel_delivery_policy(channel_id, db)
     if explicit is not None:
         channel_cap = explicit["longs_per_day"]
     elif cfg.get("longs_per_day") not in (None, ""):
@@ -170,6 +222,7 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     spread = number("publish_window_spread_min", "PUBLISH_WINDOW_SPREAD_MIN",
                     "PUBLISH_JITTER_MIN", "publish_jitter_min", default=0)
     target = number("publish_target_hour", "PUBLISH_TARGET_HOUR", default=None)
+    override = _channel_override(channel_id, db)
     return {
         "channel_id": int(channel_id),
         "longform_publish_cap": max(0, min(channel_cap, global_cap)) if channel_cap is not None else global_cap,
@@ -179,6 +232,10 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
         "publish_window_spread_min": max(0, spread),
         "generation_start_gap_min": max(0, number("MIN_GAP_MINUTES", default=90)),
         "global_generation_gap_min": max(0, number("GLOBAL_GAP_MINUTES", default=30)),
+        "delivery_state": state,
+        "manual_override": bool(override),
+        "generation_per_day": max(0, number("longform_generation_per_day", "LONGFORM_GENERATION_PER_DAY", default=1)),
+        "upload_capacity_per_day": max(0, number("upload_capacity_per_day", default=global_cap)),
     }
 
 

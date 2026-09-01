@@ -501,7 +501,9 @@ def _resolve_videos_per_day(ch: dict, date_str: str, db=None) -> int:
 
     # videos_per_day=0 está RESERVADO para el breaker de fallos (canal pausado):
     # nunca usar `or 2` aquí o un canal pausado se reactivaría como 2/día.
-    vpd_raw = ch.get("videos_per_day", 2)
+    # Public target is independent from factory generation capacity.  Keep the
+    # legacy key as a fallback for existing channel configs.
+    vpd_raw = ch.get("public_videos_per_day", ch.get("videos_per_day", 2))
     if vpd_raw in (None, ""):
         base = 2
     else:
@@ -1240,6 +1242,11 @@ def compute_daily_slots(
     for s in resolved:
         sched_h, sched_m = map(int, s["scheduled_at"][11:16].split(":"))
         up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES
+        # Collision shifts must not create an accidental dawn publication.
+        # Keep immediate deliveries inside the configured daytime envelope;
+        # scheduled deliveries retain their explicit publication target.
+        if s.get("publish_mode") != "scheduled" and up_total < 10 * 60:
+            up_total = 10 * 60
         uh = min(up_total // 60, 23)
         um = min(up_total % 60, 59)
         # For scheduled channels, target_upload_at stays as original peak time
@@ -1270,6 +1277,10 @@ def compute_daily_slots(
         tz_str = s.get("publish_timezone", "Europe/Madrid")
         s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
         s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        if s.get("publish_mode") != "scheduled" and int(s["target_upload_at"][11:13]) < 10:
+            # Stored scheduling timestamps are UTC; avoid an accidental early
+            # morning dispatch after local→UTC conversion.
+            s["target_upload_at"] = f"{date_str} 10:07:00"
     
     return resolved
 
@@ -3232,8 +3243,15 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
             (next_slot.get("target_public_at") or "?")[11:16] if next_slot.get("target_public_at") else "?",
         )
         
-        # 4. Mark slot as running
-        db.update_slot_status(slot_id, "running")
+        # 4. Claim the slot atomically. Selection happened before the lock and
+        # another scheduler tick may have selected the same row.
+        claimant = f"planning:{threading.get_ident()}"
+        if hasattr(db, "claim_planned_slot"):
+            if not db.claim_planned_slot(slot_id, claimant):
+                logger.info("Planned slot #%d was claimed by another dispatcher", slot_id)
+                return None
+        else:
+            db.update_slot_status(slot_id, "running")
         
         # 5. Create the video record
         from database.db_extended import ExtendedDatabase
@@ -4330,12 +4348,17 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         longform_url=longform_url,
         channel_url=channel_url,
     )
-    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), privacy="public")
+    from api.services.publication_policy import upload_publication_kwargs
+    publication = upload_publication_kwargs(
+        publish_mode="scheduled",
+        warmup_min=getattr(ch_config, "PUBLISH_WARMUP_MIN", 120),
+    )
+    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), **publication)
 
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), int(has_subscribe_cta)))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, publish_at, yt_visibility, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'scheduled', ?, ?, ?, datetime('now','localtime'), ?, 'scheduled', ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), publication["publish_at"], int(has_subscribe_cta)))
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()

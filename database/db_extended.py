@@ -1378,6 +1378,9 @@ def migrate_v2(db_path: str = None):
     # por canal (nunca ceros falsos) y recordatorios que SOLO alertan.
     _migrate_v50(conn, logger)
 
+    # ── v51: delivery-state and atomic scheduling claims ──
+    _migrate_v51(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3281,6 +3284,22 @@ def _migrate_v50(conn, logger):
     logger.info("Migration v50: complete")
 
 
+def _migrate_v51(conn, logger):
+    """Idempotent v51: durable claims and separated delivery capacities."""
+    for table, columns in {
+        "planned_slots": (("claimed_by", "TEXT"), ("claimed_at", "TEXT")),
+        "videos": (("upload_claimed_by", "TEXT"), ("upload_claimed_at", "TEXT")),
+    }.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_planned_slots_claim ON planned_slots(status, claimed_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_upload_claim ON videos(status, upload_claimed_at)")
+    conn.commit()
+    logger.info("Migration v51: delivery claims ensured")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -3721,6 +3740,20 @@ class ExtendedDatabase(Database):
             conn.execute(f"UPDATE videos SET {', '.join(fields)} WHERE id = ?", values)
             conn.commit()
         return True
+
+    def claim_upload_video(self, video_id: int, claimant: str) -> bool:
+        """Atomically reserve an awaiting-upload video for one dispatcher."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                """UPDATE videos SET status='uploading', upload_claimed_by=?,
+                   upload_claimed_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status='awaiting_upload'
+                     AND (yt_video_id IS NULL OR yt_video_id='')""",
+                (claimant, video_id),
+            ).rowcount
+            conn.commit()
+        return updated == 1
     
     def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
         """Mark a video as uploaded to YouTube. Supports scheduled mode statuses.
@@ -6907,6 +6940,23 @@ class ExtendedDatabase(Database):
                 count += 1
             conn.commit()
         return count
+
+    def claim_planned_slot(self, slot_id: int, claimant: str) -> bool:
+        """Atomically transition one pending slot to running.
+
+        Selection and claim are intentionally separate: callers may rank
+        candidates in Python, but only this conditional UPDATE owns the slot.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                """UPDATE planned_slots SET status='running', claimed_by=?,
+                   claimed_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status='pending'""",
+                (claimant, slot_id),
+            ).rowcount
+            conn.commit()
+        return updated == 1
     
     def get_planned_slots(self, date_key: str = None, channel_id: int = None,
                           status: str = None) -> list[dict]:
@@ -7389,6 +7439,8 @@ class ExtendedDatabase(Database):
             "channel_name": ch.get("name", ""),
             "slug": ch.get("slug", ""),
             "videos_per_day": config.get("videos_per_day", 1),
+            "public_videos_per_day": config.get("public_videos_per_day", config.get("videos_per_day", 1)),
+            "upload_capacity_per_day": config.get("upload_capacity_per_day", config.get("videos_per_day", 1)),
             "planning_enabled": config.get("planning_enabled", True),
             # ── Generación long-form/día (ago 2026): desacoplado de subida/
             # publicación. La generación no consume cuota; >1 encola backlog que
@@ -7440,8 +7492,10 @@ class ExtendedDatabase(Database):
                                         upload_windows: list = None,
                                         publish_window_spread_min: int = None,
                                         videos_day_boost_weight: float = None,
-                                        viral_day_boost_weight: float = None,
-                                        longform_generation_per_day: int = None) -> bool:
+                                         viral_day_boost_weight: float = None,
+                                         longform_generation_per_day: int = None,
+                                         public_videos_per_day: int = None,
+                                         upload_capacity_per_day: int = None) -> bool:
         """Update planning fields in channel config_json.
 
         Pass alternate_pattern=None (the Python value) to explicitly clear it.
@@ -7456,6 +7510,11 @@ class ExtendedDatabase(Database):
             config = {}
         if videos_per_day is not None:
             config["videos_per_day"] = max(0, min(10, videos_per_day))
+        if public_videos_per_day is not None:
+            config["public_videos_per_day"] = max(0, min(10, public_videos_per_day))
+            config["videos_per_day"] = config["public_videos_per_day"]
+        if upload_capacity_per_day is not None:
+            config["upload_capacity_per_day"] = max(0, min(20, upload_capacity_per_day))
         if longform_generation_per_day is not None:
             config["longform_generation_per_day"] = max(0, min(10, longform_generation_per_day))
         if planning_enabled is not None:
