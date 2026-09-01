@@ -77,6 +77,13 @@ PROD_VIDEO_DURATION_MAX = 9
 VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
+# Scene pacing — MIN is hard (never violated), MAX is soft (exceeded only
+# to respect MIN; logged as a soft exception by the scene planner).
+IMAGE_SCENE_DURATION_MIN = 5.0
+IMAGE_SCENE_DURATION_MAX = 8.0
+VIDEO_SCENE_DURATION_MIN = 4.0
+VIDEO_SCENE_DURATION_MAX = 7.0
+
 MAX_CLIP_EXTEND_SEC = 16.0
 
 # ═══════════════════════════════════════════════════════════════════
@@ -195,19 +202,22 @@ SCRIPT_HOOK_RULE = (
 )
 
 SCRIPT_STRUCTURE = [
-    {"step": "EL GANCHO", "time_pct": "0-10%",
+    {"id": "gancho", "step": "EL GANCHO", "time_pct": "0-10%",
+     "scene_pacing": {"image_target_sec": 5.0, "video_target_sec": 4.5},
      "description": (
          "El hecho más impactante en frío. Sin contexto. Imagen: la más "
          "evocadora de la historia. Cerrar con promesa: 'Al final de "
          "este video vas a entender por qué la ciencia sigue sin explicarlo.'"
      )},
-    {"step": "EL CONTEXTO", "time_pct": "10-20%",
+    {"id": "contexto", "step": "EL CONTEXTO", "time_pct": "10-20%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.5},
      "description": (
          "Lo que se creía imposible antes de este suceso. Construir "
          "anticipación: 'Las probabilidades de que esto ocurriera "
          "eran de una entre un millón. Pero ocurrió.'"
      )},
-    {"step": "LOS PROTAGONISTAS", "time_pct": "20-30%",
+    {"id": "protagonistas", "step": "LOS PROTAGONISTAS", "time_pct": "20-30%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.5},
      "description": (
          "Las personas reales detrás de la historia. Gente normal, "
          "vidas normales, hasta que ocurrió lo imposible. Humanizar "
@@ -217,7 +227,8 @@ SCRIPT_STRUCTURE = [
          "CLIFFHANGER al 25%: 'Pero lo que esta persona no sabía... "
          "es que en exactamente 72 horas, su vida cambiaría para siempre.'"
      )},
-    {"step": "EL SUCESO", "time_pct": "30-55%",
+    {"id": "desarrollo", "step": "EL SUCESO", "time_pct": "30-55%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 6.0},
      "description": (
          "El milagro, la coincidencia o el fenómeno paso a paso. "
          "Escalar el asombro. 'Y entonces ocurrió algo que desafía "
@@ -227,12 +238,14 @@ SCRIPT_STRUCTURE = [
          "CLIFFHANGER al 50%: Silencio 2s. Cambio de imagen. "
          "'Recapitulemos: [1 frase]. Ahora viene lo más increíble.'"
      )},
-    {"step": "EL MOMENTO CUMBRE", "time_pct": "55-70%",
+    {"id": "climax", "step": "EL MOMENTO CUMBRE", "time_pct": "55-70%",
+     "scene_pacing": {"image_target_sec": 5.0, "video_target_sec": 4.5},
      "description": (
          "El instante exacto de lo inexplicable. Peak de asombro. "
          "Música crece. Luz. Emoción. El momento que deja sin palabras."
      )},
-    {"step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+    {"id": "consecuencias", "step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.5},
      "description": (
          "Cómo cambió sus vidas. Qué dice la ciencia (si puede decir algo). "
          "Testimonios, documentos, evidencias. 'Nadie volvió a ser el mismo.'"
@@ -242,7 +255,8 @@ SCRIPT_STRUCTURE = [
          "'Ahora piensa en tu vida. En esas coincidencias que has ignorado. "
          "En esa vez que algo te salvó sin explicación.' Hacerlo personal."
      )},
-    {"step": "EL CIERRE", "time_pct": "85-100%",
+    {"id": "cierre", "step": "EL CIERRE", "time_pct": "85-100%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.0},
      "description": (
          "Reflexión: qué nos dice esto sobre el universo, el destino, "
          "o simplemente sobre lo mucho que nos queda por entender. "

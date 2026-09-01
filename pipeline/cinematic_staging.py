@@ -114,9 +114,34 @@ def build_contextual_fallback(block_type: str, theme_ctx: Any, portrait: bool = 
     return f"{result} vertical" if portrait else result
 
 
-def rank_candidates(candidates: list[dict], scene_text: str, theme_ctx: Any = None) -> list[dict]:
-    """Drop historical anachronisms and rank remaining metadata by overlap."""
-    scene_words = {w for w in re.findall(r"[a-z0-9]+", _text(scene_text)) if len(w) > 2}
+def rank_candidates(
+    candidates: list[dict],
+    scene_text: str,
+    theme_ctx: Any = None,
+    scene_context: Any = None,
+) -> list[dict]:
+    """Drop historical anachronisms and rank remaining metadata by overlap.
+
+    C4: when ``scene_context`` (a ``SceneVisualContext``) is provided, the
+    scoring words come from the WHOLE-video brief — visual concept, recurring
+    motif, phase and neighbours — not only the bare sub-scene fragment. This
+    keeps stock clips coherent with the video's global visual world.
+    """
+    if scene_context is not None:
+        brief_parts = [
+            scene_text,
+            getattr(scene_context, "visual_concept", ""),
+            getattr(scene_context, "bridge_from_prev", ""),
+            getattr(scene_context, "central_entity", ""),
+            *list(getattr(scene_context, "recurring_elements", []) or []),
+            getattr(scene_context, "era", ""),
+        ]
+        scene_words = {
+            w for w in re.findall(r"[a-z0-9]+", _text(*brief_parts)) if len(w) > 2
+        }
+    else:
+        scene_words = {w for w in re.findall(r"[a-z0-9]+", _text(scene_text)) if len(w) > 2}
+
     ranked: list[tuple[float, int, dict]] = []
     for index, candidate in enumerate(candidates):
         metadata = " ".join([

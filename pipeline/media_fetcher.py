@@ -451,6 +451,7 @@ class MediaFetcher:
             theme_keywords=ctx.theme_keywords_en if ctx else None,
             theme_ctx=ctx,  # v8: pass full ThemeContext for richer anchoring
             era_enabled=self._media_strategy.get("era_anchor_enabled", True),
+            scene_text=block.get("texto", ""),  # P7: ground via narration
         )
         logger.info("Built search query: %r (%d chars)", query, len(query))
 
@@ -924,34 +925,52 @@ class MediaFetcher:
         list as the renderer's timing contract.  It only partitions a scene's
         own [start, end] range, therefore subsequent timestamps are unchanged.
         """
-        config = self._config
-        if isinstance(config, dict):
-            image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 6.0))
-        else:
-            image_max = float(getattr(config, "IMAGE_SCENE_DURATION_MAX", 6.0))
+        from pipeline.scene_planner import ScenePlanner
+        planner = ScenePlanner(self._config)
 
         expanded_scenes: list[dict] = []
         expanded_assets: list[dict] = []
         for scene, asset in zip(scenes, assets):
             actual_type = asset.get("type") if asset else None
             duration = float(scene.get("duration", 0))
-            if actual_type != "image" or duration <= image_max:
+            if actual_type != "image":
                 expanded_scenes.append(scene)
                 expanded_assets.append(asset)
                 continue
 
-            count = max(2, int((duration + image_max - 1e-9) / image_max))
-            sub_duration = duration / count
+            # Decide how many image scenes this narration region should become,
+            # respecting the HARD minimum (never a flash below it) and preferring
+            # the phase target. A soft exception keeps ONE scene when no valid
+            # split exists — the original 6.01s→two×3.005s bug is gone.
+            count, parts, soft_exception = planner.partition(
+                duration, "image", scene.get("phase_id")
+            )
+            if count == 1:
+                scene = dict(scene)
+                scene["soft_exception"] = soft_exception
+                if soft_exception:
+                    logger.info(
+                        "Image scene %.1fs kept as ONE scene (soft exception — "
+                        "no split respects the hard minimum)",
+                        duration,
+                    )
+                expanded_scenes.append(scene)
+                expanded_assets.append(asset)
+                continue
+
             parent_request = str(scene.get("media_request_id", "scene"))
             seen_identity_tokens = self._asset_identity_tokens(asset)
-            for index in range(count):
+            sub_start = float(scene["start"])
+            for index, part in enumerate(parts):
                 subscene = dict(scene)
-                subscene["start"] = float(scene["start"]) + index * sub_duration
-                subscene["end"] = float(scene["start"]) + (index + 1) * sub_duration
+                subscene["start"] = sub_start
+                subscene["end"] = sub_start + part
                 subscene["duration"] = subscene["end"] - subscene["start"]
                 subscene["media_tipo"] = "image"
                 subscene["is_subscene"] = True
+                subscene["soft_exception"] = False
                 subscene["media_request_id"] = f"{parent_request}:image:{index}"
+                sub_start = subscene["end"]
                 if index == 0:
                     subasset = asset
                 else:
@@ -971,11 +990,17 @@ class MediaFetcher:
                 expanded_scenes.append(subscene)
                 expanded_assets.append(subasset)
 
-        if len(expanded_scenes) != len(scenes):
-            scenes[:] = expanded_scenes
+        # Always write back: a count==1 soft-exception also rebuilds the scene
+        # (e.g. adds ``soft_exception``), even though the length is unchanged.
+        # Unchanged scenes are appended as the same object, so references hold.
+        scenes[:] = expanded_scenes
+        if len(expanded_scenes) != len(assets) or any(
+            s.get("soft_exception") for s in expanded_scenes
+        ):
             logger.info(
-                "Expanded %d fetched scene(s) into %d actual-media ranges to enforce image timing",
-                len(assets), len(expanded_assets),
+                "Reconciled %d actual-media ranges to enforce image timing "
+                "(%d scenes, %d assets)",
+                len(expanded_scenes), len(scenes), len(expanded_assets),
             )
         return scenes, expanded_assets
 
@@ -1476,6 +1501,14 @@ class MediaFetcher:
         hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
         max_video = min(round(max_pct * n_scenes), hard_cap)
 
+        # C7 (Fase 8): hook/climax are the retention-critical beats. They only
+        # receive STOCK VIDEO when the visual bible is available, so the clip
+        # is grounded in the video's global visual direction. Without a bible
+        # they fall back to AI images (coherent by construction).
+        bible_gate = self._media_strategy.get("hook_climax_video_requires_bible", True)
+        has_bible = bool(getattr(self, "_visual_bible", None))
+        hook_video_blocked = bible_gate and not has_bible
+
         # Build candidate list sorted by priority
         candidates: list[tuple[int, int]] = []  # (priority, idx) — higher = better
         cumulative = 0.0
@@ -1491,9 +1524,10 @@ class MediaFetcher:
 
             priority = 0
 
-            # Hook / climax always candidates with top priority
+            # Hook / climax always candidates with top priority, UNLESS the
+            # bible gate blocks stock video for them (C7).
             if tipo in ("hook", "climax"):
-                priority = 100
+                priority = 0 if hook_video_blocked else 100
             # Long scene in first half of runtime
             elif dur >= min_dur and pos_in_runtime <= first_half_pct:
                 # Priority decays as we get further into the video
@@ -1597,7 +1631,8 @@ class MediaFetcher:
         if the asset is not a stock video.
         """
         quality_info: dict = {}
-        query_pool = self._build_query_pool(scene, ctx)
+        scene["scene_idx"] = scene_idx
+        query_pool = self._build_query_pool(scene, ctx, scene_idx=scene_idx)
         query_attempt = 0
 
         # ── Choose tiers based on scene type ─────────────────
@@ -2468,7 +2503,24 @@ class MediaFetcher:
 
         return result[:100]
 
-    def _build_query_pool(self, scene: dict, ctx) -> list[str]:
+    def _scene_structure(self) -> list[dict]:
+        cfg = getattr(self, "_config", None)
+        if isinstance(cfg, dict):
+            return cfg.get("SCRIPT_STRUCTURE", []) or []
+        return getattr(cfg, "SCRIPT_STRUCTURE", []) or []
+
+    def _scene_context(self, scene: dict, scene_idx: int = 0) -> "SceneVisualContext":
+        from pipeline.scene_context import build_scene_context
+        return build_scene_context(
+            scene,
+            scene_idx=scene_idx,
+            theme_ctx=getattr(self, "_theme_context", None),
+            visual_bible=getattr(self, "_visual_bible", None),
+            structure=self._scene_structure(),
+            script_title=scene.get("video_title", ""),
+        )
+
+    def _build_query_pool(self, scene: dict, ctx, scene_idx: int = 0) -> list[str]:
         """Build an ordered list of query variations for a scene.
 
         Order (narrative priority): narrative-first queries try first,
@@ -2491,6 +2543,17 @@ class MediaFetcher:
         #    thanks to the improved LLM prompt in script_generator.py)
         if base and base.strip():
             pool.append(base.strip())
+
+        # 1b. Bible-derived variant (Phase 3, C2): grounds the scene in the
+        #     video's GLOBAL visual world (visual concept / entity / motif /
+        #     era). Comes right after the narrative-first query so "lo que ves
+        #     = lo que oyes" stays dominant while stock clips also respect the
+        #     bible's protagonist/bridge/recurring-motif direction.
+        if getattr(self, "_visual_bible", None):
+            sctx = self._scene_context(scene, scene_idx=scene_idx)
+            bv = sctx.to_query_variant()
+            if bv and bv != (base or "").strip() and bv not in pool:
+                pool.append(bv)
 
         scene_tipo = scene.get("tipo", "desarrollo")
 
@@ -2696,10 +2759,18 @@ class MediaFetcher:
 
         return max(0.0, score)
 
-    def _llm_relevance_filter(self, candidates: list[dict], scene: dict) -> list[dict] | None:
+    def _llm_relevance_filter(
+        self, candidates: list[dict], scene: dict, scene_context=None
+    ) -> list[dict] | None:
         """Reorder up to 8 candidates with ONE LLM call so the best match
         comes first. Returns the reordered list, or None on any failure
-        (caller keeps the original order — never blocks the pipeline)."""
+        (caller keeps the original order — never blocks the pipeline).
+
+        C3: when ``scene_context`` is provided, the prompt includes the full
+        narrative+visual brief (fase, era, visual concept, forbidden elements)
+        so the LLM choice cannot contradict the deterministic era filter or
+        the visual bible direction.
+        """
         try:
             from config.llm_client import create_llm_client
             from config.llm_helpers import llm_json_call_or_fallback
@@ -2720,14 +2791,20 @@ class MediaFetcher:
             )
 
         scene_text = (str(scene.get("texto", "")) or "")[:400]
+        context_block = ""
+        if scene_context is not None:
+            brief = scene_context.to_rerank_brief()
+            if brief:
+                context_block = f"\nCONTEXTO DEL VIDEO:\n{brief}\n"
         user_prompt = (
             "Escena de un documental (texto narrado):\n"
-            f'"{scene_text}"\n\n'
+            f'"{scene_text}"\n'
+            f"{context_block}\n"
             "Candidatos de stock (índice y metadatos):\n"
             + "\n".join(numbered)
             + "\n\nElige el índice del clip que MEJOR encaja visualmente con la "
-              "escena, evitando anacronismos (material moderno en escenas "
-              "históricas). "
+              "escena, respetando el contexto y evitando anacronismos (material "
+              "moderno en escenas históricas) y elementos prohibidos. "
               'Responde SOLO con JSON: {"best_index": N}'
         )
 
@@ -2787,11 +2864,15 @@ class MediaFetcher:
         # optional LLM reranking remain authoritative below; this ordering
         # only prevents a generic label match from winning a more observable
         # action match when both candidates otherwise tie.
+        # C4: pass the full scene context so ranking uses the whole-video brief
+        # (fase, vecinos, concepto visual) instead of only the bare fragment.
+        scene_context = self._scene_context(scene, scene.get("scene_idx", 0))
         from pipeline.cinematic_staging import rank_candidates
         ranked_candidates = rank_candidates(
             asset_candidates,
             scene.get("texto", "") or scene.get("search_query_en", ""),
             ctx,
+            scene_context=scene_context,
         )
         if ranked_candidates:
             asset_candidates = ranked_candidates
@@ -2828,7 +2909,7 @@ class MediaFetcher:
             self._media_strategy.get("llm_relevance_filter", False)
             and len(ordered) >= 2
         ):
-            reordered = self._llm_relevance_filter(ordered, scene)
+            reordered = self._llm_relevance_filter(ordered, scene, scene_context)
             if reordered:
                 ordered = reordered
 
@@ -3607,9 +3688,15 @@ class MediaFetcher:
         theme_ctx = None,  # ThemeContext object (v8 — full context)
         max_len: int = 100,
         era_enabled: bool = True,
+        scene_text: str = "",
     ) -> str:
         """Build a search query that fuses scene-specific narrative content with
         video-level theme context.
+
+        ``scene_text`` (the scene's narration) grounds recurring labels (money,
+        expedition, archive) in observable staging via ``enrich_scene_query``.
+        ``fetch_for_block`` passes the block's ``texto`` so direct callers get
+        the same grounding as the main ``fetch_for_script`` path (P7).
 
         Strategy (v9 — full ThemeContext fusion + era anchoring):
         1. Extract scene narrative keywords from the LLM query (primary subject)
@@ -3628,7 +3715,7 @@ class MediaFetcher:
         # Ground recurring labels (money, expedition, archive investigation)
         # in actions/period objects before allocating the strict stock budget.
         from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
-        query = enrich_scene_query(query, theme_ctx)
+        query = enrich_scene_query(query, theme_ctx, scene_text=scene_text)
         query = sanitize_person_query(query)
 
         # 1. Extract scene topic keywords (strip style words, keep content nouns)

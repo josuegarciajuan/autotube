@@ -118,6 +118,118 @@ Responde SOLO con JSON:
 {{"genre":"...","era":"...","visual_style":"...","key_motifs":[...],"forbidden_elements":[...],"theme_keywords_en":[...],"color_palette":{{"primary":"#...","secondary":"#...","accent":"#..."}},"primary_subject":"...","mood":"...","lighting":"...","composition":"...","era_decade":"..."}}"""
 
 
+REANCHOR_SYSTEM = """Eres un director de arte cinematográfico. Analizas el GUIÓN FINAL de un documental y confirmas/corriges su contexto visual.
+
+El contexto previo se extrajo de la FUENTE original; el guion final puede haberse alejado de ella. Tu tarea es re-anclar época, sujeto y motivos visuales a lo que el guion REALMENTE narra.
+
+Responde SOLO con JSON."""
+
+
+REANCHOR_PROMPT = """Analiza el GUIÓN FINAL del documental y devuelve el contexto visual correcto.
+
+CONTEXTO PREVIO (referencia):
+- era: {prev_era}
+- era_decade: {prev_era_decade}
+- primary_subject: {prev_subject}
+- key_motifs: {prev_motifs}
+- forbidden_elements: {prev_forbidden}
+
+GUIÓN FINAL:
+{script_text}
+
+Determina y devuelve SOLO estos campos, ajustados al guion final:
+1. era: época concreta (ej: "siglo_XIII", "años_1960", "actualidad", "futuro_cercano")
+2. era_decade: década normalizada (ej: "1980s", "medieval") — formato "YYYYs" o época
+3. primary_subject: el sujeto/escenario visual principal del video
+4. key_motifs: 3-5 elementos visuales icónicos
+5. forbidden_elements: 2-4 elementos que NUNCA deben aparecer (anacronismos)
+
+Si el guion mantiene el contexto previo, consérvalo; si lo contradice, corrígelo.
+Responde SOLO con JSON: {{"era":"...","era_decade":"...","primary_subject":"...","key_motifs":[...],"forbidden_elements":[...]}}"""
+
+
+def reanchor_from_script(
+    theme_ctx: ThemeContext,
+    script_text: str,
+    config=None,
+) -> ThemeContext:
+    """Refresh a ThemeContext against the FINAL script (P4 fix).
+
+    The theme extracted from the source (pre-script) can drift from the actual
+    narration. This light LLM call re-anchors era/subject/motifs to the final
+    script. Fail-open: on any error the original context is returned unchanged.
+    """
+    if not theme_ctx or not script_text or len(script_text.strip()) < 40:
+        return theme_ctx
+
+    try:
+        from config.llm_client import create_llm_client
+        from config.llm_helpers import llm_json_call_or_fallback
+        from config.settings import LLM_MODEL_CREATIVE
+        from pipeline.era_terms import normalize_era
+    except Exception:
+        return theme_ctx
+
+    user_prompt = REANCHOR_PROMPT.format(
+        prev_era=theme_ctx.era or "?",
+        prev_era_decade=theme_ctx.era_decade or "?",
+        prev_subject=theme_ctx.primary_subject or "?",
+        prev_motifs=", ".join(theme_ctx.key_motifs) or "?",
+        prev_forbidden=", ".join(theme_ctx.forbidden_elements) or "?",
+        script_text=script_text[:6000],
+    )
+
+    try:
+        client = create_llm_client(timeout=45.0, max_retries=1)
+        data = llm_json_call_or_fallback(
+            client, fallback={}, max_retries=1, retry_delay=1.0,
+            model=LLM_MODEL_CREATIVE,
+            messages=[
+                {"role": "system", "content": REANCHOR_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+            max_tokens=220,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        logger.warning("Theme re-anchor failed (keeping previous): %s", exc)
+        return theme_ctx
+
+    # If the LLM returned nothing meaningful, keep the previous context as-is.
+    raw_fields = [
+        data.get("era"), data.get("era_decade"), data.get("primary_subject"),
+        data.get("key_motifs"), data.get("forbidden_elements"),
+    ]
+    if not any(raw_fields):
+        return theme_ctx
+
+    era = data.get("era", "") or theme_ctx.era
+    era_decade = normalize_era(data.get("era_decade", "") or theme_ctx.era_decade)
+    subject = data.get("primary_subject", "") or theme_ctx.primary_subject
+    motifs = data.get("key_motifs") or theme_ctx.key_motifs
+    forbidden = data.get("forbidden_elements") or theme_ctx.forbidden_elements
+
+    logger.info(
+        "Theme re-anchored: era=%s era_decade=%s subject=%s motifs=%s",
+        era, era_decade, subject, motifs[:3],
+    )
+    return ThemeContext(
+        genre=theme_ctx.genre,
+        era=era,
+        visual_style=theme_ctx.visual_style,
+        key_motifs=list(motifs),
+        forbidden_elements=list(forbidden),
+        theme_keywords_en=theme_ctx.theme_keywords_en,
+        color_palette=theme_ctx.color_palette,
+        primary_subject=subject,
+        mood=theme_ctx.mood,
+        lighting=theme_ctx.lighting,
+        composition=theme_ctx.composition,
+        era_decade=era_decade,
+    )
+
+
 class ThemeExtractor:
     """Extracts visual theme context from video argument before script generation."""
 

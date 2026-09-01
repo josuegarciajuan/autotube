@@ -50,6 +50,13 @@ PROD_VIDEO_DURATION_MAX = 9
 VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
+# Scene pacing — MIN is hard (never violated), MAX is soft (exceeded only
+# to respect MIN; logged as a soft exception by the scene planner).
+IMAGE_SCENE_DURATION_MIN = 5.0
+IMAGE_SCENE_DURATION_MAX = 7.0
+VIDEO_SCENE_DURATION_MIN = 4.0
+VIDEO_SCENE_DURATION_MAX = 6.0
+
 CANAL_TONE = (
     "Grave, tenso y profundamente humano. Narrativa documental que oscila "
     "entre el asombro y el horror. Riguroso en los hechos, implacable en la "
@@ -123,22 +130,29 @@ SCRIPT_HOOK_RULE = (
 
 )
 SCRIPT_STRUCTURE = [
-    {"step": "EL FRIO", "time_pct": "0-10%",
+    {"id": "gancho", "step": "EL FRIO", "time_pct": "0-10%",
+     "scene_pacing": {"image_target_sec": 5.0, "video_target_sec": 4.0},
      "description": "El hecho mas impactante en frio. Sin contexto."},
-    {"step": "EL SUEÑO", "time_pct": "10-20%",
+    {"id": "contexto", "step": "EL SUEÑO", "time_pct": "10-20%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.0},
      "description": "Que buscaban, por que zarparon. 'Nada podia fallar.'"},
-    {"step": "LOS PROTAGONISTAS", "time_pct": "20-30%",
+    {"id": "protagonistas", "step": "LOS PROTAGONISTAS", "time_pct": "20-30%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.0},
      "description": "Las personas reales detras de la historia.",
      "retention_anchor": "CLIFFHANGER al 25%: 'Pero lo que esta persona no sabia...'"},
-    {"step": "EL DESCENSO", "time_pct": "30-55%",
+    {"id": "desarrollo", "step": "EL DESCENSO", "time_pct": "30-55%",
+     "scene_pacing": {"image_target_sec": 5.5, "video_target_sec": 4.5},
      "description": "Todo empieza a torcerse. El hielo que no cede, la tormenta inesperada.",
      "retention_anchor": "CLIFFHANGER al 50%: Silencio 2s. 'Ahora viene lo peor.'"},
-    {"step": "EL COLAPSO", "time_pct": "55-70%",
+    {"id": "climax", "step": "EL COLAPSO", "time_pct": "55-70%",
+     "scene_pacing": {"image_target_sec": 5.0, "video_target_sec": 4.0},
      "description": "El momento exacto de la catastrofe. Peak de tension dramatica."},
-    {"step": "LA SUPERVIVENCIA", "time_pct": "70-85%",
+    {"id": "consecuencias", "step": "LA SUPERVIVENCIA", "time_pct": "70-85%",
+     "scene_pacing": {"image_target_sec": 5.5, "video_target_sec": 4.5},
      "description": "Lo que hicieron para intentar sobrevivir.",
      "retention_anchor": "EL ESPEJO al 70%: 'Ahora piensa: ¿que habrias hecho tu?'"},
-    {"step": "EL RESCATE / LEGADO", "time_pct": "85-100%",
+    {"id": "cierre", "step": "EL RESCATE / LEGADO", "time_pct": "85-100%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.0},
      "description": "Como termino. Los que sobrevivieron, los que no."},
 ]
 SCRIPT_EMOTIONAL_ARC = {

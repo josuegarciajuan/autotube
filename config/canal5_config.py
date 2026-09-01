@@ -51,6 +51,13 @@ PROD_VIDEO_DURATION_MAX = 9
 VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
+# Scene pacing — MIN is hard (never violated), MAX is soft (exceeded only
+# to respect MIN; logged as a soft exception by the scene planner).
+IMAGE_SCENE_DURATION_MIN = 6.0
+IMAGE_SCENE_DURATION_MAX = 8.0
+VIDEO_SCENE_DURATION_MIN = 4.0
+VIDEO_SCENE_DURATION_MAX = 7.0
+
 CANAL_TONE = (
     "Preciso, clinico y profundamente humano. Narrativa documental que "
     "oscila entre el asombro cientifico y la empatia medica. Riguroso "
@@ -129,22 +136,29 @@ SCRIPT_HOOK_RULE = (
 
 )
 SCRIPT_STRUCTURE = [
-    {"step": "EL SINTOMA", "time_pct": "0-10%",
+    {"id": "gancho", "step": "EL SINTOMA", "time_pct": "0-10%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 4.5},
      "description": "El hecho mas impactante en frio. Sin contexto. Cerrar con promesa."},
-    {"step": "EL HISTORIAL", "time_pct": "10-20%",
+    {"id": "contexto", "step": "EL HISTORIAL", "time_pct": "10-20%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 5.5},
      "description": "Lo que se sabia antes de este caso. 'En los libros de medicina, esto no existia.'"},
-    {"step": "EL PACIENTE", "time_pct": "20-30%",
+    {"id": "protagonistas", "step": "EL PACIENTE", "time_pct": "20-30%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 5.5},
      "description": "La persona real detras del caso clinico.",
      "retention_anchor": "CLIFFHANGER al 25%: 'Pero lo que este paciente no sabia... su caso apareceria en revistas medicas de todo el mundo.'"},
-    {"step": "EL DIAGNOSTICO", "time_pct": "30-55%",
+    {"id": "desarrollo", "step": "EL DIAGNOSTICO", "time_pct": "30-55%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.0},
      "description": "Los sintomas, las pruebas, los medicos desconcertados.",
      "retention_anchor": "CLIFFHANGER al 50%: 'Recapitulemos: [1 frase]. Ahora viene lo mas increible.'"},
-    {"step": "LA REVELACION", "time_pct": "55-70%",
+    {"id": "climax", "step": "LA REVELACION", "time_pct": "55-70%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 4.5},
      "description": "El momento clave. El hallazgo que cambio todo."},
-    {"step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+    {"id": "consecuencias", "step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 5.5},
      "description": "Como cambio la vida del paciente. Que aprendio la medicina.",
      "retention_anchor": "EL ESPEJO al 70%: 'Tu cuerpo tambien esconde misterios que ni los medicos conocen.'"},
-    {"step": "EL LEGADO", "time_pct": "85-100%",
+    {"id": "cierre", "step": "EL LEGADO", "time_pct": "85-100%",
+     "scene_pacing": {"image_target_sec": 8.0, "video_target_sec": 6.0},
      "description": "Que nos ensena este caso. Lo que la medicina aprendio."},
 ]
 SCRIPT_EMOTIONAL_ARC = {

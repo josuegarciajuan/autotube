@@ -590,19 +590,23 @@ class ImageFetcher:
         if self.primary is None and self.fallback is None:
             logger.error("No image providers configured! Set UNSPLASH_ACCESS_KEY or PIXABAY_API_KEY")
 
-    def fetch_for_scene(self, scene_description: str, n: int = None) -> list[Path]:
+    def fetch_for_scene(self, scene_description: str, n: int = None,
+                        theme_ctx=None) -> list[Path]:
         """Convert scene description to search query, fetch images, download locally.
 
         Args:
             scene_description: e.g. "[ESCENA: calle oscura bajo lluvia]"
             n: Number of images to fetch (defaults to IMAGES_PER_SCENE from config).
+            theme_ctx: Optional ThemeContext. When present, the query is built
+                from a global visual context (era/subject) instead of the bare
+                7-word snippet — the P8 legacy-path coherence fix.
 
         Returns:
             List of local Path objects to downloaded images.
         """
         if n is None:
             n = int(getattr(self._config, "IMAGES_PER_SCENE", 5))
-        query = self._scene_to_query(scene_description)
+        query = self._scene_to_query(scene_description, theme_ctx=theme_ctx)
         logger.info("Searching for scene: %r → query: %r (n=%d)", scene_description, query, n)
         results: list[dict] = []
 
@@ -636,11 +640,13 @@ class ImageFetcher:
 
         return paths
 
-    def fetch_for_script(self, escenas: list[str]) -> list[list[Path]]:
+    def fetch_for_script(self, escenas: list[str], theme_ctx=None) -> list[list[Path]]:
         """Fetch images for each scene in a script.
 
         Args:
             escenas: List of scene descriptions.
+            theme_ctx: Optional ThemeContext propagated to each scene so the
+                legacy path keeps global video context (P8).
 
         Returns:
             List of lists, where each inner list contains Path objects for that scene.
@@ -648,20 +654,40 @@ class ImageFetcher:
         results: list[list[Path]] = []
         for i, escena in enumerate(escenas):
             logger.info("Fetching images for scene %d/%d", i + 1, len(escenas))
-            images = self.fetch_for_scene(escena)
+            images = self.fetch_for_scene(escena, theme_ctx=theme_ctx)
             results.append(images)
             if i < len(escenas) - 1:
                 time.sleep(1.0)
 
         return results
 
-    def _scene_to_query(self, scene_desc: str) -> str:
+    def _global_visual_context(self, theme_ctx):
+        """Build a SceneVisualContext from the theme (P8: global coherence)."""
+        if theme_ctx is None:
+            return None
+        from pipeline.scene_context import SceneVisualContext
+        era = getattr(theme_ctx, "era_decade", "") or getattr(theme_ctx, "era", "")
+        return SceneVisualContext(
+            visual_concept=getattr(theme_ctx, "primary_subject", "") or "",
+            era=era or "",
+            forbidden_elements=list(getattr(theme_ctx, "forbidden_elements", []) or []),
+        )
+
+    def _scene_to_query(self, scene_desc: str, theme_ctx=None) -> str:
         """Convert Spanish scene description to a short, focused search query.
 
-        Takes the first 6–8 meaningful words (skipping stopwords), does
-        NOT translate (Unsplash/Pexels support Spanish), and appends only
-        minimal style modifiers to avoid biasing results.
+        When ``theme_ctx`` is provided, the query is led by the video's global
+        visual context (era/subject) so the legacy path stays coherent with the
+        whole video instead of a bare 7-word snippet (P8). Otherwise it takes
+        the first 6–8 meaningful words (skipping stopwords), does NOT translate
+        (Unsplash/Pexels support Spanish), and appends minimal style modifiers.
         """
+        ctx = self._global_visual_context(theme_ctx)
+        if ctx is not None:
+            v = ctx.to_query_variant()
+            if v:
+                return f"{v}. cinematic photography, dramatic lighting, 16:9"
+
         clean = re.sub(r"\[ESCENA:\s*", "", scene_desc, flags=re.IGNORECASE)
         clean = re.sub(r"\]", "", clean)
         clean = clean.strip()

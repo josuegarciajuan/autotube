@@ -1651,6 +1651,35 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         )
         return enriched
 
+    def _phase_taxonomy(self) -> list[dict]:
+        """Return the channel's narrative phases (id + step + pacing).
+
+        Used to constrain ``phase_id`` in the enrichment prompt and to map
+        block ``tipo`` → phase as a fallback.
+        """
+        structure = getattr(self.canal_config, "SCRIPT_STRUCTURE", []) or []
+        return [
+            p for p in structure
+            if isinstance(p, dict) and p.get("id")
+        ]
+
+    def _build_phase_block(self) -> str:
+        """Build the phase taxonomy text for the enrichment prompt."""
+        phases = self._phase_taxonomy()
+        if not phases:
+            return ""
+        lines = ["FASES NARRATIVAS DISPONIBLES (usa estos phase_id):"]
+        for p in phases:
+            pacing = p.get("scene_pacing") or {}
+            pacing_txt = ""
+            if pacing:
+                img = pacing.get("image_target_sec")
+                vid = pacing.get("video_target_sec")
+                pacing_txt = (f" — ritmo imagen ≈ {img}s, video ≈ {vid}s"
+                              if img is not None or vid is not None else "")
+            lines.append(f"- {p['id']}: {p.get('step', '')}{pacing_txt}")
+        return "\n".join(lines)
+
     def _enrich_block_fields_batch(
         self, batch: list[dict], previous_tipo: str,
         batch_num: int, num_batches: int, content_item: dict,
@@ -1720,6 +1749,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             )
             theme_block = "\n".join(theme_lines)
 
+        phase_block = self._build_phase_block()
+
         system_prompt = (
             "Eres un asistente editorial. Tu tarea es enriquecer bloques narrativos "
             "de un guion documental en español latinoamericano.\n\n"
@@ -1730,8 +1761,11 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "4. Responde ÚNICAMENTE con JSON.\n\n"
             f"{arc_hint}\n"
             + (theme_block + "\n\n" if theme_block else "")
-            + "CAMPOS POR BLOQUE:\n"
+            + (phase_block + "\n\n" if phase_block else "")
+            +             "CAMPOS POR BLOQUE:\n"
             "- tipo: (hook|desarrollo|climax|reflexion|cierre)\n"
+            "- phase_id: UNA de las FASES NARRATIVAS listadas arriba que mejor "
+            "corresponda al contenido del bloque. NUNCA inventes un id.\n"
             "- emocion: sentimiento predominante en español (misterio, asombro, tensión, reflexión...)\n"
             "- search_query_en: frase de búsqueda en INGLÉS para encontrar "
             "video/imagen en bancos de stock (Pexels, Pixabay, Unsplash).\n"
@@ -1800,8 +1834,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             f"Lote {batch_num}/{num_batches} ({len(batch)} bloques):\n\n"
             f"{blocks_text}\n\n"
             f"Devuelve los {len(batch)} bloques enriquecidos en este formato:\n"
-            '{"bloques": [{"texto": "...", "tipo": "...", "emocion": "...", '
-            '"search_query_en": "...", "escena_descripcion": "...", '
+            '{"bloques": [{"texto": "...", "tipo": "...", "phase_id": "...", '
+            '"emocion": "...", "search_query_en": "...", "escena_descripcion": "...", '
             '"media_tipo": "...", "media_duracion": N}]}'
         )
 
@@ -1830,6 +1864,21 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 return []
 
             # Validate: each enriched block must preserve the original text
+            phase_ids = {p["id"] for p in self._phase_taxonomy()}
+            _TIPO_PHASE_FALLBACK = {
+                "hook": "gancho", "desarrollo": "desarrollo",
+                "climax": "climax", "reflexion": "consecuencias", "cierre": "cierre",
+            }
+
+            def _norm_phase(block: dict) -> str | None:
+                pid = block.get("phase_id")
+                if pid in phase_ids:
+                    return pid
+                mapped = _TIPO_PHASE_FALLBACK.get(str(block.get("tipo", "")).lower())
+                if mapped in phase_ids:
+                    return mapped
+                return next(iter(phase_ids), None)
+
             valid = []
             for i, eb in enumerate(enriched_batch):
                 if isinstance(eb, dict) and eb.get("texto", "").strip():
@@ -1837,6 +1886,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     enriched_text = eb["texto"].strip()
                     # Allow minor whitespace diffs but reject major changes
                     if len(enriched_text) >= len(orig_text) * 0.85:
+                        eb["phase_id"] = _norm_phase(eb)
                         valid.append(eb)
                     else:
                         # Text was truncated — use original with default fields
@@ -1846,6 +1896,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                         )
                         b = dict(batch[i])
                         b["tipo"] = eb.get("tipo", "desarrollo")
+                        b["phase_id"] = _norm_phase(eb)
                         b["emocion"] = eb.get("emocion", "neutral")
                         b["search_query_en"] = eb.get("search_query_en", "")
                         b["escena_descripcion"] = eb.get("escena_descripcion", b.get("texto", "")[:80])

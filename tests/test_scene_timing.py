@@ -15,10 +15,12 @@ from pipeline.video_editor import VideoEditor
 
 
 def test_scene_timing_defaults_and_cross_parameter_validation():
-    assert defaults.IMAGE_SCENE_DURATION_MIN == 4.0
-    assert defaults.IMAGE_SCENE_DURATION_MAX == 6.0
+    assert defaults.IMAGE_SCENE_DURATION_MIN == 5.0
+    assert defaults.IMAGE_SCENE_DURATION_MAX == 7.0
     assert defaults.VIDEO_SCENE_DURATION_MIN == 4.0
-    assert defaults.VIDEO_SCENE_DURATION_MAX == 7.0
+    assert defaults.VIDEO_SCENE_DURATION_MAX == 6.0
+    assert defaults.IMAGE_SCENE_DEFAULT_TARGET == 5.5
+    assert defaults.VIDEO_SCENE_DEFAULT_TARGET == 5.0
     assert defaults.SCENE_SYNC_TOLERANCE_SEC == 0.15
     assert not hasattr(defaults, "SCENE_TRANSITION_DURATION_SEC")
 
@@ -98,6 +100,53 @@ def test_actual_image_fallback_rejects_a_duplicate_replacement():
     )
 
     assert assets[1]["type"] == "placeholder"
+
+
+def test_actual_image_fallback_does_not_split_into_flashes_below_hard_min():
+    """A 6.01s actual image (within soft max 7) stays ONE scene — the old
+    code split it into two ~3s flashes (bug)."""
+    fetcher = object.__new__(MediaFetcher)
+    fetcher._config = {"IMAGE_SCENE_DURATION_MIN": 5.0, "IMAGE_SCENE_DURATION_MAX": 7.0}
+    scene = {"start": 12.0, "end": 18.01, "duration": 6.01, "media_tipo": "video"}
+    asset = {"type": "image", "path": "/tmp/a.jpg", "url": "a"}
+
+    ranges, assets = fetcher._reconcile_actual_image_fallbacks(
+        [scene], [asset], fetch_distinct_image=lambda s: {"type": "image", "path": "/tmp/b.jpg"},
+    )
+    assert len(ranges) == 1
+    assert ranges[0]["duration"] == pytest.approx(6.01)
+    assert assets[0]["path"] == "/tmp/a.jpg"
+
+
+def test_actual_image_fallback_soft_exception_keeps_single_scene():
+    """7.5s actual image: no split respects hard min 5 → stays single."""
+    fetcher = object.__new__(MediaFetcher)
+    fetcher._config = {"IMAGE_SCENE_DURATION_MIN": 5.0, "IMAGE_SCENE_DURATION_MAX": 7.0}
+    scene = {"start": 0.0, "end": 7.5, "duration": 7.5, "media_tipo": "video"}
+    asset = {"type": "image", "path": "/tmp/a.jpg", "url": "a"}
+
+    ranges, _ = fetcher._reconcile_actual_image_fallbacks(
+        [scene], [asset], fetch_distinct_image=lambda s: {"type": "image", "path": "/tmp/b.jpg"},
+    )
+    assert len(ranges) == 1
+    assert ranges[0]["duration"] == pytest.approx(7.5)
+    assert ranges[0].get("soft_exception") is True
+
+
+def test_actual_image_fallback_12s_splits_into_two_6s():
+    """12s actual image splits into 6+6 (respects hard min 5 and soft max 7)."""
+    fetcher = object.__new__(MediaFetcher)
+    fetcher._config = {"IMAGE_SCENE_DURATION_MIN": 5.0, "IMAGE_SCENE_DURATION_MAX": 7.0}
+    scene = {"start": 0.0, "end": 12.0, "duration": 12.0, "media_tipo": "video"}
+    asset = {"type": "image", "path": "/tmp/a.jpg", "url": "a"}
+
+    ranges, assets = fetcher._reconcile_actual_image_fallbacks(
+        [scene], [asset],
+        fetch_distinct_image=lambda s: {"type": "image", "path": "/tmp/b.jpg"},
+    )
+    assert [(r["start"], r["end"]) for r in ranges] == [(0.0, 6.0), (6.0, 12.0)]
+    assert assets[0]["path"] == "/tmp/a.jpg"
+    assert assets[1]["path"] == "/tmp/b.jpg"
 
 
 def test_local_sd_defaults_to_native_widescreen_resolution():

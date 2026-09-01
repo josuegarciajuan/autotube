@@ -8,6 +8,7 @@ range are forced to safe defaults with a WARNING log, never silently accepted.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger("config_validator")
@@ -24,10 +25,10 @@ _RANGE_RULES: List[Tuple[str, float, float, float, str]] = [
     ("MAX_CLIP_EXTEND_SEC", 10.0,  60.0, 25.0,  "Max clip extend seconds"),
     ("SCENE_DURATION_MIN",   2.0,  10.0,  5.0,  "Minimum scene duration (s)"),
     ("SCENE_DURATION_MAX",   5.0,  30.0, 20.0,  "Maximum scene duration (s)"),
-    ("IMAGE_SCENE_DURATION_MIN", 1.0, 6.0, 4.0, "Image scene minimum duration (s)"),
-    ("IMAGE_SCENE_DURATION_MAX", 4.0, 6.0, 6.0, "Image scene maximum duration (s)"),
-    ("VIDEO_SCENE_DURATION_MIN", 1.0, 7.0, 4.0, "Video scene minimum duration (s)"),
-    ("VIDEO_SCENE_DURATION_MAX", 4.0, 7.0, 7.0, "Video scene maximum duration (s)"),
+    ("IMAGE_SCENE_DURATION_MIN", 1.0, 9.0, 5.0, "Image scene minimum duration (s)"),
+    ("IMAGE_SCENE_DURATION_MAX", 4.0, 9.0, 7.0, "Image scene maximum duration (s)"),
+    ("VIDEO_SCENE_DURATION_MIN", 1.0, 8.0, 4.0, "Video scene minimum duration (s)"),
+    ("VIDEO_SCENE_DURATION_MAX", 4.0, 8.0, 6.0, "Video scene maximum duration (s)"),
     ("SCENE_SYNC_TOLERANCE_SEC", 0.01, 1.0, 0.15, "Scene/audio sync tolerance (s)"),
     ("BACKGROUND_MUSIC_VOLUME", -35.0, -5.0, -18.0, "Background music volume (dB)"),
     ("BACKGROUND_MUSIC_DUCK_VOLUME", -40.0, -10.0, -28.0, "Ducked music volume (dB)"),
@@ -47,6 +48,101 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary
 # to prevent fully-opaque black vignette overlay.
 _MIN_SECONDARY_RGB_SUM = 30
+
+
+def _parse_time_pct(value: Any) -> Tuple[float, float] | None:
+    """Parse a ``time_pct`` like ``"10-20%"`` into (start, end) in 0-100.
+
+    Returns None when the value is malformed or out of range.
+    """
+    if not isinstance(value, str):
+        return None
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*%?\s*$", value)
+    if not m:
+        return None
+    start, end = float(m.group(1)), float(m.group(2))
+    if start < 0 or end > 100 or start >= end:
+        return None
+    return start, end
+
+
+def _validate_script_structure(slug: str, config: Dict[str, Any], warnings: List[str]) -> None:
+    """Validate SCRIPT_STRUCTURE phase ids, temporal coverage and pacing targets.
+
+    Rules:
+      - each phase has a unique ``id`` (used by the scene planner + prompts);
+      - ``time_pct`` ranges are parseable and cover 0-100% contiguously;
+      - ``scene_pacing.image_target_sec`` / ``video_target_sec`` are numeric
+        and within the channel's [MIN, MAX] hard/soft bounds (clamped).
+    """
+    structure = config.get("SCRIPT_STRUCTURE")
+    if not structure:
+        return
+    if not isinstance(structure, list):
+        warnings.append(f"[{slug}] SCRIPT_STRUCTURE is not a list — ignoring")
+        return
+
+    image_min = float(config.get("IMAGE_SCENE_DURATION_MIN", 5.0))
+    image_max = float(config.get("IMAGE_SCENE_DURATION_MAX", 7.0))
+    video_min = float(config.get("VIDEO_SCENE_DURATION_MIN", 4.0))
+    video_max = float(config.get("VIDEO_SCENE_DURATION_MAX", 6.0))
+
+    ids: List[str] = []
+    prev_end = 0.0
+    for idx, item in enumerate(structure):
+        if not isinstance(item, dict):
+            warnings.append(f"[{slug}] SCRIPT_STRUCTURE[{idx}] is not a dict — ignoring")
+            continue
+
+        pid = item.get("id")
+        if not pid:
+            warnings.append(f"[{slug}] SCRIPT_STRUCTURE[{idx}] missing 'id' — skipping")
+            continue
+        if pid in ids:
+            warnings.append(f"[{slug}] SCRIPT_STRUCTURE duplicate phase id '{pid}'")
+        ids.append(pid)
+
+        span = _parse_time_pct(item.get("time_pct", ""))
+        if span is None:
+            warnings.append(f"[{slug}] SCRIPT_STRUCTURE[{pid}] bad time_pct {item.get('time_pct')!r}")
+            continue
+        start, end = span
+        if abs(start - prev_end) > 1e-6 and prev_end > 0:
+            warnings.append(
+                f"[{slug}] SCRIPT_STRUCTURE phases not contiguous at '{pid}' "
+                f"({prev_end:.0f}% → {start:.0f}%)"
+            )
+        prev_end = end
+
+        pacing = item.get("scene_pacing") or {}
+        for kind, lo, hi, label in (
+            ("image_target_sec", image_min, image_max, "image"),
+            ("video_target_sec", video_min, video_max, "video"),
+        ):
+            tval = pacing.get(kind)
+            if tval is None:
+                continue
+            try:
+                tfloat = float(tval)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"[{slug}] SCRIPT_STRUCTURE[{pid}] scene_pacing.{kind}={tval!r} "
+                    f"not numeric — forcing default"
+                )
+                pacing[kind] = (lo + hi) / 2.0
+                continue
+            if tfloat < lo or tfloat > hi:
+                warnings.append(
+                    f"[{slug}] SCRIPT_STRUCTURE[{pid}] scene_pacing.{kind}={tfloat} "
+                    f"out of range [{lo}, {hi}] ({label}) — clamping to midpoint"
+                )
+                pacing[kind] = (lo + hi) / 2.0
+
+    if prev_end > 0 and abs(prev_end - 100.0) > 1e-6:
+        warnings.append(
+            f"[{slug}] SCRIPT_STRUCTURE covers {prev_end:.0f}% (expected 100%) — "
+            f"last phase should end at 100%"
+        )
 
 
 def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
@@ -119,14 +215,28 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
         minimum = config.get(min_key)
         maximum = config.get(max_key)
         if minimum is not None and maximum is not None and minimum >= maximum:
-            fallback_max = 6.0 if kind == "IMAGE" else 7.0
-            fallback_min = 4.0
+            fallback_min = 5.0 if kind == "IMAGE" else 4.0
+            fallback_max = 7.0 if kind == "IMAGE" else 6.0
             warnings.append(
                 f"[{slug}] {min_key} ({minimum}) >= {max_key} ({maximum}) — "
                 f"forcing {min_key}={fallback_min}, {max_key}={fallback_max}"
             )
             config[min_key] = fallback_min
             config[max_key] = fallback_max
+
+    # ── Script structure: phases must be unique, contiguous and paced ──
+    _validate_script_structure(slug, config, warnings)
+
+    # ── Media strategy: hook/climax video policy must be boolean ──
+    media = config.get("MEDIA_STRATEGY")
+    if isinstance(media, dict) and "hook_climax_video_requires_bible" in media:
+        val = media.get("hook_climax_video_requires_bible")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] MEDIA_STRATEGY.hook_climax_video_requires_bible={val!r} "
+                f"is not boolean — forcing True"
+            )
+            media["hook_climax_video_requires_bible"] = True
 
     # ── Color palette: prevent solid-black vignette ────────────
     color_pal = config.get("COLOR_PALETTE")
