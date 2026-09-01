@@ -15,10 +15,12 @@ from pipeline.video_editor import VideoEditor
 
 
 def test_scene_timing_defaults_and_cross_parameter_validation():
-    assert defaults.IMAGE_SCENE_DURATION_MIN == 4.0
-    assert defaults.IMAGE_SCENE_DURATION_MAX == 6.0
+    assert defaults.IMAGE_SCENE_DURATION_MIN == 5.0
+    assert defaults.IMAGE_SCENE_DURATION_MAX == 7.0
     assert defaults.VIDEO_SCENE_DURATION_MIN == 4.0
-    assert defaults.VIDEO_SCENE_DURATION_MAX == 7.0
+    assert defaults.VIDEO_SCENE_DURATION_MAX == 6.0
+    assert defaults.IMAGE_SCENE_DEFAULT_TARGET == 5.5
+    assert defaults.VIDEO_SCENE_DEFAULT_TARGET == 5.0
     assert defaults.SCENE_SYNC_TOLERANCE_SEC == 0.15
     assert not hasattr(defaults, "SCENE_TRANSITION_DURATION_SEC")
 

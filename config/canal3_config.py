@@ -65,6 +65,13 @@ PROD_VIDEO_DURATION_MAX = 9
 VIDEO_AVERAGE_DURATION_MIN = 7
 VIDEO_DURATION_DISCREPANCY_MIN = 2
 
+# Scene pacing — MIN is hard (never violated), MAX is soft (exceeded only
+# to respect MIN; logged as a soft exception by the scene planner).
+IMAGE_SCENE_DURATION_MIN = 6.0
+IMAGE_SCENE_DURATION_MAX = 9.0
+VIDEO_SCENE_DURATION_MIN = 5.0
+VIDEO_SCENE_DURATION_MAX = 8.0
+
 # ═══════════════════════════════════════════════════════════════════
 # NARRATIVE TONE
 # ═══════════════════════════════════════════════════════════════════
@@ -164,31 +171,38 @@ SCRIPT_HOOK_RULE = (
 
 )
 SCRIPT_STRUCTURE = [
-    {"step": "EL DESCUBRIMIENTO", "time_pct": "0-10%",
+    {"id": "gancho", "step": "EL DESCUBRIMIENTO", "time_pct": "0-10%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.0},
      "description": ("El hallazgo más impactante. Quién lo encontró, cómo, por qué "
                      "es tan importante. Imagen: la ruina o artefacto más evocador. "
                      "Cerrar con promesa: 'Al final de este video vas a entender "
                      "por qué este descubrimiento cambió la historia para siempre.'")},
-    {"step": "EL CONTEXTO", "time_pct": "10-20%",
+    {"id": "contexto", "step": "EL CONTEXTO", "time_pct": "10-20%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.0},
      "description": ("Lo que se creía antes de este descubrimiento. Cómo este hallazgo "
                      "contradice la historia oficial.")},
-    {"step": "LA CIVILIZACIÓN", "time_pct": "20-30%",
+    {"id": "protagonistas", "step": "LA CIVILIZACIÓN", "time_pct": "20-30%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.5},
      "description": ("Quiénes eran. Cómo vivían. Qué construyeron. Qué creían. Humanizar a los protagonistas del pasado."),
      "retention_anchor": ("CLIFFHANGER al 25%: 'Pero lo que los arqueólogos no esperaban "
                           "encontrar... es que esta civilización guardaba un secreto "
                           "que desafía todo lo que sabemos.'")},
-    {"step": "EL MISTERIO", "time_pct": "30-55%",
+    {"id": "desarrollo", "step": "EL MISTERIO", "time_pct": "30-55%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.5},
      "description": ("El enigma central. Lo que no encaja. La anomalía. Escalar el asombro."),
      "retention_anchor": ("CLIFFHANGER al 50%: Silencio 2s. Cambio de imagen a "
                           "primer plano del artefacto/ruina. 'Recapitulemos: [1 frase]. "
                           "Ahora prepárate para lo más increíble.'")},
-    {"step": "LA REVELACIÓN", "time_pct": "55-70%",
+    {"id": "climax", "step": "LA REVELACIÓN", "time_pct": "55-70%",
+     "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 5.0},
      "description": ("El instante de comprensión. El hallazgo que lo cambia todo. Música crece.")},
-    {"step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+    {"id": "consecuencias", "step": "LAS CONSECUENCIAS", "time_pct": "70-85%",
+     "scene_pacing": {"image_target_sec": 7.0, "video_target_sec": 6.0},
      "description": ("Cómo este descubrimiento cambió la historia. Lo que aún no sabemos."),
      "retention_anchor": ("EL ESPEJO al 70%: 'Ahora piensa: ¿cuántas civilizaciones más "
                           "siguen enterradas bajo tus pies?'")},
-    {"step": "EL LEGADO", "time_pct": "85-100%",
+    {"id": "cierre", "step": "EL LEGADO", "time_pct": "85-100%",
+     "scene_pacing": {"image_target_sec": 8.0, "video_target_sec": 7.0},
      "description": ("Lo que nos dejaron. Por qué importa hoy. Reflexión. End hook + CTA.")},
 ]
 SCRIPT_EMOTIONAL_ARC = {

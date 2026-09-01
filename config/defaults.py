@@ -89,10 +89,19 @@ PROD_VIDEO_DURATION_MAX = 9
 # Scene duration enforcement
 # Media-specific limits are used by the production timeline.  The legacy
 # SCENE_DURATION_* values remain supported for older direct VideoEditor callers.
-IMAGE_SCENE_DURATION_MIN = 4.0
-IMAGE_SCENE_DURATION_MAX = 6.0
-VIDEO_SCENE_DURATION_MIN = 4.0
-VIDEO_SCENE_DURATION_MAX = 7.0
+#
+# ═══ SEMANTICS (scene_planner) ═══════════════════════════════════════════
+#   *_MIN  = HARD limit: no scene may ever fall below it. Never violated.
+#   *_MAX  = SOFT limit: a scene may exceed it ONLY when splitting would
+#            create a sub-scene below *_MIN (a "soft exception", logged).
+#   *_DEFAULT_TARGET = preferred average duration per media type when the
+#            current narrative phase defines no specific target.
+IMAGE_SCENE_DURATION_MIN = 5.0        # HARD minimum
+IMAGE_SCENE_DURATION_MAX = 7.0        # SOFT maximum
+VIDEO_SCENE_DURATION_MIN = 4.0        # HARD minimum
+VIDEO_SCENE_DURATION_MAX = 6.0        # SOFT maximum
+IMAGE_SCENE_DEFAULT_TARGET = 5.5
+VIDEO_SCENE_DEFAULT_TARGET = 5.0
 SCENE_SYNC_TOLERANCE_SEC = 0.15
 SCENE_DURATION_MIN = 8.0
 SCENE_DURATION_MAX = 16.0
@@ -325,6 +334,11 @@ MEDIA_STRATEGY = {
     # skip anachronistic candidates (modern city footage) via provider
     # metadata tags. Disabling restores the previous era-agnostic search.
     "era_anchor_enabled": True,
+    # Hook/climax scenes are the retention-critical beats. They should only
+    # receive STOCK VIDEO when the visual bible is available (so the clip is
+    # grounded in the video's global visual direction). Without a bible they
+    # fall back to AI images for guaranteed coherence. See _classify_scenes.
+    "hook_climax_video_requires_bible": True,
     # Minimum narrative-keyword overlap a candidate must reach to be
     # preferred over lower-scored candidates. 1 = any keyword match.
     "relevance_min_overlap": 1,
