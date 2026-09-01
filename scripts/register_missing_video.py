@@ -223,7 +223,6 @@ def main():
         "slug",
         help="Channel slug",
     )
-    )
     parser.add_argument(
         "--channel-id",
         type=int,

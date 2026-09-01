@@ -6,7 +6,7 @@ interface PacingSummary {
   active_profile: string
   available_profiles: string[]
   pacing: Record<string, any>
-  active_channels: { id: number; slug: string; name: string; google_account: string }[]
+  active_channels: { id: number; slug: string; name: string; google_account: string; delivery_state?: string; manual_override?: boolean; longform_publish_cap?: number; native_shorts_per_day?: number; generation_per_day?: number; upload_capacity_per_day?: number }[]
 }
 
 interface FactoryStatus {
@@ -200,6 +200,33 @@ export default function PacingProfileCard() {
           <PacingRow label="Entre canales distintos" value={p.global_upload_spacing_min} unit="min" />
           <PacingRow label="Cap por cuenta Google" value={p.account_daily_upload_cap} unit="subidas/dia" />
           <PacingRow label="Filtro content_safety" value={p.content_safety_disabled ? 'desactivado' : 'activo'} />
+        </div>
+      </div>
+
+      <div className="border-t border-surface-border/50 pt-3 space-y-2">
+        <p className="text-[10px] uppercase tracking-wide text-gray-500">Estado de entrega por canal</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {(summary?.active_channels ?? []).map((channel) => (
+            <div key={channel.id} className="flex items-center gap-2 bg-dark-700/40 rounded-lg p-2 text-xs">
+              <span className="text-gray-200 flex-1 truncate">{channel.name}</span>
+              <span className="text-gray-500 font-mono">pub {channel.longform_publish_cap ?? '—'}L/{channel.native_shorts_per_day ?? '—'}S · gen {channel.generation_per_day ?? '—'} · upload {channel.upload_capacity_per_day ?? '—'}</span>
+              <select
+                aria-label={`Estado de entrega de ${channel.name}`}
+                value={channel.delivery_state ?? 'strike'}
+                disabled={saving}
+                onChange={async (event) => {
+                  setSaving(true)
+                  try { await api.setChannelDelivery(channel.id, { state: event.target.value }); await load() }
+                  catch (e: any) { setError(e?.message || 'No se pudo cambiar el estado.') }
+                  finally { setSaving(false) }
+                }}
+                className="bg-dark-600 border border-surface-border rounded px-1.5 py-1 text-[10px] text-gray-200"
+              >
+                <option value="strike">strike</option><option value="recovery">recovery</option><option value="normal">normal</option>
+              </select>
+              {channel.manual_override && <span className="text-amber-400" title="Override manual activo">override</span>}
+            </div>
+          ))}
         </div>
       </div>
 

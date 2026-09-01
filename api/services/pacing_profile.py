@@ -52,9 +52,6 @@ def get_pacing_telemetry() -> dict[str, int]:
 #   normal  → frecuencia máxima objetivo
 PACING_PROFILES: dict[str, dict] = {
     "strike": {
-        "shorts_per_channel_day": 1,
-        "shorts_global_day": 6,
-        "max_longform_publish_day": 1,
         "same_channel_publish_gap_h": 24,
         "same_channel_upload_gap_h": 6,
         "global_upload_spacing_min": 45,
@@ -67,9 +64,6 @@ PACING_PROFILES: dict[str, dict] = {
         "marathon_backlog_per_channel": 4,
     },
     "recovery": {
-        "shorts_per_channel_day": 2,
-        "shorts_global_day": 8,
-        "max_longform_publish_day": 1,
         "same_channel_publish_gap_h": 12,
         "same_channel_upload_gap_h": 4,
         "global_upload_spacing_min": 30,
@@ -82,9 +76,6 @@ PACING_PROFILES: dict[str, dict] = {
         "marathon_backlog_per_channel": 3,
     },
     "normal": {
-        "shorts_per_channel_day": 3,
-        "shorts_global_day": 12,
-        "max_longform_publish_day": 2,
         "same_channel_publish_gap_h": 6,
         "same_channel_upload_gap_h": 3,
         "global_upload_spacing_min": 20,
@@ -104,6 +95,7 @@ DEFAULT_PROFILE = "strike"
 _STATE_KEY = "pacing_profile"
 _OVERRIDE_PREFIX = "pacing_"
 _LEGACY_STATE_KEYS = {"global_upload_spacing_min"}
+_DB_BACKED_KEYS = ("max_longform_publish_day", "shorts_per_channel_day", "shorts_global_day")
 
 # ── DB lazy ────────────────────────────────────────────────────
 
@@ -115,9 +107,24 @@ def _get_db():
 
 # ── API pública ────────────────────────────────────────────────
 
-def list_pacing_profiles() -> dict[str, dict]:
+def list_pacing_profiles(db=None) -> dict[str, dict]:
     """Devuelve el schema completo de perfiles (para UI/API)."""
-    return {name: dict(values) for name, values in PACING_PROFILES.items()}
+    result = {name: dict(values) for name, values in PACING_PROFILES.items()}
+    if db is None:
+        try:
+            db = _get_db()
+        except Exception:
+            db = None
+    if db is not None:
+        for name in result:
+            row = getattr(db, "get_delivery_profile", lambda _name: None)(name)
+            if row:
+                result[name].update({
+                    "max_longform_publish_day": row.get("public_videos_per_day", 0),
+                    "shorts_per_channel_day": row.get("native_shorts_per_day", 0),
+                    "shorts_global_day": row.get("global_shorts_per_day", 0),
+                })
+    return result
 
 
 def get_active_profile_name(db=None) -> str:
@@ -141,15 +148,25 @@ def get_pacing(db=None) -> dict:
         db = _get_db()
     profile = PACING_PROFILES[get_active_profile_name(db)]
     resolved = dict(profile)
+    profile_row = getattr(db, "get_delivery_profile", lambda _name: None)(get_active_profile_name(db))
+    resolved["max_longform_publish_day"] = int((profile_row or {}).get("public_videos_per_day", 0))
+    resolved["shorts_per_channel_day"] = int((profile_row or {}).get("native_shorts_per_day", 0))
+    resolved["shorts_global_day"] = int((profile_row or {}).get("global_shorts_per_day", 0))
     # Aplicar overrides manuales puntuales (kill-switch por clave)
-    for key in profile:
+    for key in tuple(profile) + _DB_BACKED_KEYS:
         override_key = f"{_OVERRIDE_PREFIX}{key}"
         try:
             raw = db.get_system_state(override_key)
         except Exception:
             raw = None
         if raw is not None and raw != "":
-            resolved[key] = _coerce(key, raw)
+            if key in _DB_BACKED_KEYS:
+                try:
+                    resolved[key] = int(float(str(raw)))
+                except (TypeError, ValueError):
+                    _count("invalid_values")
+            else:
+                resolved[key] = _coerce(key, raw)
         elif key in _LEGACY_STATE_KEYS:
             try:
                 raw = db.get_system_state(key)
@@ -210,12 +227,21 @@ def get_pacing_summary(db=None) -> dict:
     channels = []
     try:
         for ch in db.get_channels(active_only=True) or []:
-            channels.append({
+            item = {
                 "id": ch.get("id"),
                 "slug": ch.get("slug"),
                 "name": ch.get("name"),
                 "google_account": ch.get("google_account") or "",
-            })
+            }
+            try:
+                from api.services.channel_policy import resolve_channel_policy
+                item.update({k: resolve_channel_policy(ch["id"], db=db).get(k)
+                             for k in ("delivery_state", "manual_override", "longform_publish_cap",
+                                       "public_longform_per_day", "native_shorts_per_day",
+                                       "public_shorts_per_day", "generation_per_day", "upload_capacity_per_day")})
+            except Exception:
+                pass
+            channels.append(item)
     except Exception:
         pass
     return {
@@ -236,6 +262,12 @@ def _coerce(key: str, raw: str):
         profile_value = PACING_PROFILES[DEFAULT_PROFILE].get(key)
     except Exception:
         profile_value = None
+    if key in _DB_BACKED_KEYS:
+        try:
+            return int(float(str(raw)))
+        except (TypeError, ValueError):
+            _count("invalid_values")
+            return 0
     if isinstance(profile_value, bool):
         value = str(raw).strip().lower()
         if value not in ("0", "1", "true", "false", "yes", "no", "on", "off"):

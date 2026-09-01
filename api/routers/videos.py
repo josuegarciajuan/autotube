@@ -344,6 +344,16 @@ def set_video_privacy(video_id: int, data: dict):
     privacy_new = data.get("privacy_status", "")
     if privacy_new not in ("public", "unlisted", "private"):
         raise HTTPException(400, "privacy_status must be 'public', 'unlisted', or 'private'")
+    if privacy_new == "public":
+        from api.services.publication_policy import assert_public_admission, validate_manual_publication
+        try:
+            validate_manual_publication(
+                publish_mode=str(v.get("publish_mode") or "immediate").lower(),
+                target_public_at=v.get("target_public_at"),
+            )
+            assert_public_admission(db, channel_id=int(v.get("channel_id") or 0), content_type="long")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     
     channel_id = v.get("channel_id")
     ch = db.get_channel(channel_id) if channel_id else None
@@ -901,6 +911,14 @@ def publish_video_now(video_id: int):
         raise HTTPException(404, "Video not found")
     if not v.get("yt_video_id"):
         raise HTTPException(400, "Video has no YouTube ID")
+    from api.services.publication_policy import validate_manual_publication
+    try:
+        validate_manual_publication(
+            publish_mode=str(v.get("publish_mode") or "immediate").lower(),
+            target_public_at=v.get("target_public_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
     from orchestrator import PipelineOrchestrator
     ch = db.get_channel(v["channel_id"]) if v.get("channel_id") else None
@@ -911,6 +929,11 @@ def publish_video_now(video_id: int):
     if not orch.uploader.authenticate():
         raise HTTPException(500, "Failed to authenticate")
 
+    from api.services.publication_policy import assert_public_admission
+    try:
+        assert_public_admission(db, channel_id=int(v.get("channel_id") or 0), content_type="long")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     result = orch.uploader.set_privacy(v["yt_video_id"], "public")
     db.update_video(video_id, status="published", privacy_status="public",
                      published_at=db_now())

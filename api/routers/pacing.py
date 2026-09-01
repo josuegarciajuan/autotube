@@ -13,6 +13,7 @@ import logging
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from api.deps import get_db
 
 from api.services import pacing_profile
 
@@ -23,6 +24,11 @@ router = APIRouter(prefix="/api/pacing", tags=["Pacing"])
 
 class ProfileUpdate(BaseModel):
     profile: str
+
+
+class ChannelDeliveryUpdate(BaseModel):
+    state: str
+    override: dict | None = None
 
 
 @router.get("/profile")
@@ -36,7 +42,7 @@ def get_profiles():
     """Schema completo de perfiles disponibles."""
     return {
         "active_profile": pacing_profile.get_active_profile_name(),
-        "profiles": pacing_profile.list_pacing_profiles(),
+        "profiles": pacing_profile.list_pacing_profiles(get_db()),
     }
 
 
@@ -53,6 +59,36 @@ def set_profile(body: ProfileUpdate):
         "active_profile": body.profile,
         "pacing": resolved,
     }
+
+
+@router.get("/channels/{channel_id}")
+def get_channel_delivery(channel_id: int):
+    db = get_db()
+    if not db.get_channel(channel_id):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Channel not found")
+    from api.services.channel_policy import resolve_channel_policy
+    return resolve_channel_policy(channel_id, db=db)
+
+
+@router.put("/channels/{channel_id}")
+def set_channel_delivery(channel_id: int, body: ChannelDeliveryUpdate):
+    db = get_db()
+    if not db.get_channel(channel_id):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        from api.services.channel_policy import (
+            set_channel_delivery_state, set_channel_delivery_override,
+        )
+        set_channel_delivery_state(body.state, channel_id, db)
+        if body.override is not None:
+            set_channel_delivery_override(channel_id, body.override, db)
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from api.services.channel_policy import resolve_channel_policy
+    return resolve_channel_policy(channel_id, db=db)
 
 
 @router.get("/factory-status")

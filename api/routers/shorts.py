@@ -297,13 +297,18 @@ async def publish_short(short_id: int):
 
     tags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])[:60]
 
+    from api.services.publication_policy import upload_publication_kwargs
+    publication = upload_publication_kwargs(
+        publish_mode=getattr(ch_config, "PUBLISH_MODE", "immediate"),
+        target_public_at=short.get("publish_at"),
+    )
     result = uploader.upload(
         video_path=file_path,
         title=title[:100],
         description=description[:5000],
         tags=tags,
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-        privacy="public",
+        **publication,
     )
 
     video_id = result.get("video_id")
@@ -752,13 +757,18 @@ async def extract_and_publish(video_id: int):
             channel_url=getattr(ch_config, "YOUTUBE_CHANNEL_URL", ""),
         )
 
+        from api.services.publication_policy import upload_publication_kwargs
+        publication = upload_publication_kwargs(
+            publish_mode=getattr(ch_config, "PUBLISH_MODE", "immediate"),
+            target_public_at=best_clip.get("publish_at"),
+        )
         result = uploader.upload(
             video_path=output_path,
             title=title,
             description=description[:5000],
             tags=hashtags[:60],
             category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-            privacy="public",
+            **publication,
         )
 
         yt_id = result.get("video_id")
@@ -1043,13 +1053,18 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
         channel_url=channel_url,
     )
 
+    from api.services.publication_policy import upload_publication_kwargs
+    publication = upload_publication_kwargs(
+        publish_mode=getattr(ch_config, "PUBLISH_MODE", "immediate"),
+        target_public_at=None,
+    )
     result = uploader.upload(
         video_path=video_path,
         title=title[:100],
         description=description[:5000],
         tags=hashtags[:60],
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-        privacy="public",
+        **publication,
     )
 
     yt_id = result.get("video_id")

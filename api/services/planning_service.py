@@ -85,6 +85,17 @@ def get_last_replan_ts(db=None) -> float:
 _POST_FULL_REPLAN_QUIET_MIN = 120
 _post_full_replan_block_until: Optional[datetime] = None
 
+
+def trigger_delivery_replan(db, channel_id: int) -> dict:
+    """Consume a delivery-change request under the single replan lock."""
+    with _REPLAN_LOCK:
+        result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+        with db._connect() as conn:
+            conn.execute("UPDATE scheduling_replan_requests SET status='completed' WHERE channel_id=? AND status='pending'",
+                         (channel_id,))
+            conn.commit()
+        return result
+
 # ── Dynamic VPD adjuster ───────────────────────────────────
 class DynamicSlotAdjuster:
     """
@@ -501,7 +512,9 @@ def _resolve_videos_per_day(ch: dict, date_str: str, db=None) -> int:
 
     # videos_per_day=0 está RESERVADO para el breaker de fallos (canal pausado):
     # nunca usar `or 2` aquí o un canal pausado se reactivaría como 2/día.
-    vpd_raw = ch.get("videos_per_day", 2)
+    # Public target is independent from factory generation capacity.  Keep the
+    # legacy key as a fallback for existing channel configs.
+    vpd_raw = ch.get("public_videos_per_day", ch.get("videos_per_day", 2))
     if vpd_raw in (None, ""):
         base = 2
     else:
@@ -1240,6 +1253,11 @@ def compute_daily_slots(
     for s in resolved:
         sched_h, sched_m = map(int, s["scheduled_at"][11:16].split(":"))
         up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES
+        # Collision shifts must not create an accidental dawn publication.
+        # Keep immediate deliveries inside the configured daytime envelope;
+        # scheduled deliveries retain their explicit publication target.
+        if s.get("publish_mode") != "scheduled" and up_total < 10 * 60:
+            up_total = 10 * 60
         uh = min(up_total // 60, 23)
         um = min(up_total % 60, 59)
         # For scheduled channels, target_upload_at stays as original peak time
@@ -1269,7 +1287,17 @@ def compute_daily_slots(
             s["target_public_at"] = None
         tz_str = s.get("publish_timezone", "Europe/Madrid")
         s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
-        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        # Batch upload times are a wall-clock contract for the configured
+        # channel/account (09:30/16:00 Madrid). Keep this field local for the
+        # planner/UI; dispatch converts it once at the worker boundary.
+        if s.get("publish_mode") != "scheduled":
+            s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        if s.get("publish_mode") != "scheduled" and int(s["target_upload_at"][11:13]) < 10:
+            # Stored scheduling timestamps are UTC; avoid an accidental early
+            # morning dispatch after local→UTC conversion.
+            target = datetime.strptime(f"{date_str} 10:07:00", "%Y-%m-%d %H:%M:%S")
+            s["target_upload_at"] = target.strftime("%Y-%m-%d %H:%M:%S")
+            s["scheduled_at"] = (target - timedelta(minutes=ESTIMATED_PIPELINE_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
     
     return resolved
 
@@ -1760,7 +1788,8 @@ def compute_horizon_slots(
             s["target_public_at"] = None
         tz_str = _get_slot_timezone(s)
         s["scheduled_at"] = _local_to_sqlite(s["scheduled_at"], tz_str)
-        s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
+        if s.get("publish_mode") != "scheduled":
+            s["target_upload_at"] = _local_to_sqlite(s["target_upload_at"], tz_str)
     
     return all_raw_slots
 
@@ -3232,8 +3261,15 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
             (next_slot.get("target_public_at") or "?")[11:16] if next_slot.get("target_public_at") else "?",
         )
         
-        # 4. Mark slot as running
-        db.update_slot_status(slot_id, "running")
+        # 4. Claim the slot atomically. Selection happened before the lock and
+        # another scheduler tick may have selected the same row.
+        claimant = f"planning:{threading.get_ident()}"
+        if hasattr(db, "claim_planned_slot"):
+            if not db.claim_planned_slot(slot_id, claimant):
+                logger.info("Planned slot #%d was claimed by another dispatcher", slot_id)
+                return None
+        else:
+            db.update_slot_status(slot_id, "running")
         
         # 5. Create the video record
         from database.db_extended import ExtendedDatabase
@@ -3298,7 +3334,10 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
             # suba en el batch y no recalcule un momento aleatorio.
             planned_upload_at = next_slot.get("target_upload_at")
             if is_scheduled and planned_upload_at:
-                planned_upload_at = str(planned_upload_at).replace("T", " ")[:19]
+                planned_upload_at = sqlite_utc(local_to_utc(
+                    str(planned_upload_at).replace("T", " ")[:19],
+                    next_slot.get("publish_timezone", "Europe/Madrid"),
+                ))
             cursor = conn.execute(
                 "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
                 "publish_mode, target_public_at, scheduled_upload_at, created_at) "
@@ -4330,12 +4369,17 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         longform_url=longform_url,
         channel_url=channel_url,
     )
-    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), privacy="public")
+    from api.services.publication_policy import upload_publication_kwargs
+    publication = upload_publication_kwargs(
+        publish_mode="scheduled",
+        warmup_min=getattr(ch_config, "PUBLISH_WARMUP_MIN", 120),
+    )
+    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), **publication)
 
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), int(has_subscribe_cta)))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, publish_at, yt_visibility, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'scheduled', ?, ?, ?, datetime('now','localtime'), ?, 'scheduled', ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), publication["publish_at"], int(has_subscribe_cta)))
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -4477,6 +4521,7 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
     for channel_id in sorted(set(existing_by_channel) | set(proposed_by_channel)):
         backlog = sorted(existing_by_channel.get(channel_id, []), key=lambda s: (s["scheduled_at"], s["id"]))
         generated = sorted(proposed_by_channel.get(channel_id, []), key=lambda s: s["scheduled_at"])
+        has_running = any(slot.get("status") == "running" for slot in backlog)
         for index, old in enumerate(backlog):
             if index >= len(generated):
                 review.append({
@@ -4507,7 +4552,11 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
                 "after": replacement,
             })
             counts[action] += 1
-        for replacement in generated[len(backlog):]:
+        # A running short is protected capacity during a safe replan. Do not
+        # create replacement rows in the same transaction; the next scheduler
+        # tick can fill capacity after the running job settles.
+        replacements = [] if has_running else generated[len(backlog):]
+        for replacement in replacements:
             review.append({
                 "kind": kind,
                 "action": "new",
@@ -4537,10 +4586,23 @@ def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
         existing_shorts = [dict(row) for row in conn.execute("""
             SELECT * FROM shorts_planned_slots WHERE status = 'pending' ORDER BY scheduled_at, id
         """).fetchall()]
+        running_shorts = [dict(row) for row in conn.execute("""
+            SELECT * FROM shorts_planned_slots WHERE status = 'running' ORDER BY scheduled_at, id
+        """).fetchall()]
     long_review, long_counts = _safe_replan_review(existing, proposed_slots)
     shorts_review, shorts_counts = _safe_replan_review(
         existing_shorts, proposed_shorts, kind="short",
     )
+    if running_shorts:
+        # Running short jobs are protected and consume no new-slot budget during
+        # this confirmation. They remain visible in the review for auditability.
+        shorts_review = [item for item in shorts_review if item["action"] != "new"]
+        shorts_counts["new"] = 0
+        shorts_review.extend({
+            "kind": "short", "action": "protected", "reason": "running_job",
+            "slot_id": row["id"], "channel_id": row["channel_id"],
+            "before": row, "after": row,
+        } for row in running_shorts)
     review = long_review + shorts_review
     # Keep flat long-form counters for compatibility while making per-kind
     # counts explicit for clients of this expanded contract.

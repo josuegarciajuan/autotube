@@ -915,6 +915,11 @@ def _hard_daily_cap(channel_id: int | None = None, db=None) -> int:
     if channel_id is None:
         return base
     try:
+        from api.services.channel_policy import policy_value
+        base = int(policy_value(channel_id, "native_shorts_per_day", db=db, default=base) or 0)
+    except Exception:
+        pass
+    try:
         from api.services.gradual_resume import get_explicit_delivery_policy
         policy = get_explicit_delivery_policy(channel_id, db)
         if policy is not None:

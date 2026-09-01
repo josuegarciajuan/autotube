@@ -775,6 +775,8 @@ class YouTubeUploader:
         # stale scheduled publish time fails cleanly (InvalidPublishAtError)
         # instead of burning quota and triggering the retry loop.
         if publish_at:
+            from api.time_utils import youtube_rfc3339
+            publish_at = youtube_rfc3339(publish_at)
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
             _pa = str(publish_at).strip()
             try:
@@ -794,6 +796,16 @@ class YouTubeUploader:
                 raise InvalidPublishAtError(
                     f"Unparseable publishAt: {publish_at!r}"
                 ) from _pe
+
+        # Final central boundary: direct/manual callers cannot accidentally
+        # upload a scheduled channel publicly without a future publishAt.
+        from api.services.publication_policy import validate_upload_visibility
+        configured_mode = self._get_config_attr("PUBLISH_MODE", "immediate")
+        validate_upload_visibility(
+            publish_mode=str(configured_mode or "immediate").lower(),
+            privacy=privacy,
+            publish_at=publish_at,
+        )
 
         service = None
         _egress_client = None
