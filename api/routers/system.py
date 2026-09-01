@@ -463,17 +463,122 @@ def resume_status(channel_id: int = None):
     return {"ok": True, "channels": channels}
 
 
+_STUDIO_CRITICAL_KEYWORDS = (
+    "strike", "suspend", "desmonetiza", "monetizaci", "violaci",
+    "derechos de autor", "reclamaci", "restricción de edad",
+    "restriccion de edad", "eliminad", "no cumple", "sintético",
+    "sintetico", "engañosa", "enganosa",
+)
+
+
+def _studio_severity(findings) -> str | None:
+    """Severidad de los hallazgos de Studio (None si no hay hallazgos)."""
+    if not findings:
+        return None
+    joined = " ".join(f.lower() for f in findings if f)
+    if any(k in joined for k in _STUDIO_CRITICAL_KEYWORDS):
+        return "critical"
+    return "warning"
+
+
+def _build_verdict(internal: dict, youtube: dict, studio_scan) -> dict:
+    """Veredicto único por canal (fuente única de verdad para la UI).
+
+    Escalera de prioridad de mayor a menor severidad: primero la evidencia
+    EXTERNA real (removed / age_restricted / discrepancias de eliminación),
+    después los hallazgos de Studio, luego el bloqueo interno temporal y por
+    último el estado pasivo de política (freq_reduced / fase / strikes).
+    """
+    removed = youtube.get("removed") or []
+    age_restricted = youtube.get("age_restricted") or []
+    discrepancies = youtube.get("discrepancies") or []
+    removed_disc = [d for d in discrepancies if str(d.get("type", "")).endswith("_removed")]
+    sched_disc = [d for d in discrepancies if str(d.get("type", "")) == "bd_published_yt_scheduled"]
+
+    findings = (studio_scan or {}).get("findings") or []
+    scanned_at = (studio_scan or {}).get("scanned_at")
+    studio_sev = _studio_severity(findings)
+
+    blocked = bool(internal.get("blocked"))
+    blocked_until = internal.get("blocked_until")
+    restan_h = internal.get("restan_h", 0.0)
+    freq_reduced = bool(internal.get("freq_reduced"))
+    phase = int(internal.get("phase") or 0)
+    strikes = int(internal.get("strikes") or 0)
+
+    def _parts(items, label):
+        if not items:
+            return ""
+        return f"{len(items)} {label}"
+
+    parts = []
+    if removed:
+        parts.append(_parts(removed, "vídeo(s) eliminado(s) en YouTube"))
+    if age_restricted:
+        parts.append(_parts(age_restricted, "vídeo(s) con restricción de edad"))
+    if removed_disc:
+        parts.append(_parts(removed_disc, "discrepancia(s) de eliminación"))
+
+    if removed or age_restricted or removed_disc:
+        detail = " · ".join(p for p in parts if p)
+        if youtube.get("checked_at"):
+            detail += f" · verific. {youtube['checked_at'][:16]}"
+        return {"severity": "critical", "label": "Restricción real en YouTube", "detail": detail}
+
+    if studio_sev == "critical":
+        d = f"{len(findings)} aviso(s) en Studio (strike/políticas/desmonetización)"
+        if scanned_at:
+            d += f" · escaneado {scanned_at[:16]}"
+        return {"severity": "critical", "label": "Avisos graves en YouTube Studio", "detail": d}
+
+    if blocked:
+        d = "No publicará contenido hasta el final del bloqueo interno de Autotube"
+        if restan_h:
+            d += f" (~{restan_h:.0f}h restantes)"
+        d += " · no es una sanción confirmada por YouTube"
+        return {"severity": "blocked", "label": "Bloqueo interno temporal", "detail": d}
+
+    if studio_sev == "warning":
+        d = f"{len(findings)} aviso(s) leve(s) en Studio — revisar"
+        if scanned_at:
+            d += f" · escaneado {scanned_at[:16]}"
+        return {"severity": "warning", "label": "Avisos en Studio — revisar", "detail": d}
+
+    if sched_disc:
+        return {
+            "severity": "warning",
+            "label": "Discrepancia de publicación",
+            "detail": f"{len(sched_disc)} vídeo(s) que BD da por publicado aún aparecen programado/privado en YouTube (lag de indexado)",
+        }
+
+    if freq_reduced or phase > 0 or strikes > 0:
+        d = "Modo defensivo post-strike"
+        if strikes:
+            d += f" · {strikes} strike(s) histórico(s)"
+        if phase > 0:
+            d += f" · {internal.get('phase_label') or f'Fase {phase}'}"
+        if freq_reduced:
+            d += " · frecuencia de publicación rebajada"
+        return {"severity": "defensive", "label": "Modo defensivo post-strike", "detail": d}
+
+    return {"severity": "ok", "label": "Operativo", "detail": "Sin restricciones detectadas"}
+
+
 @router.get("/system/channel-restrictions")
 def channel_restrictions():
     """Estado consolidado de restricciones por canal, para la barra unificada.
 
-    Por cada canal ACTIVO devuelve dos bloques claramente separados:
-      - internal : protección interna de Autotube (bloqueo, strikes, frecuencia
-                   rebajada, fase de reanudación). Es un TEMPORIZADOR interno,
-                   NO una sanción confirmada por YouTube.
-      - youtube  : verdad externa cacheada (yt_visibility de shorts recientes,
-                   estado de vídeos, vídeos removed/age-restricted, y
-                   discrepancias BD↔YouTube). Proviene del reconciliador (0 cuota).
+    Por cada canal ACTIVO devuelve tres bloques claramente separados:
+      - internal  : protección interna de Autotube (bloqueo, strikes, frecuencia
+                    rebajada, fase de reanudación). Es un TEMPORIZADOR interno,
+                    NO una sanción confirmada por YouTube.
+      - youtube   : verdad externa cacheada (yt_visibility de shorts recientes,
+                    estado de vídeos, vídeos removed/age-restricted, y
+                    discrepancias BD↔YouTube). Proviene del reconciliador (0 cuota).
+      - studio_scan: hallazgos reales del último escaneo de YouTube Studio
+                    (strikes/avisos de políticas/monetización a nivel de canal).
+      - verdict   : veredicto único por canal (severity + label + detail),
+                    calculado en servidor para no duplicar la escalera en la UI.
 
     Lectura ligera (0 cuota de YouTube API). Excluye canales inactivos/test.
     """
@@ -581,9 +686,28 @@ def channel_restrictions():
         except Exception:
             pass
 
+        # ── Hallazgos del último escaneo de YouTube Studio (real, a nivel de canal) ──
+        studio_scan = None
+        try:
+            raw = db.get_system_state(f"studio_scan_{slug}")
+            if raw:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    studio_scan = {
+                        "status": parsed.get("status"),
+                        "channel": parsed.get("channel"),
+                        "findings": parsed.get("findings") or [],
+                        "scanned_at": parsed.get("scanned_at"),
+                    }
+        except Exception:
+            studio_scan = None
+
+        verdict = _build_verdict(internal, youtube, studio_scan)
+
         out.append({
             "channel_id": cid, "slug": slug, "name": ch.get("name", ""),
             "internal": internal, "youtube": youtube,
+            "studio_scan": studio_scan, "verdict": verdict,
         })
 
     return {"ok": True, "generated_at": now_utc.isoformat(), "channels": out}
