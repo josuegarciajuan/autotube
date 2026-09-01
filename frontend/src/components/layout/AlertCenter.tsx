@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   ShieldAlert,
   Shield,
@@ -18,16 +18,25 @@ import {
 import { api, parseApiDate, formatApiDate, formatTime } from '../../lib/api'
 import { useQuotaStatus, useChannelRestrictions } from '../../hooks/useQueries'
 
-// Persistencia del plegado (igual que antes): guardamos el CONJUNTO de identidades
-// de los avisos presentes cuando el usuario colapsó la tira. La auto-expansión solo
-// se dispara si aparece una identidad que NO estaba (aviso realmente nuevo).
-const LS_KEY = 'alertcenter_collapsed_ids_v4'
-const EXPANDED_KEY = 'alertcenter_expanded_v2'
+// Persistencia del plegado: guardamos el CONJUNTO de identidades de los avisos
+// presentes cuando el usuario colapsó la tira. La auto-expansión solo se dispara
+// si aparece una identidad que NO estaba (aviso realmente nuevo).
+const LS_KEY = 'alertcenter_collapsed_ids_v5'
+const EXPANDED_KEY = 'alertcenter_expanded_v3'
+
+type Sev = 'critical' | 'blocked' | 'warning' | 'defensive' | 'ok'
 
 interface ChannelRestriction {
   channel_id: number
   slug: string
   name: string
+  verdict: { severity: Sev; label: string; detail: string }
+  studio_scan: {
+    status?: string
+    channel?: string
+    findings?: string[]
+    scanned_at?: string | null
+  } | null
   internal: {
     blocked: boolean
     blocked_until: number | null
@@ -95,14 +104,16 @@ const VIS_LABEL: Record<string, { text: string; cls: string }> = {
   unavailable: { text: 'No disponible', cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
 }
 
-// Estado "primario" por canal: el de mayor severidad que aplica.
-function primaryState(c: ChannelRestriction): { label: string; tone: 'yt' | 'block' | 'freq' | 'phase' } {
-  if (c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0) return { label: 'Restricción en YouTube', tone: 'yt' }
-  if (c.internal.blocked) return { label: 'Bloqueo interno (Autotube)', tone: 'block' }
-  if (c.internal.freq_reduced) return { label: 'Frecuencia reducida', tone: 'freq' }
-  if (c.internal.phase > 0) return { label: `Reanudación (${c.internal.phase_label || 'Fase'})`, tone: 'phase' }
-  return { label: 'OK', tone: 'phase' }
+// Paleta por severidad del veredicto único.
+const SEV: Record<Sev, { chip: string; card: string }> = {
+  critical: { chip: 'bg-red-500/20 text-red-200 border-red-500/40', card: 'border-red-500/40' },
+  blocked: { chip: 'bg-red-500/15 text-red-300 border-red-500/30', card: 'border-red-500/30' },
+  warning: { chip: 'bg-amber-500/15 text-amber-300 border-amber-500/30', card: 'border-amber-500/30' },
+  defensive: { chip: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30', card: 'border-cyan-500/30' },
+  ok: { chip: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', card: 'border-emerald-500/30' },
 }
+
+const ACTIONABLE: Sev[] = ['critical', 'blocked', 'warning']
 
 export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [expanded, setExpanded] = useState<boolean>(() => localStorage.getItem(EXPANDED_KEY) !== '0')
@@ -123,16 +134,16 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     [restrictions],
   )
 
-  // Canales que requieren atención (protección interna o restricción YouTube).
-  const attentionChannels = useMemo(
-    () => channels.filter(c => c.internal.blocked || c.internal.freq_reduced || c.internal.phase > 0
-      || c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0),
+  // Solo los canales con un problema REAL (crítico/bloqueo/advertencia) son alerta.
+  const actionable = useMemo(
+    () => channels.filter(c => ACTIONABLE.includes(c?.verdict?.severity)),
     [channels],
   )
-  const ytRestricted = useMemo(() => channels.filter(c => c.youtube.age_restricted.length > 0 || c.youtube.removed.length > 0), [channels])
-  const blocked = useMemo(() => channels.filter(c => c.internal.blocked), [channels])
-  const freqReduced = useMemo(() => channels.filter(c => c.internal.freq_reduced), [channels])
-  const resuming = useMemo(() => channels.filter(c => c.internal.phase > 0), [channels])
+  // Canales en modo defensivo de política (informativos, NO alerta).
+  const defensive = useMemo(
+    () => channels.filter(c => c?.verdict?.severity === 'defensive'),
+    [channels],
+  )
 
   const quotaProjects: QuotaProject[] = useMemo(() => {
     const list: QuotaProject[] = Array.isArray((quotaStatus as any)?.projects)
@@ -165,16 +176,16 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     return () => clearInterval(iv)
   }, [])
 
-  const totalAvisos = attentionChannels.length + quotaProjects.length + sessionWarnings.length
+  const totalAvisos = actionable.length + quotaProjects.length + sessionWarnings.length
 
-  // Identidades de los avisos actuales (para auto-expansión).
+  // Identidades de los avisos actuales (para auto-expansión solo ante algo nuevo).
   const currentIds = useMemo(() => {
     const ids = new Set<string>()
-    for (const c of attentionChannels) ids.add(`ch:${c.channel_id}:${c.internal.blocked ? 1 : 0}:${c.internal.freq_reduced ? 1 : 0}:${c.internal.phase}:${c.youtube.age_restricted.length}:${c.youtube.removed.length}`)
+    for (const c of actionable) ids.add(`ch:${c.channel_id}:${c.verdict.severity}`)
     for (const p of quotaProjects) ids.add(`quota:${p.project_id || 'x'}:${p.account || 'x'}`)
     for (const s of sessionWarnings) ids.add(`session:${s.account}`)
     return [...ids].sort()
-  }, [attentionChannels, quotaProjects, sessionWarnings])
+  }, [actionable, quotaProjects, sessionWarnings])
 
   useEffect(() => {
     if (collapsedIds.size === 0) return
@@ -232,13 +243,16 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     setBusy(null)
   }
 
+  // Si no hay ningún problema real, la barra no debe ocupar espacio.
   if (totalAvisos === 0) return null
 
-  const barTone = ytRestricted.length > 0
+  const sevRank: Sev[] = ['critical', 'blocked', 'warning', 'defensive', 'ok']
+  const maxSev = (actionable[0]?.verdict?.severity || 'defensive')
+  const barTone = maxSev === 'critical' || maxSev === 'blocked'
     ? 'from-red-500/15 via-red-500/5 to-transparent border-red-500/25'
-    : blocked.length > 0
-      ? 'from-red-500/15 via-red-500/5 to-transparent border-red-500/25'
-      : 'from-amber-500/15 via-amber-500/5 to-transparent border-amber-500/25'
+    : maxSev === 'warning'
+      ? 'from-amber-500/15 via-amber-500/5 to-transparent border-amber-500/25'
+      : 'from-sky-500/15 via-sky-500/5 to-transparent border-sky-500/25'
 
   return (
     <div className={`flex-shrink-0 border-b bg-gradient-to-r ${barTone} animate-fade-in`}>
@@ -248,30 +262,24 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
         className="w-full flex items-center gap-2.5 px-4 py-1.5 text-xs hover:bg-white/[0.03] transition-colors text-left"
         aria-expanded={expanded}
       >
-        <ShieldAlert size={15} className={blocked.length > 0 || ytRestricted.length > 0 ? 'text-neon-red flex-shrink-0' : 'text-amber-400 flex-shrink-0'} />
+        <ShieldAlert size={15} className={`${maxSev === 'critical' || maxSev === 'blocked' ? 'text-neon-red' : 'text-amber-400'} flex-shrink-0`} />
         <span className="font-semibold text-gray-200 whitespace-nowrap">
-          {totalAvisos} aviso{totalAvisos !== 1 ? 's' : ''} de restricción
+          {totalAvisos} aviso{totalAvisos !== 1 ? 's' : ''} de estado
         </span>
 
+        {/* Un chip por canal con su veredicto único */}
         <span className="flex items-center gap-1.5 flex-wrap min-w-0">
-          {ytRestricted.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/40 font-medium whitespace-nowrap">
-              {ytRestricted.length} restricción en YT
-            </span>
-          )}
-          {blocked.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30 font-medium whitespace-nowrap">
-              {blocked.length} bloqueo interno
-            </span>
-          )}
-          {freqReduced.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-medium whitespace-nowrap">
-              {freqReduced.length} frecuencia reducida
-            </span>
-          )}
-          {resuming.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-medium whitespace-nowrap">
-              {resuming.length} en reanudación
+          {actionable.map(c => {
+            const sev = SEV[c.verdict.severity] || SEV.warning
+            return (
+              <span key={c.channel_id} className={`px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${sev.chip}`}>
+                {c.name || c.slug} · {c.verdict.label}
+              </span>
+            )
+          })}
+          {defensive.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 font-medium whitespace-nowrap">
+              {defensive.length} en modo defensivo
             </span>
           )}
           {quotaProjects.length > 0 && (
@@ -308,54 +316,39 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
       {expanded && (
         <div className="px-4 pb-3 pt-1 space-y-3 max-h-[60vh] overflow-y-auto animate-fade-in">
 
-          {/* 1. Restricciones reales de YouTube */}
-          {ytRestricted.length > 0 && (
-            <div className="rounded-lg border border-red-500/30 px-3 py-2 bg-dark-800/60">
+          {/* 1. Alertas activas (canales con problema real) */}
+          {actionable.length > 0 && (
+            <div className="rounded-lg border border-red-500/25 px-3 py-2 bg-dark-800/60">
               <div className="flex items-center gap-2 flex-wrap">
-                <Ban size={14} className="text-red-400 flex-shrink-0" />
-                <span className="font-semibold text-sm text-red-200">Restricciones reales en YouTube</span>
-                <span className="text-[10px] text-gray-500">evidencia externa (yt-dlp / Studio)</span>
+                <ShieldAlert size={14} className="text-red-400 flex-shrink-0" />
+                <span className="font-semibold text-sm text-red-200">Alertas activas</span>
+                <span className="text-[10px] text-gray-500">{actionable.length} canal(es) requieren atención</span>
               </div>
-              {ytRestricted.map(c => {
-                const age = c.youtube.age_restricted
-                const rem = c.youtube.removed
-                return (
-                  <div key={c.channel_id} className="mt-2 text-xs">
-                    <span className="font-semibold text-red-300">{c.name || c.slug}</span>
-                    {age.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1.5">
-                        {age.map(s => (
-                          <span key={s.youtube_id} className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30">
-                            Restricción de edad · {s.title}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {rem.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1.5">
-                        {rem.map(s => (
-                          <span key={s.youtube_id} className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-200 border border-red-500/40">
-                            Eliminado · {s.title}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
+
+              <div className="mt-2 space-y-2">
+                {actionable.map(c => (
+                  <ChannelCard
+                    key={c.channel_id}
+                    c={c}
+                    onOpenReport={onOpenReport}
+                    busy={busy === c.channel_id}
+                    onRestore={() => handleRestore(c)}
+                    onUnblock={() => handleUnblock(c)}
+                    onStudioScan={() => handleStudioScan(c)}
+                  />
+                ))}
+              </div>
             </div>
           )}
 
-          {/* 2. Protección interna de Autotube (bloqueo / frecuencia / fases) */}
-          {attentionChannels.length > 0 && (
-            <div className="rounded-lg border border-amber-500/25 px-3 py-2 bg-dark-800/60">
+          {/* 2. Modo defensivo (política, informativo, no es alerta) */}
+          {defensive.length > 0 && (
+            <div className="rounded-lg border border-cyan-500/20 px-3 py-2 bg-dark-800/50">
               <div className="flex items-center gap-2 flex-wrap">
-                <Shield size={14} className="text-amber-300 flex-shrink-0" />
-                <span className="font-semibold text-sm text-amber-200">Protección interna de Autotube</span>
-                <span className="text-[10px] text-gray-500">
-                  {blocked.length} bloqueo · {freqReduced.length} frecuencia reducida · {resuming.length} en reanudación
-                </span>
-                {resuming.length > 0 && (
+                <Shield size={14} className="text-cyan-300 flex-shrink-0" />
+                <span className="font-semibold text-sm text-cyan-200">Modo defensivo (política vigente)</span>
+                <span className="text-[10px] text-gray-500">no es una sanción real; es la cadencia anti-spam actual</span>
+                {defensive.some(c => c.internal.freq_reduced) && (
                   <button
                     onClick={handleApplyAll}
                     disabled={applyingAll}
@@ -367,119 +360,22 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
                 )}
               </div>
 
-              <div className="mt-2 space-y-2">
-                {attentionChannels.map(c => {
-                  const st = primaryState(c)
-                  const tone = st.tone
-                  const border = tone === 'yt' ? 'border-red-500/40' : tone === 'block' ? 'border-red-500/30' : tone === 'freq' ? 'border-amber-500/30' : 'border-cyan-500/30'
+              <div className="mt-2 space-y-1.5">
+                {defensive.map(c => {
+                  const sev = SEV[c.verdict.severity]
                   return (
-                    <div key={c.channel_id} className={`rounded-md border ${border} px-3 py-2 bg-dark-900/40`}>
+                    <div key={c.channel_id} className={`rounded-md border ${sev.card} px-3 py-1.5 bg-dark-900/30`}>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-sm text-gray-100">{c.name || c.slug}</span>
                         <code className="text-[10px] text-gray-500 bg-dark-700 px-1 py-0.5 rounded">{c.slug}</code>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
-                          tone === 'yt' ? 'bg-red-500/20 text-red-200 border-red-500/40'
-                          : tone === 'block' ? 'bg-neon-red/20 text-neon-red border-neon-red/40'
-                          : tone === 'freq' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                          : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
-                        }`}>
-                          {st.label}
-                        </span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${sev.chip}`}>{c.verdict.label}</span>
                         {c.internal.strikes > 0 && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-300 border border-red-500/30">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/10 text-red-300 border border-red-500/20">
                             {c.internal.strikes} strike{c.internal.strikes > 1 ? 's' : ''}
                           </span>
                         )}
                       </div>
-
-                      {/* Impacto en lenguaje humano */}
-                      <div className="mt-1.5 text-xs text-gray-300">
-                        {c.internal.blocked ? (
-                          <span className="flex items-center gap-1.5">
-                            <Clock size={12} className="text-red-300" />
-                            No publicará contenido hasta <b>{fmtDate(c.internal.blocked_until)}</b> (~{fmtRestan(c.internal.restan_h)}).
-                            Es una protección interna de Autotube, no una sanción confirmada por YouTube.
-                          </span>
-                        ) : c.internal.freq_reduced ? (
-                          <span className="flex items-center gap-1.5 text-amber-200">
-                            <AlertTriangle size={12} />
-                            Frecuencia de publicación reducida respecto a la original, pendiente de restaurar manualmente cuando verifiques en Studio que la penalización cesó.
-                          </span>
-                        ) : c.internal.phase > 0 ? (
-                          <span className="flex items-center gap-1.5 text-cyan-200">
-                            <TrendingUp size={12} />
-                            En reanudación gradual ({c.internal.phase_label}).{c.internal.phase_days_remaining != null ? ` Quedan ${c.internal.phase_days_remaining} día(s) de esta fase.` : ''}
-                          </span>
-                        ) : null}
-                        {c.internal.why && <div className="mt-0.5 text-gray-500">⚠️ {c.internal.why}</div>}
-                      </div>
-
-                      {/* Discrepancias BD vs YouTube */}
-                      {c.youtube.discrepancies.length > 0 && (
-                        <div className="mt-1.5 text-[11px] text-gray-400 flex flex-wrap gap-1.5">
-                          <span className="font-medium text-amber-300/80">Discrepancias BD↔YouTube:</span>
-                          {c.youtube.discrepancies.map((d, i) => (
-                            <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
-                              {d.type === 'bd_published_yt_removed' ? '⚠ BD dice publicado pero está ELIMINADO' : 'BD dice publicado pero YouTube lo tiene programado/privado'}
-                              {d.publish_at ? ` · ${fmtDate(d.publish_at)}` : ''}
-                              {' '}· {d.title}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Estado real de los shorts recientes */}
-                      {c.youtube.shorts.length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1 text-[10px]">
-                          {c.youtube.shorts.slice(0, 8).map(s => {
-                            const vl = VIS_LABEL[s.visibility] || { text: s.visibility || '?', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30' }
-                            return (
-                              <span key={s.youtube_id} className={`px-1 py-0.5 rounded border ${vl.cls}`} title={s.title}>
-                                {vl.text}
-                              </span>
-                            )
-                          })}
-                          {c.youtube.checked_at && (
-                            <span className="text-gray-500 px-1">verific. {fmtDate(c.youtube.checked_at)}</span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Acciones */}
-                      <div className="mt-2 flex items-center gap-2 flex-wrap">
-                        <button
-                          onClick={() => onOpenReport(c)}
-                          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 text-red-200 border border-red-500/30 rounded-md hover:bg-red-500 hover:text-white transition-all"
-                        >
-                          <FileText size={12} /> Informe
-                        </button>
-                        <button
-                          onClick={() => handleStudioScan(c)}
-                          disabled={busy === c.channel_id}
-                          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
-                        >
-                          <Radio size={12} /> Escanear Studio
-                        </button>
-                        {c.internal.freq_reduced && (
-                          <button
-                            onClick={() => handleRestore(c)}
-                            disabled={busy === c.channel_id}
-                            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-amber-500/15 text-amber-200 border border-amber-500/30 rounded-md hover:bg-amber-500 hover:text-dark-900 transition-all disabled:opacity-50"
-                          >
-                            {busy === c.channel_id ? <RefreshCw size={12} className="animate-spin" /> : <Wrench size={12} />}
-                            Restaurar frecuencia
-                          </button>
-                        )}
-                        {c.internal.blocked && (
-                          <button
-                            onClick={() => handleUnblock(c)}
-                            disabled={busy === c.channel_id}
-                            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
-                          >
-                            Desbloquear (verificado)
-                          </button>
-                        )}
-                      </div>
+                      <div className="mt-0.5 text-xs text-gray-400">{c.verdict.detail}</div>
                     </div>
                   )
                 })}
@@ -497,9 +393,7 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
               <div className="mt-2 space-y-1.5">
                 {quotaProjects.map(p => {
                   const label = p.account || p.project_id || 'cuenta'
-                  const pReset = p.reset_at_utc
-                    ? (formatTime(p.reset_at_utc) || '—')
-                    : null
+                  const pReset = p.reset_at_utc ? (formatTime(p.reset_at_utc) || '—') : null
                   return (
                     <div key={p.project_id || label} className="flex items-center gap-2 flex-wrap text-xs">
                       <AlertTriangle size={12} className="text-blue-300" />
@@ -534,7 +428,7 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
             </div>
           )}
 
-          {/* Leyenda */}
+          {/* Leyenda (visibilidad de shorts, dentro del detalle) */}
           <div className="text-[10px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1 px-1">
             <span className="flex items-center gap-1"><CheckCircle2 size={11} className="text-emerald-400" /> Público</span>
             <span className="flex items-center gap-1"><Clock size={11} className="text-sky-300" /> Programado</span>
@@ -543,6 +437,148 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Tarjeta de un canal con problema real: un veredicto + detalle colapsable ──
+interface ChannelCardProps {
+  c: ChannelRestriction
+  busy: boolean
+  onOpenReport: (channel: any) => void
+  onRestore: () => void
+  onUnblock: () => void
+  onStudioScan: () => void
+}
+
+function ChannelCard({ c, busy, onOpenReport, onRestore, onUnblock, onStudioScan }: ChannelCardProps) {
+  const sev = SEV[c.verdict.severity] || SEV.warning
+  const findings = c.studio_scan?.findings || []
+  const lastScan = c.studio_scan?.scanned_at
+
+  return (
+    <div className={`rounded-md border ${sev.card} px-3 py-2 bg-dark-900/40`}>
+      {/* Cabecera: canal + UN veredicto */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-semibold text-sm text-gray-100">{c.name || c.slug}</span>
+        <code className="text-[10px] text-gray-500 bg-dark-700 px-1 py-0.5 rounded">{c.slug}</code>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${sev.chip}`}>{c.verdict.label}</span>
+        {c.internal.strikes > 0 && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-300 border border-red-500/30">
+            {c.internal.strikes} strike{c.internal.strikes > 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+
+      {/* Una línea de resumen del estado real */}
+      <div className="mt-1.5 text-xs text-gray-300">{c.verdict.detail}</div>
+
+      {/* Detalle interno colapsable (oculto por defecto) */}
+      <details className="mt-1.5">
+        <summary className="cursor-pointer text-[11px] text-gray-400 hover:text-gray-200 select-none">
+          Detalle interno
+        </summary>
+        <div className="mt-1.5 space-y-1.5 text-[11px] text-gray-400">
+          {c.internal.blocked && (
+            <div className="flex items-center gap-1.5">
+              <Clock size={12} className="text-red-300" />
+              Bloqueo interno hasta {fmtDate(c.internal.blocked_until)} (~{fmtRestan(c.internal.restan_h)})
+            </div>
+          )}
+          {c.internal.freq_reduced && (
+            <div className="flex items-center gap-1.5 text-amber-200">
+              <AlertTriangle size={12} />
+              Frecuencia de publicación rebajada (restaurar cuando verifiques en Studio que la penalización cesó).
+            </div>
+          )}
+          {c.internal.phase > 0 && (
+            <div className="flex items-center gap-1.5 text-cyan-200">
+              <TrendingUp size={12} />
+              Reanudación gradual: {c.internal.phase_label}
+              {c.internal.phase_days_remaining != null ? ` · quedan ${c.internal.phase_days_remaining} día(s)` : ''}
+            </div>
+          )}
+          {c.internal.why && <div className="text-gray-500">⚠️ {c.internal.why}</div>}
+
+          {/* Hallazgos reales de Studio */}
+          {findings.length > 0 && (
+            <div>
+              <span className="font-medium text-amber-300/80">Hallazgos de Studio{lastScan ? ` (${fmtDate(lastScan)})` : ''}:</span>
+              <ul className="mt-1 space-y-0.5">
+                {findings.map((f, i) => (
+                  <li key={i} className="bg-dark-700/50 px-1.5 py-0.5 rounded text-gray-300">{f}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Discrepancias BD vs YouTube */}
+          {c.youtube.discrepancies.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              <span className="font-medium text-amber-300/80">Discrepancias BD↔YouTube:</span>
+              {c.youtube.discrepancies.map((d, i) => (
+                <span key={i} className="bg-dark-700 px-1.5 py-0.5 rounded text-gray-300">
+                  {d.type === 'bd_published_yt_removed' ? '⚠ BD dice publicado pero está ELIMINADO' : 'BD dice publicado pero YouTube lo tiene programado/privado'}
+                  {d.publish_at ? ` · ${fmtDate(d.publish_at)}` : ''} · {d.title}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Estado real de los shorts recientes */}
+          {c.youtube.shorts.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {c.youtube.shorts.slice(0, 8).map(s => {
+                const vl = VIS_LABEL[s.visibility] || { text: s.visibility || '?', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30' }
+                return (
+                  <span key={s.youtube_id} className={`px-1 py-0.5 rounded border ${vl.cls}`} title={s.title}>
+                    {vl.text}
+                  </span>
+                )
+              })}
+              {c.youtube.checked_at && (
+                <span className="text-gray-500 px-1">verific. {fmtDate(c.youtube.checked_at)}</span>
+              )}
+            </div>
+          )}
+        </div>
+      </details>
+
+      {/* Acciones contextuales */}
+      <div className="mt-2 flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => onOpenReport(c)}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 text-red-200 border border-red-500/30 rounded-md hover:bg-red-500 hover:text-white transition-all"
+        >
+          <FileText size={12} /> Informe
+        </button>
+        <button
+          onClick={onStudioScan}
+          disabled={busy}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
+        >
+          <Radio size={12} /> Escanear Studio
+        </button>
+        {c.internal.freq_reduced && (
+          <button
+            onClick={onRestore}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-amber-500/15 text-amber-200 border border-amber-500/30 rounded-md hover:bg-amber-500 hover:text-dark-900 transition-all disabled:opacity-50"
+          >
+            {busy ? <RefreshCw size={12} className="animate-spin" /> : <Wrench size={12} />}
+            Restaurar frecuencia
+          </button>
+        )}
+        {c.internal.blocked && (
+          <button
+            onClick={onUnblock}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-dark-600 text-gray-300 border border-surface-border rounded-md hover:bg-dark-500 transition-all disabled:opacity-50"
+          >
+            Desbloquear (verificado)
+          </button>
+        )}
+      </div>
     </div>
   )
 }
