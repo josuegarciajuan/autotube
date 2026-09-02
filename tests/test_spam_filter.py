@@ -29,6 +29,7 @@ def test_title_similar_guard_never_flags_itself(monkeypatch):
     """Regression: a long-form video must NOT flag itself (title already saved
     in `videos` when the check runs). `exclude_longform_id` skips it."""
     from api.services import shorts_scheduler as ss
+    from api.services.channel_enforcement import record_confirmed_strike
 
     own_title = "Masacre de Pascommuck: la familia que escapó del INFIERNO (REAL)"
 
@@ -97,6 +98,7 @@ def _minimal_db(tmp_path, name):
 
 def test_spam_strike_blocks_channel(tmp_path):
     from api.services import shorts_scheduler as ss
+    from api.services.channel_enforcement import record_confirmed_strike
 
     db_path, db = _minimal_db(tmp_path, "spam_test.db")
     with db._connect() as conn:
@@ -109,13 +111,17 @@ def test_spam_strike_blocks_channel(tmp_path):
     assert ss._channel_shorts_spam_blocked(77, db=db) is False
 
     # First event → blocked 12h total
-    n = ss._record_short_spam_strike(77, "testchan", db=db)
-    assert n == 1
+    result = record_confirmed_strike(
+        db, channel_id=77, source="operator", evidence={"case": "test-1"}
+    )
+    assert result["strike_count"] == 1
     assert ss._channel_shorts_spam_blocked(77, db=db) is True
 
     # Second event → escalated to 24h total
-    n2 = ss._record_short_spam_strike(77, "testchan", db=db)
-    assert n2 == 2
+    result2 = record_confirmed_strike(
+        db, channel_id=77, source="operator", evidence={"case": "test-2"}
+    )
+    assert result2["strike_count"] == 2
     raw = db.get_system_state("shorts_spam_blocked_until_77")
     remaining = float(raw) - time.time()
     assert 23.9 * 3600 < remaining <= 24 * 3600 + 2
@@ -131,7 +137,10 @@ def test_spam_strike_survives_restart(tmp_path):
             "INSERT INTO channels (id, slug, name, active) VALUES (78, 'testchan2', 'Test2', 1)"
         )
         conn.commit()
-    ss._record_short_spam_strike(78, "testchan2", db=db1)
+    from api.services.channel_enforcement import record_confirmed_strike
+    record_confirmed_strike(
+        db1, channel_id=78, source="operator", evidence={"case": "test"}
+    )
 
     # Simulate API restart: new DB handle
     from database.db_extended import ExtendedDatabase

@@ -1329,10 +1329,10 @@ class YouTubeUploader:
             _ch = _db.get_channel_by_slug(self.channel_slug)
             if not _ch:
                 return
-            from api.services.shorts_scheduler import _record_short_spam_strike
-            _record_short_spam_strike(
-                int(_ch["id"]), self.channel_slug, db=_db,
-                video_id=video_id, reason=reason,
+            from api.services.channel_enforcement import record_watch_page_observation
+            record_watch_page_observation(
+                _db, channel_id=int(_ch["id"]), video_id=video_id or "",
+                visibility="removed", confirmations=2, source="watch_page",
             )
         except Exception as _e:
             logger.warning("[%s] spam-strike record failed: %s", self.channel_slug, _e)

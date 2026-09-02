@@ -34,7 +34,10 @@ def test_new_strikes_use_total_duration_without_legacy_buffer(tmp_path):
     from database.db_extended import ExtendedDatabase
     db = ExtendedDatabase(str(db_path))
 
-    ss._record_short_spam_strike(5, "canal4", db=db)
+    from api.services.channel_enforcement import record_confirmed_strike
+    record_confirmed_strike(
+        db, channel_id=5, source="operator", evidence={"case": "test"}
+    )
     remaining = float(db.get_system_state("shorts_spam_blocked_until_5")) - time.time()
     assert 11.9 * 3600 < remaining <= 12 * 3600 + 2
 

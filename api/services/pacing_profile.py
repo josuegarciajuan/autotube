@@ -235,10 +235,12 @@ def get_pacing_summary(db=None) -> dict:
             }
             try:
                 from api.services.channel_policy import resolve_channel_policy
-                item.update({k: resolve_channel_policy(ch["id"], db=db).get(k)
+                resolved = resolve_channel_policy(ch["id"], db=db)
+                item.update({k: resolved.get(k)
                              for k in ("delivery_state", "manual_override", "longform_publish_cap",
                                        "public_longform_per_day", "native_shorts_per_day",
                                        "public_shorts_per_day", "generation_per_day", "upload_capacity_per_day")})
+                item["enforcement"] = resolved.get("enforcement")
             except Exception:
                 pass
             channels.append(item)
@@ -410,6 +412,25 @@ def auto_transition_profile(db=None) -> dict:
     """
     if db is None:
         db = _get_db()
+    # v52: production databases transition delivery state per channel.  Keep
+    # the legacy global branch below for pre-v51 adapters and test fixtures.
+    try:
+        with db._connect() as conn:
+            has_channel_state = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_delivery_state'"
+            ).fetchone()
+        if has_channel_state:
+            from api.services.channel_enforcement import auto_transition_channels
+            report = auto_transition_channels(db)
+            changed = [v for v in report["channels"].values() if v["from"] != v["to"]]
+            return {
+                "transitioned": bool(changed), "scope": "per_channel",
+                "channels": report["channels"],
+                "from": changed[0]["from"] if len(changed) == 1 else None,
+                "to": changed[0]["to"] if len(changed) == 1 else None,
+            }
+    except Exception:
+        pass
     if not auto_transition_enabled(db):
         return {"transitioned": False, "from": get_active_profile_name(db),
                 "to": get_active_profile_name(db), "clean_days": clean_days_since_strike(db),

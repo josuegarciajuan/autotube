@@ -1382,6 +1382,9 @@ def migrate_v2(db_path: str = None):
     # ── v51: delivery-state and atomic scheduling claims ──
     _migrate_v51(conn, logger)
 
+    # ── v52: explicit, channel-scoped enforcement evidence ──
+    _migrate_v52(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3370,6 +3373,44 @@ def _migrate_v51(conn, logger):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_upload_claim ON videos(status, upload_claimed_at)")
     conn.commit()
     logger.info("Migration v51: delivery claims ensured")
+
+
+def _migrate_v52(conn, logger):
+    """Persist enforcement evidence without rewriting historical audit rows.
+
+    Old alerts are deliberately imported as ``inferred`` and non-enforcing:
+    they remain visible, but cannot retroactively change a channel's pacing.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS channel_enforcement_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+        classification TEXT NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        source TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        enforced INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_enforcement_events_channel_time
+        ON channel_enforcement_events(channel_id, occurred_at)""")
+    # Compatibility import is idempotent and never deletes or updates alerts.
+    conn.execute("""INSERT INTO channel_enforcement_events
+        (channel_id, classification, evidence_json, source, scope, occurred_at, enforced)
+        SELECT channel_id, 'inferred',
+               COALESCE(metadata_json, '{}'), 'legacy_pipeline_alerts',
+               'channel_id:' || channel_id, created_at, 0
+          FROM pipeline_alerts p
+         WHERE channel_id IS NOT NULL
+           AND alert_type IN ('spam_strike', 'silent_removal')
+           AND NOT EXISTS (
+               SELECT 1 FROM channel_enforcement_events e
+                WHERE e.source='legacy_pipeline_alerts'
+                  AND e.channel_id=p.channel_id
+                  AND e.occurred_at=p.created_at
+           )""")
+    conn.commit()
+    logger.info("Migration v52: explicit channel enforcement evidence ensured")
 
 
 def _migrate_v10(conn, logger):

@@ -71,6 +71,20 @@ def get_channel_delivery(channel_id: int):
     return resolve_channel_policy(channel_id, db=db)
 
 
+@router.get("/enforcement")
+def get_enforcement():
+    """Return enforcement evidence and scope for every channel."""
+    db = get_db()
+    from api.services.channel_enforcement import get_channel_enforcement
+    return {
+        "scope": "per_channel",
+        "channels": {
+            str(ch["id"]): get_channel_enforcement(db, int(ch["id"]))
+            for ch in (db.get_channels(active_only=False) or [])
+        },
+    }
+
+
 @router.put("/channels/{channel_id}")
 def set_channel_delivery(channel_id: int, body: ChannelDeliveryUpdate):
     db = get_db()

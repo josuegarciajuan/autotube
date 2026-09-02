@@ -14,6 +14,7 @@ import {
   TrendingUp,
   Ban,
   Radio,
+  HelpCircle,
 } from 'lucide-react'
 import { api, parseApiDate, formatApiDate, formatTime } from '../../lib/api'
 import { useQuotaStatus, useChannelRestrictions } from '../../hooks/useQueries'
@@ -77,6 +78,101 @@ interface AlertCenterProps {
   onOpenReport: (channel: any) => void
 }
 
+interface EnforcementAlert {
+  id: number
+  alert_type: string
+  severity: string
+  title: string
+  message: string
+  created_at: string
+  channel_id: number | null
+  entity_title?: string | null
+  metadata?: Record<string, unknown> | string | null
+  acknowledged?: boolean
+  resolved?: boolean
+}
+
+type SignalKind = 'removal' | 'strike' | 'internal' | 'global'
+
+interface Signal {
+  id: string
+  kind: SignalKind
+  label: string
+  title: string
+  channel: string
+  video?: string
+  source: string
+  confidence: string
+  timestamp: string
+  scope: string
+  status: string
+  effect: string
+}
+
+function readMetadata(value: EnforcementAlert['metadata']): Record<string, unknown> {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+function asText(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback
+}
+
+function signalFromAlert(alert: EnforcementAlert, channelNames: Map<number, string>): Signal {
+  const metadata = readMetadata(alert.metadata)
+  const evidence = readMetadata(metadata.evidence as EnforcementAlert['metadata'])
+  const classification = asText(metadata.classification, '')
+  const isStrike = alert.alert_type === 'spam_strike' || classification === 'confirmed_strike'
+  const isRemoval = alert.alert_type === 'silent_removal' || alert.alert_type === 'channel_delivery_unavailable'
+  const kind: SignalKind = isStrike ? 'strike' : isRemoval ? 'removal' : 'internal'
+  const channel = alert.channel_id ? (channelNames.get(alert.channel_id) || `Canal ${alert.channel_id}`) : 'Todos los canales'
+  const source = asText(metadata.source, isRemoval ? 'Reconciliador / YouTube' : kind === 'strike' ? 'Enforcement' : 'Autotube')
+  const confidence = asText(metadata.confidence || evidence.confidence, kind === 'removal' ? 'No confirmada' : 'Explícita')
+  const scope = asText(metadata.scope, alert.channel_id ? `Canal ${channel}` : 'Global')
+  const status = alert.resolved ? 'Resuelto' : alert.acknowledged ? 'Reconocido' : 'Activo'
+  return {
+    id: `alert:${alert.id}`,
+    kind,
+    label: kind === 'strike' ? 'Strike confirmado' : kind === 'removal' ? 'Retirada no confirmada' : 'Enforcement interno',
+    title: alert.entity_title || alert.title,
+    channel,
+    video: alert.entity_title || asText(metadata.video_title, ''),
+    source,
+    confidence,
+    timestamp: alert.created_at,
+    scope,
+    status,
+    effect: kind === 'strike'
+      ? 'Cadencia del canal bloqueada o reducida'
+      : kind === 'removal'
+        ? 'Revisar evidencia; no cambia el estado a strike'
+        : asText(metadata.effect, alert.message || 'Protección local aplicada'),
+  }
+}
+
+function signalFromRemoval(channel: ChannelRestriction): Signal | null {
+  const item = channel.youtube.removed[0]
+  if (!item) return null
+  return {
+    id: `removal:${channel.channel_id}:${item.youtube_id}`,
+    kind: 'removal',
+    label: 'Retirada no confirmada',
+    title: item.title || 'Vídeo sin disponibilidad',
+    channel: channel.name || channel.slug,
+    video: item.title || undefined,
+    source: 'Reconciliador / YouTube',
+    confidence: 'No confirmada',
+    timestamp: channel.youtube.checked_at || '',
+    scope: `Canal ${channel.name || channel.slug}`,
+    status: 'Requiere revisión',
+    effect: 'No se etiqueta como strike; revisar en YouTube Studio',
+  }
+}
+
 function fmtRestan(restan_h: number): string {
   if (restan_h <= 0) return 'expirado'
   if (restan_h >= 24) {
@@ -128,6 +224,7 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [busy, setBusy] = useState<number | null>(null)
   const [applyingAll, setApplyingAll] = useState(false)
   const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
+  const [monitorAlerts, setMonitorAlerts] = useState<EnforcementAlert[]>([])
   const { data: restrictions } = useChannelRestrictions()
   const { data: quotaStatus } = useQuotaStatus()
 
@@ -146,6 +243,43 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     () => channels.filter(c => c?.verdict?.severity === 'defensive'),
     [channels],
   )
+
+  const channelNames = useMemo(
+    () => new Map(channels.map(c => [c.channel_id, c.name || c.slug])),
+    [channels],
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    api.getMonitorAlerts('active', undefined, undefined, undefined, 100)
+      .then(data => { if (!cancelled) setMonitorAlerts((data.alerts || []) as EnforcementAlert[]) })
+      .catch(() => { if (!cancelled) setMonitorAlerts([]) })
+    return () => { cancelled = true }
+  }, [restrictions?.generated_at])
+
+  const signals = useMemo(() => {
+    const fromAlerts = monitorAlerts.map(a => signalFromAlert(a, channelNames))
+    const observedRemovals = channels
+      .map(signalFromRemoval)
+      .filter((signal): signal is Signal => signal !== null)
+    const internalSignals = channels
+      .filter(c => c.internal.blocked || c.internal.freq_reduced || c.delivery_state !== 'normal')
+      .map(c => ({
+        id: `internal:${c.channel_id}`,
+        kind: 'internal' as const,
+        label: 'Enforcement interno',
+        title: c.verdict.label,
+        channel: c.name || c.slug,
+        source: 'Política de Autotube',
+        confidence: 'Determinista',
+        timestamp: restrictions?.generated_at || '',
+        scope: `Canal ${c.name || c.slug}`,
+        status: c.internal.blocked ? 'Activo' : 'Vigente',
+        effect: c.verdict.detail,
+      }))
+    const merged = [...fromAlerts, ...observedRemovals, ...internalSignals]
+    return merged.filter((signal, index, all) => all.findIndex(item => item.id === signal.id) === index)
+  }, [monitorAlerts, channelNames, channels, restrictions?.generated_at])
 
   const quotaProjects: QuotaProject[] = useMemo(() => {
     const list: QuotaProject[] = Array.isArray((quotaStatus as any)?.projects)
@@ -178,7 +312,37 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     return () => clearInterval(iv)
   }, [])
 
-  const totalAvisos = actionable.length + quotaProjects.length + sessionWarnings.length
+  const globalSignals = useMemo<Signal[]>(() => [
+    ...quotaProjects.map(p => ({
+      id: `quota:${p.project_id || p.account || 'global'}`,
+      kind: 'global' as const,
+      label: 'Riesgo global',
+      title: 'Cuota YouTube API agotada',
+      channel: p.channels.length ? p.channels.join(', ') : 'Todos los canales',
+      source: 'Cuota del proyecto GCP',
+      confidence: 'Confirmada por API',
+      timestamp: p.exhausted_at || '',
+      scope: p.project_id || 'Proyecto compartido',
+      status: 'Activo',
+      effect: p.reset_at_utc ? `Operaciones API limitadas hasta ${fmtDate(p.reset_at_utc)}` : 'Operaciones API limitadas',
+    })),
+    ...sessionWarnings.map(w => ({
+      id: `session:${w.account}`,
+      kind: 'global' as const,
+      label: 'Riesgo global',
+      title: 'Sesión de navegador caducada',
+      channel: w.channels.length ? w.channels.join(', ') : 'Todos los canales',
+      source: 'Estado del navegador',
+      confidence: 'Confirmada',
+      timestamp: '',
+      scope: `Cuenta ${w.account}`,
+      status: 'Activo',
+      effect: 'Acciones de Studio pueden quedar bloqueadas',
+    })),
+  ], [quotaProjects, sessionWarnings])
+
+  const allSignals = useMemo(() => [...signals, ...globalSignals], [signals, globalSignals])
+  const totalAvisos = Math.max(allSignals.length, actionable.length)
 
   // Identidades de los avisos actuales (para auto-expansión solo ante algo nuevo).
   const currentIds = useMemo(() => {
@@ -186,8 +350,9 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
     for (const c of actionable) ids.add(`ch:${c.channel_id}:${c.verdict.severity}`)
     for (const p of quotaProjects) ids.add(`quota:${p.project_id || 'x'}:${p.account || 'x'}`)
     for (const s of sessionWarnings) ids.add(`session:${s.account}`)
+    for (const signal of allSignals) ids.add(signal.id)
     return [...ids].sort()
-  }, [actionable, quotaProjects, sessionWarnings])
+  }, [actionable, quotaProjects, sessionWarnings, allSignals])
 
   useEffect(() => {
     if (collapsedIds.size === 0) return
@@ -318,6 +483,21 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
       {expanded && (
         <div className="px-4 pb-3 pt-1 space-y-3 max-h-[60vh] overflow-y-auto animate-fade-in">
 
+          {/* Registro de señales: cada origen tiene una etiqueta propia. En
+              particular, una retirada observada nunca se presenta como strike. */}
+          {allSignals.length > 0 && (
+            <section aria-labelledby="alert-center-signals" className="rounded-lg border border-surface-border px-3 py-2 bg-dark-800/60">
+              <div className="flex items-center gap-2">
+                <HelpCircle size={14} className="text-gray-300" />
+                <h2 id="alert-center-signals" className="font-semibold text-sm text-gray-200">Señales y enforcement</h2>
+                <span className="text-[10px] text-gray-500">evidencia separada de la protección interna</span>
+              </div>
+              <div className="mt-2 space-y-2">
+                {allSignals.map(signal => <SignalRow key={signal.id} signal={signal} />)}
+              </div>
+            </section>
+          )}
+
           {/* 1. Alertas activas (canales con problema real) */}
           {actionable.length > 0 && (
             <div className="rounded-lg border border-red-500/25 px-3 py-2 bg-dark-800/60">
@@ -373,7 +553,7 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${sev.chip}`}>{c.verdict.label}</span>
                         {c.internal.strikes > 0 && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/10 text-red-300 border border-red-500/20">
-                            {c.internal.strikes} strike{c.internal.strikes > 1 ? 's' : ''}
+                            Historial de enforcement: {c.internal.strikes}
                           </span>
                         )}
                       </div>
@@ -467,7 +647,7 @@ function ChannelCard({ c, busy, onOpenReport, onRestore, onUnblock, onStudioScan
         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${sev.chip}`}>{c.verdict.label}</span>
         {c.internal.strikes > 0 && (
           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-300 border border-red-500/30">
-            {c.internal.strikes} strike{c.internal.strikes > 1 ? 's' : ''}
+            Historial de enforcement: {c.internal.strikes}
           </span>
         )}
       </div>
@@ -581,6 +761,43 @@ function ChannelCard({ c, busy, onOpenReport, onRestore, onUnblock, onStudioScan
           </button>
         )}
       </div>
+    </div>
+  )
+}
+
+function SignalRow({ signal }: { signal: Signal }) {
+  const styles: Record<SignalKind, { border: string; badge: string }> = {
+    removal: { border: 'border-amber-500/30', badge: 'bg-amber-500/15 text-amber-200 border-amber-500/30' },
+    strike: { border: 'border-red-500/35', badge: 'bg-red-500/15 text-red-200 border-red-500/35' },
+    internal: { border: 'border-cyan-500/25', badge: 'bg-cyan-500/10 text-cyan-200 border-cyan-500/25' },
+    global: { border: 'border-sky-500/25', badge: 'bg-sky-500/10 text-sky-200 border-sky-500/25' },
+  }
+  const style = styles[signal.kind]
+  return (
+    <article className={`rounded-md border ${style.border} bg-dark-900/35 px-3 py-2`}>
+      <div className="flex items-start gap-2 flex-wrap">
+        <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${style.badge}`}>{signal.label}</span>
+        <span className="font-medium text-sm text-gray-100 min-w-0">{signal.title}</span>
+        <span className="ml-auto text-[10px] text-gray-500">{signal.status}</span>
+      </div>
+      <dl className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-1 text-[10px]">
+        <SignalField label="Canal" value={signal.channel} />
+        {signal.video && <SignalField label="Vídeo" value={signal.video} />}
+        <SignalField label="Fuente" value={signal.source} />
+        <SignalField label="Confianza" value={signal.confidence} />
+        <SignalField label="Detectado" value={fmtDate(signal.timestamp) || 'Sin timestamp'} />
+        <SignalField label="Alcance" value={signal.scope} />
+        <div className="sm:col-span-2"><SignalField label="Efecto" value={signal.effect} /></div>
+      </dl>
+    </article>
+  )
+}
+
+function SignalField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="uppercase tracking-[0.08em] text-gray-600">{label}</dt>
+      <dd className="truncate text-gray-300" title={value}>{value}</dd>
     </div>
   )
 }
