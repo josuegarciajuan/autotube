@@ -4317,8 +4317,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             actual_published_at, has_subscribe_cta,
             longform_linked, longform_linked_at)
            VALUES (?, 'native', ?, ?, ?, ?, ?, ?, ?, ?,
-                   datetime('now','localtime'), ?, ?, datetime('now','localtime'), 'upload',
-                    ?, CASE WHEN ? IS NULL THEN datetime('now','localtime') ELSE NULL END,
+                   datetime('now'), ?, ?, datetime('now','localtime'), 'upload',
+                    ?, CASE WHEN ? IS NULL THEN datetime('now') ELSE NULL END,
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
          canonical_status, str(video_path), yt_id, result.get("url", ""),
@@ -4527,12 +4527,12 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
             yt_vis = 'scheduled' if sched_iso else 'public'
             conn.execute(
                 """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
-                   published_at=COALESCE(published_at, datetime('now','localtime')),
+                   published_at=COALESCE(published_at, datetime('now')),
                     publish_at=?,
                     yt_visibility=?,
                    yt_checked_at=datetime('now','localtime'),
                    yt_checked_source='upload',
-                    actual_published_at=CASE WHEN ? IS NULL THEN datetime('now','localtime') ELSE NULL END,
+                    actual_published_at=CASE WHEN ? IS NULL THEN datetime('now') ELSE NULL END,
                    error_message='',
                    longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
                    longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')

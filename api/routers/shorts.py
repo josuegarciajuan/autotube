@@ -1082,7 +1082,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
            (channel_id, type, title, hook_title, hook_text, topic,
             status, file_path, youtube_id, youtube_url, published_at,
             longform_linked, longform_linked_at)
-           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'),
+           VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now'),
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
          str(video_path), yt_id, result.get("url", "")),
