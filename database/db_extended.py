@@ -9113,11 +9113,11 @@ class ExtendedDatabase(Database):
         return self.get_queued_shorts(channel_id, limit=limit)
 
     def get_queued_shorts(self, channel_id: int, limit: int = 1) -> list[dict]:
-        """Shorts en cola listos para subir, de TODOS los tipos (FIFO).
+        """Shorts nativos en cola listos para subir (FIFO).
 
-        Cola unificada (ago 2026): la válvula de goteo despacha por este método
-        cualquier short generado sin subir — native/standalone con
-        status='generated' y clip pre-renderizados con status='ready'.
+        Los clips están desactivados permanentemente y no pueden entrar en la
+        cola. ``standalone`` fue un tipo histórico de generación y ya no se
+        acepta como tipo persistido: las nuevas filas usan ``native``.
 
         Devuelve los más antiguos primero (por id). Solo shorts con archivo en
         disco y aún sin youtube_id.
@@ -9127,9 +9127,9 @@ class ExtendedDatabase(Database):
             rows = conn.execute(
                 """SELECT id, channel_id, type, title, hook_title, hook_text, topic,
                           source_video_id, file_path, status, created_at
-                   FROM shorts
-                    WHERE channel_id = ?
-                      AND type IN ('native', 'standalone')
+                    FROM shorts
+                     WHERE channel_id = ?
+                      AND type = 'native'
                       AND status = 'generated'
                      AND file_path IS NOT NULL AND file_path != ''
                      AND (youtube_id IS NULL OR youtube_id = '')

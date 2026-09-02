@@ -6,8 +6,13 @@ from api.time_utils import parse_utc
 
 
 def validate_upload_visibility(*, publish_mode: str, privacy: str,
-                               publish_at: str | None) -> None:
+                               publish_at: str | None,
+                               content_type: str = "long") -> None:
     """Reject the only unsafe combination: scheduled content without publishAt."""
+    if content_type == "short":
+        if privacy != "public" or publish_at:
+            raise ValueError("native shorts must be public and immediate")
+        return
     if publish_mode == "scheduled" and not publish_at:
         raise ValueError("scheduled uploads require a future publish_at")
     if publish_at and privacy != "private":
@@ -47,8 +52,11 @@ def assert_public_admission(db, *, channel_id: int, content_type: str) -> None:
 
 
 def upload_publication_kwargs(*, publish_mode: str, target_public_at: str | None = None,
-                              now: datetime | None = None, warmup_min: int = 120) -> dict:
+                              now: datetime | None = None, warmup_min: int = 120,
+                              content_type: str = "long") -> dict:
     """Return safe uploader kwargs; scheduled content can never go public early."""
+    if content_type == "short":
+        return {"privacy": "public"}
     if publish_mode != "scheduled":
         return {"privacy": "public"}
     now = now or datetime.now(timezone.utc)

@@ -301,6 +301,7 @@ async def publish_short(short_id: int):
     publication = upload_publication_kwargs(
         publish_mode=getattr(ch_config, "PUBLISH_MODE", "immediate"),
         target_public_at=short.get("publish_at"),
+        content_type="short",
     )
     result = uploader.upload(
         video_path=file_path,
@@ -308,6 +309,7 @@ async def publish_short(short_id: int):
         description=description[:5000],
         tags=tags,
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+        content_type="short",
         **publication,
     )
 
@@ -1057,6 +1059,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     publication = upload_publication_kwargs(
         publish_mode=getattr(ch_config, "PUBLISH_MODE", "immediate"),
         target_public_at=None,
+        content_type="short",
     )
     result = uploader.upload(
         video_path=video_path,
@@ -1064,6 +1067,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
         description=description[:5000],
         tags=hashtags[:60],
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+        content_type="short",
         **publication,
     )
 

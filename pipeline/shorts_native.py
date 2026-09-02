@@ -520,6 +520,7 @@ NADA MAS fuera del JSON."""
         from api.services.publication_policy import upload_publication_kwargs
         publication = upload_publication_kwargs(
             publish_mode=getattr(self.config, "PUBLISH_MODE", "immediate"),
+            content_type="short",
         )
         result = uploader.upload(
             video_path=video_path,
@@ -527,6 +528,7 @@ NADA MAS fuera del JSON."""
             description=description[:5000],
             tags=script.get("hashtags", [])[:60],
             category_id=getattr(self.config, "YT_CATEGORY_ID", "24"),
+            content_type="short",
             **publication,
         )
 

@@ -30,12 +30,12 @@ logger = logging.getLogger("autotube.shorts_scheduler")
 # Clip shorts are globally disabled during anti-spam remediation. This is a
 # code-level gate, so stale rows or per-channel config cannot re-enable them.
 CLIP_SHORTS_ENABLED = False
-ALLOWED_SHORT_TYPES = frozenset(("native", "standalone"))
+ALLOWED_SHORT_TYPES = frozenset(("native",))
 
 
 def short_type_allowed(short_type: str) -> bool:
     """Return whether a short type may be generated or uploaded."""
-    return CLIP_SHORTS_ENABLED or short_type in ALLOWED_SHORT_TYPES
+    return short_type in ALLOWED_SHORT_TYPES
 
 
 def configured_clip_count(config_row, default: int = 3) -> int:
@@ -2869,7 +2869,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             except Exception:
                 pass
             _spam_gen_only = True
-            if _channel_shorts_spam_blocked(channel_id):
+            if _channel_shorts_spam_blocked(channel_id, db=db):
                 logger.info(
                     "Shorts slot #%d (%s): canal spam-bloqueado — generando native "
                     "en cola (generate_only, sin subir)",
@@ -4380,14 +4380,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     if _youtube_quota_blocked(channel_slug=channel_slug):
         from pipeline.youtube_uploader import QuotaExhaustedError
         raise QuotaExhaustedError("YouTube quota exhausted before native short upload")
-    # ── v10.3: Scheduled publishing ──
-    if target_upload_at:
-        privacy_mode = "private"
-        publish_at = _safe_publish_at(target_upload_at, channel_slug, channel_id=channel_id)
-        logger.info("Native short: scheduled publish at %s", str(publish_at)[:19])
-    else:
-        privacy_mode = "public"
-        publish_at = None
+    # Shorts are always immediate.  The target remains planning metadata only;
+    # scheduled publication is reserved for long-form videos.
+    privacy_mode = "public"
+    publish_at = None
     result = uploader.upload(
         video_path=video_path,
         title=title[:100],
@@ -4396,6 +4392,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
         privacy=privacy_mode,
         publish_at=publish_at,
+        content_type="short",
     )
 
     yt_id = result.get("video_id")
@@ -4423,13 +4420,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             longform_linked, longform_linked_at)
            VALUES (?, 'native', ?, ?, ?, ?, ?, ?, ?, ?,
                    datetime('now','localtime'), ?, ?, datetime('now','localtime'), 'upload',
-                   ?, ?,
+                    ?, CASE WHEN ? IS NULL THEN datetime('now','localtime') ELSE NULL END,
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
          canonical_status, str(video_path), yt_id, result.get("url", ""),
          sched_iso,
-         'scheduled' if sched_iso else 'public',
-         None,  # actual_published_at: NULL until reconciliador confirma
+          'scheduled' if sched_iso else 'public',
+          sched_iso,
          int(has_subscribe_cta)),
     )
     short_id = cursor.lastrowid
@@ -4495,6 +4492,12 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     short_id = int(short_record["id"])
     channel_id = int(short_record["channel_id"])
     short_type = short_record.get("type", "native")
+    if short_type != "native":
+        logger.warning(
+            "Queued short #%s rejected: only native shorts may be uploaded (type=%s)",
+            short_record.get("id"), short_type,
+        )
+        return False
     if not short_type_allowed(short_type):
         logger.warning(
             "Queued short #%d: type=%s is disabled — refusing upload",
@@ -4583,32 +4586,9 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         return False
 
     title = (short_record.get("title") or short_record.get("hook_title") or "Short")[:100]
-    # ── La cola respeta la hora pico del slot planificado ──
-    # Si el slot del short tiene target_upload_at futuro → subir como private
-    # con publishAt (publicación programada en la franja óptima). Si no hay
-    # slot o el target ya pasó → publicación inmediata.
+    # Slot targets are retained for planning/analytics, never sent to YouTube.
     privacy = "public"
     publish_at = None
-    try:
-        with db._connect() as conn:
-            slot_row = conn.execute(
-                """SELECT id, target_upload_at FROM shorts_planned_slots
-                   WHERE short_id = ? AND status IN ('generated', 'completed')
-                   ORDER BY id DESC LIMIT 1""",
-                (short_id,),
-            ).fetchone()
-        if slot_row and slot_row["target_upload_at"]:
-            publish_at = _safe_publish_at(
-                slot_row["target_upload_at"], slug, channel_id=channel_id,
-            )
-            if publish_at:
-                privacy = "private"
-                logger.info(
-                    "[%s] Queued short #%d: publicación programada en hora pico (%s)",
-                    slug, short_id, str(publish_at)[:19],
-                )
-    except Exception as exc:
-        logger.debug("[%s] Queued short #%d: slot publish lookup failed: %s", slug, short_id, exc)
     try:
         result = uploader.upload(
             video_path=file_path,
@@ -4618,6 +4598,7 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
             category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
             privacy=privacy,
             publish_at=publish_at,
+            content_type="short",
         )
     except Exception as exc:
         logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
@@ -4629,6 +4610,13 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         return False
 
     try:
+        with db._connect() as conn:
+            slot_row = conn.execute(
+                """SELECT id FROM shorts_planned_slots
+                   WHERE short_id = ? AND status IN ('generated', 'completed')
+                   ORDER BY id DESC LIMIT 1""",
+                (short_id,),
+            ).fetchone()
         with db._connect() as conn:
             # Estado de publicación real (v48): si se subió PRIVADO con publishAt
             # futuro, el short aún no está público → status='scheduled'. El
@@ -4642,18 +4630,18 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
             conn.execute(
                 """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
                    published_at=COALESCE(published_at, datetime('now','localtime')),
-                   publish_at=COALESCE(?, publish_at),
-                   yt_visibility=CASE WHEN ? IS NOT NULL THEN ? ELSE yt_visibility END,
+                    publish_at=?,
+                    yt_visibility=?,
                    yt_checked_at=datetime('now','localtime'),
                    yt_checked_source='upload',
-                   actual_published_at=CASE WHEN ? IS NULL THEN actual_published_at ELSE NULL END,
+                    actual_published_at=CASE WHEN ? IS NULL THEN datetime('now','localtime') ELSE NULL END,
                    error_message='',
                    longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
                    longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')
                                              ELSE longform_linked_at END
                    WHERE id=?""",
-                (canonical_status, yt_id, result.get("url", ""),
-                 sched_iso, sched_iso, yt_vis,
+                 (canonical_status, yt_id, result.get("url", ""),
+                  sched_iso, yt_vis,
                  sched_iso,
                  short_type, short_type, short_id),
             )
