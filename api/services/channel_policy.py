@@ -318,6 +318,15 @@ def resolve_channel_policy(channel_id: int, db=None, now: float | None = None) -
         "scope": "all" if active else "none",
     }
     policy.update(resolve_channel_policy_values(channel_id, db=db))
+    try:
+        from api.services.channel_enforcement import get_channel_enforcement
+        policy["enforcement"] = get_channel_enforcement(db, channel_id)
+    except Exception:
+        policy["enforcement"] = {
+            "state": policy.get("delivery_state"), "cause": None,
+            "source": None, "occurred_at": None, "updated_at": None,
+            "scope": f"channel_id:{int(channel_id)}",
+        }
     return policy
 
 

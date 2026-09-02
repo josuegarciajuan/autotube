@@ -220,6 +220,19 @@ def reconcile_recent_shorts(db=None) -> dict:
                 if not removal_is_confirmed(vis, int(second_vis == "removed")):
                     vis = second_vis if second_vis != "removed" else "unknown"
 
+            # Availability failures are operational evidence only.  They must
+            # never enter the strike counter or pacing state machine.
+            if vis == "unavailable":
+                try:
+                    from api.services.channel_enforcement import record_delivery_event
+                    record_delivery_event(
+                        db, channel_id=channel_id, classification="unavailable",
+                        evidence={"youtube_id": yt_id, "visibility": vis},
+                        source="yt_state_reconciler",
+                    )
+                except Exception as exc:
+                    logger.debug("Unable to record unavailable observation: %s", exc)
+
             # RSS feed is authoritative for "public".
             if vis in ("public", "unknown", "error") and yt_id in feed:
                 vis = "public"

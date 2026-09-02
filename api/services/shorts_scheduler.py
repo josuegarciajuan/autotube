@@ -245,127 +245,25 @@ def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
 
 def _record_short_spam_strike(channel_id: int, channel_slug: str, db=None,
                               video_id: str = None, reason: str = None) -> int:
-    """Record a YouTube spam removal for a channel and BLOCK its uploads.
+    """Deprecated compatibility shim. Kept only so stale imports stay harmless.
 
-    Returns the new event count. The first event blocks for 12h; subsequent
-    events block for 24h. The block key is stored in system_state so it survives
-    API restarts (apply_changes.sh).
-
-    ``video_id`` / ``reason`` se guardan (``shorts_spam_last_removal_{id}``)
-    para el informe de situación del banner (por qué se bloqueó el canal).
-
-    NOTA: el registro se hace UNA sola vez por eliminación, desde
-    `_verify_upload_exists` (punto único de detección), para cubrir tanto
-    shorts como vídeos normales sin doble conteo.
+    A watch-page / availability observation is never a confirmed strike.  All
+    enforcement now goes through ``api.services.channel_enforcement``; this
+    shim records an informational ``video_removed_unconfirmed`` observation and
+    returns 0 (no strike, no block, no pacing change).
     """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
     try:
-        if db is None:
-            from database.db_extended import ExtendedDatabase
-            db = ExtendedDatabase()
-        from api.services.channel_policy import get_historical_strikes
-        strikes_key = f"shorts_spam_strikes_{channel_id}"
-        strikes = get_historical_strikes(channel_id, db) + 1
-        db.set_system_state(strikes_key, str(strikes))
-        from api.services.spam_mitigation import resolve_spam_block_duration_hours
-        total_hours = resolve_spam_block_duration_hours(strikes)
-        block_until = time.time() + total_hours * 3600
-        db.set_system_state(f"shorts_spam_blocked_until_{channel_id}", str(block_until))
-
-        # ── Contexto del strike (para el informe de situación) ──
-        try:
-            import json as _json
-            _now_iso = __import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ).isoformat()
-            db.set_system_state(
-                f"shorts_spam_last_removal_{channel_id}",
-                _json.dumps({
-                    "video_id": video_id or "",
-                    "reason": reason or "eliminado por los sistemas automatizados de YouTube",
-                    "detected_at": _now_iso,
-                    "strike_count": strikes,
-                }),
-            )
-        except Exception as _ctx_exc:
-            logger.warning("[%s] spam removal context store failed: %s", channel_slug, _ctx_exc)
-
-        logger.error(
-            "⚠️ SPAM STRIKE #%d para %s — subidas BLOQUEADAS %dh (%s)",
-            strikes, channel_slug, total_hours,
-            "escalado (revisar contenido en YouTube Studio)" if strikes >= SHORTS_SPAM_MAX_STRIKES else "enfriamiento",
+        from api.services.channel_enforcement import record_watch_page_observation
+        record_watch_page_observation(
+            db, channel_id=channel_id, video_id=video_id or "",
+            visibility="removed", confirmations=1, source="watch_page",
         )
-
-        # ── Fase 4 bis: un strike nuevo DEVUELVE el perfil de pacing a 'strike'.
-        # Cierra el bucle adaptativo: strike → (7 días limpios) → recovery →
-        # (21 días limpios) → normal; un nuevo strike → strike otra vez.
-        try:
-            from api.services.pacing_profile import set_pacing_profile, get_active_profile_name
-            if get_active_profile_name(db) != "strike":
-                set_pacing_profile("strike", db)
-                logger.warning(
-                    "[%s] Pacing: strike #%d → perfil de pacing restaurado a 'strike'",
-                    channel_slug, strikes,
-                )
-        except Exception as _apt_exc:
-            logger.debug("Pacing reset-to-strike skipped: %s", _apt_exc)
-
-        # ── Alerta formal (StatusBar + AlertsPanel) ──
-        try:
-            from api.services.lifecycle_monitor import create_alert
-            create_alert(
-                db,
-                entity_type="channel",
-                entity_id=channel_id,
-                channel_id=channel_id,
-                alert_type="spam_strike",
-                severity="critical",
-                title=f"Canal {channel_slug}: strike de spam #{strikes} — subidas bloqueadas",
-                message=(
-                    f"YouTube eliminó una subida de {channel_slug} por spam/IA/política "
-                    f"(strike #{strikes}). Subidas bloqueadas {total_hours}h "
-                    f"(shorts + vídeos long-form).\n\n"
-                    f"Vídeo afectado: {video_id or 'desconocido'}\n"
-                    f"Razón: {reason or 'no especificada'}\n\n"
-                    f"Acciones automáticas: frecuencia de publicación rebajada (canal + "
-                    f"hermanos de proyecto), publicaciones programadas retenidas hasta el "
-                    f"fin del bloqueo. Revisa el contenido en YouTube Studio antes de restaurar."
-                ),
-                metadata={
-                    "strike": strikes,
-                    "block_hours": total_hours,
-                    "blocked_until": block_until,
-                    "video_id": video_id,
-                    "reason": reason,
-                    "action": "bloqueo + rebaja frecuencia + retención publicaciones",
-                },
-            )
-        except Exception as _alert_exc:
-            logger.warning("[%s] spam-strike alert failed: %s", channel_slug, _alert_exc)
-
-        # ── Rebaja de frecuencia (canal + hermanos del mismo proyecto) ──
-        # Tras el bloqueo, el canal y sus hermanos publican a menor ritmo para
-        # no reincidir en el flag de spam. Restauración manual vía panel.
-        try:
-            from api.services.spam_mitigation import reduce_publication_frequency_after_strike
-            reduce_publication_frequency_after_strike(channel_id, channel_slug, db=db)
-        except Exception as _freq_exc:
-            logger.error(
-                "Spam frequency reduction failed for %s: %s", channel_slug, _freq_exc,
-            )
-        # ── Retener publicaciones ya programadas del canal bloqueado ──
-        # Los vídeos subidos como private con publishAt nativo caerían durante
-        # el bloqueo; se reprograman para después del fin del bloqueo.
-        try:
-            from api.services.spam_mitigation import hold_pending_publishes_for_block
-            hold_pending_publishes_for_block(channel_id, channel_slug, block_until, db=db)
-        except Exception as _hold_exc:
-            logger.error(
-                "Spam hold pending publishes failed for %s: %s", channel_slug, _hold_exc,
-            )
-        return strikes
     except Exception as exc:
-        logger.error("Failed to record spam strike for %s: %s", channel_slug, exc)
-        return 0
+        logger.warning("[%s] removal observation record failed: %s", channel_slug, exc)
+    return 0
 
 
 def _channel_shorts_spam_blocked(channel_id: int, db=None) -> bool:
