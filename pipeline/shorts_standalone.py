@@ -269,7 +269,7 @@ def run_standalone_short(
                     """INSERT INTO shorts
                        (channel_id, type, title, hook_title, hook_text, topic,
                         status, file_path)
-                       VALUES (?, 'standalone', ?, ?, ?, ?, 'generated', ?)""",
+                       VALUES (?, 'native', ?, ?, ?, ?, 'generated', ?)""",
                     (channel_id, _title, _title[:60], _hook, _topic, str(_final)),
                 )
                 _short_id_so = cur.lastrowid

@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 
 import pytest
-from api.services.publication_policy import upload_publication_kwargs, validate_upload_visibility
+from api.services.publication_policy import (
+    upload_publication_kwargs,
+    validate_upload_visibility,
+)
 
 
 def test_scheduled_upload_is_private_and_has_future_publication():
@@ -14,6 +17,22 @@ def test_scheduled_upload_is_private_and_has_future_publication():
 
 def test_immediate_upload_retains_explicit_public_policy():
     assert upload_publication_kwargs(publish_mode="immediate") == {"privacy": "public"}
+
+
+def test_native_short_is_always_immediate_even_on_scheduled_channel():
+    assert upload_publication_kwargs(
+        publish_mode="scheduled",
+        content_type="short",
+        target_public_at="2099-01-01T12:00:00Z",
+    ) == {"privacy": "public"}
+
+
+def test_native_short_visibility_rejects_private_or_publish_at():
+    with pytest.raises(ValueError, match="native shorts"):
+        validate_upload_visibility(
+            publish_mode="scheduled", privacy="private",
+            publish_at="2099-01-01T12:00:00Z", content_type="short",
+        )
 
 
 def test_scheduled_upload_without_publish_at_is_rejected():

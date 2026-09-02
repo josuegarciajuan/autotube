@@ -196,6 +196,29 @@ def _cancel_excess_slots(db, pending_slots: list[dict], excess: int) -> int:
     return len(to_cancel)
 
 
+def _cancel_disabled_clip_work(db) -> int:
+    """Cancel unuploaded clip work so recovery can never resurrect clips."""
+    cancelled = 0
+    with db._connect() as conn:
+        cur = conn.execute(
+            """UPDATE shorts_planned_slots
+                  SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+                WHERE short_type='clip' AND status IN ('pending', 'generated')"""
+        )
+        cancelled += cur.rowcount
+        cur = conn.execute(
+            """UPDATE shorts
+                  SET status='cancelled', error_message='clip shorts disabled'
+                WHERE type='clip' AND status IN ('generated', 'ready')
+                  AND (youtube_id IS NULL OR youtube_id='')"""
+        )
+        cancelled += cur.rowcount
+        conn.commit()
+    if cancelled:
+        logger.info("Recovery: cancelled %d disabled clip item(s)", cancelled)
+    return cancelled
+
+
 def _create_recovery_slots(
     ch_id: int, slug: str, today: str, short_type: str,
     missing: int, now_minute_of_day: int,
@@ -456,6 +479,10 @@ def auto_recover_shorts(db=None) -> dict:
         ch_id = cfg["channel_id"]
         slug = cfg.get("slug", f"channel_{ch_id}")
 
+        # Clips are permanently disabled; clean legacy pending work before
+        # calculating coverage so no recovery pass can recreate it.
+        _cancel_disabled_clip_work(db)
+
         # ── Per-channel guard: shorts_enabled ──
         if not cfg.get("shorts_enabled", True):
             continue
@@ -469,7 +496,7 @@ def auto_recover_shorts(db=None) -> dict:
             continue
 
         native_target = cfg.get("shorts_native_per_day", 3)
-        clips_per_long = cfg.get("shorts_clips_per_long", 3)
+        clips_per_long = 0
 
         if native_target <= 0 and clips_per_long <= 0:
             continue

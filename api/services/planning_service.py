@@ -4385,13 +4385,14 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     publication = upload_publication_kwargs(
         publish_mode="scheduled",
         warmup_min=getattr(ch_config, "PUBLISH_WARMUP_MIN", 120),
+        content_type="short",
     )
-    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), **publication)
+    result = uploader.upload(video_path=video_path, title=title[:100], description=description[:5000], tags=hashtags[:60], category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"), content_type="short", **publication)
 
     yt_id = result.get("video_id")
     if yt_id:
         conn = sqlite3.connect(str(DATABASE_PATH))
-        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, publish_at, yt_visibility, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'scheduled', ?, ?, ?, datetime('now','localtime'), ?, 'scheduled', ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), publication["publish_at"], int(has_subscribe_cta)))
+        cursor = conn.execute("INSERT INTO shorts (channel_id, type, title, hook_title, hook_text, topic, status, file_path, youtube_id, youtube_url, published_at, publish_at, yt_visibility, actual_published_at, has_subscribe_cta, longform_linked, longform_linked_at) VALUES (?, 'native', ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now','localtime'), NULL, 'public', datetime('now','localtime'), ?, 1, datetime('now','localtime'))", (channel_id, title, title[:60], hook_text, topic, str(video_path), yt_id, result.get("url", ""), int(has_subscribe_cta)))
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()

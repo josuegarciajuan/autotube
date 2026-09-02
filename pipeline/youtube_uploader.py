@@ -127,6 +127,17 @@ _TOKEN_LOCKS_GUARD = threading.Lock()
 _TOKEN_REFRESH_COOLDOWN = 5  # seconds — if file was saved <5s ago, re-read instead of deleting
 
 
+def build_upload_status(*, privacy: str, publish_at: str | None,
+                        content_type: str = "long") -> dict:
+    """Build the YouTube status payload without allowing scheduled Shorts."""
+    if content_type == "short":
+        return {"privacyStatus": "public"}
+    status = {"privacyStatus": "private" if publish_at else privacy}
+    if publish_at:
+        status["publishAt"] = publish_at
+    return status
+
+
 class YouTubeUploader:
     """Upload videos to YouTube via the Data API v3."""
 
@@ -652,7 +663,7 @@ class YouTubeUploader:
             self._service = build("youtube", "v3", **kwargs)
         return self._service
 
-    # ── Upload ──────────────────────────────────────────────────
+# ── Upload ──────────────────────────────────────────────────
 
     def upload(
         self,
@@ -671,6 +682,7 @@ class YouTubeUploader:
         suggested_thumb_filename: str = None,
         publish_at: str = None,
         quota_reference_id: str | None = None,
+        content_type: str = "long",
     ) -> dict:
         """Upload video to YouTube.
 
@@ -800,11 +812,14 @@ class YouTubeUploader:
         # Final central boundary: direct/manual callers cannot accidentally
         # upload a scheduled channel publicly without a future publishAt.
         from api.services.publication_policy import validate_upload_visibility
+        if content_type == "short":
+            privacy, publish_at = "public", None
         configured_mode = self._get_config_attr("PUBLISH_MODE", "immediate")
         validate_upload_visibility(
             publish_mode=str(configured_mode or "immediate").lower(),
             privacy=privacy,
             publish_at=publish_at,
+            content_type=content_type,
         )
 
         service = None
@@ -878,7 +893,10 @@ class YouTubeUploader:
                     "defaultAudioLanguage": language,
                 },
                 "status": {
-                    "privacyStatus": "private" if publish_at else privacy,
+                    **build_upload_status(
+                        privacy=privacy, publish_at=publish_at,
+                        content_type=content_type,
+                    ),
                     "selfDeclaredMadeForKids": False,
                     "embeddable": True,
                     "publicStatsViewable": True,

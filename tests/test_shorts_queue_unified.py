@@ -31,6 +31,13 @@ from api.services import shorts_scheduler as ss
 from pipeline import shorts_cross_promote as scp
 
 
+def test_only_native_short_type_is_allowed():
+    """Clips and legacy standalone rows cannot enter the upload pipeline."""
+    assert ss.short_type_allowed("native") is True
+    assert ss.short_type_allowed("clip") is False
+    assert ss.short_type_allowed("standalone") is False
+
+
 def _db(tmp_path):
     path = tmp_path / "queue_unified.db"
     init_db(str(path))
@@ -141,7 +148,7 @@ def _set_published(db, channel_id: int, n: int, hours_ago: float = 0,
 def test_clip_shorts_are_globally_disabled():
     assert ss.CLIP_SHORTS_ENABLED is False
     assert ss.short_type_allowed("native") is True
-    assert ss.short_type_allowed("standalone") is True
+    assert ss.short_type_allowed("standalone") is False
     assert ss.short_type_allowed("clip") is False
 
 
@@ -234,11 +241,11 @@ def test_hard_cap_zero_when_no_uploads(patch_database_path):
 def test_queued_shorts_returns_only_allowed_types(tmp_path):
     db, _ = _db(tmp_path)
     _seed_queued(db, 1, 1, short_type="native", status="generated")
-    _seed_queued(db, 1, 1, short_type="standalone", status="generated")
+    _seed_queued(db, 1, 1, short_type="native", status="generated")
     _seed_queued(db, 1, 1, short_type="clip", status="ready")
     queued = db.get_queued_shorts(1, limit=10)
     types = {q["type"] for q in queued}
-    assert types == {"native", "standalone"}
+    assert types == {"native"}
     # La variante antigua (compat) delega en la unificada.
     assert len(db.get_queued_native_shorts(1, limit=10)) == 2
 
@@ -285,7 +292,15 @@ def test_valve_uploads_queued_when_caps_allow(patch_database_path, fake_uploader
             "SELECT status, youtube_id FROM shorts WHERE channel_id = 1 ORDER BY id LIMIT 1",
         ).fetchone()
         assert row["status"] == "published"
-        assert row["youtube_id"] == "fake-1"
+    assert row["youtube_id"] == "fake-1"
+
+
+def test_valve_uploads_native_immediately_without_publish_at(patch_database_path, fake_uploader):
+    db, path = patch_database_path
+    _seed_queued(db, 1, 1, short_type="native", status="generated")
+    assert ss._upload_queued_shorts(db, max_per_pass=1) == 1
+    assert fake_uploader["uploads"][0]["privacy"] == "public"
+    assert fake_uploader["uploads"][0]["publish_at"] is None
 
 
 # ── 4. Cooldown por última subida ────────────────────────────────
