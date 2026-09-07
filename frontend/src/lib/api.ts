@@ -60,6 +60,8 @@ export const api = {
   getChannelDelivery: (channelId: number) => request<any>(`/pacing/channels/${channelId}`),
   setChannelDelivery: (channelId: number, data: { state: string; override?: Record<string, unknown> }) =>
     request<any>(`/pacing/channels/${channelId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  clearChannelDeliveryOverride: (channelId: number) =>
+    request<any>(`/pacing/channels/${channelId}/override`, { method: 'DELETE' }),
   getFactoryStatus: () => request<any>(`/pacing/factory-status`),
   // Channels
   getChannels: (activeOnly = false) => request<any[]>(`/channels?active_only=${activeOnly}`),
