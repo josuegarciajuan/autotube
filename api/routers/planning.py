@@ -607,8 +607,19 @@ def safe_full_replan_preflight(horizon_days: int = Query(7, ge=1, le=31)):
 def safe_full_replan_apply(data: SafeFullReplanApply):
     """Apply a long-form + Shorts preflight without deleting slots or jobs."""
     from api.services.planning_service import safe_full_replan_apply as do_apply
+    from api.services.planning_service import SafeReplanBusyError
     try:
         return do_apply(data.confirmation_token, db=get_db())
+    except SafeReplanBusyError as exc:
+        logger.warning("safe full replan rejected because SQLite is busy", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SERVER_BUSY",
+                "message": "La base de datos está ocupada; inténtalo de nuevo en unos segundos.",
+            },
+            headers={"Retry-After": "5"},
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         if "expired" in message:

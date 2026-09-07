@@ -6,6 +6,7 @@ from datetime import date
 
 import pytest
 
+import api.services.planning_service as planning_service
 from api.services.planning_service import safe_full_replan_apply, safe_full_replan_preflight
 from database.db_extended import ExtendedDatabase, _migrate_v39
 
@@ -141,6 +142,45 @@ def test_apply_updates_pending_slots_in_place_without_cancelling_jobs(db):
         assert conn.execute("SELECT status FROM generation_jobs WHERE id = 41").fetchone()["status"] == "queued"
 
 
+def test_apply_reads_snapshot_on_the_transaction_connection(db, monkeypatch):
+    preflight = safe_full_replan_preflight(db=db, horizon_days=1)
+    original_connect = db._connect
+    connections = []
+
+    def tracked_connect():
+        conn = original_connect()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(db, "_connect", tracked_connect)
+    monkeypatch.setattr(db, "set_system_state", lambda *args, **kwargs: None)
+
+    safe_full_replan_apply(preflight["confirmation_token"], db=db)
+
+    assert len(connections) == 1
+
+
+def test_apply_retries_transient_sqlite_lock(db, monkeypatch):
+    preflight = safe_full_replan_preflight(db=db, horizon_days=1)
+    original_snapshot = planning_service._safe_replan_snapshot
+    attempts = 0
+
+    def flaky_snapshot(database, conn=None):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_snapshot(database, conn=conn)
+
+    monkeypatch.setattr(planning_service, "_safe_replan_snapshot", flaky_snapshot)
+    monkeypatch.setattr(db, "set_system_state", lambda *args, **kwargs: None)
+
+    result = safe_full_replan_apply(preflight["confirmation_token"], db=db)
+
+    assert result["ok"] is True
+    assert attempts == 2
+
+
 def test_apply_rejects_stale_and_reused_confirmation_tokens(db):
     stale = safe_full_replan_preflight(db=db, horizon_days=1)
     with db._connect() as conn:
@@ -264,3 +304,26 @@ def test_legacy_full_replan_endpoint_is_gone():
         full_replan()
 
     assert exc_info.value.status_code == 410
+
+
+def test_replan_router_returns_structured_503_for_database_busy(monkeypatch):
+    from fastapi import HTTPException
+    from api.routers import planning
+    from api.services.planning_service import SafeReplanBusyError
+
+    monkeypatch.setattr(planning, "get_db", lambda: object())
+    monkeypatch.setattr(
+        planning_service,
+        "safe_full_replan_apply",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SafeReplanBusyError()),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        planning.safe_full_replan_apply(planning.SafeFullReplanApply(confirmation_token="token"))
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        "code": "SERVER_BUSY",
+        "message": "La base de datos está ocupada; inténtalo de nuevo en unos segundos.",
+    }
+    assert exc_info.value.headers == {"Retry-After": "5"}

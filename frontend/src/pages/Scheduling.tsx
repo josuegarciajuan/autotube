@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, type FullReplanApplyResult, type FullReplanPreflight } from '../lib/api'
+import { api, ApiRequestError, type FullReplanApplyResult, type FullReplanPreflight } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
 import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
@@ -474,7 +474,9 @@ export default function Scheduling() {
       }
     } catch (e: any) {
       const message = e?.message || 'No se pudo aplicar la reprogramación.'
-      setReplanError(isExpiredError(message)
+      setReplanError((e instanceof ApiRequestError && (e.status === 503 || e.code === 'SERVER_BUSY'))
+        ? 'El servidor está ocupado con otra operación. Espera unos segundos y vuelve a intentarlo.'
+        : isExpiredError(message)
         ? 'La revisión ha caducado o ya no coincide con la planificación actual. Revísala de nuevo antes de confirmar.'
         : message)
       setReplanState('error')
