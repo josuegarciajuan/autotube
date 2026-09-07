@@ -431,6 +431,30 @@ Consumidores actuales: `upload_spacing`, `shorts_scheduler` (caps duros, cooldow
 gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigation`
 (cap por cuenta), `upload_scheduler` (gap de subida mismo-canal).
 
+### 💧 Modo drenaje de shorts (`short_drain_mode`) — `api/services/shorts_scheduler.py`
+
+Cuando hay un backlog de nativos generados a cola (`status='generated'`, sin
+subir) el operador puede **frenar la generación** y dejar que la válvula de
+goteo vacíe la reserva, en vez de mantenerla en equilibrio cerca del tope
+`MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL` (=60, el relleno recarga cada hueco que
+la subida libera).
+
+- **Persistencia:** `system_state["short_drain_mode"] == "true"`.
+- **Qué frena:** la generación de NATIVOS (slots due en `dispatch_next_due_shorts_slot`
+  + `_fill_native_short_queue`). La **válvula de goteo SIGUE subiendo** la cola
+  FIFO a su ritmo normal (nunca se toca). No afecta a long-forms ni a
+  `dispatch_standalone_shorts_daily`.
+- **Auto-resume:** cuando TODOS los canales activos bajan de
+  `SHORT_DRAIN_FLOOR_PER_CHANNEL` (=3) nativos subibles (`type='native'`,
+  `status='generated'`, archivo en disco, sin `youtube_id`), el flag se apaga
+  solo y la fábrica vuelve a generar. Los slots `pending` acumulados siguen su
+  horario programado (sin ráfaga al reanudar).
+- **Endpoints:** `GET /api/shorts/drain` (estado + cola por canal + ETA) y
+  `PUT /api/shorts/drain` `{"enabled": bool}` (activar/desactivar).
+- **Cupo de subida:** la válvula usa `shorts_planning_config.shorts_native_per_day`
+  (NO el perfil de pacing). Tras los strikes quedó en 2; el techo `normal` del
+  perfil es 3. Alinear a 3 para drenar a 3/canal/día (12/día global).
+
 ## 🍃 Frescura en publicación (fábrica continua)
 Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran
 "stale": antes de subirlos, `upload_scheduler` regenera título (LLM vía

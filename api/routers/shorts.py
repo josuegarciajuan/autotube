@@ -1125,3 +1125,82 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
         "hook_text": hook_text,
         "message": "Short nativo generado y publicado exitosamente",
     }
+
+
+# ── Modo drenaje de shorts (short_drain_mode) ─────────────────────
+# Pausa la GENERACIÓN de nativos (slots due + relleno de cola) mientras la
+# válvula de goteo sigue subiendo la cola FIFO, hasta bajar del piso por canal.
+from pydantic import BaseModel as _BaseModel
+
+
+class _ShortDrainUpdate(_BaseModel):
+    enabled: bool
+
+
+@router.get("/drain")
+def get_short_drain_status():
+    """Estado del modo drenaje de shorts.
+
+    Devuelve si está activo, la cola de nativos por canal (solo subibles) y
+    una ETA orientativa en días según el cupo diario aprobado por canal.
+    """
+    from api.services import shorts_scheduler as _ss
+    db = get_db()
+    backlog = _ss.short_drain_backlog(db)
+    enabled = _ss._short_drain_enabled(db)
+    floor = _ss.SHORT_DRAIN_FLOOR_PER_CHANNEL
+    channels = []
+    total = 0
+    for cid, count in sorted(backlog.items()):
+        ch = db.get_channel(cid) or {}
+        per_day = 0
+        try:
+            per_day = int(db.get_native_shorts_per_day(cid) or 0)
+        except Exception:
+            pass
+        eta_days = None
+        if per_day > 0:
+            import math
+            eta_days = math.ceil(max(0, count - floor) / per_day)
+        total += count
+        channels.append({
+            "channel_id": cid,
+            "slug": ch.get("slug", str(cid)),
+            "name": ch.get("name", ""),
+            "queued_native": count,
+            "native_per_day": per_day,
+            "eta_days_to_floor": eta_days,
+        })
+    return {
+        "enabled": enabled,
+        "floor_per_channel": floor,
+        "done": _ss._short_drain_done(db),
+        "total_queued_native": total,
+        "channels": channels,
+    }
+
+
+@router.put("/drain")
+def set_short_drain(body: _ShortDrainUpdate):
+    """Activar/desactivar el modo drenaje de shorts.
+
+    - enabled=true  → pausa la generación de nativos; la válvula sigue subiendo.
+    - enabled=false → reanuda la generación de inmediato (manual).
+    """
+    db = get_db()
+    val = "true" if body.enabled else "false"
+    db.set_system_state("short_drain_mode", val)
+    if body.enabled:
+        from api.services import shorts_scheduler as _ss
+        _ss._LAST_DRAIN_LOG_AT = 0.0
+    action = "activado" if body.enabled else "desactivado"
+    logger.info("Modo drenaje de shorts %s vía API", action)
+    # Re-evalúa estado con el flag ya aplicado
+    from api.services import shorts_scheduler as _ss
+    backlog = _ss.short_drain_backlog(db)
+    return {
+        "ok": True,
+        "enabled": body.enabled,
+        "message": f"Modo drenaje {action}",
+        "total_queued_native": sum(backlog.values()),
+    }
