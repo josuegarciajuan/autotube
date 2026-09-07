@@ -84,20 +84,19 @@ def update_planning_config(channel_id: int, data: PlanningConfigUpdate):
     if not ok:
         raise HTTPException(500, "Failed to update")
 
-    # ── Replan inmediato + override autoritativo (panel Configuración) ──
-    # Si el operador fija un objetivo de publicación long-form, esa cifra es la
-    # máxima autoridad (puede superar el perfil). apply_publish_override
-    # persiste el override y encola/recalcula el replan del horizonte.
-    # Un cambio solo de generación (sin override) también se aplica ya.
+    # ── Replan inmediato (NO bloqueante) ──
+    # Persistimos config + override y ENCOLAMOS la recomputación de slots
+    # (scheduling_replan_requests). El consumidor en segundo plano la ejecuta en
+    # ≤15-20 s; el PUT vuelve rápido y el panel refleja el valor al instante.
     try:
         from api.services.channel_policy import apply_publish_override
-        from api.services.planning_service import trigger_delivery_replan
+        from api.services.planning_service import request_planning_replan
         if data.public_videos_per_day is not None:
             apply_publish_override(channel_id, db, longs_per_day=data.public_videos_per_day)
         else:
-            trigger_delivery_replan(db, channel_id)
+            request_planning_replan(db, channel_id, reason="planning_config_changed")
     except Exception:
-        pass  # El siguiente tick del scheduler aplicará el cambio igualmente.
+        pass  # La petición durable queda para el arranque/siguiente pasada.
 
     # Return updated config
     return db.get_channel_planning_config(channel_id)
@@ -400,20 +399,16 @@ def update_shorts_planning(channel_id: int, data: ShortsConfigUpdate):
     # ── Override autoritativo shorts (panel Configuración) ──
     # Fijar shorts_native_per_day desde el panel = cifra de máxima autoridad
     # (puede superar el techo del perfil). apply_publish_override persiste el
-    # override nativo y encola/recalcula el replan del horizonte.
+    # override; el replan lo procesa el consumidor en segundo plano.
     try:
         from api.services.channel_policy import apply_publish_override
+        from api.services.planning_service import request_planning_replan
         if data.shorts_native_per_day is not None:
             apply_publish_override(channel_id, db, native_shorts_per_day=data.shorts_native_per_day)
+        # Cualquier cambio de shorts (enabled/clips/per_day) se encola para replan.
+        request_planning_replan(db, channel_id, reason="shorts_planning_config_changed")
     except Exception:
-        pass
-
-    # Replan shorts for the upcoming week
-    try:
-        from api.services.shorts_scheduler import generate_upcoming_shorts
-        generate_upcoming_shorts(days=7, db=db)
-    except Exception:
-        pass  # Non-fatal: if replan fails, the old slots remain
+        pass  # La petición durable queda para el arranque/siguiente pasada.
 
     # Return updated config
     cfgs = db.get_shorts_planning_config(channel_id=channel_id)

@@ -97,6 +97,80 @@ def trigger_delivery_replan(db, channel_id: int) -> dict:
             conn.commit()
         return result
 
+
+def request_planning_replan(db, channel_id: int = None, reason: str = "planning_config_changed",
+                            horizon_days: int = 7) -> None:
+    """Encola de forma DURABLE una recomputación de slots (long-form + shorts).
+
+    No ejecuta nada en el hilo de la petición: solo inserta filas pendientes en
+    ``scheduling_replan_requests`` (persistente a reinicios). Un consumidor en
+    segundo plano (_planning_replan_loop) las procesa de forma coalescida.
+    """
+    try:
+        from datetime import date as _rq_date
+        from datetime import timedelta as _rq_td
+        today = datetime.now(timezone.utc).astimezone(MADRID).date()
+        targets = [int(channel_id)] if channel_id else [
+            int(c.get("id")) for c in (db.get_channels(active_only=True) or [])
+        ]
+        with db._connect() as conn:
+            for cid in targets:
+                for offset in range(max(1, horizon_days)):
+                    day = (today + _rq_td(days=offset)).isoformat()
+                    conn.execute(
+                        "INSERT OR IGNORE INTO scheduling_replan_requests"
+                        "(channel_id, date_key, reason) VALUES(?,?,?)",
+                        (cid, day, reason),
+                    )
+            conn.commit()
+    except Exception:
+        logger.warning("request_planning_replan failed (channel_id=%s)", channel_id, exc_info=True)
+
+
+def has_pending_replan_requests(db) -> bool:
+    """True si hay alguna recomputación encolada sin procesar."""
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM scheduling_replan_requests WHERE status='pending' LIMIT 1"
+            ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _clear_all_pending_replans(db) -> None:
+    try:
+        with db._connect() as conn:
+            conn.execute("UPDATE scheduling_replan_requests SET status='completed' WHERE status='pending'")
+            conn.commit()
+    except Exception:
+        logger.warning("clear pending replans failed", exc_info=True)
+
+
+def run_pending_replan(db=None) -> dict:
+    """Procesa (coalescido) todas las recomputaciones encoladas.
+
+    Una sola pasada: horizonte long-form + shorts. Se invoca bajo _REPLAN_LOCK
+    desde el consumidor en segundo plano, nunca dentro de una request HTTP.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    with _REPLAN_LOCK:
+        try:
+            result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=False)
+        finally:
+            _clear_all_pending_replans(db)
+        # Shorts (no consume cuota de planificación; la válvula sigue su ritmo)
+        try:
+            from api.services.shorts_scheduler import generate_upcoming_shorts
+            generate_upcoming_shorts(days=7, db=db)
+        except Exception:
+            logger.warning("run_pending_replan: shorts replan failed", exc_info=True)
+        return result
+
+
 # ── Dynamic VPD adjuster ───────────────────────────────────
 class DynamicSlotAdjuster:
     """

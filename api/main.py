@@ -480,6 +480,12 @@ async def lifespan(app: FastAPI):
     # (fail-closed: la delegación no intenta nada con la IP muerta).
     egress_monitor_task = _supervised_loop("egress_monitor", _egress_monitor_loop)
 
+    # ── Replan diferido en segundo plano (ago 2026) ──
+    # Consume las recomputaciones encoladas en scheduling_replan_requests
+    # (cambios del panel "Configuración de Programación") SIN bloquear la
+    # request HTTP. Procesa coalescido en ≤15-20 s.
+    replan_bg_task = _supervised_loop("planning_replan", _planning_replan_loop)
+
     yield
     
     # Shutdown
@@ -496,6 +502,7 @@ async def lifespan(app: FastAPI):
         redistribution_task,
         publish_coverage_task,
         yt_state_task,
+        replan_bg_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -1322,6 +1329,45 @@ def _quota_exhausted_safe() -> bool:
         return _qdb.is_quota_exhausted()
     except Exception:
         return False  # fail open — allow calls if DB is unreachable
+
+
+async def _planning_replan_loop():
+    """Consume recomputaciones encoladas (scheduling_replan_requests) cada ~15 s.
+
+    Cambios del panel "Configuración de Programación" ya no bloquean la request:
+    se encolan y aquí se ejecuta UNA pasada coalescida (horizonte long-form +
+    shorts) bajo _REPLAN_LOCK. Sin peticiones pendientes → no hace nada.
+    """
+    import asyncio as _asyncio_rp, time as _time_rp
+    logger = logging.getLogger("autotube.replan_bg")
+    await _asyncio_rp.sleep(20)  # dejar arrancar e init horizon del scheduler
+
+    _last_run = 0.0
+    while True:
+        try:
+            now = _time_rp.time()
+            # Dejar al menos 8 s entre pasadas para coalescer ráfagas de clics.
+            if now - _last_run < 8:
+                await _asyncio_rp.sleep(8 - (now - _last_run))
+                continue
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            paused = _db.get_system_state("scheduler_paused") == "true"
+            if paused:
+                await _asyncio_rp.sleep(15)
+                continue
+            from api.services.planning_service import has_pending_replan_requests, run_pending_replan
+            if has_pending_replan_requests(_db):
+                _last_run = _time_rp.time()
+                result = await _asyncio_rp.to_thread(run_pending_replan, _db)
+                total = result.get("total_slots") if isinstance(result, dict) else None
+                logger.info("Replan diferido procesado (slots=%s)", total)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("planning_replan loop: %s", exc, exc_info=True)
+            await _asyncio_rp.sleep(15)
+        await _asyncio_rp.sleep(15)
 
 
 async def _schedule_checker_loop():
