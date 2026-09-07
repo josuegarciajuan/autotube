@@ -503,11 +503,22 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             alt_pattern = None
             alt_offset = 0
 
-        # Fase 1 conserva 1 native/día; fase 2 habilita 2. Los clips continúan
-        # desactivados tras los strikes.
-        native_per_day = (
-            PHASE2_SHORTS_NATIVE_PER_DAY if phase >= 2 else PHASE1_SHORTS_NATIVE_PER_DAY
-        )
+        # Fase 1 conserva 1 native/día. En fase >=2 el cupo de nativos NO se
+        # fija con la constante legacy (2): se deriva del cupo del perfil de
+        # entrega vigente del canal (channel_policy → delivery_profiles). Así un
+        # canal en delivery_state 'normal' obtiene shorts_native_per_day=3 (su
+        # techo aprobado) y no queda capado en 2 indefinidamente. Los clips
+        # continúan desactivados tras los strikes.
+        native_per_day = PHASE1_SHORTS_NATIVE_PER_DAY
+        if phase >= 2:
+            try:
+                from api.services.channel_policy import resolve_channel_policy_values
+                _polv = resolve_channel_policy_values(cid, db=db)
+                native_per_day = int(
+                    _polv.get("native_shorts_per_day") or PHASE2_SHORTS_NATIVE_PER_DAY
+                )
+            except Exception:
+                native_per_day = PHASE2_SHORTS_NATIVE_PER_DAY
         shorts_changed = False
         sc_list = db.get_shorts_planning_config(channel_id=cid) or []
         sc = sc_list[0] if sc_list else {}
