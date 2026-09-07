@@ -1389,6 +1389,50 @@ def _counts_toward_normal_daily_cap(row: dict) -> bool:
         return True
 
 
+def _published_normal_counts_by_local_day(db, channel_id: int,
+                                          timezone_str: str) -> dict:
+    """Return already-published normal long-forms grouped by local date.
+
+    Repack operates on pending rows, so published rows must seed its daily
+    budget before new targets are assigned. ``published_at`` is the actual
+    publication timestamp; uploaded/private rows are intentionally excluded.
+    """
+    counts: dict = {}
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT published_at, is_marathon FROM videos
+                   WHERE channel_id=? AND status='published'
+                     AND published_at IS NOT NULL""",
+                (channel_id,),
+            ).fetchall()
+    except Exception:
+        try:
+            with db._connect() as conn:
+                rows = conn.execute(
+                    """SELECT published_at FROM videos
+                       WHERE channel_id=? AND status='published'
+                         AND published_at IS NOT NULL""",
+                    (channel_id,),
+                ).fetchall()
+        except Exception:
+            return counts
+    try:
+        tz = pytz.timezone(timezone_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+    for row in rows:
+        row_dict = dict(row)
+        if not _counts_toward_normal_daily_cap(row_dict):
+            continue
+        published = parse_utc(row_dict.get("published_at"))
+        if published is None:
+            continue
+        day = published.astimezone(tz).date()
+        counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
 def _channel_peak_hours(db, channel_id: int, cfg: dict, peak_hour: int) -> list[int]:
     """Franjas pico del canal en orden de rank (para repartir N/día en N franjas).
 
@@ -1580,7 +1624,7 @@ def repack_channel_publish_times(
     plan = []
     # day_used: local date -> nº de vídeos NORMALES asignados ese día (presupuesto
     # max_per_day). Las maratones NO consumen este presupuesto.
-    day_used: dict = {}
+    day_used: dict = _published_normal_counts_by_local_day(db, channel_id, tz_str)
     # day_slots_used: local date -> horas de rank ya ocupadas ese día (TODOS los
     # vídeos, maratones incluidas). Gobierna la selección de rank intra-día para
     # que una maratón ocupe una franja distinta y nunca dos vídeos elijan la misma

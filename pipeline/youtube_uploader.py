@@ -709,6 +709,10 @@ class YouTubeUploader:
 
         Returns {video_id: str, url: str, warnings: list}
         """
+        _account_reservation_db = None
+        _account_reservation = ""
+        _account_reservation_key = quota_reference_id or f"path:{video_path}"
+        _account_reservation_consumed = False
         # Keep the legacy entry point fail-closed before authentication or any
         # possible Google request.  The dispatcher repeats this guard at its
         # own boundary so direct dispatcher consumers receive the same safety.
@@ -754,13 +758,16 @@ class YouTubeUploader:
         # señal de spam). Se comprueba ANTES de autenticar/emitir requests.
         if _gate_slug:
             try:
-                from api.services.spam_mitigation import (
-                    account_upload_slots_available, get_channel_account,
-                )
-                _account = get_channel_account(_gate_slug)
-                if _account and not account_upload_slots_available(_account):
+                from api.services.spam_mitigation import get_channel_account
+                _account_reservation_db = _spam_db
+                _account_reservation = get_channel_account(_gate_slug)
+                if (_account_reservation and not _account_reservation_db.reserve_account_upload_slot(
+                    _account_reservation,
+                    _account_reservation_key,
+                    f"uploader:{os.getpid()}:{id(self)}",
+                )):
                     raise AccountDailyCapExceededError(
-                        f"account '{_account}' reached its daily upload cap — upload held (retry tomorrow)"
+                        f"account '{_account_reservation}' reached its daily upload cap — upload held (retry tomorrow)"
                     )
             except AccountDailyCapExceededError:
                 raise
@@ -1002,6 +1009,12 @@ class YouTubeUploader:
 
             video_id: str = response["id"]
 
+            if _account_reservation_db is not None and _account_reservation:
+                _account_reservation_db.finalize_account_upload_slot(
+                    _account_reservation, _account_reservation_key,
+                )
+                _account_reservation_consumed = True
+
             # ── Track quota (diagnostic) ──────────────────────────
             track_quota(self.channel_slug, "videos.insert", 1600,
                         yt_id=video_id, caller="YouTubeUploader.upload")
@@ -1048,6 +1061,17 @@ class YouTubeUploader:
             return {"video_id": video_id, "url": youtube_url, "warnings": warnings}
 
         finally:
+            if (
+                _account_reservation_db is not None
+                and _account_reservation
+                and not _account_reservation_consumed
+            ):
+                try:
+                    _account_reservation_db.release_account_upload_slot(
+                        _account_reservation, _account_reservation_key,
+                    )
+                except Exception as _reservation_exc:
+                    logger.warning("account upload reservation release failed: %s", _reservation_exc)
             # ── Clean up SEO temp copies ───────────────────────
             for p in _cleanup_paths:
                 try:
