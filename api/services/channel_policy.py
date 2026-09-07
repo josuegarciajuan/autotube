@@ -205,12 +205,19 @@ def _channel_override(channel_id: int, db) -> dict:
 
 
 def _trigger_replan(db, channel_id: int) -> None:
-    """Best-effort synchronous trigger; planner owns serialization."""
+    """Encola una recomputación de slots de forma durable y NO bloqueante.
+
+    El replan pesado (horizonte completo) lo ejecuta el consumidor en segundo
+    plano (_planning_replan_loop), no el hilo de la petición HTTP. Esto hace que
+    los cambios del panel sean casi instantáneos (el número se actualiza ya) y
+    los slots se recalculen en ≤15-20 s.
+    """
     try:
-        from api.services.planning_service import trigger_delivery_replan
-        trigger_delivery_replan(db, channel_id)
+        from api.services.planning_service import request_planning_replan
+        request_planning_replan(db, channel_id, reason="delivery_policy_changed")
     except Exception:
-        # The durable request ledger remains for the next scheduler tick.
+        # La tabla scheduling_replan_requests (persistente) recoge la petición
+        # de todos modos en el arranque/siguiente pasada.
         _count("replan_deferred")
 
 

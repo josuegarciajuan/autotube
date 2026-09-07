@@ -303,24 +303,46 @@ function PlanningSection() {
 
   const refreshAll = useCallback(() => {
     refetchCfg(); refetchSh(); loadPacing()
-    queryClient.invalidateQueries() // refleja el replan en pipeline/hoy/semana
+    // Refresca solo lo relevante (no invalidar todo el panel a cada clic).
+    queryClient.invalidateQueries({ queryKey: ['today-slots'] })
+    queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] })
+    queryClient.invalidateQueries({ queryKey: ['planned-slots'] })
+    queryClient.invalidateQueries({ queryKey: ['week-slots'] })
   }, [refetchCfg, refetchSh, loadPacing, queryClient])
 
   useEffect(() => { loadPacing() }, [loadPacing])
 
+  // Actualiza la query cache de forma OPTIMISTA para que el +/- responda al
+  // instante; luego el PUT guarda y refetch reconcilia (server = verdad).
   const saveLong = useCallback(async (channelId: number, data: Record<string, unknown>) => {
     setBusyId(channelId); setError(null)
-    try { await api.updatePlanningConfig(channelId, data as any); refreshAll() }
-    catch (e: any) { setError(e?.message || 'No se pudo guardar.') }
-    finally { setBusyId(null) }
-  }, [refreshAll])
+    queryClient.setQueryData<any[]>(['planning-config'], (old: any[] | undefined) =>
+      old ? old.map((c: any) => (c.channel_id === channelId ? { ...c, ...data } : c)) : old)
+    try {
+      await api.updatePlanningConfig(channelId, data as any)
+      refreshAll()
+    } catch (e: any) {
+      setError(e?.message || 'No se pudo guardar.')
+      refreshAll() // revertir el optimista si falló el servidor
+    } finally {
+      setBusyId(null)
+    }
+  }, [refreshAll, queryClient])
 
   const saveShort = useCallback(async (channelId: number, data: Record<string, unknown>) => {
     setBusyId(channelId); setError(null)
-    try { await api.updateShortsPlanningConfig(channelId, data as any); refreshAll() }
-    catch (e: any) { setError(e?.message || 'No se pudo guardar.') }
-    finally { setBusyId(null) }
-  }, [refreshAll])
+    queryClient.setQueryData<any[]>(['shorts-planning-config'], (old: any[] | undefined) =>
+      old ? old.map((c: any) => (c.channel_id === channelId ? { ...c, ...data } : c)) : old)
+    try {
+      await api.updateShortsPlanningConfig(channelId, data as any)
+      refreshAll()
+    } catch (e: any) {
+      setError(e?.message || 'No se pudo guardar.')
+      refreshAll() // revertir el optimista si falló el servidor
+    } finally {
+      setBusyId(null)
+    }
+  }, [refreshAll, queryClient])
 
   const resetOverride = useCallback(async (channelId: number) => {
     setBusyId(channelId); setError(null)
