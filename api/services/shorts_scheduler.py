@@ -83,6 +83,8 @@ _SHORT_UPLOAD_BACKGROUND_LOCK = _threading_mod.Lock()
 # Cooldown after all slots exhausted to prevent log spam and CPU waste
 _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
+# Throttle del log periódico del modo drenaje (no spamear en cada tick)
+_LAST_DRAIN_LOG_AT: float = 0.0
 
 # ── Hard spam filter (ago 2026) ─────────────────────────────────
 # YouTube removed shorts of this project as spam (post-upload verification
@@ -285,6 +287,102 @@ def _shorts_paused(db=None) -> bool:
         return db.get_system_state("shorts_paused") == "true" or \
             db.get_system_state("scheduler_paused") == "true"
     except Exception:
+        return False
+
+
+# ── Modo drenaje (short_drain_mode) ───────────────────────────────
+# Cuando hay un backlog de shorts nativos generados y aún sin subir, el
+# operador puede activar un MODO DRENAJE: se PAUSA la generación de nuevos
+# nativos (slots due + relleno de cola) pero la válvula de goteo SIGUE subiendo
+# la cola FIFO a su ritmo normal. Así la reserva (~179) se vacía en lugar de
+# mantenerse en equilibrio cerca del tope MAX_QUEUED (=60).
+#
+# Persistencia: system_state["short_drain_mode"] == "true". Auto-resume: cuando
+# TODOS los canales activos bajan de SHORT_DRAIN_FLOOR_PER_CHANNEL nativos en
+# cola, el flag se apaga solo y la fábrica vuelve a generar.
+SHORT_DRAIN_FLOOR_PER_CHANNEL = 3
+
+
+def _channel_queued_native_shorts(cid: int, db=None) -> int:
+    """Shorts nativos 'generated' y subibles (con archivo en disco, sin
+    youtube_id). Excluye standalone (la válvula solo sube type='native')."""
+    import sqlite3 as _sql_qn
+    from config.settings import DATABASE_PATH as _DBP_QN
+    try:
+        with _sql_qn.connect(str(_DBP_QN), timeout=10) as _conn_qn:
+            row = _conn_qn.execute(
+                """SELECT COUNT(*) FROM shorts
+                   WHERE channel_id = ? AND type = 'native'
+                     AND status = 'generated'
+                     AND file_path IS NOT NULL AND file_path != ''
+                     AND (youtube_id IS NULL OR youtube_id = '')""",
+                (cid,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _short_drain_enabled(db=None) -> bool:
+    """True si el modo drenaje de shorts está activo (kill-switch manual)."""
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        return db.get_system_state("short_drain_mode") == "true"
+    except Exception:
+        return False
+
+
+def short_drain_backlog(db=None) -> dict:
+    """{channel_id: nativos_en_cola} para canales activos (solo tipo native
+    subible). Útil para endpoint de estado y para la decisión de auto-resume."""
+    out: dict[int, int] = {}
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        channels = db.get_channels(active_only=True) or []
+    except Exception:
+        return out
+    for ch in channels or []:
+        cid = int(ch.get("id", 0) or 0)
+        if not cid:
+            continue
+        out[cid] = _channel_queued_native_shorts(cid, db=db)
+    return out
+
+
+def _short_drain_done(db=None) -> bool:
+    """True si todos los canales activos bajaron del piso de drenaje."""
+    backlog = short_drain_backlog(db)
+    if not backlog:
+        return True
+    return all(
+        count <= SHORT_DRAIN_FLOOR_PER_CHANNEL for count in backlog.values()
+    )
+
+
+def _short_drain_auto_resume(db=None):
+    """Si el modo drenaje está activo y el backlog ya bajó del piso, lo apaga
+    (auto-resume). Devuelve True si hizo la transición."""
+    if not _short_drain_enabled(db):
+        return False
+    if not _short_drain_done(db):
+        return False
+    try:
+        if db is None:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+        db.set_system_state("short_drain_mode", "false")
+        logger.info(
+            "Modo drenaje de shorts COMPLETADO — backlog bajo piso "
+            "(%d/canal) — reanudando generación de nativos",
+            SHORT_DRAIN_FLOOR_PER_CHANNEL,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("short_drain auto-resume falló: %s", exc)
         return False
 
 
@@ -2049,6 +2147,15 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
     if _shorts_paused(db):
         return None
 
+    # ── Modo drenaje: no rellenar más la cola hasta que baje del piso. La
+    # subida la gobierna la válvula (no pasa por aquí). Auto-resume aquí para
+    # las llamadas directas a este helper fuera del dispatch.
+    if _short_drain_auto_resume(db):
+        logger.info("Fill cola nativos: drenaje completado — reanudando")
+    if _short_drain_enabled(db):
+        logger.debug("Fill cola nativos: modo drenaje activo — no relleno")
+        return None
+
     # Gobernador de fábrica (Fase 4): disco bajo o créditos LLM → no generar.
     try:
         from api.services.factory_governor import factory_ok
@@ -2343,6 +2450,27 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         _spawn_background_short_upload(db, max_per_pass=2)
     except Exception as exc:
         logger.warning("Shorts dispatch: queued upload pasada falló: %s", exc)
+
+    # ── Modo drenaje: la válvula YA subió arriba (nunca se frena). Si está
+    # activo, se corta TODA la generación de nativos (slots due + fill) hasta
+    # que el backlog baje del piso; entonces auto-resume y se sigue normal.
+    # El return aquí es intencionado: impide tanto el fill de las ramas de
+    # cuota/tope global como la generación por slots due del bloque de abajo.
+    if _short_drain_auto_resume(db):
+        logger.info("Shorts dispatch: drenaje completado — fábrica reanudada")
+    if _short_drain_enabled(db):
+        global _LAST_DRAIN_LOG_AT
+        _now_dl = time.time()
+        if _now_dl - _LAST_DRAIN_LOG_AT > 600:
+            _LAST_DRAIN_LOG_AT = _now_dl
+            _backlog = short_drain_backlog(db)
+            logger.info(
+                "Shorts dispatch: MODO DRENAJE — pausada generación de nativos "
+                "hasta bajar de %d/canal (cola actual: %s)",
+                SHORT_DRAIN_FLOOR_PER_CHANNEL,
+                {cid: n for cid, n in sorted(_backlog.items())},
+            )
+        return None
 
     # Cuota agotada: no hay dispatch inmediato; la fábrica sigue generando a cola.
     if _youtube_quota_blocked(db):
