@@ -17,6 +17,7 @@ from config.settings import (
     LLM_CREDIT_CHECK_INTERVAL_HOURS,
     LLM_CREDIT_LOW_THRESHOLD_USD,
     OPENAI_API_KEY,
+    OPENAI_QUOTA_ERROR_WINDOW_HOURS,
 )
 
 logger = logging.getLogger("autotube.llm_credits")
@@ -199,11 +200,34 @@ OPENAI_QUOTA_PATTERNS = [
 ]
 
 
+def _created_within_hours(created_at, cutoff_hours: int) -> bool:
+    """True si ``created_at`` (timestamp SQLite UTC naive) cae dentro de la ventana.
+
+    Compara contra el reloj actual en UTC. Si no puede parsearse, devuelve
+    False (el error no cuenta) para favorecer la auto-curación del estado.
+    """
+    if not created_at or cutoff_hours <= 0:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(created_at))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() <= cutoff_hours * 3600
+    except (ValueError, TypeError):
+        return False
+
+
 def check_openai_from_errors(db) -> dict:
     """Detect OpenAI quota exhaustion from existing pipeline errors.
 
     Scans pipeline_alerts and script_generation_attempts for patterns
     matching quota/credit exhaustion. No test API call is made.
+
+    Self-healing: only errors within ``OPENAI_QUOTA_ERROR_WINDOW_HOURS``
+    (default 24h) are counted. Once the newest matching error ages out of
+    the window, status returns to ``healthy`` so a stale outage of the
+    fallback provider does not keep blocking generation indefinitely.
+    Set ``OPENAI_QUOTA_ERROR_WINDOW_HOURS=0`` to keep the legacy 7-day scan.
 
     Returns:
         {
@@ -213,6 +237,7 @@ def check_openai_from_errors(db) -> dict:
             "has_quota": bool,
         }
     """
+    window_hours = OPENAI_QUOTA_ERROR_WINDOW_HOURS if OPENAI_QUOTA_ERROR_WINDOW_HOURS else (7 * 24)
     try:
         with db._connect() as conn:
             # Check pipeline_alerts for any openai-related error
@@ -241,6 +266,8 @@ def check_openai_from_errors(db) -> dict:
             # Detect quota patterns
             quota_errors = []
             for row in alert_rows:
+                if not _created_within_hours(row["created_at"], window_hours):
+                    continue
                 msg = (row["message"] or "") + (row["title"] or "")
                 for pattern in OPENAI_QUOTA_PATTERNS:
                     if pattern.lower() in msg.lower():
@@ -252,6 +279,8 @@ def check_openai_from_errors(db) -> dict:
                         break
 
             for row in attempt_rows:
+                if not _created_within_hours(row["created_at"], window_hours):
+                    continue
                 err = row["error_message"] or ""
                 for pattern in OPENAI_QUOTA_PATTERNS:
                     if pattern.lower() in err.lower():
