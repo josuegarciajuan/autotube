@@ -137,6 +137,41 @@ def set_channel_delivery_override(channel_id: int, override: dict, db) -> dict:
     return value
 
 
+def apply_publish_override(channel_id: int, db, *, longs_per_day=None,
+                           native_shorts_per_day=None) -> dict:
+    """Guardado autoritativo desde el panel "Configuración de Programación".
+
+    Persiste un override por canal (override_json) que es la MÁXIMA autoridad:
+    puede superar el techo del perfil para longs y shorts. El scheduler lo lee
+    vía resolve_channel_policy_values (longs) y policy_value/_hard_daily_cap
+    (shorts). set_channel_delivery_override ya encola el replan del horizonte.
+    """
+    override = {}
+    if longs_per_day is not None:
+        override["public_videos_per_day"] = max(0, min(10, int(longs_per_day)))
+    if native_shorts_per_day is not None:
+        override["native_shorts_per_day"] = max(0, min(10, int(native_shorts_per_day)))
+    if override:
+        set_channel_delivery_override(channel_id, override, db)
+    return resolve_channel_policy_values(channel_id, db=db)
+
+
+def clear_publish_override(channel_id: int, db) -> dict:
+    """Vuelve a perfil-managed: borra el override manual conservando el estado."""
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE channel_delivery_state SET override_json='{}', "
+                "updated_at=CURRENT_TIMESTAMP WHERE channel_id=?",
+                (channel_id,),
+            )
+            conn.commit()
+    except Exception:
+        db.set_system_state(f"channel_delivery_override_{channel_id}", "")
+    _trigger_replan(db, channel_id)
+    return resolve_channel_policy_values(channel_id, db=db)
+
+
 def set_channel_delivery_state(state: str, channel_id: int, db) -> str:
     """Change state and clear manual controls so old exceptions cannot leak."""
     if state not in DELIVERY_STATES:
@@ -263,11 +298,22 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
                     "PUBLISH_JITTER_MIN", "publish_jitter_min", default=0)
     target = number("publish_target_hour", "PUBLISH_TARGET_HOUR", default=None)
     override = _channel_override(channel_id, db)
+    # ── Override explícito (panel "Configuración de Programación") ──
+    # Un override manual es la MÁXIMA autoridad: puede superar el techo del
+    # perfil (strike/recovery/normal) para longs y shorts. Sin override, el
+    # perfil sigue siendo el techo de seguridad (comportamiento histórico:
+    # un canal puede ser más conservador, nunca más agresivo).
+    explicit_mode = explicit is not None
+    if explicit_mode and channel_cap is not None:
+        longform_cap = max(0, int(channel_cap))
+    else:
+        longform_cap = (max(0, min(int(channel_cap), global_cap))
+                        if channel_cap is not None else global_cap)
     return {
         "channel_id": int(channel_id),
-        "longform_publish_cap": max(0, min(int(channel_cap), global_cap)) if channel_cap is not None else global_cap,
+        "longform_publish_cap": longform_cap,
         "native_shorts_per_day": max(0, native_short_cap),
-        "public_longform_per_day": max(0, min(int(channel_cap), global_cap)) if channel_cap is not None else global_cap,
+        "public_longform_per_day": longform_cap,
         "public_shorts_per_day": max(0, native_short_cap),
         "same_channel_publish_gap_h": max(publish_gap, int(pacing.get("same_channel_publish_gap_h", 24))),
         "same_channel_upload_gap_h": max(upload_gap, int(pacing.get("same_channel_upload_gap_h", 6))),

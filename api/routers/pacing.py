@@ -105,6 +105,22 @@ def set_channel_delivery(channel_id: int, body: ChannelDeliveryUpdate):
     return resolve_channel_policy(channel_id, db=db)
 
 
+@router.delete("/channels/{channel_id}/override")
+def clear_channel_delivery_override(channel_id: int):
+    """Quitar el override manual por canal y volver a perfil-managed.
+
+    Usado desde el panel "Configuración de Programación" para dejar de forzar
+    una cifra por encima del techo del perfil (strike/recovery/normal).
+    """
+    db = get_db()
+    if not db.get_channel(channel_id):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Channel not found")
+    from api.services.channel_policy import clear_publish_override, resolve_channel_policy
+    clear_publish_override(channel_id, db)
+    return resolve_channel_policy(channel_id, db=db)
+
+
 @router.get("/factory-status")
 def factory_status():
     """Estado de la fábrica continua: disco, créditos LLM y profundidad de cola.

@@ -2,9 +2,8 @@ import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, ApiRequestError, type FullReplanApplyResult, type FullReplanPreflight } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
-import { Calendar, Video, Smartphone, Scissors, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
+import { Calendar, Smartphone, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw, ShieldCheck, Scissors } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
-import ChannelConfigCard from '../components/ChannelConfigCard'
 import PacingProfileCard from '../components/PacingProfileCard'
 import { getChannelStyles, getChannelShort } from '../lib/channelConfig'
 
@@ -18,75 +17,11 @@ interface ChannelSummary {
   next_kind: string | null
 }
 
-interface ShortsPlanningConfig {
-  channel_id: number; name: string; slug: string
-  shorts_enabled: boolean
-  shorts_native_per_day: number
-  shorts_clips_per_long: number
-}
-
-interface PlanningConfig {
-  channel_id: number
-  channel_name: string
-  channel_slug: string
-  videos_per_day: number
-  public_videos_per_day?: number
-  longform_generation_per_day?: number
-  upload_capacity_per_day?: number
-  viral_per_day: number
-  planning_enabled: boolean
-  videos_day_boost_weight: number
-  viral_day_boost_weight: number
-}
-
 // ── Timezone ─────────────────────────────────────────────
 // DB stores Europe/Madrid local time strings (e.g. "2026-07-13 21:00:00")
 function toLocal(ts: string): string {
   const m = ts.match(/(\d{2}):(\d{2})/)
   return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
-}
-
-// ── Shorts config card ───────────────────────────────────
-function ShortsCard({ config, onUpdate }: { config: ShortsPlanningConfig; onUpdate: (d: any) => void }) {
-  return (
-    <div className="bg-dark-700/50 rounded-xl p-4 space-y-3 border border-surface-border">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-white">{config.name}</span>
-        <button onClick={() => onUpdate({ shorts_enabled: !config.shorts_enabled })}
-          className={`relative w-9 h-5 rounded-full transition-colors ${config.shorts_enabled ? 'bg-neon-red' : 'bg-gray-600'}`}>
-          <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${config.shorts_enabled ? 'translate-x-4' : ''}`} />
-        </button>
-      </div>
-      {config.shorts_enabled && (
-        <>
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400 flex items-center gap-1.5">
-              <Smartphone size={12} className="text-emerald-400" /> Nativos/dia
-            </span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => onUpdate({ shorts_native_per_day: Math.max(0, config.shorts_native_per_day - 1) })}
-                className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Minus size={12} /></button>
-              <span className="text-white font-mono w-4 text-center">{config.shorts_native_per_day}</span>
-              <button onClick={() => onUpdate({ shorts_native_per_day: Math.min(5, config.shorts_native_per_day + 1) })}
-                className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Plus size={12} /></button>
-            </div>
-          </div>
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400 flex items-center gap-1.5">
-              <Scissors size={12} className="text-orange-400" /> Clips × vídeo largo
-            </span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => onUpdate({ shorts_clips_per_long: Math.max(0, (config.shorts_clips_per_long ?? 3) - 1) })}
-                className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Minus size={12} /></button>
-              <span className="text-white font-mono w-4 text-center">{config.shorts_clips_per_long ?? 3}</span>
-              <button onClick={() => onUpdate({ shorts_clips_per_long: Math.min(5, (config.shorts_clips_per_long ?? 3) + 1) })}
-                className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center"><Plus size={12} /></button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  )
 }
 
 // ── Today Status cards ───────────────────────────────────
@@ -242,44 +177,6 @@ function TodayStatus() {
   )
 }
 
-// ── Shorts section ───────────────────────────────────────
-function ShortsSection() {
-  const { data: configs = [], isLoading: loading, isError, refetch } = useShortsPlanningConfig()
-  const update = useCallback(async (channelId: number, data: any) => {
-    try { await api.updateShortsPlanningConfig(channelId, data); refetch() } catch (e: any) { alert(e.message) }
-  }, [refetch])
-  const activeConfigs = configs.filter((c: any) => c.slug !== 'test')
-  if (loading) return null
-  if (isError) {
-    return (
-      <div className="flex flex-col items-center gap-3 py-6 glass rounded-xl">
-        <AlertTriangle size={20} className="text-amber-400" />
-        <div className="text-center">
-          <p className="text-sm text-gray-300">Error al cargar config de shorts</p>
-          <p className="text-xs text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
-        </div>
-        <button
-          onClick={() => refetch()}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
-        >
-          <RefreshCw size={12} /> Reintentar
-        </button>
-      </div>
-    )
-  }
-  if (!activeConfigs.length) return null
-  return (
-    <div className="space-y-3">
-      <h4 className="text-sm font-medium text-white flex items-center gap-2">
-        <Smartphone size={14} className="text-emerald-400" /> Shorts por canal
-      </h4>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {activeConfigs.map(ch => (<ShortsCard key={ch.channel_id} config={ch} onUpdate={(d) => update(ch.channel_id, d)} />))}
-      </div>
-    </div>
-  )
-}
-
 // ── Cola de shorts generados (status='generated') ─────────
 // (fix ago 2026) Shorts nativos renderizados pero SIN subir (p. ej. durante
 // bloqueos de spam o cuota) antes eran invisibles en Programación.
@@ -337,25 +234,117 @@ function QueuedShortsSection() {
   )
 }
 
-// ── Planning config section ──────────────────────────────
-function PlanningConfigSection() {
-  const { data: rawConfigs = [], isLoading: loading, isError, refetch } = usePlanningConfig()
-  const configs = rawConfigs.filter((c: any) => c.channel_slug !== 'test')
+// ── Planning config section (real, editable values) ──────
+interface PacingChan {
+  id: number; slug: string; name: string; delivery_state?: string; manual_override?: boolean
+  longform_publish_cap?: number; native_shorts_per_day?: number
+  profile_longform_cap?: number; profile_short_cap?: number
+}
 
-  const update = useCallback(async (channelId: number, data: { videos_per_day?: number; planning_enabled?: boolean; viral_per_day?: number; public_videos_per_day?: number; longform_generation_per_day?: number; upload_capacity_per_day?: number }) => {
-    try {
-      await api.updatePlanningConfig(channelId, data)
-      refetch()
-    } catch (e: any) {
-      alert(e.message)
-    }
-  }, [refetch])
+interface PacingSummary { active_profile?: string; active_channels?: PacingChan[] }
 
-  if (loading) {
-    return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
-  }
+function Stepper({ value, onCommit, min = 0, max = 10, disabled, title }: {
+  value: number; onCommit: (v: number) => void; min?: number; max?: number; disabled?: boolean; title?: string
+}) {
+  return (
+    <div className="flex items-center gap-1.5" title={title}>
+      <button
+        onClick={() => onCommit(Math.max(min, value - 1))}
+        disabled={disabled}
+        className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+      ><Minus size={12} /></button>
+      <span className={`text-white font-mono w-4 text-center ${disabled ? 'text-gray-500' : ''}`}>{value}</span>
+      <button
+        onClick={() => onCommit(Math.min(max, value + 1))}
+        disabled={disabled}
+        className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+      ><Plus size={12} /></button>
+    </div>
+  )
+}
 
-  if (isError) {
+function PlanningSection() {
+  const queryClient = useQueryClient()
+  const { data: rawConfigs = [], isLoading: loadingCfg, isError: errCfg, refetch: refetchCfg } = usePlanningConfig()
+  const { data: rawShorts = [], isLoading: loadingSh, isError: errSh, refetch: refetchSh } = useShortsPlanningConfig()
+  const [pacing, setPacing] = useState<PacingSummary | null>(null)
+  const [busyId, setBusyId] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadPacing = useCallback(async () => {
+    try { const p = await api.getPacingProfile(); setPacing(p) } catch { /* non-fatal */ }
+  }, [])
+
+  const refreshAll = useCallback(() => {
+    refetchCfg(); refetchSh(); loadPacing()
+    queryClient.invalidateQueries() // refleja el replan en pipeline/hoy/semana
+  }, [refetchCfg, refetchSh, loadPacing, queryClient])
+
+  useEffect(() => { loadPacing() }, [loadPacing])
+
+  const saveLong = useCallback(async (channelId: number, data: Record<string, unknown>) => {
+    setBusyId(channelId); setError(null)
+    try { await api.updatePlanningConfig(channelId, data as any); refreshAll() }
+    catch (e: any) { setError(e?.message || 'No se pudo guardar.') }
+    finally { setBusyId(null) }
+  }, [refreshAll])
+
+  const saveShort = useCallback(async (channelId: number, data: Record<string, unknown>) => {
+    setBusyId(channelId); setError(null)
+    try { await api.updateShortsPlanningConfig(channelId, data as any); refreshAll() }
+    catch (e: any) { setError(e?.message || 'No se pudo guardar.') }
+    finally { setBusyId(null) }
+  }, [refreshAll])
+
+  const resetOverride = useCallback(async (channelId: number) => {
+    setBusyId(channelId); setError(null)
+    try { await api.clearChannelDeliveryOverride(channelId); refreshAll() }
+    catch (e: any) { setError(e?.message || 'No se pudo quitar el override.') }
+    finally { setBusyId(null) }
+  }, [refreshAll])
+
+  const loading = loadingCfg || loadingSh
+  const hasError = errCfg || errSh
+
+  // Combinar config long + shorts + pacing por canal
+  const rows = useMemo(() => {
+    const cfg = rawConfigs.filter((c: any) => c.channel_slug !== 'test')
+    const sh = rawShorts.filter((c: any) => c.slug !== 'test')
+    const pcmap = new Map<number, PacingChan>((pacing?.active_channels || []).map(c => [c.id, c]))
+    const shortsByCid = new Map<number, any>(sh.map(c => [c.channel_id, c]))
+    const union = new Map<number, any>()
+    for (const c of cfg) union.set(c.channel_id, c)
+    for (const c of sh) if (!union.has(c.channel_id)) union.set(c.channel_id, c)
+    return Array.from(union.values())
+      .map((c: any) => {
+        const cid = c.channel_id
+        const sc = shortsByCid.get(cid) || {}
+        const p: PacingChan = pcmap.get(cid) || { id: cid, slug: c.slug, name: '' }
+        const publicTarget = Number(c.public_videos_per_day ?? c.videos_per_day ?? 0)
+        const shortTarget = Number(sc.shorts_native_per_day ?? 3)
+        return {
+          channel_id: cid,
+          channel_name: c.channel_name || c.name || c.slug,
+          slug: c.slug,
+          planning_enabled: c.planning_enabled ?? true,
+          public_videos_per_day: publicTarget,
+          longform_generation_per_day: Number(c.longform_generation_per_day ?? c.videos_per_day ?? 0),
+          upload_capacity_per_day: Number(c.upload_capacity_per_day ?? c.videos_per_day ?? 0),
+          shorts_enabled: sc.shorts_enabled ?? false,
+          shorts_native_per_day: shortTarget,
+          delivery_state: p.delivery_state || pacing?.active_profile || 'strike',
+          manual_override: !!p.manual_override,
+          pub_effective: Number(p.longform_publish_cap ?? 0),
+          short_effective: Number(p.native_shorts_per_day ?? 0),
+          profile_long_cap: Number(p.profile_longform_cap ?? 0),
+          profile_short_cap: Number(p.profile_short_cap ?? 0),
+        }
+      })
+      .sort((a, b) => a.channel_id - b.channel_id)
+  }, [rawConfigs, rawShorts, pacing])
+
+  if (loading) return <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-gray-600" /></div>
+  if (hasError) {
     return (
       <div className="flex flex-col items-center gap-3 py-6 glass rounded-xl">
         <AlertTriangle size={20} className="text-amber-400" />
@@ -363,29 +352,120 @@ function PlanningConfigSection() {
           <p className="text-sm text-gray-300">Error al cargar la configuracion</p>
           <p className="text-xs text-gray-500 mt-1">El servidor puede estar reiniciandose.</p>
         </div>
-        <button
-          onClick={() => refetch()}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
-        >
+        <button onClick={() => { refetchCfg(); refetchSh() }} className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors">
           <RefreshCw size={12} /> Reintentar
         </button>
       </div>
     )
   }
+  if (!rows.length) return null
 
   return (
-    <div className="space-y-3">
-      <h4 className="text-sm font-medium text-white flex items-center gap-2">
-        <Video size={14} className="text-neon-gold" /> Videos largos por canal
-      </h4>
+    <div className="space-y-4">
+      <p className="text-[11px] text-gray-500 leading-relaxed">
+        Valores <strong className="text-gray-300">reales</strong> que aplica el motor de programación.
+        Fijar Publicaciones/Shorts por encima del techo del perfil (<strong>{pacing?.active_profile || 'strike'}</strong>) activa
+        un <strong className="text-amber-300">override autoritativo</strong> para ese canal. Cada cambio aplica ya un replan del horizonte.
+      </p>
+      {error && <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg p-2">{error}</p>}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {configs.map(cfg => (
-          <ChannelConfigCard
-            key={cfg.channel_id}
-            config={cfg}
-            onUpdate={(data) => update(cfg.channel_id, data)}
-          />
-        ))}
+        {rows.map(r => {
+          const isOverride = r.manual_override
+          const pubShown = isOverride ? r.public_videos_per_day : Math.min(r.public_videos_per_day, r.profile_long_cap || r.public_videos_per_day)
+          const shortShown = isOverride ? r.shorts_native_per_day : Math.min(r.shorts_native_per_day, r.profile_short_cap || r.shorts_native_per_day)
+          const disabled = !r.planning_enabled || busyId === r.channel_id
+          return (
+            <div key={r.channel_id} className={`bg-dark-700/50 rounded-xl p-4 space-y-3 border border-surface-border transition-opacity ${!r.planning_enabled ? 'opacity-60' : ''}`}>
+              {/* Header */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${getChannelStyles({ channel_id: r.channel_id, channel_slug: r.slug }).dot}`} />
+                  <span className="text-sm font-medium text-white truncate">{r.channel_name}</span>
+                  <span className="text-[10px] text-gray-500 font-mono">{getChannelShort({ channel_id: r.channel_id, channel_slug: r.slug, channel_name: r.channel_name })}</span>
+                  {busyId === r.channel_id && <Loader2 size={12} className="animate-spin text-neon-cyan shrink-0" />}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wide ${r.delivery_state === 'normal' ? 'text-emerald-300 bg-emerald-500/10' : r.delivery_state === 'recovery' ? 'text-amber-300 bg-amber-500/10' : 'text-red-300 bg-red-500/10'}`}>
+                    {r.delivery_state}
+                  </span>
+                  {isOverride && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wide text-amber-200 bg-amber-500/20 border border-amber-500/30" title="Override manual activo: la cifra fijada manda por encima del perfil">
+                      override
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* planning_enabled toggle */}
+              <button onClick={() => saveLong(r.channel_id, { planning_enabled: !r.planning_enabled })} disabled={busyId === r.channel_id}
+                className={`relative w-9 h-5 rounded-full transition-colors ${r.planning_enabled ? 'bg-neon-gold' : 'bg-gray-600'}`} title="Activar/desactivar planificacion">
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${r.planning_enabled ? 'translate-x-4' : ''}`} />
+              </button>
+
+              {/* Long-form: Publicaciones */}
+              <div className="border-t border-surface-border/40 pt-2 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-300 flex items-center gap-1.5"><Play size={12} className="text-neon-gold" /> Publicaciones long-form/día</span>
+                  <Stepper value={r.public_videos_per_day} disabled={disabled} onCommit={v => saveLong(r.channel_id, { public_videos_per_day: v })} max={10}
+                    title="Publicaciones/día objetivo (si supera el techo, activa override)" />
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  {isOverride
+                    ? <>Override: se publican <strong className="text-amber-300">{r.pub_effective}/día</strong> (objetivo autoritativo).</>
+                    : <>Techo del perfil <strong>{r.delivery_state}</strong>: <strong className="text-gray-300">{r.profile_long_cap}/día</strong>. Actual: <strong className="text-gray-300">{r.pub_effective}/día</strong></>}
+                </p>
+                {/* Generación y cap subida */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-gray-400">Generación</span>
+                    <Stepper value={r.longform_generation_per_day} disabled={disabled} onCommit={v => saveLong(r.channel_id, { longform_generation_per_day: v })} max={10} />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-gray-400">Cap. subida</span>
+                    <Stepper value={r.upload_capacity_per_day} disabled={disabled} onCommit={v => saveLong(r.channel_id, { upload_capacity_per_day: v })} max={20} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Shorts */}
+              <div className="border-t border-surface-border/40 pt-2 space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-300 flex items-center gap-1.5"><Smartphone size={12} className="text-emerald-400" /> Shorts nativos/día</span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => saveShort(r.channel_id, { shorts_enabled: !r.shorts_enabled })} disabled={busyId === r.channel_id}
+                      className={`relative w-8 h-4 rounded-full transition-colors ${r.shorts_enabled ? 'bg-emerald-500' : 'bg-gray-600'}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${r.shorts_enabled ? 'translate-x-4' : ''}`} />
+                    </button>
+                    <Stepper value={r.shorts_native_per_day} disabled={disabled || !r.shorts_enabled} onCommit={v => saveShort(r.channel_id, { shorts_native_per_day: v })} max={10} />
+                  </div>
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  {isOverride
+                    ? <>Override: se suben <strong className="text-amber-300">{r.short_effective}/día</strong>.</>
+                    : <>Techo del perfil: <strong className="text-gray-300">{r.profile_short_cap}/día</strong>. Actual: <strong className="text-gray-300">{r.short_effective}/día</strong></>}
+                </p>
+              </div>
+
+              {/* Clips deshabilitado con explicación */}
+              <div className="border-t border-surface-border/40 pt-2">
+                <div className="flex items-center justify-between text-xs opacity-50">
+                  <span className="text-gray-400 flex items-center gap-1.5"><Scissors size={12} className="text-orange-400" /> Clips × vídeo largo</span>
+                  <span className="text-gray-500 font-mono text-[10px]">desactivado</span>
+                </div>
+                <p className="text-[9px] text-gray-600 mt-0.5" title="Los clips están desactivados en el pipeline (CLIP_SHORTS_ENABLED=false). Este control no tiene efecto.">
+                  Los clips están desactivados en el pipeline (CLIP_SHORTS_ENABLED=false) → este control no tiene efecto.
+                </p>
+              </div>
+
+              {isOverride && (
+                <button onClick={() => resetOverride(r.channel_id)} disabled={busyId === r.channel_id}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white text-[11px] transition-colors disabled:opacity-50">
+                  <ShieldCheck size={12} className="text-emerald-400" /> Usar perfil (quitar override)
+                </button>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -650,8 +730,7 @@ export default function Scheduling() {
         <h3 className="font-display text-base font-semibold text-white flex items-center gap-2">
           <Settings size={16} className="text-purple-400" /> Configuracion de Programacion
         </h3>
-        <PlanningConfigSection />
-        <ShortsSection />
+        <PlanningSection />
       </section>
     </div>
   )

@@ -241,6 +241,16 @@ def get_pacing_summary(db=None) -> dict:
                                        "public_longform_per_day", "native_shorts_per_day",
                                        "public_shorts_per_day", "generation_per_day", "upload_capacity_per_day")})
                 item["enforcement"] = resolved.get("enforcement")
+                # Techo del perfil (sin override) para la UI de "Configuración".
+                _state = resolved.get("delivery_state") or active
+                try:
+                    _prof = db.get_delivery_profile(_state) or {}
+                except Exception:
+                    _prof = {}
+                item["profile_longform_cap"] = int(_prof.get("public_videos_per_day",
+                                                             resolved.get("longform_publish_cap")) or 0)
+                item["profile_short_cap"] = int(_prof.get("native_shorts_per_day",
+                                                          resolved.get("native_shorts_per_day")) or 0)
             except Exception:
                 pass
             channels.append(item)

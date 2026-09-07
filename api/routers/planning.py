@@ -88,6 +88,21 @@ def update_planning_config(channel_id: int, data: PlanningConfigUpdate):
     if not ok:
         raise HTTPException(500, "Failed to update")
 
+    # ── Replan inmediato + override autoritativo (panel Configuración) ──
+    # Si el operador fija un objetivo de publicación long-form, esa cifra es la
+    # máxima autoridad (puede superar el perfil). apply_publish_override
+    # persiste el override y encola/recalcula el replan del horizonte.
+    # Un cambio solo de generación (sin override) también se aplica ya.
+    try:
+        from api.services.channel_policy import apply_publish_override
+        from api.services.planning_service import trigger_delivery_replan
+        if data.public_videos_per_day is not None:
+            apply_publish_override(channel_id, db, longs_per_day=data.public_videos_per_day)
+        else:
+            trigger_delivery_replan(db, channel_id)
+    except Exception:
+        pass  # El siguiente tick del scheduler aplicará el cambio igualmente.
+
     # Return updated config
     return db.get_channel_planning_config(channel_id)
 
@@ -385,6 +400,17 @@ def update_shorts_planning(channel_id: int, data: ShortsConfigUpdate):
     ok = db.update_shorts_planning_config(channel_id, update_data)
     if not ok:
         raise HTTPException(500, "Failed to update shorts planning config")
+
+    # ── Override autoritativo shorts (panel Configuración) ──
+    # Fijar shorts_native_per_day desde el panel = cifra de máxima autoridad
+    # (puede superar el techo del perfil). apply_publish_override persiste el
+    # override nativo y encola/recalcula el replan del horizonte.
+    try:
+        from api.services.channel_policy import apply_publish_override
+        if data.shorts_native_per_day is not None:
+            apply_publish_override(channel_id, db, native_shorts_per_day=data.shorts_native_per_day)
+    except Exception:
+        pass
 
     # Replan shorts for the upcoming week
     try:
