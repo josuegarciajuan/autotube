@@ -10,6 +10,12 @@ recursos del sistema están comprometidos:
      no tope presupuestario: el kill-switch evita generar sin crédito y
      acumular errores en cadena).
 
+   Sobre los créditos LLM: el pool de modelos tiene failover real
+   (p.ej. ``deepseek:…→openai:…``), de modo que basta con que UN proveedor
+   tenga crédito para seguir generando. La fábrica se pausa SOLO cuando
+   TODOS los proveedores registrados están no-usables, no cuando cae un
+   mero fallback que el sistema no está usando.
+
 Ambas son compuertas FAIL-OPEN (ante error de medición se permite generar)
 y SOLO afectan al dispatch automático (fábrica), no a las acciones manuales
 del panel.
@@ -21,6 +27,12 @@ import logging
 import shutil
 
 logger = logging.getLogger("autotube.factory_governor")
+
+
+# Estados que significan "este proveedor no puede usarse para generar".
+# "low" (saldo bajo pero > 0) NO bloquea: el pool sigue pudiendo generar
+# con ese proveedor y la alerta es solo informativa.
+_BLOCKING_CREDIT_STATUSES = {"exhausted", "error"}
 
 
 def _default_min_free_disk_mb() -> int:
@@ -61,10 +73,16 @@ def disk_ok(min_free_mb: int | None = None) -> bool:
 
 
 def credits_ok(db=None) -> bool:
-    """True si los proveedores LLM tienen crédito. Fail-open sin registro.
+    """True si hay al menos un proveedor LLM usable. Fail-open sin registro.
 
-    DeepSeek: bloquea solo con status 'exhausted' o 'error' persistido.
-    OpenAI: bloquea solo con status 'exhausted'.
+    El pool de modelos tiene failover real (p.ej. ``deepseek:…→openai:…``),
+    por lo que basta con que UN proveedor tenga crédito para seguir generando.
+    Si el fallback (p.ej. OpenAI) se agota pero el primario (DeepSeek) sigue
+    sano, la fábrica NO debe pausarse: se sigue generando con el primario.
+
+    Se pausa SOLO cuando TODOS los proveedores registrados están no-usables
+    (status ``exhausted`` o ``error``). Fail-open: sin registros o ante error
+    de medición se permite generar.
     """
     try:
         if db is None:
@@ -72,17 +90,23 @@ def credits_ok(db=None) -> bool:
             db = ExtendedDatabase()
         from api.services.llm_credit_checker import get_llm_credit_status
         status = get_llm_credit_status(db) or {}
-        ds = status.get("deepseek") or {}
-        oa = status.get("openai") or {}
-        if ds.get("status") in ("exhausted", "error"):
+        # Solo proveedores con registro de estado presente (ausente → ignorado).
+        providers = {
+            name: status[name]
+            for name in ("deepseek", "openai")
+            if status.get(name)
+        }
+        if not providers:
+            return True  # fail-open: sin registros no bloqueamos
+        blocked = {
+            name: rec.get("status")
+            for name, rec in providers.items()
+            if rec.get("status") in _BLOCKING_CREDIT_STATUSES
+        }
+        if len(blocked) >= len(providers):
             logger.warning(
-                "Factory governor: créditos LLM DeepSeek %s — pausando generación",
-                ds.get("status"),
-            )
-            return False
-        if oa.get("status") == "exhausted":
-            logger.warning(
-                "Factory governor: créditos LLM OpenAI exhausted — pausando generación",
+                "Factory governor: TODOS los proveedores LLM no-usables (%s) — pausando generación",
+                ", ".join(f"{k}={v}" for k, v in blocked.items()),
             )
             return False
         return True
