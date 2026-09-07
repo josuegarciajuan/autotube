@@ -537,6 +537,47 @@ def test_resolver_deterministic_apply_order_second_winner_is_degraded():
     assert counts == {"retained": 1, "rescheduled": 1, "new": 0}
 
 
+def test_resolver_blocks_cross_move_onto_later_slots_current_target():
+    """Earlier items cannot claim a target a later rescheduled slot still owns.
+
+    Seed includes the current targets of every rescheduled slot: when item 1
+    tries to move onto B (still held by item 2 until its own UPDATE), it must
+    degrade exactly as the sequential UPDATEs in apply would fail.
+    """
+    review = [
+        {"kind": "long_form", "action": "rescheduled", "slot_id": 1, "channel_id": 7,
+         "before": {"target_public_at": "A"}, "after": {"target_public_at": "B"}},
+        {"kind": "long_form", "action": "rescheduled", "slot_id": 2, "channel_id": 7,
+         "before": {"target_public_at": "B"}, "after": {"target_public_at": "C"}},
+    ]
+    kept, counts = planning_service._resolve_public_target_collisions(
+        review, {"retained": 0, "rescheduled": 2, "new": 0})
+    assert [it["action"] for it in kept] == ["retained", "rescheduled"]
+    assert kept[0]["reason"] == "collision_active_slot"
+    assert kept[0]["after"] == kept[0]["before"]
+    assert kept[1]["after"]["target_public_at"] == "C"
+    assert counts == {"retained": 1, "rescheduled": 1, "new": 0}
+
+
+def test_resolver_allows_taking_a_target_freed_by_an_earlier_move():
+    """A slot that already moved away frees its old target for later items.
+
+    The deterministic walk releases the old target only after the owning slot's
+    move succeeds, mirroring the sequential UPDATEs of apply.
+    """
+    review = [
+        {"kind": "long_form", "action": "rescheduled", "slot_id": 1, "channel_id": 7,
+         "before": {"target_public_at": "A"}, "after": {"target_public_at": "FREE"}},
+        {"kind": "long_form", "action": "rescheduled", "slot_id": 2, "channel_id": 7,
+         "before": {"target_public_at": "B"}, "after": {"target_public_at": "A"}},
+    ]
+    kept, counts = planning_service._resolve_public_target_collisions(
+        review, {"retained": 0, "rescheduled": 2, "new": 0})
+    assert [it["action"] for it in kept] == ["rescheduled", "rescheduled"]
+    assert [it["after"]["target_public_at"] for it in kept] == ["FREE", "A"]
+    assert counts == {"retained": 0, "rescheduled": 2, "new": 0}
+
+
 def test_resolver_drops_new_item_only_on_collision():
     review = [
         {"kind": "long_form", "action": "retained", "slot_id": 1, "channel_id": 10,
