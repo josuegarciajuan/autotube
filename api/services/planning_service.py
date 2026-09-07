@@ -4598,6 +4598,114 @@ def _safe_replan_review(existing: list[dict], proposed: list[dict], kind: str = 
     return review, counts
 
 
+# Reason stamped on long-form items degraded by _resolve_public_target_collisions.
+_COLLISION_ACTIVE_SLOT = "collision_active_slot"
+
+
+def _resolve_public_target_collisions(review: list[dict], counts: dict | None = None):
+    """Make a long-form safe-replan plan collision-free against active slots.
+
+    ``planned_slots`` enforces the partial unique index
+    ``uq_active_planned_public_target`` on ``(channel_id, target_public_at)`` for
+    rows whose status is ``pending`` or ``running``. Running slots are immutable
+    during a safe replan, so a proposal that would retime a pending slot onto a
+    target still occupied by a running (protected) slot — or onto any target
+    that remains occupied once the plan is applied — violates the index the
+    moment ``_safe_full_replan_apply_once`` runs its UPDATE/INSERT.
+
+    This helper simulates the exact statement order used by apply and rewrites
+    the offending long-form items so the stored plan is always applicable:
+
+    * ``rescheduled`` items whose proposed ``target_public_at`` is already taken
+      degrade to ``retained`` (the slot is left where it is) and carry
+      ``reason="collision_active_slot"`` so the UI can explain the decision.
+    * ``new`` items whose proposed target is taken are removed from the review;
+      no slot is created on an occupied target.
+
+    Determinism rules (mirrors apply order):
+    a. Targets held from the start of the apply transaction seed the occupied set
+       per channel: ``protected`` (running) slots, ``retained`` slots (including
+       superseded rows that will be cancelled — their targets are kept occupied
+       on purpose so the plan never reuses them mid-transaction) AND the current
+       targets of ``rescheduled`` slots, which each slot keeps holding until its
+       own UPDATE runs.
+    b. Mutable long-form items are then processed in apply order: every
+       non-``new`` item first (in review order), then every ``new`` item. A
+       rescheduled slot releases its old target only once its own move succeeds,
+       exactly like the sequential UPDATEs in apply.
+    c. Shorts are never touched: ``shorts_planned_slots`` has no such index.
+
+    Returns the (possibly rewritten) review and the recomputed counters.
+    """
+    if counts is None:
+        counts = {"retained": 0, "rescheduled": 0, "new": 0}
+    long_items = [i for i in review if i.get("kind") == "long_form"]
+    if not long_items:
+        return review, counts
+
+    # (a) Seed occupied targets from EVERY slot that exists when the apply
+    # transaction starts: retained, protected (running) and rescheduled slots
+    # alike. A rescheduled slot keeps holding its current target until its own
+    # UPDATE runs, so an item processed earlier in apply order must never claim
+    # a target that a later rescheduled item still owns at that moment.
+    occupied: dict[int, set[str]] = {}
+    for item in long_items:
+        if item.get("action") not in ("retained", "protected", "rescheduled"):
+            continue
+        target = (item.get("before") or {}).get("target_public_at")
+        if not target:
+            continue
+        occupied.setdefault(int(item["channel_id"]), set()).add(str(target))
+
+    # (b)/(c) Walk in apply order: existing items (review order) then new ones.
+    ordered = (
+        [i for i in long_items if i.get("action") != "new"]
+        + [i for i in long_items if i.get("action") == "new"]
+    )
+    dropped = set()  # object ids of colliding 'new' items to remove from review
+    for item in ordered:
+        action = item.get("action")
+        if action not in ("rescheduled", "new"):
+            continue
+        channel = int(item["channel_id"])
+        old_target = (item.get("before") or {}).get("target_public_at") if action == "rescheduled" else None
+        new_target = (item.get("after") or {}).get("target_public_at")
+        if not new_target:
+            # Moving onto NULL leaves the partial index and frees the old target
+            # for later items; inserting with NULL never touches the index.
+            if action == "rescheduled" and old_target:
+                occupied.setdefault(channel, set()).discard(str(old_target))
+            continue
+        pool = occupied.setdefault(channel, set())
+        target_taken = str(new_target) in pool
+        if action == "rescheduled" and old_target and str(new_target) == str(old_target):
+            # The slot already owns that target (only other fields changed).
+            target_taken = False
+        if target_taken:
+            if action == "rescheduled":
+                item["action"] = "retained"
+                item["reason"] = _COLLISION_ACTIVE_SLOT
+                item["after"] = item["before"]
+            else:
+                dropped.add(id(item))
+            continue
+        if action == "rescheduled" and old_target:
+            pool.discard(str(old_target))
+        pool.add(str(new_target))
+
+    kept = [i for i in review if id(i) not in dropped]
+    counts["retained"] = sum(
+        1 for i in kept if i.get("kind") == "long_form" and i.get("action") == "retained"
+    )
+    counts["rescheduled"] = sum(
+        1 for i in kept if i.get("kind") == "long_form" and i.get("action") == "rescheduled"
+    )
+    counts["new"] = sum(
+        1 for i in kept if i.get("kind") == "long_form" and i.get("action") == "new"
+    )
+    return kept, counts
+
+
 def _cap_pending_public_slots(existing: list[dict], db) -> tuple[list[dict], list[dict]]:
     """Partition pending slots by normalized publication day and public cap."""
     from api.time_utils import parse_utc, MADRID
@@ -4661,6 +4769,11 @@ def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
         long_review.extend({"kind": "long_form", "action": "protected", "reason": "running_job",
                             "slot_id": row["id"], "channel_id": row["channel_id"],
                             "before": row, "after": row} for row in running_long)
+    # Degrade long-form items whose proposed target_public_at would collide with
+    # a target that remains occupied after the plan (protected running slots,
+    # retained pending slots). Without this, apply violates the partial unique
+    # index uq_active_planned_public_target and dies with IntegrityError.
+    long_review, long_counts = _resolve_public_target_collisions(long_review, long_counts)
     shorts_review, shorts_counts = _safe_replan_review(
         existing_shorts, proposed_shorts, kind="short",
     )
@@ -4756,74 +4869,87 @@ def _safe_full_replan_apply_once(confirmation_token: str, db=None) -> dict:
         ordered_review = [item for item in review if item["action"] != "new"] + [
             item for item in review if item["action"] == "new"
         ]
-        for item in ordered_review:
-            action = item["action"]
-            kind = item.get("kind", "long_form")
-            actual_counts = actual_shorts_counts if kind == "short" else actual_long_counts
-            if action == "retained":
-                if item.get("superseded") and kind != "short":
-                    conn.execute("UPDATE planned_slots SET status='cancelled' WHERE id=? AND status='pending'",
-                                 (item["slot_id"],))
-                actual_counts["retained"] += 1
-            elif action == "rescheduled":
-                new = item["after"]
-                # Deliberately excludes id, status, job_id, and video_id.
-                if kind == "short":
-                    # Preserve type, source/long pairing, job, short, and status.
-                    cursor = conn.execute("""
-                        UPDATE shorts_planned_slots
-                        SET date_key = ?, scheduled_at = ?, target_upload_at = ?, slot_position = ?
-                        WHERE id = ? AND status = 'pending'
-                    """, (
-                        new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
-                        new.get("slot_position", 0), item["slot_id"],
-                    ))
-                else:
-                    cursor = conn.execute("""
-                        UPDATE planned_slots
-                        SET date_key = ?, scheduled_at = ?, target_upload_at = ?, target_public_at = ?,
-                            upload_window_start = ?, upload_window_end = ?,
-                            slot_position = ?, source_mode = ?
-                        WHERE id = ? AND status = 'pending'
-                    """, (
-                        new["date_key"], new["scheduled_at"], new.get("target_upload_at"), new.get("target_public_at"),
-                        new.get("upload_window_start", 9), new.get("upload_window_end", 11),
-                        new.get("slot_position", 0), new.get("source_mode", "original"), item["slot_id"],
-                    ))
-                if cursor.rowcount != 1:
-                    conn.rollback()
-                    raise ValueError("replan confirmation is stale")
-                actual_counts["rescheduled"] += 1
-            elif action == "new":
-                new = item["after"]
-                if kind == "short":
-                    conn.execute("""
-                        INSERT INTO shorts_planned_slots
-                            (channel_id, date_key, scheduled_at, target_upload_at, short_type,
-                             long_slot_position, source_video_id, slot_position, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-                    """, (
-                        new["channel_id"], new["date_key"], new["scheduled_at"],
-                        new.get("target_upload_at"), new.get("short_type", "native"),
-                        new.get("long_slot_position"), new.get("source_video_id"),
-                        new.get("slot_position", 0),
-                    ))
-                else:
-                    conn.execute("""
-                        INSERT INTO planned_slots
-                            (channel_id, date_key, scheduled_at, target_upload_at, target_public_at,
-                             upload_window_start, upload_window_end, slot_position, source_mode, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-                    """, (
-                        new["channel_id"], new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
-                        new.get("target_public_at"), new.get("upload_window_start", 9),
-                        new.get("upload_window_end", 11), new.get("slot_position", 0),
-                        new.get("source_mode", "original"),
-                    ))
-                actual_counts["new"] += 1
+        try:
+            for item in ordered_review:
+                action = item["action"]
+                kind = item.get("kind", "long_form")
+                actual_counts = actual_shorts_counts if kind == "short" else actual_long_counts
+                if action == "retained":
+                    if item.get("superseded") and kind != "short":
+                        conn.execute("UPDATE planned_slots SET status='cancelled' WHERE id=? AND status='pending'",
+                                     (item["slot_id"],))
+                    actual_counts["retained"] += 1
+                elif action == "rescheduled":
+                    new = item["after"]
+                    # Deliberately excludes id, status, job_id, and video_id.
+                    if kind == "short":
+                        # Preserve type, source/long pairing, job, short, and status.
+                        cursor = conn.execute("""
+                            UPDATE shorts_planned_slots
+                            SET date_key = ?, scheduled_at = ?, target_upload_at = ?, slot_position = ?
+                            WHERE id = ? AND status = 'pending'
+                        """, (
+                            new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
+                            new.get("slot_position", 0), item["slot_id"],
+                        ))
+                    else:
+                        cursor = conn.execute("""
+                            UPDATE planned_slots
+                            SET date_key = ?, scheduled_at = ?, target_upload_at = ?, target_public_at = ?,
+                                upload_window_start = ?, upload_window_end = ?,
+                                slot_position = ?, source_mode = ?
+                            WHERE id = ? AND status = 'pending'
+                        """, (
+                            new["date_key"], new["scheduled_at"], new.get("target_upload_at"), new.get("target_public_at"),
+                            new.get("upload_window_start", 9), new.get("upload_window_end", 11),
+                            new.get("slot_position", 0), new.get("source_mode", "original"), item["slot_id"],
+                        ))
+                    if cursor.rowcount != 1:
+                        conn.rollback()
+                        raise ValueError("replan confirmation is stale")
+                    actual_counts["rescheduled"] += 1
+                elif action == "new":
+                    new = item["after"]
+                    if kind == "short":
+                        conn.execute("""
+                            INSERT INTO shorts_planned_slots
+                                (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                                 long_slot_position, source_video_id, slot_position, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                        """, (
+                            new["channel_id"], new["date_key"], new["scheduled_at"],
+                            new.get("target_upload_at"), new.get("short_type", "native"),
+                            new.get("long_slot_position"), new.get("source_video_id"),
+                            new.get("slot_position", 0),
+                        ))
+                    else:
+                        conn.execute("""
+                            INSERT INTO planned_slots
+                                (channel_id, date_key, scheduled_at, target_upload_at, target_public_at,
+                                 upload_window_start, upload_window_end, slot_position, source_mode, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                        """, (
+                            new["channel_id"], new["date_key"], new["scheduled_at"], new.get("target_upload_at"),
+                            new.get("target_public_at"), new.get("upload_window_start", 9),
+                            new.get("upload_window_end", 11), new.get("slot_position", 0),
+                            new.get("source_mode", "original"),
+                        ))
+                    actual_counts["new"] += 1
 
-        conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
-        conn.commit()
+            conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            # Safety net: the preflight resolver normally prevents plans whose
+            # proposed target_public_at collides with an active slot, but a plan
+            # computed before this fix (or a TOCTOU edge) must never surface as
+            # a 500. Roll back and signal a stale review so the router answers
+            # 409 SAFE_REPLAN_STALE and the client re-runs the preflight.
+            conn.rollback()
+            logger.warning(
+                "safe replan plan collided with an active planned_slots target; re-run the review",
+                exc_info=True,
+            )
+            raise ValueError("replan plan collides with an active slot; re-run the review") from exc
 
     # ── v40: este replan manual aplicado cuenta como último replan de
     # horizonte (resetea el gate de 24h) y activa la ventana silenciosa
