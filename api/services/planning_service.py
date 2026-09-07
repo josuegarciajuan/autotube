@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import secrets
+import sqlite3
 import threading
 import functools
 import time
@@ -4421,11 +4422,22 @@ _last_full_replan_ts: Optional[datetime] = None
 
 
 _SAFE_REPLAN_TOKEN_TTL_MINUTES = 10
+_SAFE_REPLAN_DB_RETRIES = 3
+_SAFE_REPLAN_RETRY_DELAYS = (0.05, 0.15)
 
 
-def _safe_replan_snapshot(db) -> str:
+class SafeReplanBusyError(RuntimeError):
+    """The safe replan could not acquire SQLite's write lock in time."""
+
+
+def _is_sqlite_busy_error(exc: sqlite3.Error) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message or "database is busy" in message
+
+
+def _safe_replan_snapshot(db, conn=None) -> str:
     """Hash the mutable inputs that make a preflight safe to apply."""
-    with db._connect() as conn:
+    if conn is not None:
         slots = [dict(row) for row in conn.execute("""
             SELECT id, channel_id, date_key, scheduled_at, target_upload_at,
                    target_public_at, upload_window_start, upload_window_end,
@@ -4457,6 +4469,9 @@ def _safe_replan_snapshot(db) -> str:
             WHERE status IN ('pending', 'running')
             ORDER BY id
         """).fetchall()]
+    else:
+        with db._connect() as read_conn:
+            return _safe_replan_snapshot(db, conn=read_conn)
     payload = json.dumps({
         "slots": slots,
         "channels": channels,
@@ -4703,7 +4718,7 @@ def safe_full_replan_preflight(db=None, horizon_days: int = 7) -> dict:
     }
 
 
-def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
+def _safe_full_replan_apply_once(confirmation_token: str, db=None) -> dict:
     """Apply a preflight in place; it never deletes slots or cancels jobs."""
     if db is None:
         from database.db_extended import ExtendedDatabase
@@ -4727,7 +4742,7 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
             conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
             conn.commit()
             raise ValueError("confirmation token has expired")
-        if _safe_replan_snapshot(db) != confirmation["snapshot_hash"]:
+        if _safe_replan_snapshot(db, conn=conn) != confirmation["snapshot_hash"]:
             conn.execute("UPDATE safe_replan_confirmations SET used_at = CURRENT_TIMESTAMP WHERE id = ?", (confirmation["id"],))
             conn.commit()
             raise ValueError("replan confirmation is stale")
@@ -4847,6 +4862,31 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
         "created": actual_long_counts["new"],
         "preserved": actual_long_counts["retained"],
     }
+
+
+def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
+    """Apply a preflight, retrying only transient SQLite lock contention."""
+    for attempt in range(_SAFE_REPLAN_DB_RETRIES):
+        try:
+            return _safe_full_replan_apply_once(confirmation_token, db=db)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_busy_error(exc):
+                raise
+            if attempt >= _SAFE_REPLAN_DB_RETRIES - 1:
+                logger.error(
+                    "safe_full_replan_apply: SQLite remained busy after %d attempts",
+                    _SAFE_REPLAN_DB_RETRIES,
+                    exc_info=True,
+                )
+                raise SafeReplanBusyError from exc
+            delay = _SAFE_REPLAN_RETRY_DELAYS[min(attempt, len(_SAFE_REPLAN_RETRY_DELAYS) - 1)]
+            logger.warning(
+                "safe_full_replan_apply: SQLite busy, retrying attempt %d/%d in %.2fs",
+                attempt + 2,
+                _SAFE_REPLAN_DB_RETRIES,
+                delay,
+            )
+            time.sleep(delay)
 
 
 @_replan_locked

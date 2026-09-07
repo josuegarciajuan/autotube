@@ -25,6 +25,18 @@ export interface FullReplanApplyResult {
   preserved: number;
 }
 
+export class ApiRequestError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.status = status
+    this.code = code
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
@@ -32,7 +44,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    const detail = err?.detail
+    const message = typeof detail === 'object' && detail !== null
+      ? detail.message || `HTTP ${res.status}`
+      : detail || `HTTP ${res.status}`
+    throw new ApiRequestError(message, res.status, typeof detail === 'object' ? detail.code : undefined)
   }
   return res.json();
 }
