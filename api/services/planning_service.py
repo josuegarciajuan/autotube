@@ -4624,9 +4624,11 @@ def _resolve_public_target_collisions(review: list[dict], counts: dict | None = 
 
     Determinism rules (mirrors apply order):
     a. Targets held from the start of the apply transaction seed the occupied set
-       per channel: ``protected`` (running) slots and ``retained`` slots,
-       including superseded rows that will be cancelled (their targets are kept
-       occupied on purpose so the plan never reuses them mid-transaction).
+       per channel: ``protected`` (running) slots, ``retained`` slots (including
+       superseded rows that will be cancelled — their targets are kept occupied
+       on purpose so the plan never reuses them mid-transaction) AND the current
+       targets of ``rescheduled`` slots, which each slot keeps holding until its
+       own UPDATE runs.
     b. Mutable long-form items are then processed in apply order: every
        non-``new`` item first (in review order), then every ``new`` item. A
        rescheduled slot releases its old target only once its own move succeeds,
@@ -4641,10 +4643,14 @@ def _resolve_public_target_collisions(review: list[dict], counts: dict | None = 
     if not long_items:
         return review, counts
 
-    # (a) Seed occupied targets from every slot that never moves during apply.
+    # (a) Seed occupied targets from EVERY slot that exists when the apply
+    # transaction starts: retained, protected (running) and rescheduled slots
+    # alike. A rescheduled slot keeps holding its current target until its own
+    # UPDATE runs, so an item processed earlier in apply order must never claim
+    # a target that a later rescheduled item still owns at that moment.
     occupied: dict[int, set[str]] = {}
     for item in long_items:
-        if item.get("action") not in ("retained", "protected"):
+        if item.get("action") not in ("retained", "protected", "rescheduled"):
             continue
         target = (item.get("before") or {}).get("target_public_at")
         if not target:
