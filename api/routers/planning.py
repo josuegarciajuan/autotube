@@ -62,15 +62,11 @@ def update_planning_config(channel_id: int, data: PlanningConfigUpdate):
     if not ch:
         raise HTTPException(404, "Channel not found")
 
-    # Validate: viral_per_day cannot exceed videos_per_day
-    if data.viral_per_day is not None:
-        total = data.videos_per_day
-        if total is None:
-            # Read current videos_per_day from config to validate against
-            current_cfg = db.get_channel_planning_config(channel_id)
-            total = current_cfg.get("videos_per_day", 0)
-        if data.viral_per_day > total:
-            raise HTTPException(400, f"viral_per_day ({data.viral_per_day}) cannot exceed videos_per_day ({total})")
+    # Validate viral_per_day range (0-10). Antes se comparaba contra
+    # videos_per_day (campo legacy ya no es el total real): el planner acota
+    # en lectura con min(viral_per_day, total_slots_del_dia).
+    if data.viral_per_day is not None and not (0 <= data.viral_per_day <= 10):
+        raise HTTPException(400, "viral_per_day must be between 0 and 10")
 
     ok = db.update_channel_planning_config(
         channel_id,

@@ -263,6 +263,32 @@ function Stepper({ value, onCommit, min = 0, max = 10, disabled, title }: {
   )
 }
 
+// Percent stepper (weight almacenado como 0..1, mostrado como %)
+function BoostRow({ label, value, onChange, disabled, title }: {
+  label: string; value: number; onChange: (v: number) => void; disabled?: boolean; title?: string
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, value || 0)) * 100)
+  const set = (p: number) => onChange(Math.max(0, Math.min(100, p)) / 100)
+  return (
+    <div className="flex items-center justify-between text-[10px]" title={title}>
+      <span className="text-gray-400">{label}</span>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => set(pct - 5)}
+          disabled={disabled}
+          className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+        ><Minus size={12} /></button>
+        <span className={`text-white font-mono w-9 text-center ${disabled ? 'text-gray-500' : ''}`}>{pct}%</span>
+        <button
+          onClick={() => set(pct + 5)}
+          disabled={disabled}
+          className="w-6 h-6 rounded bg-dark-500 text-gray-300 hover:bg-dark-400 flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+        ><Plus size={12} /></button>
+      </div>
+    </div>
+  )
+}
+
 function PlanningSection() {
   const queryClient = useQueryClient()
   const { data: rawConfigs = [], isLoading: loadingCfg, isError: errCfg, refetch: refetchCfg } = usePlanningConfig()
@@ -322,19 +348,30 @@ function PlanningSection() {
         const p: PacingChan = pcmap.get(cid) || { id: cid, slug: c.slug, name: '' }
         const publicTarget = Number(c.public_videos_per_day ?? c.videos_per_day ?? 0)
         const shortTarget = Number(sc.shorts_native_per_day ?? 3)
+        const genDay = Number(c.longform_generation_per_day ?? c.videos_per_day ?? 0)
+        const effPub = Number(p.longform_publish_cap ?? 0)
+        // Vídeos long-form/día que materializa el canal (objetivo de generación
+        // acotado por el techo/override efectivo). Es el máximo real de virales.
+        let dayLongs = genDay > 0 ? genDay : (publicTarget > 0 ? publicTarget : (effPub || 0))
+        if (effPub > 0 && effPub < dayLongs) dayLongs = effPub
+        if (dayLongs < 0) dayLongs = 0
         return {
           channel_id: cid,
           channel_name: c.channel_name || c.name || c.slug,
           slug: c.slug,
           planning_enabled: c.planning_enabled ?? true,
           public_videos_per_day: publicTarget,
-          longform_generation_per_day: Number(c.longform_generation_per_day ?? c.videos_per_day ?? 0),
+          longform_generation_per_day: genDay,
           upload_capacity_per_day: Number(c.upload_capacity_per_day ?? c.videos_per_day ?? 0),
+          viral_per_day: Math.max(0, Math.min(dayLongs, Number(c.viral_per_day ?? 0))),
+          videos_day_boost_weight: Number(c.videos_day_boost_weight ?? 0),
+          viral_day_boost_weight: Number(c.viral_day_boost_weight ?? 0),
+          dayLongs,
           shorts_enabled: sc.shorts_enabled ?? false,
           shorts_native_per_day: shortTarget,
           delivery_state: p.delivery_state || pacing?.active_profile || 'strike',
           manual_override: !!p.manual_override,
-          pub_effective: Number(p.longform_publish_cap ?? 0),
+          pub_effective: effPub,
           short_effective: Number(p.native_shorts_per_day ?? 0),
           profile_long_cap: Number(p.profile_longform_cap ?? 0),
           profile_short_cap: Number(p.profile_short_cap ?? 0),
@@ -425,6 +462,27 @@ function PlanningSection() {
                     <Stepper value={r.upload_capacity_per_day} disabled={disabled} onCommit={v => saveLong(r.channel_id, { upload_capacity_per_day: v })} max={20} />
                   </div>
                 </div>
+              </div>
+
+              {/* Virales (mezcla viral/original del long-form) */}
+              <div className="border-t border-surface-border/40 pt-2 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-300 flex items-center gap-1.5" title="Vídeos/día producidos adaptando vídeos ya virales del nicho; el resto son originales del canal.">
+                    <Play size={12} className="text-purple-400" /> Virales/día
+                  </span>
+                  <Stepper value={r.viral_per_day} disabled={disabled} min={0} max={Math.max(0, r.dayLongs)} onCommit={v => saveLong(r.channel_id, { viral_per_day: v })}
+                    title="Vídeos/día en modo viral (reescritura de vídeos virales del nicho)" />
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  {r.dayLongs > 0
+                    ? <>De {r.dayLongs} vídeos/día: <strong className="text-purple-300">{r.viral_per_day} viral</strong> · {Math.max(0, r.dayLongs - r.viral_per_day)} original.</>
+                    : <>Sin vídeos/día planificados.</>}
+                  {r.viral_per_day > 0 && <> Sin candidatos virales disponibles → cae a original.</>}
+                </p>
+                <BoostRow label="Prob. +1 video" value={r.videos_day_boost_weight} disabled={disabled} onChange={v => saveLong(r.channel_id, { videos_day_boost_weight: v })}
+                  title="Probabilidad de +1 vídeo extra a generar algunos días" />
+                <BoostRow label="Prob. 2º viral" value={r.viral_day_boost_weight} disabled={disabled} onChange={v => saveLong(r.channel_id, { viral_day_boost_weight: v })}
+                  title="Probabilidad de sumar un vídeo viral extra dentro del total del día" />
               </div>
 
               {/* Shorts */}

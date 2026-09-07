@@ -7893,9 +7893,10 @@ class ExtendedDatabase(Database):
         if alternate_offset is not None:
             config["alternate_offset"] = alternate_offset
         if viral_per_day is not None:
-            # Clamp: 0 <= viral_per_day <= videos_per_day (current total)
-            total = config.get("videos_per_day", 1)
-            config["viral_per_day"] = max(0, min(total, viral_per_day))
+            # Clamp solo al rango admisible (0-10). El planner acota en lectura
+            # con min(viral_per_day, total_slots_del_dia) en _build_source_mode_sequence.
+            # NO se ata a videos_per_day (campo legacy ya no es el total real).
+            config["viral_per_day"] = max(0, min(10, viral_per_day))
         if upload_window_start is not None:
             config["UPLOAD_WINDOW_START"] = max(0, min(23, upload_window_start))
         if upload_window_end is not None:

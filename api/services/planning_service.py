@@ -554,9 +554,27 @@ def _resolve_generation_per_day(ch: dict, date_str: str, db=None) -> int:
         raw = ch.get("LONGFORM_GENERATION_PER_DAY")
     if raw is not None and str(raw).strip() not in ("", "none", "None"):
         try:
-            return max(0, int(raw))
+            base = max(0, int(raw))
         except (TypeError, ValueError):
-            pass
+            return _resolve_videos_per_day(ch, date_str, db=db)
+        # ── "Prob. +1 video" real bajo el modelo de generación ──
+        # Si el objetivo de generación está fijado (>0), el peso
+        # videos_day_boost_weight añade determinísticamente +1 slot algunos
+        # días (semilla hash por fecha+canal). La generación está desacoplada
+        # de la subida, así que el extra se encola y la válvula lo drena.
+        if base > 0:
+            try:
+                boost_weight = float(ch.get("videos_day_boost_weight", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                boost_weight = 0.0
+            if boost_weight > 0:
+                ch_id = int(ch.get("channel_id", 0) or 0)
+                seed_str = f"{date_str}|{ch_id}|generation"
+                h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+                roll = h / 0xFFFFFFFF
+                if roll < boost_weight:
+                    return base + 1
+        return base
     return _resolve_videos_per_day(ch, date_str, db=db)
 
 
