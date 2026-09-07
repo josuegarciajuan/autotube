@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 from database.db import init_db
 from database.db_extended import ExtendedDatabase, migrate_v2
@@ -169,3 +170,50 @@ def test_claim_upload_video_is_single_winner(tmp_path):
     video = db.get_video(video_id)
     assert video["status"] == "uploading"
     assert video["upload_claimed_by"] == "worker-a"
+
+
+def test_account_upload_reservation_counts_against_daily_cap(tmp_path):
+    db = _db(tmp_path)
+    db.set_system_state("pacing_profile", "normal")
+
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-2", "worker-b") is True
+
+    # Normal profile cap is eight, so fill the remaining six slots.
+    for index in range(3, 9):
+        assert db.reserve_account_upload_slot(
+            "shared-account", f"video-{index}", f"worker-{index}"
+        ) is True
+
+    assert db.reserve_account_upload_slot("shared-account", "video-9", "worker-9") is False
+
+
+def test_account_upload_reservation_is_idempotent_per_content(tmp_path):
+    db = _db(tmp_path)
+
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-b") is False
+
+
+def test_account_upload_reservation_can_be_released(tmp_path):
+    db = _db(tmp_path)
+
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
+    assert db.release_account_upload_slot("shared-account", "video-1") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-2", "worker-b") is True
+
+
+def test_account_upload_reservation_has_one_winner_for_last_slot(tmp_path):
+    db = _db(tmp_path)
+    db.set_system_state("pacing_profile", "normal")
+    for index in range(1, 8):
+        assert db.reserve_account_upload_slot("shared-account", f"video-{index}", f"worker-{index}") is True
+
+    def reserve(content_key):
+        worker_db = ExtendedDatabase(str(db.db_path))
+        return worker_db.reserve_account_upload_slot("shared-account", content_key, content_key)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, ("video-8", "video-9")))
+
+    assert sorted(results) == [False, True]

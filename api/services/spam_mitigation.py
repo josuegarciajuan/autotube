@@ -154,7 +154,8 @@ def get_account_daily_uploads(account: str, db=None) -> int:
     if not ids:
         return 0
     ids_sql = ",".join(str(i) for i in ids)
-    today = __import__("datetime").date.today().isoformat()
+    from api.time_utils import madrid_day_range
+    day_start, day_end = madrid_day_range()
     import sqlite3
     try:
         with db._connect() as conn:
@@ -164,12 +165,13 @@ def get_account_daily_uploads(account: str, db=None) -> int:
                       (SELECT COUNT(*) FROM videos
                         WHERE channel_id IN ({ids_sql})
                           AND status IN ('uploaded','uploaded_private','published','warming')
-                          AND (date(uploaded_at) = ? OR date(published_at) = ?)) AS vids,
+                           AND ((uploaded_at >= ? AND uploaded_at < ?)
+                                OR (published_at >= ? AND published_at < ?))) AS vids,
                       (SELECT COUNT(*) FROM shorts
                         WHERE channel_id IN ({ids_sql})
                            AND status IN ('uploaded','published','scheduled')
-                          AND date(published_at) = ?) AS shs""",
-                (today, today, today),
+                           AND published_at >= ? AND published_at < ?) AS shs""",
+                (day_start, day_end, day_start, day_end, day_start, day_end),
             ).fetchone()
         return int((row["vids"] or 0) + (row["shs"] or 0))
     except Exception:

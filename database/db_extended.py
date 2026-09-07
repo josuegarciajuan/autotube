@@ -1385,6 +1385,9 @@ def migrate_v2(db_path: str = None):
     # ── v52: explicit, channel-scoped enforcement evidence ──
     _migrate_v52(conn, logger)
 
+    # ── v53: atomic Google-account upload reservations ──
+    _migrate_v53(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3413,6 +3416,26 @@ def _migrate_v52(conn, logger):
     logger.info("Migration v52: explicit channel enforcement evidence ensured")
 
 
+def _migrate_v53(conn, logger):
+    """Reserve account upload capacity atomically across all channels."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS account_upload_reservations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        date_key TEXT NOT NULL,
+        content_key TEXT NOT NULL,
+        claimant TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'reserved'
+            CHECK(state IN ('reserved', 'consumed')),
+        reserved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TEXT NOT NULL,
+        UNIQUE(account, date_key, content_key)
+    )""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_account_upload_reservations_day
+        ON account_upload_reservations(account, date_key, state)""")
+    conn.commit()
+    logger.info("Migration v53: account upload reservations ensured")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -3867,6 +3890,114 @@ class ExtendedDatabase(Database):
             ).rowcount
             conn.commit()
         return updated == 1
+
+    def reserve_account_upload_slot(self, account: str, content_key: str,
+                                    claimant: str, ttl_minutes: int = 180) -> bool:
+        """Atomically reserve one daily upload slot for a Google account.
+
+        The reservation spans all channels linked to the account and closes the
+        check-then-upload race between concurrent workers. Expired reservations
+        are removed before counting so crashed workers do not consume capacity
+        permanently.
+        """
+        account = str(account or "").strip()
+        content_key = str(content_key or "").strip()
+        if not account or not content_key:
+            return True
+        from api.services.spam_mitigation import get_account_upload_cap
+        cap = get_account_upload_cap(self)
+        if cap <= 0:
+            return True
+        from api.time_utils import madrid_date
+        now = datetime.now(_dt_timezone.utc)
+        date_key = madrid_date(now).isoformat()
+        expires_at = (now + timedelta(minutes=max(1, int(ttl_minutes)))).isoformat()
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """DELETE FROM account_upload_reservations
+                   WHERE account=? AND date_key=? AND state='reserved'
+                     AND expires_at <= ?""",
+                (account, date_key, now.isoformat()),
+            )
+            duplicate = conn.execute(
+                """SELECT 1 FROM account_upload_reservations
+                   WHERE account=? AND date_key=? AND content_key=?""",
+                (account, date_key, content_key),
+            ).fetchone()
+            if duplicate:
+                conn.commit()
+                return False
+
+            channel_ids = [
+                int(row[0]) for row in conn.execute(
+                    "SELECT id FROM channels WHERE TRIM(COALESCE(google_account, ''))=?",
+                    (account,),
+                ).fetchall()
+            ]
+            uploaded = 0
+            if channel_ids:
+                placeholders = ",".join("?" for _ in channel_ids)
+                from api.time_utils import madrid_day_range
+                day_start, day_end = madrid_day_range(date_key)
+                uploaded += conn.execute(
+                    f"""SELECT COUNT(*) FROM videos
+                        WHERE channel_id IN ({placeholders})
+                          AND status IN ('uploaded','uploaded_private','published','warming')
+                          AND (uploaded_at >= ? AND uploaded_at < ?
+                               OR published_at >= ? AND published_at < ?)""",
+                    (*channel_ids, day_start, day_end, day_start, day_end),
+                ).fetchone()[0]
+                uploaded += conn.execute(
+                    f"""SELECT COUNT(*) FROM shorts
+                        WHERE channel_id IN ({placeholders})
+                          AND status IN ('uploaded','published','scheduled')
+                          AND published_at >= ? AND published_at < ?""",
+                    (*channel_ids, day_start, day_end),
+                ).fetchone()[0]
+            active = conn.execute(
+                """SELECT COUNT(*) FROM account_upload_reservations
+                   WHERE account=? AND date_key=?""",
+                (account, date_key),
+            ).fetchone()[0]
+            if uploaded + active >= cap:
+                conn.commit()
+                return False
+            conn.execute(
+                """INSERT INTO account_upload_reservations
+                   (account, date_key, content_key, claimant, expires_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (account, date_key, content_key, claimant, expires_at),
+            )
+            conn.commit()
+        return True
+
+    def finalize_account_upload_slot(self, account: str, content_key: str) -> bool:
+        """Mark a reserved slot consumed after the upload request succeeds."""
+        from api.time_utils import madrid_date
+        date_key = madrid_date(datetime.now(_dt_timezone.utc)).isoformat()
+        with self._connect() as conn:
+            updated = conn.execute(
+                """UPDATE account_upload_reservations SET state='consumed'
+                   WHERE account=? AND date_key=? AND content_key=? AND state='reserved'""",
+                (account, date_key, content_key),
+            ).rowcount
+            conn.commit()
+        return updated == 1
+
+    def release_account_upload_slot(self, account: str, content_key: str) -> bool:
+        """Release a reservation when no upload request was sent."""
+        from api.time_utils import madrid_date
+        date_key = madrid_date(datetime.now(_dt_timezone.utc)).isoformat()
+        with self._connect() as conn:
+            deleted = conn.execute(
+                """DELETE FROM account_upload_reservations
+                   WHERE account=? AND date_key=? AND content_key=? AND state='reserved'""",
+                (account, date_key, content_key),
+            ).rowcount
+            conn.commit()
+        return deleted == 1
 
     def get_delivery_profile(self, state: str) -> dict | None:
         try:
