@@ -765,6 +765,7 @@ class YouTubeUploader:
                     _account_reservation,
                     _account_reservation_key,
                     f"uploader:{os.getpid()}:{id(self)}",
+                    content_type=content_type,
                 )):
                     raise AccountDailyCapExceededError(
                         f"account '{_account_reservation}' reached its daily upload cap — upload held (retry tomorrow)"

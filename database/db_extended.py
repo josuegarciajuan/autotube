@@ -3892,13 +3892,23 @@ class ExtendedDatabase(Database):
         return updated == 1
 
     def reserve_account_upload_slot(self, account: str, content_key: str,
-                                    claimant: str, ttl_minutes: int = 180) -> bool:
+                                    claimant: str, ttl_minutes: int = 180, *,
+                                    content_type: str = "long") -> bool:
         """Atomically reserve one daily upload slot for a Google account.
 
         The reservation spans all channels linked to the account and closes the
         check-then-upload race between concurrent workers. Expired reservations
         are removed before counting so crashed workers do not consume capacity
         permanently.
+
+        ``content_type`` ("long" | "short") lets long-forms be prioritized over
+        shorts: the account daily cap bounds TOTAL uploads (long + short) across
+        the sibling channels, so an active shorts drain can starve pending
+        long-forms out of their slots. To prevent that, shorts may only use the
+        budget that is NOT needed by long-forms still waiting to upload today
+        (``awaiting_upload`` on the account); long-forms always get admission up
+        to the hard cap. This lets pending long-forms drain even while shorts are
+        being released on the same account.
         """
         account = str(account or "").strip()
         content_key = str(content_key or "").strip()
@@ -3908,10 +3918,11 @@ class ExtendedDatabase(Database):
         cap = get_account_upload_cap(self)
         if cap <= 0:
             return True
-        from api.time_utils import madrid_date
+        from api.time_utils import madrid_date, madrid_day_range
         now = datetime.now(_dt_timezone.utc)
         date_key = madrid_date(now).isoformat()
         expires_at = (now + timedelta(minutes=max(1, int(ttl_minutes)))).isoformat()
+        longform = (str(content_type or "long").lower() != "short")
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -3936,11 +3947,10 @@ class ExtendedDatabase(Database):
                     (account,),
                 ).fetchall()
             ]
+            day_start, day_end = madrid_day_range(date_key)
             uploaded = 0
             if channel_ids:
                 placeholders = ",".join("?" for _ in channel_ids)
-                from api.time_utils import madrid_day_range
-                day_start, day_end = madrid_day_range(date_key)
                 uploaded += conn.execute(
                     f"""SELECT COUNT(*) FROM videos
                         WHERE channel_id IN ({placeholders})
@@ -3961,9 +3971,37 @@ class ExtendedDatabase(Database):
                    WHERE account=? AND date_key=?""",
                 (account, date_key),
             ).fetchone()[0]
-            if uploaded + active >= cap:
+            used = uploaded + active
+
+            # ── 1. Hard daily cap for the account (long + short) ──
+            if used >= cap:
                 conn.commit()
                 return False
+
+            # ── 2. Long-form priority over shorts ──
+            # A short must not take the last slot that a pending long-form of the
+            # same account will need today. Count long-forms in `awaiting_upload`
+            # (with a file on disk, not yet uploaded) scheduled for this Madrid
+            # day and refuse the short while doing so would leave fewer than that
+            # many slots free for them.
+            if not longform and channel_ids and used < cap:
+                try:
+                    placeholders = ",".join("?" for _ in channel_ids)
+                    pending = conn.execute(
+                        f"""SELECT COUNT(*) FROM videos
+                            WHERE channel_id IN ({placeholders})
+                              AND status = 'awaiting_upload'
+                              AND COALESCE(yt_video_id, '') = ''
+                              AND COALESCE(video_path, '') != ''
+                              AND (scheduled_upload_at IS NULL
+                                   OR (scheduled_upload_at >= ? AND scheduled_upload_at < ?))""",
+                        (*channel_ids, day_start, day_end),
+                    ).fetchone()[0]
+                except Exception:
+                    pending = 0
+                if int(pending or 0) > 0 and used >= cap - int(pending):
+                    conn.commit()
+                    return False
             conn.execute(
                 """INSERT INTO account_upload_reservations
                    (account, date_key, content_key, claimant, expires_at)

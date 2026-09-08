@@ -9,8 +9,12 @@ Se ejecuta vía systemd timer: autotube-health-report.timer (diario ~08:00).
 Escribe: logs/health_report_YYYYMMDD.log
 Alertas (dashboard) para:
   - quota_warning:   algún proyecto GCP > 90% de la cuota diaria
-  - upload_stalled:  0 subidas hoy y backlog >= 5 en awaiting_upload
-  - upload_failures: >= 5 upload_only fallidos en las últimas 24h
+  - upload_stalled:  0 subidas hoy y backlog >= 5 en awaiting_upload SIN ningún
+                     vídeo programado para subirse más tarde hoy (si hay pending_due
+                     hoy, no es un estancamiento real → alerta informativa upload_pending)
+  - upload_failures: >= 5 upload_only fallidos en 24h, EXCLUYENDO los diferimientos
+                     soft por cap diario de cuenta (job fallido cuya vídeo quedó
+                     'awaiting_upload' para reintento; no es un fallo real)
   - shorts_deleted:  >= 10 shorts eliminados por YT en las últimas 24h
 """
 
@@ -73,18 +77,36 @@ def main() -> int:
             ready = conn.execute(
                 "SELECT COUNT(*) FROM videos WHERE status='ready'"
             ).fetchone()[0]
-        _line(f"[2] Backlog: awaiting_upload={backlog}, generating/uploading={generating}, ready={ready}")
+            # Vídeos awaiting_upload que van a subirse hoy por sí solos (aún sin
+            # fecha o con scheduled_upload_at en el futuro/pendiente). Si existen,
+            # las subidas NO están estancadas: están programadas más tarde.
+            pending_due = conn.execute(
+                """SELECT COUNT(*) FROM videos
+                   WHERE status='awaiting_upload'
+                     AND (scheduled_upload_at IS NULL
+                          OR scheduled_upload_at >= datetime('now'))"""
+            ).fetchone()[0]
+        _line(f"[2] Backlog: awaiting_upload={backlog} (de ellas {pending_due} pendientes de subir hoy), "
+              f"generating/uploading={generating}, ready={ready}")
     except Exception as e:
         backlog = 0
+        pending_due = 0
         _line(f"[2] ERROR: {e}")
 
     # ── 3. Uploads fallidos en 24h ─────────────────────────────
+    # Se excluyen los jobs de subida cuya vídeo quedó 'awaiting_upload' (diferido
+    # para reintento, ej. por el cap diario de cuenta). Esos NO son fallos reales:
+    # son admisiones denegadas localmente que se reprograman solas al día siguiente.
+    # Solo cuentan los fallos que dejaron la vídeo sin plan de reintento (error).
     try:
         with db._connect() as conn:
             failed_uploads = conn.execute(
-                """SELECT COUNT(*) FROM generation_jobs
-                   WHERE action='upload_only' AND status='failed'
-                     AND created_at >= datetime('now','-24 hours')"""
+                """SELECT COUNT(*) FROM generation_jobs gj
+                   WHERE gj.action='upload_only' AND gj.status='failed'
+                     AND gj.created_at >= datetime('now','-24 hours')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM videos v
+                         WHERE v.id = gj.video_id AND v.status = 'awaiting_upload')"""
             ).fetchone()[0]
             failed_shorts = conn.execute(
                 """SELECT COUNT(*) FROM generation_jobs
@@ -92,7 +114,7 @@ def main() -> int:
                      AND status='failed'
                      AND created_at >= datetime('now','-24 hours')"""
             ).fetchone()[0]
-        _line(f"[3] Fallos 24h: uploads={failed_uploads}, shorts={failed_shorts}")
+        _line(f"[3] Fallos 24h (excl. diferimientos): uploads={failed_uploads}, shorts={failed_shorts}")
     except Exception as e:
         failed_uploads = 0
         _line(f"[3] ERROR: {e}")
@@ -162,10 +184,20 @@ def main() -> int:
             _line("  ✓ cuota por proyecto bajo control")
 
         # Upload stalled
-        if today_uploads == 0 and backlog >= 5:
+        # No es un estancamiento real si aún quedan vídeos awaiting_upload
+        # programados para subir más tarde hoy (pendiente que se auto-resuelve).
+        if today_uploads == 0 and backlog >= 5 and pending_due == 0:
             _alert("upload_stalled", "critical",
                    "Subidas estancadas",
-                   f"0 subidas hoy con {backlog} vídeos en awaiting_upload")
+                   f"0 subidas hoy con {backlog} vídeos en awaiting_upload "
+                   f"(ninguno programado para hoy)")
+        elif today_uploads == 0 and backlog >= 5 and pending_due > 0:
+            _line(f"  ✓ {backlog} vídeos en awaiting_upload están programados para "
+                  f"subirse más tarde hoy ({pending_due} pendientes) — no estancado")
+            _alert("upload_pending", "info",
+                   "Subidas pendientes para hoy",
+                   f"0 subidas aún hoy, pero {pending_due} vídeos de {backlog} en "
+                   f"awaiting_upload están programados para más tarde hoy")
         elif backlog >= 15:
             _alert("upload_backlog", "warning",
                    "Backlog de subidas alto",

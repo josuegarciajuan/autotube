@@ -431,6 +431,15 @@ Consumidores actuales: `upload_spacing`, `shorts_scheduler` (caps duros, cooldow
 gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigation`
 (cap por cuenta), `upload_scheduler` (gap de subida mismo-canal).
 
+> **Prioridad long-form sobre shorts en el cap de cuenta** (`reserve_account_upload_slot`):
+> el cap `account_daily_upload_cap` limita las SUBIDAS TOTALES (long + short) por cuenta
+> y día, así que un drenaje de shorts activo (`short_drain_mode`) puede agotar el cupo y
+> **hambrear los long-forms** de `awaiting_upload` (cada día se rechazan, se difieren a
+> mañana y se apilan). Para evitarlo, un short solo puede usar el presupuesto que NO
+> necesitan los long-forms que hoy esperan subir en esa cuenta (vídeos `awaiting_upload`
+> con archivo y programados para hoy). Los long-forms siempre entran hasta el cap duro.
+> Efecto: los longs drenan su backlog aun con shorts soltándose en paralelo.
+
 ### 💧 Modo drenaje de shorts (`short_drain_mode`) — `api/services/shorts_scheduler.py`
 
 Cuando hay un backlog de nativos generados a cola (`status='generated'`, sin
