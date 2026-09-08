@@ -217,3 +217,49 @@ def test_account_upload_reservation_has_one_winner_for_last_slot(tmp_path):
         results = list(pool.map(reserve, ("video-8", "video-9")))
 
     assert sorted(results) == [False, True]
+
+
+def test_account_cap_longform_priority_keeps_slot_for_pending_long(tmp_path):
+    """Shorts must not starve a pending long-form awaiting upload on the account."""
+    db = _db(tmp_path)
+    db.set_system_state("pacing_profile", "normal")
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute("UPDATE channels SET google_account='acct' WHERE id=1")
+        # Un long-form pendiente de subir hoy (sin scheduled_upload_at → contará como pendiente).
+        conn.execute(
+            """INSERT INTO videos (id, channel_id, canal, status, video_path)
+               VALUES (101, 1, 'one', 'awaiting_upload', '/tmp/pending.mp4')"""
+        )
+        conn.commit()
+
+    # Los shorts pueden usar casi todo el cupo (cap=8), pero NO el slot que el
+    # long-form pendiente necesita: 8 shorts fallan, el último se deniega.
+    for index in range(1, 8):
+        assert db.reserve_account_upload_slot(
+            "acct", f"short-{index}", "worker", content_type="short"
+        ) is True
+    assert db.reserve_account_upload_slot(
+        "acct", "short-8", "worker", content_type="short"
+    ) is False
+
+    # El long-form pendiente SÍ entra aunque la cuenta esté casi llena de shorts.
+    assert db.reserve_account_upload_slot(
+        "acct", "long-1", "worker", content_type="long"
+    ) is True
+
+
+def test_account_cap_no_pending_long_allows_all_shorts(tmp_path):
+    """Sin long-forms pendientes, los shorts pueden agotar todo el cupo diario."""
+    db = _db(tmp_path)
+    db.set_system_state("pacing_profile", "normal")
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute("UPDATE channels SET google_account='acct' WHERE id=1")
+        conn.commit()
+
+    for index in range(1, 9):
+        assert db.reserve_account_upload_slot(
+            "acct", f"short-{index}", "worker", content_type="short"
+        ) is True
+    assert db.reserve_account_upload_slot(
+        "acct", "short-9", "worker", content_type="short"
+    ) is False
