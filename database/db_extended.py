@@ -1388,6 +1388,9 @@ def migrate_v2(db_path: str = None):
     # ── v53: atomic Google-account upload reservations ──
     _migrate_v53(conn, logger)
 
+    # ── v54: split account upload budget per content type (long/short) ──
+    _migrate_v54(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3436,6 +3439,33 @@ def _migrate_v53(conn, logger):
     logger.info("Migration v53: account upload reservations ensured")
 
 
+def _migrate_v54(conn, logger):
+    """Split the account upload budget per content type (long/short).
+
+    Longs y shorts tienen pools independientes de cupo diario por cuenta
+    Google, de modo que un tipo jamás ocupa el cupo del otro. La columna
+    ``content_type`` distingue las reservas; las filas legacy (pre-v54) se
+    asumen 'long' (default) y son transitorias (consumed/expiran por día).
+    """
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(account_upload_reservations)").fetchall()]
+        if "content_type" not in cols:
+            conn.execute(
+                """ALTER TABLE account_upload_reservations
+                   ADD COLUMN content_type TEXT NOT NULL DEFAULT 'long'"""
+            )
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_account_upload_reservations_type
+                   ON account_upload_reservations(account, date_key, content_type, state)"""
+            )
+            conn.commit()
+            logger.info("Migration v54: content_type column added to account_upload_reservations")
+        else:
+            logger.info("Migration v54: content_type already present, skipped")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Migration v54 failed (non-fatal): %s", exc)
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -3901,28 +3931,36 @@ class ExtendedDatabase(Database):
         are removed before counting so crashed workers do not consume capacity
         permanently.
 
-        ``content_type`` ("long" | "short") lets long-forms be prioritized over
-        shorts: the account daily cap bounds TOTAL uploads (long + short) across
-        the sibling channels, so an active shorts drain can starve pending
-        long-forms out of their slots. To prevent that, shorts may only use the
-        budget that is NOT needed by long-forms still waiting to upload today
-        (``awaiting_upload`` on the account); long-forms always get admission up
-        to the hard cap. This lets pending long-forms drain even while shorts are
-        being released on the same account.
+        ``content_type`` ("long" | "short") selects an INDEPENDENT daily pool:
+        longs and shorts never compete for the same budget (ago 2026). A short
+        no longer reserves/consumes a long-form slot nor vice versa — an active
+        shorts drain can't starve longs and, critically, pending long-forms no
+        longer block shorts out of their own pool. Each type counts only its own
+        real uploads today + its own active reservations against its own cap.
+
+        Timestamps are compared by their Madrid calendar day (parsed, not raw
+        string) because ``videos.published_at`` is stored as ISO-8601
+        ("2026-09-09T03:17:39+00:00") while ``uploaded_at``/``shorts`` and the
+        ``madrid_day_range()`` bounds use space-separated UTC-naive text. A
+        naive string comparison counts yesterday's ISO publications as "today"
+        ('T' > ' ') and inflates the used budget.
         """
         account = str(account or "").strip()
         content_key = str(content_key or "").strip()
         if not account or not content_key:
             return True
+        content_type = str(content_type or "long").lower()
+        if content_type not in ("long", "short"):
+            content_type = "long"
         from api.services.spam_mitigation import get_account_upload_cap
-        cap = get_account_upload_cap(self)
+        cap = get_account_upload_cap(self, content_type=content_type)
         if cap <= 0:
             return True
-        from api.time_utils import madrid_date, madrid_day_range
+        from api.time_utils import madrid_date, MADRID
         now = datetime.now(_dt_timezone.utc)
-        date_key = madrid_date(now).isoformat()
+        target_date = madrid_date(now)
+        date_key = target_date.isoformat()
         expires_at = (now + timedelta(minutes=max(1, int(ttl_minutes)))).isoformat()
-        longform = (str(content_type or "long").lower() != "short")
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -3947,69 +3985,74 @@ class ExtendedDatabase(Database):
                     (account,),
                 ).fetchall()
             ]
-            day_start, day_end = madrid_day_range(date_key)
-            uploaded = 0
-            if channel_ids:
-                placeholders = ",".join("?" for _ in channel_ids)
-                uploaded += conn.execute(
-                    f"""SELECT COUNT(*) FROM videos
-                        WHERE channel_id IN ({placeholders})
-                          AND status IN ('uploaded','uploaded_private','published','warming')
-                          AND (uploaded_at >= ? AND uploaded_at < ?
-                               OR published_at >= ? AND published_at < ?)""",
-                    (*channel_ids, day_start, day_end, day_start, day_end),
-                ).fetchone()[0]
-                uploaded += conn.execute(
-                    f"""SELECT COUNT(*) FROM shorts
-                        WHERE channel_id IN ({placeholders})
-                          AND status IN ('uploaded','published','scheduled')
-                          AND published_at >= ? AND published_at < ?""",
-                    (*channel_ids, day_start, day_end),
-                ).fetchone()[0]
+            uploaded = self._count_account_uploads_today(
+                conn, channel_ids, content_type, target_date,
+            )
             active = conn.execute(
                 """SELECT COUNT(*) FROM account_upload_reservations
-                   WHERE account=? AND date_key=?""",
-                (account, date_key),
+                   WHERE account=? AND date_key=? AND content_type=?""",
+                (account, date_key, content_type),
             ).fetchone()[0]
             used = uploaded + active
 
-            # ── 1. Hard daily cap for the account (long + short) ──
+            # ── Hard daily cap for this account + content type ──
+            # Pools long/short independientes: no se comparte sobrante y no hay
+            # bloque de prioridad long-form (causa del hambre de shorts).
             if used >= cap:
                 conn.commit()
                 return False
-
-            # ── 2. Long-form priority over shorts ──
-            # A short must not take the last slot that a pending long-form of the
-            # same account will need today. Count long-forms in `awaiting_upload`
-            # (with a file on disk, not yet uploaded) scheduled for this Madrid
-            # day and refuse the short while doing so would leave fewer than that
-            # many slots free for them.
-            if not longform and channel_ids and used < cap:
-                try:
-                    placeholders = ",".join("?" for _ in channel_ids)
-                    pending = conn.execute(
-                        f"""SELECT COUNT(*) FROM videos
-                            WHERE channel_id IN ({placeholders})
-                              AND status = 'awaiting_upload'
-                              AND COALESCE(yt_video_id, '') = ''
-                              AND COALESCE(video_path, '') != ''
-                              AND (scheduled_upload_at IS NULL
-                                   OR (scheduled_upload_at >= ? AND scheduled_upload_at < ?))""",
-                        (*channel_ids, day_start, day_end),
-                    ).fetchone()[0]
-                except Exception:
-                    pending = 0
-                if int(pending or 0) > 0 and used >= cap - int(pending):
-                    conn.commit()
-                    return False
             conn.execute(
                 """INSERT INTO account_upload_reservations
-                   (account, date_key, content_key, claimant, expires_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (account, date_key, content_key, claimant, expires_at),
+                   (account, date_key, content_key, claimant, expires_at, content_type)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (account, date_key, content_key, claimant, expires_at, content_type),
             )
             conn.commit()
         return True
+
+    def _count_account_uploads_today(self, conn, channel_ids: list[int],
+                                     content_type: str, target_date):
+        """Count REAL uploads of ``content_type`` today (Madrid) for the account.
+
+        Robust to mixed timestamp formats: parses each stored value and compares
+        its Madrid calendar day instead of raw-string comparison against
+        ``madrid_day_range()`` bounds.
+
+        - long: counts rows in ``videos`` whose uploaded_at OR published_at falls
+          on ``target_date`` (only published/uploaded states).
+        - short: counts rows in ``shorts`` whose published_at falls on
+          ``target_date`` (only uploaded/published/scheduled states).
+        """
+        if not channel_ids:
+            return 0
+        placeholders = ",".join("?" for _ in channel_ids)
+        from api.time_utils import parse_utc, MADRID
+        count = 0
+        if content_type == "long":
+            rows = conn.execute(
+                f"""SELECT uploaded_at, published_at FROM videos
+                    WHERE channel_id IN ({placeholders})
+                      AND status IN ('uploaded','uploaded_private','published','warming')""",
+                channel_ids,
+            ).fetchall()
+            for uploaded_at, published_at in rows:
+                for value in (uploaded_at, published_at):
+                    dt = parse_utc(value)
+                    if dt is not None and dt.astimezone(MADRID).date() == target_date:
+                        count += 1
+                        break  # un vídeo cuenta una vez aunque upload y publish caigan hoy
+        else:
+            rows = conn.execute(
+                f"""SELECT published_at FROM shorts
+                    WHERE channel_id IN ({placeholders})
+                      AND status IN ('uploaded','published','scheduled')""",
+                channel_ids,
+            ).fetchall()
+            for (published_at,) in rows:
+                dt = parse_utc(published_at)
+                if dt is not None and dt.astimezone(MADRID).date() == target_date:
+                    count += 1
+        return count
 
     def finalize_account_upload_slot(self, account: str, content_key: str) -> bool:
         """Mark a reserved slot consumed after the upload request succeeds."""

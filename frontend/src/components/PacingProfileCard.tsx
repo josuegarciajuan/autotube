@@ -198,7 +198,8 @@ export default function PacingProfileCard() {
         <div className="bg-dark-700/50 rounded-xl p-3">
           <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Espaciado global</p>
           <PacingRow label="Entre canales distintos" value={p.global_upload_spacing_min} unit="min" />
-          <PacingRow label="Cap por cuenta Google" value={p.account_daily_upload_cap} unit="subidas/dia" />
+          <PacingRow label="Cap cuenta Google — Longs" value={p.account_daily_long_upload_cap ?? p.account_daily_upload_cap} unit="longs/dia" />
+          <PacingRow label="Cap cuenta Google — Shorts" value={p.account_daily_short_upload_cap ?? p.account_daily_upload_cap} unit="shorts/dia" />
           <PacingRow label="Filtro content_safety" value={p.content_safety_disabled ? 'desactivado' : 'activo'} />
         </div>
       </div>
