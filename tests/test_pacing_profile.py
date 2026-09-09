@@ -50,7 +50,10 @@ def test_default_profile_is_strike_with_antiban_values(tmp_path):
     assert pacing["same_channel_publish_gap_h"] == 24
     assert pacing["same_channel_upload_gap_h"] == 6
     assert pacing["global_upload_spacing_min"] == 45
-    assert pacing["account_daily_upload_cap"] == 4
+    # Cupo por cuenta SEPARADO por tipo: strike = 3 long + 2 short.
+    assert pacing["account_daily_long_upload_cap"] == 3
+    assert pacing["account_daily_short_upload_cap"] == 2
+    assert pacing["account_daily_upload_cap"] == 5  # derivada: long + short
     assert pacing["shorts_cooldown_min"] == 180
     assert pacing["content_safety_disabled"] is False
 
@@ -64,7 +67,10 @@ def test_set_profile_persists_and_resolves(tmp_path):
     assert resolved["max_longform_publish_day"] == 2
     assert resolved["same_channel_publish_gap_h"] == 6
     assert resolved["global_upload_spacing_min"] == 20
-    assert resolved["account_daily_upload_cap"] == 8
+    # Cupo por cuenta separado por tipo: normal = 6 long + 4 short.
+    assert resolved["account_daily_long_upload_cap"] == 6
+    assert resolved["account_daily_short_upload_cap"] == 4
+    assert resolved["account_daily_upload_cap"] == 10  # derivada
     # Persistido en system_state → sobrevive un reinicio (nuevo get_pacing)
     pacing = pacing_profile.get_pacing(db)
     assert pacing["shorts_per_channel_day"] == 3

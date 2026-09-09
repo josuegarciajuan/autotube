@@ -2014,9 +2014,26 @@ def run_job(
                         )
                         _upload_retryable_fail = True
                     else:
-                        db.update_video(video_id, progress=95, status="ready")
+                        # ── Non-retryable failure (metadata/template/config error, etc.) ──
+                        # A generic upload failure (e.g. KeyError on a description
+                        # template) will never succeed by retrying. Mark the video
+                        # 'error' (NOT 'ready') with the real message so the recovery
+                        # sweep does NOT loop it back to awaiting_upload forever
+                        # (video #2350 was retried 9× this way). A human must fix
+                        # the cause and re-dispatch.
+                        upload_err = str(getattr(orch, "_upload_error", "") or "")
+                        message = upload_err or "Upload failed (unknown reason) — video saved locally"
+                        logger.error("[%s] Upload failed (non-retryable): %s", canal, message)
+                        db.update_video(video_id, progress=95, status="error",
+                                        error_message=message[:500],
+                                        progress_phase="upload")
+                        # Fuerza job failed para que no cuente como éxito ni se
+                        # re-dispache automáticamente.
+                        _upload_retryable_fail = True
                 except Exception:
-                    db.update_video(video_id, progress=95, status="ready")
+                    db.update_video(video_id, progress=95, status="error",
+                                    error_message="Upload failed (non-retryable) — see logs",
+                                    progress_phase="upload")
                 # ── Log lifecycle: upload failed ──
                 try:
                     log_lifecycle(db, entity_type='video', entity_id=video_id, channel_id=channel_id,

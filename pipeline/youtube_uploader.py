@@ -1774,11 +1774,23 @@ class YouTubeUploader:
         """Format description using channel's DESCRIPTION_TEMPLATE.
         
         Falls back to a simple template if config isn't loaded.
+        Tolerates templates with placeholders beyond titulo/descripcion
+        (e.g. canal4's {related_videos}, {chapters}) so formatting never raises.
         """
         template = self._get_config_attr("DESCRIPTION_TEMPLATE")
 
         if template:
-            return template.format(titulo=titulo, descripcion=descripcion)
+            from pipeline.utils import safe_format_template
+            return safe_format_template(
+                template,
+                titulo=titulo,
+                descripcion=descripcion,
+                descripcion_seo=descripcion,
+                related_videos=(
+                    "👉 Mira también nuestros documentales más recientes en el canal\n"
+                    "👉 Suscríbete para más historias reales cada semana"
+                ),
+            )
 
         # Fallback template
         return f"""{titulo}
