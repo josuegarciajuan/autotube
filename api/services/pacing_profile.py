@@ -50,12 +50,22 @@ def get_pacing_telemetry() -> dict[str, int]:
 #   strike  → situación actual de strikes (1 short/día, 1 longform/día, ...)
 #   recovery → relajación gradual
 #   normal  → frecuencia máxima objetivo
+#
+# Cupo por cuenta Google (ago 2026): SEPARADO por tipo de contenido.
+# Longs y shorts usan pools independientes (`account_daily_long_upload_cap`
+# vs `account_daily_short_upload_cap`) para que un tipo jamás ocupe el cupo
+# del otro. Antes había un único `account_daily_upload_cap` compartido: los
+# long-forms `awaiting_upload` de hoy reservaban todo el cupo y los shorts
+# quedaban ahogados (0 subidas) aunque esos longs no se estuvieran subiendo.
+# `account_daily_upload_cap` se conserva solo como suma derivada/legacy; la
+# fuente de verdad son las dos claves por tipo.
 PACING_PROFILES: dict[str, dict] = {
     "strike": {
         "same_channel_publish_gap_h": 24,
         "same_channel_upload_gap_h": 6,
         "global_upload_spacing_min": 45,
-        "account_daily_upload_cap": 4,
+        "account_daily_long_upload_cap": 2,
+        "account_daily_short_upload_cap": 2,
         "shorts_cooldown_min": 180,
         "shorts_same_type_gap_min": 240,
         "shorts_cross_type_gap_min": 20,
@@ -67,7 +77,8 @@ PACING_PROFILES: dict[str, dict] = {
         "same_channel_publish_gap_h": 12,
         "same_channel_upload_gap_h": 4,
         "global_upload_spacing_min": 30,
-        "account_daily_upload_cap": 6,
+        "account_daily_long_upload_cap": 3,
+        "account_daily_short_upload_cap": 3,
         "shorts_cooldown_min": 120,
         "shorts_same_type_gap_min": 180,
         "shorts_cross_type_gap_min": 20,
@@ -79,7 +90,8 @@ PACING_PROFILES: dict[str, dict] = {
         "same_channel_publish_gap_h": 6,
         "same_channel_upload_gap_h": 3,
         "global_upload_spacing_min": 20,
-        "account_daily_upload_cap": 8,
+        "account_daily_long_upload_cap": 4,
+        "account_daily_short_upload_cap": 4,
         "shorts_cooldown_min": 90,
         "shorts_same_type_gap_min": 120,
         "shorts_cross_type_gap_min": 20,
@@ -175,6 +187,14 @@ def get_pacing(db=None) -> dict:
             if raw is not None and raw != "":
                 _count("legacy_fallbacks")
                 resolved[key] = _coerce(key, raw)
+    # ── Legacy derivada: cupo total por cuenta (long + short) ──
+    # Ya no es la fuente de verdad (lo son account_daily_<type>_upload_cap),
+    # pero se expone la suma para compatibilidad con UI/consumidores que aún
+    # leen la clave antigua compartida.
+    resolved["account_daily_upload_cap"] = (
+        int(resolved.get("account_daily_long_upload_cap") or 0)
+        + int(resolved.get("account_daily_short_upload_cap") or 0)
+    )
     return resolved
 
 

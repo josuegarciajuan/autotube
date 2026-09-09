@@ -176,90 +176,124 @@ def test_account_upload_reservation_counts_against_daily_cap(tmp_path):
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
 
-    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
-    assert db.reserve_account_upload_slot("shared-account", "video-2", "worker-b") is True
-
-    # Normal profile cap is eight, so fill the remaining six slots.
-    for index in range(3, 9):
+    # Normal profile: 4 slots per content type (long pool independiente).
+    for index in range(1, 5):
         assert db.reserve_account_upload_slot(
-            "shared-account", f"video-{index}", f"worker-{index}"
+            "shared-account", f"long-{index}", f"worker-{index}", content_type="long"
         ) is True
 
-    assert db.reserve_account_upload_slot("shared-account", "video-9", "worker-9") is False
+    assert db.reserve_account_upload_slot(
+        "shared-account", "long-5", "worker-5", content_type="long"
+    ) is False
+
+
+def test_account_upload_reservation_short_pool_is_independent(tmp_path):
+    """Longs y shorts tienen pools SEPARADOS: shorts pueden agotar su pool aun
+    con longs reservando el suyo, y viceversa."""
+    db = _db(tmp_path)
+    db.set_system_state("pacing_profile", "normal")
+
+    # Llénense 4 slots long del pool.
+    for index in range(1, 5):
+        assert db.reserve_account_upload_slot(
+            "shared-account", f"long-{index}", "worker", content_type="long"
+        ) is True
+    # El pool long está lleno; un long más se deniega.
+    assert db.reserve_account_upload_slot(
+        "shared-account", "long-5", "worker", content_type="long"
+    ) is False
+
+    # Pero los shorts tienen su PROPIO pool de 4: los 4 entran aunque longs estén llenos.
+    for index in range(1, 5):
+        assert db.reserve_account_upload_slot(
+            "shared-account", f"short-{index}", "worker", content_type="short"
+        ) is True
+    assert db.reserve_account_upload_slot(
+        "shared-account", "short-5", "worker", content_type="short"
+    ) is False
 
 
 def test_account_upload_reservation_is_idempotent_per_content(tmp_path):
     db = _db(tmp_path)
 
-    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
-    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-b") is False
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a", content_type="long") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-b", content_type="long") is False
 
 
 def test_account_upload_reservation_can_be_released(tmp_path):
     db = _db(tmp_path)
 
-    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-a", content_type="long") is True
     assert db.release_account_upload_slot("shared-account", "video-1") is True
-    assert db.reserve_account_upload_slot("shared-account", "video-2", "worker-b") is True
+    assert db.reserve_account_upload_slot("shared-account", "video-2", "worker-b", content_type="long") is True
 
 
 def test_account_upload_reservation_has_one_winner_for_last_slot(tmp_path):
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
-    for index in range(1, 8):
-        assert db.reserve_account_upload_slot("shared-account", f"video-{index}", f"worker-{index}") is True
+    for index in range(1, 4):
+        assert db.reserve_account_upload_slot(
+            "shared-account", f"video-{index}", f"worker-{index}", content_type="long"
+        ) is True
 
     def reserve(content_key):
         worker_db = ExtendedDatabase(str(db.db_path))
-        return worker_db.reserve_account_upload_slot("shared-account", content_key, content_key)
+        return worker_db.reserve_account_upload_slot(
+            "shared-account", content_key, content_key, content_type="long"
+        )
 
+    # Pool long normal = 4; ya hay 3 reservadas; de dos candidatos solo uno entra.
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(reserve, ("video-8", "video-9")))
+        results = list(pool.map(reserve, ("video-4", "video-5")))
 
     assert sorted(results) == [False, True]
 
 
-def test_account_cap_longform_priority_keeps_slot_for_pending_long(tmp_path):
-    """Shorts must not starve a pending long-form awaiting upload on the account."""
+def test_account_cap_shorts_not_blocked_by_pending_longs(tmp_path):
+    """Fix (ago 2026): los shorts NO deben ahogarse por long-forms pendientes.
+
+    Antes, un long-form ``awaiting_upload`` de hoy reservaba cupo y dejaba 0
+    slots a shorts en cuentas con >= cap longs pendientes (p. ej. 8 longs
+    pendientes con cap 8 → shorts jamás subían). Con pools separados, los longs
+    pendientes NO afectan al pool de shorts.
+    """
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
     with sqlite3.connect(str(db.db_path)) as conn:
         conn.execute("UPDATE channels SET google_account='acct' WHERE id=1")
-        # Un long-form pendiente de subir hoy (sin scheduled_upload_at → contará como pendiente).
-        conn.execute(
-            """INSERT INTO videos (id, channel_id, canal, status, video_path)
-               VALUES (101, 1, 'one', 'awaiting_upload', '/tmp/pending.mp4')"""
-        )
+        # Muchos long-forms pendientes de subir hoy (>= cap long) que antes
+        # dejaban a shorts sin cupo.
+        for i in range(1, 9):
+            conn.execute(
+                """INSERT INTO videos (id, channel_id, canal, status, video_path)
+                   VALUES (?, 1, 'one', 'awaiting_upload', '/tmp/pending.mp4')""",
+                (100 + i,),
+            )
         conn.commit()
 
-    # Los shorts pueden usar casi todo el cupo (cap=8), pero NO el slot que el
-    # long-form pendiente necesita: 8 shorts fallan, el último se deniega.
-    for index in range(1, 8):
+    # Los shorts SÍ entran: su pool (4, perfil normal) no compite con los longs.
+    for index in range(1, 5):
         assert db.reserve_account_upload_slot(
             "acct", f"short-{index}", "worker", content_type="short"
         ) is True
+    # Un short más se deniega: agotó SU pool de 4 (independiente).
     assert db.reserve_account_upload_slot(
-        "acct", "short-8", "worker", content_type="short"
+        "acct", "short-5", "worker", content_type="short"
     ) is False
-
-    # El long-form pendiente SÍ entra aunque la cuenta esté casi llena de shorts.
-    assert db.reserve_account_upload_slot(
-        "acct", "long-1", "worker", content_type="long"
-    ) is True
 
 
 def test_account_cap_no_pending_long_allows_all_shorts(tmp_path):
-    """Sin long-forms pendientes, los shorts pueden agotar todo el cupo diario."""
+    """Sin competencia, los shorts pueden agotar todo su pool diario (4 normal)."""
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
     with sqlite3.connect(str(db.db_path)) as conn:
         conn.execute("UPDATE channels SET google_account='acct' WHERE id=1")
         conn.commit()
 
-    for index in range(1, 9):
+    for index in range(1, 5):
         assert db.reserve_account_upload_slot(
             "acct", f"short-{index}", "worker", content_type="short"
         ) is True
     assert db.reserve_account_upload_slot(
-        "acct", "short-9", "worker", content_type="short"
+        "acct", "short-5", "worker", content_type="short"
     ) is False

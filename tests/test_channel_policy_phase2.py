@@ -64,4 +64,6 @@ def test_account_daily_uploads_counts_scheduled_shorts(tmp_path):
             """)
             return conn
 
-    assert spam_mitigation.get_account_daily_uploads("acct", DB()) == 1
+    assert spam_mitigation.get_account_daily_uploads("acct", DB(), content_type="short") == 1
+    # Pool long independiente: el short NO cuenta como long-form.
+    assert spam_mitigation.get_account_daily_uploads("acct", DB(), content_type="long") == 0

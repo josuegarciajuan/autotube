@@ -115,36 +115,49 @@ def get_channel_account(channel_slug: str, db=None) -> str:
         return ""
 
 
-def get_account_upload_cap(db=None) -> int:
+def get_account_upload_cap(db=None, content_type: str = "long") -> int:
     """Tope de subidas/día por cuenta Google (0 = desactivado).
 
-    Fuente: perfil central de pacing (``account_daily_upload_cap``), con
+    Cupo SEPARADO por tipo de contenido (ago 2026): longs y shorts tienen pools
+    independientes para que un tipo jamás ocupe el cupo del otro. Resolución:
+    clave por tipo > legacy ``account_daily_upload_cap`` (suma) como fallback.
+
+    Fuente: perfil central de pacing (``account_daily_<type>_upload_cap``), con
     fallback a la constante antiban de defaults.py.
     """
+    content_type = str(content_type or "long").lower()
+    content_type = content_type if content_type in ("long", "short") else "long"
     try:
         from api.services.pacing_profile import get_pacing_value
-        return max(0, int(get_pacing_value(
-            "account_daily_upload_cap",
-            default=0,
-            db=db,
-        ) or 0))
+        key = f"account_daily_{content_type}_upload_cap"
+        cap = get_pacing_value(key, default=None, db=db)
+        if cap is None:
+            # Legacy fallback: perfil único compartido (solo lectura informativa).
+            cap = get_pacing_value("account_daily_upload_cap", default=0, db=db)
+        return max(0, int(cap or 0))
     except Exception:
         # Central resolver unavailable: fail closed rather than resurrecting
         # the old per-channel config read in this consumer.
         return 0
 
 
-def get_account_daily_uploads(account: str, db=None) -> int:
-    """Subidas de HOY (long-form + shorts, subidos o publicados) de una cuenta.
+def get_account_daily_uploads(account: str, db=None, content_type: str = "long") -> int:
+    """Subidas de HOY (del tipo dado) de una cuenta Google.
 
-    Cuenta long-form con uploaded_at/published_at de hoy y shorts con
-    published_at de hoy (los status 'generated' en cola NO cuentan).
+    ``content_type`` ("long" | "short") filtra el pool: cuenta SOLO long-forms
+    (uploaded_at/published_at de hoy) o SOLO shorts (published_at de hoy). Los
+    status 'generated' en cola NO cuentan.
+
+    Nota: usa comparación robusta por día de Madrid parseando cada timestamp
+    (mezcla de formatos ISO/espacio en la DB; ver reserve_account_upload_slot).
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
     if not account:
         return 0
+    content_type = str(content_type or "long").lower()
+    content_type = content_type if content_type in ("long", "short") else "long"
     try:
         channels = [c for c in (db.get_channels(active_only=False) or [])
                     if ((c.get("google_account") or "").strip()) == account]
@@ -154,39 +167,50 @@ def get_account_daily_uploads(account: str, db=None) -> int:
     if not ids:
         return 0
     ids_sql = ",".join(str(i) for i in ids)
-    from api.time_utils import madrid_day_range
-    day_start, day_end = madrid_day_range()
+    from api.time_utils import madrid_date, parse_utc, MADRID
+    from datetime import datetime as _dt_utc, timezone as _tz_utc
+    target = madrid_date(_dt_utc.now(_tz_utc.utc))
     import sqlite3
+    count = 0
     try:
         with db._connect() as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                f"""SELECT
-                      (SELECT COUNT(*) FROM videos
+            if content_type == "long":
+                rows = conn.execute(
+                    f"""SELECT uploaded_at, published_at FROM videos
                         WHERE channel_id IN ({ids_sql})
-                          AND status IN ('uploaded','uploaded_private','published','warming')
-                           AND ((uploaded_at >= ? AND uploaded_at < ?)
-                                OR (published_at >= ? AND published_at < ?))) AS vids,
-                      (SELECT COUNT(*) FROM shorts
+                          AND status IN ('uploaded','uploaded_private','published','warming')"""
+                ).fetchall()
+                for row in rows:
+                    for value in (row["uploaded_at"], row["published_at"]):
+                        dt = parse_utc(value)
+                        if dt is not None and dt.astimezone(MADRID).date() == target:
+                            count += 1
+                            break
+            else:
+                rows = conn.execute(
+                    f"""SELECT published_at FROM shorts
                         WHERE channel_id IN ({ids_sql})
-                           AND status IN ('uploaded','published','scheduled')
-                           AND published_at >= ? AND published_at < ?) AS shs""",
-                (day_start, day_end, day_start, day_end, day_start, day_end),
-            ).fetchone()
-        return int((row["vids"] or 0) + (row["shs"] or 0))
+                          AND status IN ('uploaded','published','scheduled')"""
+                ).fetchall()
+                for row in rows:
+                    dt = parse_utc(row["published_at"])
+                    if dt is not None and dt.astimezone(MADRID).date() == target:
+                        count += 1
+        return int(count)
     except Exception:
         return 0
 
 
-def account_upload_slots_available(account: str, db=None) -> bool:
-    """True si la cuenta aún no ha alcanzado su cap diario de subidas.
+def account_upload_slots_available(account: str, db=None, content_type: str = "long") -> bool:
+    """True si la cuenta aún no ha alcanzado su cap diario de subidas del tipo.
 
     cap <= 0 → guard desactivado (siempre disponible).
     """
-    cap = get_account_upload_cap(db)
+    cap = get_account_upload_cap(db, content_type=content_type)
     if cap <= 0:
         return True
-    return get_account_daily_uploads(account, db) < cap
+    return get_account_daily_uploads(account, db, content_type=content_type) < cap
 
 
 def _reduce_one_channel(cid: int, slug: str, db) -> None:
