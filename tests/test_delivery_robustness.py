@@ -176,14 +176,14 @@ def test_account_upload_reservation_counts_against_daily_cap(tmp_path):
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
 
-    # Normal profile: 4 slots per content type (long pool independiente).
-    for index in range(1, 5):
+    # Normal profile: long pool = 6, short pool = 4 (independientes).
+    for index in range(1, 7):
         assert db.reserve_account_upload_slot(
             "shared-account", f"long-{index}", f"worker-{index}", content_type="long"
         ) is True
 
     assert db.reserve_account_upload_slot(
-        "shared-account", "long-5", "worker-5", content_type="long"
+        "shared-account", "long-7", "worker-7", content_type="long"
     ) is False
 
 
@@ -193,14 +193,14 @@ def test_account_upload_reservation_short_pool_is_independent(tmp_path):
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
 
-    # Llénense 4 slots long del pool.
-    for index in range(1, 5):
+    # Llénense los 6 slots long del pool.
+    for index in range(1, 7):
         assert db.reserve_account_upload_slot(
             "shared-account", f"long-{index}", "worker", content_type="long"
         ) is True
     # El pool long está lleno; un long más se deniega.
     assert db.reserve_account_upload_slot(
-        "shared-account", "long-5", "worker", content_type="long"
+        "shared-account", "long-7", "worker", content_type="long"
     ) is False
 
     # Pero los shorts tienen su PROPIO pool de 4: los 4 entran aunque longs estén llenos.
@@ -231,7 +231,7 @@ def test_account_upload_reservation_can_be_released(tmp_path):
 def test_account_upload_reservation_has_one_winner_for_last_slot(tmp_path):
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
-    for index in range(1, 4):
+    for index in range(1, 6):
         assert db.reserve_account_upload_slot(
             "shared-account", f"video-{index}", f"worker-{index}", content_type="long"
         ) is True
@@ -242,9 +242,9 @@ def test_account_upload_reservation_has_one_winner_for_last_slot(tmp_path):
             "shared-account", content_key, content_key, content_type="long"
         )
 
-    # Pool long normal = 4; ya hay 3 reservadas; de dos candidatos solo uno entra.
+    # Pool long normal = 6; ya hay 5 reservadas; de dos candidatos solo uno entra.
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(reserve, ("video-4", "video-5")))
+        results = list(pool.map(reserve, ("video-6", "video-7")))
 
     assert sorted(results) == [False, True]
 

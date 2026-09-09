@@ -3,6 +3,31 @@
 import re
 
 
+def safe_format_template(template: str, **kwargs) -> str:
+    """Format a template tolerantly: never raise on unknown/missing placeholders.
+
+    Descripción/marathon templates can declare placeholders (p. ej.
+    ``{related_videos}``, ``{chapters}``) that some upload paths do not always
+    supply. A plain ``str.format(...)`` then raises ``KeyError`` at upload time
+    (e.g. canal4's ``{related_videos}`` → ``Upload failed: 'related_videos'``)
+    and the video is retried forever. This fills every placeholder the template
+    references with the provided value, or ``""`` when absent, so a template
+    with an extra/typo placeholder can never break an upload.
+
+    Args:
+        template: str with ``{name}`` placeholders.
+        **kwargs: values for known placeholders.
+
+    Returns:
+        The formatted string; ``""`` if template is empty.
+    """
+    if not template:
+        return ""
+    placeholders = set(re.findall(r"\{(\w+)\}", template))
+    mapping = {name: ("" if kwargs.get(name) is None else kwargs[name]) for name in placeholders}
+    return template.format(**mapping)
+
+
 def slugify_filename(text: str, max_len: int = 100) -> str:
     """Sanitize a title into a filesystem-safe slug for YouTube SEO naming.
 

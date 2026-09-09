@@ -107,6 +107,10 @@ class PipelineOrchestrator:
         # (UploadAdmissionDeniedError) — retryable, but NOT quota exhaustion:
         # must NOT trip the per-project quota breaker.
         self._upload_admission_denied = False
+        # Last generic (non-quota, non-admission) upload failure message. The
+        # standalone worker reads this to mark the video 'error' (non-retryable)
+        # instead of looping it back to 'ready'/'awaiting_upload' forever.
+        self._upload_error: str = ""
 
         # Inter-phase state (computed once, used in subsequent phases)
         self._last_scene_ranges: list[dict] | None = None
@@ -1981,6 +1985,10 @@ class PipelineOrchestrator:
         """
         start = time.time()
         self._emit_progress(80, "upload", "Preparando subida a YouTube...")
+        # Reset per-run upload state so a previous failed run's error/admission
+        # flags never leak into this upload.
+        self._upload_admission_denied = False
+        self._upload_error = ""
 
         _saved_uploader_db = None  # for finally restore
 
@@ -2238,14 +2246,21 @@ class PipelineOrchestrator:
                 else:
                     chapters_text = "0:00 — Introducción\n0:45 — Desarrollo\n3:20 — Conclusión"
                 
-                description = self.config.DESCRIPTION_TEMPLATE.format(
+                from pipeline.utils import safe_format_template
+                description = safe_format_template(
+                    self.config.DESCRIPTION_TEMPLATE,
                     titulo=title,
                     descripcion_seo=seo_desc,
                     chapters=chapters_text,
+                    # canal4's DESCRIPTION_TEMPLATE references {related_videos};
+                    # supply it (and tolerate any template placeholder) so an
+                    # upload without AI metadata never raises KeyError.
+                    related_videos=(
+                        "👉 Mira también nuestros documentales más recientes en el canal\n"
+                        "👉 Suscríbete para más historias reales cada semana"
+                    ),
                 )
                 logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
-
-            # ── SEO filename slug from final title ─────────────────
             # YouTube uses the uploaded file name as a ranking signal.
             # We construct a keyword-rich slug so the temp copy sent to
             # YouTube carries the video title in its filename.
@@ -2583,6 +2598,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"[{self.canal}] Upload failed: {e}")
+            self._upload_error = str(e)
             _safe_log_error(self.db, self.canal, "upload", str(e))
             return None
         finally:
