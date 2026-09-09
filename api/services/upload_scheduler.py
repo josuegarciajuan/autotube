@@ -564,6 +564,131 @@ def _recover_inconsistent_upload_times(db) -> int:
     return fixed
 
 
+# ── (sept 2026): normalizar subidas batch colapsadas a la MISMA hora ──
+# Síntoma real: un batch por cuenta planificaba todos sus vídeos awaiting_upload
+# con el MISMO scheduled_upload_at exacto (p. ej. todos a 12:00). Como esos
+# vídeos son is_batch_scheduled, upload_scheduler los respeta tal cual y dispara
+# una ráfaga en una única franja en vez de repartirla en las ventanas del canal.
+# Este scan re-escalona los colisionados idénticos a lo largo de las ventanas
+# UPLOAD_WINDOWS del canal (días siguientes si hace falta), manteniendo cada
+# subida ANTES de su target_public_at (deadline = publish - warmup). Idempotente:
+# una vez re-escalonado, ya no hay colisiones idénticas y no vuelve a tocar nada.
+BATCH_MIN_GAP_MIN = 45  # separación mínima entre subidas del mismo canal tras des-colapsar
+
+
+def _normalize_collapsed_batch_uploads(db) -> int:
+    """Des-colapsa vídeos awaiting_upload (scheduled) que comparten el MISMO
+    scheduled_upload_at exacto, re-escalonándolos en varias franjas del canal.
+
+    Devuelve el nº de vídeos cuyo scheduled_upload_at fue cambiado.
+    """
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, v.scheduled_upload_at, v.target_public_at,
+                          c.config_json
+                   FROM videos v
+                   JOIN channels c ON c.id = v.channel_id
+                   WHERE v.status = 'awaiting_upload'
+                     AND v.publish_mode = 'scheduled'
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
+                     AND v.video_path IS NOT NULL AND v.video_path != ''
+                     AND v.scheduled_upload_at IS NOT NULL
+                   ORDER BY v.channel_id, v.scheduled_upload_at, v.id"""
+            ).fetchall()
+    except Exception as exc:
+        logger.debug("batch-collapse normalization scan skipped: %s", exc)
+        return 0
+
+    changed = 0
+    per_channel: dict[int, list] = {}
+    for r in rows:
+        per_channel.setdefault(r["channel_id"], []).append(dict(r))
+
+    for ch_id, items in per_channel.items():
+        # ── detectar colisiones idénticas exactas ──
+        from collections import Counter
+        times = [str(i.get("scheduled_upload_at"))[:19] for i in items]
+        cnt = Counter(times)
+        collided = {t for t, n in cnt.items() if n > 1}
+        if not collided:
+            continue
+
+        cfg = {}
+        try:
+            cfg = json.loads(items[0].get("config_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        windows = _parse_upload_windows(cfg)
+        if not windows:
+            windows = [{"start": 9, "end": 12}]
+        warmup = int(cfg.get("PUBLISH_WARMUP_MIN", 60)) or 60
+
+        # conservar la primera de cada hora colisionada; re-escalonar el resto
+        kept_times: list[datetime] = []
+        for it in sorted(items, key=lambda x: (str(x.get("scheduled_upload_at")), x["id"])):
+            t = str(it.get("scheduled_upload_at"))[:19]
+            if t in collided and not any(
+                abs((parse_utc(it["scheduled_upload_at"]) - k).total_seconds()) < 60
+                for k in kept_times
+            ):
+                kept_times.append(parse_utc(it["scheduled_upload_at"]))
+                continue  # se mantiene a su hora
+            new_t = _next_free_slot(
+                parse_utc(it["scheduled_upload_at"]),
+                it["target_public_at"],
+                windows, warmup,
+                kept_times + [parse_utc(x["scheduled_upload_at"])
+                              for x in items if x["id"] != it["id"]],
+                now=datetime.now(UTC),
+            )
+            if new_t is None:
+                continue
+            kept_times.append(new_t)
+            new_val = sqlite_utc(new_t)
+            try:
+                db.update_video(it["id"], scheduled_upload_at=new_val)
+                changed += 1
+                logger.warning(
+                    "🔁 Batch-collapse: video #%d (ch=%d) %s compartía hora con otros → "
+                    "re-escalonado a %s (UTC)",
+                    it["id"], ch_id, str(t), new_val,
+                )
+            except Exception as exc:
+                logger.debug("batch-collapse update failed #%d: %s", it["id"], exc)
+
+    return changed
+
+
+def _next_free_slot(original, target_public_at, windows, warmup_min,
+                    used_times, now: datetime) -> datetime | None:
+    """Primer instante futuro en las ventanas del canal, separado >= BATCH_MIN_GAP_MIN
+    de used_times, y antes de target_public_at - warmup. None si no hay hueco."""
+    deadline = None
+    if target_public_at:
+        pub = parse_utc(target_public_at)
+        if pub is not None:
+            deadline = pub - timedelta(minutes=warmup_min)
+
+    start = original if original and original > now else now
+    cursor = start
+    # barrer desde start hasta deadline en saltos finos
+    for _ in range(0, 24 * 60 * 14):  # hasta ~14 días de horizonte
+        cursor += timedelta(minutes=5)
+        if deadline and cursor > deadline:
+            return None
+        # dentro de una ventana (hora local Madrid)
+        local = cursor.astimezone(MADRID)
+        in_window = any(w["start"] <= local.hour < w["end"] for w in windows)
+        if not in_window:
+            continue
+        if any(abs((cursor - u).total_seconds()) < BATCH_MIN_GAP_MIN * 60
+               for u in used_times if u is not None):
+            continue
+        return cursor
+    return None
+
+
 # ── (ago 2026): autogestión de vídeos "calentando" con publishAt a días vista ──
 # Límite de vídeos a reprogramar por pasada para acotar el gasto de cuota
 # (videos.update = 50 units c/u).
@@ -976,6 +1101,14 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # ── 0b. Consistency scan: fix stale target_public_at / far-future scheduled_upload_at ──
     # Self-heals the "publish before upload" and "upload too far" inconsistencies.
     _recover_inconsistent_upload_times(db)
+
+    # ── 0b2. (sept 2026): des-colapsar subidas batch que comparten el MISMO
+    # scheduled_upload_at (ráfaga en una única franja) re-escalonándolas en las
+    # ventanas del canal antes de que disparen todas a la vez. ──
+    try:
+        _normalize_collapsed_batch_uploads(db)
+    except Exception as exc:
+        logger.debug("batch-collapse normalization skipped: %s", exc)
 
     # NOTA (ago 2026): se eliminó el repack automático por timer
     # (`_recover_far_future_published`) porque reprogramaba `publishAt` en YouTube
