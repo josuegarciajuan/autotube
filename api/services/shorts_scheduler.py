@@ -80,6 +80,20 @@ _VIDEOS_WITHOUT_SCRIPT_DATE: str = ""
 # Serializa una única subida de shorts de fondo a la vez (evita doble subida).
 import threading as _threading_mod
 _SHORT_UPLOAD_BACKGROUND_LOCK = _threading_mod.Lock()
+# Lock por CANAL que serializa las subidas del mismo canal a través de CUALQUIER
+# vía (válvula, endpoint manual /shorts-queue/upload/{id}, retries). Cierra el
+# race check-then-act: sin él, dos invocaciones del mismo canal podían pasar a la
+# vez el gate de espaciado (ninguna había escrito aún published_at) y subir dos
+# shorts seguidos. Cada canal tiene su propio lock (canales distintos en paralelo).
+_CHANNEL_UPLOAD_LOCKS: dict[int, _threading_mod.Lock] = {}
+_CHANNEL_UPLOAD_LOCKS_GUARD = _threading_mod.Lock()
+
+
+def _channel_upload_lock(cid: int) -> _threading_mod.Lock:
+    with _CHANNEL_UPLOAD_LOCKS_GUARD:
+        return _CHANNEL_UPLOAD_LOCKS.setdefault(cid, _threading_mod.Lock())
+
+
 # Cooldown after all slots exhausted to prevent log spam and CPU waste
 _LAST_ALL_EXHAUSTED_AT: float = 0.0
 _ALL_EXHAUSTED_COOLDOWN_SEC = 300  # 5 minutes
@@ -4606,83 +4620,131 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         )
         return False
 
-    uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
-    if not uploader.authenticate():
-        logger.error("[%s] YouTube auth failed (queued short #%d)", slug, short_id)
-        return False
-
-    title = (short_record.get("title") or short_record.get("hook_title") or "Short")[:100]
-    # Slot targets are retained for planning/analytics, never sent to YouTube.
-    privacy = "public"
-    publish_at = None
+    # ── Choke-point gate de espaciado del MISMO canal (UTC) ──
+    # Garantiza que ningún llamador (válvula, endpoint manual
+    # /shorts-queue/upload/{id}, retries) pueda subir dos shorts del mismo
+    # canal muy seguidos. El upload_spacing global solo cubre CANALES DISTINTOS;
+    # el mismo canal lo gobierna esta regla. Devolvemos False (queda en cola),
+    # nunca borramos.
     try:
-        result = uploader.upload(
-            video_path=file_path,
-            title=title,
-            description=description[:5000],
-            tags=hashtags[:60],
-            category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-            privacy=privacy,
-            publish_at=publish_at,
-            content_type="short",
-        )
-    except Exception as exc:
-        logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
-        return False
-
-    yt_id = result.get("video_id")
-    if not yt_id:
-        logger.error("Queued short #%d upload failed: no video ID", short_id)
-        return False
-
-    try:
-        with db._connect() as conn:
-            slot_row = conn.execute(
-                """SELECT id FROM shorts_planned_slots
-                   WHERE short_id = ? AND status IN ('generated', 'completed')
-                   ORDER BY id DESC LIMIT 1""",
-                (short_id,),
-            ).fetchone()
-        with db._connect() as conn:
-            # Estado de publicación real (v48): si se subió PRIVADO con publishAt
-            # futuro, el short aún no está público → status='scheduled'. El
-            # reconciliador (0 cuota) lo flipeará a 'published' cuando confirme la
-            # publicación real. published_at SIEMPRE = hora de subida (los caps
-            # anti-spam cuentan subidas por date(published_at); NUNCA NULL si hay
-            # youtube_id). actual_published_at se fija cuando el reconciliador confirma.
-            sched_iso = publish_at if (privacy == "private" and publish_at) else None
-            canonical_status = 'scheduled' if sched_iso else 'published'
-            yt_vis = 'scheduled' if sched_iso else 'public'
-            conn.execute(
-                """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
-                   published_at=COALESCE(published_at, datetime('now')),
-                    publish_at=?,
-                    yt_visibility=?,
-                   yt_checked_at=datetime('now','localtime'),
-                   yt_checked_source='upload',
-                    actual_published_at=CASE WHEN ? IS NULL THEN datetime('now') ELSE NULL END,
-                   error_message='',
-                   longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
-                   longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')
-                                             ELSE longform_linked_at END
-                   WHERE id=?""",
-                 (canonical_status, yt_id, result.get("url", ""),
-                  sched_iso, yt_vis,
-                 sched_iso,
-                 short_type, short_type, short_id),
+        _sp_ok, _sp_wait = _channel_short_spacing_ok(channel_id, short_type, db)
+        if not _sp_ok:
+            logger.info(
+                "[%s] Queued short #%d retenido por espaciado mismo-canal "
+                "(espera ~%ds) — se mantiene en cola",
+                slug, short_id, _sp_wait,
             )
-            # Slot en cola → completado (fix ago 2026: el estado 'generated'
-            # lo mantenía visible en Programación).
-            if slot_row:
-                conn.execute(
-                    """UPDATE shorts_planned_slots
-                       SET status='completed', updated_at=CURRENT_TIMESTAMP
-                       WHERE id=?""",
-                    (slot_row["id"],),
-                )
-            conn.commit()
+            return False
     except Exception as exc:
-        logger.warning("Queued short #%d: DB update failed: %s", short_id, exc)
+        logger.debug("[%s] spacing gate skipped (fail-open): %s", slug, exc)
+
+    # ── Seriálizamos la subida del MISMO canal (anti-race) ──
+    # Tomamos el lock del canal ANTES del upload y lo mantenemos hasta escribir
+    # published_at, para que ninguna segunda invocación (endpoint manual o una
+    # pasada de la válvula recién liberada) pueda solaparse y agrupar shorts.
+    # Canales distintos usan locks distintos → siguen subiendo en paralelo.
+    _clk = _channel_upload_lock(channel_id)
+    if not _clk.acquire(blocking=False):
+        logger.info(
+            "[%s] Queued short #%d retenido: ya hay una subida en curso en este canal",
+            slug, short_id,
+        )
+        return False
+    try:
+        # Re-check de espaciado YA con el lock del canal adquirido (cierra la
+        # ventana TOCTOU: ambas invocaciones pudieron pasar el gate de arriba
+        # antes de que ninguna escribiera published_at).
+        try:
+            _sp_ok2, _sp_wait2 = _channel_short_spacing_ok(channel_id, short_type, db)
+            if not _sp_ok2:
+                logger.info(
+                    "[%s] Queued short #%d retenido por espaciado mismo-canal "
+                    "(re-check, espera ~%ds)",
+                    slug, short_id, _sp_wait2,
+                )
+                return False
+        except Exception as exc2:
+            logger.debug("[%s] spacing re-check skipped (fail-open): %s", slug, exc2)
+
+        uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
+        if not uploader.authenticate():
+            logger.error("[%s] YouTube auth failed (queued short #%d)", slug, short_id)
+            return False
+
+        title = (short_record.get("title") or short_record.get("hook_title") or "Short")[:100]
+        # Slot targets are retained for planning/analytics, never sent to YouTube.
+        privacy = "public"
+        publish_at = None
+        try:
+            result = uploader.upload(
+                video_path=file_path,
+                title=title,
+                description=description[:5000],
+                tags=hashtags[:60],
+                category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+                privacy=privacy,
+                publish_at=publish_at,
+                content_type="short",
+            )
+        except Exception as exc:
+            logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
+            return False
+
+        yt_id = result.get("video_id")
+        if not yt_id:
+            logger.error("Queued short #%d upload failed: no video ID", short_id)
+            return False
+
+        try:
+            with db._connect() as conn:
+                slot_row = conn.execute(
+                    """SELECT id FROM shorts_planned_slots
+                       WHERE short_id = ? AND status IN ('generated', 'completed')
+                       ORDER BY id DESC LIMIT 1""",
+                    (short_id,),
+                ).fetchone()
+            with db._connect() as conn:
+                # Estado de publicación real (v48): si se subió PRIVADO con publishAt
+                # futuro, el short aún no está público → status='scheduled'. El
+                # reconciliador (0 cuota) lo flipeará a 'published' cuando confirme la
+                # publicación real. published_at SIEMPRE = hora de subida (los caps
+                # anti-spam cuentan subidas por date(published_at); NUNCA NULL si hay
+                # youtube_id). actual_published_at se fija cuando el reconciliador confirma.
+                sched_iso = publish_at if (privacy == "private" and publish_at) else None
+                canonical_status = 'scheduled' if sched_iso else 'published'
+                yt_vis = 'scheduled' if sched_iso else 'public'
+                conn.execute(
+                    """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
+                       published_at=COALESCE(published_at, datetime('now')),
+                        publish_at=?,
+                        yt_visibility=?,
+                       yt_checked_at=datetime('now','localtime'),
+                       yt_checked_source='upload',
+                        actual_published_at=CASE WHEN ? IS NULL THEN datetime('now') ELSE NULL END,
+                       error_message='',
+                       longform_linked = CASE WHEN ? = 'clip' THEN 1 ELSE longform_linked END,
+                       longform_linked_at = CASE WHEN ? = 'clip' THEN datetime('now','localtime')
+                                                 ELSE longform_linked_at END
+                       WHERE id=?""",
+                     (canonical_status, yt_id, result.get("url", ""),
+                      sched_iso, yt_vis,
+                     sched_iso,
+                     short_type, short_type, short_id),
+                )
+                # Slot en cola → completado (fix ago 2026: el estado 'generated'
+                # lo mantenía visible en Programación).
+                if slot_row:
+                    conn.execute(
+                        """UPDATE shorts_planned_slots
+                           SET status='completed', updated_at=CURRENT_TIMESTAMP
+                           WHERE id=?""",
+                        (slot_row["id"],),
+                    )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Queued short #%d: DB update failed: %s", short_id, exc)
+    finally:
+        _clk.release()
 
     # Auto-mark altered content (IA) vía browser (best-effort, en segundo plano)
     try:
@@ -4823,27 +4885,20 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
         if _channel_shorts_spam_blocked(cid, db):
             continue
         # Cooldown entre SUBIDAS del mismo canal (tiempo desde la última subida,
-        # no desde la última generación: la generación ya no sube).
+        # no desde la última generación: la generación ya no sube). Comprobado en
+        # UTC (regresión ago-2026: el bloque en línea comparaba el published_at
+        # UTC con datetime.now() local, inflando elapsed y desactivando el
+        # cooldown → shorts del mismo canal se agrupaban). La cola unificada solo
+        # contiene nativos (type='native'), así que aplicamos el same-type gap.
         try:
-            import sqlite3 as _sql_cd
-            from config.settings import DATABASE_PATH as _DBP_CD
-            with _sql_cd.connect(str(_DBP_CD), timeout=10) as _conn_cd:
-                row = _conn_cd.execute(
-                    """SELECT MAX(published_at) AS last_pub FROM shorts
-                       WHERE channel_id = ? AND published_at IS NOT NULL""",
-                    (cid,),
-                ).fetchone()
-            last_pub = row["last_pub"] if row else None
-            if last_pub:
-                from datetime import datetime as _dt_cd
-                last_dt = _dt_cd.strptime(str(last_pub)[:19], "%Y-%m-%d %H:%M:%S")
-                elapsed = (datetime.now() - last_dt).total_seconds()
-                if elapsed < _shorts_cooldown_minutes() * 60:
-                    logger.debug(
-                        "[%s] Válvula: cooldown de subida activo (última subida %s)",
-                        slug, str(last_pub)[:19],
-                    )
-                    continue
+            _spacing_ok, _wait = _channel_short_spacing_ok(cid, "native", db)
+            if not _spacing_ok:
+                logger.debug(
+                    "[%s] Válvula: cooldown de subida activo (espera ~%ds), "
+                    "short en cola retenido",
+                    slug, _wait,
+                )
+                continue
         except Exception:
             pass
         # Tope diario de nativos publicados (planning)
@@ -5962,6 +6017,85 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
 
 
 # ── Internal helpers ───────────────────────────────────────────
+
+def _last_channel_short_upload_utc(channel_id: int, db):
+    """Newest shorts.published_at for a channel as an aware-UTC datetime.
+
+    ``shorts.published_at`` is stored in UTC (datetime('now') at upload),
+    so it is the source of truth for same-channel spacing. Returns None if
+    the channel has never uploaded a short.
+    """
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """SELECT MAX(published_at) AS last_pub FROM shorts
+                   WHERE channel_id = ? AND published_at IS NOT NULL
+                     AND youtube_id IS NOT NULL AND youtube_id != ''""",
+                (channel_id,),
+            ).fetchone()
+        raw = row["last_pub"] if row else None
+        if not raw:
+            return None
+        naive = datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S")
+        # published_at es UTC (datetime('now')); tratarlo como aware-UTC, jamás local.
+        return naive.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def _channel_short_spacing_required_minutes(channel_id: int, short_type: str,
+                                             db) -> int:
+    """Minimum minutes a same-channel short must wait since the last upload.
+
+    Enforces the strongest applicable rule (cooldown + type gap + min gap),
+    resolved from the central pacing profile. Precedence (stricter wins):
+      - shorts_cooldown_min            (any same-channel short)
+      - shorts_same_type_gap_min       (same type as the last one)
+      - shorts_cross_type_gap_min      (different type)
+      - shorts_min_gap_min             (absolute floor for any short)
+    """
+    required = max(
+        _shorts_cooldown_minutes(),
+        _min_shorts_gap_minutes(),
+    )
+    # Conservador: aplicar el mismo-type gap siempre que no sepamos distinguir
+    # el tipo del último upload. Para la cola actual todos son 'native', así
+    # que el same-type gap es el que manda (native→native).
+    if short_type == "native":
+        required = max(required, _same_type_gap_minutes())
+    else:
+        required = max(required, _cross_type_gap_minutes())
+    return required
+
+
+def _channel_short_spacing_ok(channel_id: int, short_type: str, db) -> tuple[bool, int]:
+    """True if ``channel_id`` may upload a ``short_type`` now.
+
+    Returns (ok, wait_seconds). wait_seconds is how long to hold before the
+    channel's next same-channel short (0 if ok). Uses UTC on both sides so the
+    comparison is independent of the server's local timezone (regression:
+    ago-2026 the valve compared stored-UTC published_at against local
+    datetime.now(), inflating elapsed by the UTC offset and silently disabling
+    the cooldown → same-channel shorts clustered back-to-back).
+    """
+    try:
+        last_utc = _last_channel_short_upload_utc(channel_id, db)
+        if last_utc is None:
+            return True, 0
+        required_min = _channel_short_spacing_required_minutes(
+            channel_id, short_type, db,
+        )
+        now_utc = datetime.now(UTC)
+        elapsed = (now_utc - last_utc).total_seconds()
+        if elapsed >= required_min * 60:
+            return True, 0
+        wait = int((required_min * 60) - elapsed)
+        return False, max(0, wait)
+    except Exception:
+        # Fail-open on internal errors (never silently break spacing intent
+        # into an indefinite block).
+        return True, 0
+
 
 def _channel_shorts_cooldown_ok(channel_id: int, db) -> bool:
     """Check if enough time has passed since the channel's last completed short.
