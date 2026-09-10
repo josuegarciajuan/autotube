@@ -490,35 +490,41 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
             applied.append({"slug": slug, "phase": 0, "action": "skip (bloqueado/no iniciado)"})
             continue
 
+        # Política efectiva del canal (Configuración de Programación / perfil):
+        # es la fuente de verdad de la cadencia en fase >=2.
+        try:
+            from api.services.channel_policy import resolve_channel_policy_values
+            _polv = resolve_channel_policy_values(cid, db=db)
+        except Exception:
+            _polv = {}
+
         if phase == 1:
             try:
                 start = datetime.fromisoformat(entry["start_iso"]).date()
                 alt_offset = (-start.toordinal()) % 2  # día 1 = día de publicación
             except (ValueError, TypeError, KeyError, OverflowError):
                 alt_offset = 0
+            # Fase 1 (canal con strike propio recién desbloqueado) se mantiene
+            # deliberadamente conservadora: 1 long cada 2 días.
             vpd = VIDEOS_PER_DAY_MAX
             alt_pattern = [1, 0]
         else:
-            vpd = VIDEOS_PER_DAY_MAX
+            # Fase >=2: NADA hardcodeado. La cadencia es la configurada en el
+            # panel (longform_publish_cap): 2/día en `normal`, 1/día en
+            # `recovery`/`strike`. Antes se forzaba VIDEOS_PER_DAY_MAX=1 e
+            # ignoraba la configuración del canal.
+            vpd = max(1, int(_polv.get("public_longform_per_day") or VIDEOS_PER_DAY_MAX))
             alt_pattern = None
             alt_offset = 0
 
-        # Fase 1 conserva 1 native/día. En fase >=2 el cupo de nativos NO se
-        # fija con la constante legacy (2): se deriva del cupo del perfil de
-        # entrega vigente del canal (channel_policy → delivery_profiles). Así un
-        # canal en delivery_state 'normal' obtiene shorts_native_per_day=3 (su
-        # techo aprobado) y no queda capado en 2 indefinidamente. Los clips
-        # continúan desactivados tras los strikes.
+        # Fase 1 conserva 1 native/día. En fase >=2 el cupo de nativos se deriva
+        # del cupo configurado del canal (channel_policy → override del panel).
+        # Los clips continúan desactivados tras los strikes.
         native_per_day = PHASE1_SHORTS_NATIVE_PER_DAY
         if phase >= 2:
-            try:
-                from api.services.channel_policy import resolve_channel_policy_values
-                _polv = resolve_channel_policy_values(cid, db=db)
-                native_per_day = int(
-                    _polv.get("native_shorts_per_day") or PHASE2_SHORTS_NATIVE_PER_DAY
-                )
-            except Exception:
-                native_per_day = PHASE2_SHORTS_NATIVE_PER_DAY
+            native_per_day = int(
+                _polv.get("native_shorts_per_day") or PHASE2_SHORTS_NATIVE_PER_DAY
+            )
         shorts_changed = False
         sc_list = db.get_shorts_planning_config(channel_id=cid) or []
         sc = sc_list[0] if sc_list else {}

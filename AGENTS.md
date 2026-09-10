@@ -431,14 +431,28 @@ Consumidores actuales: `upload_spacing`, `shorts_scheduler` (caps duros, cooldow
 gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigation`
 (cap por cuenta), `upload_scheduler` (gap de subida mismo-canal).
 
-> **Prioridad long-form sobre shorts en el cap de cuenta** (`reserve_account_upload_slot`):
-> el cap `account_daily_upload_cap` limita las SUBIDAS TOTALES (long + short) por cuenta
-> y día, así que un drenaje de shorts activo (`short_drain_mode`) puede agotar el cupo y
-> **hambrear los long-forms** de `awaiting_upload` (cada día se rechazan, se difieren a
-> mañana y se apilan). Para evitarlo, un short solo puede usar el presupuesto que NO
-> necesitan los long-forms que hoy esperan subir en esa cuenta (vídeos `awaiting_upload`
-> con archivo y programados para hoy). Los long-forms siempre entran hasta el cap duro.
-> Efecto: los longs drenan su backlog aun con shorts soltándose en paralelo.
+> **Fuente única de cadencia = "Configuración de Programación" (ago 2026).**
+> El número de shorts y long-forms públicos por canal/día lo fija el panel
+> (`PUT /api/planning/config/{id}` y `PUT /api/planning/shorts-config/{id}` →
+> `apply_publish_override` → `channel_delivery_state.override_json`, leído vía
+> `resolve_channel_policy_values`/`policy_value`). NINGÚN consumidor debe recortar
+> por debajo de esa config: los topes agregados se **derivan por suma**, no son
+> constantes.
+> - **Tope por cuenta Google (shorts y longs por separado):** `get_account_upload_cap(...,
+>   account=)` = SUMA de `public_longform_per_day` / `public_shorts_per_day` de los
+>   canales activos de la cuenta (`api/services/spam_mitigation.py`). Antes una
+>   constante (p. ej. 4 shorts/cuenta) impedía subir 3/canal en cuentas con 2 canales.
+> - **Tope global de shorts/día:** `_global_shorts_daily_cap()` = SUMA de
+>   `native_shorts_per_day` de canales activos (no `GLOBAL_SHORTS_PER_DAY_CAP`).
+> - **Long-form:** `gradual_resume` (fase ≥2), `spread_pending_publishes` y el
+>   repack usan `longform_publish_cap` del canal (2/día en `normal`), no un 1/día
+>   fijo. `restore_publication_frequency` restaura los valores del panel.
+> - **Persistencia:** cambiar `channel_delivery_state` (incl. transición automática
+>   strike→recovery→normal) **NO** borra `override_json`.
+> - **Reintentos:** `_hold_exhausted_uploads` no retiene un vídeo en `held` mientras
+>   el canal no haya cubierto su objetivo diario (los reintentos no dejan huecos).
+> - **Día natural:** caps de shorts y cuenta se cuentan por día **Madrid**
+>   (`madrid_day_range`), no por `localtime` del server.
 
 ### 💧 Modo drenaje de shorts (`short_drain_mode`) — `api/services/shorts_scheduler.py`
 

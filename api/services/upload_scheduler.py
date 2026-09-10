@@ -878,9 +878,45 @@ def _hold_exhausted_uploads(db) -> int:
         logger.debug("hold scan skipped: %s", exc)
         return 0
 
+    # Objetivo diario del canal y cuánto lleva subido hoy (Madrid). No se
+    # retiene un vídeo mientras el canal NO haya cubierto su cadencia: los
+    # reintentos no deben dejar huecos por debajo de la Configuración de
+    # Programación. La retención (y su alerta) queda para cuando el objetivo
+    # del día ya está cubierto.
+    from api.time_utils import madrid_day_range
+    from api.services.channel_policy import policy_value
+    _day_start, _day_end = madrid_day_range()
+    _target_met_cache: dict[int, bool] = {}
+
+    def _target_met(cid: int) -> bool:
+        if cid in _target_met_cache:
+            return _target_met_cache[cid]
+        try:
+            target = int(policy_value(cid, "longform_publish_cap", db=db, default=1) or 1)
+        except Exception:
+            target = 1
+        used = 0
+        try:
+            with db._connect() as conn:
+                row = conn.execute(
+                    """SELECT COUNT(*) FROM videos
+                       WHERE channel_id = ?
+                         AND status IN ('uploaded','uploaded_private','published','warming')
+                         AND ((uploaded_at >= ? AND uploaded_at < ?)
+                              OR (published_at >= ? AND published_at < ?))""",
+                    (cid, _day_start, _day_end, _day_start, _day_end),
+                ).fetchone()
+            used = int(row[0]) if row else 0
+        except Exception:
+            used = 0
+        _target_met_cache[cid] = used >= target
+        return _target_met_cache[cid]
+
     held = 0
     for r in rows:
         if int(r["n"]) >= MAX_UPLOAD_RETRY_PER_VIDEO:
+            if not _target_met(int(r["channel_id"])):
+                continue  # aún no se cubre el objetivo del canal hoy → seguir reintentando
             try:
                 if hold_video(
                     db, r["id"], r["slug"], "upload",

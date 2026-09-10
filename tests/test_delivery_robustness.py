@@ -20,7 +20,10 @@ def _db(tmp_path):
     return ExtendedDatabase(str(path))
 
 
-def test_channel_state_change_resets_manual_delivery_override(tmp_path):
+def test_channel_state_change_preserves_manual_delivery_override(tmp_path):
+    """La Configuración de Programación es la fuente de verdad: cambiar el
+    estado de entrega (incl. transición automática strike→normal) NO borra el
+    override del panel."""
     db = _db(tmp_path)
     channel_policy.set_channel_delivery_state("recovery", 1, db=db)
     channel_policy.set_channel_delivery_override(1, {"longs_per_day": 0}, db=db)
@@ -31,6 +34,17 @@ def test_channel_state_change_resets_manual_delivery_override(tmp_path):
 
     assert db.get_system_state("channel_delivery_override_1") in (None, "")
     assert channel_policy.get_channel_delivery_state(1, db=db) == "normal"
+    # El override del panel sobrevive a la transición de estado.
+    assert channel_policy.resolve_channel_policy_values(1, db=db)["longform_publish_cap"] == 0
+
+
+def test_clearing_manual_override_returns_to_profile_cap(tmp_path):
+    db = _db(tmp_path)
+    channel_policy.set_channel_delivery_state("normal", 1, db=db)
+    channel_policy.set_channel_delivery_override(1, {"longs_per_day": 0}, db=db)
+    assert channel_policy.resolve_channel_policy_values(1, db=db)["longform_publish_cap"] == 0
+
+    channel_policy.clear_publish_override(1, db=db)
     assert channel_policy.resolve_channel_policy_values(1, db=db)["longform_publish_cap"] == 2
 
 
@@ -271,29 +285,31 @@ def test_account_cap_shorts_not_blocked_by_pending_longs(tmp_path):
             )
         conn.commit()
 
-    # Los shorts SÍ entran: su pool (4, perfil normal) no compite con los longs.
-    for index in range(1, 5):
+    # Los shorts SÍ entran. El tope de la cuenta = SUMA de los topes
+    # configurados de sus canales (1 canal × 3 shorts/día en perfil normal);
+    # no compite con los longs (pool independiente).
+    for index in range(1, 4):
         assert db.reserve_account_upload_slot(
             "acct", f"short-{index}", "worker", content_type="short"
         ) is True
-    # Un short más se deniega: agotó SU pool de 4 (independiente).
+    # Un short más se deniega: agotó SU pool de 3 (independiente).
     assert db.reserve_account_upload_slot(
-        "acct", "short-5", "worker", content_type="short"
+        "acct", "short-4", "worker", content_type="short"
     ) is False
 
 
 def test_account_cap_no_pending_long_allows_all_shorts(tmp_path):
-    """Sin competencia, los shorts pueden agotar todo su pool diario (4 normal)."""
+    """Sin competencia, los shorts agotan el tope diario de su canal (3 normal)."""
     db = _db(tmp_path)
     db.set_system_state("pacing_profile", "normal")
     with sqlite3.connect(str(db.db_path)) as conn:
         conn.execute("UPDATE channels SET google_account='acct' WHERE id=1")
         conn.commit()
 
-    for index in range(1, 5):
+    for index in range(1, 4):
         assert db.reserve_account_upload_slot(
             "acct", f"short-{index}", "worker", content_type="short"
         ) is True
     assert db.reserve_account_upload_slot(
-        "acct", "short-5", "worker", content_type="short"
+        "acct", "short-4", "worker", content_type="short"
     ) is False
