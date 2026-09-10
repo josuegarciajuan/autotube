@@ -946,9 +946,55 @@ def _hard_daily_cap(channel_id: int | None = None, db=None) -> int:
         return base
 
 
+_GLOBAL_SHORTS_CAP_CACHE: dict = {"ts": 0.0, "value": None, "path": ""}
+
+
 def _global_shorts_daily_cap() -> int:
-    """Cap global de shorts/día entre todos los canales."""
-    return _pacing_int("shorts_global_day", GLOBAL_SHORTS_PER_DAY_CAP)
+    """Cap global de shorts/día = SUMA de los topes configurados por canal.
+
+    La Configuración de Programación es la fuente de verdad: no hay una
+    constante global que recorte por debajo. Cacheado 30 s (por ruta de DB)
+    para no abrir la DB en cada comprobación del bucle de subida.
+    """
+    import time as _t
+    from config.settings import DATABASE_PATH as _DBP
+    now = _t.time()
+    cached = _GLOBAL_SHORTS_CAP_CACHE
+    if (cached["value"] is not None and cached.get("path") == str(_DBP)
+            and (now - cached["ts"]) < 30):
+        return int(cached["value"])
+    total = None
+    try:
+        from database.db_extended import ExtendedDatabase
+        from config.settings import DATABASE_PATH
+        from api.services.channel_policy import policy_value
+        db = ExtendedDatabase(str(DATABASE_PATH))
+        acc = 0
+        found = False
+        for ch in (db.get_channels(active_only=True) or []):
+            cid = int(ch.get("id") or 0)
+            if not cid:
+                continue
+            found = True
+            try:
+                acc += max(0, int(policy_value(
+                    cid, "native_shorts_per_day", db=db, default=0,
+                ) or 0))
+            except Exception:
+                continue
+        # Solo confiamos en la suma si es > 0: un 0 puede venir de esquemas
+        # mínimos/fixtures donde el cap por canal no resuelve. Un 0 real (todos
+        # los canales a 0 shorts) ya lo bloquea `_hard_daily_cap` por canal.
+        if found and acc > 0:
+            total = acc
+    except Exception:
+        total = None
+    if total is None:
+        total = _pacing_int("shorts_global_day", GLOBAL_SHORTS_PER_DAY_CAP)
+    cached["ts"] = now
+    cached["value"] = total
+    cached["path"] = str(_DBP)
+    return int(total)
 
 
 def _shorts_cooldown_minutes() -> int:

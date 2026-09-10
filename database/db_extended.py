@@ -3953,7 +3953,9 @@ class ExtendedDatabase(Database):
         if content_type not in ("long", "short"):
             content_type = "long"
         from api.services.spam_mitigation import get_account_upload_cap
-        cap = get_account_upload_cap(self, content_type=content_type)
+        # La cuenta es la fuente del tope: SUMA de los topes configurados de sus
+        # canales (Configuración de Programación), nunca una constante.
+        cap = get_account_upload_cap(self, content_type=content_type, account=account)
         if cap <= 0:
             return True
         from api.time_utils import madrid_date, MADRID
@@ -3970,9 +3972,15 @@ class ExtendedDatabase(Database):
                      AND expires_at <= ?""",
                 (account, date_key, now.isoformat()),
             )
+            # Solo una reserva EN VUELO (state='reserved') del mismo contenido
+            # debe bloquear: evita el doble dispatch simultáneo. Una reserva ya
+            # 'consumed' NO bloquea un reintento (su subida ya se contabiliza en
+            # `uploaded`); antes se contaba como activa y, sumada al recuento de
+            # subidas reales, disparaba un falso "daily upload cap".
             duplicate = conn.execute(
                 """SELECT 1 FROM account_upload_reservations
-                   WHERE account=? AND date_key=? AND content_key=?""",
+                   WHERE account=? AND date_key=? AND content_key=?
+                     AND state='reserved'""",
                 (account, date_key, content_key),
             ).fetchone()
             if duplicate:
@@ -3990,7 +3998,8 @@ class ExtendedDatabase(Database):
             )
             active = conn.execute(
                 """SELECT COUNT(*) FROM account_upload_reservations
-                   WHERE account=? AND date_key=? AND content_type=?""",
+                   WHERE account=? AND date_key=? AND content_type=?
+                     AND state='reserved'""",
                 (account, date_key, content_type),
             ).fetchone()[0]
             used = uploaded + active
@@ -4109,12 +4118,13 @@ class ExtendedDatabase(Database):
             if old and old[0] == state:
                 conn.commit()
                 return False
+            # Cambiar de estado NO borra la config del panel (override_json):
+            # la Configuración de Programación es la fuente de verdad y debe
+            # sobrevivir a una transición automática strike→recovery→normal.
+            # El bloqueo por strike se aplica aparte (strike_active), no vía cap.
             conn.execute("""INSERT INTO channel_delivery_state(channel_id,state,override_json)
                 VALUES(?,?, '{}') ON CONFLICT(channel_id) DO UPDATE SET state=excluded.state,
-                override_json='{}', updated_at=CURRENT_TIMESTAMP""", (channel_id, state))
-            conn.execute("DELETE FROM system_state WHERE key IN (?, ?)",
-                         (f"channel_delivery_override_{channel_id}",
-                          f"channel_delivery_policy_{channel_id}"))
+                updated_at=CURRENT_TIMESTAMP""", (channel_id, state))
             for offset in range(max(1, horizon_days)):
                 day = (today + timedelta(days=offset)).isoformat()
                 conn.execute("""INSERT OR IGNORE INTO scheduling_replan_requests
@@ -4136,8 +4146,11 @@ class ExtendedDatabase(Database):
             if old == value:
                 conn.commit()
                 return False
+            # Un override del panel no debe degradar el canal a 'strike': si la
+            # fila no existe se crea en 'normal' (neutro); si existe, se
+            # preserva su estado actual (ON CONFLICT solo toca override_json).
             conn.execute("""INSERT INTO channel_delivery_state(channel_id,state,override_json)
-                VALUES(?, 'strike', ?) ON CONFLICT(channel_id) DO UPDATE SET override_json=excluded.override_json,
+                VALUES(?, 'normal', ?) ON CONFLICT(channel_id) DO UPDATE SET override_json=excluded.override_json,
                 updated_at=CURRENT_TIMESTAMP""", (channel_id, json.dumps(value)))
             today = datetime.now(_dt_timezone.utc).astimezone(ZoneInfo("Europe/Madrid")).date()
             for offset in range(max(1, horizon_days)):
@@ -9315,14 +9328,19 @@ class ExtendedDatabase(Database):
         ya consume el hueco de subida del día (anti-spam). Usado por el cap de
         dispatch para no exceder shorts_native_per_day.
         """
+        # Día natural de Madrid (no `localtime` del server): el cap de cuenta y
+        # los perfiles de pacing cuentan por día Madrid; usar otra frontera
+        # inflaba/desinflaba el cupo y permitía o bloqueaba de más.
+        from api.time_utils import madrid_day_range
+        day_start, day_end = madrid_day_range()
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM shorts
                    WHERE channel_id = ?
                      AND type = 'native'
                      AND status IN ('published', 'scheduled')
-                     AND DATE(published_at) = DATE('now', 'localtime')""",
-                (channel_id,),
+                     AND published_at >= ? AND published_at < ?""",
+                (channel_id, day_start, day_end),
             ).fetchone()
         return row["cnt"] if row else 0
 

@@ -253,11 +253,13 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             except Exception:
                 pass
 
-            # ── Cuota diaria (perfil pacing) ──
+            # ── Cuota diaria por canal (Configuración de Programación) ──
+            # Fuente de verdad: el cap configurado del canal (override del
+            # panel / perfil), NO el valor global del perfil.
             try:
-                from api.services.pacing_profile import get_pacing_value
-                n = int(get_pacing_value(
-                    "max_longform_publish_day", default=1, db=db,
+                from api.services.channel_policy import policy_value
+                n = int(policy_value(
+                    ch_id, "longform_publish_cap", db=db, default=1,
                 ) or 1)
             except Exception:
                 n = 1
@@ -307,17 +309,29 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             else:
                 _resolve_dry_alert(db, slug, channel_id=ch_id)
 
-            # ── Auditoría SOLO (ago 2026): ya NO se dispara repack automático ──
-            # El repack por timer se eliminó (drenaba la cuota con el ping-pong de
-            # set_publish_at). Este loop ahora solo vigila la cobertura y alerta
-            # si un día queda con hueco; la corrección se hace a mano cuando el
-            # operador lo detecta. 0 cuota de YouTube (solo SQLite + alertas).
+            # ── Enforcer de cobertura: alerta + repack con gate de cuota ──
+            # Si un día próximo queda por debajo del cap configurado y hay cola
+            # pendiente, se dispara el repack del canal (apply_publish_repack con
+            # quota_gate=True) para CUMPLIR la cadencia configurada. El gate de
+            # cuota evita el ping-pong de set_publish_at cuando no hay margen.
             if pending and deficit_days:
                 triggered = True
                 reason = f"déficit en {len(deficit_days)} día(s): {deficit_days}"
+                try:
+                    from api.services.publish_repack import apply_publish_repack
+                    _rep = apply_publish_repack(db, ch_id, slug, dry_run=False,
+                                                quota_gate=True)
+                    _moved = int((_rep or {}).get("rescheduled", 0) or 0)
+                    if _moved:
+                        result["repacked"] = result.get("repacked", 0) + _moved
+                        reason += f" — repack: {_moved} reprogramado(s)"
+                    elif (_rep or {}).get("quota_skipped"):
+                        reason += " — repack omitido por cuota"
+                except Exception as exc:
+                    logger.debug("[%s] coverage repack skipped: %s", slug, exc)
                 if _maybe_alert_deficit(db, slug, channel_id=ch_id, deficit_days=deficit_days):
                     result["alerted_deficit"] = result.get("alerted_deficit", 0) + 1
-                    reason += " — alerta generada para revisión"
+                    reason += " — alerta generada"
             else:
                 _resolve_deficit_alert(db, slug, channel_id=ch_id)
 

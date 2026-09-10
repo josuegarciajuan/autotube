@@ -97,11 +97,11 @@ def _project_sibling_channels(slug: str, db) -> list[dict]:
     return [c for c in channels if c.get("slug") == slug]
 
 
-# ── Cap de subidas por cuenta Google (antiban, ago 2026) ──────────
+# ── Cap de subidas por cuenta Google ─────────────────────────────
 # Los strikes de YouTube se registran por CUENTA/PROYECTO GCP, no por canal.
-# Dos canales hermanos que comparten cuenta pueden saturarla aunque cada uno
-# cumpla su cap individual. ACCOUNT_DAILY_UPLOAD_CAP (config/defaults.py)
-# limita las SUBIDAS TOTALES (long-form + shorts) por cuenta y día.
+# La Configuración de Programación del panel es la ÚNICA fuente de verdad:
+# el tope de la cuenta es la SUMA de los topes configurados de sus canales
+# (nunca una constante). Un tipo (long/short) jamás ocupa el cupo del otro.
 
 def get_channel_account(channel_slug: str, db=None) -> str:
     """Cuenta Google del canal (google_account) o '' si no tiene."""
@@ -115,18 +115,55 @@ def get_channel_account(channel_slug: str, db=None) -> str:
         return ""
 
 
-def get_account_upload_cap(db=None, content_type: str = "long") -> int:
-    """Tope de subidas/día por cuenta Google (0 = desactivado).
+def _sum_account_channel_caps(account: str, content_type: str, db=None):
+    """Suma de los topes configurados de los canales activos de la cuenta.
 
-    Cupo SEPARADO por tipo de contenido (ago 2026): longs y shorts tienen pools
-    independientes para que un tipo jamás ocupe el cupo del otro. Resolución:
-    clave por tipo > legacy ``account_daily_upload_cap`` (suma) como fallback.
+    Devuelve None si la cuenta no tiene canales (para caer al fallback de perfil);
+    en caso contrario el total (puede ser 0 si todos configuran 0).
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        channels = [
+            c for c in (db.get_channels(active_only=True) or [])
+            if ((c.get("google_account") or "").strip()) == account
+        ]
+    except Exception:
+        return None
+    if not channels:
+        return None
+    from api.services.channel_policy import policy_value
+    key = "public_longform_per_day" if content_type == "long" else "public_shorts_per_day"
+    total = 0
+    for ch in channels:
+        try:
+            total += max(0, int(policy_value(
+                int(ch.get("id") or 0), key, db=db, default=0,
+            ) or 0))
+        except Exception:
+            continue
+    return total
 
-    Fuente: perfil central de pacing (``account_daily_<type>_upload_cap``), con
-    fallback a la constante antiban de defaults.py.
+
+def get_account_upload_cap(db=None, content_type: str = "long",
+                           account: str | None = None) -> int:
+    """Tope de subidas/día por cuenta Google.
+
+    Cupo SEPARADO por tipo de contenido: longs y shorts tienen pools
+    independientes. Cuando se conoce ``account`` (ruta normal de subida), el
+    tope es la SUMA de los topes configurados de sus canales — la Configuración
+    de Programación manda y ninguna constante recorta por debajo. Sin ``account``
+    se conserva el fallback de perfil (0 = guard desactivado) para consumidores
+    informativos/legacy.
     """
     content_type = str(content_type or "long").lower()
     content_type = content_type if content_type in ("long", "short") else "long"
+    account = (account or "").strip()
+    if account:
+        derived = _sum_account_channel_caps(account, content_type, db=db)
+        if derived is not None:
+            return max(0, int(derived))
     try:
         from api.services.pacing_profile import get_pacing_value
         key = f"account_daily_{content_type}_upload_cap"
@@ -207,7 +244,7 @@ def account_upload_slots_available(account: str, db=None, content_type: str = "l
 
     cap <= 0 → guard desactivado (siempre disponible).
     """
-    cap = get_account_upload_cap(db, content_type=content_type)
+    cap = get_account_upload_cap(db, content_type=content_type, account=account)
     if cap <= 0:
         return True
     return get_account_daily_uploads(account, db, content_type=content_type) < cap
@@ -353,30 +390,29 @@ def restore_publication_frequency(channel_id: int, db=None) -> bool:
     except (json.JSONDecodeError, TypeError):
         return False
 
-    try:
-        from config.defaults import LONGFORM_DAILY_HARD_CAP
-        cap = int(LONGFORM_DAILY_HARD_CAP or 0)
-    except Exception:
-        cap = 0
+    # Restaura los valores ORIGINALES del canal (los que fijó la Configuración
+    # de Programación al reducirse por el strike). No se aplica el techo antiban
+    # de 1/día: la config del panel es la fuente de verdad. Los clips siguen
+    # desactivados (feature eliminada), no por cap de cadencia.
+    restored_long = max(0, int(original.get("videos_per_day", 0) or 0))
+    restored_short = max(0, int(original.get("shorts_native_per_day", 0) or 0))
 
     db.update_channel_planning_config(
         channel_id,
-        videos_per_day=min(max(int(original.get("videos_per_day", 0) or 0), 0), cap),
+        videos_per_day=restored_long,
         videos_day_boost_weight=0.0,
     )
     db.update_shorts_planning_config(
         channel_id,
         {
-            "shorts_native_per_day": min(
-                int(original.get("shorts_native_per_day", 3) or 3), 1
-            ),
+            "shorts_native_per_day": restored_short,
             "shorts_clips_per_long": 0,
         },
     )
     db.set_system_state(_RESTORE_KEY.format(channel_id=channel_id), "")
     logger.warning(
-        "Spam frequency restored for channel #%s (capado a %d long + 1 short/día)",
-        channel_id, cap,
+        "Spam frequency restored for channel #%s (%d long + %d shorts/día, config del panel)",
+        channel_id, restored_long, restored_short,
     )
     return True
 
@@ -526,23 +562,32 @@ def ensure_spam_holds(db=None) -> dict:
         logger.warning("gradual resume phases skipped: %s", exc)
 
     # ── Esparcido global de publicaciones pendientes (antiban, ago 2026) ──
-    # Un canal sin strike propio (ej. hermano de proyecto) puede acumular un
-    # backlog de vídeos "calentando" con publishAt a 3h → 8 publicaciones/día,
-    # la ráfaga que YouTube penaliza. _spread_phase1_pending solo cubre canales
-    # con strike propio en Fase 1; aquí se esparce a máx 1/día CUALQUIER canal
-    # activo (fase 0, 1 o 2) con más de 1 publicación pendiente. Idempotente:
-    # solo mueve lo que esté mal, y los canales bloqueados ya fueron retenidos.
+    # Un canal puede acumular un backlog de vídeos "calentando" con publishAt
+    # muy juntos, la ráfaga que YouTube penaliza. _spread_phase1_pending solo
+    # cubre canales con strike propio en Fase 1; aquí se esparce CUALQUIER canal
+    # activo (fase 0, 1 o 2) con más pendientes que su cadencia configurada.
+    # El tope por día es el de la Configuración de Programación del canal
+    # (longform_publish_cap), NO una constante: en `normal` son 2/día. Los
+    # canales en strike/recovery bajan solos a 1/día porque su perfil lo fija.
     spread_total = 0
     try:
         from api.services.gradual_resume import (
             _phase_for, load_plan, spread_pending_publishes,
         )
+        from api.services.channel_policy import policy_value
         _plan_map = load_plan(db) or {}
         for ch in (db.get_channels(active_only=True) or []):
             cid = int(ch.get("id", 0) or 0)
             slug = ch.get("slug", "")
             if not cid or not slug:
                 continue
+            # Canal bloqueado: sus publicaciones ya fueron retenidas (hold) tras
+            # el bloqueo; no re-esparcirlas hacia el bloqueo en curso.
+            try:
+                if db.is_channel_spam_blocked(cid):
+                    continue
+            except Exception:
+                pass
             # En Fase 1 (strike propio) el esparcido ya lo hace
             # _spread_phase1_pending con su patrón 0,2,4 — no duplicar.
             try:
@@ -551,8 +596,14 @@ def ensure_spam_holds(db=None) -> dict:
             except Exception:
                 pass
             try:
+                _per_day = int(policy_value(
+                    cid, "longform_publish_cap", db=db, default=1,
+                ) or 1)
+            except Exception:
+                _per_day = 1
+            try:
                 spread_total += spread_pending_publishes(
-                    db, cid, slug, max_per_day=1,
+                    db, cid, slug, max_per_day=max(1, _per_day),
                 )
             except Exception as exc:
                 logger.warning("spread_pending_publishes[%s] skipped: %s", slug, exc)
