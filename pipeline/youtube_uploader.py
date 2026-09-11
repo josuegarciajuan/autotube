@@ -683,6 +683,7 @@ class YouTubeUploader:
         publish_at: str = None,
         quota_reference_id: str | None = None,
         content_type: str = "long",
+        manual_override: bool = False,
     ) -> dict:
         """Upload video to YouTube.
 
@@ -706,6 +707,12 @@ class YouTubeUploader:
           When set, privacy is forced to "private" (YouTube requirement)
           and YouTube will auto-publish at the specified time.
           e.g. "2026-07-31T19:00:00.000Z"
+        - manual_override: operator-forced immediate public upload. Skips the
+          spam-block gate, the account daily cap reservation, the global
+          upload spacing wait, and forces the visibility policy to "immediate"
+          (public, no publish_at) even for channels configured as scheduled.
+          It does NOT bypass YT_REMEDIATION_MODE (global emergency kill-switch).
+          Use only from an explicit manual action with confirmation.
 
         Returns {video_id: str, url: str, warnings: list}
         """
@@ -733,7 +740,7 @@ class YouTubeUploader:
         _gate_slug = self.channel_slug or (
             self.account_name if self.account_name and self.account_name != "default" else None
         )
-        if _gate_slug:
+        if _gate_slug and not manual_override:
             try:
                 from database.db_extended import ExtendedDatabase
                 _spam_db = ExtendedDatabase()
@@ -756,7 +763,7 @@ class YouTubeUploader:
         # cuenta ya subió su tope diario, la subida se rechaza localmente
         # (AccountDailyCapExceededError → retryable, sin impacto de cuota ni
         # señal de spam). Se comprueba ANTES de autenticar/emitir requests.
-        if _gate_slug:
+        if _gate_slug and not manual_override:
             try:
                 from api.services.spam_mitigation import get_channel_account
                 _account_reservation_db = _spam_db
@@ -823,6 +830,11 @@ class YouTubeUploader:
         if content_type == "short":
             privacy, publish_at = "public", None
         configured_mode = self._get_config_attr("PUBLISH_MODE", "immediate")
+        if manual_override:
+            # Operator forced an immediate public upload: validate as immediate
+            # (public, no publish_at) instead of the channel's scheduled mode.
+            configured_mode = "immediate"
+            privacy, publish_at = "public", None
         validate_upload_visibility(
             publish_mode=str(configured_mode or "immediate").lower(),
             privacy=privacy,
@@ -843,7 +855,9 @@ class YouTubeUploader:
         # desde la misma IP). Antes de emitir la subida, espera el hueco mínimo
         # desde la última subida de OTRO canal (por canal lo gobierna el cooldown
         # existente). Se espera en bucle (chunked) sin bloquear el event loop.
-        self._wait_global_upload_spacing()
+        # manual_override (acción manual del operador) lo salta.
+        if not manual_override:
+            self._wait_global_upload_spacing()
 
         # ── SEO-friendly temp copies ────────────────────────────
         # YouTube's processing pipeline uses the uploaded file name as

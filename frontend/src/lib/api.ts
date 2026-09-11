@@ -184,7 +184,8 @@ export const api = {
   deleteVideo: (id: number) => request<any>(`/videos/${id}`, { method: 'DELETE' }),
   generateVideo: (data: { channel_id: number; action: string; content_id?: number; test_mode?: boolean; upload?: boolean; source_mode?: string; viral_candidate_id?: number }) =>
     request<any>('/videos/generate', { method: 'POST', body: JSON.stringify(data) }),
-  uploadVideo: (id: number) => request<any>(`/videos/${id}/upload`, { method: 'POST' }),
+  uploadVideo: (id: number, opts?: { forceImmediate?: boolean }) =>
+    request<any>(`/videos/${id}/upload${opts?.forceImmediate ? '?force_immediate=true' : ''}`, { method: 'POST' }),
   regenerateThumbnail: (id: number) => request<any>(`/videos/${id}/regenerate-thumbnail`, { method: 'POST' }),
   retryThumbnail: (id: number) => request<any>(`/videos/${id}/retry-thumbnail-upload`, { method: 'POST' }),
 
@@ -327,8 +328,8 @@ export const api = {
     return request<any>(`/planning/shorts-slots/week${params}`)
   },
   // Sube ahora un short nativo en cola (status='generated') — fix ago 2026
-  uploadQueuedShort: (shortId: number) =>
-    request<any>(`/planning/shorts-queue/upload/${shortId}`, { method: 'POST' }),
+  uploadQueuedShort: (shortId: number, opts?: { forceImmediate?: boolean }) =>
+    request<any>(`/planning/shorts-queue/upload/${shortId}${opts?.forceImmediate ? '?force_immediate=true' : ''}`, { method: 'POST' }),
 
   // System
   stabilizeSystem: () => request<any>('/system/stabilize', { method: 'POST' }),

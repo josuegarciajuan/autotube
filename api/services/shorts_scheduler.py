@@ -4561,11 +4561,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 # proyecto, tope duro por canal, tope global diario, cooldown, caps de
 # planning) y respetando la hora pico del slot planificado (private+publishAt).
 
-def _upload_queued_short(short_record: dict, db=None) -> bool:
+def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = False) -> bool:
     """Sube UN short en cola y lo marca publicado. Único punto de subida de cola.
 
     Maneja native/standalone (status='generated') y clip (status='ready').
     Devuelve True si se subió. False (sin error) si un gate lo mantiene en cola.
+
+    force_immediate=True → acción manual del operador: salta cuota, tope duro,
+    tope global y espaciado, y fuerza la subida pública inmediata en el uploader.
     """
     from pathlib import Path
     from config.config_bridge import get_channel_config
@@ -4645,13 +4648,13 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         logger.warning("Queued short #%d: descripción falló (usa hashtags): %s", short_id, exc)
         description = "\n\n".join(hashtags)
 
-    # Quota guard (proyecto del canal)
-    if _youtube_quota_blocked(channel_slug=slug):
+    # Quota guard (proyecto del canal) — omitido en subida manual forzada.
+    if not force_immediate and _youtube_quota_blocked(channel_slug=slug):
         logger.info("[%s] Queued short upload skipped: cuota bloqueada", slug)
         return False
 
     # HARD per-channel daily cap (anti-strike): no subir si ya se subió hoy.
-    if _channel_hard_daily_short_cap_reached(channel_id, db):
+    if not force_immediate and _channel_hard_daily_short_cap_reached(channel_id, db):
         logger.info(
             "[%s] Queued short #%d skipped: tope duro diario (%d/día) — se mantiene en cola",
             slug, short_id, _hard_daily_cap(channel_id, db),
@@ -4659,7 +4662,7 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         return False
 
     # Tope GLOBAL diario (anti-spam): todos los canales sumados.
-    if _global_shorts_daily_cap_reached(db):
+    if not force_immediate and _global_shorts_daily_cap_reached(db):
         logger.info(
             "Queued short #%d (%s) skipped: tope global diario (%d/día) alcanzado — en cola",
             short_id, slug, _global_shorts_daily_cap(),
@@ -4671,26 +4674,33 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     # /shorts-queue/upload/{id}, retries) pueda subir dos shorts del mismo
     # canal muy seguidos. El upload_spacing global solo cubre CANALES DISTINTOS;
     # el mismo canal lo gobierna esta regla. Devolvemos False (queda en cola),
-    # nunca borramos.
-    try:
-        _sp_ok, _sp_wait = _channel_short_spacing_ok(channel_id, short_type, db)
-        if not _sp_ok:
-            logger.info(
-                "[%s] Queued short #%d retenido por espaciado mismo-canal "
-                "(espera ~%ds) — se mantiene en cola",
-                slug, short_id, _sp_wait,
-            )
-            return False
-    except Exception as exc:
-        logger.debug("[%s] spacing gate skipped (fail-open): %s", slug, exc)
+    # nunca borramos. La subida manual forzada lo salta.
+    if not force_immediate:
+        try:
+            _sp_ok, _sp_wait = _channel_short_spacing_ok(channel_id, short_type, db)
+            if not _sp_ok:
+                logger.info(
+                    "[%s] Queued short #%d retenido por espaciado mismo-canal "
+                    "(espera ~%ds) — se mantiene en cola",
+                    slug, short_id, _sp_wait,
+                )
+                return False
+        except Exception as exc:
+            logger.debug("[%s] spacing gate skipped (fail-open): %s", slug, exc)
 
     # ── Seriálizamos la subida del MISMO canal (anti-race) ──
     # Tomamos el lock del canal ANTES del upload y lo mantenemos hasta escribir
     # published_at, para que ninguna segunda invocación (endpoint manual o una
     # pasada de la válvula recién liberada) pueda solaparse y agrupar shorts.
     # Canales distintos usan locks distintos → siguen subiendo en paralelo.
+    # La subida manual forzada espera el lock (bloqueante con timeout) en vez de
+    # rechazar, para que el clic nunca quede "sin hacer nada".
     _clk = _channel_upload_lock(channel_id)
-    if not _clk.acquire(blocking=False):
+    if force_immediate:
+        _got_lock = _clk.acquire(timeout=300)
+    else:
+        _got_lock = _clk.acquire(blocking=False)
+    if not _got_lock:
         logger.info(
             "[%s] Queued short #%d retenido: ya hay una subida en curso en este canal",
             slug, short_id,
@@ -4700,17 +4710,18 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
         # Re-check de espaciado YA con el lock del canal adquirido (cierra la
         # ventana TOCTOU: ambas invocaciones pudieron pasar el gate de arriba
         # antes de que ninguna escribiera published_at).
-        try:
-            _sp_ok2, _sp_wait2 = _channel_short_spacing_ok(channel_id, short_type, db)
-            if not _sp_ok2:
-                logger.info(
-                    "[%s] Queued short #%d retenido por espaciado mismo-canal "
-                    "(re-check, espera ~%ds)",
-                    slug, short_id, _sp_wait2,
-                )
-                return False
-        except Exception as exc2:
-            logger.debug("[%s] spacing re-check skipped (fail-open): %s", slug, exc2)
+        if not force_immediate:
+            try:
+                _sp_ok2, _sp_wait2 = _channel_short_spacing_ok(channel_id, short_type, db)
+                if not _sp_ok2:
+                    logger.info(
+                        "[%s] Queued short #%d retenido por espaciado mismo-canal "
+                        "(re-check, espera ~%ds)",
+                        slug, short_id, _sp_wait2,
+                    )
+                    return False
+            except Exception as exc2:
+                logger.debug("[%s] spacing re-check skipped (fail-open): %s", slug, exc2)
 
         uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
         if not uploader.authenticate():
@@ -4731,6 +4742,7 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
                 privacy=privacy,
                 publish_at=publish_at,
                 content_type="short",
+                manual_override=force_immediate,
             )
         except Exception as exc:
             logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
@@ -4845,9 +4857,9 @@ def _upload_queued_short(short_record: dict, db=None) -> bool:
     return True
 
 
-def _upload_queued_native_short(short_record: dict, db=None) -> bool:
+def _upload_queued_native_short(short_record: dict, db=None, force_immediate: bool = False) -> bool:
     """Compat: sube un short nativo en cola. Delega en la válvula unificada."""
-    return _upload_queued_short(short_record, db=db)
+    return _upload_queued_short(short_record, db=db, force_immediate=force_immediate)
 
 
 def _spawn_background_short_upload(db=None, max_per_pass: int = 2) -> None:

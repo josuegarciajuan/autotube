@@ -1966,7 +1966,8 @@ class PipelineOrchestrator:
     def phase_upload(self, script: dict, video_data: dict,
                       metadata: dict = None, job_id: int = None,
                       planned_public_at: str = None,
-                      skip_lifecycle_scheduling: bool = False) -> Optional[str]:
+                      skip_lifecycle_scheduling: bool = False,
+                      force_immediate: bool = False) -> Optional[str]:
         """Upload video to YouTube. Returns video_id or None.
         
         Args:
@@ -1982,6 +1983,10 @@ class PipelineOrchestrator:
                       calculated target_public_at to align with the planning.
             skip_lifecycle_scheduling: If True, skip scheduling lifecycle
                       actions (caller handles it separately, e.g. worker).
+            force_immediate: If True, operator-forced immediate PUBLIC upload:
+                      ignores the channel's scheduled PUBLISH_MODE and uploads
+                      public with no publishAt (bypasses pacing/visibility
+                      policy at the uploader via manual_override).
         """
         start = time.time()
         self._emit_progress(80, "upload", "Preparando subida a YouTube...")
@@ -2021,7 +2026,9 @@ class PipelineOrchestrator:
                 return None
 
             # ── Scheduled publishing: check if channel uses scheduled mode ──
-            publish_mode = getattr(self.config, "PUBLISH_MODE", "immediate")
+            # force_immediate (manual operator action) overrides scheduled mode
+            # so the video is uploaded PUBLIC now, with no publishAt.
+            publish_mode = "immediate" if force_immediate else getattr(self.config, "PUBLISH_MODE", "immediate")
             publish_schedule_info = None
             
             if publish_mode == "scheduled":
@@ -2335,6 +2342,7 @@ class PipelineOrchestrator:
                     f"upload:{self.canal}:db:{self.db_video_id}"
                     if self.db_video_id is not None else None
                 ),
+                manual_override=force_immediate,
             )
 
             video_id = result.get("video_id")
@@ -2370,6 +2378,10 @@ class PipelineOrchestrator:
                     if publish_schedule_info:
                         update_kwargs["target_public_at"] = publish_schedule_info["target_public_at"]
                         update_kwargs["peak_source"] = publish_schedule_info["peak_source"]
+                    elif force_immediate:
+                        # Manual public upload: clear any stale scheduled target.
+                        update_kwargs["target_public_at"] = None
+                        update_kwargs["peak_source"] = None
                     self.db.update_video(self.db_video_id, **update_kwargs)
                     # Note: mark_video_uploaded is called by the API layer (generation_service)
                     # to ensure the tracked record gets yt_video_id/yt_url

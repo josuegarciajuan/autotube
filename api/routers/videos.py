@@ -300,8 +300,15 @@ def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
 
 
 @router.post("/{video_id}/upload")
-def upload_video(video_id: int, background_tasks: BackgroundTasks):
-    """Upload (or re-upload) a video to YouTube."""
+def upload_video(video_id: int, background_tasks: BackgroundTasks,
+                 force_immediate: bool = False):
+    """Upload (or re-upload) a video to YouTube.
+
+    force_immediate=true → operator-forced subida + publicación PÚBLICA AHORA
+    (sin programar; salta pacing/visibilidad vía manual_override). Además omite
+    el guard de job activo por canal para que la acción manual funcione aunque
+    la fábrica esté generando.
+    """
     db = get_db()
     
     v = db.get_video(video_id)
@@ -310,10 +317,14 @@ def upload_video(video_id: int, background_tasks: BackgroundTasks):
     if not v.get("video_path"):
         raise HTTPException(400, "Video has no file path")
     
-    # Guard: don't start if this channel already has an active job
     active = db.get_active_job_for_channel(v.get("channel_id", 0))
     if active:
-        raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+        if not force_immediate:
+            raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
+        # Manual upload: only avoid dispatching the SAME video twice in parallel.
+        if (active.get("action") == "upload_only"
+                and active.get("video_id") == video_id):
+            raise HTTPException(409, "Ya hay una subida en curso para este video.")
     
     from api.services.generation_service import start_upload_job
     job_id = db.create_job(v["channel_id"] or 1, "upload_only", video_id)
@@ -323,9 +334,11 @@ def upload_video(video_id: int, background_tasks: BackgroundTasks):
         start_upload_job,
         job_id=job_id,
         video_id=video_id,
+        force_immediate=force_immediate,
     )
     
-    return {"job_id": job_id, "message": "Upload started"}
+    return {"job_id": job_id, "message": "Upload started",
+            "force_immediate": force_immediate}
 
 
 @router.put("/{video_id}/privacy")
