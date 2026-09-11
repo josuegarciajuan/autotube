@@ -105,17 +105,31 @@ async def supervise_loop(
                         break
 
                 if child.cancelled():
-                    return
-                exc = child.exception()
-                if exc is None:
-                    logger.warning("Background loop '%s' exited unexpectedly", task_name)
-                else:
-                    logger.error(
-                        "Background loop '%s' crashed: %s",
+                    # A stale cancel with a process-level recovery callback is
+                    # terminal: the callback (e.g. controlled API restart) is
+                    # responsible for bringing the loop back. Without a callback
+                    # there is no other recovery path, so fall through to the
+                    # bounded restart logic instead of disabling the loop
+                    # forever (bug ago 2026: yt_state_reconcile was cancelled
+                    # stale at 05:05 and never came back).
+                    if on_stale is not None:
+                        return
+                    logger.warning(
+                        "Background loop '%s' was cancelled (no on_stale); "
+                        "restarting under the restart budget",
                         task_name,
-                        exc,
-                        exc_info=(type(exc), exc, exc.__traceback__),
                     )
+                else:
+                    exc = child.exception()
+                    if exc is None:
+                        logger.warning("Background loop '%s' exited unexpectedly", task_name)
+                    else:
+                        logger.error(
+                            "Background loop '%s' crashed: %s",
+                            task_name,
+                            exc,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
             except asyncio.CancelledError:
                 if child is not None and not child.done():
                     child.cancel()

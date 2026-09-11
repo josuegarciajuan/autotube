@@ -786,7 +786,14 @@ async def _yt_state_reconcile_loop():
             _tth("yt_state_reconcile")
             from api.services.yt_state_reconciler import reconcile_recent_shorts
             from database.db_extended import ExtendedDatabase
-            summary = await asyncio.to_thread(reconcile_recent_shorts, ExtendedDatabase())
+            # Hard cap so a hung yt-dlp/network call can never starve the
+            # heartbeat past the watchdog timeout (900s) and get the loop
+            # cancelled. 300s < 900s leaves margin; the leaked thread finishes
+            # on its own and reconciliation is idempotent.
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(reconcile_recent_shorts, ExtendedDatabase()),
+                timeout=300,
+            )
             if summary.get("checked", 0) > 0:
                 logger.info(
                     "YT state reconcile: checked=%d updated=%d (pub=%d priv=%d age=%d removed=%d stuck=%d err=%d)",
