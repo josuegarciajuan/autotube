@@ -16,6 +16,9 @@ def _db(tmp_path):
     init_db(str(path))
     migrate_v2(str(path))
     with ExtendedDatabase(str(path))._connect() as conn:
+        # migrate_v2 may seed real channels when run from the project tree; use a
+        # deterministic id without depending on an empty table.
+        conn.execute("DELETE FROM channels")
         conn.execute(
             "INSERT INTO channels (id, name, slug, config_json, active) VALUES (1, 'One', 'one', ?, 1)",
             (json.dumps({"PUBLISH_TIMEZONE": "Europe/Madrid"}),),
