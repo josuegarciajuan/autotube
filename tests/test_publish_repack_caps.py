@@ -59,6 +59,22 @@ def test_published_marathon_does_not_consume_repack_day_budget(tmp_path):
     assert _published_normal_counts_by_local_day(db, 1, "Europe/Madrid") == {}
 
 
+def test_channel_peak_hours_keeps_midnight_slot():
+    """Regression: target_hour=0 must not be dropped as falsy."""
+    from pipeline.publish_scheduler import _channel_peak_hours
+
+    class DB:
+        def get_optimal_slots(self, cid, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 0},
+                {"slot_rank": 2, "target_hour": 11},
+                {"slot_rank": 3, "target_hour": 7},
+            ]
+
+    hours = _channel_peak_hours(DB(), 1, {}, 21)
+    assert 0 in hours
+
+
 def test_dense_backlog_is_spread_not_stacked_at_safety_bound(tmp_path, monkeypatch):
     """A 9-video queue at 2/day must span days, never pile on the safety bound."""
     db = _db(tmp_path)
