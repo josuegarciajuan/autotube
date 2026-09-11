@@ -469,6 +469,12 @@ async def lifespan(app: FastAPI):
     # endpoints leen esa verdad, no el status optimista que se marcaba al subir.
     yt_state_task = _supervised_loop("yt_state_reconcile", _yt_state_reconcile_loop)
 
+    # ── Recuperación de packaging (ago 2026) ──
+    # Reencola los vídeos que la compuerta final de packaging dejó en
+    # 'validation_failed' y que ahora sí pasan el validador (p. ej. tras
+    # relajar la política de títulos de canal2). 0 cuota.
+    packaging_recovery_task = _supervised_loop("packaging_recovery", _packaging_recovery_loop)
+
     # ── Recordatorios operativos (v50): solo alertan, nunca ejecutan ──
     # Al vencer un scheduled_reminder se emite una alerta de sistema
     # (scheduled_reminder_due) para revisión humana. Sin acciones en silencio.
@@ -502,6 +508,7 @@ async def lifespan(app: FastAPI):
         redistribution_task,
         publish_coverage_task,
         yt_state_task,
+        packaging_recovery_task,
         replan_bg_task,
     ]
     if _startup_tasks is not None:
@@ -806,6 +813,43 @@ async def _yt_state_reconcile_loop():
             logger.warning("YT state reconcile error: %s", exc)
 
         await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _packaging_recovery_loop():
+    """Background loop: requeue videos held at the final packaging gate.
+
+    A ``validation_failed`` video that now passes the validator is returned to
+    ``awaiting_upload``. Idempotent, 0 YouTube API quota.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.packaging_recovery")
+
+    from api.services.packaging_recovery import (
+        PACKAGING_RECOVERY_INTERVAL_MIN,
+        recover_packaging_held_videos,
+    )
+
+    await asyncio.sleep(150)  # Let API + other loops stabilize first
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("packaging_recovery")
+            from database.db_extended import ExtendedDatabase
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(recover_packaging_held_videos, ExtendedDatabase()),
+                timeout=300,
+            )
+            if summary.get("recovered"):
+                logger.info(
+                    "Packaging recovery: %d requeued, %d skipped, %d errors",
+                    summary["recovered"], summary.get("skipped", 0),
+                    summary.get("errors", 0),
+                )
+        except Exception as exc:
+            logger.warning("Packaging recovery tick failed: %s", exc)
+
+        await asyncio.sleep(PACKAGING_RECOVERY_INTERVAL_MIN * 60)
 
 
 async def _upload_health_checker_loop():
