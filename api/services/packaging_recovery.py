@@ -105,30 +105,56 @@ def recover_packaging_held_videos(
             logger.warning("packaging recovery: validation error for video %s: %s", vid, exc)
             continue
 
+        new_title = None
         if not result.valid:
-            skipped += 1
-            details.append({
-                "video_id": vid, "slug": slug, "action": "still_invalid",
-                "reasons": list(result.reasons),
-            })
-            continue
+            # Deterministic self-heal for length-only failures: trim the title
+            # and re-validate. Specificity needs content evidence (LLM/manual)
+            # and is intentionally NOT guessed here.
+            if "length" in result.reasons:
+                try:
+                    from api.services.title_recovery import repair_title
+                    repaired = repair_title(row.get("titulo_final"), cfg)
+                except Exception as exc:
+                    logger.debug("packaging recovery: repair_title failed for #%s: %s", vid, exc)
+                    repaired = None
+                if repaired:
+                    retry_video = dict(video)
+                    retry_video["titulo_final"] = repaired
+                    retry = validate_upload_packaging(retry_video, cfg)
+                    if retry.valid:
+                        new_title = repaired
+                        result = retry
+            if not result.valid:
+                skipped += 1
+                details.append({
+                    "video_id": vid, "slug": slug, "action": "still_invalid",
+                    "reasons": list(result.reasons),
+                })
+                continue
 
         if dry_run:
             recovered += 1
             per_channel[channel_id] = per_channel.get(channel_id, 0) + 1
-            details.append({"video_id": vid, "slug": slug, "action": "would_requeue"})
+            detail = {"video_id": vid, "slug": slug, "action": "would_requeue"}
+            if new_title:
+                detail["new_title"] = new_title
+            details.append(detail)
             logger.info("[%s] [DRY-RUN] packaging recovery would requeue video #%s", slug, vid)
             continue
 
         try:
-            db.update_video(
-                vid,
-                status="awaiting_upload",
-                progress=5,
-                progress_phase="upload",
-                scheduled_upload_at=None,
-                error_message="Requeued by packaging recovery",
-            )
+            update_kwargs = {
+                "status": "awaiting_upload",
+                "progress": 5,
+                "progress_phase": "upload",
+                "scheduled_upload_at": None,
+                "error_message": "Requeued by packaging recovery",
+            }
+            if new_title:
+                import json as _json
+                update_kwargs["titulo_final"] = new_title
+                update_kwargs["title_options"] = _json.dumps([new_title], ensure_ascii=False)
+            db.update_video(vid, **update_kwargs)
         except Exception as exc:
             errors += 1
             logger.error("packaging recovery: failed to requeue video %s: %s", vid, exc)
@@ -136,7 +162,10 @@ def recover_packaging_held_videos(
 
         recovered += 1
         per_channel[channel_id] = per_channel.get(channel_id, 0) + 1
-        details.append({"video_id": vid, "slug": slug, "action": "requeued"})
+        detail = {"video_id": vid, "slug": slug, "action": "requeued"}
+        if new_title:
+            detail["new_title"] = new_title
+        details.append(detail)
         logger.warning("[%s] packaging recovery: requeued video #%s → awaiting_upload", slug, vid)
 
     if recovered:
