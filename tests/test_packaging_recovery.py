@@ -84,6 +84,50 @@ def test_dry_run_does_not_write(tmp_path, monkeypatch):
     assert result["details"][0]["action"] == "would_requeue"
 
 
+def test_recovers_length_by_trimming_title(tmp_path, monkeypatch):
+    import api.services.upload_scheduler as scheduler
+    import config.config_bridge as bridge
+
+    def fake_validate(video, cfg):
+        t = video.get("titulo_final") or ""
+        ok = 28 <= len(t) <= 65
+        return ValidationResult(ok, () if ok else ("length",))
+
+    monkeypatch.setattr(scheduler, "validate_upload_packaging", fake_validate)
+    monkeypatch.setattr(bridge, "get_channel_config", lambda slug: object())
+
+    video = _video(tmp_path, 1, valid=False)
+    video["titulo_final"] = (
+        "El dia que la muerte los paso por alto historias imposibles de "
+        "sobrevivientes suprimido"
+    )
+    db = FakeDB([video])
+    result = recovery.recover_packaging_held_videos(db=db)
+
+    assert result["recovered"] == 1
+    vid, kwargs = db.updated[0]
+    assert len(kwargs["titulo_final"]) <= 65
+    assert kwargs["status"] == "awaiting_upload"
+
+
+def test_does_not_guess_specificity(tmp_path, monkeypatch):
+    import api.services.upload_scheduler as scheduler
+    import config.config_bridge as bridge
+
+    monkeypatch.setattr(
+        scheduler, "validate_upload_packaging",
+        lambda video, cfg: ValidationResult(False, ("specificity",)),
+    )
+    monkeypatch.setattr(bridge, "get_channel_config", lambda slug: object())
+
+    db = FakeDB([_video(tmp_path, 1, valid=False)])
+    result = recovery.recover_packaging_held_videos(db=db)
+
+    assert result["recovered"] == 0
+    assert db.updated == []
+    assert result["details"][0]["action"] == "still_invalid"
+
+
 def test_skips_missing_file(tmp_path, monkeypatch):
     video = _video(tmp_path, 1, valid=True)
     video["video_path"] = str(tmp_path / "gone.mp4")
