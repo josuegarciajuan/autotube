@@ -1452,7 +1452,13 @@ def _channel_peak_hours(db, channel_id: int, cfg: dict, peak_hour: int) -> list[
         slots = db.get_optimal_slots(channel_id, "long")
         if slots:
             ranked = sorted(slots, key=lambda s: int(s.get("slot_rank") or 99))
-            hours = [int(s.get("target_hour") or -1) for s in ranked]
+            # OJO: `or -1` descartaba target_hour=0 (medianoche), una franja
+            # válida. canal2 rank1=0 quedaba fuera y solo conservaba franjas con
+            # 4h de gap → el repack no lograba 2/día (bug sep 2026).
+            hours = [
+                int(s["target_hour"]) if s.get("target_hour") is not None else -1
+                for s in ranked
+            ]
             hours = [h for h in hours if 0 <= h <= 23]
     except Exception:
         hours = []
