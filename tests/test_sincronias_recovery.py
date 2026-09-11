@@ -22,6 +22,23 @@ def test_title_requires_specific_case_and_fact_framing():
     assert "specificity" in result.reasons
 
 
+def test_packaging_rules_demand_year_only_when_configured():
+    from prompts.base_prompts import packaging_rules
+
+    on = type("Cfg", (), {"TITLE_FORMULAS": ["{year}: {person_or_place}"],
+                          "TITLE_REQUIRE_YEAR": True})
+    off = type("Cfg", (), {"TITLE_FORMULAS": [], "TITLE_REQUIRE_YEAR": False})
+    assert "año de 4 dígitos" in packaging_rules(on)
+    assert "año de 4 dígitos" not in packaging_rules(off)
+
+
+def test_canal2_accepts_titles_without_a_year():
+    """Regression ago 2026: requiring a year held canal2's whole backlog."""
+    from config.canal2_config import TITLE_REQUIRED_SPECIFICITY
+
+    assert TITLE_REQUIRED_SPECIFICITY == ["place_or_person"]
+
+
 def test_thumbnail_overlay_rejects_repetitive_shock_badges():
     result = validate_thumbnail_overlay("OCULTO | REAL | PROHIBIDO", max_chars=42)
     assert not result.valid

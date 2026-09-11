@@ -1534,13 +1534,23 @@ def repack_channel_publish_times(
 
     # ── Horizonte de seguridad ESCALABLE (antiban, ago 2026) ──────────
     # El cap fijo de 5 días (MAX_PUBLISH_AHEAD_SAFETY_HOURS) recortaba y APILABA
-    # vídeos de colas largas en el mismo instante: con el gap antiban de 24h
-    # (1 publicación/día) una cola de N vídeos necesita N días, y una cola de 20
-    # vídeos excedía el cap → varios vídeos caían al safety_limit con el MISMO
-    # timestamp (p. ej. 4 vídeos a 2026-08-28T18:42:05.726688), recreando la
-    # ráfaga de mismo día/hora. El horizonte efectivo escala con la cola para
-    # que el cap NUNCA recorte una cola legítima de 1/día.
-    safety_ahead_hours = max(safety_ahead_hours, gap_hours * max(1, len(rows) + 2))
+    # vídeos de colas largas en el mismo instante: al exceder el cap, varios
+    # vídeos caían al MISMO safe_limit (ráfaga de mismo día/hora).
+    #
+    # El horizonte debe dimensionarse por la TASA DIARIA real del canal
+    # (longform_publish_cap), no por gap_hours: con gap=6h el cálculo antiguo
+    # (gap * len) daba 66h para 9 vídeos y dejaba el cap por defecto (120h) en
+    # vigor, pero 9 vídeos a 2/día necesitan ~5 días → los sobrantes se
+    # recortaban al bound y volvían a apilarse (bug canal5, sep 2026).
+    _rate_per_day = 1
+    try:
+        from api.services.channel_policy import policy_value as _pv
+        _rate_per_day = int(_pv(channel_id, "longform_publish_cap", db=db, default=1) or 1)
+    except Exception:
+        _rate_per_day = 1
+    _rate_per_day = max(1, _rate_per_day)
+    _days_needed = (len(rows) + _rate_per_day - 1) // _rate_per_day
+    safety_ahead_hours = max(safety_ahead_hours, (_days_needed + 1) * 24)
 
     # ── 2. Config de pico para el primer slot ──
     try:
@@ -1568,6 +1578,30 @@ def repack_channel_publish_times(
     # ── v-fix 2longs: franjas rank del canal para repartir N/día en N franjas ──
     peak_hours = _channel_peak_hours(db, channel_id, cfg, peak_hour)
 
+    # ── Tope diario real (longform_publish_cap) ──
+    # Se resuelve ANTES de ordenar franjas y de calcular el horizonte: la tasa
+    # diaria determina tanto el nº de franjas usables como los días que
+    # necesita la cola.
+    max_per_day = 1
+    try:
+        from api.services.channel_policy import policy_value as _pvp
+        max_per_day = int(_pvp(
+            channel_id, "longform_publish_cap", db=db, default=1,
+        ) or 0)
+    except Exception:
+        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 0)
+    max_per_day = max(0, max_per_day)
+    if max_per_day == 0:
+        logger.info("[%s] repack: publicación long-form desactivada (cap=0)", slug)
+        return []
+    # Con 2+/día, recorrer las franjas en orden CRONOLÓGICO: el cursor debe
+    # empezar en la franja más temprana del día para poder colocar la segunda
+    # (p. ej. canal5 [19,5,10] → [5,10,19] → 5:00 y 19:00, 14h ≥ gap 6h). Con el
+    # orden por rank (pico principal primero) el cursor arrancaba en 19:00 y el
+    # repack solo lograba 1/día, apilando el resto en el safety bound.
+    if max_per_day >= 2:
+        peak_hours = sorted(peak_hours)
+
     # ── 3. Walk ──
     now_utc = _dt.now(_tz.utc)
     # Primer slot: siguiente pico HH:00 (>= floor). El warmup NO debe retrasar el
@@ -1586,31 +1620,14 @@ def repack_channel_publish_times(
         tz = pytz.timezone(tz_str)
     except pytz.UnknownTimeZoneError:
         tz = pytz.UTC
-    # Primer slot: siguiente pico HH:00 (>= floor)
+    # Primer slot: primera franja pico HH:00 (>= floor). Con 2+/día se usa la
+    # más temprana (peak_hours ya ordenado); con 1/día, el pico principal.
+    first_hour = peak_hours[0] if max_per_day >= 2 else peak_hour
     local_floor = floor.astimezone(tz)
-    cursor_local = local_floor.replace(hour=peak_hour, minute=0, second=0, microsecond=0)
+    cursor_local = local_floor.replace(hour=first_hour, minute=0, second=0, microsecond=0)
     if cursor_local < local_floor:
         cursor_local += _td(days=1)
     cursor_utc = cursor_local.astimezone(_tz.utc)
-
-    # Tope diario (antiban, ago 2026): máx publicaciones normales por día
-    # natural local. Los maratones tienen su propia cadencia y no consumen este
-    # presupuesto, aunque siguen respetando el espaciado del canal.
-    # Fuente: perfil central de pacing (``max_longform_publish_day``). El perfil
-    # GANA sobre config_json por canal — relajar los strikes = cambiar perfil.
-    max_per_day = 1
-    try:
-        from api.services.pacing_profile import get_pacing_value
-        from api.services.channel_policy import policy_value
-        max_per_day = int(policy_value(
-            channel_id, "longform_publish_cap", db=db, default=1,
-        ) or 0)
-    except Exception:
-        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 0)
-    max_per_day = max(0, max_per_day)
-    if max_per_day == 0:
-        logger.info("[%s] repack: publicación long-form desactivada (cap=0)", slug)
-        return []
 
     # ── Política explícita por canal (ago 2026) ──────────────────────────
     # El techo del perfil es global (max_longform_publish_day). Si el canal

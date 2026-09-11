@@ -170,7 +170,13 @@ TITLE_POWER_WORDS = [
 
 TITLE_MAX_CHARS = 65
 TITLE_MIN_CHARS = 28
-TITLE_REQUIRED_SPECIFICITY = ["year", "place_or_person"]
+# El guard duro exige un ancla concreta (persona/lugar). Exigir además un año
+# bloqueaba el 100% del backlog de canal2 en la compuerta final de packaging
+# (validation_failed). El año se pide ahora en el prompt (TITLE_REQUIRE_YEAR),
+# no como condición de rechazo de subida.
+TITLE_REQUIRED_SPECIFICITY = ["place_or_person"]
+# Refuerzo de generación: el prompt exige un año de 4 dígitos cuando exista.
+TITLE_REQUIRE_YEAR = True
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras", "desafía toda lógica"]
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 RECOVERY_CHECKPOINTS_ENABLED = True

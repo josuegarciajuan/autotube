@@ -61,6 +61,38 @@ async def test_supervisor_does_not_restart_after_restart_budget_is_exhausted():
 
 
 @pytest.mark.asyncio
+async def test_supervisor_restarts_stale_loop_when_no_stale_callback(monkeypatch):
+    """A stale cancel without on_stale must not disable the loop forever."""
+    import api.services.lifecycle_monitor as lifecycle_monitor
+    import api.services.task_watchdog as watchdog
+
+    attempts = 0
+
+    monkeypatch.setattr(watchdog, "get_task_heartbeat_age", lambda _: 999.0)
+    monkeypatch.setattr(lifecycle_monitor, "task_is_stale", lambda _: True)
+
+    async def loop_factory():
+        nonlocal attempts
+        attempts += 1
+        await asyncio.Event().wait()
+
+    await asyncio.wait_for(
+        watchdog.supervise_loop(
+            "stale_no_callback",
+            loop_factory,
+            restart_delay=0,
+            max_restarts=1,
+            monitor_interval=0.001,
+            startup_grace=0,
+            cancel_grace=0.1,
+        ),
+        timeout=2,
+    )
+
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_supervisor_calls_stale_recovery_without_restarting_task(monkeypatch):
     import api.services.lifecycle_monitor as lifecycle_monitor
     import api.services.task_watchdog as watchdog
