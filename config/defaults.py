@@ -45,6 +45,10 @@ EGRESS_AGENT_URL = None
 # profile or DB config_json; pipelines must read them through config_bridge.
 TITLE_MIN_CHARS = 28
 TITLE_REQUIRED_SPECIFICITY = []
+# Soft generation-side rule: when True, the metadata prompt requires the title
+# to include a 4-digit year. It is NOT a hard upload gate (that is
+# TITLE_REQUIRED_SPECIFICITY); it only guides the LLM.
+TITLE_REQUIRE_YEAR = False
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras"]
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]

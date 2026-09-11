@@ -61,12 +61,18 @@ def _niche_substance_rule(cfg) -> str:
 def packaging_rules(cfg) -> str:
     """Shared evidence-first rules for scripts and metadata prompts."""
     formulas = ", ".join(getattr(cfg, "TITLE_FORMULAS", [])[:6])
+    year_rule = ""
+    if getattr(cfg, "TITLE_REQUIRE_YEAR", False):
+        year_rule = (
+            "\n- OBLIGATORIO: el título debe incluir un año de 4 dígitos "
+            "(p. ej. 1987). Sin año, el paquete se considera incompleto."
+        )
     return f"""REGLAS DE PACKAGING EVIDENCE-FIRST:
 - El título debe identificar un caso concreto (persona/lugar y fecha o año cuando existan), no una promesa genérica.
 - Separa siempre HECHO documentado, INTERPRETACIÓN propuesta y DESCONOCIDO; no presentes hipótesis como hechos.
 - Evita fórmulas repetitivas de shock, "oculto", "real", "prohibido" y superlativos vacíos.
 - Usa una sola idea visual legible en la miniatura y texto corto; no uses sellos de credibilidad como sustituto de evidencia.
-- Fórmulas configuradas para este canal: {formulas}
+- Fórmulas configuradas para este canal: {formulas}{year_rule}
 """
 
 
