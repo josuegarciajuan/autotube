@@ -184,15 +184,17 @@ function QueuedShortsSection() {
   const { data: shortsToday, refetch } = useShortsSlotsToday()
   const [uploading, setUploading] = useState<number | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
+  const [confirmId, setConfirmId] = useState<number | null>(null)
   const queued = shortsToday?.queued || []
 
   if (!queued.length) return null
 
   const handleUpload = async (shortId: number) => {
+    setConfirmId(null)
     setUploading(shortId); setMsg(null)
     try {
-      const res = await api.uploadQueuedShort(shortId)
-      setMsg(res?.ok ? `Short #${shortId} subido.` : `No se pudo subir el short #${shortId}.`)
+      const res = await api.uploadQueuedShort(shortId, { forceImmediate: true })
+      setMsg(res?.ok ? `Short #${shortId} subido y publicado ahora.` : `No se pudo subir el short #${shortId}.`)
     } catch (e: any) {
       setMsg(e?.message || `Error al subir el short #${shortId}.`)
     } finally {
@@ -219,13 +221,31 @@ function QueuedShortsSection() {
             ) : (
               <span className="text-red-400 text-[10px] shrink-0" title="El archivo ya no existe en disco">✗ sin archivo</span>
             )}
-            <button
-              onClick={() => handleUpload(q.short_id)}
-              disabled={uploading === q.short_id || !q.file_exists}
-              className="px-2 py-1 rounded bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-            >
-              {uploading === q.short_id ? 'Subiendo...' : 'Subir ahora'}
-            </button>
+            {confirmId === q.short_id ? (
+              <span className="flex items-center gap-1 shrink-0">
+                <span className="text-[10px] text-amber-300" title="Se subirá y publicará público inmediatamente, saltando topes">¿Público ahora?</span>
+                <button
+                  onClick={() => handleUpload(q.short_id)}
+                  className="px-2 py-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 text-[10px] transition-colors"
+                >
+                  Sí
+                </button>
+                <button
+                  onClick={() => setConfirmId(null)}
+                  className="px-2 py-1 rounded bg-dark-600 text-gray-400 hover:text-white text-[10px] transition-colors"
+                >
+                  No
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmId(q.short_id)}
+                disabled={uploading === q.short_id || !q.file_exists}
+                className="px-2 py-1 rounded bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              >
+                {uploading === q.short_id ? 'Subiendo...' : 'Subir ahora'}
+              </button>
+            )}
           </div>
         ))}
       </div>

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { api, formatApiDate, formatCountdown, parseApiDate, formatTime, PlannedSlot, GeneratingVideo, AwaitingUploadVideo, WarmingVideo, ShortsPipelineSlot, PublishedItem } from '../lib/api'
 import { usePipelineStatus } from '../hooks/useQueries'
 import { Loader2, Clock, Play, Lock, AlertTriangle, CheckCircle2, ArrowRight, Smartphone, Scissors, Upload, HardDrive, Film, ExternalLink, Trophy, Flame, RefreshCw, Check } from 'lucide-react'
@@ -332,7 +332,7 @@ function TimelineStrip({ dates, current }: { dates: TimelineDates; current: Stag
 
 // ── Unified card ─────────────────────────────────────────────
 
-function PipelineCard({ item, onUploadNow }: { item: TaggedItem; onUploadNow?: (videoId: number) => void }) {
+function PipelineCard({ item, onUploadNow, uploading }: { item: TaggedItem; onUploadNow?: (videoId: number) => void; uploading?: boolean }) {
   const colors = getChannelStyles({ channel_id: item.channelId, channel_slug: item.channelSlug, channel_name: item.channelName })
   const short = getChannelShort({ channel_id: item.channelId, channel_slug: item.channelSlug, channel_name: item.channelName })
   const idLabel = (item.state === 'planned' || item.state === 'generating' || item.state === 'awaiting') && item.videoId != null
@@ -408,9 +408,11 @@ function PipelineCard({ item, onUploadNow }: { item: TaggedItem; onUploadNow?: (
             {onUploadNow && item.videoId != null && (
               <button
                 onClick={() => onUploadNow(item.videoId!)}
-                className="ml-auto flex items-center gap-1 text-[9px] px-2 py-1 rounded-md bg-blue-400/10 text-blue-400 border border-blue-400/20 hover:bg-blue-400/20 transition-colors"
+                disabled={uploading}
+                className="ml-auto flex items-center gap-1 text-[9px] px-2 py-1 rounded-md bg-blue-400/10 text-blue-400 border border-blue-400/20 hover:bg-blue-400/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
               >
-                <Upload size={9} /> Subir
+                {uploading ? <Loader2 size={9} className="animate-spin" /> : <Upload size={9} />}
+                {uploading ? 'Subiendo…' : 'Subir'}
               </button>
             )}
           </>
@@ -492,6 +494,10 @@ export default function PipelineView() {
   const { data, isLoading: loading, error: queryError, refetch } = usePipelineStatus()
   const error = queryError ? String(queryError) : null
 
+  const [uploadingId, setUploadingId] = useState<number | null>(null)
+  const [uploadMsg, setUploadMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [confirmUpload, setConfirmUpload] = useState<{ videoId: number; title?: string } | null>(null)
+
   const {
     mergedPlanned, mergedGenerating, mergedAwaiting, warming, published,
   } = useMemo(() => {
@@ -529,12 +535,24 @@ export default function PipelineView() {
     return { mergedPlanned: mergedPlannedVal, mergedGenerating: mergedGeneratingVal, mergedAwaiting: mergedAwaitingVal, warming: warmingVal, published: publishedVal }
   }, [data])
 
-  async function handleUploadNow(videoId: number) {
+  function handleUploadNow(videoId: number) {
+    const item = mergedAwaiting.find(i => i.videoId === videoId)
+    setUploadMsg(null)
+    setConfirmUpload({ videoId, title: item?.title })
+  }
+
+  async function doUploadNow(videoId: number) {
+    setConfirmUpload(null)
+    setUploadingId(videoId)
+    setUploadMsg(null)
     try {
-      await api.uploadVideo(videoId)
+      await api.uploadVideo(videoId, { forceImmediate: true })
+      setUploadMsg({ kind: 'ok', text: `Vídeo #${videoId}: subida y publicación pública iniciadas.` })
       refetch()
     } catch (e: any) {
-      console.error('Upload now error:', e)
+      setUploadMsg({ kind: 'err', text: `Vídeo #${videoId}: ${e?.message || 'no se pudo subir'}` })
+    } finally {
+      setUploadingId(null)
     }
   }
 
@@ -577,7 +595,17 @@ export default function PipelineView() {
   }
 
   return (
-    <div className="pipeline-grid">
+    <>
+      {uploadMsg && (
+        <div className={`mb-3 flex items-center gap-2 text-[11px] px-3 py-2 rounded-lg border ${uploadMsg.kind === 'ok'
+          ? 'bg-green-400/10 text-green-300 border-green-400/20'
+          : 'bg-red-400/10 text-red-300 border-red-400/20'}`}>
+          {uploadMsg.kind === 'ok' ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+          <span className="flex-1">{uploadMsg.text}</span>
+          <button onClick={() => setUploadMsg(null)} className="text-gray-400 hover:text-white">✕</button>
+        </div>
+      )}
+      <div className="pipeline-grid">
       <div className="pipeline-column">
         <ColumnHeader icon={Clock} title="Planificado" count={mergedPlanned.length} colorClass="text-amber-400" />
         {mergedPlanned.length === 0 ? (
@@ -601,7 +629,7 @@ export default function PipelineView() {
         {mergedAwaiting.length === 0 ? (
           <p className="text-[10px] text-gray-600 text-center py-4">No hay videos esperando subida</p>
         ) : (
-          <div className="space-y-3">{mergedAwaiting.map(i => <PipelineCard key={i.key} item={i} onUploadNow={handleUploadNow} />)}</div>
+          <div className="space-y-3">{mergedAwaiting.map(i => <PipelineCard key={i.key} item={i} onUploadNow={handleUploadNow} uploading={uploadingId === i.videoId} />)}</div>
         )}
       </div>
 
@@ -623,5 +651,41 @@ export default function PipelineView() {
         )}
       </div>
     </div>
+
+      {confirmUpload && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+             onClick={() => setConfirmUpload(null)}>
+          <div className="glass rounded-xl max-w-md w-full p-5 border border-amber-400/30"
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle size={18} className="text-amber-400" />
+              <h3 className="text-sm font-semibold text-white">Subir y publicar AHORA</h3>
+            </div>
+            <p className="text-xs text-gray-300 leading-relaxed">
+              Se subirá <span className="text-white font-semibold">{confirmUpload.title || `el vídeo #${confirmUpload.videoId}`}</span> a
+              YouTube y se publicará como <span className="text-amber-300 font-semibold">PÚBLICO inmediatamente</span>,
+              sin programar y saltándose los topes anti-strike.
+            </p>
+            <p className="text-[10px] text-red-300/80 mt-2">
+              Riesgo: subidas sin espaciado ni caps son el patrón asociado a strikes de YouTube. Úsalo solo si es intencional.
+            </p>
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setConfirmUpload(null)}
+                className="px-3 py-1.5 text-xs rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 hover:text-white transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => doUploadNow(confirmUpload.videoId)}
+                className="px-3 py-1.5 text-xs rounded-lg bg-amber-400/20 text-amber-300 border border-amber-400/30 hover:bg-amber-400/30 transition-colors font-semibold"
+              >
+                Subir y publicar ahora
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }

@@ -2303,8 +2303,11 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
         logger.info("Job %d cleanup complete: orchestrator released + gc.collect() + malloc_trim", job_id)
 
 
-async def start_upload_job(job_id: int, video_id: int):
-    """Upload only — for re-uploading existing videos."""
+async def start_upload_job(job_id: int, video_id: int, force_immediate: bool = False):
+    """Upload only — for re-uploading existing videos.
+
+    force_immediate: operator-forced immediate PUBLIC upload (no scheduling).
+    """
     import json, time
 
     db = _get_db()
@@ -2407,16 +2410,20 @@ async def start_upload_job(job_id: int, video_id: int):
         # orch.phase_upload() recalculates a stale target_public_at and forces
         # private + publishAt for scheduled channels, mirroring the full worker.
         target_public_at = v.get("target_public_at")
-        # ── Clamp far-future publish (no quedarse "calentando" >24h) ──
-        target_public_at = _clamp_scheduled_public_at(
-            db, canal, channel_id, video_id, target_public_at,
-        )
-        # Persistir el target clampado para mantener DB/UI coherentes
-        try:
-            if target_public_at and target_public_at != v.get("target_public_at"):
-                db.update_video(video_id, target_public_at=target_public_at)
-        except Exception:
-            pass
+        if force_immediate:
+            # Manual immediate public upload: no scheduling target at all.
+            target_public_at = None
+        else:
+            # ── Clamp far-future publish (no quedarse "calentando" >24h) ──
+            target_public_at = _clamp_scheduled_public_at(
+                db, canal, channel_id, video_id, target_public_at,
+            )
+            # Persistir el target clampado para mantener DB/UI coherentes
+            try:
+                if target_public_at and target_public_at != v.get("target_public_at"):
+                    db.update_video(video_id, target_public_at=target_public_at)
+            except Exception:
+                pass
 
         def _do_upload():
             video_data = {
@@ -2436,6 +2443,7 @@ async def start_upload_job(job_id: int, video_id: int):
                 job_id=job_id,
                 planned_public_at=target_public_at,
                 skip_lifecycle_scheduling=True,
+                force_immediate=force_immediate,
             )
         
         ok, result = await _run_in_executor(_do_upload, timeout=PHASE_TIMEOUTS["upload"])
@@ -2453,10 +2461,31 @@ async def start_upload_job(job_id: int, video_id: int):
         video_yt_id = result  # phase_upload returns the YouTube video id (str) or None
         if video_yt_id:
             url = f"https://youtube.com/watch?v={video_yt_id}"
-            pub_mode = get_channel_config(canal).PUBLISH_MODE
-            upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
-            db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
-            db.update_video(video_id, progress=100)
+            if force_immediate:
+                # ── Manual immediate PUBLIC upload: mark published NOW ──
+                # No scheduling: clear target/peak, force public + immediate.
+                db.mark_video_uploaded(video_id, video_yt_id, url, status="published")
+                try:
+                    with db._connect() as conn:
+                        conn.execute(
+                            "UPDATE videos SET progress=100, privacy_status='public', "
+                            "publish_mode='immediate', target_public_at=NULL, peak_source=NULL, "
+                            "published_at=COALESCE(published_at, CURRENT_TIMESTAMP), "
+                            "status='published' WHERE id=?",
+                            (video_id,),
+                        )
+                        conn.commit()
+                except Exception as _mk_exc:
+                    logger.warning(
+                        "force_immediate: failed to stamp published fields for #%d: %s",
+                        video_id, _mk_exc,
+                    )
+                db.update_video(video_id, progress=100)
+            else:
+                pub_mode = get_channel_config(canal).PUBLISH_MODE
+                upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
+                db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
+                db.update_video(video_id, progress=100)
             # ── Save upload timing ───────────────────────────
             try:
                 _upload_ms = int((time.time() - upload_start) * 1000)

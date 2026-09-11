@@ -492,11 +492,10 @@ def get_today_shorts_slots():
 
 
 @router.post("/shorts-queue/upload/{short_id}")
-def upload_queued_short(short_id: int):
+def upload_queued_short(short_id: int, force_immediate: bool = False):
     """Sube AHORA un short nativo en cola (status='generated') manualmente.
 
-    (fix ago 2026) Acción manual para drenar la cola de shorts generados que
-    quedaron esperando (p. ej. tras expirar bloqueo de spam / cuota).
+    force_immediate=true → salta cuota/topes/espaciado (acción manual del operador).
     """
     from api.services.shorts_scheduler import _upload_queued_native_short
     from database.db_extended import ExtendedDatabase
@@ -509,8 +508,9 @@ def upload_queued_short(short_id: int):
         rec = None
     if not rec:
         raise HTTPException(404, f"Short #{short_id} no está en cola (status='generated')")
-    ok = _upload_queued_native_short(rec, db=db)
-    return {"ok": bool(ok), "short_id": short_id, "uploaded": bool(ok)}
+    ok = _upload_queued_native_short(rec, db=db, force_immediate=force_immediate)
+    return {"ok": bool(ok), "short_id": short_id, "uploaded": bool(ok),
+            "force_immediate": force_immediate}
 
 
 @router.get("/shorts-slots/week")
