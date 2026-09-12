@@ -123,6 +123,7 @@ export interface ShortsStats {
 export interface ConfigSection {
   key: string
   label: string
+  hint?: string
   fields: ConfigField[]
 }
 
@@ -149,16 +150,15 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'voice',
     label: '🎙️ Voz (TTS)',
+    hint: 'Elige la voz. El tono de cada párrafo/bloque lo detecta el algoritmo automáticamente según lo que se narra: no se elige manualmente. Aquí solo calibras cómo suena cada tono.',
     fields: [
       { key: 'VOICE_SELECT', label: 'Voz Narradora', affectsVideo: true, type: 'voice-select' },
-      { key: 'EXPRESSIVE_NARRATION', label: 'Narración expresiva (prosodia por tono)', affectsVideo: true, type: 'boolean' },
-      { key: 'PROSODY_PROFILES', label: 'Prosodia por tono', affectsVideo: true, type: 'prosody-table' },
-      { key: 'TONO_DEFAULT', label: 'Tono por defecto', affectsVideo: true, type: 'text' },
+      { key: 'EXPRESSIVE_NARRATION', label: 'Narración expresiva (tono automático)', affectsVideo: true, type: 'boolean' },
+      { key: 'PROSODY_PROFILES', label: 'Calibración de tonos (automático)', affectsVideo: true, type: 'prosody-table' },
       { key: 'KOKORO_PAUSE_BETWEEN_BLOCKS', label: 'Pausa entre párrafos (s)', affectsVideo: true, type: 'number' },
       { key: 'VOICE_RATE', label: 'Velocidad base (respaldo)', affectsVideo: true, type: 'text' },
       { key: 'VOICE_PITCH', label: 'Tono base (respaldo)', affectsVideo: true, type: 'text' },
       { key: 'VOICE_VOLUME', label: 'Volumen', affectsVideo: true, type: 'text' },
-      { key: 'VOICE_SECONDARY', label: 'Voz Secundaria', affectsVideo: true, type: 'text' },
     ],
   },
   {

@@ -80,9 +80,12 @@ export default function VoiceLab({ config, slug }: Props) {
     <div className="mt-3 rounded border border-dark-600 bg-dark-800/50 p-2.5">
       <div className="flex items-center justify-between mb-2">
         <div>
-          <div className="text-[11px] font-semibold text-gray-300">🧪 Laboratorio de voz</div>
+          <div className="text-[11px] font-semibold text-gray-300">🧪 Laboratorio de voz (solo prueba)</div>
           <div className="text-[10px] text-gray-500">
             Voz activa: <span className="text-neon-cyan">{voice}</span> · {engine}
+          </div>
+          <div className="text-[10px] text-gray-600">
+            El tono de cada bloque lo elige el algoritmo automáticamente. Aquí solo lo escuchas.
           </div>
         </div>
         <button

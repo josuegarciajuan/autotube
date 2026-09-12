@@ -58,7 +58,7 @@ export default function ProsodyEditor({ config, onUpdateField }: Props) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <span className="text-[10px] text-gray-500">
-          rate: <code>-18%</code> más lento · pitch: <code>-3Hz</code> más grave · pausa tras el tono
+          El tono se asigna solo por bloque · rate: <code>-18%</code> más lento · pitch: <code>-3Hz</code> más grave
         </span>
         <button
           onClick={() => onUpdateField('PROSODY_PROFILES', { ...DEFAULT_PROFILES })}

@@ -2383,6 +2383,9 @@ export default function ChannelDetail() {
               {CONFIG_SECTIONS.map((section: ConfigSection) => (
                 <div key={section.key} className="bg-dark-700/50 rounded-lg p-3 border border-surface-border">
                   <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{section.label}</h4>
+                  {section.hint && (
+                    <p className="text-[10px] text-gray-500 mb-2 -mt-1">{section.hint}</p>
+                  )}
                   <div className="space-y-1.5">
                     {section.fields.map((field: ConfigField) => (
                       <div key={field.key} className="flex items-start justify-between gap-2">
