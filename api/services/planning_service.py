@@ -5280,16 +5280,15 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         logger.warning("authoritative_replan: shorts falló: %s", exc)
         summary["shorts"] = {"error": str(exc)}
 
-    # ── 5. Ventana silenciosa + marcar último replan ─────────────────
-    _post_full_replan_block_until = (
-        datetime.now() + timedelta(minutes=_POST_FULL_REPLAN_QUIET_MIN)
-    )
+    # ── 5. Marcar último replan (SIN ventana silenciosa) ─────────────
+    # Una reprogramación TOTAL debe dejar al motor seguir planificando. La
+    # ventana silenciosa de 120 min (heredada del flujo safe) bloqueaba la
+    # reconstrucción del horizonte y dejaba 0 slots pendientes tras el botón.
+    # Solo se marca el timestamp del último replan (cooldown corto de 5 min).
+    _post_full_replan_block_until = None
     try:
         db.set_system_state(_LAST_REPLAN_KEY, str(_time.time()))
-        db.set_system_state(
-            "post_full_replan_block_until",
-            str(_post_full_replan_block_until.timestamp()),
-        )
+        db.set_system_state("post_full_replan_block_until", "")
     except Exception:
         pass
 
