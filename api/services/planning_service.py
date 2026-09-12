@@ -5245,9 +5245,14 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
 
     # ── 3. Regenerar horizonte de generación (bypass ventana silenciosa) ──
     try:
+        global _last_horizon_replan_ts
         _post_full_replan_block_until = None
+        # Una reprogramación TOTAL manual debe reconstruir el plan YA, sin que
+        # el cooldown de 5 min (o la ventana silenciosa) deje 0 slots pendientes.
+        _last_horizon_replan_ts = None
         try:
             db.set_system_state("post_full_replan_block_until", "")
+            db.set_system_state(_LAST_REPLAN_KEY, "0")
         except Exception:
             pass
         summary["horizon"] = compute_and_store_horizon(
