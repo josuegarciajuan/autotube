@@ -112,9 +112,10 @@ def test_enforce_power_words_collapses_even_without_power_words():
     assert enforce_power_words("Título (Impactante) (IMPACTANTE)", []) == "Título (Impactante)"
 
 
-def test_enforce_power_words_still_injects_when_missing():
-    # Sin power word: la red de seguridad sigue inyectando (aquí se garantiza
-    # que el resultado contiene la palabra y no excede 100 chars)
+def test_enforce_power_words_no_longer_injects_when_missing():
+    # v49: la red de seguridad destructiva se eliminó. Sin power word el título
+    # se devuelve ÍNTEGRO (nunca se anexan sufijos rotos tipo "| Impactante").
     result = enforce_power_words("Un título sin gancho", ["impactante"], max_chars=65)
-    assert "impactante" in result.lower()
+    assert result == "Un título sin gancho"
+    assert "|" not in result
     assert len(result) <= 65
