@@ -9,6 +9,13 @@ from pathlib import Path
 
 from PIL import Image, ImageStat
 
+from pipeline.title_tokens import (
+    contains_banned_token,
+    has_dangling_tail,
+    is_all_caps,
+    uppercase_words,
+)
+
 
 @dataclass(frozen=True)
 class ValidationResult:
@@ -35,6 +42,23 @@ def validate_title(title: str, config) -> ValidationResult:
         words = re.findall(r"\b[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑ-]{2,}\b", text)
         if not any(word.casefold() not in {"el", "la", "los", "las", "un", "una"} for word in words):
             reasons.append("specificity")
+
+    # ── Shared-token checks (v49) ───────────────────────────────────
+    if contains_banned_token(text):
+        reasons.append("banned_token")
+    if has_dangling_tail(text):
+        reasons.append("incomplete_phrase")
+    if "|" in text or "[" in text or "]" in text:
+        reasons.append("injected_suffix")
+
+    # Capitalisation is policy-driven: channels that intentionally use
+    # Title Case must not be penalised for it.
+    caps_policy = str(getattr(config, "TITLE_CAPS_POLICY", "sentence") or "sentence").lower()
+    if caps_policy in {"sentence", "one_word_caps"} and len(uppercase_words(text)) > 1:
+        reasons.append("excessive_caps")
+    if is_all_caps(text):
+        reasons.append("all_caps")
+
     return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
 
 

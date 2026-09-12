@@ -37,6 +37,8 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from pipeline.title_tokens import BANNED_TOKENS as _SHARED_BANNED_TOKENS
+
 logger = logging.getLogger("autotube.content_safety")
 
 
@@ -114,12 +116,7 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         "desde el mas alla", "destino estaba marcado", "infancia paranormal",
         "poseido",
     ],
-    "clickbait_riesgo": [
-        # Marcadores de clickbait sobrerrepresentados en eliminados (análisis
-        # ago 2026, ratio 4-9x vs. supervivientes). Decisión binaria del
-        # operador: se bloquean, no se moderan.
-        "maldit", "que nadie te conto", "increible", "imposible",
-    ],
+    "clickbait_riesgo": sorted(_SHARED_BANNED_TOKENS),
 }
 
 # ── Marcadores de contexto adverso ─────────────────────────────────
