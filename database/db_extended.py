@@ -7984,6 +7984,26 @@ class ExtendedDatabase(Database):
             config = json.loads(ch.get("config_json", "{}"))
         except (json.JSONDecodeError, TypeError):
             config = {}
+        # Defaults universales para planificación viral: si el canal no los
+        # define en config_json, la UI y el motor DEBEN coincidir (antes la UI
+        # mostraba 0 y el planner usaba 1). Ver config/defaults.py.
+        try:
+            from config import defaults as _plan_defaults
+            _viral_per_day_def = int(getattr(_plan_defaults, "VIRAL_PER_DAY", 1))
+            _viral_boost_def = float(getattr(_plan_defaults, "VIRAL_DAY_BOOST_WEIGHT", 0.8))
+        except Exception:
+            _viral_per_day_def, _viral_boost_def = 1, 0.8
+        # None/vacío → default; un 0 explícito se respeta. Datos inválidos → default.
+        _raw_vpd = config.get("viral_per_day")
+        try:
+            _viral_per_day = _viral_per_day_def if _raw_vpd is None else max(0, int(_raw_vpd))
+        except (TypeError, ValueError):
+            _viral_per_day = _viral_per_day_def
+        _raw_boost = config.get("viral_day_boost_weight")
+        try:
+            _viral_boost = _viral_boost_def if _raw_boost is None else max(0.0, min(1.0, float(_raw_boost)))
+        except (TypeError, ValueError):
+            _viral_boost = _viral_boost_def
         return {
             "channel_id": channel_id,
             "channel_name": ch.get("name", ""),
@@ -8011,10 +8031,10 @@ class ExtendedDatabase(Database):
             "alternate_pattern": config.get("alternate_pattern"),
             "alternate_offset": config.get("alternate_offset", 0),
             # ── Source mode distribution (videos_per_day = total, viral_per_day = how many viral) ──
-            "viral_per_day": config.get("viral_per_day", 0),
+            "viral_per_day": _viral_per_day,
             # ── Random daily boost weights (v9.1) ──
             "videos_day_boost_weight": config.get("videos_day_boost_weight", 0.7),
-            "viral_day_boost_weight": config.get("viral_day_boost_weight", 0.2),
+            "viral_day_boost_weight": _viral_boost,
             # ── 3-phase pipeline config (v9) ──
             "upload_window_start": config.get("UPLOAD_WINDOW_START", 9),
             "upload_window_end": config.get("UPLOAD_WINDOW_END", 11),

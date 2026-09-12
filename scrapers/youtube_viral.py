@@ -223,11 +223,17 @@ class YouTubeViralScraper(BaseScraper):
             self.max_age_days = getattr(self.config, "VIRAL_MAX_AGE_DAYS", DEFAULT_MAX_AGE_DAYS)
             self.max_queries = getattr(self.config, "VIRAL_MAX_QUERIES", DEFAULT_MAX_QUERIES)
             self.max_candidates = getattr(self.config, "VIRAL_MAX_CANDIDATES", DEFAULT_MAX_CANDIDATES)
+            self.min_duration_sec = int(getattr(
+                self.config, "VIRAL_MIN_DURATION_SEC", MIN_DOCUMENTARY_DURATION_SEC))
+            self.require_verified_date = bool(getattr(
+                self.config, "VIRAL_REQUIRE_VERIFIED_DATE", False))
         else:
             self.min_views = DEFAULT_MIN_VIEWS
             self.max_age_days = DEFAULT_MAX_AGE_DAYS
             self.max_queries = DEFAULT_MAX_QUERIES
             self.max_candidates = DEFAULT_MAX_CANDIDATES
+            self.min_duration_sec = MIN_DOCUMENTARY_DURATION_SEC
+            self.require_verified_date = False
 
         # English keywords (pulled from channel config or viral_keywords module)
         self.keywords_eng: list[str] = []
@@ -643,10 +649,10 @@ class YouTubeViralScraper(BaseScraper):
             # Short videos (<10 min) are typically comedy, sketch, meme,
             # or reaction content unsuitable for long-form documentary.
             # This replaces the hardcoded comedy_channels blocklist.
-            if duration_sec > 0 and duration_sec < MIN_DOCUMENTARY_DURATION_SEC:
+            if duration_sec > 0 and duration_sec < self.min_duration_sec:
                 logger.debug(
                     "[%s] Filtered out (duration %.0fs < %ds min): %s",
-                    self.canal, duration_sec, MIN_DOCUMENTARY_DURATION_SEC,
+                    self.canal, duration_sec, self.min_duration_sec,
                     title[:60],
                 )
                 return None
@@ -884,13 +890,32 @@ class YouTubeViralScraper(BaseScraper):
                                    hours, candidate["views"], candidate["viral_score"])
                     verified.append(candidate)
                 else:
-                    logger.warning("[%s] DISCARDING candidate with unknown age: '%s'",
-                                   self.canal, candidate.get("title", "")[:60])
-                    discarded_count += 1
+                    # Fecha no verificable. Antes se descartaba SIEMPRE, lo que
+                    # vaciaba la lista cuando yt-dlp no devolvía upload_date
+                    # (causa de fallback masivo a original). Solo se descarta si
+                    # el canal lo exige explícitamente.
+                    if self.require_verified_date:
+                        logger.warning("[%s] DISCARDING candidate with unknown age (required): '%s'",
+                                       self.canal, candidate.get("title", "")[:60])
+                        discarded_count += 1
+                    else:
+                        logger.info("[%s] Keeping candidate with unknown age (date_unverified): '%s'",
+                                    self.canal, candidate.get("title", "")[:60])
+                        candidate["date_unverified"] = True
+                        candidate.setdefault("hours_since_pub", -1)
+                        verified.append(candidate)
 
             # Sort by views descending — take best regardless of age
             verified.sort(key=lambda x: x.get("views", 0), reverse=True)
-            all_candidates = verified
+            # Preservar también los que YA traían fecha verificada: antes
+            # `all_candidates = verified` los descartaba al fusionar, reduciendo
+            # el pool disponible (otra causa de fallback a original).
+            _verified_ids = {c.get("video_id") for c in verified}
+            _already_verified = [
+                c for c in all_candidates
+                if c.get("date_verified", False) and c.get("video_id") not in _verified_ids
+            ]
+            all_candidates = verified + _already_verified
 
             within_window = [c for c in verified if c.get("hours_since_pub", 999) <= self.max_age_days * 24]
             logger.info("[%s] Date verification: %d verified (%d within %dd window), %d discarded",
@@ -1329,21 +1354,16 @@ class YouTubeViralScraper(BaseScraper):
                         self.canal)
             return None
 
-        # Step 1: Download audio
-        audio_path = self._download_audio(video_url, video_id)
-        if not audio_path:
-            logger.warning("[%s] ✗ Candidate failed at DOWNLOAD: %s", self.canal, video_id)
-            return None
-
-        # Step 2: Transcribe
-        transcript_en = self._transcribe(audio_path)
+        # Step 1+2: Obtener texto fuente EN (subtítulos → audio+Whisper → metadata)
+        # No se descarta el candidato por un fallo de descarga de audio: los
+        # subtítulos (metadata) son la vía principal y title+description el último
+        # recurso, de modo que el fallback a original sea la excepción.
+        transcript_en = self._fetch_transcript(candidate)
         if not transcript_en:
-            logger.warning("[%s] ⚠ Transcription empty — using title+description as fallback", self.canal)
-            transcript_en = f"{candidate.get('title', '')}. {candidate.get('description', '')}"
-            if len(transcript_en.strip()) < 50:
-                logger.warning("[%s] ✗ Candidate failed at TRANSCRIBE (fallback too short)", self.canal)
-                return None
-        logger.info("[%s]   Transcribed: %d words EN", self.canal, len(transcript_en.split()))
+            logger.warning("[%s] ✗ Candidate failed at TRANSCRIPT (no subtitles/audio/metadata): %s",
+                           self.canal, video_id)
+            return None
+        logger.info("[%s]   Source text: %d words EN", self.canal, len(transcript_en.split()))
 
         # Step 3: Create original Spanish script from English transcript
         translated_script, translated_title, translated_desc = self._translate_and_paraphrase(
@@ -1383,13 +1403,6 @@ class YouTubeViralScraper(BaseScraper):
             ),
         }
 
-        # Cleanup audio
-        try:
-            if audio_path and Path(audio_path).exists():
-                Path(audio_path).unlink()
-        except OSError:
-            pass
-
         return {
             "source": "youtube_viral",
             "url": video_url,
@@ -1414,6 +1427,121 @@ class YouTubeViralScraper(BaseScraper):
 
     # ── Video download + transcription ──────────────────────────
 
+    def _fetch_subtitles(self, video_url: str, video_id: str) -> str | None:
+        """Descarga subtítulos (auto o manuales) en inglés SIN bajar el media.
+
+        Usa ``yt-dlp --skip-download``, que resuelve a nivel de metadata (igual
+        que la búsqueda, que sí funciona desde datacenter). Evita el bloqueo que
+        sufre la descarga de audio. Devuelve el texto EN o None.
+        """
+        if not video_url or not video_id:
+            return None
+        _VIRAL_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        prefix = f"subs_{video_id}"
+        out_tmpl = str(_VIRAL_AUDIO_DIR / f"{prefix}.%(ext)s")
+        cmd = [
+            _YTDLP_BIN,
+            video_url,
+            "--skip-download",
+            "--write-auto-subs",
+            "--write-subs",
+            "--sub-langs", "en.*,en",
+            "--sub-format", "vtt",
+            "-o", out_tmpl,
+            "--no-warnings",
+            "--no-check-certificate",
+            "--user-agent", random.choice(_USER_AGENTS),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] Subtitle fetch timed out for %s", self.canal, video_id)
+            return None
+        except Exception as exc:
+            logger.warning("[%s] Subtitle fetch error for %s: %s", self.canal, video_id, exc)
+            return None
+
+        try:
+            candidates = sorted(_VIRAL_AUDIO_DIR.glob(f"{prefix}*.vtt"))
+            for sub_path in candidates:
+                text = self._vtt_to_text(sub_path)
+                try:
+                    sub_path.unlink()
+                except OSError:
+                    pass
+                if text and len(text.split()) >= 50:
+                    logger.info("[%s] Subtitles found for %s (%d words)",
+                                self.canal, video_id, len(text.split()))
+                    return text
+            if proc.returncode != 0:
+                err_tail = (proc.stderr or "")[-300:].replace("\n", " ")
+                logger.info("[%s] No subtitles for %s (rc=%s): %s",
+                            self.canal, video_id, proc.returncode, err_tail)
+        except Exception as exc:
+            logger.warning("[%s] Subtitle parsing failed for %s: %s", self.canal, video_id, exc)
+        return None
+
+    @staticmethod
+    def _vtt_to_text(path: Path) -> str:
+        """Convierte un fichero WebVTT a texto plano (sin timestamps ni tags).
+
+        Deduplica líneas consecutivas repetidas (los subtítulos automáticos
+        repiten mucho) para que el texto no quede inflado.
+        """
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+        lines: list[str] = []
+        for line in raw.splitlines():
+            s = line.strip()
+            if not s or s == "WEBVTT" or s.startswith(("NOTE", "STYLE", "Kind:", "Language:")):
+                continue
+            if "-->" in s or s.isdigit():
+                continue
+            # Quita tags inline tipo <c>, <00:00:00.000> y alineación
+            s = re.sub(r"<[^>]+>", "", s).strip()
+            if not s:
+                continue
+            if lines and lines[-1] == s:
+                continue
+            lines.append(s)
+        return " ".join(lines)
+
+    def _fetch_transcript(self, candidate: dict) -> str | None:
+        """Obtiene el texto fuente EN del candidato con estrategia híbrida.
+
+        1. Subtítulos (metadata, sin media) — rápido y fiable.
+        2. Audio + Whisper como respaldo.
+        3. title + description si todo lo anterior falla (no se descarta el
+           candidato por un fallo de red).
+        """
+        video_url = candidate.get("url", "")
+        video_id = candidate.get("video_id", "") or "unknown"
+
+        text = self._fetch_subtitles(video_url, video_id)
+        if text and len(text.split()) >= 50:
+            return text
+
+        audio_path = self._download_audio(video_url, video_id)
+        if audio_path:
+            try:
+                text = self._transcribe(audio_path)
+            finally:
+                try:
+                    Path(audio_path).unlink()
+                except OSError:
+                    pass
+            if text and len(text.split()) >= 50:
+                return text
+
+        fallback = f"{candidate.get('title', '')}. {candidate.get('description', '')}".strip()
+        if len(fallback) >= 50:
+            logger.warning("[%s] Using title+description as source (no subtitles/audio) for %s",
+                           self.canal, video_id)
+            return fallback
+        return None
+
     def _download_audio(self, video_url: str, video_id: str) -> str | None:
         """Download audio-only from a YouTube video using yt-dlp. Returns path to audio file."""
         audio_path = _VIRAL_AUDIO_DIR / f"{video_id}.mp3"
@@ -1430,6 +1558,8 @@ class YouTubeViralScraper(BaseScraper):
             "-o", str(audio_path),
             "--no-warnings",
             "--no-check-certificate",
+            "--retries", "3",
+            "--fragment-retries", "3",
             "--user-agent", random.choice(_USER_AGENTS),
         ]
 
@@ -1440,7 +1570,9 @@ class YouTubeViralScraper(BaseScraper):
                 logger.info("[%s] Audio downloaded: %.1f MB", self.canal, size_mb)
                 return str(audio_path)
             else:
-                logger.error("[%s] Audio download failed — file not found: %s", self.canal, audio_path)
+                err_tail = (proc.stderr or "")[-500:].replace("\n", " ")
+                logger.error("[%s] Audio download failed — file not found: %s | stderr: %s",
+                             self.canal, audio_path, err_tail)
                 return None
         except subprocess.TimeoutExpired:
             logger.error("[%s] Audio download timed out (>600s)", self.canal)
@@ -1884,27 +2016,18 @@ class YouTubeViralScraper(BaseScraper):
                     self.canal, top["views"], top["viral_score"],
                     top["hours_since_pub"], top["duration_sec"], top["channel_name"])
 
-        # Step 3: Download audio
+        # Step 3+4: Obtener texto fuente EN (subtítulos → audio+Whisper → metadata)
         t3 = time.time()
         video_url = top["url"]
         video_id = top["video_id"]
-        logger.info("[%s] Step 3: Downloading audio from %s...", self.canal, video_url[:80])
-        audio_path = self._download_audio(video_url, video_id)
-        if not audio_path:
-            logger.error("[%s] Step 3 FAILED: Audio download failed for %s — skipping candidate", self.canal, video_id)
-            return items
-        logger.info("[%s] Step 3 (download): done in %.1fs → %s", self.canal, time.time() - t3, audio_path)
-
-        # Step 4: Transcribe (English → text)
-        t4 = time.time()
-        logger.info("[%s] Step 4: Transcribing audio with faster-whisper...", self.canal)
-        transcript_en = self._transcribe(audio_path)
+        logger.info("[%s] Step 3: Fetching transcript for %s...", self.canal, video_url[:80])
+        transcript_en = self._fetch_transcript(top)
         if not transcript_en:
-            logger.warning("[%s] Step 4 WARNING: Transcription empty — using title+description as fallback", self.canal)
-            transcript_en = f"{top['title']}. {top.get('description', '')}"
-        else:
-            logger.info("[%s] Step 4 (transcribe): done in %.1fs → %d words EN",
-                        self.canal, time.time() - t4, len(transcript_en.split()))
+            logger.error("[%s] Step 3 FAILED: no transcript available for %s — skipping candidate",
+                         self.canal, video_id)
+            return items
+        logger.info("[%s] Step 3+4 (transcript): done in %.1fs → %d words EN",
+                    self.canal, time.time() - t3, len(transcript_en.split()))
 
         # Step 5: Translate + paraphrase
         t5 = time.time()
@@ -1977,14 +2100,6 @@ class YouTubeViralScraper(BaseScraper):
             "viral_meta_json": json.dumps(viral_meta, ensure_ascii=False),
             "viral_blocks_json": json.dumps(blocks, ensure_ascii=False),
         })
-
-        # Step 9: Clean up audio file (save disk space)
-        try:
-            if audio_path and Path(audio_path).exists():
-                Path(audio_path).unlink()
-                logger.debug("[%s] Cleaned up audio file: %s", self.canal, Path(audio_path).name)
-        except OSError:
-            pass
 
         elapsed = time.time() - t0
         logger.info("[%s] ========== VIRAL SCRAPE COMPLETE (%.1fs total) ==========", self.canal, elapsed)

@@ -405,9 +405,9 @@ function PlanningSection() {
           public_videos_per_day: publicTarget,
           longform_generation_per_day: genDay,
           upload_capacity_per_day: Number(c.upload_capacity_per_day ?? c.videos_per_day ?? 0),
-          viral_per_day: Math.max(0, Math.min(dayLongs, Number(c.viral_per_day ?? 0))),
+          viral_per_day: Math.max(0, Math.min(dayLongs, Number(c.viral_per_day ?? 1))),
           videos_day_boost_weight: Number(c.videos_day_boost_weight ?? 0),
-          viral_day_boost_weight: Number(c.viral_day_boost_weight ?? 0),
+          viral_day_boost_weight: Number(c.viral_day_boost_weight ?? 0.8),
           dayLongs,
           shorts_enabled: sc.shorts_enabled ?? false,
           shorts_native_per_day: shortTarget,
@@ -453,6 +453,10 @@ function PlanningSection() {
           const pubShown = isOverride ? r.public_videos_per_day : Math.min(r.public_videos_per_day, r.profile_long_cap || r.public_videos_per_day)
           const shortShown = isOverride ? r.shorts_native_per_day : Math.min(r.shorts_native_per_day, r.profile_short_cap || r.shorts_native_per_day)
           const disabled = !r.planning_enabled || busyId === r.channel_id
+          const viralRest = Math.max(0, r.dayLongs - r.viral_per_day)
+          const expectedViral = r.dayLongs > 0
+            ? Math.round((r.viral_per_day + viralRest * r.viral_day_boost_weight) / r.dayLongs * 100)
+            : 0
           return (
             <div key={r.channel_id} className={`bg-dark-700/50 rounded-xl p-4 space-y-3 border border-surface-border transition-opacity ${!r.planning_enabled ? 'opacity-60' : ''}`}>
               {/* Header */}
@@ -509,22 +513,22 @@ function PlanningSection() {
               {/* Virales (mezcla viral/original del long-form) */}
               <div className="border-t border-surface-border/40 pt-2 space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-300 flex items-center gap-1.5" title="Vídeos/día producidos adaptando vídeos ya virales del nicho; el resto son originales del canal.">
-                    <Play size={12} className="text-purple-400" /> Virales/día
+                  <span className="text-gray-300 flex items-center gap-1.5" title="Mínimo garantizado de vídeos/día en modo viral (reescritura de vídeos virales del nicho). El resto son originales.">
+                    <Play size={12} className="text-purple-400" /> Virales/día (mínimo)
                   </span>
                   <Stepper value={r.viral_per_day} disabled={disabled} min={0} max={Math.max(0, r.dayLongs)} onCommit={v => saveLong(r.channel_id, { viral_per_day: v })}
-                    title="Vídeos/día en modo viral (reescritura de vídeos virales del nicho)" />
+                    title="Mínimo garantizado de vídeos/día en modo viral" />
                 </div>
                 <p className="text-[10px] text-gray-500">
                   {r.dayLongs > 0
-                    ? <>De {r.dayLongs} vídeos/día: <strong className="text-purple-300">{r.viral_per_day} viral</strong> · {Math.max(0, r.dayLongs - r.viral_per_day)} original.</>
+                    ? <>De {r.dayLongs} vídeos/día: <strong className="text-purple-300">{r.viral_per_day} viral garantizados</strong> · {viralRest} con probabilidad. Esperado: <strong className="text-purple-300">≈{expectedViral}% viral</strong>.</>
                     : <>Sin vídeos/día planificados.</>}
-                  {r.viral_per_day > 0 && <> Sin candidatos virales disponibles → cae a original.</>}
+                  {r.viral_per_day > 0 && <> Si no hay candidatos virales viables → cae a original (excepción, no norma).</>}
                 </p>
                 <BoostRow label="Prob. +1 video" value={r.videos_day_boost_weight} disabled={disabled} onChange={v => saveLong(r.channel_id, { videos_day_boost_weight: v })}
                   title="Probabilidad de +1 vídeo extra a generar algunos días" />
-                <BoostRow label="Prob. 2º viral" value={r.viral_day_boost_weight} disabled={disabled} onChange={v => saveLong(r.channel_id, { viral_day_boost_weight: v })}
-                  title="Probabilidad de sumar un vídeo viral extra dentro del total del día" />
+                <BoostRow label="Prob. resto viral" value={r.viral_day_boost_weight} disabled={disabled} onChange={v => saveLong(r.channel_id, { viral_day_boost_weight: v })}
+                  title="Probabilidad de que CADA slot restante (por encima del mínimo) se planifique viral" />
               </div>
 
               {/* Shorts */}
