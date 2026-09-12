@@ -5262,6 +5262,16 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         logger.warning("authoritative_replan: horizon falló: %s", exc)
         summary["horizon"] = {"error": str(exc)}
 
+    # ── Salvaguarda: recomputación durable ───────────────────────────
+    # Si el horizonte chocó con un slot 'running' (generación activa, protegida),
+    # se encola una recomputación que el loop reintentará en ≤15s y volverá a
+    # intentarlo hasta que la generación termine. Nunca se mata un job activo.
+    try:
+        request_planning_replan(db, reason="authoritative_full_replan")
+        summary["replan_queued"] = True
+    except Exception as exc:
+        logger.debug("authoritative_replan: no se pudo encolar replan: %s", exc)
+
     # ── 4. Regenerar shorts (3/día) ──────────────────────────────────
     try:
         from api.services.shorts_scheduler import generate_upcoming_shorts
