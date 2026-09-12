@@ -665,10 +665,13 @@ MARATHON_PUBLISH_MODE = "scheduled"
 # Umbral total = MARATHON_BACKLOG_PER_CHANNEL × canales_activos.
 MARATHON_BACKLOG_PER_CHANNEL = 4
 
-# Cooldown entre marathons del MISMO canal (horas). Un canal recién maratoneado
-# no vuelve a ser elegible hasta que pasen estas horas. Se lee del config_json
-# del canal (MARATHON_COOLDOWN_HOURS) con fallback a este default.
-MARATHON_COOLDOWN_HOURS = 48
+# Cooldown entre marathons del MISMO canal (horas). 0 = SIN cooldown: los
+# maratones funcionan como "rueda" gobernada solo por el backlog (umbral) y el
+# round-robin por canal, un maratón a la vez. Cuando la generación de uno
+# termina y la condición sigue cumpliéndose, se encola el siguiente canal de la
+# rueda sin esperar separación alguna (se permite repetir canal si le toca).
+# Se lee del config_json del canal (MARATHON_COOLDOWN_HOURS) con fallback a este.
+MARATHON_COOLDOWN_HOURS = 0
 
 # ── MARATHON TITLE STRATEGY ──
 

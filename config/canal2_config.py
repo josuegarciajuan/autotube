@@ -385,7 +385,7 @@ KOKORO_PAUSE_BETWEEN_BLOCKS = 0.9
 # ═══════════════════════════════════════════════════════════════════
 
 MARATHON_ENABLED = True
-MARATHON_COOLDOWN_HOURS = 48
+MARATHON_COOLDOWN_HOURS = 0  # 0 = sin cooldown (rueda por backlog + round-robin)
 MARATHON_NARRATIVE_FORMAT = "miracles_and_coincidences"
 
 MARATHON_TITLE_FORMULAS = [

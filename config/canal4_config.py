@@ -523,7 +523,7 @@ NICHE_KEYWORDS_ENG = [
 ]
 
 MARATHON_ENABLED = True
-MARATHON_COOLDOWN_HOURS = 48
+MARATHON_COOLDOWN_HOURS = 0  # 0 = sin cooldown (rueda por backlog + round-robin)
 MARATHON_NARRATIVE_FORMAT = "tragic_expeditions"
 
 MARATHON_TITLE_FORMULAS = [

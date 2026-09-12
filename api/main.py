@@ -1576,10 +1576,12 @@ async def _schedule_checker_loop():
                 _tth("schedule_checker")
 
                 # ════════════════════════════════════════════════════════════
-                # Marathon check: always runs — marathon service dispatches
-                # as generate_only if quota is exhausted, generate_and_upload otherwise.
+                # Marathon check ("rueda"): sin cooldown por canal. Mientras el
+                # backlog supere el umbral se encola el siguiente canal de la
+                # rotación, un maratón a la vez. Intervalo corto (10 min) para
+                # encadenar el siguiente en cuanto termina el anterior.
                 # ════════════════════════════════════════════════════════════
-                if now - last_marathon_check > 3600:  # every 60 min
+                if now - last_marathon_check > 600:  # cada 10 min
                     try:
                         from api.services.marathon_service import check_and_dispatch_marathon
                         _tth("schedule_checker")

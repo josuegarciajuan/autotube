@@ -7456,23 +7456,39 @@ class ExtendedDatabase(Database):
             return cursor.lastrowid
     
     def create_planned_slots_batch(self, slots: list[dict]) -> int:
-        """Insert multiple slots atomically. Returns count inserted."""
+        """Insert multiple slots. Collisions with active targets are skipped.
+
+        ``uq_active_planned_public_target`` prohíbe dos slots activos con el mismo
+        ``(channel_id, target_public_at)``. Un slot 'running' o un plan
+        concurrente puede ocupar el target: se salta esa fila en vez de abortar
+        todo el batch (que dejaba 0 slots y rompía el horizonte/replan).
+        """
         count = 0
+        skipped = 0
         with self._connect() as conn:
             for s in slots:
-                conn.execute(
-                    """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                       target_upload_at, target_public_at, upload_window_start, upload_window_end,
-                       slot_position, source_mode)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (s["channel_id"], s["date_key"], s["scheduled_at"],
-                     s.get("target_upload_at"), s.get("target_public_at"),
-                     s.get("upload_window_start", 9), s.get("upload_window_end", 11),
-                     s.get("slot_position", 0),
-                     s.get("source_mode", "original")),
-                )
-                count += 1
+                try:
+                    conn.execute(
+                        """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
+                           target_upload_at, target_public_at, upload_window_start, upload_window_end,
+                           slot_position, source_mode)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (s["channel_id"], s["date_key"], s["scheduled_at"],
+                         s.get("target_upload_at"), s.get("target_public_at"),
+                         s.get("upload_window_start", 9), s.get("upload_window_end", 11),
+                         s.get("slot_position", 0),
+                         s.get("source_mode", "original")),
+                    )
+                    count += 1
+                except sqlite3.IntegrityError:
+                    skipped += 1
+                    continue
             conn.commit()
+        if skipped:
+            logger.info(
+                "create_planned_slots_batch: %d slot(s) skipped (target activo ya ocupado)",
+                skipped,
+            )
         return count
 
     def claim_planned_slot(self, slot_id: int, claimant: str) -> bool:
