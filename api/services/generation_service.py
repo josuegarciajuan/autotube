@@ -2865,15 +2865,19 @@ async def regenerate_scene_audio_task(scene_id: int, canal: str):
     
     scene = dict(row)
     try:
-        from pipeline.tts_engine import TTSEngine
-        voice_config = {
-            "voice": "es-ES-AlvaroNeural",
-            "rate": "-8%",
-            "pitch": "-20Hz",
-            "volume": "+0%",
-        }
-        tts = TTSEngine(voice_config)
-        audio_path, timestamps = tts.generate(scene["script_text"])
+        # Use the channel's real voice + expressive prosody (same path as
+        # full generation) so regenerated audio matches the rest of the video.
+        from config.config_bridge import get_channel_config
+        from config.voice_resolver import build_tts_engine
+        cfg = get_channel_config(canal)
+        tts = build_tts_engine(cfg)
+        bloques = [{"tipo": "desarrollo", "texto": scene["script_text"]}]
+        try:
+            audio_path, _timestamps = tts.generate_segmented(bloques)
+        finally:
+            unload = getattr(tts, "unload", None)
+            if callable(unload):
+                unload()
         db.update_scene(scene_id, audio_path=audio_path)
     except Exception as e:
         logger.error(f"Scene audio regeneration failed: {e}")
