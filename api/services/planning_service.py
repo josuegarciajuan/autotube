@@ -2413,15 +2413,16 @@ def compute_and_store_horizon(
     # El índice parcial uq_active_planned_public_target prohíbe dos slots
     # activos con el mismo (channel_id, target_public_at). Un plan nuevo NO
     # debe duplicar el target de una generación en curso (status='running') ni
-    # proponer dos slots con el mismo target en el mismo batch. Sin este filtro
-    # el replan muere con IntegrityError y deja 0 slots (botón "Reprogramar").
+    # el de un pendiente fuera de la ventana borrada (p. ej. más allá del
+    # horizonte), ni proponer dos slots con el mismo target en el batch. Sin
+    # este filtro el replan muere con IntegrityError y deja 0 slots.
     try:
         with db._connect() as _conn:
-            _running_targets = {
+            _active_targets = {
                 (int(_r["channel_id"]), str(_r["target_public_at"]))
                 for _r in _conn.execute(
                     "SELECT channel_id, target_public_at FROM planned_slots "
-                    "WHERE status='running' AND target_public_at IS NOT NULL"
+                    "WHERE status IN ('pending','running') AND target_public_at IS NOT NULL"
                 ).fetchall()
             }
         _seen: set = set()
@@ -2430,7 +2431,7 @@ def compute_and_store_horizon(
             _t = _s.get("target_public_at")
             if _t:
                 _key = (int(_s.get("channel_id") or 0), str(_t))
-                if _key in _running_targets or _key in _seen:
+                if _key in _active_targets or _key in _seen:
                     continue
                 _seen.add(_key)
             _deduped.append(_s)
@@ -3587,6 +3588,7 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     }
 
 
+@_replan_locked
 def top_up_horizon(db=None, horizon_days: int = DEFAULT_HORIZON_DAYS,
                    max_ahead_days: int = 30) -> dict:
     """Extiende el horizonte de planificación HACIA DELANTE (incremental).

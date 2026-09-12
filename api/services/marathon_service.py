@@ -30,31 +30,40 @@ logger = logging.getLogger("autotube.marathon")
 # ── Public API ─────────────────────────────────────────────────
 
 def _marathon_cooldown_hours(cfg: dict) -> float:
-    """Cooldown del canal (MARATHON_COOLDOWN_HOURS) con fallback al default."""
+    """Cooldown del canal (MARATHON_COOLDOWN_HOURS) con fallback al default.
+
+    ``0`` es un valor VÁLIDO (= sin cooldown, modo "rueda"): no debe caer al
+    default por ser falsy. Solo un valor ausente/vacío/inválido usa el fallback.
+    """
     try:
         from config.defaults import MARATHON_COOLDOWN_HOURS as _DEFAULT_COOLDOWN_H
     except ImportError:
-        _DEFAULT_COOLDOWN_H = 24
+        _DEFAULT_COOLDOWN_H = 0
     try:
-        return float(cfg.get("MARATHON_COOLDOWN_HOURS", _DEFAULT_COOLDOWN_H) or _DEFAULT_COOLDOWN_H)
+        raw = cfg.get("MARATHON_COOLDOWN_HOURS", _DEFAULT_COOLDOWN_H)
+        if raw is None or str(raw).strip() == "":
+            raw = _DEFAULT_COOLDOWN_H
+        return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return float(_DEFAULT_COOLDOWN_H)
+        return max(0.0, float(_DEFAULT_COOLDOWN_H))
 
 
 def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime | None = None) -> bool:
     """True si el canal maratoneó hace menos de MARATHON_COOLDOWN_HOURS horas.
 
-    El record de get_last_marathon guarda la fecha como "%Y-%m-%d %H:%M:%S"
-    (sin tz, hora local). Los canales en cooldown NO se eligen: la rotación
-    round-robin simplemente los salta.
+    Con ``MARATHON_COOLDOWN_HOURS = 0`` (modo rueda) NUNCA hay cooldown: los
+    canales se eligen solo por backlog + round-robin, sin separación entre
+    maratones (se permite repetir canal si le toca la rueda).
     """
     try:
+        cooldown_h = _marathon_cooldown_hours(cfg)
+        if cooldown_h <= 0:
+            return False
         last = db.get_last_marathon(channel_id)
         if not last or not last.get("date"):
             return False
         last_dt = datetime.strptime(str(last["date"]), "%Y-%m-%d %H:%M:%S")
         now = now or datetime.now()
-        cooldown_h = _marathon_cooldown_hours(cfg)
         if (now - last_dt).total_seconds() < cooldown_h * 3600:
             return True
     except Exception:

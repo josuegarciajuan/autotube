@@ -31,6 +31,22 @@ CHANNELS = [
 ]
 
 
+def _set_marathon_cooldown(db, hours: int) -> None:
+    """Fija MARATHON_COOLDOWN_HOURS explícito en el config_json de los canales."""
+    with db._connect() as conn:
+        for ch_id, _n, _s, _p, _a in CHANNELS:
+            row = conn.execute(
+                "SELECT config_json FROM channels WHERE id = ?", (ch_id,)
+            ).fetchone()
+            cfg = json.loads((row["config_json"] if row else "{}") or "{}")
+            cfg["MARATHON_COOLDOWN_HOURS"] = hours
+            conn.execute(
+                "UPDATE channels SET config_json = ? WHERE id = ?",
+                (json.dumps(cfg), ch_id),
+            )
+        conn.commit()
+
+
 @pytest.fixture
 def db(tmp_path):
     """Base de datos con schema mínimo (incluye system_state) + 3 canales."""
@@ -234,10 +250,15 @@ class TestComputeAndStoreHorizonPersistence:
 
 class TestMarathonCooldown:
     def test_recent_marathon_skips_channel_and_picks_another(self, db):
-        """Canal con marathon reciente → saltado; se elige otro elegible."""
+        """Canal con marathon reciente → saltado; se elige otro elegible.
+
+        El cooldown por defecto es 0 (modo rueda); aquí se fija 24h explícito
+        para validar el mecanismo de cooldown cuando está configurado.
+        """
         from api.services.marathon_service import select_marathon_channel
 
-        # canal2 (id 3) maratoneó hace 1h → en cooldown (24h por defecto)
+        _set_marathon_cooldown(db, 24)
+        # canal2 (id 3) maratoneó hace 1h → en cooldown (24h)
         db.record_marathon(3, "running")
 
         selected = select_marathon_channel(db)
@@ -248,10 +269,23 @@ class TestMarathonCooldown:
         """Todos los canales en cooldown → select_marathon_channel devuelve None."""
         from api.services.marathon_service import select_marathon_channel
 
+        _set_marathon_cooldown(db, 24)
         for ch_id, _n, _s, _p, _a in CHANNELS:
             db.record_marathon(ch_id, "running")
 
         assert select_marathon_channel(db) is None
+
+    def test_cooldown_zero_is_wheel_without_separation(self, db):
+        """Con cooldown=0 (default) un maratón reciente NO descarta al canal:
+        la rueda puede repetir canal, no hay separación entre maratones."""
+        from api.services.marathon_service import select_marathon_channel
+
+        _set_marathon_cooldown(db, 0)
+        for ch_id, _n, _s, _p, _a in CHANNELS:
+            db.record_marathon(ch_id, "running")
+
+        selected = select_marathon_channel(db)
+        assert selected is not None, "sin cooldown siempre hay canal elegible"
 
     def test_cooldown_expired_allows_channel_again(self, db):
         """Marathon de hace > MARATHON_COOLDOWN_HOURS → canal elegible de nuevo."""

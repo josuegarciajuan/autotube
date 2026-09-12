@@ -493,6 +493,12 @@ la subida libera).
 - **"Reprogramar Ahora"** = `POST /api/planning/full-replan/authoritative`
   (`authoritative_replan`): borra la programación pendiente, reasigna pendientes
   y calentando, fuerza `publishAt` y regenera el plan. Idempotente.
+- **Maratones = "rueda" sin cooldown** (`MARATHON_COOLDOWN_HOURS=0`): mientras el
+  backlog (`awaiting_upload + warming`) supere el umbral, se encola **un maratón a
+  la vez** siguiendo el round-robin de canales; al terminar, si la condición
+  sigue cumpliéndose, se pasa al siguiente canal; tras dar la vuelta a los 4,
+  vuelve a empezar. **No hay separación** entre maratones (se permite repetir
+  canal si le toca). El check corre cada 10 min (`api/main.py`) para encadenar.
 
 ## 🍃 Frescura en publicación (fábrica continua)
 Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran
