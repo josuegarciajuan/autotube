@@ -92,19 +92,16 @@ TITLE_FORMULAS = [
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "archivado", "silenciado",
-    "desclasificado", "ocultado", "suprimido", "enterrado",
+    "confidencial", "archivado", "silenciado", "desclasificado",
+    "suprimido", "enterrado",
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
     "implacable", "extremo", "brutal", "salvaje", "inhóspito",
-    "despiadado", "crucial", "angustiante", "desgarrador",
-    "sobrecogedor", "desolador", "sombrío", "trágico",
-    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "impactante", "increíble", "insólito", "intrigante",
-    "enigma", "misterio", "inquietante",
-    "desapareció", "nunca regresó", "atrapados", "perdidos", "abandonados",
-    "muertos", "congelados", "hundidos", "sepultados",
-    "desvanecido", "devorados", "ahogados",
+    "despiadado", "crucial", "angustiante",
+    "desolador", "sombrío", "trágico", "perturbador", "insólito",
+    "intrigante", "enigma", "inquietante",
+    "atrapados", "perdidos", "abandonados", "congelados", "hundidos",
+    "sepultados", "devorados", "ahogados",
     "sobrevivió", "rescatado", "encontrado", "escapó", "volvió",
     "emergió", "resistió", "aguantó", "superó", "logró salir",
     "milagrosamente", "contra todo pronóstico",
@@ -112,10 +109,26 @@ TITLE_POWER_WORDS = [
     "selva", "abisal", "infierno", "gélido", "abrasador",
     "helado", "ardiente", "impenetrable", "remoto",
     "inaccesible", "aislado", "traidor", "mortal",
-    "real", "documentado", "verificado", "demostrado", "confirmado",
+    "documentado", "verificado", "demostrado", "confirmado",
     "registrado", "grabado", "filmado",
 ]
 TITLE_MAX_CHARS = 65
+TITLE_MIN_CHARS = 28
+TITLE_CAPS_POLICY = "sentence"
+TITLE_STYLE_GUIDE = (
+    "Titulares de supervivencia: lugar concreto + número de personas + "
+    "desenlace. Tono seco y factual, respeto absoluto por las víctimas. "
+    "Empieza por el lugar o la cifra, nunca por 'El/La'."
+)
+TITLE_GOOD_EXAMPLES = [
+    "La masacre de Villisca: el asesino que cubrió los rostros",
+    "129 hombres partieron al Ártico: ninguno regresó con vida",
+    "7 días a -40 °C en el paso: la decisión que lo cambió todo",
+]
+TITLE_BAD_EXAMPLES = [
+    "Lanzó una recta y su brazo EXPLOTÓ: el | Extraño para Siempre",
+    "La expedición que nadie contó — Historia Grabado",
+]
 
 SCRIPT_HOOK_RULE = (
     "ATENCION: La primera frase del guion DEBE ser el hecho mas "

@@ -118,31 +118,42 @@ TITLE_FORMULAS = [
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "enterrado", "sellado",
-    "exclusivo", "desclasificado", "suprimido", "archivado", "silenciado",
-    "protegido", "blindado", "vetado",
+    "confidencial", "enterrado", "sellado", "exclusivo", "desclasificado",
+    "suprimido", "archivado", "silenciado", "protegido", "blindado", "vetado",
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "asombroso", "desconcertante", "fascinante", "impactante",
-    "colosal", "monumental", "imponente", "magnífico", "sobrecogedor",
-    "devastador", "insospechado", "deslumbrante",
-    "oculto", "secreto", "perturbador", "siniestro", "enigmático",
-    "increíble", "insólito", "misterio", "enigma",
-    "indescifrable", "desconocido", "enigmático",
+    "asombroso", "desconcertante", "fascinante", "colosal", "monumental",
+    "imponente", "magnífico", "devastador", "insospechado", "deslumbrante",
+    "siniestro", "perturbador", "enigmático", "insólito", "enigma",
+    "indescifrable", "desconocido",
     "perdida", "milenaria", "ancestral", "desaparecida", "sumergida",
-    "maldita", "sagrada", "olvidado", "sepultado", "inhallable",
-    "legendaria", "mítica", "prehistórica", "antediluviana",
-    "sumergido", "subterráneo", "abandonado", "erosionado",
-    "petrificado", "fosilizado",
+    "sagrada", "olvidado", "sepultado", "inhallable", "legendaria",
+    "mítica", "prehistórica", "antediluviana", "sumergido", "subterráneo",
+    "abandonado", "erosionado", "petrificado", "fosilizado",
     "descubrieron", "encontraron", "reescribió", "cambió", "revolucionó",
     "desenterraron", "hallaron", "excavaron", "revelaron", "desvelaron",
     "sacaron a la luz", "emergió",
     "demostrado", "confirmado", "verificado", "documentado",
-    "imposible", "sacudió", "cambió todo",
-    "gigantesca", "titánica", "faraónica", "imposible",
-    "monumental", "inmensa", "descomunal",
+    "sacudió", "cambió todo",
+    "gigantesca", "titánica", "faraónica", "inmensa", "descomunal",
 ]
 TITLE_MAX_CHARS = 65
+TITLE_MIN_CHARS = 28
+TITLE_CAPS_POLICY = "sentence"
+TITLE_STYLE_GUIDE = (
+    "Pregunta histórica concreta + dato verificable (fecha, lugar o "
+    "civilización). Nombra a los protagonistas (César, una ciudad) y la "
+    "consecuencia real. Rigor arqueológico, sin sensacionalismo."
+)
+TITLE_GOOD_EXAMPLES = [
+    "¿Qué pruebas reales existen de que la Atlántida nunca estuvo donde creemos?",
+    "La guerra que César NO podía evitar y que CAMBIÓ Roma",
+    "La ciudad que apareció bajo el mar: 3.000 años sin explicación",
+]
+TITLE_BAD_EXAMPLES = [
+    "Daluka reinó en un Egipto sin hombres: ¿quién. ESTREMECEDOR",
+    "El secreto de la Atlántida | La Verdad Ocultado",
+]
 
 # ═══════════════════════════════════════════════════════════════════
 # SCRIPT STRUCTURE — "Expedición al Pasado" method

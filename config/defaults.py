@@ -50,6 +50,18 @@ TITLE_REQUIRED_SPECIFICITY = []
 # TITLE_REQUIRED_SPECIFICITY); it only guides the LLM.
 TITLE_REQUIRE_YEAR = False
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras"]
+
+# ── Title engine (v49) ─────────────────────────────────────────────
+# Multi-candidate generation + deterministic rubric + caps policy.
+TITLE_ENGINE_ENABLED = True
+TITLE_CANDIDATE_COUNT = 5
+TITLE_TARGET_MIN_CHARS = 45
+TITLE_TARGET_MAX_CHARS = 70
+TITLE_CAPS_POLICY = "sentence"          # "sentence" | "title_case" | "one_word_caps"
+TITLE_STYLE_GUIDE = ""
+TITLE_GOOD_EXAMPLES = []
+TITLE_BAD_EXAMPLES = []
+
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
 RECOVERY_CHECKPOINTS_ENABLED = False
