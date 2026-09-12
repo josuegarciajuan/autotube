@@ -5250,7 +5250,10 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         summary["jobs_cancelled"] = conn.execute(
             "UPDATE generation_jobs SET status='cancelled', "
             "error_msg='Reprogramación total (operador)', "
-            "finished_at=datetime('now') WHERE status='queued'"
+            "finished_at=datetime('now') WHERE status='queued' "
+            # Los maratones NO se cancelan: la "rueda" de maratones es
+            # independiente del plan normal; el _queue_consumer los despacha.
+            "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1)"
         ).rowcount
         conn.commit()
     logger.info(
