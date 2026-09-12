@@ -1396,6 +1396,11 @@ async def _planning_replan_loop():
     _last_run = 0.0
     while True:
         try:
+            # Heartbeat: sin esto el watchdog marca el loop como "stale" cada
+            # ~10 min y lo cancela/reinicia, dejando recomputaciones durables
+            # (p. ej. tras "Reprogramar Ahora") sin procesar a tiempo.
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth_rp
+            _tth_rp("planning_replan")
             now = _time_rp.time()
             # Dejar al menos 8 s entre pasadas para coalescer ráfagas de clics.
             if now - _last_run < 8:
