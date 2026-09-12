@@ -318,6 +318,10 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ confirmation_token: confirmationToken }),
   }),
+  // Reprogramación TOTAL autoritativa ("Reprogramar Ahora"): borra la
+  // programación pendiente, reasigna vídeos (pendientes + calentando), fuerza
+  // su publishAt en YouTube y regenera el plan. Sin token de confirmación.
+  authoritativeFullReplan: () => request<any>('/planning/full-replan/authoritative', { method: 'POST' }),
 
   // Optimal Publish Slots (v10)
   getOptimalSlots: (channelId: number) =>

@@ -4058,18 +4058,19 @@ class ExtendedDatabase(Database):
         from api.time_utils import parse_utc, MADRID
         count = 0
         if content_type == "long":
+            # Cap de SUBIDAS: solo cuentan las subidas reales (uploaded_at).
+            # Contar también published_at agotaba el cupo con publicaciones de
+            # privados de días previos y bloqueaba las subidas nuevas (ago 2026).
             rows = conn.execute(
-                f"""SELECT uploaded_at, published_at FROM videos
+                f"""SELECT uploaded_at FROM videos
                     WHERE channel_id IN ({placeholders})
                       AND status IN ('uploaded','uploaded_private','published','warming')""",
                 channel_ids,
             ).fetchall()
-            for uploaded_at, published_at in rows:
-                for value in (uploaded_at, published_at):
-                    dt = parse_utc(value)
-                    if dt is not None and dt.astimezone(MADRID).date() == target_date:
-                        count += 1
-                        break  # un vídeo cuenta una vez aunque upload y publish caigan hoy
+            for (uploaded_at,) in rows:
+                dt = parse_utc(uploaded_at)
+                if dt is not None and dt.astimezone(MADRID).date() == target_date:
+                    count += 1
         else:
             rows = conn.execute(
                 f"""SELECT published_at FROM shorts

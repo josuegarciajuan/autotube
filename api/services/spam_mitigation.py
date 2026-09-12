@@ -213,17 +213,20 @@ def get_account_daily_uploads(account: str, db=None, content_type: str = "long")
         with db._connect() as conn:
             conn.row_factory = sqlite3.Row
             if content_type == "long":
+                # Cap de SUBIDAS: solo cuentan las subidas reales (uploaded_at).
+                # Un vídeo subido privado un día y publicado días después NO debe
+                # consumir el cupo de subida del día en que se publica (ago 2026):
+                # contar published_at agotaba el cupo con publicaciones de
+                # backlog y bloqueaba las subidas nuevas (bucle de inanición).
                 rows = conn.execute(
-                    f"""SELECT uploaded_at, published_at FROM videos
+                    f"""SELECT uploaded_at FROM videos
                         WHERE channel_id IN ({ids_sql})
                           AND status IN ('uploaded','uploaded_private','published','warming')"""
                 ).fetchall()
                 for row in rows:
-                    for value in (row["uploaded_at"], row["published_at"]):
-                        dt = parse_utc(value)
-                        if dt is not None and dt.astimezone(MADRID).date() == target:
-                            count += 1
-                            break
+                    dt = parse_utc(row["uploaded_at"])
+                    if dt is not None and dt.astimezone(MADRID).date() == target:
+                        count += 1
             else:
                 rows = conn.execute(
                     f"""SELECT published_at FROM shorts

@@ -67,3 +67,36 @@ def test_account_daily_uploads_counts_scheduled_shorts(tmp_path):
     assert spam_mitigation.get_account_daily_uploads("acct", DB(), content_type="short") == 1
     # Pool long independiente: el short NO cuenta como long-form.
     assert spam_mitigation.get_account_daily_uploads("acct", DB(), content_type="long") == 0
+
+
+def test_account_daily_uploads_long_counts_only_real_uploads():
+    """Regla dura (sep 2026): una publicación de un privado subido otro día NO
+    consume el cap de subidas de hoy. Solo cuentan los `uploaded_at` de hoy.
+    """
+    import sqlite3
+    from api.services import spam_mitigation
+
+    class DB:
+        def get_channels(self, active_only=False):
+            return [{"id": 1, "google_account": "acct"}]
+
+        def _connect(self):
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript("""
+                CREATE TABLE videos (channel_id INTEGER, status TEXT,
+                    uploaded_at TEXT, published_at TEXT);
+                CREATE TABLE shorts (channel_id INTEGER, status TEXT,
+                    published_at TEXT);
+                -- Subido hace un año, publicado hoy: NO cuenta como subida de hoy.
+                INSERT INTO videos VALUES
+                    (1, 'published', '2020-01-01 10:00:00', datetime('now'));
+                -- Subido hoy: SÍ cuenta.
+                INSERT INTO videos VALUES
+                    (1, 'uploaded_private', datetime('now'), NULL);
+            """)
+            return conn
+
+    assert spam_mitigation.get_account_daily_uploads(
+        "acct", DB(), content_type="long"
+    ) == 1

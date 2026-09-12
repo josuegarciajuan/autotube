@@ -152,9 +152,9 @@ class TestWarmupFloorKeepsTodaySlot:
         db = RepackDB(
             videos=[
                 (1, 3, "uploaded_private", "YT1", "2026-08-24 21:00:00",
-                 None, "2026-08-18 09:00:00", "2026-08-17 08:00:00", "scheduled"),
+                 None, "2026-08-23 20:00:00", "2026-08-17 08:00:00", "scheduled"),
                 (2, 3, "uploaded_private", "YT2", "2026-08-25 21:00:00",
-                 None, "2026-08-19 09:00:00", "2026-08-18 08:00:00", "scheduled"),
+                 None, "2026-08-24 20:00:00", "2026-08-18 08:00:00", "scheduled"),
             ],
             channel_cfg=CANAL2_CFG,
         )
@@ -189,9 +189,9 @@ class TestRepackPreservesValidTarget:
         db = RepackDB(
             videos=[
                 (1, 3, "uploaded_private", "YT1", "2026-08-25 21:07:00",
-                 None, "2026-08-18 09:00:00", "2026-08-17 08:00:00", "scheduled"),
+                 None, "2026-08-24 09:00:00", "2026-08-17 08:00:00", "scheduled"),
                 (2, 3, "uploaded_private", "YT2", "2026-08-26 21:00:00",
-                 None, "2026-08-19 09:00:00", "2026-08-18 08:00:00", "scheduled"),
+                 None, "2026-08-25 09:00:00", "2026-08-18 08:00:00", "scheduled"),
             ],
             channel_cfg=CANAL2_CFG,
         )
@@ -204,6 +204,36 @@ class TestRepackPreservesValidTarget:
         assert plan[0]["preserved"] is True
         assert "19:07" in plan[0]["new_target"], (
             f"el target válido debería preservarse, es {plan[0]['new_target']}"
+        )
+
+
+# ── 2b. Regla dura 48h: warming demasiado antiguo se recorta ───
+
+class TestWarmingBeyond48hClamped:
+    """Un vídeo ya subido no puede quedar a más de 48h de su subida."""
+
+    def test_warming_beyond_48h_is_clamped(self, frozen_now):
+        frozen_now("2026-09-01T12:00:00+00:00")
+        db = RepackDB(
+            videos=[
+                (1, 3, "uploaded_private", "YT1", "2026-09-05 21:00:00",
+                 None, "2026-08-30 10:00:00", "2026-08-29 08:00:00", "scheduled"),
+            ],
+            channel_cfg=CANAL2_CFG,
+        )
+        from pipeline.publish_scheduler import repack_channel_publish_times
+
+        plan = repack_channel_publish_times(db, 3, "canal2", timezone_str="Europe/Madrid")
+        assert plan, "debe haber plan"
+        assert plan[0]["preserved"] is False
+        nt = datetime.fromisoformat(plan[0]["new_target"])
+        up = datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+        limit = max(
+            up + timedelta(hours=48),
+            datetime(2026, 9, 1, 12, 5, tzinfo=timezone.utc),
+        )
+        assert nt <= limit + timedelta(minutes=1), (
+            f"warming >48h debe recortarse, es {nt}"
         )
 
 

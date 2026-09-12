@@ -1184,8 +1184,12 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                    AND (SELECT COUNT(*) FROM generation_jobs gj2
                         WHERE gj2.video_id = v.id AND gj2.action = 'upload_only'
                           AND gj2.status = 'failed') < ?
-                ORDER BY v.scheduled_upload_at ASC, v.created_at ASC
-               LIMIT 20""",
+                  -- v (sep 2026): priorizar por publicación objetivo más próxima
+                  -- (el que antes debe ir público se sube primero), no por FIFO de
+                  -- creación; así el calentando nunca supera la ventana de 48h.
+                  ORDER BY COALESCE(v.target_public_at, v.scheduled_upload_at) ASC,
+                           v.scheduled_upload_at ASC, v.created_at ASC
+                LIMIT 20""",
             (MAX_UPLOAD_RETRY_PER_VIDEO,),
         ).fetchall()
 
@@ -1216,6 +1220,25 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 continue
         except Exception:
             pass
+
+        # ── Ventana máxima de calentando (regla dura 48h, sep 2026) ──
+        # Un vídeo programado NO puede subirse si su publicación objetivo está a
+        # más de max_warmup_hours: se quedaría "calentando" demasiado tiempo
+        # (señal de spam + desincronización del plan). Se deja en awaiting_upload.
+        try:
+            from api.services.channel_policy import policy_value as _pv
+            _max_warmup = int(_pv(channel_id, "max_warmup_hours", db=db, default=48) or 48)
+        except Exception:
+            _max_warmup = 48
+        if str(row["publish_mode"] or "").lower() == "scheduled" and row["target_public_at"]:
+            _tp = parse_utc(row["target_public_at"])
+            if _tp is not None and now < _tp - timedelta(hours=_max_warmup):
+                logger.info(
+                    "📤 Video %d: too early to upload (target %s > %dh away) — "
+                    "staying awaiting_upload",
+                    video_id, _tp.isoformat()[:16], _max_warmup,
+                )
+                continue
 
         # Check if scheduled_upload_at needs to be set (first time seeing this video)
         # sqlite3.Row doesn't have .get() — use dict-style access with fallback
@@ -1349,22 +1372,19 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 ).fetchone()
             today_uploads[ch_id] = row["cnt"] if row else 0
 
-    # Resolve videos_per_day per channel from config_json
+    # ── Cupo de subidas/día DERIVADO por canal (regla dura, sep 2026) ──
+    # = públicos/día (channel_policy), independiente del plan de publicación.
+    # El campo manual `upload_capacity_per_day` queda deprecado (el panel ya no
+    # lo edita): la fuente es la política del canal.
     ch_vpd = {}  # channel_id → upload capacity (not public target)
     for entry in eligible:
         ch_id = entry["row"]["channel_id"]
         if ch_id not in ch_vpd:
             try:
-                cfg = json.loads(entry["row"].get("config_json") or "{}")
-                vpd = cfg.get("upload_capacity_per_day", cfg.get("videos_per_day", 1))
-                # Publication policy is separate from upload throughput. A
-                # private warm-up upload may be admitted ahead of the public
-                # target; the publication cap remains enforced by the publish
-                # scheduler/replanner.
                 from api.services.channel_policy import policy_value
-                capacity = int(vpd or 0)
-                policy_cap = int(policy_value(ch_id, "upload_capacity_per_day", db=db, default=capacity) or capacity)
-                ch_vpd[ch_id] = min(max(capacity, 0), max(policy_cap, 0))
+                ch_vpd[ch_id] = max(0, int(policy_value(
+                    ch_id, "upload_capacity_per_day", db=db, default=1,
+                ) or 1))
             except Exception:
                 ch_vpd[ch_id] = 1
 
@@ -1381,6 +1401,28 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 slug, uploaded_today, max_allowed,
             )
             continue
+
+        # ── Cortocircuito del cap por cuenta Google (regla dura, sep 2026) ──
+        # Si la cuenta ya alcanzó su tope diario de subidas reales, NO se lanza
+        # el worker que fallaría en 2s (bucle de denegaciones). Se espera al
+        # reset de medianoche (Madrid) sin tocar el estado del vídeo.
+        try:
+            from api.services.spam_mitigation import (
+                get_channel_account, account_upload_slots_available,
+            )
+            _acct = get_channel_account(
+                entry["row"].get("channel_slug") or entry["row"].get("canal") or ""
+            )
+            if _acct and not account_upload_slots_available(_acct, db, content_type="long"):
+                slug = entry["row"].get("channel_slug", "?")
+                logger.info(
+                    "📤 Upload skipped for %s: account '%s' daily cap reached — "
+                    "waiting for Madrid midnight (no denial loop)",
+                    slug, _acct,
+                )
+                continue
+        except Exception:
+            pass
 
         # ── v25: same-channel upload gap (default 3h) ──
         # Prevents a backlog from uploading back-to-back for the same channel.

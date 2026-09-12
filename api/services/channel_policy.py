@@ -331,9 +331,16 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
         "delivery_state": state,
         "manual_override": bool(override),
         "generation_per_day": max(0, number("longform_generation_per_day", "LONGFORM_GENERATION_PER_DAY", default=1)),
-        "upload_capacity_per_day": max(0, number(
-            "upload_capacity_per_day", default=cfg.get("videos_per_day", 1)
-        )),
+        # ── Cupo de subidas privadas/día DERIVADO (regla dura, sep 2026) ──
+        # Es el MÍNIMO necesario para cubrir el plan de públicos con una ventana
+        # de calentando de MAX_WARMUP_HOURS: en régimen estable = públicos/día.
+        # No es editable desde el panel (evita descuadres manuales). Los topes
+        # agregados (cuenta Google, espaciado global, ventanas) siguen mandando.
+        "upload_capacity_per_day": max(0, longform_cap),
+        "max_warmup_hours": max(1, int(number(
+            "max_warmup_hours", "MAX_WARMUP_HOURS", "PUBLISH_MAX_WARMUP_HOURS",
+            default=48,
+        ) or 48)),
     }
 
 
