@@ -15,7 +15,9 @@ if REPO_ROOT not in sys.path:
 
 from pipeline.title_tokens import (  # noqa: E402
     contains_banned_token,
+    has_clickbait_suffix,
     has_dangling_tail,
+    has_unbalanced_punctuation,
     normalize,
     uppercase_words,
 )
@@ -244,6 +246,35 @@ def test_validate_title_rejects_banned_token():
 def test_validate_title_accepts_clean_title():
     cfg = _cfg(TITLE_MIN_CHARS=1, TITLE_MAX_CHARS=100)
     assert validate_title("Jung y Pauli: la sincronicidad de 1952", cfg).valid
+
+
+def test_validate_title_rejects_clickbait_suffix():
+    cfg = _cfg(TITLE_MIN_CHARS=1, TITLE_MAX_CHARS=100)
+    result = validate_title("La sincronía que lo cambió todo — Real", cfg)
+    assert not result.valid
+    assert "clickbait_suffix" in result.reasons
+
+
+def test_validate_title_rejects_unbalanced_question():
+    cfg = _cfg(TITLE_MIN_CHARS=1, TITLE_MAX_CHARS=100)
+    result = validate_title("Daluka reinó en Egipto: ¿quién. ESTREMECEDOR", cfg)
+    assert not result.valid
+    assert "unbalanced_punctuation" in result.reasons
+
+
+def test_validate_title_allows_trailing_real_adjective():
+    cfg = _cfg(TITLE_MIN_CHARS=1, TITLE_MAX_CHARS=100)
+    assert validate_title(
+        "Síndrome de Alicia: cuando distorsiona el mundo real", cfg
+    ).valid
+
+
+def test_has_clickbait_suffix_only_matches_separator_labels():
+    assert has_clickbait_suffix("Un caso — Real")
+    assert has_clickbait_suffix("Un caso (Caso Real)")
+    assert not has_clickbait_suffix("El mundo real")
+    assert not has_unbalanced_punctuation("¿Qué ocurrió realmente?")
+    assert has_unbalanced_punctuation("¿Quién. ESTREMECEDOR")
 
 
 # ── TitleEngine deterministic integration (no LLM) ───────────────────

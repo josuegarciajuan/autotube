@@ -11,7 +11,9 @@ from PIL import Image, ImageStat
 
 from pipeline.title_tokens import (
     contains_banned_token,
+    has_clickbait_suffix,
     has_dangling_tail,
+    has_unbalanced_punctuation,
     is_all_caps,
     uppercase_words,
 )
@@ -50,6 +52,10 @@ def validate_title(title: str, config) -> ValidationResult:
         reasons.append("incomplete_phrase")
     if "|" in text or "[" in text or "]" in text:
         reasons.append("injected_suffix")
+    if has_clickbait_suffix(text):
+        reasons.append("clickbait_suffix")
+    if has_unbalanced_punctuation(text):
+        reasons.append("unbalanced_punctuation")
 
     # Capitalisation is policy-driven: channels that intentionally use
     # Title Case must not be penalised for it.

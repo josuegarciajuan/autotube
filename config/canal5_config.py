@@ -125,7 +125,7 @@ TITLE_STYLE_GUIDE = (
     "nunca milagros, curas ni promesas. Empieza por el nombre o el dato."
 )
 TITLE_GOOD_EXAMPLES = [
-    "Brooke Greenberg: 20 años con cuerpo de bebé, el caso imposible",
+    "Brooke Greenberg: 20 años con cuerpo de bebé, sin diagnóstico",
     "Síndrome de Alicia: cuando tu cerebro distorsiona el mundo real",
     "El síndrome que borra los rostros: 12 casos sin diagnóstico",
 ]

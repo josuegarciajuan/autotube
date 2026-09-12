@@ -167,3 +167,40 @@ def is_all_caps(text: str) -> bool:
     if not stripped:
         return False
     return stripped == stripped.upper() and any(c.isalpha() for c in stripped)
+
+
+# ── Clickbait credibility suffix ─────────────────────────────────────
+# A credibility label glued to the end behind a separator/parenthesis:
+# "… — Real", "… (Caso real)", "… | Revelación". A plain trailing "real"
+# as a normal adjective ("el mundo real") is NOT matched because the label
+# must be preceded by a separator or an opening bracket.
+_CLICKBAIT_SUFFIX_RE = re.compile(
+    r"(?:[|–—\-]\s*|\()\s*(?:real|caso\s+real|revelaci[oó]n|impactante|"
+    r"expediente|archivos?\s+cia|clasificado)\s*\)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def has_clickbait_suffix(text: str) -> bool:
+    """True if *text* ends with a credibility clickbait label.
+
+    Matches labels glued behind a separator/parenthesis ("— Real",
+    "(Caso real)", "| Revelación") without flagging a legitimate trailing
+    adjective such as "...el mundo real".
+    """
+    return bool(_CLICKBAIT_SUFFIX_RE.search((text or "").strip()))
+
+
+def has_unbalanced_punctuation(text: str) -> bool:
+    """True when an opening question/exclamation mark is never closed.
+
+    Catches truncated questions such as ``"¿quién. ESTREMECEDOR"``. Only the
+    opening-without-closing direction is flagged: a closing mark without its
+    Spanish opening mark (common in LLM output) is tolerated.
+    """
+    t = text or ""
+    if "¿" in t and "?" not in t:
+        return True
+    if "¡" in t and "!" not in t:
+        return True
+    return False

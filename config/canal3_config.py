@@ -146,8 +146,8 @@ TITLE_STYLE_GUIDE = (
     "consecuencia real. Rigor arqueológico, sin sensacionalismo."
 )
 TITLE_GOOD_EXAMPLES = [
-    "¿Qué pruebas reales existen de que la Atlántida nunca estuvo donde creemos?",
-    "La guerra que César NO podía evitar y que CAMBIÓ Roma",
+    "¿Dónde estuvo realmente la Atlántida? Las pruebas clave",
+    "La guerra que César no pudo evitar: así CAMBIÓ Roma",
     "La ciudad que apareció bajo el mar: 3.000 años sin explicación",
 ]
 TITLE_BAD_EXAMPLES = [
