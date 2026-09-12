@@ -1640,6 +1640,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     b_with_defaults = dict(b)
                     b_with_defaults.setdefault("tipo", "desarrollo")
                     b_with_defaults.setdefault("emocion", "neutral")
+                    b_with_defaults.setdefault("tono", "")
+                    b_with_defaults.setdefault("segmentos", [])
                     b_with_defaults.setdefault("search_query_en", content_item.get("title", ""))
                     b_with_defaults.setdefault("escena_descripcion", b.get("texto", "")[:80])
                     b_with_defaults.setdefault("media_tipo", "imagen")
@@ -1767,6 +1769,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "- phase_id: UNA de las FASES NARRATIVAS listadas arriba que mejor "
             "corresponda al contenido del bloque. NUNCA inventes un id.\n"
             "- emocion: sentimiento predominante en español (misterio, asombro, tensión, reflexión...)\n"
+            "- tono: TONO DE NARRACIÓN canónico para el locutor. UNA de estas opciones EXACTAS:\n"
+            "  (neutro|suspense|misterio|tension|revelacion|asombro|tristeza|esperanza|reflexion|enfasis|cierre).\n"
+            "  Elige según CÓMO debe sonar este bloque, no solo lo que dice. Ejemplos:\n"
+            "  * Un párrafo que genera intriga o no revela aún → 'suspense' o 'misterio'.\n"
+            "  * Un giro, un descubrimiento o el desenlace → 'revelacion' (habla más rápido y agudo).\n"
+            "  * Un dato impactante → 'asombro'.\n"
+            "  * Una pérdida o tragedia → 'tristeza' (más lento y grave).\n"
+            "  * Una conclusión serena → 'reflexion'.\n"
+            "- segmentos: (OPCIONAL, solo si el bloque mezcla varios tonos) lista de objetos\n"
+            "  [{\"texto\": \"<frase textual del bloque>\", \"tono\": \"<tono canónico>\"}, ...]\n"
+            "  Reglas: 2-4 segmentos máximo; los 'texto' concatenados deben reproducir el bloque\n"
+            "  original; úsalo sobre todo cuando el bloque empieza en suspense y termina en\n"
+            "  revelación (o viceversa). Si el bloque tiene un único tono, OMITE 'segmentos'.\n"
             "- search_query_en: frase de búsqueda en INGLÉS para encontrar "
             "video/imagen en bancos de stock (Pexels, Pixabay, Unsplash).\n"
             "  REGLAS OBLIGATORIAS:\n"
@@ -1835,8 +1850,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             f"{blocks_text}\n\n"
             f"Devuelve los {len(batch)} bloques enriquecidos en este formato:\n"
             '{"bloques": [{"texto": "...", "tipo": "...", "phase_id": "...", '
-            '"emocion": "...", "search_query_en": "...", "escena_descripcion": "...", '
-            '"media_tipo": "...", "media_duracion": N}]}'
+            '"emocion": "...", "tono": "...", "segmentos": [{"texto": "...", "tono": "..."}], '
+            '"search_query_en": "...", "escena_descripcion": "...", '
+            '"media_tipo": "...", "media_duracion": N}]}\n'
+            'Nota: "segmentos" es opcional; omítelo si el bloque tiene un único tono.'
         )
 
         try:
@@ -1887,6 +1904,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     # Allow minor whitespace diffs but reject major changes
                     if len(enriched_text) >= len(orig_text) * 0.85:
                         eb["phase_id"] = _norm_phase(eb)
+                        eb["tono"] = str(eb.get("tono", "") or "").strip()
+                        eb["segmentos"] = self._sanitize_segmentos(
+                            enriched_text, eb.get("segmentos"),
+                        )
                         valid.append(eb)
                     else:
                         # Text was truncated — use original with default fields
@@ -1898,6 +1919,8 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                         b["tipo"] = eb.get("tipo", "desarrollo")
                         b["phase_id"] = _norm_phase(eb)
                         b["emocion"] = eb.get("emocion", "neutral")
+                        b["tono"] = eb.get("tono", "")
+                        b["segmentos"] = eb.get("segmentos", [])
                         b["search_query_en"] = eb.get("search_query_en", "")
                         b["escena_descripcion"] = eb.get("escena_descripcion", b.get("texto", "")[:80])
                         b["media_tipo"] = eb.get("media_tipo", "imagen")
@@ -1915,6 +1938,33 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         except Exception as exc:
             logger.warning("Enrich batch %d LLM call failed: %s", batch_num, exc)
             return []
+
+    @staticmethod
+    def _sanitize_segmentos(block_text: str, segmentos) -> list[dict]:
+        """Validate/normalize LLM-provided sub-phrase tone segments.
+
+        Returns a clean list of ``{"texto","tono"}`` or ``[]`` when the
+        segments don't reproduce the original block text (which would make
+        the narration diverge from the stored guion).
+        """
+        if not isinstance(segmentos, list) or not segmentos:
+            return []
+        clean: list[dict] = []
+        for seg in segmentos:
+            if not isinstance(seg, dict):
+                continue
+            stext = str(seg.get("texto") or "").strip()
+            if not stext:
+                continue
+            clean.append({"texto": stext, "tono": str(seg.get("tono") or "").strip()})
+        if len(clean) < 2:
+            return []
+        # The concatenation of the segments must reproduce the block text
+        # (allow small connector-word differences).
+        joined = " ".join(s["texto"] for s in clean)
+        if len(joined) < len(block_text) * 0.85:
+            return []
+        return clean
 
     # ────────────────────────────────────────────────────────────
     # Phase 2: document-level metadata
