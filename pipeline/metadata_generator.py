@@ -117,13 +117,14 @@ Ejemplos de buena capitalización:
 
 🖼️ TEXTO MINIATURA (DOS LÍNEAS DE OVERLAY):
 Ahora la miniatura tiene DOS líneas de texto en vez de una:
-- LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máximo 12 caracteres. Debe ser la palabra o frase más impactante que haga DETENER el scroll. **DEBE contener una palabra CLAVE del título del video — NUNCA uses frases genéricas.** Formatos probados:
-  • Palabra-clave del título: "SIN SANGRE", "COLAPSO", "ODÍSEA", "DEVORADA"
-  • Cifra impactante: "3 MINUTOS", "NINGUNO SALIÓ", "5 MÉDICOS"
-  • Afirmación extrema: "FUE REAL", "CAMBIÓ TODO"
+- LÍNEA 1 (gancho principal, texto GRANDE): 1-3 palabras en MAYÚSCULAS. Máximo 14 caracteres. Debe ser CONCRETA y aportar información (cifra, fecha, lugar, consecuencia, nombre clave). **DEBE contener una palabra CLAVE concreta del título — PROHIBIDO usar comodines genéricos.** Formatos probados:
+  • Dato concreto del título: "1971 MADRID", "COLAPSO CARDIACO", "SIN SANGRE", "CASO 43"
+  • Cifra impactante: "3 MINUTOS", "5 MEDICOS"
+  • Afirmación informativa: "NO FUE EL", "LO SABIAN"
 - LÍNEA 2 (complemento, texto MEDIANO debajo de L1): 2-4 palabras. Máximo 24 caracteres. Complementa a L1 y al título sin repetirlos. Añade la pieza de intriga que falta. Formatos probados:
-  • "Nadie lo explicó", "Lo que ocultaron", "La verdad sale"
-  • "El informe secreto", "Dijeron que era imposible"
+  • "Lo que ocultaron", "El informe secreto", "Dijeron que era imposible"
+  • "La prueba que faltaba", "El error del peritaje"
+- PALABRAS PROHIBIDAS (clichés vacíos): OCULTO, OCULTA, REAL, PROHIBIDO, IMPACTANTE, INCREÍBLE, SECRETO, SECRETA, NADIE LO VIO, NADIE LO EXPLICÓ. El texto debe ser específico del tema.
 - Regla de oro: L1 + L2 + título deben contar una mini-historia de 3 frases que obligue a hacer clic. NINGUNA línea repite a las otras ni al título.
 
 ═══ COHERENCIA TÍTULO ↔ MINIATURA ═══

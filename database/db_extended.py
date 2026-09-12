@@ -1391,6 +1391,9 @@ def migrate_v2(db_path: str = None):
     # ── v54: split account upload budget per content type (long/short) ──
     _migrate_v54(conn, logger)
 
+    # ── v55: thumbnail diversity (color_key, face_role, subject) ──
+    _migrate_v55(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3466,6 +3469,23 @@ def _migrate_v54(conn, logger):
         logger.warning("Migration v54 failed (non-fatal): %s", exc)
 
 
+def _migrate_v55(conn, logger):
+    """Idempotent v55: thumbnail diversity columns (tema-primero, sep 2026).
+
+    Guarda por vídeo el tono dominante, el rol de la cara y el sujeto concreto
+    de la miniatura. Junto con ``thumbnail_style``/``thumbnail_layout`` (v45)
+    permite que cada nueva miniatura evite repetir el layout y el color de las
+    anteriores del mismo canal.
+    """
+    for column in ("thumbnail_color_key", "thumbnail_face_role", "thumbnail_subject"):
+        try:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column} TEXT DEFAULT ''")
+            logger.info("Migration v55: added %s column to videos", column)
+        except sqlite3.OperationalError:
+            pass  # already present — idempotent
+    conn.commit()
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -5158,27 +5178,76 @@ class ExtendedDatabase(Database):
     # ── Video Stats History ────────────────────────────────────
 
     def update_video_thumbnail_style(self, video_id: int, style: str,
-                                     layout: str = "") -> bool:
-        """Registra el estilo visual y layout de la miniatura de un video.
+                                     layout: str = "", *,
+                                     color_key: str = "",
+                                     face_role: str = "",
+                                     subject: str = "") -> bool:
+        """Registra el estilo, layout y diversidad de la miniatura de un video.
 
         D2 (ago 2026): cierra el loop CTR→estilo. Con CTR ya instrumentado
         (B1), permite agregar CTR promedio por estilo de miniatura y saber
         qué packaging funciona. ``style`` = visual_style (p.ej. "distress_signal"),
         ``layout`` = plantilla de composición (p.ej. "split_face").
+
+        v3 (tema-primero, sep 2026): ``color_key`` (bucket de tono dominante),
+        ``face_role`` (protagonist|secondary|none) y ``subject`` permiten la
+        guardia anti-repetición entre miniaturas consecutivas del canal.
         """
         if not video_id or not style:
             return False
         try:
             with self._connect() as conn:
+                tables = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+                sets = ["thumbnail_style = ?", "thumbnail_layout = ?"]
+                params: list = [style, layout or ""]
+                for column, value in (
+                    ("thumbnail_color_key", color_key),
+                    ("thumbnail_face_role", face_role),
+                    ("thumbnail_subject", subject),
+                ):
+                    # Defensive: older DBs before migration v55 keep the legacy
+                    # 3-column update instead of failing.
+                    if column in tables:
+                        sets.append(f"{column} = ?")
+                        params.append(value or "")
                 conn.execute(
-                    "UPDATE videos SET thumbnail_style = ?, thumbnail_layout = ?, "
-                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (style, layout or "", video_id),
+                    f"UPDATE videos SET {', '.join(sets)}, "
+                    f"updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (*params, video_id),
                 )
                 conn.commit()
             return True
         except Exception:
             return False
+
+    def get_recent_thumbnail_context(self, channel_id: int, limit: int = 3) -> list[dict]:
+        """Últimas miniaturas del canal (nuevas primero) para la guardia de diversidad.
+
+        Devuelve layout, tono dominante, rol de cara y sujeto de cada uno de los
+        últimos vídeos con miniatura generada. 0 coste (solo DB).
+        """
+        if not channel_id:
+            return []
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+                wanted = [c for c in (
+                    "thumbnail_layout", "thumbnail_color_key",
+                    "thumbnail_face_role", "thumbnail_subject",
+                ) if c in cols]
+                if not wanted:
+                    return []
+                rows = conn.execute(
+                    f"""SELECT {', '.join(wanted)} FROM videos
+                        WHERE channel_id = ?
+                          AND (thumbnail_path IS NOT NULL AND thumbnail_path != '')
+                        ORDER BY id DESC LIMIT ?""",
+                    (channel_id, int(limit)),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def get_thumbnail_style_ctr(self, channel_id: int) -> list[dict]:
         """CTR promedio por estilo de miniatura (packaging loop, D2 ago 2026).

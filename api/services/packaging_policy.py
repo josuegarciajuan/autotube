@@ -38,17 +38,78 @@ def validate_title(title: str, config) -> ValidationResult:
     return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
 
 
+_OVERLAY_CLICHES = {
+    "oculto", "oculta", "real", "prohibido", "impactante", "increíble",
+    "increible", "secreto", "secreta", "nadie", "exclusivo", "inédito",
+    "inedito", "shock", "impensable",
+}
+
+
 def validate_thumbnail_overlay(overlay: str, max_chars: int = 32) -> ValidationResult:
     text = " ".join(str(overlay or "").split())
     reasons: list[str] = []
     if len(text) > max_chars:
         reasons.append("length")
     tokens = [t.strip("|,:;.!?()[]").casefold() for t in text.split()]
-    banned = {"oculto", "real", "prohibido", "impactante", "increíble", "increible"}
-    if len(set(tokens) & banned) >= 2:
+    if len(set(tokens) & _OVERLAY_CLICHES) >= 2:
         reasons.append("repetitive_claims")
+    # A pure-cliché overlay ("OCULTO REAL") carries no specific information.
+    if tokens and set(tokens) <= _OVERLAY_CLICHES:
+        reasons.append("generic_overlay")
     if text.count("|") > 1:
         reasons.append("too_many_lines")
+    return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
+
+
+def validate_thumbnail_diversity(
+    new: dict,
+    recent: list[dict] | None,
+    config,
+) -> ValidationResult:
+    """Advisory diversity check between consecutive thumbnails of a channel.
+
+    ``new``/``recent`` dicts carry ``layout``, ``color_key`` and ``overlay``.
+    Unlike the upload gate, this never blocks a publish: callers typically use
+    it to regenerate once when a repeat is detected.
+    """
+    reasons: list[str] = []
+    recent = [r for r in (recent or []) if r]
+    if not recent:
+        return ValidationResult(True, ())
+
+    depth = int(getattr(config, "THUMBNAIL_LAYOUT_HISTORY_DEPTH", 3))
+    blocked_layouts = {
+        str(r.get("layout") or "") for r in recent[:depth] if r.get("layout")
+    }
+    if new.get("layout") and str(new["layout"]) in blocked_layouts:
+        reasons.append("layout_repeated")
+
+    # Hue distance vs the closest recent dominant colour.
+    new_key = str(new.get("color_key") or "")
+    try:
+        from pipeline.thumbnail_color import hue_distance, hue_of_key
+    except Exception:  # pragma: no cover - defensive
+        hue_distance = hue_of_key = None  # type: ignore
+    if new_key and hue_distance and hue_of_key:
+        new_hue = hue_of_key(new_key)
+        min_distance = int(getattr(config, "THUMBNAIL_ACCENT_HUE_DISTANCE_MIN", 40))
+        if new_hue is not None:
+            for r in recent[:depth]:
+                old_hue = hue_of_key(str(r.get("color_key") or ""))
+                if old_hue is None:
+                    continue
+                if hue_distance(new_hue, old_hue) < min_distance:
+                    reasons.append("color_repeated")
+                    break
+
+    new_overlay = " ".join(str(new.get("overlay") or "").split()).casefold()
+    if new_overlay:
+        for r in recent[:depth]:
+            old_overlay = " ".join(str(r.get("overlay") or "").split()).casefold()
+            if old_overlay and old_overlay == new_overlay:
+                reasons.append("overlay_repeated")
+                break
+
     return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
 
 
