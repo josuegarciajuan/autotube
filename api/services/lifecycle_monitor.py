@@ -43,6 +43,7 @@ TASK_TIMEOUTS = {
     "packaging_recovery": 2400,      # requeue de validation_failed (loop duerme 1800s)
     "reminders": 900,                # recordatorios operativos que solo alertan (60s)
     "planning_replan": 600,          # consumo de recomputaciones durables (loop 15s; to_thread puede tardar)
+    "editorial_reviews": 3600,        # revisiones por vídeo + auditoría diaria
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

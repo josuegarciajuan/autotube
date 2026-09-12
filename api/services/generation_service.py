@@ -2141,6 +2141,11 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 pub_mode = get_channel_config(canal).PUBLISH_MODE
                 upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, video_yt_id, yt_url, status=upload_status)
+                try:
+                    from api.services.editorial_reviews import schedule_video_reviews
+                    schedule_video_reviews(db, video_id)
+                except Exception as review_exc:
+                    logger.warning("Editorial review scheduling skipped: %s", review_exc)
 
                 # ── Auto-mark altered content (IA) via browser automation ──
                 try:
@@ -2486,6 +2491,11 @@ async def start_upload_job(job_id: int, video_id: int, force_immediate: bool = F
                 upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
                 db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
                 db.update_video(video_id, progress=100)
+            try:
+                from api.services.editorial_reviews import schedule_video_reviews
+                schedule_video_reviews(db, video_id)
+            except Exception as review_exc:
+                logger.warning("Editorial review scheduling skipped: %s", review_exc)
             # ── Save upload timing ───────────────────────────
             try:
                 _upload_ms = int((time.time() - upload_start) * 1000)
@@ -2687,6 +2697,11 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             pub_mode = get_channel_config(canal).PUBLISH_MODE
             upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
             db.update_video(video_id, progress=100, status=upload_status)
+            try:
+                from api.services.editorial_reviews import schedule_video_reviews
+                schedule_video_reviews(db, video_id)
+            except Exception as review_exc:
+                logger.warning("Editorial review scheduling skipped: %s", review_exc)
 
             # ── Auto-mark altered content (IA) via browser ──
             try:

@@ -1789,6 +1789,11 @@ def run_job(
                              canal, yt_video_id, video_id, worker_status)
                 try:
                     db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
+                    try:
+                        from api.services.editorial_reviews import schedule_video_reviews
+                        schedule_video_reviews(db, video_id)
+                    except Exception as review_exc:
+                        logger.warning("Editorial review scheduling skipped: %s", review_exc)
                     db.update_video(video_id, progress=100, status=worker_status)
                     logger.info("[%s] yt_video_id persisted successfully for video #%d", canal, video_id)
                 except Exception as persist_err:

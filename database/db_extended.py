@@ -1394,6 +1394,9 @@ def migrate_v2(db_path: str = None):
     # ── v55: thumbnail diversity (color_key, face_role, subject) ──
     _migrate_v55(conn, logger)
 
+    # ── v56: durable, quota-free editorial review checkpoints (ESR) ──
+    _migrate_v56(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3484,6 +3487,15 @@ def _migrate_v55(conn, logger):
         except sqlite3.OperationalError:
             pass  # already present — idempotent
     conn.commit()
+
+
+def _migrate_v56(conn, logger):
+    """Idempotent v56: scheduled read-only editorial review ledger (ESR)."""
+    schema = Path(__file__).parent / "schema_v56.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        conn.commit()
+        logger.info("Migration v56: editorial review checkpoints ensured")
 
 
 def _migrate_v10(conn, logger):

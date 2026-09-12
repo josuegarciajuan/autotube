@@ -912,3 +912,14 @@ COMMENT_REPLY_1_DELAY_MIN_H = 8
 COMMENT_REPLY_1_DELAY_MAX_H = 18
 COMMENT_REPLY_2_DELAY_MIN_H = 26
 COMMENT_REPLY_2_DELAY_MAX_H = 48
+
+# Editorial recovery reviews. Disabled by default; channel profiles opt in.
+# Values are consumed through config_bridge, never by slug-specific services.
+EDITORIAL_RECOVERY_REVIEW = {
+    "enabled": False,
+    "max_attempts": 3,
+    "retry_minutes": 60,
+    "min_impressions": 100,
+    "min_ctr_percent": 4.0,
+    "min_retention_percent": 35.0,
+}

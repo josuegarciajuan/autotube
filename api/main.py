@@ -492,6 +492,10 @@ async def lifespan(app: FastAPI):
     # request HTTP. Procesa coalescido en ≤15-20 s.
     replan_bg_task = _supervised_loop("planning_replan", _planning_replan_loop)
 
+    # Quota-free editorial reviews are opt-in per channel and only inspect new
+    # uploads plus a daily channel audit. They never mutate historical videos.
+    editorial_reviews_task = _supervised_loop("editorial_reviews", _editorial_reviews_loop)
+
     yield
     
     # Shutdown
@@ -510,6 +514,7 @@ async def lifespan(app: FastAPI):
         yt_state_task,
         packaging_recovery_task,
         replan_bg_task,
+        editorial_reviews_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -771,6 +776,29 @@ async def _egress_monitor_loop():
         except Exception as exc:
             logger.warning("egress monitor loop error: %s", exc)
         await asyncio.sleep(60)
+
+
+async def _editorial_reviews_loop():
+    """Run opt-in quota-free editorial checkpoints once per hour."""
+    import asyncio, logging
+    logger = logging.getLogger("autotube.editorial_reviews")
+    await asyncio.sleep(120)
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat
+            from api.services.editorial_reviews import schedule_daily_audits, process_due_reviews
+            from database.db_extended import ExtendedDatabase
+            touch_task_heartbeat("editorial_reviews")
+            db = ExtendedDatabase()
+            scheduled = await asyncio.to_thread(schedule_daily_audits, db)
+            result = await asyncio.to_thread(process_due_reviews, db)
+            if scheduled or result.get("processed"):
+                logger.info("Editorial reviews: scheduled=%d processed=%d succeeded=%d failed=%d",
+                            scheduled, result.get("processed", 0), result.get("succeeded", 0),
+                            result.get("failed", 0))
+        except Exception as exc:
+            logger.exception("Editorial reviews loop failed: %s", exc)
+        await asyncio.sleep(3600)
 
 
 async def _yt_state_reconcile_loop():
