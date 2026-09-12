@@ -409,6 +409,20 @@ PUBLISH_JITTER_MIN = 15
 PUBLISH_WARMUP_MIN = 5
 PUBLISH_WINDOW_SPREAD_MIN = 90
 
+# ── Ventana máxima de calentando (regla dura, sep 2026) ────────────────
+# Un vídeo subido como privado (warming) NUNCA debe esperar más de
+# MAX_WARMUP_HOURS horas hasta su publicación: subir privado días antes es una
+# señal de spam y además desincroniza la planificación. Si un vídeo no cabe en
+# la ventana [target_public_at - MAX_WARMUP_HOURS, target_public_at - warmup],
+# se queda en `awaiting_upload` (preferible) en vez de subirse pronto.
+MAX_WARMUP_HOURS = 48
+
+# ── Colchón de generación (regla dura, sep 2026) ───────────────────────
+# Nº mínimo de vídeos en `awaiting_upload` por canal que la fábrica mantiene
+# para que la válvula de subida nunca se quede seca. Si el colchón baja, la
+# generación añade un slot extra (la generación no consume cuota de YouTube).
+MIN_AWAITING_UPLOAD_BUFFER = 2
+
 # ── Tope de publicaciones long-form por canal y día (antiban, ago 2026) ──
 # Tras strikes de spam, YouTube penaliza las ráfagas de publicaciones del mismo
 # canal (mismo día / misma hora). Este tope limita CUÁNTOS vídeos pueden hacerse

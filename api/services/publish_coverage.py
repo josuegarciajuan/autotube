@@ -193,6 +193,106 @@ def _resolve_deficit_alert(db, slug: str, channel_id: int | None) -> int:
     return resolved
 
 
+# ── Cumplimiento diario de públicos (regla dura, sep 2026) ─────────────
+# Si a lo largo del día el canal va por debajo de su cap de públicos y hay
+# vídeos ya subidos (warming) que no están comprometidos para hoy, se adelanta
+# su publishAt para CUMPLIR el plan hoy. Es la remediación que rompe el bucle
+# "el plan no se cumple y nadie lo arregla".
+_CATCHUP_STAGGER_MIN = 10
+
+
+def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
+                                   cap: int) -> dict:
+    """Fuerza la publicación de warming para cubrir el déficit de HOY.
+
+    Returns: {published, committed, need, forced, reason}.
+    """
+    from api.time_utils import parse_utc
+    out = {"published": 0, "committed": 0, "need": 0, "forced": 0, "reason": ""}
+    if not cap or cap <= 0:
+        return out
+    now = datetime.now(timezone.utc)
+    now_local = now.astimezone(tz)
+    today_local = now_local.date()
+
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, status, yt_video_id, target_public_at,
+                          published_at, uploaded_at, created_at
+                   FROM videos
+                   WHERE channel_id=?
+                     AND status IN ('published','uploaded_private','warming','scheduled')
+                   ORDER BY COALESCE(uploaded_at, created_at) ASC""",
+                (channel_id,),
+            ).fetchall()
+    except Exception as exc:
+        out["reason"] = f"scan failed: {exc}"
+        return out
+
+    candidates = []
+    for r in rows:
+        status = r["status"]
+        target = parse_utc(r["target_public_at"])
+        if status == "published":
+            pub = parse_utc(r["published_at"])
+            if pub is not None and pub.astimezone(tz).date() == today_local:
+                out["published"] += 1
+            continue
+        if not r["yt_video_id"]:
+            continue
+        if target is not None and target.astimezone(tz).date() == today_local:
+            out["committed"] += 1
+            continue
+        candidates.append((int(r["id"]), str(r["yt_video_id"]), status))
+
+    out["need"] = max(0, int(cap) - (out["published"] + out["committed"]))
+    if out["need"] <= 0:
+        out["reason"] = "cobertura de hoy OK"
+        return out
+    if not candidates:
+        out["reason"] = "déficit sin material warming"
+        return out
+
+    # Autenticación perezosa (una sola vez por canal)
+    try:
+        from pipeline.youtube_uploader import YouTubeUploader
+        uploader = YouTubeUploader(slug)
+        if not uploader.authenticate():
+            out["reason"] = "auth fallida"
+            return out
+    except Exception as exc:
+        out["reason"] = f"auth error: {exc}"
+        return out
+
+    base = now + timedelta(minutes=5 + (channel_id % 4) * 3)
+    for idx, (vid, yt_id, _status) in enumerate(candidates[: out["need"]]):
+        target_dt = base + timedelta(minutes=idx * _CATCHUP_STAGGER_MIN)
+        target_iso = target_dt.astimezone(timezone.utc).isoformat()
+        try:
+            res = uploader.set_publish_at(yt_id, target_iso)
+            if not res.get("updated"):
+                raise RuntimeError(f"respuesta inesperada: {res}")
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE videos SET target_public_at=? WHERE id=?",
+                    (target_iso, vid),
+                )
+                conn.commit()
+            out["forced"] += 1
+            logger.info(
+                "[%s] Public catch-up: #%d (%s) publishAt → %s (déficit hoy)",
+                slug, vid, yt_id, target_iso[:16],
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Public catch-up: no se pudo adelantar #%d (%s): %s",
+                slug, vid, yt_id, exc,
+            )
+    out["reason"] = f"déficit {out['need']} → forzados {out['forced']}"
+    return out
+
+
 def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                                   max_channels: int = 8) -> dict:
     """Audita la cobertura de publicación de todos los canales libres.
@@ -335,6 +435,21 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             else:
                 _resolve_deficit_alert(db, slug, channel_id=ch_id)
 
+            # ── Cumplimiento diario: forzar warming para cubrir HOY ──
+            today_info = {"published": 0, "committed": 0, "need": 0, "forced": 0,
+                          "reason": "skip"}
+            try:
+                today_info = remediate_today_public_deficit(
+                    db, slug, ch_id, tz, n,
+                )
+                if today_info.get("forced"):
+                    result["public_catchup_forced"] = (
+                        result.get("public_catchup_forced", 0)
+                        + int(today_info["forced"])
+                    )
+            except Exception as exc:
+                logger.debug("[%s] today public catch-up skipped: %s", slug, exc)
+
             result["channels"][slug] = {
                 "pending": len(pending),
                 "quota_per_day": n,
@@ -342,6 +457,7 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                 "deficit_days": deficit_days,
                 "triggered": triggered,
                 "reason": reason,
+                "today": today_info,
             }
 
         logger.info(

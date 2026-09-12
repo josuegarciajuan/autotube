@@ -195,7 +195,7 @@ class TestRepackNonCollidingStillPreserved:
                 (1001, 5, "uploaded_private", "YT1001", "2026-09-01T20:00:00+00:00",
                  None, "2026-08-31 10:00:00", "2026-08-30 08:00:00", "scheduled", 0),
                 (1002, 5, "uploaded_private", "YT1002", "2026-09-02T18:00:00+00:00",
-                 None, "2026-08-31 11:00:00", "2026-08-30 09:00:00", "scheduled", 0),
+                 None, "2026-09-01 00:00:00", "2026-08-30 09:00:00", "scheduled", 0),
             ],
             channel_cfg=CANAL4_CFG,
         )

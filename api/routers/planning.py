@@ -650,6 +650,19 @@ def safe_full_replan_apply(data: SafeFullReplanApply):
         raise HTTPException(409, {"code": code, "message": message}) from exc
 
 
+@router.post("/full-replan/authoritative")
+def authoritative_full_replan(horizon_days: int = Query(7, ge=1, le=31)):
+    """Reprogramación TOTAL autoritativa ("Reprogramar Ahora").
+
+    Borra la programación pendiente, reasigna los vídeos pendientes y los que
+    están calentando, fuerza su publicidad en YouTube y regenera el plan
+    (longs + shorts). Idempotente y diseñada para que el operador la pulse
+    cuando detecte que algo se ha descuadrado.
+    """
+    from api.services.planning_service import authoritative_replan
+    return authoritative_replan(db=get_db(), horizon_days=horizon_days)
+
+
 @router.post("/full-replan")
 def full_replan():
     """Deprecated dangerous reset; clients must use preflight then apply."""

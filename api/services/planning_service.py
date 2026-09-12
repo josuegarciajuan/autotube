@@ -647,9 +647,45 @@ def _resolve_generation_per_day(ch: dict, date_str: str, db=None) -> int:
                 h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
                 roll = h / 0xFFFFFFFF
                 if roll < boost_weight:
-                    return base + 1
+                    return _with_awaiting_upload_buffer(ch, base + 1, db)
+        return _with_awaiting_upload_buffer(ch, base, db)
+    return _with_awaiting_upload_buffer(
+        ch, _resolve_videos_per_day(ch, date_str, db=db), db
+    )
+
+
+def _with_awaiting_upload_buffer(ch: dict, base: int, db) -> int:
+    """Añade +1 a la generación diaria si el canal está por debajo del colchón.
+
+    Regla dura (sep 2026): mantener al menos MIN_AWAITING_UPLOAD_BUFFER vídeos en
+    `awaiting_upload` por canal para que la válvula de subida nunca se quede
+    seca. La generación no consume cuota de YouTube, así que generar de más es
+    seguro: los vídeos quedan en cola (preferido) en vez de calentando.
+    """
+    if db is None or base <= 0:
         return base
-    return _resolve_videos_per_day(ch, date_str, db=db)
+    # El colchón solo aplica a canales con plan real (>=2/día). Canales de
+    # 1/día (o perfil strike) no generan de más: generación = plan.
+    if base < 2:
+        return base
+    try:
+        from config.defaults import MIN_AWAITING_UPLOAD_BUFFER as _BUF
+    except Exception:
+        _BUF = 2
+    try:
+        ch_id = int(ch.get("channel_id", 0) or 0)
+        if not ch_id:
+            return base
+        with db._connect() as conn:
+            awaiting = int(conn.execute(
+                "SELECT COUNT(*) FROM videos WHERE channel_id=? AND status='awaiting_upload'",
+                (ch_id,),
+            ).fetchone()[0] or 0)
+        if awaiting < max(0, int(_BUF or 0)):
+            return base + 1
+    except Exception:
+        pass
+    return base
 
 
 # ── Quota-aware planning (ago 2026) ────────────────────────────
@@ -5105,6 +5141,148 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
                 delay,
             )
             time.sleep(delay)
+
+
+@_replan_locked
+def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
+    """Reprogramación TOTAL autoritativa — botón "Reprogramar Ahora".
+
+    Regla dura (sep 2026): a diferencia de safe_full_replan (que nunca borra ni
+    cancela), este flujo:
+
+      1. Borra TODOS los `planned_slots` y `shorts_planned_slots` pendientes y
+         cancela los `generation_jobs` en cola (protege 'running': invariante de
+         una sola generación).
+      2. Reasigna `target_public_at` + `scheduled_upload_at` de TODOS los vídeos
+         pendientes (awaiting_upload) y ya subidos (uploaded_private/warming)
+         al plan de públicos (2/día, gap/pico) con ventana de ≤48h.
+      3. Fuerza `publishAt` en YouTube de los ya subidos (videos.update).
+      4. Cubre el déficit de HOY (catch-up) y regenera shorts a 3/día.
+      5. Reconstruye el horizonte de generación y activa la ventana silenciosa.
+
+    Pensado para ejecutarse cuando "algo se descuadra": un clic y el sistema
+    vuelve a estar al día de forma completa.
+    """
+    import time as _time
+    global _post_full_replan_block_until
+
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    if str(db.get_system_state("scheduler_paused") or "") == "true":
+        return {"ok": False, "reason": "scheduler_paused"}
+
+    channels = [
+        c for c in (db.get_channels(active_only=True) or [])
+        if c.get("slug") != "test"
+    ]
+    summary = {
+        "ok": True,
+        "slots_cleared": 0,
+        "jobs_cancelled": 0,
+        "videos_retimed": 0,
+        "today_forced": 0,
+        "channels": {},
+        "shorts": {},
+        "horizon": None,
+    }
+
+    # ── 1. Borrar programación pendiente + jobs en cola ──────────────
+    with db._connect() as conn:
+        summary["slots_cleared"] = conn.execute(
+            "DELETE FROM planned_slots WHERE status='pending'"
+        ).rowcount
+        conn.execute(
+            "DELETE FROM shorts_planned_slots WHERE status IN ('pending','cancelled')"
+        )
+        summary["jobs_cancelled"] = conn.execute(
+            "UPDATE generation_jobs SET status='cancelled', "
+            "error_msg='Reprogramación total (operador)', "
+            "finished_at=datetime('now') WHERE status='queued'"
+        ).rowcount
+        conn.commit()
+    logger.info(
+        "authoritative_replan: cleared %d slots, cancelled %d queued jobs",
+        summary["slots_cleared"], summary["jobs_cancelled"],
+    )
+
+    # ── 2. Reasignar vídeos y forzar publishAt de los ya subidos ─────
+    from api.services.publish_repack import apply_publish_repack
+    from api.services.publish_coverage import remediate_today_public_deficit
+    import pytz
+
+    for ch in channels:
+        ch_id = int(ch["id"])
+        slug = ch.get("slug") or f"canal{ch_id}"
+        try:
+            rep = apply_publish_repack(
+                db, ch_id, slug,
+                dry_run=False, quota_gate=False, force_yt=True,
+            )
+            repacked = int((rep or {}).get("rescheduled", 0) or 0)
+        except Exception as exc:
+            logger.warning("authoritative_replan: repack %s falló: %s", slug, exc)
+            repacked = 0
+
+        today_info = {"forced": 0, "need": 0, "reason": "skip"}
+        try:
+            from api.services.channel_policy import policy_value
+            cap = int(policy_value(
+                ch_id, "longform_publish_cap", db=db, default=0,
+            ) or 0)
+            cfg = db.get_channel_planning_config(ch_id) or {}
+            tz = pytz.timezone(cfg.get("publish_timezone", "Europe/Madrid"))
+            today_info = remediate_today_public_deficit(db, slug, ch_id, tz, cap)
+        except Exception as exc:
+            today_info = {"forced": 0, "need": 0, "reason": f"error: {exc}"}
+
+        summary["videos_retimed"] += repacked
+        summary["today_forced"] += int(today_info.get("forced", 0) or 0)
+        summary["channels"][slug] = {
+            "repacked": repacked,
+            "today": today_info,
+        }
+
+    # ── 3. Regenerar horizonte de generación (bypass ventana silenciosa) ──
+    try:
+        _post_full_replan_block_until = None
+        try:
+            db.set_system_state("post_full_replan_block_until", "")
+        except Exception:
+            pass
+        summary["horizon"] = compute_and_store_horizon(
+            horizon_days=horizon_days, db=db, force_replan=False,
+        )
+    except Exception as exc:
+        logger.warning("authoritative_replan: horizon falló: %s", exc)
+        summary["horizon"] = {"error": str(exc)}
+
+    # ── 4. Regenerar shorts (3/día) ──────────────────────────────────
+    try:
+        from api.services.shorts_scheduler import generate_upcoming_shorts
+        summary["shorts"] = generate_upcoming_shorts(days=horizon_days, db=db)
+    except Exception as exc:
+        logger.warning("authoritative_replan: shorts falló: %s", exc)
+        summary["shorts"] = {"error": str(exc)}
+
+    # ── 5. Ventana silenciosa + marcar último replan ─────────────────
+    _post_full_replan_block_until = (
+        datetime.now() + timedelta(minutes=_POST_FULL_REPLAN_QUIET_MIN)
+    )
+    try:
+        db.set_system_state(_LAST_REPLAN_KEY, str(_time.time()))
+        db.set_system_state(
+            "post_full_replan_block_until",
+            str(_post_full_replan_block_until.timestamp()),
+        )
+    except Exception:
+        pass
+
+    logger.info(
+        "authoritative_replan: %d vídeos reprogramados, %d forzados hoy, %d slots",
+        summary["videos_retimed"], summary["today_forced"], summary["slots_cleared"],
+    )
+    return summary
 
 
 @_replan_locked

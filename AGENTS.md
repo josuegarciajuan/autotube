@@ -478,6 +478,22 @@ la subida libera).
   (NO el perfil de pacing). Tras los strikes quedó en 2; el techo `normal` del
   perfil es 3. Alinear a 3 para drenar a 3/canal/día (12/día global).
 
+## 📌 Planificación: públicos vs. subidas (regla dura, sep 2026)
+> **Spec completo:** `specs/planificacion-publicos-subidas.md`. Cualquier cambio
+> futuro en planificación/subida/publicación/reprogramación DEBE respetarlo.
+
+- **Públicos/día = plan** (2 longs + 3 shorts por canal). Es la ÚNICA fuente de
+  `publishAt`; ni la generación ni el upload lo recortan.
+- **Subidas privadas/día = derivado** (`public_longform_per_day`); **ventana de
+  calentando máx 48h**. Si un vídeo no cabe, se queda `awaiting_upload` (preferido).
+- **Cumplimiento diario:** si un canal va por debajo de su cap de públicos y hay
+  `warming`, `publish_coverage` adelanta su `publishAt` para cumplir HOY.
+- **Cap por cuenta cuenta solo `uploaded_at`** (subidas reales), nunca `published_at`.
+- **Nunca `error` por cap/ventana**; cortocircuito al tope de cuenta (sin bucle).
+- **"Reprogramar Ahora"** = `POST /api/planning/full-replan/authoritative`
+  (`authoritative_replan`): borra la programación pendiente, reasigna pendientes
+  y calentando, fuerza `publishAt` y regenera el plan. Idempotente.
+
 ## 🍃 Frescura en publicación (fábrica continua)
 Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran
 "stale": antes de subirlos, `upload_scheduler` regenera título (LLM vía

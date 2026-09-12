@@ -1779,6 +1779,32 @@ def repack_channel_publish_times(
                 slot = old_dt
                 preserved = True
 
+        # ── Regla dura: ventana máxima de calentando (sep 2026) ──────────
+        # Un vídeo YA subido como privado no puede quedar a más de
+        # `max_warmup_hours` de su subida. Si el repack lo empujaba más allá
+        # (backlog denso), se recorta a uploaded_at + max_warmup, o a "ahora"
+        # si la ventana ya venció. Se respeta el hueco mínimo respecto al slot
+        # anterior para no crear colisión de publicación.
+        if status in ("uploaded_private", "warming") and row["uploaded_at"]:
+            _up = parse_utc(row["uploaded_at"])
+            if _up is not None:
+                try:
+                    from api.services.channel_policy import policy_value as _pvw
+                    _mw = int(_pvw(channel_id, "max_warmup_hours", db=db, default=48) or 48)
+                except Exception:
+                    _mw = 48
+                _hard_cap = _up + _td(hours=_mw)
+                if slot > _hard_cap:
+                    _clamped = max(_hard_cap, now_utc + _td(minutes=5))
+                    if last_slot_utc is None or _clamped >= last_slot_utc + _td(hours=gap_hours):
+                        logger.info(
+                            "[%s] repack: #%d warming >%dh — recortado %s → %s",
+                            slug, video_id, _mw,
+                            slot.isoformat()[:16], _clamped.isoformat()[:16],
+                        )
+                        slot = _clamped
+                        preserved = False
+
         if slot > safety_limit:
             logger.warning(
                 "[%s] repack: safety bound %dh alcanzado para #%d — se recorta",

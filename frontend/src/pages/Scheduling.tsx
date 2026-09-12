@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, ApiRequestError, type FullReplanApplyResult, type FullReplanPreflight } from '../lib/api'
+import { api, ApiRequestError } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
 import { Calendar, Smartphone, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw, ShieldCheck, Scissors } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
@@ -575,30 +575,19 @@ function PlanningSection() {
 export default function Scheduling() {
   const [showReplanModal, setShowReplanModal] = useState(false)
   const [replanState, setReplanState] = useState<'idle' | 'loading-review' | 'review' | 'applying' | 'result' | 'error'>('idle')
-  const [preflight, setPreflight] = useState<FullReplanPreflight | null>(null)
-  const [replanResult, setReplanResult] = useState<FullReplanApplyResult | null>(null)
+  const [replanResult, setReplanResult] = useState<any>(null)
   const [replanError, setReplanError] = useState<string | null>(null)
   const reviewButtonRef = useRef<HTMLButtonElement>(null)
   const replanDialogRef = useRef<HTMLDivElement>(null)
   const replanTriggerRef = useRef<HTMLButtonElement>(null)
   const queryClient = useQueryClient()
 
-  const isExpiredError = (message: string) => /expir|caduc|stale|invalid|no longer/i.test(message)
-
   const openReplanReview = useCallback(async () => {
+    // Reprogramación TOTAL: no requiere preflight; se confirma y aplica directo.
     setShowReplanModal(true)
-    setReplanState('loading-review')
-    setPreflight(null)
+    setReplanState('review')
     setReplanResult(null)
     setReplanError(null)
-    try {
-      const result = await api.fullReplanPreflight()
-      setPreflight(result)
-      setReplanState('review')
-    } catch (e: any) {
-      setReplanError(e?.message || 'No se pudo preparar la revisión.')
-      setReplanState('error')
-    }
   }, [])
 
   const closeReplanModal = useCallback(() => {
@@ -633,15 +622,14 @@ export default function Scheduling() {
   }, [showReplanModal, replanState, closeReplanModal])
 
   const handleReplan = useCallback(async () => {
-    if (!preflight?.confirmation_token) return
     setReplanState('applying')
     setReplanResult(null)
     setReplanError(null)
     try {
-      const result = await api.fullReplanApply(preflight.confirmation_token)
+      const result = await api.authoritativeFullReplan()
       setReplanResult(result)
       setReplanState('result')
-      if (result.ok) {
+      if (result?.ok) {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['today-slots'] }),
           queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] }),
@@ -656,12 +644,10 @@ export default function Scheduling() {
       const message = e?.message || 'No se pudo aplicar la reprogramación.'
       setReplanError((e instanceof ApiRequestError && (e.status === 503 || e.code === 'SERVER_BUSY'))
         ? 'El servidor está ocupado con otra operación. Espera unos segundos y vuelve a intentarlo.'
-        : isExpiredError(message)
-        ? 'La revisión ha caducado o ya no coincide con la planificación actual. Revísala de nuevo antes de confirmar.'
         : message)
       setReplanState('error')
     }
-  }, [preflight, queryClient])
+  }, [queryClient])
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
@@ -716,10 +702,17 @@ export default function Scheduling() {
                 {replanResult.ok && (
                   <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs">
                     <p className="text-gray-400">
-                      <span className="text-neon-cyan">{replanResult.updated}</span> slots reprogramados
+                      <span className="text-neon-cyan">{replanResult.slots_cleared}</span> slots borrados y reprogramados
                     </p>
-                    <p className="text-gray-400"><span className="text-green-400">+{replanResult.created}</span> slots nuevos</p>
-                    <p className="text-gray-500"><span className="text-gray-300">{replanResult.preserved}</span> slots preservados</p>
+                    <p className="text-gray-400">
+                      <span className="text-neon-cyan">{replanResult.videos_retimed}</span> vídeos reasignados (pendientes + calentando)
+                    </p>
+                    <p className="text-gray-400">
+                      <span className="text-green-400">{replanResult.today_forced}</span> publicaciones forzadas para hoy
+                    </p>
+                    <p className="text-gray-500">
+                      <span className="text-gray-300">{replanResult.jobs_cancelled}</span> jobs en cola cancelados
+                    </p>
                   </div>
                 )}
 
@@ -754,31 +747,20 @@ export default function Scheduling() {
                 </div>
 
                 <div className="text-sm text-gray-300 space-y-2">
-                  <p>Esta revisión calcula los cambios antes de aplicarlos:</p>
+                  <p>Reprogramación <strong>total</strong>. Esta acción:</p>
                   <ul className="list-disc list-inside text-gray-400 space-y-1 text-xs ml-2">
-                    <li>Preservar slots pendientes que no necesiten cambios</li>
-                    <li>Reprogramar solo los horarios necesarios, sin tocar vídeos ni jobs</li>
-                    <li>Añadir slots nuevos cuando el plan lo requiera, respetando:</li>
-                  </ul>
-                  <ul className="list-disc list-inside text-gray-500 space-y-0.5 text-xs ml-6">
-                    <li>Cupo diario por canal (videos + shorts)</li>
-                    <li>Franjas horarias de upload y publicacion</li>
-                    <li>Colisiones entre canales y mismo canal</li>
-                    <li>Videos/shorts ya en vuelo (generando, pendiente subida, calentando)</li>
+                    <li><strong>Borra</strong> la programación pendiente actual (longs + shorts)</li>
+                    <li>Reasigna los vídeos <strong>pendientes de subir</strong> y los que están <strong>calentando</strong></li>
+                    <li>Fuerza en YouTube su publicación a la hora correcta</li>
+                    <li>Cubre el plan diario del canal (2 longs + 3 shorts), forzando el déficit de hoy si lo hay</li>
+                    <li>Respeta la ventana de calentando máxima de 48h</li>
                   </ul>
                   <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 mt-3">
                     <p className="text-amber-300 text-xs flex items-start gap-2">
                       <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-                      <span>Los slots en <strong>generacion activa</strong> (running) se preservan. Esta acción solo ajusta horarios pendientes y añade los nuevos necesarios.</span>
+                      <span>Los jobs de <strong>generación en curso</strong> (running) se preservan. Los pendientes en cola se cancelan y se vuelven a planificar.</span>
                     </p>
                   </div>
-                  {preflight && (
-                    <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs text-gray-400">
-                      <p><span className="text-neon-cyan">{preflight.summary.proposed}</span> slots propuestos para los próximos {preflight.summary.horizon_days} días</p>
-                      <p>{preflight.proposed_slots.length} horarios revisados, conservando slots, vídeos y jobs existentes.</p>
-                      {preflight.expires_at ? <p className="text-gray-500">Esta revisión caduca: {preflight.expires_at}</p> : null}
-                    </div>
-                  )}
                 </div>
 
                 <div className="flex gap-2 pt-1">
@@ -791,7 +773,6 @@ export default function Scheduling() {
                   <button
                     ref={reviewButtonRef}
                     onClick={handleReplan}
-                    disabled={!preflight?.confirmation_token}
                     className="flex-1 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors"
                   >
                     Confirmar y aplicar
