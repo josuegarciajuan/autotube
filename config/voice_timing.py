@@ -29,6 +29,13 @@ UNKNOWN_RATE_FALLBACK = 1.0     # assume neutral pace if rate is unreadable
 
 # ── Public API ─────────────────────────────────────────────────
 
+def _get(cfg: Any, key: str, default=None):
+    """Read a value from a dict or a module/namespace config."""
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
 def voice_speed_factor(canal_config: Any) -> float:
     """Return the speed multiplier for the channel's configured voice.
 
@@ -36,8 +43,28 @@ def voice_speed_factor(canal_config: Any) -> float:
     * Kokoro stores rate as a float speed multiplier (e.g. 0.85 is slower).
     * A factor > 1.0 means the voice speaks *faster* than neutral.
     """
+    # Expressive narration: derive the average speed from the tone profiles
+    # (closer to reality than a single rate_base). rate_to_speed returns a
+    # speech multiplier (<1 = slower), so invert to the WPM-factor convention.
+    if _get(canal_config, "EXPRESSIVE_NARRATION", False):
+        profiles = _get(canal_config, "PROSODY_PROFILES", None)
+        if isinstance(profiles, dict) and profiles:
+            try:
+                from config.voice_resolver import rate_to_speed
+                speeds = [
+                    rate_to_speed(p.get("rate"))
+                    for p in profiles.values() if isinstance(p, dict)
+                ]
+                speeds = [s for s in speeds if s > 0]
+                if speeds:
+                    avg_speed = sum(speeds) / len(speeds)
+                    if avg_speed > 0:
+                        return 1.0 / avg_speed
+            except Exception:
+                pass  # fall back to the legacy rate_base path
+
     # Try TTS_STRATEGY dict first (per-channel config bridge format)
-    tts = getattr(canal_config, "TTS_STRATEGY", None)
+    tts = _get(canal_config, "TTS_STRATEGY", None)
     if isinstance(tts, dict):
         rate = tts.get("rate_base") or tts.get("rate_primary")
     else:
@@ -45,7 +72,7 @@ def voice_speed_factor(canal_config: Any) -> float:
 
     # Fall back to legacy VOICE_RATE attribute
     if rate is None:
-        rate = getattr(canal_config, "VOICE_RATE", None)
+        rate = _get(canal_config, "VOICE_RATE", None)
 
     if rate is None:
         return UNKNOWN_RATE_FALLBACK

@@ -238,6 +238,7 @@ async def _synthesize_block(
     voice: str,
     rate: str,
     pitch: str,
+    volume: Optional[str] = None,
 ) -> tuple[list[bytes], list[dict]]:
     """Synthesise a single block via edge-tts WebSocket.
 
@@ -250,6 +251,7 @@ async def _synthesize_block(
         voice=voice,
         rate=rate,
         pitch=pitch,
+        volume=volume if volume is not None else "+0%",
         boundary="WordBoundary",
     )
 
@@ -435,11 +437,17 @@ def synthesize_shorts_blocks(
         raise RuntimeError("No blocks with text to synthesise")
 
     temp_files: list[str]       = []
+    pause_after_list: list[int] = []   # expressive pause after each block (ms)
     all_timestamps: list[dict]  = []
     cumulative_offset_ms: float = 0.0
 
-    logger.info("🎙️ Segmented Short TTS: %d blocks → %s",
-                len(valid), output_audio_path)
+    # Expressive narration: tono-based prosody takes precedence over TTS_STRATEGY.
+    from config.voice_resolver import resolve_prosody
+    _expressive = bool(getattr(ch_config, "EXPRESSIVE_NARRATION", True))
+    _profiles = getattr(ch_config, "PROSODY_PROFILES", {}) or {}
+
+    logger.info("🎙️ Segmented Short TTS: %d blocks → %s (expressive=%s)",
+                len(valid), output_audio_path, _expressive and bool(_profiles))
 
     for i, block in enumerate(valid):
         block_type = block.get("tipo", "desarrollo")
@@ -447,11 +455,25 @@ def synthesize_shorts_blocks(
         # Normalize numbers for natural TTS pronunciation
         from pipeline.text_normalizer import normalize_numbers
         block_text = normalize_numbers(block_text)
-        rate, pitch = _block_voice_params(block_type, ch_config)
 
-        logger.info("  [%d/%d] %s | rate=%s pitch=%s | %d chars",
-                     i + 1, len(valid), block_type, rate, pitch,
-                     len(block_text))
+        volume = "+0%"
+        if _expressive and _profiles:
+            pros = resolve_prosody(
+                ch_config,
+                tono=block.get("tono"),
+                emocion=block.get("emocion", ""),
+                tipo=block_type,
+            )
+            rate, pitch = pros["rate"], pros["pitch"]
+            volume = pros["volume"]
+            block_pause = int(pros.get("pause_after_ms", 0) or 0) or BLOCK_PAUSE_MS
+        else:
+            rate, pitch = _block_voice_params(block_type, ch_config)
+            block_pause = BLOCK_PAUSE_MS
+
+        logger.info("  [%d/%d] %s | tono=%s rate=%s pitch=%s pause=%dms | %d chars",
+                     i + 1, len(valid), block_type, block.get("tono"),
+                     rate, pitch, block_pause, len(block_text))
 
         # --- attempt synthesis with per-block params ---
         audio_chunks: list[bytes] = []
@@ -459,7 +481,7 @@ def synthesize_shorts_blocks(
 
         try:
             audio_chunks, word_ts = _run_async_in_thread(
-                _synthesize_block(block_text, voice, rate, pitch)
+                _synthesize_block(block_text, voice, rate, pitch, volume)
             )
         except Exception as exc:
             logger.warning(
@@ -486,6 +508,7 @@ def synthesize_shorts_blocks(
         tmp.write(b"".join(audio_chunks))
         tmp.close()
         temp_files.append(tmp.name)
+        pause_after_list.append(block_pause)
 
         # Offset timestamps and accumulate
         for ts in word_ts:
@@ -498,7 +521,7 @@ def synthesize_shorts_blocks(
             # Inter-block pause: offset subsequent blocks' timestamps
             # so SRT subtitles reflect the silence between narrative blocks
             if i < len(valid) - 1:
-                cumulative_offset_ms += BLOCK_PAUSE_MS
+                cumulative_offset_ms += block_pause
 
         # ── v3: progress callback per block ──
         if progress_cb is not None:
@@ -511,14 +534,15 @@ def synthesize_shorts_blocks(
         raise RuntimeError("No blocks produced audio — cannot create Short")
 
     # ── Concatenate all MP3 segments ──────────────────────────
-    logger.info("Concatenating %d audio segments with %dms inter-block pauses…",
-                len(temp_files), BLOCK_PAUSE_MS)
+    logger.info("Concatenating %d audio segments with expressive pauses…",
+                len(temp_files))
     combined = AudioSegment.empty()
     for i, tmp_path in enumerate(temp_files):
         combined += AudioSegment.from_mp3(tmp_path)
         # Insert silence between blocks (not after the last one)
         if i < len(temp_files) - 1:
-            combined += AudioSegment.silent(duration=BLOCK_PAUSE_MS)
+            pause = pause_after_list[i] if i < len(pause_after_list) else BLOCK_PAUSE_MS
+            combined += AudioSegment.silent(duration=pause)
 
     duration_sec = len(combined) / 1000.0
     combined.export(str(output_audio_path), format="mp3", bitrate="192k")

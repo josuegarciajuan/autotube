@@ -75,6 +75,33 @@ class KokoroTTSEngine:
         # 0 = disabled (legacy: keep model loaded for all blocks)
         self.unload_every_n_blocks = voice_config.get("unload_every_n_blocks", 0)
 
+        # ── Expressive narration ──────────────────────────────
+        self.expressive = bool(voice_config.get("expressive", False))
+        self.prosody_profiles = voice_config.get("prosody_profiles", {}) or {}
+        self.tono_default = voice_config.get("tono_default", "neutro")
+        self.max_segments = int(voice_config.get("max_segments", 3) or 3)
+        self.rate_base = voice_config.get(
+            "rate_base", self.block_speeds.get("base", 0.9)
+        )
+        self._expr_cfg = {
+            "EXPRESSIVE_NARRATION": self.expressive,
+            "PROSODY_PROFILES": self.prosody_profiles,
+            "TONO_CATALOG": list(self.prosody_profiles.keys()),
+            "TONO_DEFAULT": self.tono_default,
+            "TTS_STRATEGY": {},
+            "VOICE_RATE": self.rate_base,
+            "VOICE_PITCH": "+0Hz",
+            "VOICE_VOLUME": "+0%",
+        }
+
+    def _segments_for_block(self, bloque: dict) -> list[dict]:
+        """Split a block into toned, prosody-resolved segments (sub-frases)."""
+        from config.voice_resolver import split_block_segments
+        return split_block_segments(
+            bloque, self._expr_cfg,
+            max_segments=self.max_segments, expressive=self.expressive,
+        )
+
     @property
     def pipeline(self):
         """Lazy-load Kokoro pipeline (heavy model, loaded once)."""
@@ -380,6 +407,20 @@ class KokoroTTSEngine:
         # Pre-load pipeline (triggers lazy init on current thread)
         _ = self.pipeline
 
+        from config.voice_resolver import rate_to_speed
+
+        # ── Silence helper (respects batching mode) ───────────
+        def _append_silence(seconds: float, name: str):
+            samples = int(seconds * self.sample_rate)
+            if samples <= 0:
+                return
+            if use_temp_files:
+                p = os.path.join(temp_dir, f"{name}.wav")
+                sf.write(p, np.zeros(samples, dtype=np.float32), self.sample_rate)
+                audio_paths.append(p)
+            else:
+                all_audio.append(np.zeros(samples, dtype=np.float32))
+
         for i, bloque in enumerate(bloques):
             # ── Batch boundary: unload + reload to free RAM ──
             if use_temp_files and i > 0 and i % unload_every == 0:
@@ -396,85 +437,89 @@ class KokoroTTSEngine:
                 logger.warning("Block %d has empty text — skipping", i)
                 continue
 
-            clean = self._clean_guion(texto)
-            if not clean:
+            segments = self._segments_for_block(bloque)
+            if not segments:
                 continue
 
-            speed = self._speed_for_tipo(tipo)
-            logger.info(
-                "  Block %d/%d [%s] speed=%.2f text=%d chars",
-                i + 1, len(bloques), tipo, speed, len(clean)
-            )
+            logger.info("  Block %d/%d [%s] → %d segmento(s)",
+                        i + 1, len(bloques), tipo, len(segments))
 
-            # Generate audio for this block (with timeout in separate thread)
-            t0 = time.time()
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
-                    _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
-                    audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
-            except concurrent.futures.TimeoutError:
-                logger.error("Kokoro block %d timed out after %ds — skipping", i, _BLOCK_TIMEOUT)
-                continue
-            except Exception as exc:
-                logger.error("Kokoro block %d failed: %s — skipping", i, exc)
-                continue
+            for si, seg in enumerate(segments):
+                clean = self._clean_guion(seg["texto"])
+                if not clean:
+                    continue
 
-            if not audio_chunks:
-                logger.warning("Block %d produced no audio", i)
-                continue
+                speed = rate_to_speed(
+                    seg.get("rate"),
+                    default=self._speed_for_tipo(tipo),
+                )
+                logger.info(
+                    "    seg %d/%d tono=%s speed=%.2f pause=%dms text=%d chars",
+                    si + 1, len(segments), seg.get("tono"), speed,
+                    seg.get("pause_after_ms", 0), len(clean),
+                )
 
-            block_audio = (
-                np.concatenate(audio_chunks) if len(audio_chunks) > 1
-                else audio_chunks[0]
-            )
-            block_dur = len(block_audio) / self.sample_rate
-            elapsed = time.time() - t0
-            logger.info("    ✅ %.1fs audio in %.1fs (RTF %.1fx)", block_dur, elapsed, elapsed / block_dur)
+                # Generate audio for this segment (timeout in separate thread)
+                t0 = time.time()
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
+                        _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
+                        audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    logger.error("Kokoro seg %d.%d timed out after %ds — skipping",
+                                 i, si, _BLOCK_TIMEOUT)
+                    continue
+                except Exception as exc:
+                    logger.error("Kokoro seg %d.%d failed: %s — skipping", i, si, exc)
+                    continue
 
-            # Pause only at paragraph boundaries (when previous block
-            # was last in its paragraph). Inter-paragraph transitions
-            # with background music are handled separately by the video
-            # editor's transition system (_insert_transitions).
-            if i > 0 and self.pause_between > 0:
-                prev_block = bloques[i - 1]
-                if prev_block.get("is_last_in_paragraph", False):
-                    pause_samples = int(self.pause_between * self.sample_rate)
-                    if use_temp_files:
-                        pause_path = os.path.join(
-                            temp_dir, f"pause_{i:04d}.wav",
-                        )
-                        sf.write(pause_path,
-                                 np.zeros(pause_samples, dtype=np.float32),
-                                 self.sample_rate)
-                        audio_paths.append(pause_path)
-                    else:
-                        all_audio.append(np.zeros(pause_samples, dtype=np.float32))
-                    cumulative_offset_ms += self.pause_between * 1000.0
-                    logger.debug(
-                        "    ⏸️ %.1fs pause at paragraph boundary (block %d → %d)",
-                        self.pause_between, i - 1, i,
-                    )
+                if not audio_chunks:
+                    logger.warning("Seg %d.%d produced no audio", i, si)
+                    continue
 
-            if use_temp_files:
-                block_path = os.path.join(temp_dir, f"block_{i:04d}.wav")
-                sf.write(block_path, block_audio, self.sample_rate)
-                audio_paths.append(block_path)
-                del block_audio
-                del audio_chunks
-            else:
-                all_audio.append(block_audio)
+                block_audio = (
+                    np.concatenate(audio_chunks) if len(audio_chunks) > 1
+                    else audio_chunks[0]
+                )
+                block_dur = len(block_audio) / self.sample_rate
+                elapsed = time.time() - t0
+                logger.info("    ✅ %.1fs audio in %.1fs (RTF %.1fx)",
+                            block_dur, elapsed, elapsed / block_dur)
 
-            # Estimate word-level timestamps for this block
-            words = clean.split()
-            block_ts = self._estimate_timestamps(words, block_dur)
+                if use_temp_files:
+                    block_path = os.path.join(temp_dir, f"block_{i:04d}_{si:02d}.wav")
+                    sf.write(block_path, block_audio, self.sample_rate)
+                    audio_paths.append(block_path)
+                    del block_audio
+                    del audio_chunks
+                else:
+                    all_audio.append(block_audio)
 
-            # Adjust with cumulative offset
-            for ts in block_ts:
-                ts["start_ms"] = round(ts["start_ms"] + cumulative_offset_ms, 1)
-                ts["end_ms"] = round(ts["end_ms"] + cumulative_offset_ms, 1)
-            all_timestamps.extend(block_ts)
+                # Estimate word-level timestamps for this segment
+                words = clean.split()
+                block_ts = self._estimate_timestamps(words, block_dur)
+                for ts in block_ts:
+                    ts["start_ms"] = round(ts["start_ms"] + cumulative_offset_ms, 1)
+                    ts["end_ms"] = round(ts["end_ms"] + cumulative_offset_ms, 1)
+                all_timestamps.extend(block_ts)
+                cumulative_offset_ms += block_dur * 1000.0
 
-            cumulative_offset_ms += block_dur * 1000.0
+                # Expressive pause after the segment (except last overall)
+                is_last_overall = (i == len(bloques) - 1 and si == len(segments) - 1)
+                pause_ms = int(seg.get("pause_after_ms", 0) or 0)
+                if pause_ms > 0 and not is_last_overall:
+                    _append_silence(pause_ms / 1000.0, f"tpause_{i:04d}_{si:02d}")
+                    cumulative_offset_ms += pause_ms
+
+            # Pause at paragraph boundaries (previous behavior, now after
+            # the block that closes a paragraph). Inter-paragraph music
+            # transitions are handled by the video editor.
+            if (i < len(bloques) - 1 and self.pause_between > 0
+                    and bloque.get("is_last_in_paragraph", False)):
+                _append_silence(self.pause_between, f"ppause_{i:04d}")
+                cumulative_offset_ms += self.pause_between * 1000.0
+                logger.debug("    ⏸️ %.1fs pause after paragraph (block %d)",
+                             self.pause_between, i)
 
             # Progress callback (if provided)
             if progress_cb:
