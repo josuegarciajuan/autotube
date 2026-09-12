@@ -42,6 +42,7 @@ TASK_TIMEOUTS = {
     "yt_state_reconcile": 900,       # verdad externa de publicación de shorts (5 min)
     "packaging_recovery": 2400,      # requeue de validation_failed (loop duerme 1800s)
     "reminders": 900,                # recordatorios operativos que solo alertan (60s)
+    "planning_replan": 600,          # consumo de recomputaciones durables (loop 15s; to_thread puede tardar)
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}
