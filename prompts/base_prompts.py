@@ -59,7 +59,12 @@ def _niche_substance_rule(cfg) -> str:
 
 
 def packaging_rules(cfg) -> str:
-    """Shared evidence-first rules for scripts and metadata prompts."""
+    """Shared evidence-first rules for scripts and metadata prompts.
+
+    Includes the channel's title caps policy, style guide and curated
+    good/bad examples so the LLM writes titles the TitleEngine will score
+    well (no clickbait suffixes, no broken tails, one idea, concrete facts).
+    """
     formulas = ", ".join(getattr(cfg, "TITLE_FORMULAS", [])[:6])
     year_rule = ""
     if getattr(cfg, "TITLE_REQUIRE_YEAR", False):
@@ -67,12 +72,55 @@ def packaging_rules(cfg) -> str:
             "\n- OBLIGATORIO: el título debe incluir un año de 4 dígitos "
             "(p. ej. 1987). Sin año, el paquete se considera incompleto."
         )
+
+    caps_policy = str(getattr(cfg, "TITLE_CAPS_POLICY", "sentence") or "sentence").lower()
+    policy_text = {
+        "title_case": (
+            "Title Case (este canal lo tiene activado): capitaliza las palabras "
+            "principales y deja en minúscula artículos/preposiciones cortas."
+        ),
+        "one_word_caps": (
+            "Frase normal en español y deja UNA sola palabra clave en MAYÚSCULAS "
+            "para enfatizar."
+        ),
+        "sentence": (
+            "Sentence case (estándar en español): solo la primera letra y los "
+            "nombres propios en mayúscula. El Title Case es INCORRECTO en español."
+        ),
+    }.get(caps_policy, "Sentence case: solo la primera letra y los nombres propios.")
+
+    style_guide = str(getattr(cfg, "TITLE_STYLE_GUIDE", "") or "").strip()
+    style_block = f"\n- Guía de estilo del canal: {style_guide}" if style_guide else ""
+
+    good = getattr(cfg, "TITLE_GOOD_EXAMPLES", []) or []
+    bad = getattr(cfg, "TITLE_BAD_EXAMPLES", []) or []
+    good_block = ""
+    if good:
+        good_block = "\n- BUENOS ejemplos (imita el registro, no el tema):\n" + "\n".join(
+            f"    · {g}" for g in good[:5]
+        )
+    bad_block = ""
+    if bad:
+        bad_block = "\n- MALOS ejemplos (nunca los repitas):\n" + "\n".join(
+            f"    · {b}" for b in bad[:5]
+        )
+
     return f"""REGLAS DE PACKAGING EVIDENCE-FIRST:
 - El título debe identificar un caso concreto (persona/lugar y fecha o año cuando existan), no una promesa genérica.
 - Separa siempre HECHO documentado, INTERPRETACIÓN propuesta y DESCONOCIDO; no presentes hipótesis como hechos.
 - Evita fórmulas repetitivas de shock, "oculto", "real", "prohibido" y superlativos vacíos.
 - Usa una sola idea visual legible en la miniatura y texto corto; no uses sellos de credibilidad como sustituto de evidencia.
 - Fórmulas configuradas para este canal: {formulas}{year_rule}
+
+REGLAS DEL TÍTULO (LONG-FORM):
+- Longitud objetivo 45-70 caracteres; el gancho debe quedar en los primeros 40.
+- Pon el número/cifra/nombre propio al frente cuando exista.
+- Una sola idea por título. Oculta la RESPUESTA, no el TEMA (~80% premisa / 20% incógnita).
+- PROHIBIDO terminar en conector (de, del, la, que, y, para, con...).
+- PROHIBIDO usar '|' o '[' ']' en el título.
+- Máximo UNA palabra en MAYÚSCULAS por título; nunca todo el título en mayúsculas.
+- Sin emojis en long-form. Sin sufijos clickbait: (REAL), (CASO REAL), (IMPACTANTE), (REVELACIÓN), (ARCHIVOS CIA), (EXPEDIENTE).
+- Capitalización: {policy_text}{style_block}{good_block}{bad_block}
 """
 
 

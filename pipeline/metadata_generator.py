@@ -31,6 +31,12 @@ from pipeline.title_enricher import (
     build_power_words_prompt_section,
     resolve_title_max_chars,
 )
+from pipeline.title_engine import (
+    TitleEngine,
+    apply_caps_policy,
+    deterministic_fallback_title,
+    truncate_title_at_word,
+)
 from pipeline.seo_researcher import SEOResearcher, _format_seconds
 from prompts.base_prompts import packaging_rules
 from api.services.packaging_policy import validate_title
@@ -51,38 +57,30 @@ Tu misión: crear metadatos que maximicen CTR (Click-Through Rate), retención y
 
 ═══ REGLAS DE ORO ═══
 
-📝 TÍTULO VIRAL (1 ÚNICO título optimizado):
-- LONGITUD OBJETIVO: 40-65 caracteres (rango de máximo CTR comprobado). MÁXIMO ABSOLUTO: 100 caracteres.
-- La keyword principal al frente (primeras 3 palabras). NO empieces con artículos débiles ("El", "La", "Un", "Una", "Los", "Las") a menos que formen parte de una frase de impacto deliberada. Mejor empieza con el número, la keyword o "Este/Esta" si necesitas un determinante.
-- USA PATRONES DE ALTO CTR científicamente probados:
-  • Número impar + adjetivo extremo — ej: "3 médicos vieron esto y NO pudieron explicarlo"
-  • Pregunta retórica que genera necesidad de respuesta — ej: "¿Qué filmó esta cámara a 11.000 metros?"
-  • Revelación exclusiva — ej: "Lo que NADIE te contó sobre [tema]"
-  • Contraste emocional extremo — ej: "Entró al quirófano riendo. Salió sin poder hablar."
-  • Sufijo factual opcional al final SOLO si aporta contexto verificable — ej: "(2026)", "(Caso de 1921)". NUNCA "(REAL)", "(CASO REAL)", "(IMPACTANTE)", "(REVELACIÓN)", "(ARCHIVOS CIA)", "(EXPEDIENTE)": son señal clásica de spam/clickbait para YouTube.
-- POWER WORDS por categoría (usa al menos 1 de cada categoría a lo largo de los metadatos, no solo en el título):
-  ⚡ URGENCIA / EXCLUSIVIDAD: REVELADO, FILTRADO, CENSURADO, INÉDITO, CLASIFICADO, CONFIDENCIAL, PROHIBIDO, EXCLUSIVA
-  💥 IMPACTO EMOCIONAL: ESCALOFRIANTE, DESGARRADOR, INEXPLICABLE, DEMOLEDOR, SOBRECOGEDOR, ESTREMECEDOR, ALUCINANTE, ATERRADOR
-  🔍 CURIOSIDAD / MISTERIO: OCULTO, SECRETO, PERTURBADOR, SINIESTRO, ENIGMÁTICO, IMPACTANTE, INCREÍBLE, INSÓLITO
-- Clickbait ÉTICO: el título promete algo que el video REALMENTE entrega.
-- CAPITALIZACIÓN: escribe el título como una frase normal en español — SOLO la primera letra en mayúscula y los nombres propios. NUNCA pongas cada palabra en mayúscula (Title Case). Puedes poner UNA palabra clave en MAYÚSCULAS para destacar (máximo 1 por título).
-- PROHIBIDO añadir sufijos de credibilidad clickbait: (REAL), (CASO REAL), (REVELACIÓN), (IMPACTANTE), (ARCHIVOS CIA), (EXPEDIENTE). YouTube los trata como spam y multiplican el riesgo de strike. La credibilidad se construye con DETALLES concretos del título, no con etiquetas vacías. A lo sumo un sufijo factual verificable como (2026).
-- El título debe crear una sensación de "TENGO que ver esto" al hacer scroll.
+📝 TÍTULO (1 ÚNICO título optimizado):
+- LONGITUD OBJETIVO: 45-70 caracteres. El gancho debe quedar en los primeros 40. MÁXIMO ABSOLUTO: 100 caracteres.
+- Pon el número/cifra, el año o el nombre propio AL FRENTE cuando exista. Evita empezar por artículos o pronombres vacíos ("El", "La", "Esto").
+- UNA SOLA IDEA por título. Oculta la RESPUESTA, no el TEMA (~80% premisa / 20% incógnita).
+- El título debe identificar un caso concreto (persona/lugar y fecha/año cuando existan), no una promesa genérica.
+- PROHIBIDO terminar en conector (de, del, la, que, y, para, con, sin...).
+- PROHIBIDO usar '|' o '[' ']'. PROHIBIDO pegar sufijos de credibilidad clickbait: (REAL), (CASO REAL), (REVELACIÓN), (IMPACTANTE), (ARCHIVOS CIA), (EXPEDIENTE). La credibilidad se demuestra con detalles concretos, no con etiquetas.
+- CAPITALIZACIÓN (español): escribe el título como una frase normal — SOLO la primera letra y los nombres propios en mayúscula. NUNCA pongas cada palabra en mayúscula (Title Case es incorrecto en español). Puedes poner UNA palabra clave en MAYÚSCULAS (máximo 1 por título); nunca el título entero en mayúsculas.
+- Sin emojis en long-form.
 
 🧠 PSICOLOGÍA DEL CLICK (APLICADA AL TÍTULO):
-- Curiosity Gap: crea una pregunta que solo se responde al hacer clic.
-- Zeigarnik Effect: información incompleta → ansiedad → necesidad de cerrar el ciclo.
-- Emotional Arousal (high-arousal words): sorpresa, ira, miedo, asombro → comparten más.
-- Von Restorff Effect: el título debe destacar entre los demás resultados de búsqueda.
+- Curiosity Gap: plantea una pregunta que solo se responde al ver el vídeo.
+- Zeigarnik Effect: información incompleta → necesidad de cerrar el ciclo.
+- Emotional Arousal: sorpresa, asombro, tensión → se comparte más.
+- Von Restorff Effect: el título debe destacar entre los resultados de búsqueda.
 - Números impares: 20% más CTR que los pares. Usa 3, 5, 7, 9, 11.
-- La credibilidad NO se declara, se demuestra: un sufijo vacío "(REAL)" no aporta información y es señal clásica de spam/clickbait. Mejor un dato concreto en el cuerpo del título.
+- La credibilidad NO se declara, se demuestra con un dato concreto en el cuerpo del título.
 
 Ejemplos de buena capitalización:
   CORRECTO: "Nadie creyó su predicción. 3 días después ocurrió"
   CORRECTO: "5 médicos vieron esto y NO pudieron explicarlo"
   CORRECTO: "El experimento que volvió LOCOS a 5 personas"
   INCORRECTO: "El Milagro Que Dejó Sin Palabras A 5 Médicos"
-  INCORRECTO (empieza con artículo débil sin impacto): "La historia que nadie te contó sobre..."
+  INCORRECTO (termina en conector): "La historia que nadie contó sobre"
 
 📄 DESCRIPCIÓN (SEO completa):
 - **LO PRIMERO de todo**: CAPÍTULOS con timestamps en formato "0:00 — Título del capítulo" (mínimo 3, máximo 8). Esta es la PRIMERA LÍNEA de la descripción, sin NINGUNA introducción previa. YouTube indexa los timestamps y los muestra como "Key Moments" en los resultados de búsqueda, lo que aumenta el CTR un 20-30%.
@@ -592,29 +590,37 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 max_tokens=4000,
             )
             
-            # Validate and sanitize — single title
-            title = result.get("title", "")
-            if not title or not isinstance(title, str):
-                title = self._fallback_titles(script)[0]
-            
-            # Extract title suffix if present (LLM may or may not include it in title)
-            title = _append_title_suffix(title, result.get("title_suffix", ""))
-            title_suffix_norm = _normalize_title_suffix(result.get("title_suffix", ""))
-            
-            # Ensure title ≤ 100 chars (trim suffix if needed)
-            if len(title) > self.title_max_chars:
-                # Try to fit by trimming suffix first, then title
-                suffix_formatted = f" ({title_suffix_norm})" if title_suffix_norm else ""
-                max_title_body = self.title_max_chars - len(suffix_formatted)
-                title = title[:max_title_body].rstrip() + suffix_formatted
-                title = title[:self.title_max_chars]  # final safety
+            # ── Title selection via TitleEngine (v49) ──────────────
+            engine_result = None
+            title = ""
+            title_candidates: list = []
+            title_rationale = ""
+            if getattr(self.config, "TITLE_ENGINE_ENABLED", True):
+                try:
+                    engine_result = TitleEngine(self.config).generate(script, source_content)
+                    title = engine_result.get("selected_title", "") or ""
+                    title_candidates = engine_result.get("candidates", []) or []
+                    title_rationale = engine_result.get("rationale", "") or ""
+                except Exception as exc:  # noqa: BLE001 — fail-open to legacy path
+                    logger.warning(
+                        "MetadataGenerator: TitleEngine failed — using legacy "
+                        "title path: %s", exc,
+                    )
 
-            # ── Safety net: enforce at least one power word ────────
-            title = enforce_power_words(title, power_words, max_chars=self.title_max_chars)
+            if not title:
+                # Legacy (sane) fallback: the metadata LLM's own title if valid,
+                # else the script-derived fallback. Never hard-cuts a word and
+                # never injects a power-word suffix.
+                title = result.get("title", "")
+                if not title or not isinstance(title, str):
+                    title = self._fallback_titles(script)[0]
+                title = _append_title_suffix(title, result.get("title_suffix", ""))
+                title = apply_caps_policy(title, self.config)
 
             # ── Antiban (ago 2026): quitar sufijos de credibilidad clickbait
             # tipo (REAL)/(CASO REAL) por si el LLM los incluyó igualmente.
             title = _strip_clickbait_suffix(title)
+            title = truncate_title_at_word(title, self.title_max_chars)
             title_check = validate_title(title, self.config)
 
             description = result.get("description", "")
@@ -660,8 +666,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             )
             
             return {
-                "titles": [title],
+                "titles": [c.get("title", "") for c in title_candidates] or [title],
                 "selected_title": title,
+                "title_candidates": title_candidates,
+                "title_rationale": title_rationale,
                 "description": description,
                 "tags": tags_validated,
                 "thumbnail_text": thumbnail_text,
@@ -701,7 +709,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
         return valid[:10]
 
     def _fallback_titles(self, script: dict) -> list[str]:
-        """Generate a single fallback title from script data."""
+        """Generate complete fallback titles from script data (never broken)."""
         titulo_raw = script.get("titulo_options") or script.get("titulo_options", "[]")
         if isinstance(titulo_raw, str):
             try:
@@ -710,35 +718,45 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 titles = []
         else:
             titles = titulo_raw or []
-        
-        if titles and isinstance(titles, list) and len(titles) > 0:
-            return [str(titles[0])[:self.title_max_chars]]
-        
-        # Ultimate fallback
-        keywords = script.get("keywords", [])
-        if isinstance(keywords, str):
-            try:
-                keywords = json.loads(keywords)
-            except json.JSONDecodeError:
-                keywords = []
-        
-        main_kw = keywords[0] if keywords else "Historia Impactante"
-        return [f"El {main_kw} que Nadie Te Contó — La Verdad Oculta"]
+
+        out: list[str] = []
+        if isinstance(titles, list):
+            for t in titles:
+                text = str(t or "").strip()
+                if text:
+                    out.append(truncate_title_at_word(
+                        apply_caps_policy(text, self.config), self.title_max_chars
+                    ))
+        if out:
+            return out[:5]
+
+        # Ultimate fallback — complete and natural, never a broken suffix.
+        fallback = deterministic_fallback_title(script, self.config)
+        return [truncate_title_at_word(
+            apply_caps_policy(fallback, self.config), self.title_max_chars
+        )]
 
     def _fallback_metadata(self, script: dict) -> dict:
         """Return basic metadata when LLM generation fails."""
         logger.warning("MetadataGenerator: using fallback metadata")
-        
-        titles = self._fallback_titles(script)
-        title = titles[0] if titles else "Video sin título"
 
-        # ── Safety net: enforce at least one power word ────────────
-        power_words = getattr(self.config, "TITLE_POWER_WORDS", [])
-        title = enforce_power_words(title, power_words, max_chars=self.title_max_chars)
+        # Deterministic TitleEngine pass (no LLM) — never destructive.
+        engine_result = None
+        title = ""
+        try:
+            engine_result = TitleEngine(self.config).generate(script, use_llm=False)
+            title = engine_result.get("selected_title", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MetadataGenerator: fallback TitleEngine failed: %s", exc)
+
+        if not title:
+            titles = self._fallback_titles(script)
+            title = titles[0] if titles else "Video sin título"
 
         # ── Antiban: quitar sufijos clickbait (REAL) también en fallback ──
         title = _strip_clickbait_suffix(title)
-        
+        title = truncate_title_at_word(title, self.title_max_chars)
+
         # ── Unique keyword selection per video ─────────────────────
         # Even in fallback, avoid using the same static keyword set
         # for every video.
@@ -760,7 +778,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             else:
                 keywords = keywords_raw or []
             tags = keywords[:10] if keywords else []
-        
+
         # Build basic description from template
         channel_desc = getattr(self.config, "DESCRIPTION_TEMPLATE", "")
         if channel_desc and "{titulo}" in channel_desc:
@@ -779,10 +797,13 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             )
         else:
             description = f"{title}\n\nUna historia que te dejará sin palabras...\n\n#historias #documental"
-        
+
+        candidates = (engine_result or {}).get("candidates", []) or []
         return {
-            "titles": titles,
+            "titles": [c.get("title", "") for c in candidates] or [title],
             "selected_title": title,
+            "title_candidates": candidates,
+            "title_rationale": (engine_result or {}).get("rationale", ""),
             "description": description[:5000],
             "tags": self._validate_tags(tags),
             "thumbnail_text": _derive_hook_from_title(title),
