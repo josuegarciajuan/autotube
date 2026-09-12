@@ -7,6 +7,7 @@ import { useResumeStatus } from '../hooks/useQueries'
 import { ArrowLeft, Wand2, Upload, Play, AlertCircle, Calendar, Youtube, Edit3, Save, Users, Video, Image, Settings, RefreshCw, Zap, Loader2, Key, Link2, Clipboard, ExternalLink, Trash2, Eye, Clock, Plus, Heart, TrendingUp, DollarSign, Award, BarChart3, ListPlus, MessageCircle, Sparkles, Megaphone, Scissors, X, Download, AlertTriangle, Globe, MapPin, Brain, Film, Share2, CheckCircle, ShieldCheck } from 'lucide-react'
 import VideoTiming from '../components/VideoTiming'
 import VoiceSelector from '../components/VoiceSelector'
+import ProsodyEditor, { DEFAULT_PROFILES } from '../components/ProsodyEditor'
 import PublicationModeToggle from '../components/PublicationModeToggle'
 import WatchTimeChart from '../components/WatchTimeChart'
 import HorariosTab from '../components/HorariosTab'
@@ -783,7 +784,15 @@ export default function ChannelDetail() {
   }
 
   function startEditingConfig() {
-    setEditConfig({ ...(channel.config_json || {}) })
+    const cfg: Record<string, any> = { ...(channel.config_json || {}) }
+    // Seed expressive-narration defaults so the UI reflects real behaviour
+    // (the pipeline defaults to ON until explicitly changed).
+    if (cfg.EXPRESSIVE_NARRATION === undefined) cfg.EXPRESSIVE_NARRATION = true
+    if (!cfg.PROSODY_PROFILES || typeof cfg.PROSODY_PROFILES !== 'object') {
+      cfg.PROSODY_PROFILES = { ...DEFAULT_PROFILES }
+    }
+    if (!cfg.TONO_DEFAULT) cfg.TONO_DEFAULT = 'neutro'
+    setEditConfig(cfg)
     setEditingConfig(true)
   }
 
@@ -812,7 +821,10 @@ export default function ChannelDetail() {
       )
     }
     if (field.type === 'voice-select') {
-      return <VoiceSelector config={editConfig} onUpdateField={updateConfigField} />
+      return <VoiceSelector config={editConfig} onUpdateField={updateConfigField} slug={channel?.slug} />
+    }
+    if (field.type === 'prosody-table') {
+      return <ProsodyEditor config={editConfig} onUpdateField={updateConfigField} />
     }
     if (field.type === 'number') {
       return <input type="number" value={value || ''} onChange={e => updateConfigField(field.key, Number(e.target.value))}
@@ -874,8 +886,15 @@ export default function ChannelDetail() {
         </span>
       )
     }
+    if (field.key === 'EXPRESSIVE_NARRATION' && value === undefined) {
+      return <span className="text-green-400">✅ Sí <span className="text-[10px] text-gray-500">(por defecto)</span></span>
+    }
     if (value === undefined || value === null) return <span className="text-gray-600">—</span>
     if (field.type === 'boolean') return <span className={value ? 'text-green-400' : 'text-gray-500'}>{value ? '✅ Sí' : '❌ No'}</span>
+    if (field.type === 'prosody-table') {
+      const n = value && typeof value === 'object' ? Object.keys(value).length : 0
+      return <span className="text-xs text-gray-300">{n > 0 ? `${n} tonos configurados` : '—'}</span>
+    }
     if (field.type === 'select' && field.options) {
       const opt = field.options.find(o => o.value === value)
       return <span className="text-sm text-gray-300">{opt?.label || String(value)}</span>

@@ -6,7 +6,9 @@
  *  appropriate config keys (TTS_ENGINE, VOICE_ID / KOKORO_VOICE).
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Play, Pause, ChevronDown, ChevronRight } from 'lucide-react'
+import { Play, Pause, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
+import { api } from '../lib/api'
+import VoiceLab from './VoiceLab'
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -16,7 +18,8 @@ interface Voice {
   engine: "kokoro" | "edgetts"
   engine_label: string
   gender: "male" | "female"
-  preview_url: string
+  tag?: string
+  preview_url?: string
 }
 
 interface GroupedVoices {
@@ -28,6 +31,7 @@ interface GroupedVoices {
 interface Props {
   config: Record<string, any>
   onUpdateField: (key: string, value: any) => void
+  slug?: string
 }
 
 // ── Engine grouping ──────────────────────────────────────────
@@ -44,10 +48,11 @@ const GENDER_ICON: Record<string, string> = {
 
 // ═══════════════════════════════════════════════════════════════
 
-export default function VoiceSelector({ config, onUpdateField }: Props) {
+export default function VoiceSelector({ config, onUpdateField, slug }: Props) {
   const [voices, setVoices] = useState<GroupedVoices[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [playError, setPlayError] = useState<string | null>(null)
   const [playingKey, setPlayingKey] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -63,11 +68,7 @@ export default function VoiceSelector({ config, onUpdateField }: Props) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    fetch('api/voices')
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    api.getVoices()
       .then(data => {
         if (cancelled) return
         const list: Voice[] = data.voices || []
@@ -107,14 +108,24 @@ export default function VoiceSelector({ config, onUpdateField }: Props) {
     // Stop any existing
     audioRef.current?.pause()
     audioRef.current = null
+    setPlayError(null)
 
-    const audio = new Audio(voice.preview_url)
+    // Synthesize at runtime with the production engine/prosody (cached).
+    const voiceId = voice.key.includes(':') ? voice.key.split(':')[1] : voice.key
+    const url = api.voiceClipUrl(voice.engine, voiceId, 'neutro', slug)
+    const audio = new Audio(url)
     audioRef.current = audio
     audio.onended = () => setPlayingKey(null)
-    audio.onerror = () => setPlayingKey(null)
-    audio.play().catch(() => setPlayingKey(null))
+    audio.onerror = () => {
+      setPlayingKey(null)
+      setPlayError('No se pudo reproducir la muestra. Comprueba que la API y el motor TTS estén disponibles.')
+    }
+    audio.play().catch(() => {
+      setPlayingKey(null)
+      setPlayError('El navegador bloqueó la reproducción. Vuelve a pulsar el botón.')
+    })
     setPlayingKey(voice.key)
-  }, [playingKey])
+  }, [playingKey, slug])
 
   // ── Select a voice ─────────────────────────────────────────
   const selectVoice = useCallback((voice: Voice) => {
@@ -202,6 +213,9 @@ export default function VoiceSelector({ config, onUpdateField }: Props) {
                         <span className="truncate font-medium text-[11px]">
                           {voice.name} {GENDER_ICON[voice.gender]}
                         </span>
+                        {voice.tag && (
+                          <span className="truncate text-[9px] text-gray-500">{voice.tag}</span>
+                        )}
                       </div>
 
                       {/* Selection indicator */}
@@ -216,6 +230,16 @@ export default function VoiceSelector({ config, onUpdateField }: Props) {
           </div>
         )
       })}
+
+      {playError && (
+        <div className="flex items-start gap-1 text-[10px] text-red-400">
+          <AlertCircle size={11} className="mt-0.5 shrink-0" />
+          <span>{playError}</span>
+        </div>
+      )}
+
+      {/* Lab: probar cada tono y un relato largo con la voz activa */}
+      <VoiceLab config={config} slug={slug} />
     </div>
   )
 }

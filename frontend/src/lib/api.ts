@@ -169,6 +169,16 @@ export const api = {
 
   // Voices
   getVoices: () => request<any>('/voices'),
+  voiceClipUrl: (engine: string, voice: string, tone: string, slug?: string) => {
+    const p = new URLSearchParams({ engine, voice, tone });
+    if (slug) p.set('slug', slug);
+    return apiUrl(`/voices/clip?${p.toString()}`);
+  },
+  voiceRelatoUrl: (engine: string, voice: string, slug?: string) => {
+    const p = new URLSearchParams({ engine, voice });
+    if (slug) p.set('slug', slug);
+    return apiUrl(`/voices/relato?${p.toString()}`);
+  },
 
   // Videos
   getVideos: (channelId?: number, status?: string, limit = 50, playlistId?: number) => {
