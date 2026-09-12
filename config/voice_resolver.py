@@ -75,6 +75,67 @@ def _tono_from_emotion(emocion: str) -> Optional[str]:
     return None
 
 
+# ── Content-based tone inference (fallback adaptativo) ────────
+# Se aplica cuando el LLM no aporta un tono ni una emoción reconocible
+# (p. ej. guiones antiguos o bloques sin metadatos). Analiza el propio
+# texto del bloque para decidir CÓMO debe sonar.
+# Señales de alta precisión (evitamos conectores genéricos como "entonces"
+# que provocarían falsos positivos). El orden define la prioridad.
+_TEXT_CUES: list[tuple[str, list[str]]] = [
+    ("revelacion", [
+        "revel", "descubr", "en realidad", "la verdad", "resultó", "resulto",
+        "giro inesperado", "desenlace", "lo que nadie sabía", "lo que nadie sabia",
+    ]),
+    ("asombro", [
+        "increíble", "increible", "asombr", "imposible", "sorprendente",
+        "extraordinari", "nunca antes",
+    ]),
+    ("tristeza", [
+        "murió", "murio", "murieron", "perdió", "perdio", "perdieron",
+        "nunca más", "nunca mas", "lágrim", "lagrim", "adiós", "adios",
+        "quedó vacía", "quedo vacia",
+    ]),
+    ("esperanza", [
+        "esperanza", "futuro", "renac", "nuevo comienzo", "una posibilidad",
+    ]),
+    ("tension", [
+        "de repente", "de pronto", "peligro", "miedo", "terror", "sangre",
+        "gritó", "grito", "dispar", "escap", "persegu", "trampa",
+    ]),
+    ("misterio", [
+        "misterio", "enigma", "secreto", "ocult", "desaparec",
+        "inexplicable", "silencio sepulcral",
+    ]),
+    ("suspense", [
+        "suspenso", "intriga", "extraño", "extrano", "oscur", "¿", "?", "...",
+    ]),
+    ("enfasis", [
+        "precisamente", "exactamente", "fue una decisión", "fue una decision",
+        "lo más importante", "lo mas importante",
+    ]),
+    ("reflexion", [
+        "la historia", "aprend", "comprendió", "comprendio", "con el tiempo",
+        "lección", "leccion", "tal vez", "quizá", "quiza",
+    ]),
+]
+
+
+def infer_tono_from_text(texto: str) -> Optional[str]:
+    """Infer a canonical tone from the block's own text (best effort).
+
+    Used as an adaptive fallback so narration varies per paragraph even when
+    the LLM did not annotate an explicit ``tono``.
+    """
+    if not texto:
+        return None
+    low = str(texto).lower()
+    for tono, cues in _TEXT_CUES:
+        for cue in cues:
+            if cue in low:
+                return tono
+    return None
+
+
 # ── Public API ───────────────────────────────────────────────
 
 def resolve_channel_voice(config: Any) -> dict:
@@ -147,11 +208,12 @@ def normalize_tono(
     tono: Optional[str] = None,
     emocion: str = "",
     tipo: str = "",
+    texto: str = "",
 ) -> str:
     """Resolve a raw tone value to a canonical tone.
 
-    Priority: explicit canonical ``tono`` > emotion keywords > block type map
-    > configured default.
+    Priority: explicit canonical ``tono`` > emotion keywords > content cues
+    > block type map > configured default.
     """
     profiles = _get(config, "PROSODY_PROFILES", {}) or {}
     catalog = set(_get(config, "TONO_CATALOG", None) or profiles.keys())
@@ -172,6 +234,11 @@ def normalize_tono(
     if mapped and (not catalog or mapped in catalog):
         return mapped
 
+    # Adaptive fallback: infer the tone from what the block actually says.
+    mapped = infer_tono_from_text(texto)
+    if mapped and (not catalog or mapped in catalog):
+        return mapped
+
     tkey = _strip_accents(str(tipo or ""))
     # Strip trailing digits (desarrollo1 → desarrollo).
     tkey = re.sub(r"\d+$", "", tkey) or tkey
@@ -187,6 +254,7 @@ def resolve_prosody(
     tono: Optional[str] = None,
     emocion: str = "",
     tipo: str = "",
+    texto: str = "",
 ) -> dict:
     """Return the prosody settings to apply to a segment.
 
@@ -213,7 +281,7 @@ def resolve_prosody(
             "pause_after_ms": 0,
         }
 
-    resolved_tono = normalize_tono(config, tono=tono, emocion=emocion, tipo=tipo)
+    resolved_tono = normalize_tono(config, tono=tono, emocion=emocion, tipo=tipo, texto=texto)
     profile = profiles.get(resolved_tono, {}) or {}
     return {
         "tono": resolved_tono,
@@ -268,7 +336,8 @@ def split_block_segments(
         if not seg["texto"]:
             continue
         pros = resolve_prosody(config, tono=seg["tono"],
-                               emocion=seg["emocion"], tipo=seg["tipo"])
+                               emocion=seg["emocion"], tipo=seg["tipo"],
+                               texto=seg["texto"])
         if merged and merged[-1]["tono"] == pros["tono"]:
             merged[-1]["texto"] = f"{merged[-1]['texto']} {seg['texto']}".strip()
         else:
