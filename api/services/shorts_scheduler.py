@@ -3999,11 +3999,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                     f"NO uses espanol (las APIs de stock no lo entienden). "
                     f"Ademas genera 'theme_keywords_en': 5-8 keywords EN INGLES del tema visual GLOBAL "
                     f"del short para mantener coherencia entre escenas. "
+                    f"Para CADA BLOQUE genera 'tono' (como debe sonar la narracion): una de "
+                    f"(neutro|suspense|misterio|tension|revelacion|asombro|tristeza|esperanza|reflexion|enfasis|cierre). "
                     f"Devuelve SOLO JSON: "
                     f'{{"tema": "frase corta que identifica el tema (max 80 chars)", '
                     f'"titulo": "...", "hook_text": "frase de gancho 8-12 palabras", '
                     f'"theme_keywords_en": ["global", "theme", "keywords"], '
-                    f'"bloques": [{{"tipo": "hook", "texto": "1-2 frases", '
+                    f'"bloques": [{{"tipo": "hook", "tono": "suspense", "texto": "1-2 frases", '
                     f'"search_query_en": "english keywords for stock search"}}, '
                     f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
                     f'"search_query_en": "english keywords"}}, '

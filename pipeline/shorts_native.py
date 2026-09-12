@@ -306,6 +306,11 @@ TEMA: {content_item.get('title', '')}
 5. climax (5-8 seg) — consecuencia, revelación o misterio
 {cierre_desc}
 
+TONO DE NARRACIÓN (campo "tono" por bloque, OBLIGATORIO):
+Usa SOLO uno de: (neutro|suspense|misterio|tension|revelacion|asombro|tristeza|esperanza|reflexion|enfasis|cierre).
+Elige cómo debe SONAR el bloque: el hook suele ser 'suspense' o 'tension'; el climax
+'es una 'revelacion' o 'asombro'; el cierre 'reflexion' o 'cierre'.
+
 IMPORTANTE — BÚSQUEDA DE ASSETS (imágenes y videos):
 - Para CADA bloque, genera "search_query_en" con 5-8 keywords EN INGLÉS que describan
   la escena visual exacta de ese bloque. Usa solo inglés (las APIs de stock no entienden español).
@@ -317,7 +322,7 @@ IMPORTANTE — BÚSQUEDA DE ASSETS (imágenes y videos):
   mantener coherencia visual entre escenas.
 
 Devuelve SOLO JSON con entre 5 y 7 bloques:
-{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo1", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo2", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo3", "texto": "narración en español (opcional)", "search_query_en": "english stock search keywords"}}, {{"tipo": "climax", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}
+{{"tema": "frase corta que identifica el tema (max 80 chars)", "titulo": "título corto y viral", "theme_keywords_en": ["global", "theme", "keywords", ...], "bloques": [{{"tipo": "hook", "tono": "suspense", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo1", "tono": "misterio", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo2", "tono": "tension", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "desarrollo3", "tono": "reflexion", "texto": "narración en español (opcional)", "search_query_en": "english stock search keywords"}}, {{"tipo": "climax", "tono": "revelacion", "texto": "narración en español", "search_query_en": "english stock search keywords"}}, {{"tipo": "cierre", "tono": "cierre", "texto": "narración en español", "search_query_en": "english stock search keywords"}}], "hashtags": ["#Shorts", ...], "hook_text": "frase para quemar en pantalla"}}
 
 El array bloques debe tener 5, 6 o 7 elementos. Si usas 5, omite desarrollo3.
 NADA MAS fuera del JSON."""

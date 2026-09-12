@@ -96,6 +96,58 @@ class TTSEngine:
         self.volume = voice_config.get("volume", "+0%")
         self.tts_strategy = voice_config.get("tts_strategy", {})
 
+        # ── Expressive narration ──────────────────────────────
+        self.expressive = bool(voice_config.get("expressive", False))
+        self.prosody_profiles = voice_config.get("prosody_profiles", {}) or {}
+        self.tono_default = voice_config.get("tono_default", "neutro")
+        self.max_segments = int(voice_config.get("max_segments", 3) or 3)
+        # Lightweight config-like dict so we can reuse voice_resolver logic.
+        self._expr_cfg = {
+            "EXPRESSIVE_NARRATION": self.expressive,
+            "PROSODY_PROFILES": self.prosody_profiles,
+            "TONO_CATALOG": list(self.prosody_profiles.keys()),
+            "TONO_DEFAULT": self.tono_default,
+            "TTS_STRATEGY": self.tts_strategy,
+            "VOICE_RATE": self.rate,
+            "VOICE_PITCH": self.pitch,
+            "VOICE_VOLUME": self.volume,
+        }
+
+    # ── Expressive narration: segment resolution ────────────
+
+    def _segments_for_block(self, bloque: dict) -> list[dict]:
+        """Split a block into toned, prosody-resolved segments (sub-frases)."""
+        from config.voice_resolver import split_block_segments
+        return split_block_segments(
+            bloque, self._expr_cfg,
+            max_segments=self.max_segments, expressive=self.expressive,
+        )
+
+    def _synthesize_with_retry(
+        self,
+        clean_text: str,
+        rate: Optional[str],
+        pitch: Optional[str],
+        volume: Optional[str],
+        timeout: int,
+    ) -> tuple[list[bytes], list[dict]]:
+        """Synthesize one segment, retrying once with default prosody."""
+        try:
+            return _run_async_with_timeout(
+                self._stream_sync(clean_text, rate=rate, pitch=pitch, volume=volume),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.error("Segment synthesis failed: %s — retrying with defaults", exc)
+            try:
+                return _run_async_with_timeout(
+                    self._stream_sync(clean_text),
+                    timeout=timeout,
+                )
+            except Exception as exc2:
+                logger.error("Segment retry also failed: %s — skipping", exc2)
+                return [], []
+
     def _voice_for_tipo(self, tipo: str) -> tuple[str, str]:
         """Get (rate, pitch) for a block type from TTS_STRATEGY.
 
@@ -122,6 +174,7 @@ class TTSEngine:
         text: str,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
+        volume: Optional[str] = None,
     ) -> edge_tts.Communicate:
         """Create an edge_tts Communicate instance with voice settings.
 
@@ -129,6 +182,7 @@ class TTSEngine:
             text: Text to synthesize.
             rate: Optional rate override for this segment.
             pitch: Optional pitch override for this segment.
+            volume: Optional volume override for this segment.
 
         Returns:
             Configured edge_tts.Communicate instance.
@@ -138,7 +192,7 @@ class TTSEngine:
             voice=self.voice,
             rate=rate if rate is not None else self.rate,
             pitch=pitch if pitch is not None else self.pitch,
-            volume=self.volume,
+            volume=volume if volume is not None else self.volume,
             boundary="WordBoundary",
         )
 
@@ -314,77 +368,68 @@ class TTSEngine:
                 logger.warning("Block %d has empty text — skipping", i)
                 continue
 
-            rate, pitch = self._voice_for_tipo(tipo)
-            logger.info("  Block %d/%d [%s]: rate=%s pitch=%s text=%d chars",
-                         i + 1, len(bloques), tipo, rate, pitch, len(texto))
-
-            # Clean text for this block
-            clean_text = self._clean_guion(texto)
-            if not clean_text:
+            segments = self._segments_for_block(bloque)
+            if not segments:
                 continue
 
-            # Synthesize with timeout to prevent indefinite hangs
-            try:
-                audio_data, word_ts = _run_async_with_timeout(
-                    self._stream_sync(clean_text, rate=rate, pitch=pitch),
-                    timeout=tts_timeout,
+            logger.info("  Block %d/%d [%s] → %d segmento(s)",
+                        i + 1, len(bloques), tipo, len(segments))
+
+            for si, seg in enumerate(segments):
+                rate, pitch, volume = seg["rate"], seg["pitch"], seg["volume"]
+                clean_text = self._clean_guion(seg["texto"])
+                if not clean_text:
+                    continue
+
+                logger.info(
+                    "    seg %d/%d tono=%s rate=%s pitch=%s pause=%dms text=%d chars",
+                    si + 1, len(segments), seg.get("tono"), rate, pitch,
+                    seg.get("pause_after_ms", 0), len(clean_text),
                 )
-            except TimeoutError:
-                logger.error("Block %d TTS timed out after %ds — retrying with defaults", i, tts_timeout)
-                try:
-                    audio_data, word_ts = _run_async_with_timeout(
-                        self._stream_sync(clean_text),
-                        timeout=tts_timeout,
+
+                audio_data, word_ts = self._synthesize_with_retry(
+                    clean_text, rate, pitch, volume, tts_timeout,
+                )
+                if not audio_data:
+                    logger.warning("    seg %d produced no audio — skipping", si)
+                    continue
+
+                # Save to temp file
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                tmp.write(b"".join(audio_data))
+                tmp.close()
+
+                # Measure actual segment audio duration with pydub.
+                # WordBoundary timestamps from edge-tts exclude trailing silence
+                # and MP3 encoder padding (~1s per block). Using actual pydub
+                # duration prevents cumulative desync in marathons with 90+ blocks.
+                block_seg = AudioSegment.from_mp3(tmp.name)
+                actual_dur_ms = len(block_seg)
+                temp_segments.append(block_seg)
+                os.unlink(tmp.name)  # loaded into memory, temp file no longer needed
+
+                # Adjust timestamps with cumulative offset
+                for ts in word_ts:
+                    ts["start_ms"] = round(ts["start_ms"] + cumulative_offset_ms, 1)
+                    ts["end_ms"] = round(ts["end_ms"] + cumulative_offset_ms, 1)
+                all_timestamps.extend(word_ts)
+
+                # Update cumulative offset using ACTUAL audio duration
+                cumulative_offset_ms = round(cumulative_offset_ms + actual_dur_ms, 1)
+
+                # Expressive pause after the segment (except at the very end).
+                is_last_overall = (
+                    i == len(bloques) - 1 and si == len(segments) - 1
+                )
+                pause_ms = int(seg.get("pause_after_ms", 0) or 0)
+                if pause_ms > 0 and not is_last_overall:
+                    temp_segments.append(
+                        AudioSegment.silent(duration=pause_ms,
+                                            frame_rate=block_seg.frame_rate)
                     )
-                except TimeoutError:
-                    logger.error("Block %d retry also timed out — skipping", i)
-                    continue
-                except Exception as exc2:
-                    logger.error("Block %d retry also failed: %s — skipping", i, exc2)
-                    continue
-            except Exception as exc:
-                logger.error("Block %d synthesis failed: %s — retrying with defaults", i, exc)
-                try:
-                    audio_data, word_ts = _run_async_with_timeout(
-                        self._stream_sync(clean_text),
-                        timeout=tts_timeout,
-                    )
-                except TimeoutError:
-                    logger.error("Block %d retry timed out — skipping", i)
-                    continue
-                except Exception as exc2:
-                    logger.error("Block %d retry also failed: %s — skipping", i, exc2)
-                    continue
+                    cumulative_offset_ms = round(cumulative_offset_ms + pause_ms, 1)
 
-            if not audio_data:
-                logger.warning("Block %d produced no audio — skipping", i)
-                continue
-
-            # Save to temp file
-            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-            tmp.write(b"".join(audio_data))
-            tmp.close()
-
-            # Measure actual block audio duration with pydub.
-            # WordBoundary timestamps from edge-tts exclude trailing silence
-            # and MP3 encoder padding (~1s per block). Using actual pydub
-            # duration prevents cumulative desync in marathons with 90+ blocks.
-            # (Kokoro TTS already measures real audio duration per block.)
-            block_seg = AudioSegment.from_mp3(tmp.name)
-            actual_dur_ms = len(block_seg)
-            temp_segments.append(block_seg)
-            os.unlink(tmp.name)  # loaded into memory, temp file no longer needed
-
-            # Adjust timestamps with cumulative offset
-            for ts in word_ts:
-                ts["start_ms"] = round(ts["start_ms"] + cumulative_offset_ms, 1)
-                ts["end_ms"] = round(ts["end_ms"] + cumulative_offset_ms, 1)
-            all_timestamps.extend(word_ts)
-
-            # Update cumulative offset using ACTUAL audio duration
-            cumulative_offset_ms = round(cumulative_offset_ms + actual_dur_ms, 1)
-
-            # Progress callback (if provided)
+            # Progress callback (if provided) — one tick per block
             if progress_cb:
                 try:
                     progress_cb(i + 1, len(bloques))
@@ -425,6 +470,7 @@ class TTSEngine:
         text: str,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
+        volume: Optional[str] = None,
     ) -> tuple[list[bytes], list[dict]]:
         """Asynchronously stream TTS audio with word boundary detection.
 
@@ -432,11 +478,12 @@ class TTSEngine:
             text: Text to synthesize.
             rate: Optional rate override.
             pitch: Optional pitch override.
+            volume: Optional volume override.
 
         Returns:
             Tuple of (audio_chunks, timestamps_list).
         """
-        communicate = self._build_communicate(text, rate=rate, pitch=pitch)
+        communicate = self._build_communicate(text, rate=rate, pitch=pitch, volume=volume)
         audio_chunks: list[bytes] = []
         timestamps: list[dict] = []
 

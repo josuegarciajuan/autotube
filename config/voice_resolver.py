@@ -10,6 +10,7 @@ engine instance for any given channel config (module, dict, or SimpleNamespace).
 """
 
 import logging
+import re
 from typing import Optional, Union, Any
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,57 @@ def _get(cfg: Any, key: str, default=None) -> Any:
     if isinstance(cfg, dict):
         return cfg.get(key, default)
     return getattr(cfg, key, default)
+
+
+# ── Expressive narration: canonical tones & emotion hints ────
+
+# Mapa de palabras clave (substring, sin acentos) → tono canónico.
+# Se usa como respaldo cuando el LLM no emite un "tono" canónico.
+_TONO_KEYWORDS = [
+    ("suspense", "suspense"), ("suspenso", "suspense"), ("intriga", "suspense"),
+    ("mister", "misterio"), ("enigma", "misterio"), ("oculto", "misterio"),
+    ("tension", "tension"), ("tension", "tension"), ("peligro", "tension"),
+    ("miedo", "tension"), ("terror", "tension"), ("panico", "tension"),
+    ("revela", "revelacion"), ("descubr", "revelacion"), ("giro", "revelacion"),
+    ("desenlace", "revelacion"), ("sorpres", "asombro"),
+    ("asombr", "asombro"), ("increib", "asombro"), ("impact", "asombro"),
+    ("trist", "tristeza"), ("dolor", "tristeza"), ("melancol", "tristeza"),
+    ("esperanz", "esperanza"), ("alivio", "esperanza"), ("luz", "esperanza"),
+    ("reflex", "reflexion"), ("reflexi", "reflexion"), ("medita", "reflexion"),
+    ("enfasis", "enfasis"), ("enfatic", "enfasis"), ("clave", "enfasis"),
+    ("cierre", "cierre"), ("final", "cierre"), ("conclusion", "cierre"),
+]
+
+_TIPO_AS_TONO = {
+    "hook": "suspense",
+    "desarrollo": "reflexion",
+    "climax": "tension",
+    "reflexion": "reflexion",
+    "cierre": "cierre",
+    "intro": "neutro",
+    "cta": "esperanza",
+    "subscribe_cta": "esperanza",
+    "desarrollo1": "reflexion",
+    "desarrollo2": "reflexion",
+    "desarrollo3": "reflexion",
+}
+
+
+def _strip_accents(text: str) -> str:
+    """Lowercase + remove common Spanish accents for keyword matching."""
+    table = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN")
+    return text.translate(table).lower()
+
+
+def _tono_from_emotion(emocion: str) -> Optional[str]:
+    """Map a free-text emotion to a canonical tone (best effort)."""
+    if not emocion:
+        return None
+    low = _strip_accents(str(emocion))
+    for needle, tono in _TONO_KEYWORDS:
+        if needle in low:
+            return tono
+    return None
 
 
 # ── Public API ───────────────────────────────────────────────
@@ -40,6 +92,12 @@ def resolve_channel_voice(config: Any) -> dict:
     engine = _get(config, "TTS_ENGINE", "edgetts")
     tts_strategy = _get(config, "TTS_STRATEGY", {}) or {}
 
+    expressive = bool(_get(config, "EXPRESSIVE_NARRATION", True))
+    profiles = _get(config, "PROSODY_PROFILES", {}) or {}
+    tono_catalog = _get(config, "TONO_CATALOG", None) or list(profiles.keys())
+    tono_default = _get(config, "TONO_DEFAULT", "neutro")
+    max_segments = int(_get(config, "TONO_MAX_SEGMENTS_PER_BLOCK", 3) or 3)
+
     if engine == "kokoro":
         voice = _get(config, "KOKORO_VOICE", "em_santa")
         # Build block_speeds from TTS_STRATEGY rate values
@@ -52,6 +110,11 @@ def resolve_channel_voice(config: Any) -> dict:
             "volume": _get(config, "VOICE_VOLUME", "+0%"),
             "block_speeds": block_speeds,
             "tts_strategy": tts_strategy,
+            "expressive": expressive,
+            "prosody_profiles": profiles,
+            "tono_catalog": tono_catalog,
+            "tono_default": tono_default,
+            "max_segments": max_segments,
         }
     else:
         # edge-tts: use VOICE_ID (panel selection) with voice_primary as fallback
@@ -69,7 +132,186 @@ def resolve_channel_voice(config: Any) -> dict:
             "volume": volume,
             "block_speeds": None,
             "tts_strategy": tts_strategy,
+            "expressive": expressive,
+            "prosody_profiles": profiles,
+            "tono_catalog": tono_catalog,
+            "tono_default": tono_default,
+            "max_segments": max_segments,
         }
+
+
+# ── Prosody resolution ───────────────────────────────────────
+
+def normalize_tono(
+    config: Any,
+    tono: Optional[str] = None,
+    emocion: str = "",
+    tipo: str = "",
+) -> str:
+    """Resolve a raw tone value to a canonical tone.
+
+    Priority: explicit canonical ``tono`` > emotion keywords > block type map
+    > configured default.
+    """
+    profiles = _get(config, "PROSODY_PROFILES", {}) or {}
+    catalog = set(_get(config, "TONO_CATALOG", None) or profiles.keys())
+    default = _get(config, "TONO_DEFAULT", "neutro") or "neutro"
+
+    if tono:
+        candidate = _strip_accents(str(tono)).strip()
+        # Direct canonical match (accent-insensitive).
+        for canon in catalog:
+            if _strip_accents(canon) == candidate:
+                return canon
+        # Fuzzy: keyword inside the tone string.
+        mapped = _tono_from_emotion(str(tono))
+        if mapped and (not catalog or mapped in catalog):
+            return mapped
+
+    mapped = _tono_from_emotion(emocion)
+    if mapped and (not catalog or mapped in catalog):
+        return mapped
+
+    tkey = _strip_accents(str(tipo or ""))
+    # Strip trailing digits (desarrollo1 → desarrollo).
+    tkey = re.sub(r"\d+$", "", tkey) or tkey
+    mapped = _TIPO_AS_TONO.get(tkey)
+    if mapped and (not catalog or mapped in catalog):
+        return mapped
+
+    return default if (not catalog or default in catalog) else (next(iter(catalog), "neutro"))
+
+
+def resolve_prosody(
+    config: Any,
+    tono: Optional[str] = None,
+    emocion: str = "",
+    tipo: str = "",
+) -> dict:
+    """Return the prosody settings to apply to a segment.
+
+    Returns ``{tono, rate, pitch, volume, pause_after_ms}``. When expressive
+    narration is disabled, falls back to the legacy per-``tipo`` rate/pitch
+    from ``TTS_STRATEGY`` with no expressive pause.
+    """
+    expressive = bool(_get(config, "EXPRESSIVE_NARRATION", True))
+    profiles = _get(config, "PROSODY_PROFILES", {}) or {}
+    strategy = _get(config, "TTS_STRATEGY", {}) or {}
+    base_rate = _get(config, "VOICE_RATE", "+0%")
+    base_pitch = _get(config, "VOICE_PITCH", "+0Hz")
+    base_volume = _get(config, "VOICE_VOLUME", "+0%")
+
+    if not expressive or not profiles:
+        tkey = re.sub(r"\d+$", "", _strip_accents(str(tipo or ""))) or str(tipo or "")
+        rate = strategy.get(f"rate_{tkey}", strategy.get("rate_base", base_rate))
+        pitch = strategy.get(f"pitch_{tkey}", strategy.get("pitch_base", base_pitch))
+        return {
+            "tono": None,
+            "rate": rate,
+            "pitch": pitch,
+            "volume": base_volume,
+            "pause_after_ms": 0,
+        }
+
+    resolved_tono = normalize_tono(config, tono=tono, emocion=emocion, tipo=tipo)
+    profile = profiles.get(resolved_tono, {}) or {}
+    return {
+        "tono": resolved_tono,
+        "rate": profile.get("rate", base_rate),
+        "pitch": profile.get("pitch", base_pitch),
+        "volume": profile.get("volume", base_volume),
+        "pause_after_ms": int(profile.get("pause_after_ms", 0) or 0),
+    }
+
+
+def split_block_segments(
+    bloque: dict,
+    config: Any,
+    max_segments: int = 3,
+    expressive: bool = True,
+) -> list[dict]:
+    """Split a block into toned, prosody-resolved segments.
+
+    Returns a list of dicts with: ``texto, tono, emocion, tipo, rate, pitch,
+    volume, pause_after_ms``. Consecutive segments that resolve to the same
+    tone are merged, and the result is capped at ``max_segments`` (extra tail
+    segments are merged into the last one).
+    """
+    tipo = bloque.get("tipo", "desarrollo")
+    emocion = bloque.get("emocion", "")
+    raw = bloque.get("segmentos") if expressive else None
+
+    candidates: list[dict] = []
+    if isinstance(raw, list) and raw:
+        for seg in raw:
+            if not isinstance(seg, dict):
+                continue
+            stext = str(seg.get("texto") or "").strip()
+            if not stext:
+                continue
+            candidates.append({
+                "texto": stext,
+                "tono": seg.get("tono"),
+                "emocion": seg.get("emocion", emocion),
+                "tipo": tipo,
+            })
+    if not candidates:
+        candidates = [{
+            "texto": str(bloque.get("texto") or "").strip(),
+            "tono": bloque.get("tono"),
+            "emocion": emocion,
+            "tipo": tipo,
+        }]
+
+    merged: list[dict] = []
+    for seg in candidates:
+        if not seg["texto"]:
+            continue
+        pros = resolve_prosody(config, tono=seg["tono"],
+                               emocion=seg["emocion"], tipo=seg["tipo"])
+        if merged and merged[-1]["tono"] == pros["tono"]:
+            merged[-1]["texto"] = f"{merged[-1]['texto']} {seg['texto']}".strip()
+        else:
+            merged.append({
+                "texto": seg["texto"],
+                "tono": pros["tono"],
+                "emocion": seg["emocion"],
+                "tipo": seg["tipo"],
+                "rate": pros["rate"],
+                "pitch": pros["pitch"],
+                "volume": pros["volume"],
+                "pause_after_ms": pros["pause_after_ms"],
+            })
+
+    if max_segments and max_segments > 0 and len(merged) > max_segments:
+        keep = merged[: max_segments - 1]
+        tail = " ".join(s["texto"] for s in merged[max_segments - 1:]).strip()
+        last = dict(merged[max_segments - 1])
+        last["texto"] = tail
+        keep.append(last)
+        merged = keep
+
+    return merged
+
+
+def rate_to_speed(rate: Any, default: float = 1.0) -> float:
+    """Convert an edge-tts rate value to a float speed multiplier.
+
+    Accepts strings like ``"-18%"``, ``"+5%"`` or numbers (``0.8``).
+    Approx: speed = 1.0 + pct/100  (clamped to [0.5, 2.0]).
+    """
+    if rate is None:
+        return default
+    if isinstance(rate, (int, float)):
+        val = float(rate)
+        # Already a multiplier (0.5..2.0) rather than a percentage.
+        if 0.4 <= val <= 2.5:
+            return max(0.5, min(2.0, val))
+        return max(0.5, min(2.0, 1.0 + val / 100.0))
+    match = re.match(r"([+-]?\d+(?:\.\d+)?)\s*%?", str(rate).strip())
+    if not match:
+        return default
+    return max(0.5, min(2.0, 1.0 + float(match.group(1)) / 100.0))
 
 
 def build_tts_engine(config: Any) -> Any:
@@ -98,8 +340,17 @@ def build_tts_engine(config: Any) -> Any:
             # Batch unload: reload Kokoro every N blocks to keep RAM low.
             # 0 = disabled (legacy: model stays loaded for all blocks).
             "unload_every_n_blocks": _get(config, "KOKORO_UNLOAD_EVERY_N_BLOCKS", 0),
+            # Expressive narration
+            "expressive": resolved["expressive"],
+            "prosody_profiles": resolved["prosody_profiles"],
+            "tono_default": resolved["tono_default"],
+            "max_segments": resolved["max_segments"],
+            "rate_base": resolved["block_speeds"].get("base", 0.9),
         }
-        logger.info("🔊 TTS engine: Kokoro (voice=%s)", resolved["voice"])
+        logger.info(
+            "🔊 TTS engine: Kokoro (voice=%s, expressive=%s)",
+            resolved["voice"], resolved["expressive"],
+        )
         return KokoroTTSEngine(voice_config)
     else:
         from pipeline.tts_engine import TTSEngine
@@ -109,8 +360,16 @@ def build_tts_engine(config: Any) -> Any:
             "pitch": resolved["pitch"],
             "volume": resolved["volume"],
             "tts_strategy": resolved["tts_strategy"],
+            # Expressive narration
+            "expressive": resolved["expressive"],
+            "prosody_profiles": resolved["prosody_profiles"],
+            "tono_default": resolved["tono_default"],
+            "max_segments": resolved["max_segments"],
         }
-        logger.info("🔊 TTS engine: edge-tts (voice=%s, rate=%s)", resolved["voice"], resolved["rate"])
+        logger.info(
+            "🔊 TTS engine: edge-tts (voice=%s, rate=%s, expressive=%s)",
+            resolved["voice"], resolved["rate"], resolved["expressive"],
+        )
         return TTSEngine(voice_config)
 
 

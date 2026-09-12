@@ -550,6 +550,44 @@ KOKORO_VOICE = "em_santa"
 KOKORO_PAUSE_BETWEEN_BLOCKS = 0.8
 
 # ═══════════════════════════════════════════════════════════════════
+# EXPRESSIVE NARRATION (prosodia por tono)
+# ═══════════════════════════════════════════════════════════════════
+# Cuando está activo, cada bloque (y opcionalmente sub-frases) lleva un
+# "tono" canónico que modula rate/pitch/volume + pausa del narrador.
+# Desactivado ⇒ comportamiento legacy (solo TTS_STRATEGY por tipo de bloque).
+EXPRESSIVE_NARRATION = True
+
+# Tope de sub-frases por bloque (evita multiplicar llamadas TTS).
+TONO_MAX_SEGMENTS_PER_BLOCK = 3
+
+# Tono por defecto si el LLM no aporta uno válido.
+TONO_DEFAULT = "neutro"
+
+# Vocabulario canónico de tonos. Cualquier valor fuera de esta lista
+# se normaliza a TONO_DEFAULT (o se deriva de emocion/tipo).
+TONO_CATALOG = [
+    "neutro", "suspense", "misterio", "tension", "revelacion",
+    "asombro", "tristeza", "esperanza", "reflexion", "enfasis", "cierre",
+]
+
+# Perfil de prosodia por tono. Heredable y sobrescribible por canal.
+#   rate/pitch/volume: strings estilo edge-tts ("-18%", "+3Hz", "+2%")
+#   pause_after_ms: silencio insertado tras el segmento (expresividad)
+PROSODY_PROFILES = {
+    "neutro":     {"rate": "+0%",  "pitch": "+0Hz", "volume": "+0%", "pause_after_ms": 250},
+    "suspense":   {"rate": "-18%", "pitch": "-3Hz", "volume": "+0%", "pause_after_ms": 600},
+    "misterio":   {"rate": "-14%", "pitch": "-2Hz", "volume": "+0%", "pause_after_ms": 500},
+    "tension":    {"rate": "-10%", "pitch": "-1Hz", "volume": "+2%", "pause_after_ms": 300},
+    "revelacion": {"rate": "+8%",  "pitch": "+2Hz", "volume": "+3%", "pause_after_ms": 250},
+    "asombro":    {"rate": "+4%",  "pitch": "+4Hz", "volume": "+2%", "pause_after_ms": 350},
+    "tristeza":   {"rate": "-16%", "pitch": "-4Hz", "volume": "-2%", "pause_after_ms": 700},
+    "esperanza":  {"rate": "-4%",  "pitch": "+1Hz", "volume": "+0%", "pause_after_ms": 400},
+    "reflexion":  {"rate": "-12%", "pitch": "-1Hz", "volume": "+0%", "pause_after_ms": 600},
+    "enfasis":    {"rate": "-6%",  "pitch": "+1Hz", "volume": "+4%", "pause_after_ms": 300},
+    "cierre":     {"rate": "-8%",  "pitch": "+0Hz", "volume": "+0%", "pause_after_ms": 500},
+}
+
+# ═══════════════════════════════════════════════════════════════════
 # DYNAMIC VIDEOS PER DAY (auto-adjust by recovery planner)
 # ═══════════════════════════════════════════════════════════════════
 # Master switch — set False to disable auto-adjust entirely
