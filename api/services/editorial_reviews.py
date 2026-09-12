@@ -30,7 +30,7 @@ DEFAULT_RULES = {
 
 def ensure_review_schema(db) -> None:
     with db._connect() as conn:
-        conn.executescript((Path(__file__).resolve().parents[2] / "database" / "schema_v50.sql").read_text())
+        conn.executescript((Path(__file__).resolve().parents[2] / "database" / "schema_v56.sql").read_text())
         conn.commit()
 
 

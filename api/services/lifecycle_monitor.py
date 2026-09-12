@@ -77,6 +77,7 @@ AWAITING_UPLOAD_STUCK_HOURS = 48
 UPLOAD_RETRY_THRESHOLD = 4          # intentos de subida fallidos/48h
 SHORT_READY_STUCK_HOURS = 24
 CONTENT_SAFETY_REJECTIONS = 3       # fallos de script "sin contenido" /24h
+CRITICAL_REVIEW_ALERTS = {"review_visibility_mismatch", "review_exact_duplicate"}
 
 # ── UTC timestamp helper ──────────────────────────────────────
 def _utcnow():
@@ -295,6 +296,28 @@ def check_all_health(db) -> dict:
     created = 0
     resolved = 0
 
+    # Opt-in D+2..D+30 reviews. This only considers videos created after the
+    # channel activation timestamp; it never touches slots or existing media.
+    try:
+        from api.services.review_governance import is_newly_activated_video, schedule_review_tasks, process_due_reviews
+        from api.services.yt_state_reconciler import reconcile_recent_videos
+        from config.config_bridge import get_channel_config
+        with db._connect() as conn:
+            candidates = conn.execute(
+                """SELECT * FROM videos WHERE status IN ('uploaded','uploaded_private','published','scheduled')
+                   AND yt_video_id IS NOT NULL AND yt_video_id != ''"""
+            ).fetchall()
+        for raw in candidates:
+            video = dict(raw)
+            cfg = get_channel_config(video.get("canal") or "")
+            if is_newly_activated_video(db, video, cfg):
+                schedule_review_tasks(db, video["id"], video["channel_id"], video.get("uploaded_at") or video.get("created_at"))
+        review_result = process_due_reviews(db)
+        created += int(review_result.get("alerts", 0))
+        reconcile_recent_videos(db)
+    except Exception as exc:
+        logger.warning("Review governance check failed: %s", exc)
+
     # ── Check 1: Videos stuck in a phase ──
     created += _check_video_phase_stuck(db)
 
@@ -480,6 +503,9 @@ def resolve_alert(db, alert_id: int) -> bool:
     """Mark alert as resolved."""
     try:
         with db._connect() as conn:
+            row = conn.execute("SELECT alert_type, severity FROM pipeline_alerts WHERE id=?", (alert_id,)).fetchone()
+            if row and (row["alert_type"] in CRITICAL_REVIEW_ALERTS or row["severity"] == "critical" and row["alert_type"].startswith("review_")):
+                return False
             conn.execute(
                 """UPDATE pipeline_alerts
                    SET resolved = 1, resolved_at = datetime('now')
@@ -501,13 +527,15 @@ def resolve_all_alerts(db, severity: Optional[str] = None) -> int:
                 sql = """UPDATE pipeline_alerts
                          SET resolved = 1, resolved_at = datetime('now'),
                              acknowledged = 1
-                         WHERE resolved = 0 AND severity = ?"""
+                         WHERE resolved = 0 AND severity = ?
+                           AND alert_type NOT IN ('review_visibility_mismatch','review_exact_duplicate')"""
                 cur = conn.execute(sql, (severity,))
             else:
                 sql = """UPDATE pipeline_alerts
                          SET resolved = 1, resolved_at = datetime('now'),
                              acknowledged = 1
-                         WHERE resolved = 0"""
+                         WHERE resolved = 0
+                           AND alert_type NOT IN ('review_visibility_mismatch','review_exact_duplicate')"""
                 cur = conn.execute(sql)
             conn.commit()
             return cur.rowcount

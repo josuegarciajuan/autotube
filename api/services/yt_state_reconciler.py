@@ -39,6 +39,7 @@ RECONCILE_FEED_CACHE_SEC = 300       # reuse one RSS fetch per channel for 5 min
 STUCK_GRACE_MIN = 45                 # after publish_at, allow this lag before alerting
 
 ALERT_TYPE_STUCK = "short_publish_stuck"
+ALERT_TYPE_LONGFORM_MISMATCH = "longform_visibility_mismatch"
 
 _FEED_CACHE: dict[int, tuple] = {}
 
@@ -310,6 +311,60 @@ def reconcile_recent_shorts(db=None) -> dict:
                 except Exception as exc:
                     logger.warning("Reconciler: stuck alert failed for short #%d: %s", short_id, exc)
 
+    return summary
+
+
+def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
+    """Cache quota-free external visibility for long-form videos.
+
+    Only derived columns are updated; status/privacy and publish scheduling are
+    intentionally untouched.  Discrepancies become manual-review alerts.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    now = datetime.now(timezone.utc)
+    summary = {"checked": 0, "updated": 0, "alerts": 0, "errors": 0}
+    since = (now - timedelta(days=lookback_days)).isoformat()
+    with db._connect() as conn:
+        rows = conn.execute(
+            """SELECT id, channel_id, yt_video_id, status, privacy_status,
+                      yt_visibility, yt_checked_at, titulo_final
+               FROM videos WHERE yt_video_id IS NOT NULL AND yt_video_id != ''
+                 AND COALESCE(uploaded_at, created_at) >= ?""", (since,)
+        ).fetchall()
+    for raw in rows:
+        video = dict(raw)
+        checked = _parse_iso(video.get("yt_checked_at"))
+        if checked and (now - checked).total_seconds() < RECONCILE_SHORT_COOLDOWN_SEC:
+            continue
+        try:
+            visibility = classify_video_visibility(video["yt_video_id"])
+            feed = _feed_public_ids(db, int(video["channel_id"]))
+            if video["yt_video_id"] in feed:
+                visibility = "public"
+            with db._connect() as conn:
+                conn.execute(
+                    """UPDATE videos SET yt_visibility=?, yt_checked_at=?,
+                       yt_checked_source=? WHERE id=?""",
+                    (visibility, now.isoformat(), "rss" if video["yt_video_id"] in feed else "ytdlp", video["id"]),
+                )
+                conn.commit()
+            summary["checked"] += 1
+            summary["updated"] += 1
+            expected = video.get("privacy_status") or ""
+            mismatch = expected and visibility not in ("unknown", "error") and expected != visibility
+            if mismatch:
+                from api.services.lifecycle_monitor import emit_alert
+                if emit_alert(db, entity_type="video", entity_id=video["id"],
+                              channel_id=video["channel_id"], alert_type=ALERT_TYPE_LONGFORM_MISMATCH,
+                              severity="critical", title=f"Visibilidad externa discrepante: vídeo #{video['id']}",
+                              message=f"BD={expected}; YouTube={visibility}. No se cambia privacidad automáticamente.",
+                              metadata={"db_privacy": expected, "external": visibility, "yt_id": video["yt_video_id"]}):
+                    summary["alerts"] += 1
+        except Exception as exc:
+            logger.warning("Long-form reconcile failed for #%s: %s", video["id"], exc)
+            summary["errors"] += 1
     return summary
 
 

@@ -1699,6 +1699,14 @@ class PipelineOrchestrator:
         """
         from pipeline.video_validator import VideoValidator
 
+        # Editorial guard is opt-in and evaluated only for newly activated
+        # channel content, before TTS/render. Ambiguous topics alert for human
+        # review; clearly out-of-niche topics fail closed.
+        from pipeline.editorial_guard import validate_new_content
+        editorial = validate_new_content(script, self.config, self.db, self.canal)
+        if not editorial.allowed:
+            raise RuntimeError(editorial.reason)
+
         validator = VideoValidator(self.config)
         result = validator.pre_validate(script)
 
