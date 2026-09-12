@@ -143,6 +143,24 @@ def test_validate_diversity_flags_repeated_layout_and_color():
     assert "overlay_repeated" in res.reasons
 
 
+def test_overlay_two_line_budget_is_per_line():
+    from api.services.packaging_policy import validate_thumbnail_overlay
+
+    # 14 + 24 chars joined is > 32, but each line fits its own budget.
+    assert validate_thumbnail_overlay("1971 MADRID | El informe secreto",
+                                      max_chars=24).valid
+
+
+def test_smart_overlay_preserves_two_lines():
+    from pipeline.metadata_generator import _smart_overlay_text
+
+    out = _smart_overlay_text("1971 MADRID | El informe secreto que nadie quiso leer")
+    l1, l2 = [p.strip() for p in out.split("|")]
+    assert l1 == "1971 MADRID"
+    assert len(l2) <= 24
+    assert l2  # L2 survives
+
+
 def test_validate_diversity_ok_when_distinct():
     from api.services.packaging_policy import validate_thumbnail_diversity
 

@@ -160,17 +160,35 @@ def _smart_overlay_text(text: str, soft: int = 24, hard: int = 34) -> str:
     text = " ".join((text or "").split())  # normalize whitespace
     if not text:
         return text
+    # "L1 | L2": truncate each line to its own budget so the two-line structure
+    # and the complementary line survive (previously the whole string was cut,
+    # dropping L2 entirely).
+    if "|" in text:
+        budgets = (14, 24)
+        out_lines = []
+        for i, part in enumerate(p.strip() for p in text.split("|")):
+            part = " ".join(part.split())
+            if not part:
+                continue
+            budget = budgets[i] if i < len(budgets) else soft
+            out_lines.append(_truncate_words(part, budget))
+        return " | ".join(out_lines) if out_lines else text[:hard]
     if len(text) <= hard:
         return text
-    # Drop trailing whole words to fit within soft limit
-    words = text.split()
+    return _truncate_words(text, soft)
+
+
+def _truncate_words(text: str, limit: int) -> str:
+    """Drop trailing whole words until *text* fits within *limit* chars."""
+    if len(text) <= limit:
+        return text
     out = ""
-    for w in words:
-        cand = (out + " " + w).strip()
-        if out and len(cand) > soft:
+    for word in text.split():
+        cand = (out + " " + word).strip()
+        if out and len(cand) > limit:
             break
         out = cand
-    return out or text[:hard]  # never empty; last-resort hard cut
+    return out or text[:limit]  # never empty; last-resort hard cut
 
 
 # ── Unique keyword selection per video ──────────────────────────

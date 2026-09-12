@@ -48,7 +48,11 @@ _OVERLAY_CLICHES = {
 def validate_thumbnail_overlay(overlay: str, max_chars: int = 32) -> ValidationResult:
     text = " ".join(str(overlay or "").split())
     reasons: list[str] = []
-    if len(text) > max_chars:
+    # A "L1 | L2" overlay is two independent lines: the char budget applies to
+    # each line, not to the joined string (otherwise every 2-line overlay would
+    # be rejected at the fail-closed upload gate).
+    lines = [part.strip() for part in text.split("|")] if "|" in text else [text]
+    if any(len(line) > max_chars for line in lines if line):
         reasons.append("length")
     tokens = [t.strip("|,:;.!?()[]").casefold() for t in text.split()]
     if len(set(tokens) & _OVERLAY_CLICHES) >= 2:
