@@ -387,19 +387,30 @@ THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF5C00"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
+
+# v3 (tema-primero): color del contenido; la firma es el marco tipo film strip.
+THUMBNAIL_COLOR_MODE = "image_content"
+THUMBNAIL_FRAME_STYLE = "film_strip"
+THUMBNAIL_LAYOUT_POOL = [
+    "topic_hero", "negative_space_top", "split_diagonal",
+    "center_burst", "subject_closeup",
+]
+
 THUMBNAIL_VISUAL_STYLE = "distress_signal"
+# Overlays temáticos (coordenadas/SIN SEÑAL) son uso puntual, no firma.
+THUMBNAIL_THEMATIC_OVERLAYS_ENABLED = False
 THUMBNAIL_RESCUE_MAYDAY = False
 THUMBNAIL_RESCUE_COORDINATES = True
 THUMBNAIL_RESCUE_SIN_SENAL = True
 THUMBNAIL_ALLOW_FACES = True
+# El sujeto del tema manda. La cara solo es protagonista si el vídeo trata de
+# una persona concreta; si aparece, es un chip secundario real de stock.
 THUMBNAIL_CONCEPT_DIRECTIVE = (
-    "El PAISAJE/ENTORNO de la expedicion es el protagonista, PERO incluye SIEMPRE "
-    "un ROSTRO HUMANO REAL de stock como ancla emocional: expresion extrema de "
-    "sorpresa, miedo o determinacion, contacto visual directo, ocupando 30-45% "
-    "del encuadre (regla: las caras suben el CTR +38%). El rostro debe ser de "
-    "BANCO DE IMAGENES REAL (stock), NUNCA generado por IA ni con menores. "
-    "Si no hay rostro de stock relevante para la escena, usa silueta a contraluz "
-    "o figura humana en escala media."
+    "Canal de expediciones: el ENTORNO/LUGAR o el objeto del tema es el "
+    "protagonista de la imagen. Si el vídeo trata de una persona concreta, un "
+    "rostro humano REAL de stock (sin menores) puede ser el sujeto principal "
+    "con emoción intensa pero creíble. En el resto de casos la cara es, como "
+    "mucho, un elemento secundario y pequeño; nunca la imagen entera."
 )
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "distress_signal",

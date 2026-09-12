@@ -379,19 +379,31 @@ THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#FF2D55"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
+
+# v3 (tema-primero): color del contenido; la firma es el marco.
+THUMBNAIL_COLOR_MODE = "image_content"
+THUMBNAIL_FRAME_STYLE = "corner_marks"
+THUMBNAIL_LAYOUT_POOL = [
+    "topic_hero", "subject_closeup", "artifact_document",
+    "split_diagonal", "center_burst",
+]
+
 THUMBNAIL_VISUAL_STYLE = "clinical_mystery"
+# Overlays temáticos (ECG/cruz/diagnóstico) pasan a uso puntual, no firma.
+THUMBNAIL_THEMATIC_OVERLAYS_ENABLED = False
 THUMBNAIL_MEDICAL_ECG = True
 THUMBNAIL_MEDICAL_CROSS = False
 THUMBNAIL_MEDICAL_DIAGNOSIS = False
 THUMBNAIL_ALLOW_FACES = True
+# Sujeto-tema primero: imagen clínica de alto impacto (radiografía, ADN, ECG).
+# La cara solo es protagonista si el vídeo es el caso de una persona concreta;
+# en ese caso, rostro real de stock (sin menores) y sin sangre visible.
 THUMBNAIL_CONCEPT_DIRECTIVE = (
-    "Canal medico-cientifico. Prioriza imagenes clinicas de alto impacto "
-    "(radiografias, resonancias, ADN, ECG), PERO incluye cuando exista un "
-    "ROSTRO HUMANO REAL de stock con expresion extrema de asombro, preocupacion "
-    "o alivio (contacto visual directo, 30-45% del encuadre; las caras suben el "
-    "CTR +38%). El rostro debe ser de BANCO DE IMAGENES REAL (stock), NUNCA "
-    "generado por IA ni con menores. SIN sangre visible. El elemento clinico "
-    "sigue siendo el ancla contextual del fondo."
+    "Canal medico-cientifico: la imagen clinica del tema (radiografia, "
+    "resonancia, ADN, ECG) es el protagonista. Si el vídeo es el caso de una "
+    "persona concreta, un rostro humano REAL de stock (sin menores) puede ser "
+    "el sujeto principal con emocion intensa pero creible. En el resto de casos "
+    "la cara es secundaria y pequena. SIN sangre visible."
 )
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "clinical_mystery",

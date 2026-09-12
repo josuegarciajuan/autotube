@@ -461,6 +461,15 @@ THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#D4A843"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#1A0F08"
+
+# v3 (tema-primero): el color nace del contenido; la firma es el marco.
+THUMBNAIL_COLOR_MODE = "image_content"
+THUMBNAIL_FRAME_STYLE = "double_border"
+THUMBNAIL_LAYOUT_POOL = [
+    "topic_hero", "artifact_document", "negative_space_top",
+    "split_diagonal", "subject_closeup",
+]
+
 THUMBNAIL_VISUAL_STYLE = "ancient_mystery"
 THUMBNAIL_MANUAL_STYLE = {
     "visual_style": "ancient_mystery",
