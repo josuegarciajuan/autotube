@@ -94,33 +94,45 @@ TITLE_FORMULAS = [
 ]
 TITLE_POWER_WORDS = [
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "archivado", "desclasificado",
-    "silenciado", "ocultado", "suprimido", "enterrado",
+    "confidencial", "archivado", "desclasificado", "silenciado",
+    "suprimido", "enterrado",
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "asombroso", "desconcertante", "fascinante", "impactante",
-    "desgarrador", "conmovedor", "angustiante", "perturbador",
+    "asombroso", "desconcertante", "fascinante",
+    "conmovedor", "angustiante", "perturbador",
     "alarmante", "devastador", "sobrehumano", "insólito",
-    "oculto", "secreto", "siniestro", "enigmático",
-    "increíble", "misterioso", "único", "raro", "extraño",
+    "siniestro", "enigmático", "misterioso", "único", "raro", "extraño",
     "indescifrable", "desconocido", "insospechado", "enigma",
     "síndrome", "enfermedad", "diagnóstico", "caso", "paciente",
-    "curación", "tratamiento", "pronóstico", "patología",
-    "condición", "trastorno", "mutación", "anomalía",
-    "malformación", "resistencia", "inmunidad", "remisión",
-    "milagro médico", "caso único",
-    "documentado", "real", "verificado", "confirmado", "demostrado",
+    "pronóstico", "patología", "condición", "trastorno", "mutación",
+    "anomalía", "malformación", "resistencia", "inmunidad", "remisión",
+    "caso único",
+    "documentado", "verificado", "confirmado", "demostrado",
     "científico", "médico", "clínico", "probado", "estudiado",
     "publicado", "registrado",
     "rara", "única", "primera", "última", "ningún",
     "solo una", "la más rara", "extrema", "severa",
     "sobrevivió", "venció", "superó", "desafió", "contradijo",
-    "imposible", "increíble", "milagrosa", "inexplicable",
-    "contra todo pronóstico", "resucitó",
-    "cuerpo", "cerebro", "dolor", "sufrimiento", "agonía",
-    "transformación", "mutación", "deformidad",
+    "inexplicable", "contra todo pronóstico",
+    "cerebro", "dolor", "transformación",
 ]
 TITLE_MAX_CHARS = 65
+TITLE_MIN_CHARS = 28
+TITLE_CAPS_POLICY = "sentence"
+TITLE_STYLE_GUIDE = (
+    "Titulares médico-científicos: nombre real del síndrome o del paciente "
+    "+ cifra clínica (años, médicos, casos). Tono de asombro riguroso; "
+    "nunca milagros, curas ni promesas. Empieza por el nombre o el dato."
+)
+TITLE_GOOD_EXAMPLES = [
+    "Brooke Greenberg: 20 años con cuerpo de bebé, sin diagnóstico",
+    "Síndrome de Alicia: cuando tu cerebro distorsiona el mundo real",
+    "El síndrome que borra los rostros: 12 casos sin diagnóstico",
+]
+TITLE_BAD_EXAMPLES = [
+    "El caso imposible | La Verdad Ocultado",
+    "Síndrome raro: Increíble y Real para Siempre",
+]
 
 SCRIPT_HOOK_RULE = (
     "ATENCION: La primera frase del guion DEBE ser el hecho mas "

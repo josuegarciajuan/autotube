@@ -141,35 +141,48 @@ TITLE_FORMULAS = [
 TITLE_POWER_WORDS = [
     # ⚡ URGENCIA / EXCLUSIVIDAD
     "revelado", "filtrado", "censurado", "inédito", "clasificado",
-    "confidencial", "prohibido", "exclusiva", "urgente", "limitado",
-    "desclasificado", "archivado", "ocultado", "silenciado", "suprimido",
-    "enterrado", "sellado", "bloqueado",
+    "confidencial", "exclusiva", "desclasificado", "archivado",
+    "silenciado", "suprimido", "enterrado", "sellado", "bloqueado",
     # 💥 IMPACTO EMOCIONAL
     "escalofriante", "desgarrador", "inexplicable", "demoledor",
     "sobrecogedor", "estremecedor", "alucinante", "aterrador",
-    "conmovedor", "inspirador", "revelador", "imposible",
-    "extraordinario", "asombroso", "fascinante", "impactante",
+    "conmovedor", "inspirador", "revelador",
+    "extraordinario", "asombroso", "fascinante",
     "devastador", "magnético", "irresistible", "sobrehumano",
-    "desconcertante", "perturbador", "increíble", "insólito",
+    "desconcertante", "perturbador", "insólito",
     # 🔍 CURIOSIDAD / MISTERIO
-    "oculto", "secreto", "siniestro", "enigmático", "misterio",
-    "enigma", "intriga", "sorprendente", "desconocido",
-    "inexplorado", "indescifrable", "inquietante",
+    "siniestro", "enigmático", "enigma", "intriga", "sorprendente",
+    "desconocido", "inexplorado", "indescifrable", "inquietante",
     # Authority / Verification
-    "demostrado", "documentado", "real", "comprobado", "verificado",
+    "demostrado", "documentado", "comprobado", "verificado",
     "confirmado", "científico", "probado",
     # Spiritual / Destiny
     "milagro", "destino", "sincronía", "casualidad", "profecía",
     "sobrevivió", "regresó", "salvó", "predijo", "anticipó",
-    "señal", "coincidencia", "universo", "cósmico", "divino",
+    "señal", "coincidencia", "cósmico", "divino",
     "transformación", "despertar", "conexión", "energía",
-    "revelación", "visionario", "premonición", "presagio",
+    "visionario", "premonición", "presagio",
     # Unexpected / Twist
     "inesperado", "impensable", "improbable", "insospechado",
 ]
 
 TITLE_MAX_CHARS = 65
 TITLE_MIN_CHARS = 28
+TITLE_CAPS_POLICY = "sentence"
+TITLE_STYLE_GUIDE = (
+    "Titulares que nombran a los protagonistas reales (Jung, Pauli) y la "
+    "coincidencia concreta que los conecta. Tono de asombro sereno, nunca "
+    "sensacionalista. Empieza por el nombre o el dato, no por 'El/La'."
+)
+TITLE_GOOD_EXAMPLES = [
+    "Jung y Pauli: la sincronicidad que cambió la física",
+    "De 14 rechazos al examen ASCP: su historia de perseverancia",
+    "El sueño que anunció el Titanic: 14 años antes del naufragio",
+]
+TITLE_BAD_EXAMPLES = [
+    "Aprobó el examen ASCP tras ser atropellada | La Verdad Ocultado",
+    "La sincronía que lo cambió TODO para Siempre — Real",
+]
 # El guard duro exige un ancla concreta (persona/lugar). Exigir además un año
 # bloqueaba el 100% del backlog de canal2 en la compuerta final de packaging
 # (validation_failed). El año se pide ahora en el prompt (TITLE_REQUIRE_YEAR),
