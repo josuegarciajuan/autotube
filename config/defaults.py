@@ -720,6 +720,29 @@ VIRAL_ENABLED = True
 VIRAL_CONTENT_MODE = "rewrite"
 VIRAL_MAX_AGE_DAYS = 29
 
+# ── Planificación de fuente viral (Configuración de Programación) ──
+# viral_per_day: mínimo GARANTIZADO de long-forms virales por día para el canal.
+# viral_day_boost_weight: probabilidad (0-1) de que CADA slot restante por
+#   encima del mínimo se planifique como viral. Con 2 vídeos/día, 1 + 0.8
+#   ⇒ ~90% de los long-forms generados son virales; con 3/día ⇒ ~87%.
+# Estos defaults son la fuente única cuando el canal no los define en
+# config_json (así la UI no muestra un 0 fantasma que el motor ignora).
+VIRAL_PER_DAY = 1
+VIRAL_DAY_BOOST_WEIGHT = 0.8
+
+# ── Robustez del descubrimiento/procesado viral ──
+# max_attempts: candidatos que el orchestrator intenta procesar antes de caer
+#   a original. Más intentos ⇒ el fallback a original es la excepción.
+VIRAL_MAX_ATTEMPTS = 10
+# Duración mínima (s) de un candidato para considerarlo documental.
+VIRAL_MIN_DURATION_SEC = 600
+# Vistas mínimas del candidato. Se puede relajar por canal.
+VIRAL_MIN_VIEWS = 500_000
+# Si True, descarta candidatos cuya fecha de subida no se pudo verificar.
+# Por defecto False: se conservan marcados como `date_unverified` (los filtros
+# demasiado estrictos eran una de las causas del fallback masivo a original).
+VIRAL_REQUIRE_VERIFIED_DATE = False
+
 # ═══════════════════════════════════════════════════════════════════
 # CROSS-PLATFORM DEFAULTS
 # ═══════════════════════════════════════════════════════════════════

@@ -914,33 +914,49 @@ def _resolve_native_cap(alloc: dict, slug: str, default_n: int) -> int:
 def _build_source_mode_sequence(total: int, ch: dict, date_str: str) -> list[str]:
     """Build alternating source_mode sequence for one channel's daily slots.
 
-    Viral count is computed deterministically: viral_per_day (base minimum) +
-    probabilistic +1 based on viral_day_boost_weight, capped at total.
+    Viral count is computed deterministically:
+      * ``viral_per_day`` = mínimo GARANTIZADO de slots virales.
+      * ``viral_day_boost_weight`` = probabilidad (0-1) de que CADA slot
+        restante (por encima del mínimo) sea viral, con hash determinista por
+        (fecha, canal, posición). Antes sólo se podía sumar +1 como máximo, lo
+        que impedía llegar al 80-90% con 3+ slots/día.
 
     Always starts with 'viral' when viral_count > 0 so viral slots get
     earlier scheduled_at and are dispatched first. Then alternates to
     distribute them evenly throughout the day.
 
-    Examples:
-        total=3, viral_count=1 → ['viral', 'original', 'original']
-        total=3, viral_count=2 → ['viral', 'original', 'viral']
-        total=4, viral_count=2 → ['viral', 'original', 'viral', 'original']
-        total=2, viral_count=0 → ['original', 'original']
-        total=2, viral_count=2 → ['viral', 'viral']
+    Examples (boost=0.8):
+        total=2, viral_per_day=1 → 1 garantizado + 80% el 2º → ~90% viral
+        total=3, viral_per_day=1 → 1 + 2·0.8 → ~87% viral
+        total=2, viral_per_day=2 → ['viral', 'viral']
+        total=2, viral_per_day=0 → ['original', 'original'] (opt-out explícito)
     """
-    # ── Deterministic viral count with boost ──
-    viral_min = int(ch.get("viral_per_day", 1) or 1)
-    viral_boost = float(ch.get("viral_day_boost_weight", 0.2))
+    if total <= 0:
+        return []
+
+    # ── Mínimo garantizado ──
+    raw_vpd = ch.get("viral_per_day")
+    # None (clave ausente) → default 1; un 0 explícito se respeta.
+    viral_min = 1 if raw_vpd is None else int(raw_vpd or 0)
+    viral_min = max(0, min(viral_min, total))
+
+    try:
+        viral_boost = float(ch.get("viral_day_boost_weight", 0.8) or 0.0)
+    except (TypeError, ValueError):
+        viral_boost = 0.0
+    viral_boost = max(0.0, min(1.0, viral_boost))
+
     ch_id = int(ch.get("channel_id", 0) or 0)
 
-    # Deterministic hash-based random with offset suffix to avoid same seed as videos
-    seed_str = f"{date_str}|{ch_id}|viral"
-    h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
-    roll = h / 0xFFFFFFFF
+    viral_count = viral_min
+    if viral_boost > 0 and viral_min < total:
+        # Cada slot restante con la misma probabilidad, reproducible por hash.
+        for pos in range(viral_min, total):
+            seed_str = f"{date_str}|{ch_id}|viral|{pos}"
+            h = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+            if (h / 0xFFFFFFFF) < viral_boost:
+                viral_count += 1
 
-    viral_count = min(viral_min, total)
-    if total > viral_min and roll < viral_boost:
-        viral_count = min(viral_min + 1, total)
     viral_count = max(0, min(viral_count, total))
 
     if viral_count <= 0:
@@ -3515,9 +3531,9 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
                 ))
             cursor = conn.execute(
                 "INSERT INTO videos (canal, channel_id, video_path, status, progress, "
-                "publish_mode, target_public_at, scheduled_upload_at, created_at) "
-                "VALUES (?, ?, '', 'generating', 0, ?, ?, ?, CURRENT_TIMESTAMP)",
-                (slug, channel_id, publish_mode, target_public_at, planned_upload_at),
+                "publish_mode, target_public_at, scheduled_upload_at, source_mode, created_at) "
+                "VALUES (?, ?, '', 'generating', 0, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (slug, channel_id, publish_mode, target_public_at, planned_upload_at, source_mode),
             )
             conn.commit()
             video_id = cursor.lastrowid

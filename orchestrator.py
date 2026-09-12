@@ -753,7 +753,15 @@ class PipelineOrchestrator:
             self._emit_progress(14, "script",
                                 f"Procesando {min(5, len(discovered))} candidatos virales...")
 
-            max_attempts = min(5, len(discovered))
+            # Nº de candidatos a intentar antes de caer a original. Configurable
+            # por canal: más intentos ⇒ el fallback a original es la excepción.
+            try:
+                _max_cfg = int(getattr(self.config, "VIRAL_MAX_ATTEMPTS", 10) or 10)
+            except (TypeError, ValueError):
+                _max_cfg = 10
+            max_attempts = min(max(_max_cfg, 1), len(discovered))
+            self._emit_progress(14, "script",
+                                f"Procesando {max_attempts} candidatos virales...")
             for attempt, candidate in enumerate(discovered[:max_attempts], 1):
                 logger.info("[%s] Attempt %d/%d: '%s' (score=%.0f, views=%s)",
                             self.canal, attempt, max_attempts,
@@ -928,6 +936,14 @@ class PipelineOrchestrator:
             "[%s] ⚠ VIRAL FALLBACK: No viral candidates found after exhaustive search. "
             "Switching to original mode as last resort.", self.canal
         )
+        # Traza durable para poder medir cuántos slots virales caen a original.
+        try:
+            self.db.log_pipeline(
+                self.canal, "script", "warning",
+                "viral_fallback: sin candidatos virales viables; se generó original",
+            )
+        except Exception:
+            pass
         self.source_mode = "original"
         self._emit_progress(15, "script",
                             "⚠ Sin candidatos virales — generando guion original con IA...")
