@@ -463,6 +463,7 @@ def synthesize_shorts_blocks(
                 tono=block.get("tono"),
                 emocion=block.get("emocion", ""),
                 tipo=block_type,
+                texto=block_text,
             )
             rate, pitch = pros["rate"], pros["pitch"]
             volume = pros["volume"]

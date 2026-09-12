@@ -7,6 +7,7 @@ from config.voice_resolver import (
     resolve_prosody,
     rate_to_speed,
     split_block_segments,
+    infer_tono_from_text,
 )
 
 
@@ -109,6 +110,65 @@ def test_split_block_segments_no_segments_uses_block_tone():
     assert len(segs) == 1
     assert segs[0]["tono"] == "misterio"
     assert segs[0]["texto"] == "Solo un tono."
+
+
+# ── infer_tono_from_text (adaptación por contenido) ──────────
+
+def test_infer_tono_from_text_revelacion():
+    assert infer_tono_from_text("Y entonces lo descubrió: la verdad era otra.") == "revelacion"
+
+
+def test_infer_tono_from_text_tension():
+    assert infer_tono_from_text("De repente, algo se movió en la oscuridad.") == "tension"
+
+
+def test_infer_tono_from_text_misterio():
+    assert infer_tono_from_text("Un secreto oculto durante generaciones.") == "misterio"
+
+
+def test_infer_tono_from_text_none_when_neutral():
+    assert infer_tono_from_text("El río atraviesa la llanura.") is None
+
+
+def test_normalize_prefers_explicit_tono_over_text():
+    # El texto sugiere tensión, pero el tono explícito manda.
+    assert normalize_tono(
+        _cfg(), tono="cierre",
+        texto="De repente, algo se movió en la oscuridad.",
+    ) == "cierre"
+
+
+def test_normalize_prefers_emocion_over_text():
+    assert normalize_tono(
+        _cfg(), emocion="asombro",
+        texto="De repente, algo se movió en la oscuridad.",
+    ) == "asombro"
+
+
+def test_normalize_uses_text_when_no_tono_or_emocion():
+    # Simula un bloque de guion antiguo sin tono ni emoción útil.
+    assert normalize_tono(
+        _cfg(), tipo="desarrollo",
+        texto="Y entonces lo descubrió: la verdad era otra.",
+    ) == "revelacion"
+
+
+def test_resolve_prosody_adaptive_from_text():
+    pros = resolve_prosody(_cfg(), tipo="desarrollo",
+                           texto="De repente, un grito rompió el silencio.")
+    assert pros["tono"] == "tension"
+    assert pros["rate"] == PROSODY_PROFILES["tension"]["rate"]
+
+
+def test_split_block_segments_adapts_old_block_by_text():
+    # Bloque legacy: sin tono, sin emoción, sin segmentos.
+    bloque = {
+        "tipo": "desarrollo",
+        "texto": "Y entonces lo descubrió: la verdad era otra.",
+    }
+    segs = split_block_segments(bloque, _cfg(), max_segments=3, expressive=True)
+    assert len(segs) == 1
+    assert segs[0]["tono"] == "revelacion"
 
 
 # ── rate_to_speed ─────────────────────────────────────────────

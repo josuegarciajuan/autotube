@@ -34,6 +34,23 @@ esperanza, reflexion, enfasis, cierre` (definido en `config/defaults.py:TONO_CAT
 Resolución del tono (prioridad): `tono` canónico explícito → keywords de
 `emocion` → mapa por `tipo` → `TONO_DEFAULT`.
 
+## Adaptación automática del tono (sin elección manual)
+
+El usuario **solo elige la voz** (Santa, Jorge, ...). El tono de cada
+párrafo/bloque se decide en el algoritmo con esta prioridad:
+
+1. `tono` canónico emitido por el LLM al enriquecer el guion (contexto real).
+2. Keywords de `emocion` (meta ya existente en guiones antiguos).
+3. **Inferencia por contenido del texto** (`infer_tono_from_text`): señales
+   léxicas y de puntuación (revelación, tensión, misterio, tristeza...).
+4. Mapa por `tipo` de bloque (hook/climax/cierre...).
+5. `TONO_DEFAULT`.
+
+Esto hace que la narración varíe por párrafo incluso en guiones generados antes
+de esta feature (sin `tono`), o cuando `emocion` viene vacía. Los botones de
+tono del panel son **solo prueba de audio**; no seleccionan nada. El editor de
+prosodia calibra cómo suena cada tono cuando el algoritmo lo detecta.
+
 ## Config (heredable, override por canal)
 
 En `config/defaults.py`:
