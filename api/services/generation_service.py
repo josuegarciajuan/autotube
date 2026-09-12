@@ -3404,13 +3404,25 @@ async def auto_recover_on_startup():
     # restart is not idle (a generation is running → Step 3 recovery is skipped)
     # they are NOT recreated, stranding the videos in 'error' until an idle
     # restart. Reassembly jobs carry no running process, so they are safe to keep.
+    # EXCEPT marathon jobs: la "rueda" de maratones encola un maratón cada vez; si
+    # un reinicio lo mata, se pierde la generación y el guard de fallo reciente
+    # bloquea la rueda 4h. Los maratones en cola se preservan (el _queue_consumer
+    # los despacha igual).
     queued_killed = conn.execute(
         "UPDATE generation_jobs SET status='failed', "
         "error_msg='Server restarted — old process no longer exists' "
-        "WHERE status = 'queued' AND action != 'reassemble'"
+        "WHERE status = 'queued' AND action != 'reassemble' "
+        "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1)"
     ).rowcount
     if queued_killed:
         log.info("Marked %d queued job(s) as failed (server restart)", queued_killed)
+    preserved_marathon = conn.execute(
+        "SELECT COUNT(*) FROM generation_jobs "
+        "WHERE status='queued' AND video_id IN "
+        "(SELECT id FROM videos WHERE is_marathon=1)"
+    ).fetchone()[0]
+    if preserved_marathon:
+        log.info("Preserved %d queued marathon job(s) across restart", preserved_marathon)
     preserved_reassemble = conn.execute(
         "SELECT COUNT(*) FROM generation_jobs "
         "WHERE status='queued' AND action='reassemble'"
