@@ -2408,7 +2408,41 @@ def compute_and_store_horizon(
     
     # Compute horizon slots
     slots = compute_horizon_slots(channel_configs, horizon_days=horizon_days, db=db)
-    
+
+    # ── Anti-colisión con slots activos (regla dura, sep 2026) ────────
+    # El índice parcial uq_active_planned_public_target prohíbe dos slots
+    # activos con el mismo (channel_id, target_public_at). Un plan nuevo NO
+    # debe duplicar el target de una generación en curso (status='running') ni
+    # proponer dos slots con el mismo target en el mismo batch. Sin este filtro
+    # el replan muere con IntegrityError y deja 0 slots (botón "Reprogramar").
+    try:
+        with db._connect() as _conn:
+            _running_targets = {
+                (int(_r["channel_id"]), str(_r["target_public_at"]))
+                for _r in _conn.execute(
+                    "SELECT channel_id, target_public_at FROM planned_slots "
+                    "WHERE status='running' AND target_public_at IS NOT NULL"
+                ).fetchall()
+            }
+        _seen: set = set()
+        _deduped = []
+        for _s in slots:
+            _t = _s.get("target_public_at")
+            if _t:
+                _key = (int(_s.get("channel_id") or 0), str(_t))
+                if _key in _running_targets or _key in _seen:
+                    continue
+                _seen.add(_key)
+            _deduped.append(_s)
+        if len(_deduped) != len(slots):
+            logger.info(
+                "Horizon replan: skipped %d slot(s) colliding with active/running targets",
+                len(slots) - len(_deduped),
+            )
+        slots = _deduped
+    except Exception as _exc:
+        logger.debug("Horizon dedup skipped: %s", _exc)
+
     if not slots:
         logger.info("compute_and_store_horizon: no slots to plan")
         return {"total_slots": 0, "days_planned": 0, "slots_by_channel": {}}
