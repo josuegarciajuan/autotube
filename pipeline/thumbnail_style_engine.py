@@ -223,7 +223,9 @@ INSTRUCCIONES:
 - Define la paleta de colores (primary, accent, text, shadow en hex).
 - Define las reglas de texto (uppercase si/no, max_words).
 - Escribe un pollo_prompt_suffix que capture la esencia visual del canal.
-- Sé coherente: todas las miniaturas del canal deben tener el MISMO estilo.
+- Coherencia ≠ repetición: mantén la identidad (luz, textura, tono fotográfico)
+  pero la composición, el sujeto y el COLOR de cada miniatura deben variar con el
+  contenido del vídeo. No fijes una paleta de color como seña de identidad.
 
 Responde SOLO con JSON:
 {{"visual_style": "dark_cinematic", "reasoning": "...", "color_palette": {{...}}, "base_composition": "...", "text_style": {{...}}, "pollo_prompt_suffix": "..."}}"""

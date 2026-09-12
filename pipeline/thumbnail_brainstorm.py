@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from config.llm_helpers import _derive_hook_from_title
+from pipeline.thumbnail_art_director import (
+    TOPIC_FIRST_DIRECTIVE,
+    recent_context_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,14 @@ class ThumbnailBrief:
     composition_notes: str = "texto abajo, imagen arriba"
     layout: str = "dark_reveal"
 
+    # ── v3 (tema-primero): sujeto + plan de proveedores + énfasis ──
+    subject_type: str = ""         # person | place | object_artifact | concept | medical | event
+    primary_subject: str = ""      # sintagma nominal concreto del tema
+    provider_main: str = ""        # "ai" | "stock"
+    provider_face: str = ""        # "stock" | "none"
+    emphasis_word: str = ""        # palabra del overlay que se resalta
+    color_intent: str = ""         # intención emocional de color (no hex de canal)
+
     # Psychology analysis (for debugging / logging)
     psych_hooks: list[str] = field(default_factory=list)
     psych_score: float = 0.0
@@ -47,16 +59,9 @@ class ThumbnailBrief:
 
 # ── LLM Prompts ─────────────────────────────────────────────────
 
-# ── Default face directive (standard YouTube CTR-maximization strategy) ──
-DEFAULT_FACE_DIRECTIVE = (
-    "Facial expression psychology: the human face is the single highest-CTR element on "
-    "YouTube thumbnails. A shocked/surprised/astonished facial expression triggers instant "
-    "emotional contagion (mirror neurons) and dramatically increases click-through rate — "
-    "this is the 'MrBeast face' principle. Siempre que el contenido lo permita, la emoción "
-    "DEBE materializarse en un ROSTRO HUMANO en primer plano con expresión facial intensa "
-    "(sorpresa, shock, asombro, miedo, incredulidad). Los rostros generan más clicks que "
-    "cualquier escena abstracta."
-)
+# ── Default directive: sujeto-tema primero (v3, reemplaza el "MrBeast face") ──
+# Se mantiene el nombre por compatibilidad con llamadas existentes.
+DEFAULT_FACE_DIRECTIVE = TOPIC_FIRST_DIRECTIVE
 
 PSYCHOLOGY_AGENT_SYSTEM = """Eres un psicólogo especializado en comportamiento de consumo digital y 
 marketing de atención. Tu especialidad es analizar contenido de video y determinar 
@@ -100,13 +105,20 @@ INSTRUCCIONES:
 1. Identifica la emoción dominante que maximizará el CTR.
    {face_directive}
 2. Define un curiosity gap específico (algo que la imagen insinúe pero no revele).
-3. Sugiere 1-2 símbolos/conceptos visuales con alta carga psicológica para la imagen PRINCIPAL.
-4. Indica qué NO debe mostrar la miniatura.
-5. IMPORTANTE: Evalúa el NIVEL DE IMPACTO VISUAL necesario (1-10). Para contenido de psicología/documental oscuro, el impacto debe ser 8+. Sugiere TÉCNICAS ESPECÍFICAS: iluminación dramática, primer plano extremo, contraste máximo, colores vibrantes contra fondos oscuros, composición asimétrica.
-6. Describe UNA ESCENA SECUNDARIA que complemente la imagen principal sin repetirla — será un recuadro pequeño en la composición final (por ejemplo: un documento, una fotografía antigua, un objeto simbólico, una silueta).
+3. Define el SUJETO PRINCIPAL CONCRETO del vídeo (el tema del título), no un fondo genérico.
+4. Clasifica el vídeo en UN tipo de sujeto: "person" (trata de una persona concreta),
+   "place" (lugar/expedición/civilización), "object_artifact" (documento/objeto/reliquia),
+   "medical" (caso clínico/enfermedad), "event" (batalla/naufragio/catástrofe) o "concept".
+5. Indica qué NO debe mostrar la miniatura.
+6. IMPORTANTE: Evalúa el NIVEL DE IMPACTO VISUAL necesario (1-10) y sugiere técnicas
+   específicas (iluminación, encuadre, contraste, composición).
+7. Describe UNA ESCENA SECUNDARIA que complemente la imagen principal sin repetirla —
+   será un recuadro pequeño (documento, fotografía antigua, objeto simbólico, silueta).
+
+{recent_context}
 
 Responde SOLO con JSON:
-{{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "avoid_showing": "...", "secondary_scene": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
+{{"emotion_target": "...", "curiosity_gap": "...", "visual_concept": "...", "primary_subject": "...", "subject_type": "person|place|object_artifact|concept|medical|event", "provider_main": "ai|stock", "provider_face": "stock|none", "avoid_showing": "...", "secondary_scene": "...", "psychological_hooks": ["...", "..."], "confidence_score": 0.0}}"""
 
 
 MARKETING_AGENT_SYSTEM = """Eres un estratega de marketing digital especializado en YouTube. 
@@ -140,20 +152,29 @@ ESTILO VISUAL: {visual_style}
 PALETA DE COLORES: {color_palette}
 
 REQUISITOS:
-1. Crea DOS líneas de texto overlay:
-   - LÍNEA 1 (text_gancho): 1-2 palabras en MAYÚSCULAS. Máx 12 caracteres. Palabra-gancho que DETIENE el scroll.
-   - LÍNEA 2 (text_complemento): 2-4 palabras. Máx 24 caracteres. Complementa L1 y título sin repetirlos.
-   - Regla: L1 + L2 + título deben contar una mini-historia de 3 actos.
-   - Formatos para L1: "SIN SANGRE", "FUE REAL", "3 MINUTOS", "5 MÉDICOS", "NADIE LO VIO", "PROHIBIDO"
-   - **L1 DEBE contener una palabra clave extraída del TÍTULO. NUNCA uses frases genéricas.**
-   - Formatos para L2: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
-2. Define el BADGE/SELLO de confianza (badge_text): DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío.
-3. Define la composición (dónde va el texto, dónde el foco visual). {face_directive}
-4. Sugiere qué layout usar: shock_closeup, dark_reveal, split_face, incomplete_puzzle
-5. Crea 3 variantes de texto completas para A/B testing futuro (campo text_variants legacy)
+1. Crea DOS líneas de texto overlay (deben funcionar CON el título, no repetirlo):
+   - LÍNEA 1 (text_gancho): 1-3 palabras en MAYÚSCULAS. Máx 14 caracteres. Palabra-gancho
+     concreta que DETIENE el scroll y aporta información (cifra, fecha, lugar, consecuencia).
+   - LÍNEA 2 (text_complemento): 2-4 palabras. Máx 24 caracteres. Añade la intriga que el
+     título no revela.
+   - PROHIBIDO usar comodines vacíos: "OCULTO", "REAL", "IMPACTANTE", "INCREÍBLE",
+     "PROHIBIDO", "NADIE LO VIO", "NADIE LO EXPLICÓ". El texto debe ser específico del tema.
+   - **L1 DEBE contener una palabra clave concreta extraída del TÍTULO.**
+2. Indica la PALABRA DE ÉNFASIS (emphasis_word): una sola palabra (1-2 máximo) de L1 o L2
+   que se resaltará en la miniatura. En minúsculas, sin puntuación.
+3. Define el BADGE/SELLO de confianza (badge_text): DOCUMENTAL, CASO REAL, ARCHIVO,
+   EXPEDIENTE, o vacío.
+4. Define la INTENCIÓN DE COLOR (color_intent) según la emoción y el contenido: p. ej.
+   "frío peligro azul", "calor ámbar histórico", "verde tóxico médico". NO devuelvas hex.
+5. Define la composición (dónde va el texto, dónde el foco visual). {face_directive}
+6. Sugiere un layout de: topic_hero, subject_closeup, artifact_document, split_diagonal,
+   negative_space_top, center_burst, portrait_hero, dark_reveal, shock_closeup.
+7. Crea 3 variantes de texto completas (campo text_variants legacy).
+
+{recent_context}
 
 Responde SOLO con JSON:
-{{"text_gancho": "...", "text_complemento": "...", "badge_text": "...", "best_text": "...", "text_variants": ["...", "...", "..."], "text_color_hex": "#...", "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""
+{{"text_gancho": "...", "text_complemento": "...", "emphasis_word": "...", "badge_text": "...", "color_intent": "...", "best_text": "...", "text_variants": ["...", "...", "..."], "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""
 
 
 class ThumbnailBrainstorm:
@@ -169,6 +190,7 @@ class ThumbnailBrainstorm:
         channel_theme: str = "",
         allow_faces: bool = True,
         concept_directive: str = "",
+        recent_context: dict | None = None,
     ) -> ThumbnailBrief:
         """Run both agents and merge into a complete design brief.
 
@@ -179,11 +201,12 @@ class ThumbnailBrainstorm:
             style_profile: Channel style profile from ThumbnailStyleEngine.
             channel_name: Channel display name.
             channel_theme: One-line theme summary.
-            allow_faces: If False, use concept_directive instead of the default
-                surprised-face strategy. Channels without faces (e.g. medical)
-                set this to False.
+            allow_faces: If False, faces are never the protagonist.
             concept_directive: Custom visual directive string. When non-empty,
-                replaces the default face-based directive in all agent prompts.
+                it is appended to the topic-first directive (never replaces the
+                subject-first rule).
+            recent_context: Summary of recent channel thumbnails (layouts,
+                colours, subjects) so the agents explicitly avoid repeating them.
 
         Returns:
             ThumbnailBrief ready for image generation and composition.
@@ -192,13 +215,13 @@ class ThumbnailBrainstorm:
         visual_style = style.get("visual_style", "dark_cinematic")
         color_palette = style.get("color_palette", {})
 
-        # Build the face/concept directive for this channel
-        # concept_directive (when non-empty) always takes precedence over default,
-        # regardless of allow_faces. allow_faces only controls fallback brief logic.
+        # Topic-first is always the base; a channel directive is appended as an
+        # extra constraint (it can no longer turn the thumbnail into a face-first
+        # design).
+        face_directive = DEFAULT_FACE_DIRECTIVE
         if concept_directive:
-            face_directive = concept_directive
-        else:
-            face_directive = DEFAULT_FACE_DIRECTIVE
+            face_directive = f"{DEFAULT_FACE_DIRECTIVE}\n{concept_directive}"
+        recent_block = recent_context_prompt(recent_context)
 
         script_snippet = script_text[:1500] if script_text else ""
 
@@ -211,6 +234,7 @@ class ThumbnailBrainstorm:
                 channel_theme=channel_theme,
                 visual_style=visual_style,
                 face_directive=face_directive,
+                recent_context=recent_block,
             )
 
             marketing = self._run_marketing_agent(
@@ -219,6 +243,7 @@ class ThumbnailBrainstorm:
                 visual_style=visual_style,
                 color_palette=color_palette,
                 face_directive=face_directive,
+                recent_context=recent_block,
             )
 
             brief = self._merge(psych, marketing, style, title=title)
@@ -243,6 +268,7 @@ class ThumbnailBrainstorm:
         allow_faces: bool = True,
         concept_directive: str = "",
         num_variants: int = 3,
+        recent_context: dict | None = None,
     ) -> list[ThumbnailBrief]:
         """Generate N visually distinct thumbnail briefs for A/B testing.
         
@@ -282,6 +308,7 @@ class ThumbnailBrainstorm:
                 channel_theme=channel_theme,
                 allow_faces=allow_faces,
                 concept_directive=concept_directive,
+                recent_context=recent_context,
             )
         except Exception as exc:
             logger.warning("Variant 1 brainstorm failed: %s — using fallback", exc)
@@ -391,6 +418,12 @@ Genera el texto superpuesto para esta variante."""
                     text_color_hex=base.text_color_hex,
                     composition_notes=result.get("composition_notes", variant_directive[:200]),
                     layout=base.layout,
+                    subject_type=base.subject_type,
+                    primary_subject=base.primary_subject,
+                    provider_main=base.provider_main,
+                    provider_face=base.provider_face,
+                    emphasis_word=result.get("emphasis_word", base.emphasis_word),
+                    color_intent=base.color_intent,
                     psych_hooks=list(base.psych_hooks),
                     psych_score=base.psych_score,
                     marketing_ctr_estimate=base.marketing_ctr_estimate,
@@ -417,6 +450,12 @@ Genera el texto superpuesto para esta variante."""
             text_color_hex=base.text_color_hex,
             composition_notes=variant_directive[:200],
             layout=base.layout,
+            subject_type=base.subject_type,
+            primary_subject=base.primary_subject,
+            provider_main=base.provider_main,
+            provider_face=base.provider_face,
+            emphasis_word=base.emphasis_word,
+            color_intent=base.color_intent,
             psych_hooks=list(base.psych_hooks),
             psych_score=base.psych_score,
             marketing_ctr_estimate=base.marketing_ctr_estimate,
@@ -433,6 +472,7 @@ Genera el texto superpuesto para esta variante."""
         channel_theme: str,
         visual_style: str,
         face_directive: str = "",
+        recent_context: str = "",
     ) -> dict:
         """Call the psychology LLM agent."""
         from config.llm_client import create_llm_client
@@ -453,6 +493,7 @@ Genera el texto superpuesto para esta variante."""
             script_snippet=script_snippet[:1200],
             visual_style=visual_style,
             face_directive=face_directive or DEFAULT_FACE_DIRECTIVE,
+            recent_context=recent_context,
         )
 
         try:
@@ -466,7 +507,7 @@ Genera el texto superpuesto para esta variante."""
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.8,
-                max_tokens=400,
+                max_tokens=500,
             )
         except Exception:
             logger.debug("Psychology agent failed after retries — returning empty dict")
@@ -479,6 +520,7 @@ Genera el texto superpuesto para esta variante."""
         visual_style: str,
         color_palette: dict,
         face_directive: str = "",
+        recent_context: str = "",
     ) -> dict:
         """Call the marketing LLM agent."""
         from config.llm_client import create_llm_client
@@ -498,6 +540,7 @@ Genera el texto superpuesto para esta variante."""
             visual_style=visual_style,
             color_palette=json.dumps(color_palette, ensure_ascii=False),
             face_directive=face_directive or DEFAULT_FACE_DIRECTIVE,
+            recent_context=recent_context,
         )
 
         try:
@@ -543,7 +586,14 @@ Genera el texto superpuesto para esta variante."""
             secondary_scene=psych.get("secondary_scene", ""),
             text_color_hex=marketing.get("text_color_hex", style.get("color_palette", {}).get("text", "#F5F0E8")),
             composition_notes=marketing.get("composition_notes", "texto abajo, imagen arriba"),
-            layout=marketing.get("layout", style.get("base_composition", "dark_reveal")),
+            layout=marketing.get("layout", style.get("base_composition", "topic_hero")),
+            # ── v3 tema-primero ──
+            subject_type=psych.get("subject_type", ""),
+            primary_subject=psych.get("primary_subject", psych.get("visual_concept", ""))[:160],
+            provider_main=psych.get("provider_main", ""),
+            provider_face=psych.get("provider_face", ""),
+            emphasis_word=marketing.get("emphasis_word", ""),
+            color_intent=marketing.get("color_intent", ""),
             psych_hooks=psych.get("psychological_hooks", []),
             psych_score=float(psych.get("confidence_score", 0.0)),
             marketing_ctr_estimate=marketing.get("ctr_estimate", ""),
@@ -558,7 +608,7 @@ Genera el texto superpuesto para esta variante."""
         l2 = hook_parts[1] if len(hook_parts) >= 2 else "La verdad oculta"
 
         if not allow_faces:
-            # Clinical/medical fallback — no surprised faces
+            # Clinical/medical fallback — no faces at all
             return ThumbnailBrief(
                 image_concept=(
                     "clinical medical imagery, dramatic anatomical close-up, "
@@ -575,29 +625,44 @@ Genera el texto superpuesto para esta variante."""
                 secondary_scene="medical report with redacted text, classified stamp",
                 text_color_hex="#FFFFFF",
                 composition_notes="texto GRANDE abajo con outline grueso, imagen clínica dramática arriba ocupando 70%",
-                layout=style.get("base_composition", "dark_reveal"),
+                layout=style.get("base_composition", "topic_hero"),
+                subject_type="medical",
+                primary_subject=hook_text,
+                provider_main="ai",
+                provider_face="none",
+                emphasis_word=l1.split()[0] if l1 else "",
+                color_intent="frío clínico cian",
                 psych_hooks=["morbid_curiosity", "scientific_awe", "diagnostic_urgency"],
                 psych_score=0.7,
                 marketing_ctr_estimate="high",
                 marketing_text_variants=["DIAGNÓSTICO", "ANOMALÍA", "RARO"],
             )
         return ThumbnailBrief(
-            image_concept="dramatic atmospheric scene with intense lighting, high contrast, photorealistic, 8K",
-            visual_focus="central dramatic element with strong contrast",
-            emotion_target="shock",
+            image_concept=(
+                "topic-first cinematic scene representing the video subject, "
+                "single dominant focal point, dramatic lighting, no unrelated background"
+            ),
+            visual_focus="central topic element with strong contrast",
+            emotion_target="curiosidad",
             curiosity_gap="¿Qué secreto se oculta?",
             text_overlay=hook_text,
             text_gancho=l1,
             text_complemento=l2,
             badge_text="DOCUMENTAL",
-            secondary_scene="classified document with redacted text",
+            secondary_scene="complementary document or symbol from the story",
             text_color_hex="#FFFFFF",
-            composition_notes="texto GRANDE abajo con outline grueso, imagen dramática arriba ocupando 70%",
-            layout=style.get("base_composition", "shock_closeup"),
+            composition_notes="texto GRANDE abajo con outline grueso, sujeto del tema arriba ocupando 70%",
+            layout=style.get("base_composition", "topic_hero"),
+            subject_type="concept",
+            primary_subject=hook_text,
+            provider_main="ai",
+            provider_face="none",
+            emphasis_word=l1.split()[0] if l1 else "",
+            color_intent="atmósfera del tema",
             psych_hooks=["curiosity_gap", "emotional_arousal", "pattern_interrupt"],
             psych_score=0.7,
             marketing_ctr_estimate="high",
-            marketing_text_variants=["IMPACTANTE", "INCREÍBLE", "SECRETO"],
+            marketing_text_variants=["DESCUBIERTO", "EL DATO", "LA CLAVE"],
         )
 
     # ── Helpers ───────────────────────────────────────────────

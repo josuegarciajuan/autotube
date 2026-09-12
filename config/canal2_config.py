@@ -648,6 +648,14 @@ THUMBNAIL_BORDER_COLOR = "#CC0000"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
+# v3 (tema-primero): el color nace del contenido; la firma es el marco.
+THUMBNAIL_COLOR_MODE = "image_content"
+THUMBNAIL_FRAME_STYLE = "corner_marks"
+THUMBNAIL_LAYOUT_POOL = [
+    "topic_hero", "negative_space_top", "split_diagonal",
+    "center_burst", "subject_closeup",
+]
+
 THUMBNAIL_VISUAL_STYLE = "moody_atmospheric"
 
 THUMBNAIL_MANUAL_STYLE = {

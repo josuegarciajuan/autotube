@@ -507,6 +507,27 @@ THUMBNAIL_TEXT_STROKE_WIDTH = 3
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 THUMBNAIL_STYLE_OVERRIDE = True
 
+# ── v3 (tema-primero, sep 2026): diversidad y color por contenido ──
+# El color deja de ser seña de identidad: nace de la imagen del tema y se
+# elige un acento que no repita el tono dominante de los últimos vídeos.
+# "channel_palette" restaura el comportamiento legacy (tinte por canal).
+THUMBNAIL_COLOR_MODE = "image_content"
+# La firma corporativa se sostiene en: reglas de composición, marco/borde,
+# tipografía fija y sello/badge. Los overlays temáticos (MAYDAY, ECG...) pasan
+# a uso puntual (off por defecto) para no convertirse en patrón.
+THUMBNAIL_FRAME_STYLE = "corner_marks"
+THUMBNAIL_THEMATIC_OVERLAYS_ENABLED = False
+THUMBNAIL_LAYOUT_POOL = [
+    "topic_hero", "subject_closeup", "artifact_document",
+    "split_diagonal", "negative_space_top", "center_burst",
+]
+THUMBNAIL_LAYOUT_HISTORY_DEPTH = 3
+THUMBNAIL_ACCENT_HUE_DISTANCE_MIN = 40
+THUMBNAIL_EMPHASIS_ENABLED = True
+# "auto" deja que la política decida el rol de la cara por tipo de sujeto.
+THUMBNAIL_FACE_ROLE = "auto"
+THUMBNAIL_TYPOGRAPHY_POOL = ["DejaVuSans-Bold"]
+
 # ═══════════════════════════════════════════════════════════════════
 # VOICE / TTS DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
