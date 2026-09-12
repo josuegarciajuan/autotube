@@ -1394,6 +1394,12 @@ def migrate_v2(db_path: str = None):
     # ── v55: thumbnail diversity (color_key, face_role, subject) ──
     _migrate_v55(conn, logger)
 
+    # ── v56: durable, quota-free editorial review checkpoints (ESR) ──
+    _migrate_v56(conn, logger)
+
+    # ── v57: review governance ledger + long-form external visibility ──
+    _migrate_v57(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3484,6 +3490,34 @@ def _migrate_v55(conn, logger):
         except sqlite3.OperationalError:
             pass  # already present — idempotent
     conn.commit()
+
+
+def _migrate_v56(conn, logger):
+    """Idempotent v56: scheduled read-only editorial review ledger (ESR)."""
+    schema = Path(__file__).parent / "schema_v56.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        conn.commit()
+        logger.info("Migration v56: editorial review checkpoints ensured")
+
+
+def _migrate_v57(conn, logger):
+    """Idempotent v57: review governance ledger + long-form external visibility."""
+    schema = Path(__file__).parent / "schema_v57.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+    for column, definition in (
+        ("yt_visibility", "TEXT DEFAULT ''"),
+        ("yt_checked_at", "TEXT"),
+        ("yt_checked_source", "TEXT DEFAULT ''"),
+        ("actual_published_at", "TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column} {definition}")
+    conn.commit()
+    logger.info("Migration v57: review tasks and long-form visibility ensured")
+
 
 
 def _migrate_v10(conn, logger):
@@ -6074,7 +6108,11 @@ class ExtendedDatabase(Database):
                    ORDER BY fetched_at DESC LIMIT 1""",
                 (channel_id,),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result["metrics_available"] = any(result.get(k) is not None for k in ("subscribers", "total_views", "video_count"))
+        return result
 
     def get_video_latest_stats(self, video_id: int) -> dict | None:
         """Get the most recent stats snapshot for a single video."""
@@ -6085,7 +6123,11 @@ class ExtendedDatabase(Database):
                    ORDER BY fetched_at DESC LIMIT 1""",
                 (video_id,),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result["metrics_available"] = any(result.get(k) is not None for k in ("views", "likes", "comments", "estimated_minutes_watched"))
+        return result
 
     def has_recovery_checkpoint(self, video_id: int, checkpoint_hours: int) -> bool:
         with self._connect() as conn:

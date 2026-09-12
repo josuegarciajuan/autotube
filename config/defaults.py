@@ -66,6 +66,15 @@ THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
 RECOVERY_CHECKPOINTS_ENABLED = False
 
+# Review governance is opt-in in DB config_json/system_state. Defaults are
+# deliberately inert so existing channels and already-created videos are not
+# changed by the feature.
+REVIEW_GOVERNANCE_ENABLED = False
+REVIEW_GOVERNANCE_ACTIVATION_KEY = "review_governance_activation_at"
+REVIEW_GOVERNANCE_NICHE_GUARD_ENABLED = False
+REVIEW_GOVERNANCE_NICHE_KEYWORDS = []
+REVIEW_GOVERNANCE_AMBIGUOUS_REVIEW = True
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
@@ -912,3 +921,14 @@ COMMENT_REPLY_1_DELAY_MIN_H = 8
 COMMENT_REPLY_1_DELAY_MAX_H = 18
 COMMENT_REPLY_2_DELAY_MIN_H = 26
 COMMENT_REPLY_2_DELAY_MAX_H = 48
+
+# Editorial recovery reviews. Disabled by default; channel profiles opt in.
+# Values are consumed through config_bridge, never by slug-specific services.
+EDITORIAL_RECOVERY_REVIEW = {
+    "enabled": False,
+    "max_attempts": 3,
+    "retry_minutes": 60,
+    "min_impressions": 100,
+    "min_ctr_percent": 4.0,
+    "min_retention_percent": 35.0,
+}

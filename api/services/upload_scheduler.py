@@ -892,7 +892,9 @@ def _hold_exhausted_uploads(db) -> int:
         if cid in _target_met_cache:
             return _target_met_cache[cid]
         try:
-            target = int(policy_value(cid, "longform_publish_cap", db=db, default=1) or 1)
+            _cap = policy_value(cid, "longform_publish_cap", db=db, default=1)
+            # 0 = canal pausado (cap intencional), no valor ausente.
+            target = 1 if _cap is None else int(_cap)
         except Exception:
             target = 1
         used = 0
@@ -1382,9 +1384,11 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         if ch_id not in ch_vpd:
             try:
                 from api.services.channel_policy import policy_value
-                ch_vpd[ch_id] = max(0, int(policy_value(
+                _cap = policy_value(
                     ch_id, "upload_capacity_per_day", db=db, default=1,
-                ) or 1))
+                )
+                # 0 = canal pausado (cap intencional), no valor ausente.
+                ch_vpd[ch_id] = max(0, 1 if _cap is None else int(_cap))
             except Exception:
                 ch_vpd[ch_id] = 1
 

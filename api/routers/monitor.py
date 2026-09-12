@@ -611,6 +611,8 @@ def silence_type(alert_type: str, silenced: bool = True):
     requiere acción (el operador decide cuándo reactivarlos).
     """
     db = get_db()
+    if silenced and (alert_type in {"review_visibility_mismatch", "review_exact_duplicate"} or alert_type.startswith("review_")):
+        return {"ok": False, "error": "Los tipos críticos de revisión no se pueden silenciar"}
     try:
         with db._connect() as conn:
             silenced_types = _get_silenced_alert_types(conn)
@@ -676,6 +678,26 @@ def trigger_health_check():
     db = get_db()
     result = check_all_health(db)
     return result
+
+
+@router.get("/monitor/duplicates/exact")
+def exact_duplicate_preview(channel_id: Optional[int] = Query(None)):
+    """Read-only preview of exact duplicate evidence; never mutates YouTube."""
+    db = get_db()
+    from api.services.review_governance import find_exact_duplicate_groups
+    return {"groups": find_exact_duplicate_groups(db, channel_id)}
+
+
+@router.post("/monitor/duplicates/exact/{keep_video_id}/{duplicate_video_id}/privatize")
+def privatize_exact_duplicate(keep_video_id: int, duplicate_video_id: int, confirmation: str):
+    """Explicit, conservative mutation for one confirmed exact duplicate."""
+    db = get_db()
+    from fastapi import HTTPException
+    try:
+        from api.services.review_governance import privatize_exact_duplicate as action
+        return action(db, keep_video_id, duplicate_video_id, confirmation)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 # ═══════════════════════════════════════════════════════════════
