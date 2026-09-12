@@ -358,12 +358,15 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             # panel / perfil), NO el valor global del perfil.
             try:
                 from api.services.channel_policy import policy_value
-                n = int(policy_value(
+                _cap = policy_value(
                     ch_id, "longform_publish_cap", db=db, default=1,
-                ) or 1)
+                )
+                # Un cap configurado a 0 es una PAUSA intencional del canal,
+                # no un valor ausente: no lo coerciones a 1.
+                n = 1 if _cap is None else int(_cap)
             except Exception:
                 n = 1
-            n = max(1, n)
+            n = max(0, n)
 
             # ── Zona horaria del canal ──
             try:
