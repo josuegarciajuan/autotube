@@ -18,6 +18,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 from config.settings import THUMBNAILS_DIR
 from api.services.packaging_policy import validate_thumbnail_overlay
+from pipeline import thumbnail_color as tcolor
+from pipeline.thumbnail_art_director import (
+    ArtDirection,
+    ThumbnailArtDirector,
+    build_recent_context,
+)
 
 # ── Default thumbnail dimensions (overridable per channel via config_bridge) ──
 THUMBNAIL_WIDTH = 1280
@@ -132,6 +138,27 @@ class ThumbnailMaker:
         self.medical_cross = getattr(config, "THUMBNAIL_MEDICAL_CROSS", False)
         self.medical_diagnosis = getattr(config, "THUMBNAIL_MEDICAL_DIAGNOSIS", False)
 
+        # ── v3 (tema-primero): diversidad, color por contenido, énfasis ──
+        self.color_mode = str(getattr(config, "THUMBNAIL_COLOR_MODE", "image_content"))
+        self.layout_pool = list(getattr(config, "THUMBNAIL_LAYOUT_POOL", None) or [])
+        self.layout_history_depth = int(getattr(config, "THUMBNAIL_LAYOUT_HISTORY_DEPTH", 3))
+        self.accent_hue_distance_min = int(
+            getattr(config, "THUMBNAIL_ACCENT_HUE_DISTANCE_MIN", 40)
+        )
+        self.emphasis_enabled = bool(getattr(config, "THUMBNAIL_EMPHASIS_ENABLED", True))
+        self.typography_pool = list(
+            getattr(config, "THUMBNAIL_TYPOGRAPHY_POOL", None) or [self.font_family]
+        ) or [self.font_family]
+        self.frame_style = str(getattr(config, "THUMBNAIL_FRAME_STYLE", "corner_marks"))
+        self.thematic_overlays_enabled = bool(
+            getattr(config, "THUMBNAIL_THEMATIC_OVERLAYS_ENABLED", False)
+        )
+        self.art_director = ThumbnailArtDirector()
+        # Filled by make_viral_thumbnail so phase_metadata can recompose stably.
+        self._last_art_direction: ArtDirection | None = None
+        self._last_color_plan: dict | None = None
+        self._last_face_chip_path = "__unset__"  # marker: None = resolved "no face"
+
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
         self.font_small = _find_font(int(self.font_size * 0.65), bold=True,
@@ -143,6 +170,7 @@ class ThumbnailMaker:
     # elements (insets, badge, border weight, gradient opacity,
     # vignette strength, number of text lines) are applied.
     LAYOUT_COMPOSITION: dict = {
+        # ── legacy layouts (kept for backwards compatibility) ──
         "shock_closeup": {
             "show_insets": False,
             "show_badge": False,
@@ -152,6 +180,7 @@ class ThumbnailMaker:
             "gradient_start_pct": 0.35,
             "text_lines": 1,
             "vignette_strength": 0.4,
+            "text_position": "bottom",
         },
         "dark_reveal": {
             "show_insets": True,
@@ -163,6 +192,7 @@ class ThumbnailMaker:
             "gradient_start_pct": 0.45,
             "text_lines": 2,
             "vignette_strength": 0.4,
+            "text_position": "bottom",
         },
         "split_face": {
             "show_insets": False,
@@ -173,6 +203,7 @@ class ThumbnailMaker:
             "gradient_start_pct": 0.40,
             "text_lines": 2,
             "vignette_strength": 0.5,
+            "text_position": "bottom",
         },
         "classified_document": {
             "show_insets": True,
@@ -184,6 +215,7 @@ class ThumbnailMaker:
             "gradient_start_pct": 0.50,
             "text_lines": 2,
             "vignette_strength": 0.7,
+            "text_position": "bottom",
         },
         "incomplete_puzzle": {
             "show_insets": True,
@@ -195,6 +227,87 @@ class ThumbnailMaker:
             "gradient_start_pct": 0.45,
             "text_lines": 2,
             "vignette_strength": 0.55,
+            "text_position": "bottom",
+        },
+        # ── v3 topic-first layouts ──
+        "topic_hero": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 1.0,
+            "gradient_opacity": 150,
+            "gradient_start_pct": 0.50,
+            "text_lines": 2,
+            "vignette_strength": 0.35,
+            "text_position": "bottom",
+        },
+        "subject_closeup": {
+            "show_insets": False,
+            "show_badge": False,
+            "show_border": True,
+            "border_width_factor": 0.6,
+            "gradient_opacity": 130,
+            "gradient_start_pct": 0.42,
+            "text_lines": 1,
+            "vignette_strength": 0.40,
+            "text_position": "bottom",
+        },
+        "artifact_document": {
+            "show_insets": True,
+            "inset_count": 2,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 0.9,
+            "gradient_opacity": 190,
+            "gradient_start_pct": 0.50,
+            "text_lines": 2,
+            "vignette_strength": 0.60,
+            "text_position": "bottom",
+        },
+        "split_diagonal": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 0.9,
+            "gradient_opacity": 145,
+            "gradient_start_pct": 0.45,
+            "text_lines": 2,
+            "vignette_strength": 0.40,
+            "text_position": "bottom",
+        },
+        "negative_space_top": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 0.8,
+            "gradient_opacity": 135,
+            "gradient_start_pct": 0.00,
+            "gradient_inverted": True,
+            "text_lines": 2,
+            "vignette_strength": 0.35,
+            "text_position": "top",
+        },
+        "center_burst": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 1.0,
+            "gradient_opacity": 120,
+            "gradient_start_pct": 0.35,
+            "text_lines": 1,
+            "vignette_strength": 0.55,
+            "text_position": "center",
+        },
+        "portrait_hero": {
+            "show_insets": False,
+            "show_badge": True,
+            "show_border": True,
+            "border_width_factor": 1.0,
+            "gradient_opacity": 130,
+            "gradient_start_pct": 0.45,
+            "text_lines": 1,
+            "vignette_strength": 0.45,
+            "text_position": "bottom",
         },
     }
 
@@ -296,6 +409,7 @@ class ThumbnailMaker:
         channel_theme: str = "",
         base_image_path: Path | None = None,
         video_id: int = 0,
+        art_direction: ArtDirection | None = None,
     ) -> Path:
         """Create a CTR-optimized viral thumbnail using the 4-phase pipeline.
 
@@ -323,6 +437,9 @@ class ThumbnailMaker:
                 Used by phase_metadata() to avoid regenerating the image.
             video_id: Database video ID for per-video unique naming
                 and per-channel subdirectory placement.
+            art_direction: Pre-resolved direction (from a previous call). When
+                provided, the brainstorm/layout/color selection is NOT re-run,
+                so a recompose keeps the same layout and palette.
 
         Returns:
             Path to the generated thumbnail JPEG.
@@ -339,6 +456,9 @@ class ThumbnailMaker:
             keywords=keywords or [],
         )
 
+        # ── Diversity memory: recent thumbnails of this channel ──
+        recent_context = self._load_recent_context(slug, video_id)
+
         # ── F2: Brainstorming ──────────────────────────────────
         logger.info("[Thumbnail v2] F2: Brainstorming thumbnail concept")
         brief = self._run_brainstorm(
@@ -348,6 +468,7 @@ class ThumbnailMaker:
             style=style,
             channel_name=channel_display_name or self.channel_name,
             channel_theme=channel_theme,
+            recent_context=recent_context,
         )
 
         # Use provided overlay_text or the one from brainstorming
@@ -371,20 +492,73 @@ class ThumbnailMaker:
         final_overlay = self._dedupe_overlay(title, final_overlay)
         text_gancho = self._dedupe_overlay(title, text_gancho)
 
+        # ── F2b: Art direction (subject-first + diversity) ─────
+        # Recompose (phase_metadata) reuses the direction chosen in phase_video
+        # so the layout/colour do not change between the two passes.
+        if art_direction is None and base_image_path and self._last_art_direction is not None:
+            art_direction = self._last_art_direction
+        if art_direction is None:
+            allow_faces = getattr(self._channel_cfg, "THUMBNAIL_ALLOW_FACES", True)
+            art_direction = self.art_director.plan(
+                title=title,
+                script_text=script_text,
+                style=style,
+                raw_subject_type=brief.subject_type,
+                primary_subject=brief.primary_subject or title,
+                raw_main=brief.provider_main,
+                raw_face=brief.provider_face,
+                color_intent=brief.color_intent,
+                emphasis_word=brief.emphasis_word,
+                layout_pool=self.layout_pool,
+                recent_context=recent_context,
+                allow_faces=allow_faces,
+                preferred_layout=getattr(brief, "layout", "") or "",
+                video_id=video_id,
+            )
+        # Make the chosen layout authoritative for the recompose.
+        brief.layout = art_direction.layout
+        self._last_art_direction = art_direction
+        logger.info(
+            "[Thumbnail v3] art direction: subject=%s face=%s providers=%s/%s layout=%s",
+            art_direction.subject_type, art_direction.face_role,
+            art_direction.provider_main, art_direction.provider_face,
+            art_direction.layout,
+        )
+
         # ── F3: Image Generation + QC ──────────────────────────
         if base_image_path and Path(base_image_path).exists():
             logger.info("[Thumbnail v2] F3: Using existing base image (skip generation)")
             base_image = Path(base_image_path)
         else:
-            logger.info("[Thumbnail v2] F3: Generating image via Pollo AI + QC")
-            base_image = self._generate_with_quality_control(
-                brief=brief,
-                style=style,
-                slug=slug,
+            logger.info(
+                "[Thumbnail v3] F3: Generating subject image (provider=%s)",
+                art_direction.provider_main,
+            )
+            base_image = self._generate_subject_image(
+                brief=brief, style=style, slug=slug, art=art_direction,
             )
 
         # Store raw Pollo image BEFORE composition (for metadata phase recompose)
         self._last_raw_base = base_image if not (base_image_path and Path(base_image_path).exists()) else None
+
+        # ── Color plan derived from the content image ──────────
+        if base_image_path and self._last_color_plan:
+            color_plan = self._last_color_plan
+        else:
+            color_plan = self._resolve_color_plan(base_image, style, recent_context)
+        self._last_color_plan = color_plan
+        logger.info(
+            "[Thumbnail v3] color: accent=%s text=%s key=%s",
+            color_plan.get("accent"), color_plan.get("text"), color_plan.get("color_key"),
+        )
+
+        # ── Face chip (secondary only; real stock face) ────────
+        if base_image_path and self._last_face_chip_path != "__unset__":
+            cached = self._last_face_chip_path
+            face_chip_path = Path(cached) if cached else None
+        else:
+            face_chip_path = self._fetch_face_chip(art_direction, brief, slug)
+            self._last_face_chip_path = str(face_chip_path) if face_chip_path else None
 
         # ── F4: Composition ────────────────────────────────────
         logger.info("[Thumbnail v2] F4: Composing final thumbnail")
@@ -404,13 +578,16 @@ class ThumbnailMaker:
             text_gancho=text_gancho,
             text_complemento=text_complemento,
             badge_text=badge_text,
-            layout=getattr(brief, 'layout', '') or '',
+            layout=art_direction.layout,
             inset_image_path=inset_path,
+            color_plan=color_plan,
+            face_chip_path=face_chip_path,
+            emphasis_word=art_direction.emphasis_word,
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
 
-        # ── P1 (ago 2026): registrar estilo + layout para el loop CTR→estilo ──
+        # ── P1 (ago 2026) + v3: registrar estilo, layout y diversidad ──
         if video_id:
             try:
                 from database.db_extended import ExtendedDatabase
@@ -419,6 +596,9 @@ class ThumbnailMaker:
                     video_id,
                     str(style.get("visual_style", "") or ""),
                     str(getattr(brief, 'layout', '') or ''),
+                    color_key=str(color_plan.get("color_key", "") or ""),
+                    face_role=art_direction.face_role,
+                    subject=art_direction.primary_subject[:120],
                 )
             except Exception as exc:
                 logger.warning("[Thumbnail v2] thumbnail_style persist failed: %s", exc)
@@ -467,7 +647,8 @@ class ThumbnailMaker:
             List of Path objects, one per generated thumbnail variant.
         """
         slug = canal_slug or ""
-        
+        recent_context = self._load_recent_context(slug, video_id)
+
         # ── F1: Style Engine (shared, cached) ──────────────────
         style = self._get_or_create_style(
             slug=slug,
@@ -490,6 +671,7 @@ class ThumbnailMaker:
                     channel_name=channel_display_name or self.channel_name,
                     channel_theme=channel_theme,
                     num_variants=num_variants,
+                    recent_context=recent_context,
                 )
             except Exception as exc:
                 logger.warning("Brainstorm variants failed: %s — using single brief fallback", exc)
@@ -500,24 +682,50 @@ class ThumbnailMaker:
                     style=style,
                     channel_name=channel_display_name or self.channel_name,
                     channel_theme=channel_theme,
+                    recent_context=recent_context,
                 )
                 variant_briefs = [brief]  # Fallback: single variant
-        
+        if not variant_briefs:
+            return []
+
+        allow_faces = getattr(self._channel_cfg, "THUMBNAIL_ALLOW_FACES", True)
+
         # ── F3: Generate ONE base image (shared across variants) ──
         logger.info("[Thumbnail v2] F3: Generating shared base image for %d variants", len(variant_briefs))
-        base_image = self._generate_with_quality_control(
-            brief=variant_briefs[0],  # Use first brief for image gen
+        art = self.art_director.plan(
+            title=title,
+            script_text=script_text,
             style=style,
-            slug=slug,
+            raw_subject_type=variant_briefs[0].subject_type,
+            primary_subject=variant_briefs[0].primary_subject or title,
+            raw_main=variant_briefs[0].provider_main,
+            raw_face=variant_briefs[0].provider_face,
+            color_intent=variant_briefs[0].color_intent,
+            emphasis_word=variant_briefs[0].emphasis_word,
+            layout_pool=self.layout_pool,
+            recent_context=recent_context,
+            allow_faces=allow_faces,
+            preferred_layout=getattr(variant_briefs[0], "layout", "") or "",
+            video_id=video_id,
+        )
+        self._last_art_direction = art
+        base_image = self._generate_subject_image(
+            brief=variant_briefs[0], style=style, slug=slug, art=art,
         )
         # Store for metadata recompose
         self._last_raw_base = base_image
+
+        color_plan = self._resolve_color_plan(base_image, style, recent_context)
+        self._last_color_plan = color_plan
+        face_chip_path = self._fetch_face_chip(art, variant_briefs[0], slug)
 
         # Reuse an existing video scene image for the inset recuadro
         inset_path = self._pick_inset_image(scene_images, base_image=base_image)
 
         # ── F4: Compose each variant on the same base image ────
+        # Each variant gets a different layout (never repeat within the call).
         variant_paths: list[Path] = []
+        used_layouts: list[str] = list(recent_context.get("layouts", []) or [])
         for i, brief in enumerate(variant_briefs):
             # Build overlay text from brief fields
             l1 = getattr(brief, 'text_gancho', '') or ''
@@ -527,8 +735,22 @@ class ThumbnailMaker:
             l1 = self._dedupe_overlay(title, l1)
             overlay = self._dedupe_overlay(title, overlay)
             badge = getattr(brief, 'badge_text', '') or ''
-            layout = getattr(brief, 'layout', '') or ''
-            
+            # Rotation: variant i never reuses a layout already used here.
+            layout = self.art_director.plan(
+                title=f"{title}#{i}",
+                script_text=script_text,
+                style=style,
+                raw_subject_type=art.subject_type,
+                primary_subject=art.primary_subject,
+                layout_pool=self.layout_pool,
+                recent_context={"layouts": used_layouts, "colors": [], "subjects": []},
+                allow_faces=allow_faces,
+                preferred_layout=getattr(brief, 'layout', '') or "",
+                video_id=video_id,
+            ).layout
+            used_layouts.insert(0, layout)
+            brief.layout = layout
+
             thumb_path = self._compose_final(
                 base_image=base_image,
                 brief=brief,
@@ -542,6 +764,9 @@ class ThumbnailMaker:
                 badge_text=badge,
                 layout=layout,
                 inset_image_path=inset_path,
+                color_plan=color_plan,
+                face_chip_path=face_chip_path,
+                emphasis_word=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
             )
             variant_paths.append(thumb_path)
             logger.info(
@@ -557,6 +782,9 @@ class ThumbnailMaker:
                     video_id,
                     str(style.get("visual_style", "") or ""),
                     str(getattr(variant_briefs[0], 'layout', '') or ''),
+                    color_key=str(color_plan.get("color_key", "") or ""),
+                    face_role=art.face_role,
+                    subject=art.primary_subject[:120],
                 )
             except Exception as exc:
                 logger.warning("[Thumbnail v2] thumbnail_style persist failed (variants): %s", exc)
@@ -644,11 +872,12 @@ class ThumbnailMaker:
         style: dict,
         channel_name: str,
         channel_theme: str,
+        recent_context: dict | None = None,
     ) -> "ThumbnailBrief":
         """Run psychology + marketing agents."""
         from pipeline.thumbnail_brainstorm import ThumbnailBrainstorm
 
-        # Per-channel concept directive (overrides default surprised-face pattern)
+        # Per-channel concept directive (appended to the topic-first rule)
         cfg = self._channel_cfg
         allow_faces = getattr(cfg, "THUMBNAIL_ALLOW_FACES", True)
         concept_directive = getattr(cfg, "THUMBNAIL_CONCEPT_DIRECTIVE", "")
@@ -663,7 +892,37 @@ class ThumbnailMaker:
             channel_theme=channel_theme,
             allow_faces=allow_faces,
             concept_directive=concept_directive,
+            recent_context=recent_context,
         )
+
+    # ── v3: recent-thumbnail context (diversity memory) ──────────
+
+    def _load_recent_context(self, slug: str, video_id: int = 0) -> dict:
+        """Fetch the last N thumbnails of this channel for the diversity guard."""
+        if not slug or not video_id:
+            return {}
+        try:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+            channel_id = None
+            if hasattr(db, "get_channel_by_slug"):
+                ch = db.get_channel_by_slug(slug)
+                channel_id = ch.get("id") if ch else None
+            if not channel_id:
+                with db._connect() as conn:
+                    row = conn.execute(
+                        "SELECT id FROM channels WHERE slug = ?", (slug,)
+                    ).fetchone()
+                channel_id = row["id"] if row else None
+            if not channel_id:
+                return {}
+            rows = db.get_recent_thumbnail_context(
+                channel_id, limit=max(3, self.layout_history_depth)
+            )
+            return build_recent_context(rows)
+        except Exception as exc:
+            logger.debug("[Thumbnail v3] recent context unavailable: %s", exc)
+            return {}
 
     # ── F3: Image Generation + Quality Control ────────────────
 
@@ -926,6 +1185,116 @@ class ThumbnailMaker:
         logger.info("[Thumbnail v2] Gradient fallback saved: %s", fallback)
         return fallback
 
+    # ── v3: image sourcing (AI vs stock) + color + face chip ────
+
+    def _generate_subject_image(
+        self,
+        brief: "ThumbnailBrief",
+        style: dict,
+        slug: str,
+        art: ArtDirection,
+    ) -> Path:
+        """Generate/fetch the main subject image honouring the provider plan."""
+        if art.provider_main == "stock":
+            query = (art.primary_subject or brief.primary_subject
+                     or brief.image_concept or "")
+            if query:
+                stock = self._fetch_stock_image(query, slug, tag="subject", n=3)
+                if stock:
+                    logger.info("[Thumbnail v3] subject from stock: %s", stock)
+                    return stock
+            logger.info("[Thumbnail v3] stock subject unavailable — falling back to AI")
+        return self._generate_with_quality_control(brief=brief, style=style, slug=slug)
+
+    def _fetch_stock_image(
+        self, query: str, slug: str, tag: str = "img", n: int = 3,
+    ) -> Path | None:
+        """Fetch one real stock image (Unsplash/Pixabay) for *query*.
+
+        Never raises: a provider/rate-limit failure simply returns ``None`` so
+        the caller can fall back to AI generation or skip the element.
+        """
+        query = (query or "").strip()
+        if not query:
+            return None
+        try:
+            from pipeline.image_fetcher import ImageFetcher
+            fetcher = ImageFetcher(self._channel_cfg)
+            paths = fetcher.fetch_for_scene(query, n=n)
+            if paths:
+                return Path(paths[0])
+        except Exception as exc:
+            logger.warning("[Thumbnail v3] stock fetch failed (%s): %s", tag, exc)
+        return None
+
+    def _fetch_face_chip(
+        self, art: ArtDirection, brief: "ThumbnailBrief", slug: str,
+    ) -> Path | None:
+        """Fetch a real stock face for a secondary chip (never AI, never minors)."""
+        if art.face_role == "none" or art.provider_face != "stock":
+            return None
+        # When the face is the protagonist, the base image already is the face.
+        if art.face_role == "protagonist":
+            return None
+        query = (
+            f"{art.primary_subject or brief.primary_subject} "
+            "person face dramatic portrait adult"
+        ).strip()
+        face = self._fetch_stock_image(query, slug, tag="face", n=2)
+        if face:
+            logger.info("[Thumbnail v3] face chip from stock: %s", face)
+        return face
+
+    def _resolve_color_plan(
+        self, base_image: Path, style: dict, recent_context: dict | None = None,
+    ) -> dict:
+        """Derive the accent/text colours from the content image.
+
+        In ``image_content`` mode (default) the channel palette is ignored for
+        tinting; the accent is chosen to contrast and to avoid the dominant hue
+        of the last few videos. ``channel_palette`` keeps the legacy behaviour.
+        """
+        recent_context = recent_context or {}
+        recent_hues: list[int] = []
+        for key in recent_context.get("colors", []) or []:
+            hue = tcolor.hue_of_key(str(key))
+            if hue is not None:
+                recent_hues.append(hue)
+
+        if self.color_mode == "channel_palette":
+            palette = style.get("color_palette", {}) or {}
+            accent = palette.get("accent", "#CC3333")
+            text = palette.get("text", "#F5F0E8")
+            shadow = palette.get("shadow", "#0A0A0A")
+            return {
+                "accent": accent, "text": text, "shadow": shadow,
+                "color_key": "", "dominant": [], "mode": "channel_palette",
+            }
+
+        try:
+            dominant = tcolor.dominant_palette(base_image, k=5)
+        except Exception as exc:
+            logger.warning("[Thumbnail v3] dominant palette failed: %s", exc)
+            dominant = [(40, 40, 60)]
+        accent = tcolor.choose_accent(
+            dominant,
+            recent_hues=recent_hues,
+            min_distance=self.accent_hue_distance_min,
+            seed=0,  # deterministic tie-break
+        )
+        text = tcolor.contrast_text_color(dominant[0])
+        accent_rgb = tuple(int(accent.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        return {
+            "accent": accent,
+            "text": text,
+            "shadow": "#0A0A0A" if text == "#FFFFFF" else "#F5F5F5",
+            # The stored key is the ACCENT hue: the diversity guard then makes
+            # consecutive thumbnails use a different dominant accent colour.
+            "color_key": tcolor.color_key(accent_rgb),
+            "dominant": dominant,
+            "mode": "image_content",
+        }
+
     # ── F4: Final Composition ─────────────────────────────────
 
     @staticmethod
@@ -952,6 +1321,9 @@ class ThumbnailMaker:
         badge_text: str = "",
         layout: str = "",
         inset_image_path: Path | None = None,
+        color_plan: dict | None = None,
+        face_chip_path: Path | None = None,
+        emphasis_word: str = "",
     ) -> Path:
         """Apply channel-style mosaic composition to the base image.
 
@@ -980,13 +1352,18 @@ class ThumbnailMaker:
             comp["text_lines"],
         )
 
-        # ── Palette helpers ─────────────────────────────────────
+        # ── Palette helpers (content image wins over channel palette) ──
         color_palette = style.get("color_palette", {})
-        accent_rgb = self._hex_to_rgb(color_palette.get("accent", "#CC3333"))
         text_style = style.get("text_style", {})
         use_uppercase = text_style.get("uppercase", True)
-        text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
-        shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
+        if color_plan:
+            accent_rgb = self._hex_to_rgb(color_plan.get("accent", "#CC3333"))
+            text_color = self._hex_to_rgb(color_plan.get("text", "#F5F0E8"))
+            shadow_color = self._hex_to_rgb(color_plan.get("shadow", "#0A0A0A"))
+        else:
+            accent_rgb = self._hex_to_rgb(color_palette.get("accent", "#CC3333"))
+            text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
+            shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
 
         # ── Load and resize ─────────────────────────────────────
         img = Image.open(base_image).convert("RGB")
@@ -1018,14 +1395,22 @@ class ThumbnailMaker:
         draw_overlay = ImageDraw.Draw(overlay)
         gradient_opacity = comp["gradient_opacity"]
         gradient_start = comp["gradient_start_pct"]
-        start_y = int(self.height * gradient_start)
-        for y in range(start_y, self.height):
-            alpha = int(gradient_opacity * (y - start_y) / (self.height - start_y))
-            draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
-        # Subtle top gradient (always applied, halved)
-        for y in range(0, int(self.height * 0.08)):
-            alpha = int(30 * (1 - y / (self.height * 0.08)))
-            draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
+        if comp.get("gradient_inverted"):
+            # Dark band at the TOP (text sits at the top).
+            start_y = int(self.height * gradient_start)
+            span = max(1, int(self.height * 0.55) - start_y)
+            for y in range(start_y, min(self.height, start_y + span)):
+                alpha = int(gradient_opacity * (1 - (y - start_y) / span))
+                draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
+        else:
+            start_y = int(self.height * gradient_start)
+            for y in range(start_y, self.height):
+                alpha = int(gradient_opacity * (y - start_y) / (self.height - start_y))
+                draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
+            # Subtle top gradient (always applied, halved)
+            for y in range(0, int(self.height * 0.08)):
+                alpha = int(30 * (1 - y / (self.height * 0.08)))
+                draw_overlay.line([(0, y), (self.width, y)], fill=(0, 0, 0, alpha))
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
@@ -1077,14 +1462,19 @@ class ThumbnailMaker:
         # P6 (ago 2026): texto más grande para legibilidad en móvil (miniaturas
         # pequeñas). Regla psicología: 25-35% del alto; 17-19% es el máximo
         # legible sin recortes con _fit_text_to_box. Antes 13-17%.
+        text_position = comp.get("text_position", "bottom")
         if text_gancho_v:
             # Bigger font when there is only one text line
             if comp["text_lines"] == 1:
                 gancho_font_size = max(80, int(self.height * 0.19))
-                l1_y_pct = 0.38   # more centred
             else:
                 gancho_font_size = max(72, int(self.height * 0.16))
-                l1_y_pct = 0.52  # lower third
+            if text_position == "top":
+                l1_y_pct = 0.06
+            elif text_position == "center":
+                l1_y_pct = 0.38
+            else:  # bottom
+                l1_y_pct = 0.38 if comp["text_lines"] == 1 else 0.52
             gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
             if gancho_font:
                 bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
@@ -1093,12 +1483,12 @@ class ThumbnailMaker:
                 l1_x = (self.width - l1_w) // 2
                 l1_y = int(self.height * l1_y_pct)
 
-                # Shadow in 8 directions
-                for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
-                               (-stroke_w, -stroke_w), (stroke_w, stroke_w), (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
-                    draw.text((l1_x + sx, l1_y + sy), text_gancho_v, fill=shadow_color, font=gancho_font)
-                draw.text((l1_x, l1_y), text_gancho_v, fill=text_color, font=gancho_font,
-                          stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
+                self._draw_text_line(
+                    draw, text_gancho_v, l1_x, l1_y, gancho_font,
+                    text_color=text_color, shadow_color=shadow_color,
+                    stroke_w=stroke_w, accent_rgb=accent_rgb,
+                    emphasis_word=emphasis_word if self.emphasis_enabled else "",
+                )
 
         # ── L2 (complemento) — only when 2-line layout ─────
         if comp["text_lines"] >= 2 and text_complemento_v:
@@ -1132,6 +1522,13 @@ class ThumbnailMaker:
                     outline=self.border_color,
                 )
 
+        # ── Channel signature frame (corporate identity, constant) ──
+        self._draw_channel_frame(draw, accent_rgb)
+
+        # ── Face chip (secondary face only, real stock) ────────
+        if face_chip_path and Path(face_chip_path).exists():
+            self._draw_face_chip(img, draw, Path(face_chip_path), accent_rgb)
+
         # ── Classified stamp ────────────────────────────────
         if resolved_layout == "classified_document":
             self._add_classified_overlay(draw, {
@@ -1140,21 +1537,20 @@ class ThumbnailMaker:
                 "text_shadow": shadow_color,
             })
 
-        # ── Rescue-themed overlays (distress signal) ────────────
-        if self.rescue_mayday:
-            self._draw_mayday_banner(draw)
-        if self.rescue_sin_senal:
-            self._draw_sin_senal_stamp(draw)
-        if self.rescue_coordinates:
-            self._draw_coordinates_overlay(draw)
-
-        # ── Medical-themed overlays (clinical_mystery) ──────────
-        if self.medical_ecg:
-            self._draw_ecg_waveform(draw)
-        if self.medical_cross:
-            self._draw_medical_cross_stamp(draw)
-        if self.medical_diagnosis:
-            self._draw_diagnosis_badge(draw)
+        # ── Optional thematic overlays (off by default: not a signature) ──
+        if self.thematic_overlays_enabled:
+            if self.rescue_mayday:
+                self._draw_mayday_banner(draw)
+            if self.rescue_sin_senal:
+                self._draw_sin_senal_stamp(draw)
+            if self.rescue_coordinates:
+                self._draw_coordinates_overlay(draw)
+            if self.medical_ecg:
+                self._draw_ecg_waveform(draw)
+            if self.medical_cross:
+                self._draw_medical_cross_stamp(draw)
+            if self.medical_diagnosis:
+                self._draw_diagnosis_badge(draw)
 
         # ── Save ─────────────────────────────────────────────
         if video_id and canal_slug:
@@ -1169,6 +1565,117 @@ class ThumbnailMaker:
         img.save(out_path, "JPEG", quality=95)
         logger.info("Viral v2 thumbnail saved: %s", out_path)
         return out_path
+
+    def _draw_text_line(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        x: int,
+        y: int,
+        font,
+        text_color: tuple,
+        shadow_color: tuple,
+        stroke_w: int,
+        accent_rgb: tuple,
+        emphasis_word: str = "",
+    ) -> None:
+        """Draw one line with 8-direction shadow and an optional highlight.
+
+        The highlighted word (``emphasis_word``) gets an accent-coloured box
+        with contrast text — attention without clickbait arrows/circles.
+        """
+        for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                       (-stroke_w, -stroke_w), (stroke_w, stroke_w),
+                       (-stroke_w, stroke_w), (stroke_w, -stroke_w)]:
+            draw.text((x + sx, y + sy), text, fill=shadow_color, font=font)
+        draw.text((x, y), text, fill=text_color, font=font,
+                  stroke_width=self.text_stroke_width,
+                  stroke_fill=self.text_stroke_color)
+
+        needle = (emphasis_word or "").strip().upper()
+        if not needle:
+            return
+        tokens = text.split()
+        match_idx = next((i for i, tok in enumerate(tokens)
+                          if tok.strip(".,:;!?¿¡") == needle), None)
+        if match_idx is None:
+            return
+        prefix = " ".join(tokens[:match_idx])
+        if prefix:
+            prefix += " "
+        try:
+            w_prefix = draw.textlength(prefix, font=font)
+        except Exception:
+            w_prefix = 0
+        bb = draw.textbbox((x + int(w_prefix), y), tokens[match_idx], font=font)
+        pad = max(5, int(font.size * 0.10))
+        draw.rounded_rectangle(
+            [bb[0] - pad, bb[1] - pad, bb[2] + pad, bb[3] + pad],
+            radius=max(6, pad),
+            fill=accent_rgb,
+        )
+        luminance = 0.299 * accent_rgb[0] + 0.587 * accent_rgb[1] + 0.114 * accent_rgb[2]
+        hl_color = (17, 17, 17) if luminance > 140 else (255, 255, 255)
+        draw.text((x + int(w_prefix), y), tokens[match_idx], font=font, fill=hl_color)
+
+    def _draw_channel_frame(self, draw: ImageDraw.ImageDraw, accent_rgb: tuple) -> None:
+        """Draw the channel's corporate frame (constant across videos).
+
+        This is what keeps the channel recognisable now that colour comes from
+        the content: a frame style defined per channel in ``THUMBNAIL_FRAME_STYLE``.
+        """
+        style = (self.frame_style or "none").lower()
+        if style in ("none", ""):
+            return
+        frame_color = self.border_color
+        w, h = self.width, self.height
+        if style == "double_border":
+            inset = max(6, self.border_width + 3)
+            for i in range(2):
+                off = inset + i * 4
+                draw.rectangle([off, off, w - 1 - off, h - 1 - off],
+                               outline=frame_color, width=2)
+        elif style == "film_strip":
+            mark = 46
+            for side_x in (0, w - 12):
+                for y in range(18, h - 18, 34):
+                    draw.rectangle([side_x, y, side_x + 12, y + 20],
+                                   fill=frame_color)
+        else:  # corner_marks (default)
+            length = max(48, int(min(w, h) * 0.10))
+            thick = max(5, self.border_width)
+            # horizontal marks
+            draw.rectangle([0, 0, length, thick], fill=frame_color)
+            draw.rectangle([w - length, 0, w, thick], fill=frame_color)
+            draw.rectangle([0, h - thick, length, h], fill=frame_color)
+            draw.rectangle([w - length, h - thick, w, h], fill=frame_color)
+            # vertical marks
+            draw.rectangle([0, 0, thick, length], fill=frame_color)
+            draw.rectangle([w - thick, 0, w, length], fill=frame_color)
+            draw.rectangle([0, h - length, thick, h], fill=frame_color)
+            draw.rectangle([w - thick, h - length, w, h], fill=frame_color)
+
+    def _draw_face_chip(
+        self, img: Image.Image, draw: ImageDraw.ImageDraw,
+        face_path: Path, accent_rgb: tuple,
+    ) -> None:
+        """Paste a small circular real-stock face as a secondary anchor."""
+        size = max(120, int(self.width * 0.17))
+        margin = 22
+        cx, cy = margin, margin
+        try:
+            face = Image.open(face_path).convert("RGB")
+            face = self._resize_center_crop(face)
+            face = face.resize((size, size), Image.LANCZOS)
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, size, size], fill=255)
+            img.paste(face, (cx, cy), mask)
+            draw.ellipse(
+                [cx - 4, cy - 4, cx + size + 4, cy + size + 4],
+                outline=accent_rgb, width=4,
+            )
+        except Exception as exc:
+            logger.warning("Face chip failed: %s", exc)
 
     # ── Inset recuadros helper ──────────────────────────────
 
