@@ -1,3 +1,11 @@
+/** Prosody profile for one narrative tone (expressive narration). */
+export interface ProsodyProfile {
+  rate: string
+  pitch: string
+  volume: string
+  pause_after_ms: number
+}
+
 /** Channel configuration — mirrors config/canal2_config.py fields. */
 export interface ChannelConfig {
   canal_display_name: string
@@ -10,6 +18,14 @@ export interface ChannelConfig {
   voice_pitch: string
   voice_volume: string
   voice_secondary: string
+
+  // Expressive narration (prosodia por tono)
+  EXPRESSIVE_NARRATION?: boolean
+  PROSODY_PROFILES?: Record<string, ProsodyProfile>
+  TONO_DEFAULT?: string
+  TONO_CATALOG?: string[]
+  TONO_MAX_SEGMENTS_PER_BLOCK?: number
+  KOKORO_PAUSE_BETWEEN_BLOCKS?: number
 
   reddit_subreddits: string[]
   wikipedia_categories: string[]
@@ -114,7 +130,7 @@ export interface ConfigField {
   key: string
   label: string
   affectsVideo: boolean   // ⚡ badge
-  type: 'text' | 'list' | 'dict' | 'number' | 'boolean' | 'select' | 'voice-select'
+  type: 'text' | 'list' | 'dict' | 'number' | 'boolean' | 'select' | 'voice-select' | 'prosody-table'
   options?: { value: string; label: string }[]  // for 'select' type
 }
 
@@ -135,8 +151,12 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     label: '🎙️ Voz (TTS)',
     fields: [
       { key: 'VOICE_SELECT', label: 'Voz Narradora', affectsVideo: true, type: 'voice-select' },
-      { key: 'VOICE_RATE', label: 'Velocidad', affectsVideo: true, type: 'text' },
-      { key: 'VOICE_PITCH', label: 'Tono', affectsVideo: true, type: 'text' },
+      { key: 'EXPRESSIVE_NARRATION', label: 'Narración expresiva (prosodia por tono)', affectsVideo: true, type: 'boolean' },
+      { key: 'PROSODY_PROFILES', label: 'Prosodia por tono', affectsVideo: true, type: 'prosody-table' },
+      { key: 'TONO_DEFAULT', label: 'Tono por defecto', affectsVideo: true, type: 'text' },
+      { key: 'KOKORO_PAUSE_BETWEEN_BLOCKS', label: 'Pausa entre párrafos (s)', affectsVideo: true, type: 'number' },
+      { key: 'VOICE_RATE', label: 'Velocidad base (respaldo)', affectsVideo: true, type: 'text' },
+      { key: 'VOICE_PITCH', label: 'Tono base (respaldo)', affectsVideo: true, type: 'text' },
       { key: 'VOICE_VOLUME', label: 'Volumen', affectsVideo: true, type: 'text' },
       { key: 'VOICE_SECONDARY', label: 'Voz Secundaria', affectsVideo: true, type: 'text' },
     ],
