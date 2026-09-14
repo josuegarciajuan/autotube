@@ -41,9 +41,22 @@ from typing import Callable, Iterable, Optional
 # ``full_pipeline_worker.py --job-id <N>`` in their own session.
 _WORKER_PATTERN = "full_pipeline_worker.*--job-id {job_id}"
 
+# When executed as ``python3 scripts/deploy_safety.py``, sys.path[0] is the
+# ``scripts/`` directory, so the project root is NOT importable and
+# ``import config`` / ``import database`` fail — which used to make the gate
+# silently report "no active generation" (fail-open) and deploy during
+# in-process generation. Bootstrap the project root explicitly.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-def running_longform_jobs(db_path: Optional[str] = None) -> list[int]:
-    """Running long-form job ids. Fail-open: [] on any DB error."""
+
+def running_longform_jobs(db_path: Optional[str] = None) -> Optional[list[int]]:
+    """Running long-form job ids, or ``None`` when the state cannot be read.
+
+    ``None`` (unreadable) is deliberately distinct from ``[]`` (read OK, no
+    jobs): a safety gate must never treat an unreadable DB as "nothing running".
+    """
     try:
         import sqlite3
 
@@ -58,8 +71,9 @@ def running_longform_jobs(db_path: Optional[str] = None) -> list[int]:
         finally:
             conn.close()
         return [int(r[0]) for r in rows]
-    except Exception:
-        return []
+    except Exception as exc:
+        print(f"WARN: no se pudo leer el estado de generación: {exc}", file=sys.stderr)
+        return None
 
 
 def worker_pid(job_id: int) -> Optional[int]:
@@ -184,6 +198,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     force = os.environ.get("SKIP_ACTIVE_WORKER_CHECK", "false").strip().lower() == "true"
     isatty = bool(getattr(sys.stdin, "isatty", lambda: False)())
     jobs = running_longform_jobs()
+
+    # Unreadable state is NOT "nothing running": block unless explicitly forced.
+    if jobs is None:
+        if force:
+            print("DEPLOY_SAFE: forced (SKIP_ACTIVE_WORKER_CHECK) — estado de generación ilegible")
+            return 0
+        reason = "no se pudo leer el estado de generación de la DB"
+        print(f"DEPLOY_BLOCKED: {reason}")
+        _emit_skip_alert(reason)
+        return 1
+
     use_sub = use_subprocess_worker()
     kill_mode = systemd_kill_mode() if jobs and use_sub else None
 

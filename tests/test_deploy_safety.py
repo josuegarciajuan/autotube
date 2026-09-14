@@ -11,9 +11,17 @@ do nothing (it even exited 0). The gate must now:
     SKIP_ACTIVE_WORKER_CHECK=true or confirmed interactively.
 """
 
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import scripts.deploy_safety as ds
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FakeStdin:
@@ -138,3 +146,56 @@ def test_main_forced_via_env(monkeypatch, patch_main):
     patch_main(jobs=[10904], pid=None)
     monkeypatch.setenv("SKIP_ACTIVE_WORKER_CHECK", "true")
     assert ds.main([]) == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# Standalone execution — sys.path bootstrap + unreadable DB
+# ═══════════════════════════════════════════════════════════════
+
+def _make_jobs_db(tmp_path, running_ids):
+    db = tmp_path / "deploy_jobs.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE generation_jobs (id INTEGER PRIMARY KEY, status TEXT)")
+    for jid in running_ids:
+        conn.execute(
+            "INSERT INTO generation_jobs (id, status) VALUES (?, 'running')", (jid,)
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_script_run_sees_db_jobs(tmp_path):
+    """Standalone run must import config and read the DB.
+
+    Regression: `python3 scripts/deploy_safety.py` sets sys.path[0]=scripts/,
+    so `import config` failed and the gate always reported "no active
+    generation" (silent fail-open), allowing deploys during in-process
+    generation. With a running job present the script must NOT claim there is
+    no active generation.
+    """
+    db = _make_jobs_db(tmp_path, [999001])
+    env = dict(os.environ)
+    env["DATABASE_PATH"] = str(db)
+    env.pop("SKIP_ACTIVE_WORKER_CHECK", None)
+    proc = subprocess.run(
+        [sys.executable, "scripts/deploy_safety.py"],
+        cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=60,
+    )
+    out = proc.stdout + proc.stderr
+    assert "no active long-form generation" not in out
+    # fake job id → no OS worker → in-process → blocked, exit 1
+    assert proc.returncode == 1
+    assert "in-process" in out
+
+
+def test_script_run_forced_with_unreadable_db(tmp_path):
+    env = dict(os.environ)
+    env["DATABASE_PATH"] = str(tmp_path / "does_not_exist.db")
+    env["SKIP_ACTIVE_WORKER_CHECK"] = "true"
+    proc = subprocess.run(
+        [sys.executable, "scripts/deploy_safety.py"],
+        cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0
+    assert "DEPLOY_SAFE" in proc.stdout
