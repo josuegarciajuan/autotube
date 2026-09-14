@@ -253,7 +253,8 @@ async def lifespan(app: FastAPI):
     # no repita temas históricos desde el primer momento. Idempotente: cada
     # canal se barre una sola vez (flag en system_state).
     try:
-        _backfilled = ExtendedDatabase().backfill_consumed_topics()
+        from database.db_extended import ExtendedDatabase as _EDBStartup
+        _backfilled = _EDBStartup().backfill_consumed_topics()
         logging.getLogger("autotube.startup").info(
             "consumed_topics backfill: %d topic(s) seeded", _backfilled,
         )
