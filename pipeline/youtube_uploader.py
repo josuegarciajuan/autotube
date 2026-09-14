@@ -46,6 +46,15 @@ RETRY_BASE_DELAY = 2  # seconds
 POST_UPLOAD_VERIFY_RETRIES = 4
 POST_UPLOAD_VERIFY_DELAY = 10  # seconds — YouTube processing may take a few secs
 
+# Anti-churn de set_publish_at: no volver a llamar videos().update (50 ud) para
+# el MISMO vídeo al MISMO publishAt dentro de esta ventana. El repack/coverage
+# recalcula desde `now` en cada pasada y podía reprogramar una y otra vez el
+# mismo vídeo (se observaron 10 videos.update en 25 min el 14-sep-2026, justo
+# antes de un 403 de cuota). Un cambio REAL de target sí se aplica (no es un
+# blindaje ciego): solo se omite la repetición redundante.
+PUBLISH_AT_REPEAT_COOLDOWN_MIN = int(os.getenv("PUBLISH_AT_REPEAT_COOLDOWN_MIN", "60"))
+PUBLISH_AT_REPEAT_TOLERANCE_MIN = 5  # mismo target si dista < 5 min
+
 
 class QuotaExhaustedError(RuntimeError):
     """YouTube API daily quota exhausted. Raised when quotaExceeded is detected.
@@ -196,15 +205,81 @@ class YouTubeUploader:
 
     def _http_error_reason(self, exc: HttpError) -> str:
         """Extract the YouTube API error reason from a googleapiclient HttpError."""
+        return self._http_error_detail(exc).get("reason", "")
+
+    def _http_error_detail(self, exc: HttpError) -> dict:
+        """Structured detail from a YouTube API HttpError for diagnostics.
+
+        Antes solo se leía `reason`. Sin `message`/`domain`/`status` no había
+        forma de distinguir una cuota diaria de proyecto de un rate limit de
+        endpoint o de un 403 de permisos.
+        """
+        detail: dict = {
+            "reason": "", "message": "", "domain": "",
+            "code": None, "status": None,
+        }
         try:
             import json as _json
             content = exc.content if hasattr(exc, "content") else b""
             data = _json.loads(content) if content else {}
-            return data.get("error", {}).get("errors", [{}])[0].get("reason", "") or ""
+            err = data.get("error", {}) or {}
+            errors = err.get("errors") or [{}]
+            first = errors[0] if errors else {}
+            detail["reason"] = first.get("reason", "") or ""
+            detail["message"] = (first.get("message") or err.get("message") or "")[:300]
+            detail["domain"] = first.get("domain", "") or ""
+            detail["code"] = err.get("code")
         except Exception:
-            return ""
+            pass
+        try:
+            detail["status"] = getattr(getattr(exc, "resp", None), "status", None)
+        except Exception:
+            pass
+        return detail
 
-    def _mark_quota_exhausted(self, caller: str = "", readonly: bool = False) -> None:
+    @staticmethod
+    def _operation_for_caller(caller: str) -> tuple[str, int]:
+        """Best-effort (operation, units) for a failed call, from the caller name."""
+        c = (caller or "").lower()
+        if "set_publish_at" in c or "set_privacy" in c or "update_description" in c \
+                or "video_update" in c:
+            return "videos.update", 50
+        if "thumbnail" in c:
+            return "thumbnails.set", 50
+        if "playlist" in c:
+            return "playlistItems.insert", 50
+        if "comment" in c:
+            return "commentThreads.insert", 50
+        return "videos.list", 1
+
+    def _record_api_failure(self, operation: str, units: int, caller: str,
+                            exc: Exception, *, yt_id: str = "") -> None:
+        """Registra una llamada fallida en yt_quota_log (observabilidad).
+
+        El `track_quota` se llamaba SOLO tras el éxito, así que la llamada que
+        recibía el 403 de cuota nunca quedaba en el log: no había forma de saber
+        qué endpoint/proyecto la disparó. La entrada lleva success=0 (no suma al
+        consumo diario) y el `reason` real de YouTube. Nunca lanza.
+        """
+        try:
+            reason = "unknown"
+            if isinstance(exc, HttpError):
+                _d = self._http_error_detail(exc)
+                reason = _d.get("reason") or f"http_{_d.get('status')}"
+            track_quota(
+                self.channel_slug or self.account_name or "unknown",
+                operation, units, yt_id=yt_id or None,
+                success=False,
+                error=f"{reason}: {str(exc)[:300]}",
+                caller=caller,
+            )
+        except Exception:
+            pass
+
+    def _mark_quota_exhausted(self, caller: str = "", readonly: bool = False,
+                              detail: Optional[dict] = None,
+                              operation: str = "", units: int = 0,
+                              yt_id: str = "") -> None:
         """Trip the YouTube quota circuit breaker for this channel's project.
 
         Fase cuota (ago 2026):
@@ -212,19 +287,38 @@ class YouTubeUploader:
         - readonly=True (stats, playlists, verificaciones): NO fija el breaker
           de subidas — solo logea. Un 403 de lectura no debe parar las subidas
           del proyecto (las llamadas de lectura son 1 ud y reintentables).
+        - `detail` (reason/message/domain/status) se persiste y viaja en la
+          alerta para poder diagnosticar QUÉ llamada agotó la cuota.
         """
         channel = self.channel_slug or self.account_name or "unknown"
+        detail = detail or {}
+        _diag = (
+            f"endpoint={operation or caller or 'unknown'} units={units} "
+            f"reason={detail.get('reason') or 'unknown'} "
+            f"msg={detail.get('message') or ''}"
+        )
         if readonly:
             logger.warning(
                 "[%s] quotaExceeded en operación de solo lectura (%s) — "
-                "no se activa el breaker de subidas",
-                channel, caller or "unknown",
+                "no se activa el breaker de subidas. %s",
+                channel, caller or "unknown", _diag,
             )
             return
         try:
             from database.db_extended import ExtendedDatabase
             _qdb = ExtendedDatabase()
             _qdb.set_quota_exhausted(channel_slug=channel)
+            # Diagnóstico persistente para la UI / post-mortem (razón real del 403).
+            try:
+                import json as _json
+                _qdb.set_system_state("quota_last_error", _json.dumps({
+                    "channel": channel, "caller": caller, "operation": operation,
+                    "units": units, "yt_id": yt_id,
+                    "reason": detail.get("reason"), "message": detail.get("message"),
+                    "domain": detail.get("domain"), "status": detail.get("status"),
+                }, ensure_ascii=False))
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -263,25 +357,57 @@ class YouTubeUploader:
                     f"Cuota diaria agotada para el proyecto GCP '{project_id}' "
                     f"(token compartido). Canales afectados: {channels_label}. "
                     "Subidas y comprobaciones YT pausadas para este proyecto "
-                    "hasta el reset PT."
+                    "hasta el reset PT. "
+                    f"Endpoint que la agotó: {operation or caller or 'desconocido'} "
+                    f"({units} ud) — reason={detail.get('reason') or 'quotaExceeded'}."
                 ),
                 metadata={
                     "channel": channel,
                     "caller": caller,
                     "project_id": project_id,
                     "channels": shared_channels,
+                    "operation": operation,
+                    "units": units,
+                    "yt_id": yt_id,
+                    "reason": detail.get("reason"),
+                    "message": detail.get("message"),
+                    "domain": detail.get("domain"),
+                    "status": detail.get("status"),
                 },
             )
         except Exception:
             pass
 
     def _raise_if_quota_exceeded(self, exc: HttpError, caller: str = "",
-                                 readonly: bool = False) -> None:
-        if self._http_error_reason(exc) == "quotaExceeded":
-            self._mark_quota_exhausted(caller=caller, readonly=readonly)
+                                 readonly: bool = False, *,
+                                 operation: str = "", units: int = 0,
+                                 yt_id: str = "") -> None:
+        """Raise QuotaExhaustedError only on a REAL daily-quota 403.
+
+        - `quotaExceeded` → abre el breaker del proyecto (cuota diaria agotada).
+        - `rateLimitExceeded`/`userRateLimitExceeded` → límite transitorio de
+          endpoint: se loguea y se re-lanza el HttpError SIN abrir el breaker
+          diario (antes un rate limit también podía tumbar el proyecto entero).
+        Siempre registra la llamada fallida (success=0) para diagnóstico.
+        """
+        detail = self._http_error_detail(exc)
+        reason = detail.get("reason", "")
+        if not operation:
+            operation, units = self._operation_for_caller(caller)
+        self._record_api_failure(operation, units, caller, exc, yt_id=yt_id)
+        if reason == "quotaExceeded":
+            self._mark_quota_exhausted(caller=caller, readonly=readonly,
+                                       detail=detail, operation=operation,
+                                       units=units, yt_id=yt_id)
             raise QuotaExhaustedError(
                 "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
             ) from exc
+        if reason in ("rateLimitExceeded", "userRateLimitExceeded"):
+            logger.warning(
+                "[%s] Rate limit TRANSITORIO de YouTube en %s (NO es cuota diaria; "
+                "no se abre el breaker): %s",
+                self.channel_slug or self.account_name, caller or "unknown", detail,
+            )
 
     @staticmethod
     def _channel_alert_entity_id(slug: str) -> int:
@@ -1141,7 +1267,10 @@ class YouTubeUploader:
                 id=video_id,
             ).execute()
         except HttpError as exc:
-            self._raise_if_quota_exceeded(exc, "update_description.fetch_title")
+            self._raise_if_quota_exceeded(
+                exc, "update_description.fetch_title",
+                operation="videos.list", units=1, yt_id=video_id,
+            )
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
@@ -1171,7 +1300,10 @@ class YouTubeUploader:
                 body=body,
             ).execute()
         except HttpError as exc:
-            self._raise_if_quota_exceeded(exc, "update_description")
+            self._raise_if_quota_exceeded(
+                exc, "update_description",
+                operation="videos.update", units=50, yt_id=video_id,
+            )
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
@@ -1207,7 +1339,10 @@ class YouTubeUploader:
                 body=body,
             ).execute()
         except HttpError as exc:
-            self._raise_if_quota_exceeded(exc, "set_privacy")
+            self._raise_if_quota_exceeded(
+                exc, "set_privacy",
+                operation="videos.update", units=50, yt_id=video_id,
+            )
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
@@ -1232,6 +1367,18 @@ class YouTubeUploader:
         Returns:
             {updated: True, yt_video_id, publish_at} o lanza HttpError.
         """
+        # ── Anti-churn: mismo vídeo + mismo target reciente → no gastar 50 ud ──
+        if self._publish_at_recently_set(video_id, publish_at):
+            logger.info(
+                "[%s] set_publish_at omitido (mismo target en <%d min): video %s → %s",
+                self.channel_slug, PUBLISH_AT_REPEAT_COOLDOWN_MIN,
+                video_id, publish_at,
+            )
+            return {
+                "updated": True, "yt_video_id": video_id,
+                "publish_at": publish_at, "skipped_recent": True,
+            }
+
         service = self._get_service()
 
         body = {
@@ -1248,18 +1395,76 @@ class YouTubeUploader:
                 body=body,
             ).execute()
         except HttpError as exc:
-            self._raise_if_quota_exceeded(exc, "set_publish_at")
+            self._raise_if_quota_exceeded(
+                exc, "set_publish_at",
+                operation="videos.update", units=50, yt_id=video_id,
+            )
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
         track_quota(self.channel_slug, "videos.update", 50,
                     yt_id=video_id, caller="set_publish_at")
+        self._stamp_publish_at(video_id, publish_at)
 
         logger.info(
             "[%s] publishAt reprogramado para video %s → %s",
             self.channel_slug, video_id, publish_at,
         )
         return {"updated": True, "yt_video_id": video_id, "publish_at": publish_at}
+
+    @staticmethod
+    def _targets_within(a, b, minutes: int = PUBLISH_AT_REPEAT_TOLERANCE_MIN) -> bool:
+        """True si dos timestamps de publicación representan el mismo instante (±)."""
+        try:
+            from pipeline.publish_scheduler import _parse_target_public_at
+            pa = _parse_target_public_at(str(a), "Europe/Madrid")
+            pb = _parse_target_public_at(str(b), "Europe/Madrid")
+            if pa is None or pb is None:
+                return str(a)[:16] == str(b)[:16]
+            return abs((pb - pa).total_seconds()) <= minutes * 60
+        except Exception:
+            return str(a)[:16] == str(b)[:16]
+
+    def _publish_at_recently_set(self, video_id: str, publish_at: str) -> bool:
+        """True si este vídeo ya se reprogramó al mismo target hace poco.
+
+        Best-effort y fail-open: si no hay DB o algo falla, se permite la llamada.
+        """
+        if self.db is None:
+            return False
+        try:
+            import json as _json
+            from datetime import datetime, timezone
+            raw = self.db.get_system_state(f"publish_at_set:{video_id}")
+            if not raw:
+                return False
+            data = _json.loads(raw)
+            at = datetime.fromisoformat(str(data.get("at", "")))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            elapsed_min = (datetime.now(timezone.utc) - at).total_seconds() / 60.0
+            if elapsed_min >= PUBLISH_AT_REPEAT_COOLDOWN_MIN:
+                return False
+            return self._targets_within(data.get("target"), publish_at)
+        except Exception:
+            return False
+
+    def _stamp_publish_at(self, video_id: str, publish_at: str) -> None:
+        """Registra el último set_publish_at aplicado (para el anti-churn)."""
+        if self.db is None:
+            return
+        try:
+            import json as _json
+            from datetime import datetime, timezone
+            self.db.set_system_state(
+                f"publish_at_set:{video_id}",
+                _json.dumps({
+                    "target": publish_at,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }),
+            )
+        except Exception:
+            pass
 
     # ── Thumbnail ───────────────────────────────────────────────
 
@@ -1295,7 +1500,10 @@ class YouTubeUploader:
 
         except HttpError as exc:
             try:
-                self._raise_if_quota_exceeded(exc, "_set_thumbnail")
+                self._raise_if_quota_exceeded(
+                    exc, "_set_thumbnail",
+                    operation="thumbnails.set", units=50, yt_id=video_id,
+                )
             except QuotaExhaustedError:
                 raise
             reason = str(exc)[:200]
@@ -1472,7 +1680,10 @@ class YouTubeUploader:
                         part="status,snippet", id=video_id
                     ).execute()
                 except HttpError as exc:
-                    self._raise_if_quota_exceeded(exc, "_verify_upload_exists")
+                    self._raise_if_quota_exceeded(
+                        exc, "_verify_upload_exists",
+                        operation="videos.list", units=1, yt_id=video_id,
+                    )
                     raise
 
                 # ── Track quota (diagnostic) ──────────────────────────
@@ -1711,7 +1922,14 @@ class YouTubeUploader:
                                                      severity="critical", caller="_resumable_upload")
                         raise RuntimeError(_msg) from exc
                     if error_reason == "quotaExceeded":
-                        self._mark_quota_exhausted(caller="_resumable_upload")
+                        self._record_api_failure(
+                            "videos.insert", 1600, "_resumable_upload", exc,
+                        )
+                        self._mark_quota_exhausted(
+                            caller="_resumable_upload",
+                            detail=self._http_error_detail(exc),
+                            operation="videos.insert", units=1600,
+                        )
                         raise QuotaExhaustedError(
                             "Cuota diaria de YouTube API agotada. Generación sigue activa. Reintentar tras el reset PT."
                         ) from exc
