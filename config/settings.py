@@ -285,6 +285,13 @@ except Exception:
     YT_PROJECT_BUDGET_UNITS = {}
 YT_PROJECT_DEFAULT_BUDGET = int(os.getenv("YT_PROJECT_DEFAULT_BUDGET", "100000"))
 YT_PROJECT_RESERVED_UNITS = int(os.getenv("YT_PROJECT_RESERVED_UNITS", "100"))
+# Margen de seguridad ADICIONAL (porcentaje de la cuota real) que se resta al
+# presupuesto automático de subidas. Sirve para dejar colchón cuando la cuota
+# real del proyecto en GCP Console es menor que YT_PROJECT_BUDGET_UNITS o está
+# sujeta a variación: p. ej. con 100000 y 5% → 5000 ud de colchón (≈3 subidas).
+# 0 (default) = sin margen extra (comportamiento previo). NO sustituye a poner
+# el valor real en YT_PROJECT_BUDGET_UNITS — ver Fase 0 del plan de cuota.
+YT_PROJECT_SAFETY_RESERVE_PCT = float(os.getenv("YT_PROJECT_SAFETY_RESERVE_PCT", "0"))
 # Presupuesto automático (subidas) de un proyecto = cuota real - reservados.
 # Por proyecto, NO un valor global hardcodeado.
 YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "0"))  # 0 = derivar por proyecto
@@ -315,13 +322,21 @@ def get_project_budget_units(project_id: str) -> int:
 
 
 def get_project_automatic_budget_units(project_id: str) -> int:
-    """Presupuesto automático (subidas) de un proyecto = cuota - reservados.
+    """Presupuesto automático (subidas) de un proyecto.
+
+    = cuota_real − reservados_fijos − margen_seguridad(%), con suelo de 1600 ud
+    (una subida). El margen (YT_PROJECT_SAFETY_RESERVE_PCT) deja colchón cuando
+    la cuota real es menor que el valor configurado o varía; default 0.
 
     Si YT_AUTOMATIC_BUDGET_UNITS > 0, se usa ese valor global (legacy).
     """
     if YT_AUTOMATIC_BUDGET_UNITS > 0:
         return YT_AUTOMATIC_BUDGET_UNITS
-    return max(get_project_budget_units(project_id) - YT_PROJECT_RESERVED_UNITS, 1600)
+    real = get_project_budget_units(project_id)
+    safety = 0
+    if YT_PROJECT_SAFETY_RESERVE_PCT > 0:
+        safety = int(real * YT_PROJECT_SAFETY_RESERVE_PCT / 100.0)
+    return max(real - YT_PROJECT_RESERVED_UNITS - safety, 1600)
 
 
 # ── Upload batching por cuenta (planificación quota-aware, ago 2026) ──
