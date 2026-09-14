@@ -4395,6 +4395,13 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     from database.db_extended import ExtendedDatabase
     dbx = ExtendedDatabase(str(DATABASE_PATH))
     recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    # v58: incluir TODO lo consumido por el canal (long-form + shorts).
+    try:
+        _consumed_labels = dbx.get_consumed_topic_labels(channel_id, limit=60)
+        if _consumed_labels:
+            recent_topics = list(dict.fromkeys(_consumed_labels + list(recent_topics or [])))[:60]
+    except Exception as _cl_exc:
+        logger.debug("consumed-topics warning merge skipped: %s", _cl_exc)
     topic_warning = ""
     if recent_topics:
         topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
@@ -4442,6 +4449,18 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
+
+    # ── Anti-repetición (v58): rechazar tema ya consumido (long/short) ──
+    try:
+        _dup, _dl = dbx.is_topic_consumed(channel_id, (topic or title), config=ch_config)
+        if _dup:
+            logger.warning(
+                "[%s] Short rechazado por tema ya consumido: '%s' ≈ '%s'",
+                channel_slug, (topic or title)[:60], (_dl or "")[:60],
+            )
+            return
+    except Exception as _td_exc:
+        logger.warning("[%s] topic-dedup check error (fail-open): %s", channel_slug, _td_exc)
 
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False
@@ -4577,6 +4596,12 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         short_id = cursor.lastrowid
         conn.commit()
         conn.close()
+
+        # ── Anti-repetición (v58): marcar tema consumido ──
+        try:
+            dbx.mark_topic_consumed(channel_id, (topic or title), "native_short", short_id)
+        except Exception as _mtc:
+            logger.warning("[%s] mark_topic_consumed failed: %s", channel_slug, _mtc)
 
         # ── Post-publish cross-promotion ──────────────
         run_post_publish_promotion(

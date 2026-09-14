@@ -1400,6 +1400,9 @@ def migrate_v2(db_path: str = None):
     # ── v57: review governance ledger + long-form external visibility ──
     _migrate_v57(conn, logger)
 
+    # ── v58: consumed_topics — shared anti-repetition registry ──
+    _migrate_v58(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3518,6 +3521,15 @@ def _migrate_v57(conn, logger):
     conn.commit()
     logger.info("Migration v57: review tasks and long-form visibility ensured")
 
+
+
+def _migrate_v58(conn, logger):
+    """Idempotent v58: consumed_topics anti-repetition registry (long+shorts)."""
+    schema = Path(__file__).parent / "schema_v58.sql"
+    if schema.exists():
+        conn.executescript(schema.read_text(encoding="utf-8"))
+        conn.commit()
+        logger.info("Migration v58: consumed_topics registry ensured")
 
 
 def _migrate_v10(conn, logger):
@@ -8632,6 +8644,192 @@ class ExtendedDatabase(Database):
                 (channel_id, limit),
             ).fetchall()
         return [r["topic"] for r in rows]
+
+    # ── consumed_topics: shared anti-repetition registry (long-form + shorts) ──
+
+    def _topic_dedup_disabled(self) -> bool:
+        """Kill-switch de emergencia vía system_state."""
+        try:
+            return (self.get_system_state("topic_dedup_disabled") or "").lower() == "true"
+        except Exception:
+            return False
+
+    def mark_topic_consumed(self, channel_id: int, label: str, source: str,
+                            ref_id: int | None = None) -> bool:
+        """Registra una temática como consumida (idempotente).
+
+        Returns True si se insertó una fila nueva, False si ya existía o el
+        label no tenía tokens significativos.
+        """
+        from pipeline.topic_dedup import (
+            normalize_topic, topic_tokens, tokens_to_json,
+        )
+        label = (label or "").strip()
+        if not channel_id or not label:
+            return False
+        norm = normalize_topic(label)
+        toks = topic_tokens(label)
+        if not norm or not toks:
+            return False
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO consumed_topics
+                       (channel_id, topic_label, topic_norm, tokens_json, source, ref_id)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (channel_id, label[:300], norm, tokens_to_json(toks),
+                     (source or "unknown")[:40], ref_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+        except Exception as exc:
+            logger.warning("mark_topic_consumed failed (ch=%s): %s", channel_id, exc)
+            return False
+
+    def get_consumed_topics(self, channel_id: int, limit: int | None = None) -> list[dict]:
+        """Devuelve las temáticas consumidas de un canal (más recientes primero)."""
+        try:
+            with self._connect() as conn:
+                q = ("SELECT id, topic_label, topic_norm, tokens_json, source, "
+                     "ref_id, created_at FROM consumed_topics WHERE channel_id = ? "
+                     "ORDER BY created_at DESC")
+                params: list = [channel_id]
+                if limit is not None:
+                    q += " LIMIT ?"
+                    params.append(limit)
+                rows = conn.execute(q, params).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning("get_consumed_topics failed (ch=%s): %s", channel_id, exc)
+            return []
+
+    def get_consumed_topic_signatures(self, channel_id: int) -> list[tuple[str, set]]:
+        """Lista ``(label, tokens)`` para chequeos de similitud."""
+        from pipeline.topic_dedup import tokens_from_json
+        return [
+            (row["topic_label"], tokens_from_json(row.get("tokens_json")))
+            for row in self.get_consumed_topics(channel_id)
+        ]
+
+    def get_consumed_topic_labels(self, channel_id: int, limit: int = 60) -> list[str]:
+        """Etiquetas de temas consumidos (long+short), más recientes primero.
+
+        Se usa para avisar al LLM de TODO lo ya tratado por el canal, no solo
+        de los últimos 15 shorts.
+        """
+        return [r["topic_label"] for r in self.get_consumed_topics(channel_id, limit=limit)]
+
+    def is_topic_consumed(self, channel_id: int, label: str, config=None
+                          ) -> tuple[bool, str | None]:
+        """¿Esta temática ya fue consumida en el canal?
+
+        Respeta el flag de canal ``TOPIC_DEDUP_ENABLED`` y el kill-switch
+        ``system_state['topic_dedup_disabled']``.
+        """
+        from pipeline.topic_dedup import (
+            get_dedup_settings, topic_tokens, is_topic_duplicate,
+        )
+        enabled, threshold, min_shared = get_dedup_settings(config)
+        if not enabled or self._topic_dedup_disabled():
+            return False, None
+        tokens = topic_tokens(label or "")
+        if not tokens:
+            return False, None
+        return is_topic_duplicate(
+            tokens, self.get_consumed_topic_signatures(channel_id),
+            threshold=threshold, min_shared=min_shared,
+        )
+
+    def filter_consumed_topics(self, channel_id: int, labels: list[str], config=None
+                               ) -> dict:
+        """Filtra una lista de etiquetas contra el registro.
+
+        Carga las firmas una sola vez. Returns:
+            ``{"kept": [...], "rejected": [(label, matched_label), ...]}``
+        """
+        from pipeline.topic_dedup import (
+            get_dedup_settings, topic_tokens, find_best_duplicate,
+        )
+        enabled, threshold, min_shared = get_dedup_settings(config)
+        if not enabled or self._topic_dedup_disabled():
+            return {"kept": list(labels), "rejected": []}
+        signatures = self.get_consumed_topic_signatures(channel_id)
+        kept: list[str] = []
+        rejected: list[tuple[str, str]] = []
+        for label in labels:
+            tokens = topic_tokens(label or "")
+            matched, _sim = find_best_duplicate(
+                tokens, signatures, threshold=threshold, min_shared=min_shared,
+            )
+            if matched:
+                rejected.append((label, matched))
+            else:
+                kept.append(label)
+        return {"kept": kept, "rejected": rejected}
+
+    def backfill_consumed_topics(self, channel_id: int | None = None) -> int:
+        """Siembra el registro con long-forms y shorts nativos ya existentes.
+
+        Idempotente (INSERT OR IGNORE). Guarda un flag por canal en
+        ``system_state`` para no repetir el barrido en cada arranque.
+        Returns el nº de temas insertados.
+        """
+        inserted = 0
+        try:
+            with self._connect() as conn:
+                if channel_id is None:
+                    rows = conn.execute("SELECT id FROM channels").fetchall()
+                    channel_ids = [r["id"] for r in rows]
+                else:
+                    channel_ids = [channel_id]
+
+            for ch_id in channel_ids:
+                flag_key = f"consumed_topics_backfill_v1_{ch_id}"
+                if self.get_system_state(flag_key) == "true":
+                    continue
+
+                # Long-forms: título final publicado.
+                try:
+                    with self._connect() as conn:
+                        vids = conn.execute(
+                            """SELECT id, COALESCE(titulo_final, '') AS label
+                               FROM videos
+                               WHERE canal = (SELECT slug FROM channels WHERE id = ?)
+                                 AND titulo_final IS NOT NULL AND titulo_final != ''""",
+                            (ch_id,),
+                        ).fetchall()
+                except Exception:
+                    vids = []
+
+                for v in vids:
+                    if self.mark_topic_consumed(ch_id, v["label"], "longform", v["id"]):
+                        inserted += 1
+
+                # Shorts nativos/standalone (NO clips: derivan del long-form).
+                try:
+                    with self._connect() as conn:
+                        shorts = conn.execute(
+                            """SELECT id, COALESCE(NULLIF(topic, ''), title) AS label
+                               FROM shorts
+                               WHERE channel_id = ? AND type = 'native'
+                                 AND COALESCE(NULLIF(topic, ''), title) IS NOT NULL
+                                 AND COALESCE(NULLIF(topic, ''), title) != ''""",
+                            (ch_id,),
+                        ).fetchall()
+                except Exception:
+                    shorts = []
+
+                for s in shorts:
+                    if self.mark_topic_consumed(ch_id, s["label"], "native_short", s["id"]):
+                        inserted += 1
+
+                self.set_system_state(flag_key, "true")
+
+            if inserted:
+                logger.info("consumed_topics backfill: %d topics seeded", inserted)
+        except Exception as exc:
+            logger.warning("backfill_consumed_topics failed: %s", exc)
+        return inserted
 
     def get_shorts_stats(self) -> dict:
         """Get aggregate shorts statistics including YouTube metrics."""

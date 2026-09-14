@@ -109,6 +109,26 @@ class NativeShortsPipeline:
 
             # 6. Upload
             result = self._phase_upload_short(short_script, video_path)
+
+            # ── Anti-repetición (v58): marcar tema consumido ──
+            if result:
+                try:
+                    _ch = self.db.get_channel_by_slug(self.channel_slug)
+                    _cid = _ch.get("id") if _ch else None
+                    _lbl = (
+                        short_script.get("tema")
+                        or short_content.get("tema")
+                        or short_script.get("titulo")
+                        or short_content.get("title")
+                        or ""
+                    )
+                    _sid = result.get("short_id")
+                    if _cid and _sid:
+                        self.db.mark_topic_consumed(_cid, _lbl, "native_short", _sid)
+                except Exception as _mtc:
+                    logger.warning(
+                        "[%s] mark_topic_consumed failed: %s", self.channel_slug, _mtc,
+                    )
             return result
 
         except Exception as e:
@@ -200,6 +220,15 @@ class NativeShortsPipeline:
             topic_warning = ""
             if channel_id:
                 recent_topics = self.db.get_recent_short_topics(channel_id, limit=15)
+                # v58: incluir TODO lo consumido por el canal (long+shorts).
+                try:
+                    _consumed_labels = self.db.get_consumed_topic_labels(channel_id, limit=60)
+                    if _consumed_labels:
+                        recent_topics = list(dict.fromkeys(
+                            _consumed_labels + list(recent_topics or [])
+                        ))[:60]
+                except Exception as _cl_exc:
+                    logger.debug("consumed-topics warning merge skipped: %s", _cl_exc)
                 if recent_topics:
                     topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
                     topic_warning = (
@@ -233,8 +262,34 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
                 max_tokens=500,
             )
             if isinstance(result, list) and result:
-                logger.info("LLM generated %d topic ideas for native short", len(result))
-                return result
+                # ── Anti-repetición (v58): descartar temas ya consumidos ──
+                if channel_id:
+                    try:
+                        _kept = []
+                        for _idea in result:
+                            _lbl = ""
+                            if isinstance(_idea, dict):
+                                _lbl = (_idea.get("tema") or _idea.get("title") or "")
+                            _dup, _dl = self.db.is_topic_consumed(
+                                channel_id, _lbl, config=self.config
+                            )
+                            if _dup:
+                                logger.info(
+                                    "[%s] Tema ya consumido, descartado: '%s' ≈ '%s'",
+                                    self.channel_slug, _lbl[:60], (_dl or "")[:60],
+                                )
+                                continue
+                            _kept.append(_idea)
+                        result = _kept
+                    except Exception as _td_exc:
+                        logger.warning(
+                            "[%s] topic-dedup filter failed (fail-open): %s",
+                            self.channel_slug, _td_exc,
+                        )
+                if result:
+                    logger.info("LLM generated %d topic ideas for native short", len(result))
+                    return result
+                logger.info("All LLM topic ideas already consumed for %s", self.channel_slug)
         except Exception as e:
             logger.warning("LLM topic generation failed after retries: %s", e)
 

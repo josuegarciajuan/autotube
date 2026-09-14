@@ -275,6 +275,15 @@ def run_standalone_short(
                 _short_id_so = cur.lastrowid
                 _conn_so.commit()
 
+            # ── Anti-repetición (v58): marcar tema consumido ──
+            try:
+                from database.db_extended import ExtendedDatabase as _EDB_so
+                _EDB_so(str(_DBP_SO)).mark_topic_consumed(
+                    channel_id, (_topic or _title), "standalone_short", _short_id_so
+                )
+            except Exception as _mtc_so:
+                logger.warning("[standalone] mark_topic_consumed failed: %s", _mtc_so)
+
             # ── Cleanup temp files (el render ya se movió a la cola) ──
             try:
                 shutil.rmtree(output_dir, ignore_errors=True)
@@ -314,6 +323,16 @@ def run_standalone_short(
         if result and result.get("short_id"):
             logger.info("[standalone] ✅ Short published: %s → %s",
                         title[:40], result.get("url", ""))
+            # ── Anti-repetición (v58): marcar tema consumido ──
+            try:
+                from database.db_extended import ExtendedDatabase as _EDB_up
+                from config.settings import DATABASE_PATH as _DBP_up
+                _EDB_up(str(_DBP_up)).mark_topic_consumed(
+                    channel_id, (topic.get("tema") or title),
+                    "standalone_short", result["short_id"],
+                )
+            except Exception as _mtc_up:
+                logger.warning("[standalone] mark_topic_consumed failed: %s", _mtc_up)
             return result["short_id"]
 
         return None

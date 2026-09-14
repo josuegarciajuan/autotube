@@ -557,9 +557,31 @@ class PipelineOrchestrator:
         # candidatos: si un topic se marca, se descarta (mark_content_used) y se
         # prueba con el siguiente, evitando long-forms sobre temas que YouTube
         # elimina.
+        #
+        # Anti-repetición (v58): además, se descarta cualquier fuente cuya
+        # temática ya haya sido consumida (long-form o short previo del canal).
+        _dedup_channel_id = self._get_channel_id()
         for content_item in content_items:
             _ct = content_item.get("text", "")
             _ct_title = content_item.get("title", "")
+
+            # ── Tema ya consumido → descartar fuente y seguir ──
+            try:
+                if _dedup_channel_id is not None:
+                    _dup, _dup_label = self.db.is_topic_consumed(
+                        _dedup_channel_id, _ct_title,
+                        config=getattr(self, "config", None),
+                    )
+                    if _dup:
+                        logger.info(
+                            "[%s] Fuente descartada por tema ya consumido: '%s' ~ '%s'",
+                            self.canal, (_ct_title or _ct)[:70], (_dup_label or "")[:70],
+                        )
+                        self.db.mark_content_used(content_item.get("id"))
+                        continue
+            except Exception as _td_exc:
+                logger.warning(f"[{self.canal}] topic-dedup check error (fail-open): {_td_exc}")
+
             try:
                 from pipeline.content_safety import classify_topic_safety
                 _verdict = classify_topic_safety(
@@ -628,6 +650,24 @@ class PipelineOrchestrator:
                     return self.phase_generate_script()
             except Exception as _pc_exc:
                 logger.warning(f"[{self.canal}] Post-guion safety check error (fail-open): {_pc_exc}")
+
+        # ── Anti-repetición (v58): marcar la temática como consumida ──
+        if result and _dedup_channel_id is not None:
+            try:
+                _consumed_label = (
+                    result.get("titulo")
+                    or (result.get("titulo_options") or [None])[0]
+                    or content_title
+                )
+                if self.db.mark_topic_consumed(
+                    _dedup_channel_id, _consumed_label, "longform", result.get("id")
+                ):
+                    logger.info(
+                        "[%s] Temática marcada como consumida: '%s'",
+                        self.canal, str(_consumed_label)[:70],
+                    )
+            except Exception as _mtc:
+                logger.warning(f"[{self.canal}] mark_topic_consumed failed: {_mtc}")
 
         duration_ms = int((time.time() - start) * 1000)
 
@@ -928,6 +968,19 @@ class PipelineOrchestrator:
         if viral_content.get("id", 0) > 0:
             self.db.mark_content_used(viral_content["id"])
 
+        # ── Anti-repetición (v58): marcar la temática como consumida ──
+        try:
+            _vch = self._get_channel_id()
+            _vlabel = (
+                result.get("titulo")
+                or (result.get("titulo_options") or [None])[0]
+                or translated_title
+            )
+            if _vch is not None:
+                self.db.mark_topic_consumed(_vch, _vlabel, "longform", result.get("id"))
+        except Exception as _vmt:
+            logger.warning("[%s] mark_topic_consumed (viral) failed: %s", self.canal, _vmt)
+
         return result
 
     def _viral_fallback_to_original(self, start: float) -> Optional[dict]:
@@ -1087,6 +1140,19 @@ class PipelineOrchestrator:
                                  f"{num_sections} sections, {duration_target}min target",
                                  content_id=result.get("id"),
                                  duration_ms=duration_ms)
+            # ── Anti-repetición (v58): marcar la temática del maratón ──
+            try:
+                _mch = self._get_channel_id()
+                _mlabel = (
+                    result.get("titulo")
+                    or (result.get("titulo_options") or [None])[0]
+                    or "marathon"
+                )
+                if _mch is not None:
+                    self.db.mark_topic_consumed(_mch, _mlabel, "longform", result.get("id"))
+            except Exception as _mmt:
+                logger.warning("[MARATHON][%s] mark_topic_consumed failed: %s",
+                               self.canal, _mmt)
         else:
             _safe_log_error(self.db, self.canal, "marathon_script",
                             "Marathon script generation failed")

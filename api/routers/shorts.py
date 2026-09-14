@@ -947,6 +947,13 @@ async def generate_native(channel_id: int):
     from database.db_extended import ExtendedDatabase
     dbx = ExtendedDatabase(str(DATABASE_PATH))
     recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    # v58: incluir TODO lo consumido por el canal (long-form + shorts).
+    try:
+        _consumed_labels = dbx.get_consumed_topic_labels(channel_id, limit=60)
+        if _consumed_labels:
+            recent_topics = list(dict.fromkeys(_consumed_labels + list(recent_topics or [])))[:60]
+    except Exception as _cl_exc:
+        logger.debug("consumed-topics warning merge skipped: %s", _cl_exc)
     topic_warning = ""
     if recent_topics:
         topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
@@ -1007,6 +1014,24 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
+
+    # ── Anti-repetición (v58): rechazar tema ya consumido (long/short) ──
+    try:
+        _dup, _dl = dbx.is_topic_consumed(channel_id, (topic or title), config=ch_config)
+        if _dup:
+            logger.warning(
+                "Short manual rechazado por tema ya consumido: '%s' ≈ '%s'",
+                (topic or title)[:60], (_dl or "")[:60],
+            )
+            raise HTTPException(
+                409,
+                f"El tema ya fue tratado antes (≈ '{(_dl or '')[:80]}'). "
+                f"Pide un tema diferente.",
+            )
+    except HTTPException:
+        raise
+    except Exception as _td_exc:
+        logger.warning("topic-dedup check error (fail-open): %s", _td_exc)
 
     # 3. Segmented TTS (block-by-block, no mid-phrase truncation)
     output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -1170,6 +1195,12 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     short_id = cursor.lastrowid
     conn.commit()
     conn.close()
+
+    # ── Anti-repetición (v58): marcar tema consumido ──
+    try:
+        dbx.mark_topic_consumed(channel_id, (topic or title), "native_short", short_id)
+    except Exception as _mtc:
+        logger.warning("mark_topic_consumed failed: %s", _mtc)
 
     # Record assets for cross-short dedup
     if asset_items:
