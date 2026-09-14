@@ -262,14 +262,30 @@ bash scripts/stop_dev.sh
 Cuando necesites aplicar cambios en producción sin interrumpir generaciones activas:
 
 ```bash
-# Rebuild frontend + restart API (workers sobreviven)
+# Rebuild frontend + restart API (workers subprocess sobreviven)
 bash scripts/apply_changes.sh
 ```
 
 Este script:
 1. Recompila el frontend (`npm run build`)
-2. Reinicia la API (graceful kill + restart)
-3. **NO mata workers de generación activos**
+2. Decide si es seguro reiniciar vía `scripts/deploy_safety.py`
+3. Reinicia la API con systemd (`KillMode=process`)
+4. **NO mata workers de generación subprocess activos**
+
+**Puerta de seguridad (`scripts/deploy_safety.py`):**
+- Sin long-form running → despliega.
+- Todos los jobs running son worker *subprocess* (`full_pipeline_worker`) y la
+  unidad systemd tiene `KillMode=process` → despliega (el worker sobrevive).
+- Algún job running es *in-process* (legacy) → **aborta con `exit 1`** (mataría
+  la generación), salvo `SKIP_ACTIVE_WORKER_CHECK=true`.
+- Nunca hace `read` sin TTY (el hook `post-merge` corre el deploy en background);
+  no se cuelga ni falla en silencio.
+
+**⚠️ Nota histórica:** antes, `apply_changes.sh` abortaba con `exit 0` si había
+*cualquier* worker vivo, aunque fuera subprocess. El auto-deploy del hook
+`post-merge` no aplicaba nada y la producción quedaba con código viejo sin avisar.
+Corregido (sep 2026): el abort ahora es `exit 1` y se registra la alerta
+`deploy_skipped`.
 
 ### 🛠️ Restart manual tradicional (solo si no hay generación activa)
 
@@ -293,7 +309,8 @@ El worker de generación (`api/services/full_pipeline_worker.py`) es un script s
 usan el worker independiente. Si `False`, usan el modo legacy (in-process, mueren con la API).
 
 **⚠️ Si hay una generación corriendo en modo legacy (in-process), NO reiniciar la API
-porque matará la generación.** Usa `scripts/apply_changes.sh` que detecta esto y advierte.
+porque matará la generación.** `scripts/apply_changes.sh` lo detecta vía
+`scripts/deploy_safety.py` y aborta con `exit 1` (el modo subprocess sí permite el deploy).
 
 ### Base de datos — schema y migraciones
 - Schema base: `database/schema.sql`

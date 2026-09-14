@@ -10,11 +10,14 @@
 #
 # What it does:
 #   1. Rebuilds the frontend (npm run build in frontend/)
-#   2. Gracefully restarts the API (kill old uvicorn + start new one)
+#   2. Gracefully restarts the API (systemd, KillMode=process)
 #   3. Running workers continue independently (they survive API restart)
 #
-# If a video is being generated in-process (legacy mode), this script
-# warns and refuses to restart to avoid killing the generation.
+# Deploy safety is decided by scripts/deploy_safety.py: it only blocks when a
+# long-form generation runs IN-PROCESS (legacy mode, would die on restart).
+# Subprocess workers are safe and the deploy proceeds. Aborting now exits 1
+# (before it exited 0, so the post-merge auto-deploy failed silently).
+# Kill-switch: SKIP_ACTIVE_WORKER_CHECK=true forces the deploy.
 # Use start_dev.sh if you need hot-reload during development.
 
 set -e
@@ -44,70 +47,20 @@ echo "   ✅ All Python files pass syntax check"
 echo ""
 
 echo "🔍 Checking for active generation..."
-ACTIVE_JOBS=$(python3 -c "
-from database.db_extended import ExtendedDatabase
-from database.db import init_db
-from database.db_extended import migrate_v2
-init_db()
-migrate_v2()
-db = ExtendedDatabase()
-active = db.get_active_jobs()
-running = [j for j in active if j['status'] == 'running']
-if running:
-    print(f'ACTIVE:{len(running)}:{running[0][\"id\"]}')
-else:
-    print('NONE')
-" 2>/dev/null || echo "ERROR")
-
-echo "   $ACTIVE_JOBS"
-
-if [[ "$ACTIVE_JOBS" == ACTIVE:* ]]; then
-    JOB_ID=$(echo "$ACTIVE_JOBS" | cut -d: -f3)
-    # Detect whether the running job is a subprocess worker (survivable)
-    # or legacy in-process (would die on API restart)
-    WORKER_MODE="IN_PROCESS"
-    if pgrep -f "full_pipeline_worker.*--job-id $JOB_ID" > /dev/null 2>&1; then
-        WORKER_MODE="SUBPROCESS"
-    fi
-    if [ "$WORKER_MODE" = "SUBPROCESS" ]; then
-        echo ""
-        echo "✅ Active job #$JOB_ID running in SUBPROCESS mode."
-        echo "   The worker will continue independently during the API restart."
-        echo ""
-    else
-        echo ""
-        echo "⚠️  ACTIVE JOB #$JOB_ID IS RUNNING IN-PROCESS!"
-        echo "   Restarting the API would KILL this generation."
-        echo "   Enable subprocess worker mode (USE_SUBPROCESS_WORKER=True)"
-        echo "   or wait for the job to finish."
-        echo ""
-        read -p "Continue anyway? This WILL kill the running job [y/N]: " CONFIRM
-        if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
-            echo "Aborted."
-            exit 1
-        fi
-    fi
+# Decisión centralizada en scripts/deploy_safety.py (testeable, sin cuelgues de TTY):
+#   - sin jobs long-form running         -> desplegar
+#   - todos los jobs running son subprocess -> desplegar (KillMode=process)
+#   - algún job running es in-process    -> abortar (exit 1) salvo force
+if ! DEPLOY_CHECK_OUT=$(python3 scripts/deploy_safety.py 2>&1); then
+    echo "   $DEPLOY_CHECK_OUT"
+    echo ""
+    echo "❌ Deploy bloqueado: hay generación IN-PROCESS activa que moriría al"
+    echo "   reiniciar el API. Reintenta cuando termine, o fuerza con"
+    echo "   SKIP_ACTIVE_WORKER_CHECK=true (solo si sabes lo que haces)."
+    echo ""
+    exit 1
 fi
-
-# ── FIX (stabilize-scheduler): no reiniciar con generación activa.
-# Aunque el worker subprocess sobreviva al reinicio del API, cada reinicio
-# mata workers (SIGTERM) cuando hay cascadas (stale scheduler, kills de
-# huérfanos), y los deploys sumados agravan el problema. Si hay CUALQUIER
-# worker de generación vivo, abortamos el deploy y avisamos de reintentar
-# cuando termine. Kill-switch: SKIP_ACTIVE_WORKER_CHECK=true fuerza el deploy.
-if [ "${SKIP_ACTIVE_WORKER_CHECK:-false}" != "true" ]; then
-    ACTIVE_WORKERS=$(pgrep -f "full_pipeline_worker" 2>/dev/null | wc -l)
-    if [ "$ACTIVE_WORKERS" -gt 0 ]; then
-        echo ""
-        echo "⚠️  Hay $ACTIVE_WORKERS worker(s) de generación activo(s)."
-        echo "   Reiniciar el API puede matar generaciones (cascada de SIGTERM)."
-        echo "   Se ABORTA el deploy para no interrumpir la generación."
-        echo "   Reintenta cuando termine, o fuerza con SKIP_ACTIVE_WORKER_CHECK=true"
-        echo "   (p. ej. si solo hay shorts / maintenance)."
-        echo ""
-        exit 0
-    fi
-fi
+echo "   $DEPLOY_CHECK_OUT"
 
 # ── Step 1: Rebuild frontend ──
 echo ""
