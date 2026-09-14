@@ -3788,6 +3788,28 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
             logger.warning("[standalone] No topics found for %s", channel_slug)
             return None
 
+        # ── Anti-repetición (v58): descartar temas ya consumidos ──
+        try:
+            from config.config_bridge import get_channel_config as _gcc_s
+            _cfg_s = _gcc_s(channel_slug)
+            _kept_topics = []
+            for _t in topics:
+                _lbl = _t.get("tema") or _t.get("title") or ""
+                _dup, _dl = _db_s.is_topic_consumed(channel_id, _lbl, config=_cfg_s)
+                if _dup:
+                    logger.info(
+                        "[standalone] %s: tema ya consumido '%s' ≈ '%s' — descartado",
+                        channel_slug, _lbl[:60], (_dl or "")[:60],
+                    )
+                    continue
+                _kept_topics.append(_t)
+            topics = _kept_topics
+        except Exception as _td_exc:
+            logger.warning("[standalone] topic-dedup check error (fail-open): %s", _td_exc)
+        if not topics:
+            logger.warning("[standalone] Todos los temas descubiertos ya están consumidos para %s", channel_slug)
+            return None
+
         def _classify_topic(candidate):
             from pipeline.content_safety import classify_topic_safety
             return classify_topic_safety(
@@ -3866,6 +3888,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     from database.db_extended import ExtendedDatabase
     dbx = ExtendedDatabase(str(DATABASE_PATH))
     recent_topics = dbx.get_recent_short_topics(channel_id, limit=15)
+    # v58: incluir TODO lo consumido por el canal (long-form + shorts) para que
+    # el LLM no regenere temas ya tratados.
+    try:
+        _consumed_labels = dbx.get_consumed_topic_labels(channel_id, limit=60)
+        if _consumed_labels:
+            recent_topics = list(dict.fromkeys(_consumed_labels + list(recent_topics or [])))[:60]
+    except Exception as _cl_exc:
+        logger.debug("consumed-topics warning merge skipped: %s", _cl_exc)
     topic_warning = ""
     if recent_topics:
         topic_list = "\n".join(f'  - "{t}"' for t in recent_topics)
@@ -4103,6 +4133,42 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                     "[%s] Script has only %d words (< %d min) — proceeding anyway",
                     channel_slug, total_words, _MIN_WORDS,
                 )
+
+        # ── Hard topic-dedup guard (v58): tema ya consumido → regenerar/fail ──
+        # Registro compartido long-form + shorts por canal. Evita repetir la
+        # misma temática aunque cambie el título (el guard de títulos no lo
+        # detecta). Fail-open si el registry falla.
+        _topic_candidate = (
+            script.get("tema") or script.get("titulo")
+            or script.get("title") or ""
+        )[:200]
+        if _topic_candidate:
+            try:
+                _topic_dup, _topic_dup_label = dbx.is_topic_consumed(
+                    channel_id, _topic_candidate, config=ch_config
+                )
+            except Exception as _td_exc:
+                logger.warning("[%s] topic-dedup check error (fail-open): %s", channel_slug, _td_exc)
+                _topic_dup, _topic_dup_label = False, None
+            if _topic_dup:
+                if not _is_last:
+                    conflict_feedback = (
+                        f"\n\n❌ RECHAZADO: el tema '{_topic_candidate[:60]}' ya fue "
+                        f"tratado antes (≈ '{(_topic_dup_label or '')[:60]}'). "
+                        f"Elige un tema COMPLETAMENTE DIFERENTE.\n"
+                    )
+                    logger.warning(
+                        "[%s] Topic already consumed (intento %d/%d): '%s' ≈ '%s' — regenerando",
+                        channel_slug, _attempt + 1, MAX_SCRIPT_ATTEMPTS,
+                        _topic_candidate[:60], (_topic_dup_label or "")[:60],
+                    )
+                    continue
+                logger.warning(
+                    "[%s] Topic already consumed: '%s' ≈ '%s' — rejecting slot",
+                    channel_slug, _topic_candidate[:60], (_topic_dup_label or "")[:60],
+                )
+                _native_fail(slot_id, job_id, "tema ya consumido")
+                return None
 
         # ── Hard spam filter: title similarity guard (dentro del bucle) ──
         # Near-duplicate titles across shorts AND long-form are a classic spam
@@ -4433,6 +4499,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 flush_short_asset_history(short_id, channel_id, asset_items)
             except Exception as e:
                 logger.warning("[%s] Failed to flush short asset history: %s", channel_slug, e)
+        # ── Anti-repetición (v58): marcar tema consumido (compartido long+short) ──
+        try:
+            dbx.mark_topic_consumed(
+                channel_id, (topic or title), "native_short", short_id
+            )
+        except Exception as e:
+            logger.warning("[%s] mark_topic_consumed (native) failed: %s", channel_slug, e)
         _update_short_job_progress(job_id, 100, "generated")
         logger.info(
             "[%s] Native Short GENERADO y en cola (status=generated): %s",
@@ -4527,6 +4600,14 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             flush_short_asset_history(short_id, channel_id, asset_items)
         except Exception as e:
             logger.warning("[%s] Failed to flush short asset history: %s", channel_slug, e)
+
+    # ── Anti-repetición (v58): marcar tema consumido (compartido long+short) ──
+    try:
+        dbx.mark_topic_consumed(
+            channel_id, (topic or title), "native_short", short_id
+        )
+    except Exception as e:
+        logger.warning("[%s] mark_topic_consumed (native published) failed: %s", channel_slug, e)
 
     # Auto-mark altered content (IA) via browser
     try:

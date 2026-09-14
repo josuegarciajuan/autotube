@@ -75,6 +75,16 @@ REVIEW_GOVERNANCE_NICHE_GUARD_ENABLED = False
 REVIEW_GOVERNANCE_NICHE_KEYWORDS = []
 REVIEW_GOVERNANCE_AMBIGUOUS_REVIEW = True
 
+# ── Anti-repetición de temáticas (v58, sep 2026) ───────────────────
+# Registro compartido long-form + shorts por canal (tabla consumed_topics).
+# Una vez elegida una temática se marca como consumida de forma permanente y
+# ningún candidato futuro con solapamiento de palabras clave por encima del
+# umbral se vuelve a generar. Kill-switch de emergencia:
+# system_state["topic_dedup_disabled"] = "true".
+TOPIC_DEDUP_ENABLED = True
+TOPIC_DEDUP_THRESHOLD = 0.5     # solapamiento mínimo |A∩B| / max(|A|,|B|)
+TOPIC_DEDUP_MIN_TOKENS = 2      # tokens significativos compartidos mínimos
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════

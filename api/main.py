@@ -247,6 +247,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
     _ping_watchdog_now()  # config sync can be slow on first run
+
+    # ── Backfill: sembrar el registro de temáticas consumidas (v58) ──
+    # Marca los long-forms y shorts nativos ya publicados para que la fábrica
+    # no repita temas históricos desde el primer momento. Idempotente: cada
+    # canal se barre una sola vez (flag en system_state).
+    try:
+        _backfilled = ExtendedDatabase().backfill_consumed_topics()
+        logging.getLogger("autotube.startup").info(
+            "consumed_topics backfill: %d topic(s) seeded", _backfilled,
+        )
+    except Exception as _bf_exc:
+        logging.getLogger("autotube.startup").warning(
+            "consumed_topics backfill skipped: %s", _bf_exc,
+        )
+    _ping_watchdog_now()
     
     # ── Clean up orphaned ffmpeg/edge-tts/yt-dlp processes from prior runs ──
     try:
