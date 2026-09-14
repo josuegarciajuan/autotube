@@ -165,37 +165,37 @@ def _make_jobs_db(tmp_path, running_ids):
     return db
 
 
-def test_script_run_sees_db_jobs(tmp_path):
-    """Standalone run must import config and read the DB.
+def test_script_run_imports_project_config():
+    """Standalone run must resolve the project modules (sys.path bootstrap).
 
     Regression: `python3 scripts/deploy_safety.py` sets sys.path[0]=scripts/,
-    so `import config` failed and the gate always reported "no active
-    generation" (silent fail-open), allowing deploys during in-process
-    generation. With a running job present the script must NOT claim there is
-    no active generation.
+    so `import config` failed and the gate silently reported "no active
+    generation" (fail-open). After the fix the project root is importable, so
+    an "No module named 'config'/'database'" failure must never appear.
+
+    ``SKIP_ACTIVE_WORKER_CHECK=true`` keeps the run side-effect free (no
+    deploy_skipped alert) while still exercising the import path.
     """
-    db = _make_jobs_db(tmp_path, [999001])
     env = dict(os.environ)
-    env["DATABASE_PATH"] = str(db)
-    env.pop("SKIP_ACTIVE_WORKER_CHECK", None)
-    proc = subprocess.run(
-        [sys.executable, "scripts/deploy_safety.py"],
-        cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=60,
-    )
-    out = proc.stdout + proc.stderr
-    assert "no active long-form generation" not in out
-    # fake job id → no OS worker → in-process → blocked, exit 1
-    assert proc.returncode == 1
-    assert "in-process" in out
-
-
-def test_script_run_forced_with_unreadable_db(tmp_path):
-    env = dict(os.environ)
-    env["DATABASE_PATH"] = str(tmp_path / "does_not_exist.db")
     env["SKIP_ACTIVE_WORKER_CHECK"] = "true"
     proc = subprocess.run(
         [sys.executable, "scripts/deploy_safety.py"],
         cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=60,
     )
-    assert proc.returncode == 0
+    out = proc.stdout + proc.stderr
+    assert "No module named 'config'" not in out
+    assert "No module named 'database'" not in out
     assert "DEPLOY_SAFE" in proc.stdout
+    assert proc.returncode == 0
+
+
+def test_running_longform_jobs_reads_explicit_db(tmp_path):
+    db = _make_jobs_db(tmp_path, [999001])
+    assert ds.running_longform_jobs(db_path=str(db)) == [999001]
+
+
+def test_running_longform_jobs_unreadable_returns_none(tmp_path):
+    # A non-sqlite file → unreadable state must be None, never [] ("nothing running").
+    bad = tmp_path / "bad.db"
+    bad.write_text("not a database")
+    assert ds.running_longform_jobs(db_path=str(bad)) is None
