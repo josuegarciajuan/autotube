@@ -42,6 +42,13 @@ def _db(tmp_path):
     return ExtendedDatabase(str(path))
 
 
+@pytest.fixture(autouse=True)
+def _disable_network_credit_recheck(monkeypatch):
+    """El gobernador fuerza un re-chequeo de saldo al detectar todo bloqueado;
+    en tests no debe salir a la red (lo sobreescribe cada test que lo necesite)."""
+    monkeypatch.setattr(fg, "_force_credit_recheck", lambda db: None)
+
+
 def test_credits_ok_when_no_status_recorded(tmp_path):
     # Fail-open: sin registro de créditos NO se bloquea
     db = _db(tmp_path)
@@ -123,6 +130,31 @@ def test_credits_blocked_when_only_openai_exhausted_recorded(tmp_path):
         )
         conn.commit()
     assert fg.credits_ok(db) is False
+
+
+def test_credits_recheck_unblocks_after_recharge(tmp_path, monkeypatch):
+    """Con TODOS los proveedores marcados agotados, el gobernador fuerza un
+    re-chequeo; si la recarga ya está disponible, la fábrica NO se pausa."""
+    db = _db(tmp_path)
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO llm_credit_status (provider, status, balance_usd) VALUES ('deepseek', 'exhausted', 0.0)"
+        )
+        conn.execute(
+            "INSERT INTO llm_credit_status (provider, status, error_count_7d) VALUES ('openai', 'exhausted', 3)"
+        )
+        conn.commit()
+
+    def _refresh(db_):
+        with db_._connect() as conn:
+            conn.execute(
+                "UPDATE llm_credit_status SET status='healthy', balance_usd=9.98 "
+                "WHERE provider='deepseek'"
+            )
+            conn.commit()
+
+    monkeypatch.setattr(fg, "_force_credit_recheck", _refresh)
+    assert fg.credits_ok(db) is True
 
 
 def test_credits_allowed_when_only_low(tmp_path):
