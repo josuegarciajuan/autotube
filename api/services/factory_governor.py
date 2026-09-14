@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 
 logger = logging.getLogger("autotube.factory_governor")
 
@@ -33,6 +34,42 @@ logger = logging.getLogger("autotube.factory_governor")
 # "low" (saldo bajo pero > 0) NO bloquea: el pool sigue pudiendo generar
 # con ese proveedor y la alerta es solo informativa.
 _BLOCKING_CREDIT_STATUSES = {"exhausted", "error"}
+
+# Cuando TODOS los proveedores están bloqueados, el estado cacheado en DB puede
+# estar obsoleto (p.ej. una recarga de DeepSeek aún no detectada por el chequeo
+# periódico de 4h). Antes de pausar la fábrica forzamos una re-consulta de saldo,
+# throttled para no martillear las APIs de billing en cada tick de dispatch.
+_CREDIT_RECHECK_THROTTLE_S = 300
+_last_credit_recheck_ts = 0.0
+
+
+def _registered_providers(status: dict) -> dict:
+    """Proveedores LLM con registro de estado presente (ausente → ignorado)."""
+    return {name: status[name] for name in ("deepseek", "openai") if status.get(name)}
+
+
+def _blocked_providers(status: dict) -> dict:
+    """{proveedor: estado} de los que están no-usables para generar."""
+    return {
+        name: rec.get("status")
+        for name, rec in _registered_providers(status).items()
+        if rec.get("status") in _BLOCKING_CREDIT_STATUSES
+    }
+
+
+def _force_credit_recheck(db) -> None:
+    """Re-consulta los créditos LLM (throttled). Fail-open: nunca propaga error."""
+    global _last_credit_recheck_ts
+    now = time.monotonic()
+    if now - _last_credit_recheck_ts < _CREDIT_RECHECK_THROTTLE_S:
+        return
+    _last_credit_recheck_ts = now
+    try:
+        from api.services.llm_credit_checker import check_all_llm_credits
+        check_all_llm_credits(db, force=True)
+        logger.info("Factory governor: re-chequeo forzado de créditos LLM")
+    except Exception as exc:
+        logger.warning("Factory governor: re-chequeo de créditos falló: %s", exc)
 
 
 def _default_min_free_disk_mb() -> int:
@@ -83,6 +120,10 @@ def credits_ok(db=None) -> bool:
     Se pausa SOLO cuando TODOS los proveedores registrados están no-usables
     (status ``exhausted`` o ``error``). Fail-open: sin registros o ante error
     de medición se permite generar.
+
+    Antes de pausar, si TODOS están bloqueados se fuerza una re-consulta de
+    saldo (throttled): así una recarga reciente se detecta de inmediato en vez
+    de esperar al chequeo periódico y dejar la fábrica parada horas.
     """
     try:
         if db is None:
@@ -90,19 +131,18 @@ def credits_ok(db=None) -> bool:
             db = ExtendedDatabase()
         from api.services.llm_credit_checker import get_llm_credit_status
         status = get_llm_credit_status(db) or {}
-        # Solo proveedores con registro de estado presente (ausente → ignorado).
-        providers = {
-            name: status[name]
-            for name in ("deepseek", "openai")
-            if status.get(name)
-        }
+        providers = _registered_providers(status)
         if not providers:
             return True  # fail-open: sin registros no bloqueamos
-        blocked = {
-            name: rec.get("status")
-            for name, rec in providers.items()
-            if rec.get("status") in _BLOCKING_CREDIT_STATUSES
-        }
+        blocked = _blocked_providers(status)
+        if len(blocked) >= len(providers):
+            # Estado posiblemente obsoleto (recarga no detectada) → re-consultar.
+            _force_credit_recheck(db)
+            status = get_llm_credit_status(db) or {}
+            providers = _registered_providers(status)
+            if not providers:
+                return True
+            blocked = _blocked_providers(status)
         if len(blocked) >= len(providers):
             logger.warning(
                 "Factory governor: TODOS los proveedores LLM no-usables (%s) — pausando generación",

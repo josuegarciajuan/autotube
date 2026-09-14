@@ -108,7 +108,7 @@ def test_llm_credits_alert_creates_with_channel_id(monkeypatch, tmp_path):
         ).fetchone()
     assert row is not None
     assert row["entity_type"] == "system"
-    assert row["entity_id"] == 0
+    assert row["entity_id"] == 1  # stable per-provider id (deepseek) — see collision fix
     assert row["channel_id"] is None  # system-wide alert, not bound to a channel
     assert "DeepSeek" in row["title"]
 
@@ -133,6 +133,38 @@ def test_llm_credits_dedup_respects_channel_id(monkeypatch, tmp_path):
             "SELECT COUNT(*) as c FROM pipeline_alerts WHERE alert_type = 'llm_credit_exhausted'"
         ).fetchone()["c"]
     assert n == 1
+
+
+def test_llm_credits_provider_alerts_do_not_collide(monkeypatch, tmp_path):
+    """DeepSeek and OpenAI exhausted alerts must coexist.
+
+    Both providers share the dedup key (system, entity_id=0,
+    alert_type='llm_credit_exhausted'). Before the fix ``_maybe_create_alert``
+    matched the OpenAI row and overwrote its message with the DeepSeek text,
+    leaving a single mislabelled alert (observed in production: alert #2189).
+    The provider-scoped dedup must create one row per provider.
+    """
+    db = _build_db(tmp_path, _PIPELINE_ALERTS_DDL)
+
+    import api.services.llm_credit_checker as lcc
+    fake_status = {
+        "deepseek": {"status": "exhausted", "balance_usd": 0.0, "currency": "USD"},
+        "openai": {"status": "exhausted", "error_count_7d": 3, "last_error": "429"},
+        "youtube": None,
+    }
+    monkeypatch.setattr(lcc, "check_all_llm_credits", lambda db, force=False: fake_status)
+
+    assert _check_llm_credits(db) == 2  # one alert per provider
+
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT title FROM pipeline_alerts WHERE alert_type = 'llm_credit_exhausted' "
+            "ORDER BY title"
+        ).fetchall()
+    titles = [r["title"] for r in rows]
+    assert len(titles) == 2
+    assert any("DeepSeek" in t for t in titles)
+    assert any("OpenAI" in t for t in titles)
 
 
 # ═══════════════════════════════════════════════════════════════

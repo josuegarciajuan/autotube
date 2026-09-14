@@ -1259,27 +1259,39 @@ def _auto_resolve_platform_tokens(db) -> int:
 
 
 def _maybe_create_alert(db, conn, entity_type, entity_id, channel_id,
-                        alert_type, severity, title, message, metadata) -> int:
-    """Create alert if not already existing for this entity+type. Returns 1 if created, 0 if dup."""
+                        alert_type, severity, title, message, metadata,
+                        dedup_title_like: Optional[str] = None) -> int:
+    """Create alert if not already existing for this entity+type. Returns 1 if created, 0 if dup.
+
+    ``dedup_title_like``: cuando varios recursos comparten la misma clave
+    (entity_type, entity_id, alert_type) restringe el dedup y el cooldown a las
+    alertas cuyo título contiene ese texto. Evita que alertas de proveedores
+    distintos (p.ej. DeepSeek y OpenAI) se sobreescriban el mensaje entre sí.
+    """
+    title_clause = " AND title LIKE ?" if dedup_title_like else ""
+    title_param = (f"%{dedup_title_like}%",) if dedup_title_like else ()
+
     # ── Cooldown: suppress alert if recently resolved by user ──
     recently_resolved = conn.execute(
-        """SELECT id FROM pipeline_alerts
-           WHERE entity_type = ? AND entity_id IS ? AND alert_type = ?
-             AND resolved = 1
-             AND resolved_at > datetime('now', ?)
-           LIMIT 1""",
+        f"""SELECT id FROM pipeline_alerts
+            WHERE entity_type = ? AND entity_id IS ? AND alert_type = ?
+              AND resolved = 1
+              AND resolved_at > datetime('now', ?)
+              {title_clause}
+            LIMIT 1""",
         (entity_type, entity_id, alert_type,
-         f'-{ALERT_RESOLVE_COOLDOWN_HOURS} hours'),
+         f'-{ALERT_RESOLVE_COOLDOWN_HOURS} hours', *title_param),
     ).fetchone()
     if recently_resolved:
         return 0
 
     # Dedup: don't create same alert for same entity if unresolved
     existing = conn.execute(
-        """SELECT id FROM pipeline_alerts
-           WHERE entity_type = ? AND entity_id IS ? AND alert_type = ? AND resolved = 0
-           LIMIT 1""",
-        (entity_type, entity_id, alert_type),
+        f"""SELECT id FROM pipeline_alerts
+            WHERE entity_type = ? AND entity_id IS ? AND alert_type = ? AND resolved = 0
+              {title_clause}
+            LIMIT 1""",
+        (entity_type, entity_id, alert_type, *title_param),
     ).fetchone()
     if existing:
         # Update the existing alert
@@ -1326,6 +1338,13 @@ def _resolve_credit_alerts(db, conn, provider: str, alert_types) -> int:
     return resolved
 
 
+# entity_id estable por proveedor: el índice único de pipeline_alerts es
+# (entity_type, entity_id, alert_type), así que DeepSeek y OpenAI necesitan
+# entity_id distintos para que sus alertas de crédito coexistan en vez de
+# sobreescribirse (bug observado: alerta #2189 con título OpenAI y mensaje DeepSeek).
+_LLM_CREDIT_ALERT_ENTITY_ID = {"deepseek": 1, "openai": 2}
+
+
 def _check_llm_credits(db) -> int:
     """Check DeepSeek balance and OpenAI quota errors every 12h.
     
@@ -1360,7 +1379,7 @@ def _check_llm_credits(db) -> int:
                         balance = ds.get("balance_usd", 0)
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0, channel_id=None,
+                            entity_type="system", entity_id=_LLM_CREDIT_ALERT_ENTITY_ID["deepseek"], channel_id=None,
                             alert_type="llm_credit_exhausted",
                             severity="critical",
                             title="DeepSeek sin créditos — generación de scripts detenida",
@@ -1372,6 +1391,7 @@ def _check_llm_credits(db) -> int:
                                 f"(DeepSeek es el proveedor principal de scripts)."
                             ),
                             metadata={"provider": "deepseek", "balance_usd": balance},
+                            dedup_title_like="DeepSeek",
                         )
                 elif ds_status == "low":
                     existing = conn.execute(
@@ -1383,7 +1403,7 @@ def _check_llm_credits(db) -> int:
                         balance = ds.get("balance_usd", 0)
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0, channel_id=None,
+                            entity_type="system", entity_id=_LLM_CREDIT_ALERT_ENTITY_ID["deepseek"], channel_id=None,
                             alert_type="llm_credit_low",
                             severity="warning",
                             title="DeepSeek créditos bajos — recargar pronto",
@@ -1396,6 +1416,7 @@ def _check_llm_credits(db) -> int:
                                 f"de las generaciones automáticas."
                             ),
                             metadata={"provider": "deepseek", "balance_usd": balance},
+                            dedup_title_like="DeepSeek",
                         )
                 elif ds_status == "healthy":
                     # Saldo recuperado → auto-resolver alertas de crédito abiertas
@@ -1419,7 +1440,7 @@ def _check_llm_credits(db) -> int:
                         last_err = oa.get("last_error", "")[:300]
                         created += _maybe_create_alert(
                             db, conn,
-                            entity_type="system", entity_id=0, channel_id=None,
+                            entity_type="system", entity_id=_LLM_CREDIT_ALERT_ENTITY_ID["openai"], channel_id=None,
                             alert_type="llm_credit_exhausted",
                             severity="critical",
                             title="OpenAI sin créditos/quota — fallback de scripts caído",
@@ -1433,6 +1454,7 @@ def _check_llm_credits(db) -> int:
                                 f"no funcionará."
                             ),
                             metadata={"provider": "openai", "error_count_7d": err_count},
+                            dedup_title_like="OpenAI",
                         )
                 elif oa_status == "healthy":
                     # Cuota recuperada → auto-resolver alertas de crédito abiertas
