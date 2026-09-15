@@ -355,6 +355,13 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
                 conn.commit()
             summary["checked"] += 1
             summary["updated"] += 1
+
+            # Un vídeo cuya retirada YA está registrada canónicamente
+            # (deleted_on_yt por el sweep) no necesita una alerta de mismatch:
+            # sería ruido redundante y crítico sobre un hecho ya conocido.
+            if (video.get("status") or "") in ("deleted_on_yt", "removed"):
+                continue
+
             expected = (video.get("privacy_status") or "").strip().lower()
             if not expected or visibility in ("unknown", "error"):
                 continue
