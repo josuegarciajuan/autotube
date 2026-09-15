@@ -164,6 +164,21 @@ def test_reconcile_benign_lag_does_not_alert(monkeypatch):
     assert emitted == [], "benign lag must not emit a critical alert"
 
 
+def test_reconcile_skips_known_deleted_video(monkeypatch):
+    """Vídeo ya marcado deleted_on_yt: la retirada ya está registrada → sin alerta."""
+    db = FakeVideosDB([_video(12, privacy="public", status="deleted_on_yt")])
+    monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "removed")
+    monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {})
+
+    emitted = []
+    monkeypatch.setattr("api.services.lifecycle_monitor.emit_alert",
+                        lambda *a, **k: emitted.append(k) or 1)
+
+    summary = rec.reconcile_recent_videos(db)
+    assert summary["alerts"] == 0
+    assert emitted == []
+
+
 def test_reconcile_dangerous_mismatch_alerts(monkeypatch):
     db = FakeVideosDB([_video(11, privacy="public", status="published")])
     monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "private")
