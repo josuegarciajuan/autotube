@@ -39,6 +39,53 @@ from config.settings import LLM_API_KEY, LLM_BASE_URL
 logger = logging.getLogger(__name__)
 
 
+def chat_completion_with_failover(candidates, messages, *, timeout=120.0, **kwargs):
+    """Run ``chat.completions.create`` with ordered cross-provider failover.
+
+    El sistema debe degradar con gracia cuando un proveedor está caído (sin
+    créditos, key revocada, red). En vez de depender de un único proveedor, se
+    intentan en orden los candidatos indicados y se devuelve la primera
+    respuesta válida.
+
+    Args:
+        candidates: lista ordenada de dicts con
+            ``{provider, credential, base_url, model}``. El primero es el primario.
+        messages: mensajes OpenAI-style.
+        timeout: timeout por intento.
+        **kwargs: se reenvían a ``chat.completions.create``.
+
+    Returns:
+        El objeto de respuesta del primer proveedor que responda.
+
+    Raises:
+        La última excepción si todos los candidatos fallan.
+    """
+    last_exc = None
+    for cand in candidates:
+        if not cand.get("credential"):
+            continue
+        provider = cand.get("provider") or "?"
+        try:
+            client = create_llm_client(
+                api_key=cand["credential"],
+                base_url=cand["base_url"],
+                timeout=timeout,
+            )
+            return client.chat.completions.create(
+                model=cand["model"], messages=messages, **kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "LLM failover: provider '%s' failed (%s): %s",
+                provider, type(exc).__name__, str(exc)[:160],
+            )
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No LLM provider candidate with an API key configured")
+
+
 def create_llm_client(
     api_key=None,
     base_url=None,

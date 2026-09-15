@@ -15,7 +15,11 @@ from difflib import SequenceMatcher
 from typing import Optional
 
 from config.llm_helpers import _extract_reasoning_content
-from config.model_pool import ModelPool
+from config.model_pool import (
+    ModelPool,
+    is_non_retryable_error,
+    mark_provider_unavailable,
+)
 
 from config.settings import (
     LLM_MODEL,
@@ -329,6 +333,15 @@ class ScriptGenerator:
                     time.sleep(delay)
             except Exception as exc:
                 last_exc = exc
+                # Cuota/creditos/auth son definitivos: reintentar solo martillea
+                # al proveedor caído (bug 2026-09-15). Abortar para que el
+                # failover pase ya al siguiente modelo.
+                if is_non_retryable_error(exc):
+                    logger.warning(
+                        "LLM non-retryable error (%s): %s — abortando reintentos",
+                        model_name or "unknown", str(exc)[:160],
+                    )
+                    raise
                 if attempt < self._llm_retries - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
@@ -340,7 +353,6 @@ class ScriptGenerator:
 
     # ── Model pool failover (v22) ───────────────────────────────────
 
-    @staticmethod
     @staticmethod
     def _classify_error(exc: Exception) -> str:
         """Classify an exception into a standard error_type for logging."""
@@ -617,6 +629,13 @@ class ScriptGenerator:
                         error_type, error_msg[:120],
                     )
 
+                    # Cuota/creditos/auth: definitivo. Marcar el proveedor en
+                    # cooldown y saltar ya al siguiente modelo sin gastar los
+                    # intentos restantes.
+                    if is_non_retryable_error(exc):
+                        mark_provider_unavailable(entry.provider)
+                        break
+
             # Model exhausted — move to next
             logger.warning(
                 "Failover: %s exhausted (%d attempts) — model FAILED",
@@ -773,7 +792,6 @@ class ScriptGenerator:
         models (GPT → DeepSeek → GPT → DeepSeek) instead of relying
         on the default pool ordering.
         """
-        from config.model_pool import ModelPool
         entry = ModelPool._build_entry(provider, model_id)
         if not entry:
             raise ValueError(

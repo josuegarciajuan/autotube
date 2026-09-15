@@ -805,13 +805,22 @@ def _download_thumbnail(url: str, canal_slug: str) -> str | None:
 
 
 def _analyze_thumbnail_vision(image_path: str, config: SimpleNamespace) -> dict | None:
-    """Use vision-capable LLM (gpt-4o-mini) to analyze thumbnail composition."""
-    from config.settings import VISION_MODEL, VISION_API_KEY, VISION_BASE_URL
-    from openai import OpenAI
+    """Use vision-capable LLM (gpt-4o-mini) to analyze thumbnail composition.
+
+    Failover bidireccional: el proveedor de visión (OpenAI por defecto) es el
+    primario; si falla (sin créditos, key revocada, red) se intenta DeepSeek.
+    DeepSeek no es multimodal, así que ese fallback puede fallar también — en
+    tal caso se degrada a ``None`` sin romper la generación.
+    """
+    from config.settings import (
+        VISION_MODEL, VISION_API_KEY, VISION_BASE_URL,
+        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+    )
+    from config.llm_client import chat_completion_with_failover
     import base64
 
-    if not VISION_API_KEY:
-        logger.warning("No VISION_API_KEY configured — cannot analyze thumbnail")
+    if not VISION_API_KEY and not LLM_API_KEY:
+        logger.warning("No VISION_API_KEY/LLM_API_KEY configured — cannot analyze thumbnail")
         return None
 
     # Read image as base64
@@ -822,8 +831,13 @@ def _analyze_thumbnail_vision(image_path: str, config: SimpleNamespace) -> dict 
         logger.warning("Failed to read image for vision analysis: %s", e)
         return None
 
-    # Vision-capable model (OpenAI gpt-4o-mini supports multimodal)
-    vision_client = OpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
+    # Candidatos de proveedor en orden: visión (OpenAI) → fallback (DeepSeek).
+    candidate_providers = [
+        {"provider": "vision-openai", "credential": VISION_API_KEY,
+         "base_url": VISION_BASE_URL, "model": VISION_MODEL},
+        {"provider": "deepseek", "credential": LLM_API_KEY,
+         "base_url": LLM_BASE_URL, "model": LLM_MODEL},
+    ]
     system = """You are a thumbnail design analyst. Analyze the YouTube thumbnail image.
 Return a JSON object with:
 {
@@ -837,8 +851,8 @@ Return a JSON object with:
 }"""
 
     try:
-        resp = vision_client.chat.completions.create(
-            model=VISION_MODEL,
+        resp = chat_completion_with_failover(
+            candidate_providers,
             messages=[
                 {"role": "system", "content": system},
                 {

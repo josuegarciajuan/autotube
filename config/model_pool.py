@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -35,6 +36,69 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Provider circuit breaker ───────────────────────────────────
+# Un proveedor sin créditos / con la API key revocada NO debe reintentarse en
+# cada fase de cada generación: eso martillea al proveedor caído (9 llamadas
+# HTTP por fase medido en ago-sep 2026) y multiplica la latencia. Tras un error
+# definitivo (cuota/creditos/auth) se marca el proveedor como no disponible
+# durante una ventana y el failover salta directo al siguiente.
+DEFAULT_PROVIDER_COOLDOWN_SEC = 1800  # 30 min
+_PROVIDER_DISABLED_UNTIL: dict[str, float] = {}
+
+_NON_RETRYABLE_PATTERNS = (
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "no credits remaining",
+    "exceeded your current quota",
+    "billing_not_active",
+    "out of credits",
+    "insufficient funds",
+    "invalid_api_key",
+    "invalid api key",
+    "incorrect api key",
+    "invalid authentication",
+    "authenticationerror",
+)
+
+
+def is_non_retryable_error(exc: Exception) -> bool:
+    """True si el error es definitivo (cuota/creditos/auth) y no debe reintentarse."""
+    msg = str(exc).lower()
+    if any(p in msg for p in _NON_RETRYABLE_PATTERNS):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return True
+    return False
+
+
+def mark_provider_unavailable(provider: str,
+                              ttl_seconds: float = DEFAULT_PROVIDER_COOLDOWN_SEC) -> None:
+    """Disable a provider for ``ttl_seconds`` after a non-retryable failure."""
+    if not provider:
+        return
+    _PROVIDER_DISABLED_UNTIL[provider] = time.time() + max(1.0, float(ttl_seconds))
+    logger.warning(
+        "Provider '%s' marked unavailable for %ds (cuota/auth) — failover directo",
+        provider, int(ttl_seconds),
+    )
+
+
+def provider_is_available(provider: str) -> bool:
+    """Return whether a provider may be tried (clears expired cooldowns)."""
+    until = _PROVIDER_DISABLED_UNTIL.get(provider)
+    if until is None:
+        return True
+    if time.time() >= until:
+        _PROVIDER_DISABLED_UNTIL.pop(provider, None)
+        return True
+    return False
+
+
+def reset_provider_circuit() -> None:
+    """Clear all provider cooldowns (tests / manual recovery)."""
+    _PROVIDER_DISABLED_UNTIL.clear()
 
 
 @dataclass
@@ -179,8 +243,17 @@ class ModelPool:
         Each iteration step represents a model failover boundary. The caller
         should attempt up to ``retries_per_model`` calls on each client before
         advancing to the next model.
+
+        Providers en cooldown por cuota/auth se saltan (fail-open: si TODOS
+        están en cooldown, se iteran igualmente para no bloquear el sistema).
         """
-        for entry in self.entries:
+        available = [e for e in self.entries if provider_is_available(e.provider)]
+        if not available:
+            logger.warning(
+                "All model providers are in cooldown — failing open (trying all)",
+            )
+            available = list(self.entries)
+        for entry in available:
             client = self.create_client(entry)
             yield entry, client
 

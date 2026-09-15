@@ -185,6 +185,10 @@ def check_deepseek_balance(api_key: str = None) -> dict:
 # OpenAI Quota Detection (error-based, no test API call)
 # ═══════════════════════════════════════════════════════════════
 
+# Solo patrones que denotan falta de CUOTA/CRÉDITOS reales. Antes incluía
+# "429", "authentication" y "rate_limit_exceeded", que son demasiado amplios:
+# un rate-limit transitorio o un error de auth de CUALQUIER proveedor marcaban
+# "OpenAI sin créditos" y la alerta no se auto-resolvía jamás.
 OPENAI_QUOTA_PATTERNS = [
     "insufficient_quota",
     "You exceeded your current quota",
@@ -193,10 +197,8 @@ OPENAI_QUOTA_PATTERNS = [
     "quota exceeded",
     "out of credits",
     "no credits",
+    "credit_balance_exhausted",
     "insufficient funds",
-    "rate_limit_exceeded",
-    "429",
-    "authentication",
 ]
 
 
@@ -240,10 +242,15 @@ def check_openai_from_errors(db) -> dict:
     window_hours = OPENAI_QUOTA_ERROR_WINDOW_HOURS if OPENAI_QUOTA_ERROR_WINDOW_HOURS else (7 * 24)
     try:
         with db._connect() as conn:
-            # Check pipeline_alerts for any openai-related error
+            # Check pipeline_alerts for any openai-related error.
+            # IMPORTANTE: excluir las propias alertas de crédito. Sin esto el
+            # detector se cuenta a sí mismo (auto-referencia): una vez creada
+            # la alerta, su mensaje contiene "quota"/"créditos" y mantiene el
+            # estado 'exhausted' para siempre, impidiendo el auto-resolve.
             alert_rows = conn.execute(
                 """SELECT message, title, created_at FROM pipeline_alerts
                    WHERE resolved = 0
+                     AND alert_type NOT IN ('llm_credit_exhausted', 'llm_credit_low')
                      AND (
                         title LIKE '%OpenAI%' OR title LIKE '%openai%'
                         OR message LIKE '%OpenAI%' OR message LIKE '%openai%'

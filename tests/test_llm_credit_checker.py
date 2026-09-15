@@ -17,6 +17,7 @@ from api.services import llm_credit_checker as lcc
 _ALERTS_DDL = """
 CREATE TABLE IF NOT EXISTS pipeline_alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_type  TEXT,
     message     TEXT,
     title       TEXT,
     created_at  TIMESTAMP,
@@ -109,3 +110,48 @@ def test_created_within_hours_boundary():
     assert lcc._created_within_hours(_stamp(0.5), 24) is True
     assert lcc._created_within_hours(_stamp(25), 24) is False
     assert lcc._created_within_hours("not-a-date", 24) is False
+
+
+def _insert_alert(db, alert_type, title, message, hours_ago, resolved=0):
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO pipeline_alerts
+               (alert_type, title, message, created_at, resolved)
+               VALUES (?, ?, ?, ?, ?)""",
+            (alert_type, title, message, _stamp(hours_ago), resolved),
+        )
+        conn.commit()
+
+
+def test_openai_ignores_its_own_credit_alert(monkeypatch, tmp_path):
+    """La propia alerta de crédito NO debe auto-alimentar el estado 'exhausted'.
+
+    Regresión del bug 2026-09-15: el detector escaneaba las pipeline_alerts sin
+    resolver, incluida la alerta que él mismo creó, por lo que nunca volvía a
+    'healthy' y jamás se auto-resolvía.
+    """
+    db = _db(tmp_path)
+    monkeypatch.setattr(lcc, "OPENAI_QUOTA_ERROR_WINDOW_HOURS", 24)
+    _insert_alert(
+        db, "llm_credit_exhausted",
+        "OpenAI sin créditos/quota — fallback de scripts caído",
+        "La API de OpenAI devuelve insufficient_quota (429): no credits remaining",
+        hours_ago=1,
+    )
+    res = lcc.check_openai_from_errors(db)
+    assert res["status"] == "healthy"
+    assert res["error_count_7d"] == 0
+
+
+def test_openai_ignores_broad_rate_limit_alerts(monkeypatch, tmp_path):
+    """Un 429 transitorio / auth de OTRO proveedor no debe marcar OpenAI exhausted."""
+    db = _db(tmp_path)
+    monkeypatch.setattr(lcc, "OPENAI_QUOTA_ERROR_WINDOW_HOURS", 24)
+    _insert_alert(
+        db, "rate_limit",
+        "YouTube API rate limit 429",
+        "429 Too Many Requests en la API de YouTube (no es OpenAI)",
+        hours_ago=1,
+    )
+    res = lcc.check_openai_from_errors(db)
+    assert res["status"] == "healthy"
