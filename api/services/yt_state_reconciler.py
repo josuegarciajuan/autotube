@@ -41,6 +41,9 @@ STUCK_GRACE_MIN = 45                 # after publish_at, allow this lag before a
 ALERT_TYPE_STUCK = "short_publish_stuck"
 ALERT_TYPE_LONGFORM_MISMATCH = "longform_visibility_mismatch"
 
+# Visibilidades externas que indican RESTRICCIÓN/retirada real en YouTube.
+_RESTRICTED_EXTERNAL = {"private", "removed", "age_restricted", "unavailable", "login_required"}
+
 _FEED_CACHE: dict[int, tuple] = {}
 
 
@@ -352,9 +355,22 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
                 conn.commit()
             summary["checked"] += 1
             summary["updated"] += 1
-            expected = video.get("privacy_status") or ""
-            mismatch = expected and visibility not in ("unknown", "error") and expected != visibility
-            if mismatch:
+            expected = (video.get("privacy_status") or "").strip().lower()
+            if not expected or visibility in ("unknown", "error"):
+                continue
+
+            # Dirección PELIGROSA: YouTube tiene el vídeo MÁS restringido de lo
+            # que cree la BD (p.ej. BD=public, YouTube=private/removed) → posible
+            # restricción/retirada silenciosa. Solo esto es crítico.
+            dangerous = (expected in ("public", "unlisted")
+                         and visibility in _RESTRICTED_EXTERNAL)
+            # Lag BENIGNO: YouTube ya es público pero la BD aún no lo refleja
+            # (el verificador de publicación tiene 180 min de gracia). No es una
+            # discrepancia real, se auto-cura; no debe generar alerta crítica.
+            benign_lag = (expected in ("private", "unlisted")
+                          and visibility == "public")
+
+            if dangerous:
                 from api.services.lifecycle_monitor import emit_alert
                 if emit_alert(db, entity_type="video", entity_id=video["id"],
                               channel_id=video["channel_id"], alert_type=ALERT_TYPE_LONGFORM_MISMATCH,
@@ -362,6 +378,11 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
                               message=f"BD={expected}; YouTube={visibility}. No se cambia privacidad automáticamente.",
                               metadata={"db_privacy": expected, "external": visibility, "yt_id": video["yt_video_id"]}):
                     summary["alerts"] += 1
+            elif benign_lag:
+                logger.debug(
+                    "Long-form #%s: YouTube ya público, BD=%s (lag del verificador) — sin alerta",
+                    video["id"], expected,
+                )
         except Exception as exc:
             logger.warning("Long-form reconcile failed for #%s: %s", video["id"], exc)
             summary["errors"] += 1

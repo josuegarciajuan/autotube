@@ -675,6 +675,7 @@ def _check_video_failed_unalerted(db) -> int:
             # (e.g. "Unknown error" when the real cause was an OOM abort).
             rows = conn.execute(
                 """SELECT v.id, v.channel_id, v.canal, v.progress_phase,
+                          v.error_message as video_error,
                           g.error_msg, g.id as job_id
                    FROM videos v
                    JOIN generation_jobs g ON g.video_id = v.id
@@ -708,6 +709,12 @@ def _check_video_failed_unalerted(db) -> int:
                 # error_msg del job; el recovery marca el vídeo 'interrupted').
                 # Coherente con TRANSIENT_SKIP_PATTERNS ("server restarted").
                 if not row["error_msg"] and (row["progress_phase"] or "") == "interrupted":
+                    continue
+
+                # ── Recuperado por Glass Box: el job falló con error_msg vacío
+                # ("Unknown error") pero el vídeo fue reencolado. No es un fallo
+                # vigente → no crear alerta crítica espuria.
+                if "__glass_box_recovered__" in (row["video_error"] or ""):
                     continue
 
                 # Skip transient/intentional failures (no alert).
@@ -895,14 +902,18 @@ def _auto_resolve_completed(db) -> int:
                 )
                 resolved += 1
 
-            # Resolve alerts for videos that are now uploaded/published
+            # Resolve alerts for videos that are now uploaded/published.
+            # Incluye 'failed': si el vídeo ya no está en 'error' (p.ej. recuperado
+            # por Glass Box y reencolado), el fallo que originó la alerta ya no es
+            # vigente. Antes las alertas 'failed' quedaban eternas tras una
+            # recuperación (bug 2026-09-15).
             alerts = conn.execute(
                 """SELECT pa.id, pa.entity_id, pa.alert_type
                    FROM pipeline_alerts pa
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                     WHERE pa.resolved = 0
                       AND v.status NOT IN ('error', 'generating', 'draft')
-                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck')"""
+                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck', 'failed')"""
             ).fetchall()
 
             for alert in alerts:
@@ -910,6 +921,31 @@ def _auto_resolve_completed(db) -> int:
                     """UPDATE pipeline_alerts
                        SET resolved = 1, resolved_at = datetime('now'),
                            message = message || ' [Auto-resolved: video completed]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            # Resolve long-form visibility mismatches once DB and YouTube agree
+            # again (p.ej. el verificador de publicación actualizó privacy_status
+            # a 'public'). Sin esto, un lag benigno ya curado dejaba la alerta
+            # crítica abierta para siempre.
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                    WHERE pa.resolved = 0
+                      AND pa.alert_type = 'longform_visibility_mismatch'
+                      AND v.yt_visibility IS NOT NULL
+                      AND v.yt_visibility != ''
+                      AND lower(v.yt_visibility) = lower(COALESCE(v.privacy_status, ''))"""
+            ).fetchall()
+
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'),
+                           message = message || ' [Auto-resolved: visibilidad BD=YouTube]'
                        WHERE id = ?""",
                     (alert["id"],),
                 )

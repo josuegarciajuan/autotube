@@ -14,6 +14,20 @@ from pathlib import Path
 REVIEW_OFFSETS = (("d2", 2), ("d7", 7), ("d14", 14), ("d21", 21), ("d30", 30))
 CRITICAL_REVIEW_ALERTS = {"review_visibility_mismatch", "review_exact_duplicate"}
 
+# Visibilidades externas que indican RESTRICCIÓN/retirada real en YouTube.
+_RESTRICTED_EXTERNAL = {"private", "removed", "age_restricted", "unavailable", "login_required"}
+
+
+def _is_dangerous_visibility_mismatch(db_privacy, external) -> bool:
+    """True solo si YouTube está MÁS restringido que lo que cree la BD.
+
+    El lag benigno (BD=private/unlisted, YouTube=public) es el verificador de
+    publicación aún sin actualizar; no debe crear alertas críticas irreversibles.
+    """
+    db_privacy = (db_privacy or "").strip().lower()
+    external = (external or "").strip().lower()
+    return db_privacy in ("public", "unlisted") and external in _RESTRICTED_EXTERNAL
+
 
 def _parse(value):
     if not value:
@@ -91,7 +105,12 @@ def process_due_reviews(db, now=None) -> dict:
                 f"Revisión {video['review_kind']}: estado externo ausente",
                 "No hay estado externo cacheado; revisar manualmente en Studio.",
             ))
-        elif video["yt_visibility"] != (video.get("privacy_status") or "") and video.get("privacy_status"):
+        elif _is_dangerous_visibility_mismatch(
+            video.get("privacy_status"), video.get("yt_visibility")
+        ):
+            # Solo discrepancia PELIGROSA (YouTube más restrictivo que la BD).
+            # El lag benigno (BD=private, YouTube=public) se auto-cura y no debe
+            # crear una alerta crítica que además es irrepetible de resolver.
             result["alerts"] += bool(_emit(
                 db, video, "review_visibility_mismatch", "critical",
                 f"Revisión {video['review_kind']}: discrepancia de visibilidad",
