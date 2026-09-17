@@ -85,6 +85,20 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         "sin quimioterapia", "médicos lo ocultan", "medicos lo ocultan",
         "la industria farmacéutica lo esconde", "cura probada",
     ],
+    # T1.6 (experimento de recuperación): política de YouTube "AI personas on
+    # sensitive topics" — un canal con persona IA dando diagnóstico, consejo o
+    # tratamiento sanitario es inelegible. Bloqueo duro de fórmulas de consejo.
+    "consejo_medico": [
+        "te recomiendo tomar", "recomiendo tomar", "debes tomar", "deberias tomar",
+        "tienes que tomar", "toma este remedio", "toma esta pastilla",
+        "toma este medicamento", "suspende la medicacion", "deja la medicacion",
+        "deja de tomar tu medicacion", "no necesitas medicacion",
+        "no necesitas medicos", "soy medico", "como medico te digo",
+        "mi diagnostico es", "te diagnostico", "te receto", "receta para curar",
+        "este remedio cura", "cura tu ", "elimina tu dolor", "adios al dolor",
+        "reduce tu colesterol con", "detecta el cancer con",
+        "deja de vacunarte", "no te vacunes",
+    ],
     "violencia_grafica": [
         "desmembr", "decapita", "vísceras", "visceras", "sangre a borbotones",
         "cuerpo mutilado", "cadáver descompuesto", "cadaver descompuesto",
@@ -225,12 +239,15 @@ def _llm_check(topic: str, title: str, script_texts: list[str]) -> SafetyVerdict
                     "políticas de spam/contenido. Devuelve SOLO JSON "
                     '{"safe": bool, "reason": "motivo corto en español", '
                     '"categories": ["menores","autolesion","claims_medicos",'
-                    '"violencia_grafica","desinformacion_sanitaria"]}.\n'
+                    '"consejo_medico","violencia_grafica","desinformacion_sanitaria"]}.\n'
                     "Reglas: NO es seguro (safe=false) si trata de menores en "
                     "contexto criminal/sexual/exploitativo (abusos, pornografía, "
                     "secuestro, asesinato de menores), autolesión/suicidio/métodos, "
-                    "claims médicos de cura/tratamiento, detalle gráfico de "
-                    "muertes o desinformación sanitaria.\n"
+                    "claims médicos de cura/tratamiento, consejo/diagnóstico/"
+                    "tratamiento sanitario en primera persona o con una PERSONA "
+                    "de médico/experto IA (política 'AI personas on sensitive "
+                    "topics'), detalle gráfico de muertes o desinformación "
+                    "sanitaria.\n"
                     "ES seguro (safe=true) para: documental médico legítimo "
                     "sobre una condición o síndrome (aunque afecte a niños), "
                     "historia/documental general, hechos históricos con víctimas "

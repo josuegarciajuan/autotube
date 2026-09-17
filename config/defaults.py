@@ -95,6 +95,12 @@ TOPIC_DEDUP_SEMANTIC_THRESHOLD = 0.86   # similitud coseno mínima
 # contenido repetitivo entre canales del mismo operador).
 TOPIC_CROSS_CHANNEL_DEDUP_ENABLED = True
 
+# ── Gate de novedad de guion (T1.4, experimento de recuperación) ─────────────
+# Bloquea guiones casi-idénticos a uno anterior del mismo canal (patrón de
+# plantilla = contenido inauténtico). Se evalúa ANTES de TTS/render.
+SCRIPT_HISTORY_GATE_ENABLED = True
+SCRIPT_HISTORY_GATE_THRESHOLD = 0.55   # Jaccard de 4-gramas (conservador)
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
