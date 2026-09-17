@@ -224,6 +224,9 @@ def schedule_checkpoints(db, start_iso: str) -> list[dict]:
       ``due_at`` (permite reprogramar cambiando ``--start``).
     - Si no existe, lo crea.
     """
+    # entity_type/entity_id propios del experimento: `scheduled_reminders` tiene
+    # un índice único (entity_type, entity_id) y los 3 checkpoints deben coexistir.
+    # entity_id = días del checkpoint (7/21/45) garantiza unicidad.
     scheduled: list[dict] = []
     with db._connect() as conn:
         existing_rows = conn.execute(
@@ -249,8 +252,10 @@ def schedule_checkpoints(db, start_iso: str) -> list[dict]:
             with db._connect() as conn:
                 conn.execute(
                     "UPDATE scheduled_reminders SET due_at = ?, message = ?, "
-                    "metadata_json = ? WHERE id = ? AND status = 'pending'",
-                    (due_at, message, json.dumps(meta, ensure_ascii=False), cur["id"]),
+                    "metadata_json = ?, entity_type = 'experiment', entity_id = ? "
+                    "WHERE id = ? AND status = 'pending'",
+                    (due_at, message, json.dumps(meta, ensure_ascii=False),
+                     days, cur["id"]),
                 )
                 conn.commit()
             reminder_id = cur["id"]
@@ -260,11 +265,18 @@ def schedule_checkpoints(db, start_iso: str) -> list[dict]:
                 title=title,
                 message=message,
                 due_at=due_at,
-                entity_type="system",
+                entity_id=days,
+                entity_type="experiment",
                 alert_type="experiment_checkpoint",
                 metadata=meta,
             )
-            logger.info("Checkpoint T+%d programado → %s (id=%s)", days, due_at, reminder_id)
+            if reminder_id is None:
+                logger.error(
+                    "Checkpoint T+%d NO se pudo programar (conflicto de entidad). "
+                    "Revisar scheduled_reminders.", days,
+                )
+            else:
+                logger.info("Checkpoint T+%d programado → %s (id=%s)", days, due_at, reminder_id)
 
         scheduled.append({
             "checkpoint_days": days,

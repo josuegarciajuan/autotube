@@ -65,6 +65,7 @@ CREATE TABLE scheduled_reminders (
     status TEXT DEFAULT 'pending', metadata_json TEXT, alert_id INTEGER,
     resolved_at TEXT
 );
+CREATE UNIQUE INDEX idx_rem_entity ON scheduled_reminders(entity_type, entity_id);
 """
 
 
@@ -98,14 +99,19 @@ class FakeDB:
                                   entity_type="system",
                                   alert_type="scheduled_reminder_due",
                                   metadata=None):
-        cur = self.conn.execute(
-            "INSERT INTO scheduled_reminders (entity_type, entity_id, title, message,"
-            " alert_type, due_at, status, metadata_json) VALUES (?,?,?,?,?,?,'pending',?)",
-            (entity_type, entity_id or 0, title, message, alert_type, due_at,
-             json.dumps(metadata or {})),
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO scheduled_reminders (entity_type, entity_id, title, message,"
+                " alert_type, due_at, status, metadata_json) VALUES (?,?,?,?,?,?,'pending',?)",
+                (entity_type, entity_id or 0, title, message, alert_type, due_at,
+                 json.dumps(metadata or {})),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            # Comportamiento real: create_scheduled_reminder devuelve None.
+            self.conn.rollback()
+            return None
 
     def list_scheduled_reminders(self, status=None, limit=50):
         if status:
@@ -206,9 +212,13 @@ def test_schedule_checkpoints_creates_three():
     _seed(db)
     scheduled = schedule_checkpoints(db, "2026-09-17")
     assert len(scheduled) == len(CHECKPOINT_DAYS) == 3
+    assert all(s["reminder_id"] is not None for s in scheduled)  # nada bloqueado por unicidad
     reminders = db.list_scheduled_reminders(status="pending")
     assert len(reminders) == 3
     assert all(r["alert_type"] == "experiment_checkpoint" for r in reminders)
+    # entity_id único por checkpoint (índice único entity_type/entity_id)
+    assert sorted(r["entity_id"] for r in reminders) == [7, 21, 45]
+    assert all(r["entity_type"] == "experiment" for r in reminders)
     dates = sorted(r["due_at"] for r in reminders)
     assert dates == ["2026-09-24T09:00:00", "2026-10-08T09:00:00", "2026-11-01T09:00:00"]
     state = json.loads(db.get_system_state(CHECKPOINTS_KEY))
