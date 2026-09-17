@@ -551,6 +551,27 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
+        # ── T1.3: ordenar candidatos por DEMANDA real (autocomplete YouTube) ──
+        # Es un ranking, no un bloqueo: si la red falla se conserva el orden
+        # original (fail-open). Evita guionar sobre temas que nadie busca.
+        try:
+            from pipeline.topic_demand import rank_labels
+            _labels = [
+                (ci.get("title") or ci.get("text") or "")[:120]
+                for ci in content_items
+            ]
+            _demand = {lbl: sc for lbl, sc in rank_labels(_labels)}
+            content_items.sort(
+                key=lambda ci: _demand.get(
+                    (ci.get("title") or ci.get("text") or "")[:120], 0.5
+                ),
+                reverse=True,
+            )
+        except Exception as _dm_exc:  # noqa: BLE001
+            logger.warning(
+                f"[{self.canal}] demand ranking error (fail-open): {_dm_exc}"
+            )
+
         # ── Anti-strike: filtro de seguridad de contenido ─────────────
         # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
         # gráfica, desinformación sanitaria) antes de guionar. Itera sobre los
