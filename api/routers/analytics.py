@@ -6,6 +6,46 @@ from config.config_bridge import get_channel_config
 router = APIRouter()
 
 
+@router.get("/analytics/experiment")
+def get_experiment_metrics():
+    """KPIs del experimento de recuperación de alcance (T3.1).
+
+    Devuelve el baseline sellado, las métricas vivas y el estado de los
+    checkpoints T+7/T+21/T+45. Alimenta el análisis de cada checkpoint
+    (ver ``specs/experimento-recuperacion-alcance.md``).
+    """
+    import json as _json
+    db = get_db()
+    from scripts.experiment_tracker import (
+        BASELINE_KEY, STARTED_KEY, compute_baseline,
+    )
+
+    started = db.get_system_state(STARTED_KEY)
+    raw = db.get_system_state(BASELINE_KEY)
+    try:
+        baseline = _json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        baseline = None
+
+    try:
+        live = compute_baseline(db)
+    except Exception as exc:  # noqa: BLE001
+        live = {"error": str(exc)[:300]}
+
+    checkpoints = [
+        {"title": r.get("title"), "due_at": r.get("due_at"),
+         "status": r.get("status")}
+        for r in db.list_scheduled_reminders(status=None, limit=50)
+        if r.get("alert_type") == "experiment_checkpoint"
+    ]
+    return {
+        "started_at": started,
+        "baseline": baseline,
+        "live": live,
+        "checkpoints": checkpoints,
+    }
+
+
 @router.get("/channels/{channel_id}/analytics/growth")
 def get_channel_growth(channel_id: int, days: int = 30):
     """Get daily growth data for a channel (subs, views, watch hours, revenue)."""
