@@ -198,16 +198,28 @@ REGLAS DE FRAGMENTACION:
 # OUTLINE PROMPT
 # ═══════════════════════════════════════════════════════════════════
 
-def build_outline_prompt(config, duration_min: float = 15, word_target: int = 2500) -> str:
+def build_outline_prompt(config, duration_min: float = 15, word_target: int = 2500,
+                          variant_seed: int | str | None = None) -> str:
     """Generate a structured outline BEFORE writing any narrative blocks.
 
     Produces 4-6 chapters with concrete facts, preventing the LLM from
     producing rambling, repetitive, or factually empty narration.
+
+    ``variant_seed`` (T1.5): fija el arquetipo narrativo para este vídeo. Con
+    ``None`` se elige al azar, de modo que dos vídeos del mismo canal no
+    compartan estructura (anti-plantilla).
     """
     tone = getattr(config, "CANAL_TONE", "Documental, riguroso.")
     style = getattr(config, "CANAL_NARRATIVE_STYLE", "documental")
     audience = getattr(config, "TARGET_AUDIENCE", "publico LATAM adulto curioso")
     n_chapters = min(6, max(4, int(duration_min / 3)))
+
+    from pipeline.narrative_archetypes import (
+        archetype_prompt_block, pick_archetype,
+    )
+    archetype_block = archetype_prompt_block(
+        pick_archetype(config, seed=variant_seed)
+    )
 
     return f"""Eres un editor de documentales y divulgador especializado.
 TONO: {tone}
@@ -224,6 +236,8 @@ REGLAS INQUEBRANTABLES:
 4. PROHIBIDO el lenguaje puramente metaforico o poetico sin sustancia.
 5. Los hechos deben ser verificables.
 6. Cada capitulo necesita keywords visuales en INGLES para la busqueda de stock media.
+
+{archetype_block}
 
 FORMATO DE SALIDA (JSON):
 {{

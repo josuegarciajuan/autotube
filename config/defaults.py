@@ -101,6 +101,12 @@ TOPIC_CROSS_CHANNEL_DEDUP_ENABLED = True
 SCRIPT_HISTORY_GATE_ENABLED = True
 SCRIPT_HISTORY_GATE_THRESHOLD = 0.55   # Jaccard de 4-gramas (conservador)
 
+# ── Arquetipos narrativos variables (T1.5) ──────────────────────────────────
+# Lista vacía = usar los arquetipos por defecto de
+# ``pipeline/narrative_archetypes.py``. Un canal puede sobrescribirla con sus
+# propios dicts {key, name, guidance} para forzar su repertorio.
+NARRATIVE_ARCHETYPES = []
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
