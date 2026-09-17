@@ -8767,6 +8767,100 @@ class ExtendedDatabase(Database):
                 kept.append(label)
         return {"kept": kept, "rejected": rejected}
 
+    def get_consumed_topic_signatures_all_channels(
+        self, exclude_channel_id: int | None = None
+    ) -> list[dict]:
+        """Firmas de temas consumidos de TODOS los canales (veto cruzado).
+
+        Evita que canal3 y canal4 (u otros) publiquen el mismo tema con títulos
+        distintos, patrón que refuerza la señal de "contenido repetitivo".
+        """
+        try:
+            with self._connect() as conn:
+                if exclude_channel_id:
+                    rows = conn.execute(
+                        "SELECT channel_id, topic_label, tokens_json "
+                        "FROM consumed_topics WHERE channel_id != ?",
+                        (exclude_channel_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT channel_id, topic_label, tokens_json "
+                        "FROM consumed_topics"
+                    ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning("get_consumed_topic_signatures_all_channels failed: %s", exc)
+            return []
+
+    def _dedup_entries(self, channel_id: int, cross_channel: bool) -> list:
+        """Entradas contra las que comparar (canal propio ± resto de canales)."""
+        entries: list = self.get_consumed_topics(channel_id)
+        if cross_channel:
+            entries = entries + self.get_consumed_topic_signatures_all_channels(
+                exclude_channel_id=channel_id
+            )
+        return entries
+
+    def is_topic_consumed_semantic(self, channel_id: int, label: str, config=None,
+                                   cross_channel: bool = False
+                                   ) -> tuple[bool, str | None]:
+        """Dedup por tokens + embeddings (T1.1) con veto cruzado opcional (T1.2).
+
+        Respeta ``TOPIC_DEDUP_ENABLED``, ``TOPIC_DEDUP_SEMANTIC_ENABLED``,
+        ``TOPIC_CROSS_CHANNEL_DEDUP_ENABLED`` y el kill-switch
+        ``system_state['topic_dedup_disabled']``.
+        """
+        from pipeline.topic_dedup import get_dedup_settings
+        from pipeline.topic_semantic import detect_duplicate, get_semantic_settings
+
+        enabled, threshold, min_shared = get_dedup_settings(config)
+        if not enabled or self._topic_dedup_disabled():
+            return False, None
+        label = (label or "").strip()
+        if not label:
+            return False, None
+        use_cross = cross_channel and bool(
+            getattr(config, "TOPIC_CROSS_CHANNEL_DEDUP_ENABLED", True)
+        ) if config is not None else cross_channel
+        entries = self._dedup_entries(channel_id, use_cross)
+        sem_enabled, sem_threshold = get_semantic_settings(config)
+        is_dup, matched, _method = detect_duplicate(
+            label, entries,
+            token_threshold=threshold, min_shared=min_shared,
+            semantic_threshold=sem_threshold, use_semantic=sem_enabled,
+        )
+        return is_dup, matched
+
+    def filter_consumed_topics_semantic(self, channel_id: int, labels: list[str],
+                                        config=None, cross_channel: bool = False
+                                        ) -> dict:
+        """Filtra una lista de etiquetas con dedup semántico + veto cruzado."""
+        from pipeline.topic_dedup import get_dedup_settings
+        from pipeline.topic_semantic import detect_duplicate, get_semantic_settings
+
+        enabled, threshold, min_shared = get_dedup_settings(config)
+        if not enabled or self._topic_dedup_disabled():
+            return {"kept": list(labels), "rejected": []}
+        use_cross = cross_channel and bool(
+            getattr(config, "TOPIC_CROSS_CHANNEL_DEDUP_ENABLED", True)
+        ) if config is not None else cross_channel
+        entries = self._dedup_entries(channel_id, use_cross)
+        sem_enabled, sem_threshold = get_semantic_settings(config)
+        kept: list[str] = []
+        rejected: list[tuple[str, str]] = []
+        for label in labels:
+            is_dup, matched, _method = detect_duplicate(
+                label or "", entries,
+                token_threshold=threshold, min_shared=min_shared,
+                semantic_threshold=sem_threshold, use_semantic=sem_enabled,
+            )
+            if is_dup and matched:
+                rejected.append((label, matched))
+            else:
+                kept.append(label)
+        return {"kept": kept, "rejected": rejected}
+
     def backfill_consumed_topics(self, channel_id: int | None = None) -> int:
         """Siembra el registro con long-forms y shorts nativos ya existentes.
 
