@@ -175,6 +175,32 @@ def _retry_end_screens_worker_egress(_egress, account: str, yt_video_id: str, wl
     return False
 
 
+_PENDING_MARK_THREADS: list = []
+# Tope de espera del marcado IA antes de que el worker termine (15 min).
+MARK_THREAD_JOIN_TIMEOUT_S = 900
+
+
+def _join_pending_mark_threads(timeout_sec: float = MARK_THREAD_JOIN_TIMEOUT_S) -> None:
+    """Espera a que terminen los marcados IA en curso antes de que el worker salga.
+
+    Bug (ago 2026): el marcado de "contenido alterado/IA" corría en un thread
+    ``daemon=True`` dentro del worker subprocess. Al terminar el worker, el
+    proceso salía y mataba el thread antes del ``sleep(60)`` + automatización de
+    navegador → los long-forms quedaban SIN divulgación (0 marcados desde
+    ~semana 33; los shorts, que lo hacen inline, sí funcionaban).
+    """
+    import time as _t
+    deadline = _t.monotonic() + max(0.0, float(timeout_sec))
+    for th in list(_PENDING_MARK_THREADS):
+        remaining = deadline - _t.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            th.join(timeout=remaining)
+        except Exception:
+            pass
+
+
 def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: int):
     """Background thread (worker subprocess): mark video as AI-generated + configure end screens.
 
@@ -1873,11 +1899,18 @@ def run_job(
                         account = get_account_for_channel(canal)
                         if account:
                             import threading as _thr
-                            _thr.Thread(
+                            # daemon=False + join acotado en main(): el worker NO
+                            # debe salir antes de que el marcado IA termine (bug:
+                            # el thread daemon moría con el proceso y el long-form
+                            # quedaba sin divulgación desde ~semana 33).
+                            _mark_thread = _thr.Thread(
                                 target=_auto_mark_ia_worker,
                                 args=(yt_video_id, canal, account, video_id),
-                                daemon=True
-                            ).start()
+                                daemon=False,
+                                name=f"auto-mark-ia-{video_id}",
+                            )
+                            _mark_thread.start()
+                            _PENDING_MARK_THREADS.append(_mark_thread)
                 except Exception as e:
                     logger.warning("[%s] Failed to trigger auto-mark IA: %s", canal, e)
                     _alert_nonfatal(
@@ -2317,6 +2350,11 @@ def main():
     )
 
     logger.info("Worker finished: success=%s", success)
+
+    # El marcado IA + end screens corre en threads; esperarlos (acotado) para
+    # que el subprocess no los mate al salir. Ver _join_pending_mark_threads.
+    _join_pending_mark_threads()
+
     sys.exit(0 if success else 1)
 
 
