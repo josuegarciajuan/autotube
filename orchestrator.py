@@ -566,11 +566,15 @@ class PipelineOrchestrator:
             _ct_title = content_item.get("title", "")
 
             # ── Tema ya consumido → descartar fuente y seguir ──
+            # T1.1/T1.2 del experimento: dedup por tokens + embeddings del
+            # proveedor IA, y veto cruzado entre canales (un tema ya tratado por
+            # otro canal tampoco se repite).
             try:
                 if _dedup_channel_id is not None:
-                    _dup, _dup_label = self.db.is_topic_consumed(
+                    _dup, _dup_label = self.db.is_topic_consumed_semantic(
                         _dedup_channel_id, _ct_title,
                         config=getattr(self, "config", None),
+                        cross_channel=True,
                     )
                     if _dup:
                         logger.info(

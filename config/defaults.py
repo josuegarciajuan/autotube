@@ -85,6 +85,16 @@ TOPIC_DEDUP_ENABLED = True
 TOPIC_DEDUP_THRESHOLD = 0.5     # solapamiento mínimo |A∩B| / max(|A|,|B|)
 TOPIC_DEDUP_MIN_TOKENS = 2      # tokens significativos compartidos mínimos
 
+# ── Dedup semántico + veto cruzado (experimento de recuperación de alcance) ──
+# Capa sobre el dedup de tokens: embeddings del proveedor IA ya integrado para
+# atrapar paráfrasis que no comparten tokens. Degrada a tokens si no hay
+# embeddings disponibles (nunca falla abierto a publicar repetidos).
+TOPIC_DEDUP_SEMANTIC_ENABLED = True
+TOPIC_DEDUP_SEMANTIC_THRESHOLD = 0.86   # similitud coseno mínima
+# Un tema consumido por OTRO canal tampoco se repite (evita la señal de
+# contenido repetitivo entre canales del mismo operador).
+TOPIC_CROSS_CHANNEL_DEDUP_ENABLED = True
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════
