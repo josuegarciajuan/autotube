@@ -1777,6 +1777,52 @@ class PipelineOrchestrator:
         if not editorial.allowed:
             raise RuntimeError(editorial.reason)
 
+        # ── T1.4: gate de novedad de guion (anti-plantilla / anti-repetición) ──
+        # Bloquea guiones casi-idénticos a uno previo del canal ANTES de gastar
+        # TTS/media/render. Fail-open ante errores técnicos.
+        try:
+            from pipeline.script_history_gate import (
+                check_script_novelty, get_novelty_settings,
+            )
+            _nv_enabled, _nv_thr = get_novelty_settings(self.config)
+            if _nv_enabled:
+                _novelty = check_script_novelty(
+                    script.get("guion") or "", self.canal, self.db,
+                    threshold=_nv_thr,
+                )
+                if not _novelty.novel:
+                    try:
+                        from api.services.lifecycle_monitor import emit_alert
+                        _ch = self.db.get_channel_by_slug(self.canal)
+                        emit_alert(
+                            self.db, entity_type="system",
+                            entity_id=(_ch or {}).get("id") or 0,
+                            channel_id=(_ch or {}).get("id"),
+                            alert_type="script_repetition_blocked",
+                            severity="warning",
+                            title=f"Guion bloqueado por repetición ({self.canal})",
+                            message=(f"Similitud {_novelty.similarity:.2f} con el "
+                                     f"guion #{_novelty.similar_to_id}; se aborta "
+                                     f"antes de TTS/render."),
+                            metadata={
+                                "similar_to": _novelty.similar_to_id,
+                                "similarity": _novelty.similarity,
+                            },
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise RuntimeError(
+                        f"Guion repetido (sim={_novelty.similarity:.2f} "
+                        f"vs script #{_novelty.similar_to_id})"
+                    )
+        except RuntimeError:
+            raise
+        except Exception as _nv_exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] script-novelty gate error (fail-open): %s",
+                self.canal, _nv_exc,
+            )
+
         validator = VideoValidator(self.config)
         result = validator.pre_validate(script)
 
