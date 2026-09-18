@@ -777,7 +777,12 @@ class YouTubeBrowser:
                 self._playwright = None
 
     def mark_altered_content(self, youtube_video_id: str) -> bool:
-        with self._lock:
+        # Lock de proceso (threading) + lock de fichero por cuenta: el backfill
+        # y el worker de generación son procesos distintos y no deben abrir dos
+        # sesiones sobre el mismo perfil de Chromium.
+        from pipeline.browser_lock import browser_account_lock
+        account = getattr(self, "account", None) or "default"
+        with self._lock, browser_account_lock(account):
             try:
                 self._ensure_browser()
                 page = self._context.new_page()
