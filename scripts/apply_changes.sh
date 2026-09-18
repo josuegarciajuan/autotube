@@ -65,6 +65,10 @@ echo "   $DEPLOY_CHECK_OUT"
 # ── Step 1: Rebuild frontend ──
 echo ""
 echo "📦 Step 1/3: Rebuilding frontend..."
+# C5 (ago/sep 2026): los `vite build` se quedaban colgados en estado D
+# (io_uring_del_tctx) y sobrevivían a kill -9, bloqueando el lock del hook
+# post-merge. Deshabilitar io_uring en libuv/node evita el cuelgue.
+export UV_USE_IO_URING=0
 cd "$PROJECT_ROOT/frontend"
 npm run build 2>&1 | tail -3
 cd "$PROJECT_ROOT"
