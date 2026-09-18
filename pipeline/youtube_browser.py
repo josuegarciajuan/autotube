@@ -25,6 +25,10 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 logger = logging.getLogger(__name__)
 
+# C5 preventivo: el driver node de Playwright hereda este env. Deshabilitar
+# io_uring en libuv evita cuelgues en estado D (ver specs/io_uring-cuelgues.md).
+os.environ.setdefault("UV_USE_IO_URING", "0")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # TOKENS_DIR override: permite ejecutar scripts desde una worktree (git) apuntando
 # a los tokens/sesiones reales del árbol de producción (p. ej. emergencias).# Ej: YT_BROWSER_TOKENS_DIR=/root/autotube/tokens python3 scripts/hold_...
