@@ -70,6 +70,24 @@ def test_short_script_fails_open():
     assert res.novel is True
 
 
+def test_own_script_is_excluded_from_history():
+    """Regresión: el guion candidato ya está en `scripts` (insert antes de la
+    pre-validación) y sin exclude_id se compara consigo mismo → sim=1.0 y se
+    bloquea TODA generación. Con exclude_id debe ser novedoso."""
+    candidate = " ".join(f"propio{i}" for i in range(60))
+    # El guion candidato es la fila #1 de la tabla (ya persistido).
+    db = FakeDB([candidate])
+
+    self_match = check_script_novelty(candidate, "canal3", db)
+    assert self_match.novel is False
+    assert self_match.similar_to_id == 1
+    assert self_match.similarity == 1.0
+
+    excluded = check_script_novelty(candidate, "canal3", db, exclude_id=1)
+    assert excluded.novel is True
+    assert excluded.similarity == 0.0
+
+
 def test_missing_table_fails_open():
     db = FakeDB([])
     db.conn.execute("DROP TABLE scripts")

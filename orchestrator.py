@@ -1810,6 +1810,9 @@ class PipelineOrchestrator:
                 _novelty = check_script_novelty(
                     script.get("guion") or "", self.canal, self.db,
                     threshold=_nv_thr,
+                    # El guion ya está en `scripts` (insert previo a la
+                    # pre-validación): excluirlo para no compararlo consigo mismo.
+                    exclude_id=script.get("id"),
                 )
                 if not _novelty.novel:
                     try:
