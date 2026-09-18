@@ -2433,6 +2433,51 @@ class PipelineOrchestrator:
                 )
                 logger.info(f"[{self.canal}] Using template metadata for upload (no AI metadata)")
 
+            # ── Saneo final del título (choke point real de subida) ──
+            # El worker sube directamente desde el checkpoint, sin pasar por el
+            # packaging gate de upload_scheduler: un título con '|'/'[]' o fuera
+            # de rango llegaría a YouTube. Se sanea aquí, sólo si es inválido.
+            try:
+                from api.services.packaging_policy import validate_title
+                if not validate_title(title, self.config).valid:
+                    from api.services.title_recovery import sanitize_title_for_upload
+                    _clean = sanitize_title_for_upload(title, self.config)
+                    if not _clean:
+                        # Al menos elimina separadores inyectados y trunca.
+                        from pipeline.title_engine import apply_caps_policy
+                        _clean = apply_caps_policy(title, self.config)
+                    if _clean and _clean != title:
+                        logger.warning(
+                            "[%s] Título saneado antes de subir: '%s' → '%s'",
+                            self.canal, title[:60], _clean[:60],
+                        )
+                        title = _clean
+                        if metadata is not None:
+                            metadata["selected_title"] = _clean
+            except Exception as _title_exc:
+                logger.debug("[%s] title sanitize skipped: %s", self.canal, _title_exc)
+
+            # ── Thumbnail: resolver desde la DB si el checkpoint no lo trae ──
+            # Un upload_only reencolado puede tener un checkpoint sin
+            # `thumbnail_path`; el fichero sí existe en la DB. Sin esto, el
+            # preflight editorial de canal4 (require_thumbnail) bloquea la subida
+            # y crea una alerta crítica espuria.
+            review_thumb = video_data.get("thumbnail_path") or ""
+            try:
+                from pathlib import Path as _Path
+                if not review_thumb or not _Path(review_thumb).is_file():
+                    _row = self.db.get_video(self.db_video_id) if self.db_video_id else None
+                    _db_thumb = (_row or {}).get("thumbnail_path") or ""
+                    if _db_thumb and _Path(_db_thumb).is_file():
+                        review_thumb = _db_thumb
+                        video_data["thumbnail_path"] = _db_thumb
+                        logger.info(
+                            "[%s] thumbnail_path resuelto desde DB para el preflight: %s",
+                            self.canal, _db_thumb,
+                        )
+            except Exception as _thumb_exc:
+                logger.debug("[%s] thumbnail resolve skipped: %s", self.canal, _thumb_exc)
+
             # Last safe admission point: validate only this new upload. The
             # channel profile owns the rules and failures are visible to the
             # operator; no existing video is changed.
@@ -2440,7 +2485,7 @@ class PipelineOrchestrator:
                 from api.services.editorial_reviews import validate_new_video
                 verdict = validate_new_video(
                     self.canal, (script or {}).get("tema", ""), title,
-                    video_data.get("thumbnail_path", ""),
+                    review_thumb,
                 )
                 if not verdict["allowed"]:
                     from api.services.lifecycle_monitor import emit_alert
