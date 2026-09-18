@@ -1836,6 +1836,23 @@ async def _schedule_checker_loop():
                 except Exception as exc:
                     logger.debug("Auto-pacing transition: %s", exc)
 
+                # ── Salud del marcado IA (A4): reconciliación + heartbeat ──
+                # Crítico si hay publicaciones recientes sin marcar; si no, info.
+                try:
+                    _last_ia = _sched_db.get_system_state("last_ia_mark_health_check")
+                    if _last_ia != _today_local:
+                        from api.services.ia_marking_health import check_ia_marking_health
+                        _ia = await asyncio.to_thread(check_ia_marking_health, _sched_db)
+                        _sched_db.set_system_state("last_ia_mark_health_check", _today_local)
+                        logger.info(
+                            "IA marking health: %s/%s marcados (backfill pendiente=%s)",
+                            _ia.get("recent_total", 0) - _ia.get("recent_unmarked", 0),
+                            _ia.get("recent_total", 0),
+                            _ia.get("backfill_pending", 0),
+                        )
+                except Exception as exc:
+                    logger.debug("IA marking health: %s", exc)
+
                 # ════════════════════════════════════════════════════════════
                 # Phase B: YT API-dependent operations (gated by quota)
                 # Fase cuota (ago 2026): gate solo cuando TODOS los proyectos
