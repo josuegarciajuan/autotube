@@ -963,6 +963,12 @@ async def _health_monitor_loop():
             # Offload to thread pool — check_all_health() makes sync sqlite3
             # calls that can block the event loop during lock contention.
             result = await asyncio.to_thread(check_all_health, db)
+            # Watchdog: procesos node atascados en estado D (io_uring) → alerta.
+            try:
+                from api.services.system_watchdog import check_node_io_uring
+                await asyncio.to_thread(check_node_io_uring, db)
+            except Exception as _wd_exc:
+                logger.debug("node watchdog: %s", _wd_exc)
             if result.get("alerts_created", 0) > 0:
                 logger.info("Health check: %d new alerts created", result["alerts_created"])
             # Always broadcast system snapshot to monitor WS clients
