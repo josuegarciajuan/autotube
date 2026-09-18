@@ -107,15 +107,22 @@ def recover_packaging_held_videos(
 
         new_title = None
         if not result.valid:
-            # Deterministic self-heal for length-only failures: trim the title
-            # and re-validate. Specificity needs content evidence (LLM/manual)
-            # and is intentionally NOT guessed here.
-            if "length" in result.reasons:
+            # Deterministic self-heal for repairable failures (length,
+            # injected '|'/'[]', clickbait suffix, caps, punctuation). Specificity
+            # needs content evidence (LLM/manual) and is intentionally NOT guessed.
+            try:
+                from api.services.title_recovery import (
+                    REPAIRABLE_TITLE_REASONS, sanitize_title_for_upload,
+                )
+                repairable = set(result.reasons) & REPAIRABLE_TITLE_REASONS
+            except Exception as exc:
+                logger.debug("packaging recovery: sanitizer import failed for #%s: %s", vid, exc)
+                repairable = set()
+            if repairable:
                 try:
-                    from api.services.title_recovery import repair_title
-                    repaired = repair_title(row.get("titulo_final"), cfg)
+                    repaired = sanitize_title_for_upload(row.get("titulo_final"), cfg)
                 except Exception as exc:
-                    logger.debug("packaging recovery: repair_title failed for #%s: %s", vid, exc)
+                    logger.debug("packaging recovery: sanitize failed for #%s: %s", vid, exc)
                     repaired = None
                 if repaired:
                     retry_video = dict(video)

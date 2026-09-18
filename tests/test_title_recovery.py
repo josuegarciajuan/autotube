@@ -52,6 +52,34 @@ def test_repair_title_rejects_too_short():
     assert tr.repair_title("Corto", CFG) is None
 
 
+def test_sanitize_title_removes_injected_suffix():
+    out = tr.sanitize_title_for_upload(
+        "Cuando la conciencia humana convoca al | El Caso Suprimido", CFG,
+    )
+    assert out is not None
+    assert "|" not in out and "[" not in out and "]" not in out
+    assert 28 <= len(out) <= 65
+    # El conector colgante "al" del corte por '|' debe desaparecer.
+    assert not out.endswith(" al")
+
+
+def test_sanitize_title_removes_square_brackets():
+    out = tr.sanitize_title_for_upload(
+        "El secreto [PROHIBIDO] de la isla perdida", CFG,
+    )
+    assert out is not None
+    assert "[" not in out and "]" not in out
+    assert 28 <= len(out) <= 65
+
+
+def test_sanitize_title_truncates_and_rejects_too_short():
+    out = tr.sanitize_title_for_upload(
+        "Egipto quedó sin hombres en una sola | El Secreto Insospechado", CFG,
+    )
+    assert out is not None and len(out) <= 65
+    assert tr.sanitize_title_for_upload("Corto | x", CFG) is None
+
+
 def test_retitle_dry_run_repairs_length_without_writing(monkeypatch):
     long = "¿Por qué no hay rastro de las 6 civilizaciones que nos precedieron?. ENIGMÁTICO."
     video = {"id": 1, "channel_id": 4, "status": "validation_failed",

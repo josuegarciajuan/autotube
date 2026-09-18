@@ -54,6 +54,69 @@ def repair_title(title: str, cfg, max_chars: int | None = None) -> str | None:
     return text
 
 
+# Motivos del packaging gate que se pueden reparar de forma determinista
+# (sin evidencia de contenido). El resto (banned_token, specificity,
+# generic_sensationalism) exige intervención del LLM/operador.
+REPAIRABLE_TITLE_REASONS = frozenset({
+    "injected_suffix",
+    "length",
+    "clickbait_suffix",
+    "unbalanced_punctuation",
+    "excessive_caps",
+    "all_caps",
+})
+
+# Conectores que quedan colgando al cortar un título por el separador '|'.
+_DANGLING_TAIL_WORDS = frozenset({
+    "al", "a", "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "en", "con", "sin", "por", "para", "que", "su", "sus",
+    "y", "o", "u", "e", "como", "más", "mas",
+})
+
+
+def _strip_dangling_tail(text: str) -> str:
+    words = text.split()
+    while words and words[-1].strip(".,;:·•–—-|¿?¡!").casefold() in _DANGLING_TAIL_WORDS:
+        words.pop()
+    # No incluir ¿?¡! en el strip exterior: son puntuación legítima en español.
+    return " ".join(words).strip(" .,;:·•–—-|")
+
+
+def sanitize_title_for_upload(title: str, cfg, max_chars: int | None = None) -> str | None:
+    """Repara un título que sólo falla reglas de packaging reparables.
+
+    - Si lleva ``|`` se queda con el segmento más informativo (el más largo).
+    - Elimina ``|`` / ``[`` / ``]``, sufijos clickbait y aplica la política de
+      mayúsculas del canal.
+    - Trunca en frontera de palabra y quita conectores colgantes.
+    - Devuelve ``None`` si no puede cumplir los límites configurados (para que
+      el gate siga fallando cerrado).
+    """
+    from pipeline.metadata_generator import _strip_clickbait_suffix
+    from pipeline.title_engine import apply_caps_policy
+
+    minimum, maximum = _title_bounds(cfg)
+    if max_chars is not None:
+        maximum = int(max_chars)
+
+    text = " ".join(str(title or "").split())
+    if not text:
+        return None
+    if "|" in text:
+        segments = [s.strip() for s in text.split("|") if s.strip()]
+        if segments:
+            text = max(segments, key=len)
+    text = text.replace("[", " ").replace("]", " ")
+    text = _strip_clickbait_suffix(text)
+    # apply_caps_policy vuelve a limpiar separadores, aplica caps y trunca.
+    text = apply_caps_policy(text, cfg)
+    text = _truncate_at_word(text, maximum)
+    text = _strip_dangling_tail(text)
+    if not text or len(text) < minimum or len(text) > maximum:
+        return None
+    return text
+
+
 def _script_context(db, script_id) -> tuple[str, list]:
     if not script_id:
         return "", []
