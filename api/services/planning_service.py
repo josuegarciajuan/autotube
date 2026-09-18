@@ -3847,9 +3847,13 @@ def count_channel_consecutive_failures(db, channel_id: int) -> int:
     window_start = (datetime.now(timezone.utc) - timedelta(hours=CHANNEL_FAILURE_WINDOW_H)).strftime("%Y-%m-%d %H:%M:%S")
     try:
         with db._connect() as conn:
+            # Se incluyen TODOS los jobs (no sólo los fallidos): un job exitoso
+            # intercalado CORTA la racha. Antes sólo se miraban los `failed`, así
+            # que un éxito no reseteaba el contador y el aviso `consecutive_failures`
+            # se recreaba al resolverlo (falso positivo permanente).
             rows = conn.execute(
-                """SELECT error_msg FROM generation_jobs
-                   WHERE channel_id = ? AND status = 'failed'
+                """SELECT status, error_msg FROM generation_jobs
+                   WHERE channel_id = ?
                      AND action IN ('generate_only', 'generate_and_upload')
                      AND created_at >= ?
                    ORDER BY id DESC LIMIT 20""",
@@ -3861,6 +3865,8 @@ def count_channel_consecutive_failures(db, channel_id: int) -> int:
 
     count = 0
     for row in rows:
+        if (row["status"] or "") != "failed":
+            break  # un job no fallido (éxito/running) resetea la racha
         err = (row["error_msg"] or "").lower()
         # Regla de seguridad (ago 2026): error vacío/NULL (muerte por SIGTERM
         # sin mensaje) resetea la racha — nunca cuenta como fallo permanente.

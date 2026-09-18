@@ -48,7 +48,8 @@ def jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def _recent_scripts(db, slug: str, lookback: int) -> list[tuple[int, str]]:
+def _recent_scripts(db, slug: str, lookback: int,
+                    exclude_id: int | None = None) -> list[tuple[int, str]]:
     try:
         with db._connect() as conn:
             rows = conn.execute(
@@ -56,7 +57,13 @@ def _recent_scripts(db, slug: str, lookback: int) -> list[tuple[int, str]]:
                 "ORDER BY id DESC LIMIT ?",
                 (slug, lookback),
             ).fetchall()
-        return [(int(r["id"]), r["guion"] or "") for r in rows]
+        out = [(int(r["id"]), r["guion"] or "") for r in rows]
+        # El guion candidato ya está persistido en la tabla `scripts` (se inserta
+        # en script_generator antes de la pre-validación), así que sin excluirlo
+        # se compara consigo mismo y da similitud 1.00 → bloquea TODA generación.
+        if exclude_id is not None:
+            out = [(sid, g) for sid, g in out if sid != int(exclude_id)]
+        return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("script-history lookup failed (%s): %s", slug, exc)
         return []
@@ -68,8 +75,14 @@ def check_script_novelty(
     db,
     threshold: float = DEFAULT_THRESHOLD,
     lookback: int = DEFAULT_LOOKBACK,
+    exclude_id: int | None = None,
 ) -> NoveltyResult:
     """¿Es el guion suficientemente distinto de los previos del canal?
+
+    ``exclude_id`` debe ser el ``id`` del propio guion candidato cuando ya está
+    persistido en ``scripts`` (caso normal: ``script_generator`` lo inserta antes
+    de la pre-validación). Sin excluirlo, el gate lo compara consigo mismo
+    (similitud 1.00) y bloquea toda generación.
 
     Fail-open: ante cualquier error o guion demasiado corto, devuelve ``novel=True``
     (nunca bloquea por un fallo técnico).
@@ -79,7 +92,8 @@ def check_script_novelty(
         if len(candidate) < MIN_SHINGLES:
             return NoveltyResult(True, None, 0.0)
         best_id, best = None, 0.0
-        for sid, prior in _recent_scripts(db, slug, lookback):
+        for sid, prior in _recent_scripts(db, slug, lookback,
+                                          exclude_id=exclude_id):
             sim = jaccard(candidate, _shingles(prior))
             if sim > best:
                 best, best_id = sim, sid

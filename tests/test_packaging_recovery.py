@@ -110,6 +110,34 @@ def test_recovers_length_by_trimming_title(tmp_path, monkeypatch):
     assert kwargs["status"] == "awaiting_upload"
 
 
+def test_recovers_injected_suffix_by_sanitizing_title(tmp_path, monkeypatch):
+    import api.services.upload_scheduler as scheduler
+    import config.config_bridge as bridge
+
+    def fake_validate(video, cfg):
+        t = video.get("titulo_final") or ""
+        ok = "|" not in t and "[" not in t and "]" not in t and 28 <= len(t) <= 65
+        return ValidationResult(ok, () if ok else ("injected_suffix",))
+
+    monkeypatch.setattr(scheduler, "validate_upload_packaging", fake_validate)
+
+    class Cfg:
+        TITLE_MIN_CHARS = 28
+        TITLE_MAX_CHARS = 65
+
+    monkeypatch.setattr(bridge, "get_channel_config", lambda slug: Cfg())
+
+    video = _video(tmp_path, 1, valid=False)
+    video["titulo_final"] = "Cuando la conciencia humana convoca al | El Caso Suprimido"
+    db = FakeDB([video])
+    result = recovery.recover_packaging_held_videos(db=db)
+
+    assert result["recovered"] == 1
+    vid, kwargs = db.updated[0]
+    assert "|" not in kwargs["titulo_final"]
+    assert kwargs["status"] == "awaiting_upload"
+
+
 def test_does_not_guess_specificity(tmp_path, monkeypatch):
     import api.services.upload_scheduler as scheduler
     import config.config_bridge as bridge

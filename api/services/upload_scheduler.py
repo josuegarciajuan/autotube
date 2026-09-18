@@ -1582,7 +1582,35 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
     # Final fail-closed packaging gate immediately before upload dispatch.
     try:
         from config.config_bridge import get_channel_config
-        packaging = validate_upload_packaging(video, get_channel_config(slug))
+        video_cfg = get_channel_config(slug)
+        packaging = validate_upload_packaging(video, video_cfg)
+        if not packaging.valid:
+            # Auto-reparación determinista para motivos reparables (título con
+            # '|'/'[]', demasiado largo, sufijo clickbait, caps/puntuación): en
+            # vez de colgar el vídeo, se sanea el título, se persiste y se
+            # re-valida. Los motivos que exigen evidencia (specificity,
+            # banned_token, generic_sensationalism) siguen fallando cerrado.
+            repaired_title = None
+            try:
+                from api.services.title_recovery import (
+                    REPAIRABLE_TITLE_REASONS, sanitize_title_for_upload,
+                )
+                if set(packaging.reasons) <= REPAIRABLE_TITLE_REASONS:
+                    repaired_title = sanitize_title_for_upload(
+                        video.get("titulo_final"), video_cfg,
+                    )
+            except Exception as exc:
+                logger.debug("[%s] Title auto-repair skipped for #%d: %s", slug, video_id, exc)
+            if repaired_title and repaired_title != video.get("titulo_final"):
+                db.update_video(video_id, titulo_final=repaired_title)
+                video["titulo_final"] = repaired_title
+                retry = validate_upload_packaging(video, video_cfg)
+                if retry.valid:
+                    logger.warning(
+                        "[%s] Video #%d title auto-repaired at packaging gate: '%s'",
+                        slug, video_id, repaired_title[:70],
+                    )
+                    packaging = retry
         if not packaging.valid:
             logger.error("[%s] Video #%d held: unsafe packaging (%s)",
                          slug, video_id, ", ".join(packaging.reasons))
